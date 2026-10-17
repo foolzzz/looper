@@ -610,6 +610,7 @@ class TestReadOnly:
         assert [n for n in notes if n] == [{"planner_changed_files": ["notes.md"]}]
 
 
+@pytest.mark.usefixtures("agent_db")
 class TestResidentClaude:
     def test_claude_that_dies_is_restarted_with_its_session(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(plan(step("s1"), step("s2", "s1")), "<exit>", decide("accept"))
@@ -739,7 +740,7 @@ class TestResidentClaude:
 
         assert asyncio.run(_run()) == (True, True, True)
 
-    def test_claude_runs_unrestricted_in_the_task_directory(
+    def test_claude_runs_read_only_in_the_task_directory(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from looper.db import role_configs
@@ -776,7 +777,7 @@ class TestResidentClaude:
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format",
                        "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
-                       "--settings", "--model", "--max-turns"}
+                       "--settings", "--model", "--max-turns", "--disallowedTools", "--allowedTools"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
 
     def test_each_turn_is_recorded_with_its_own_cost(self, planner_claude: Any, agent_db: Any) -> None:
