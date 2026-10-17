@@ -1,10 +1,14 @@
 import type { GateState, UserGate } from "@/lib/api";
 
-/** How each gate state reads: a word (color is never the only signal), a badge tone and an icon tone. */
-export const GATE_STATES: Record<
-  GateState,
-  { label: string; variant: "default" | "success" | "warning" | "outline"; tone: string }
-> = {
+/** How a gate reads: a word (color is never the only signal), a badge tone and an icon tone. */
+export interface GateLook {
+  label: string;
+  variant: "default" | "success" | "warning" | "outline";
+  tone: string;
+}
+
+/** How each gate state reads; a discussing gate reads by whose turn it is (`gateLook`). */
+export const GATE_STATES: Record<GateState, GateLook> = {
   pending: { label: "Not open yet", variant: "outline", tone: "text-muted-foreground" },
   open: { label: "Waiting for you", variant: "warning", tone: "text-warning" },
   discussing: { label: "Discussing", variant: "default", tone: "text-primary" },
@@ -12,6 +16,22 @@ export const GATE_STATES: Record<
   cancelled: { label: "Cancelled", variant: "outline", tone: "text-muted-foreground" },
   skipped: { label: "Skipped", variant: "outline", tone: "text-muted-foreground" },
 };
+
+/** How a discussing gate reads by whose turn it is: the user's like an open gate, the Planner's like running work. */
+export const GATE_TURNS: Record<"user" | "planner", GateLook> = {
+  user: { label: "Your turn", variant: "warning", tone: "text-warning" },
+  planner: { label: "Planner answering", variant: "default", tone: "text-primary" },
+};
+
+/** Whose turn a discussing gate shows; null for a gate in any other state. */
+export const gateTurn = (gate: Pick<UserGate, "state" | "waiting_on">) =>
+  gate.state === "discussing" ? gate.waiting_on : null;
+
+/** How a gate reads: by its state, but a discussing one by whose turn it is. */
+export function gateLook(gate: Pick<UserGate, "state" | "waiting_on">): GateLook {
+  const turn = gateTurn(gate);
+  return turn ? GATE_TURNS[turn] : GATE_STATES[gate.state];
+}
 
 /** A gate that waits for the user: open, or discussing. */
 export const isGateWaiting = (gate: Pick<UserGate, "state">) => gate.state === "open" || gate.state === "discussing";

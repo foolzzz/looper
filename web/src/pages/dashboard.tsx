@@ -15,8 +15,8 @@ import { historyHref } from "@/pages/agent-history";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
-/** The groups always counted; "Cancelled" and "Other" show only when they hold a task. */
-const ALWAYS_SHOWN: TaskGroup[] = ["needs_you", "in_progress", "queued", "ready", "attention", "completed"];
+/** The groups always counted; "Needs you", "Cancelled" and "Other" show only when they hold a task. */
+const ALWAYS_SHOWN: TaskGroup[] = ["in_progress", "queued", "ready", "attention", "completed"];
 
 const linkClass =
   "rounded-sm hover:text-primary hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -84,7 +84,7 @@ function TaskCounts({ tasks }: { tasks: Overview["tasks"] }) {
   const shown = TASK_GROUPS.filter((g) => ALWAYS_SHOWN.includes(g.id) || tasks[g.id] > 0);
   const others = Object.entries(tasks.other_statuses).map(([status, n]) => `${status} ${n}`).join(", ");
   return (
-    <nav aria-label="Tasks by group" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+    <nav aria-label="Tasks by group" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       {shown.map((g) => {
         const count = tasks[g.id];
         const tone =

@@ -25,23 +25,23 @@ import {
   postGateMessage,
   type GateAgendaItem,
   type GateMessage,
-  type GateState,
   type TaskDetail,
   type UserGate,
 } from "@/lib/api";
-import { GATE_STATES, gateAnchor, isGateShown, isGateWaiting, sinceText } from "@/lib/gates";
+import { gateAnchor, gateLook, isGateShown, isGateWaiting, sinceText } from "@/lib/gates";
 import { errorText, useAction } from "@/lib/use-action";
 import { cn } from "@/lib/utils";
 
 /** How often a gate that waits reads its discussion again while its task runs. */
 const THREAD_POLL_MS = 3000;
 
-// Big enough to hit (44 px), wrapping a long label instead of widening the page, with a focus ring that shows.
-const TARGET = "h-auto min-h-11 whitespace-normal break-words py-2 text-left focus-visible:ring-2";
+// Big enough to hit (44 px), wrapping a long label instead of widening the page (also within a word with no spaces),
+// with a focus ring that shows.
+const TARGET = "h-auto min-h-11 max-w-full whitespace-normal [overflow-wrap:anywhere] py-2 text-left focus-visible:ring-2";
 
-/** A gate state as a badge: its word and tone. */
-export function GateBadge({ state }: { state: GateState }) {
-  const look = GATE_STATES[state];
+/** A gate as a badge: its state's word and tone, or whose turn it is while it is discussed. */
+export function GateBadge({ gate }: { gate: Pick<UserGate, "state" | "waiting_on"> }) {
+  const look = gateLook(gate);
   return <Badge variant={look.variant}>{look.label}</Badge>;
 }
 
@@ -115,6 +115,7 @@ const LOOPER_LABELS: Partial<Record<GateMessage["kind"], string>> = {
   reminder: "Reminder",
   closed: "Conclusion",
   error: "Not delivered",
+  late: "Sent as a supplement",
 };
 
 function MessageRow({ message }: { message: GateMessage }) {
@@ -182,7 +183,8 @@ function Thread({ messages, error }: { messages: GateMessage[] | null; error: st
     if (list.current) list.current.scrollTop = list.current.scrollHeight;
   }, [count]);
   if (error && !messages) return <p role="alert" className="text-xs text-destructive">{error}</p>;
-  if (!messages) return <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Loading" />;
+  if (!messages)
+    return <Loader2 className="h-4 w-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-label="Loading" />;
   if (!messages.length) return <p className="text-xs text-muted-foreground">No messages yet.</p>;
   return (
     <>
@@ -259,33 +261,41 @@ function AgendaRow({
   );
 }
 
-/** A gate that waits for the user: why it stopped, its questions, the discussion and the way to answer or end it. */
+/** A gate that waits for the user: why it stopped, its questions, the discussion and the way to answer or end it.
+ * `draft` is the text in its answer box, kept by the caller so that it outlives the gate. */
 function WaitingGate({
   task,
   gate,
+  draft: text,
+  setDraft: setText,
   onChanged,
 }: {
   task: TaskDetail;
   gate: UserGate;
+  draft: string;
+  setDraft: (text: string) => void;
   onChanged: (gate: UserGate) => void;
 }) {
   const active = isActiveTask(task);
   // A completed task's gates take no message (409); a stopped, failed or cancelled one keeps them for its restart.
   const takes = task.group !== "completed";
+  // While it is the user's turn, the thread changes only with the gate, which the task page reads again anyway.
   const thread = useGateThread(task.task_id, gate.step, {
     enabled: true,
-    follow: active,
+    follow: active && gate.waiting_on === "planner",
     signature: JSON.stringify(gate),
   });
-  const [text, setText] = useState("");
   // The task status a message was kept in (its Planner was not running): the note holds until the status changes.
   const [keptIn, setKeptIn] = useState<string | null>(null);
   const kept = keptIn === task.status;
   const { busy, error, run } = useAction();
   const anchor = gateAnchor(gate.step);
+  const input = useRef<HTMLTextAreaElement>(null);
+  // The user's messages a failed Planner turn had, while no newer one waits for the Planner.
+  const notDelivered = gate.waiting_on === "planner" ? 0 : gate.not_delivered;
 
-  const send = (post: () => ReturnType<typeof postGateMessage>, clear: boolean) =>
-    run(async () => {
+  const send = async (post: () => ReturnType<typeof postGateMessage>, clear: boolean) => {
+    await run(async () => {
       const posted = await post();
       setKeptIn(posted.delivered === "kept" ? task.status : null);
       thread.add(posted.message);
@@ -293,6 +303,9 @@ function WaitingGate({
       thread.reload();
       onChanged(posted.gate);
     });
+    // The button pressed was disabled while it sent, which drops the focus to the page: back to the answer box.
+    input.current?.focus();
+  };
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (text.trim()) void send(() => postGateMessage(task.task_id, gate.step, { text }), true);
@@ -310,19 +323,33 @@ function WaitingGate({
       <div className="space-y-1 border-b border-border px-4 py-3">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
           <MessageCircleQuestionMark className="h-4 w-4 text-warning" aria-hidden="true" />
-          <span className="font-semibold text-warning">Waiting for you</span>
           <span className="font-mono text-muted-foreground">gate {gate.step}</span>
           {gate.opened_at && (
             <span className="text-muted-foreground">
-              · for {sinceText(gate.opened_at)} (since <When iso={gate.opened_at} />)
+              · open for {sinceText(gate.opened_at)} (since <When iso={gate.opened_at} />)
             </span>
           )}
-          <span role="status" className="ml-auto">
+          {/* Whose turn it is: the one place the panel says so. */}
+          <span
+            role="status"
+            className={
+              notDelivered > 0 ? "flex basis-full flex-wrap items-center gap-x-2 gap-y-1 text-destructive" : "ml-auto"
+            }
+          >
             {gate.waiting_on === "planner" ? (
               <span className="flex items-center gap-1.5 text-primary">
                 <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                 The Planner is answering
               </span>
+            ) : notDelivered > 0 ? (
+              <>
+                <Badge variant="destructive">Not delivered</Badge>
+                <span>
+                  {notDelivered === 1
+                    ? "The Planner could not take your last message. Your next message sends it again."
+                    : `The Planner could not take your last ${notDelivered} messages. Your next message sends them again.`}
+                </span>
+              </>
             ) : (
               <Badge variant="warning">Your turn</Badge>
             )}
@@ -358,6 +385,7 @@ function WaitingGate({
               Your answer
             </label>
             <textarea
+              ref={input}
               id={`${anchor}-text`}
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -369,8 +397,8 @@ function WaitingGate({
             {(!active || kept) && (
               <p role="status" className="text-xs text-muted-foreground">
                 {kept
-                  ? "Your message is kept: the task's Planner is not running, and gets it when the task starts again."
-                  : "The task is not running: what you send is kept, and its Planner gets it when the task starts again."}
+                  ? "Your message is kept: the task's Planner is not running, and gets it when the task continues (Start over discards it)."
+                  : "The task is not running: what you send is kept, and its Planner gets it when the task continues (Start over discards it)."}
               </p>
             )}
             {error && (
@@ -381,7 +409,7 @@ function WaitingGate({
             <div className="flex flex-wrap items-start gap-2">
               <Button type="submit" disabled={busy || !text.trim()} className={TARGET}>
                 {busy ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                 ) : (
                   <Send className="h-4 w-4" aria-hidden="true" />
                 )}
@@ -459,8 +487,20 @@ function Conclusion({ gate }: { gate: UserGate }) {
 }
 
 /** A gate that closed, collapsed to its line unless `open`: its conclusion (passed) or why it was cancelled, and its
- * discussion, read when first shown. */
-function ClosedGate({ taskId, gate, open }: { taskId: string; gate: UserGate; open: boolean }) {
+ * discussion, read when first shown; below it, a `draft` the user had not sent when it closed. */
+function ClosedGate({
+  taskId,
+  gate,
+  open,
+  draft,
+  onDiscard,
+}: {
+  taskId: string;
+  gate: UserGate;
+  open: boolean;
+  draft: string;
+  onDiscard: () => void;
+}) {
   const passed = gate.state === "passed";
   const [showThread, setShowThread] = useState(false);
   const thread = useGateThread(taskId, gate.step, { enabled: showThread, follow: false, signature: gate.state });
@@ -480,7 +520,7 @@ function ClosedGate({ taskId, gate, open }: { taskId: string; gate: UserGate; op
           <span className="min-w-0 flex-1 space-y-0.5">
             <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <span className="font-mono text-xs text-muted-foreground">gate {gate.step}</span>
-              <GateBadge state={gate.state} />
+              <GateBadge gate={gate} />
               <span className="min-w-0 break-words text-sm font-medium">{gate.topic}</span>
             </span>
             <span className="block text-xs text-muted-foreground">
@@ -516,6 +556,17 @@ function ClosedGate({ taskId, gate, open }: { taskId: string; gate: UserGate; op
           </details>
         </div>
       </details>
+      {draft.trim() && (
+        <div className="pb-3 pl-10 pr-4">
+          <div className="space-y-2 rounded-md border border-dashed border-border px-3 py-2">
+            <p className="text-xs font-medium text-warning">Not sent: the gate closed before you sent this.</p>
+            <p className="whitespace-pre-wrap break-words text-sm">{draft}</p>
+            <Button type="button" variant="outline" size="sm" onClick={onDiscard} className={TARGET}>
+              Discard
+            </Button>
+          </div>
+        </div>
+      )}
     </li>
   );
 }
@@ -526,6 +577,10 @@ function ClosedGate({ taskId, gate, open }: { taskId: string; gate: UserGate; op
  * gets a gate as the server answered a message in it.
  */
 export function TaskGates({ task, onChanged }: { task: TaskDetail; onChanged: (gate: UserGate) => void }) {
+  // The text in each gate's answer box, by its step: kept here, so that a gate that closes before it is sent still
+  // shows it.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const setDraft = (step: string) => (text: string) => setDrafts((all) => ({ ...all, [step]: text }));
   const gates = (task.gates ?? []).filter(isGateShown);
   if (gates.length === 0) return null;
   const waiting = gates.filter(isGateWaiting);
@@ -536,13 +591,27 @@ export function TaskGates({ task, onChanged }: { task: TaskDetail; onChanged: (g
   return (
     <div className="space-y-3">
       {waiting.map((gate) => (
-        <WaitingGate key={gate.step_id} task={task} gate={gate} onChanged={onChanged} />
+        <WaitingGate
+          key={gate.step_id}
+          task={task}
+          gate={gate}
+          draft={drafts[gate.step] ?? ""}
+          setDraft={setDraft(gate.step)}
+          onChanged={onChanged}
+        />
       ))}
       {closed.length > 0 && (
         <section aria-label="Gates">
           <ol className="divide-y divide-border rounded-lg border border-border bg-card">
             {closed.map((gate) => (
-              <ClosedGate key={gate.step_id} taskId={task.task_id} gate={gate} open={gate === latest} />
+              <ClosedGate
+                key={gate.step_id}
+                taskId={task.task_id}
+                gate={gate}
+                open={gate === latest}
+                draft={drafts[gate.step] ?? ""}
+                onDiscard={() => setDraft(gate.step)("")}
+              />
             ))}
           </ol>
         </section>

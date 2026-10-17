@@ -1424,6 +1424,10 @@ export interface UserGate {
   depends_on: string[];
   /** While it waits: for the user's word, or for the Planner to take the user's messages; null otherwise. */
   waiting_on: "user" | "planner" | null;
+  /** How many of the user's messages a failed Planner turn had and no later turn has taken. While no newer message
+   * waits for the Planner, `waiting_on` is then "user": an automatic retry may still deliver them, and the user's
+   * next message sends them again. */
+  not_delivered: number;
   turns: number;
   reminders: number;
   opened_at: string | null;
@@ -1436,8 +1440,10 @@ export interface GateMessage {
   id: number;
   role: "user" | "planner" | "looper";
   /** user: "message" or "end" (ended the discussion); planner: "reply"; looper: what happened to the gate,
-   * "error" when the Planner could not take the user's messages. */
-  kind: "message" | "end" | "reply" | "opened" | "updated" | "reminder" | "cancelled" | "closed" | "resumed" | "error";
+   * "error" when the Planner could not take the user's messages, "late" for a message the user wrote while the gate
+   * was closing (it became a supplement to the task). */
+  kind: "message" | "end" | "reply" | "opened" | "updated" | "reminder" | "cancelled" | "closed" | "resumed" | "error"
+    | "late";
   text: string;
   /** Who wrote it in a group chat; null otherwise. */
   author: string | null;

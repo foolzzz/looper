@@ -33,7 +33,7 @@ import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
 import { GateBadge, TaskGates } from "@/components/task-gates";
-import { GATE_STATES, gateAnchor, stepAnchor } from "@/lib/gates";
+import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -629,18 +629,21 @@ function OverviewTab({
     onGateShown();
   }, [gateFocus, onGateShown]);
   const steps = task.steps || [];
-  // A gate step shows its gate's state.
+  // A gate step shows its gate's state, or whose turn it is while it is discussed.
   const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
   const gateOf = (step: TaskStep) => (step.kind === "gate" ? gates.get(step.id) : undefined);
   const stepIcon = (step: TaskStep, gate = gateOf(step)) =>
-    gate ? <CirclePause className={cn("h-4 w-4", GATE_STATES[gate.state].tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
+    gate ? <CirclePause className={cn("h-4 w-4", gateLook(gate).tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
   const stepBadge = (step: TaskStep, gate = gateOf(step)) =>
-    gate ? <GateBadge state={gate.state} /> : stepStatusBadge(step.status);
-  // Done means accepted (verified); a step in review is not done yet, and a dropped (skipped) one is not counted.
-  const planned = steps.filter((s) => s.status !== "skipped");
+    gate ? <GateBadge gate={gate} /> : stepStatusBadge(step.status);
+  // Done means accepted (verified); a step in review is not done yet. A dropped (skipped) step is not counted, nor is
+  // a cancelled gate (its step is verified, but nothing was settled).
+  const cancelledGate = (s: TaskStep) => gateOf(s)?.state === "cancelled";
+  const planned = steps.filter((s) => s.status !== "skipped" && !cancelledGate(s));
   const done = planned.filter((s) => s.status === "verified").length;
   const inReview = planned.filter((s) => s.status === "completed").length;
-  const dropped = steps.length - planned.length;
+  const dropped = steps.filter((s) => s.status === "skipped").length;
+  const cancelledGates = steps.filter(cancelledGate).length;
   const isActive = isActiveTask(task);
 
   return (
@@ -680,9 +683,15 @@ function OverviewTab({
           <p className="mt-1 text-sm font-medium">
             {steps.length > 0 ? `${done}/${planned.length} done` : "No steps yet"}
           </p>
-          {(inReview > 0 || dropped > 0) && (
+          {(inReview > 0 || dropped > 0 || cancelledGates > 0) && (
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {[inReview > 0 && `${inReview} in review`, dropped > 0 && `${dropped} skipped`].filter(Boolean).join(" · ")}
+              {[
+                inReview > 0 && `${inReview} in review`,
+                dropped > 0 && `${dropped} skipped`,
+                cancelledGates > 0 && `${cancelledGates} gate${cancelledGates === 1 ? "" : "s"} cancelled`,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             </p>
           )}
         </div>
@@ -1452,6 +1461,13 @@ const GATE_LOOKS: Record<GateState, NodeLook> = {
   skipped: { ...STEP_LOOKS.skipped, label: GATE_STATES.skipped.label },
 };
 
+/** A discussing gate's look by whose turn it is (`gateTurn`): the user's like an open gate, the Planner's like a
+ * running step. */
+const GATE_TURN_LOOKS: Record<keyof typeof GATE_TURNS, NodeLook> = {
+  user: { ...GATE_LOOKS.open, label: GATE_TURNS.user.label },
+  planner: { ...STEP_LOOKS.dispatched, label: GATE_TURNS.planner.label },
+};
+
 /** A gate step's state: its gate's, else what its step status says. */
 function gateState(step: TaskStep, gate: UserGate | undefined): GateState {
   if (gate) return gate.state;
@@ -1668,7 +1684,9 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
       const live = step.status !== "skipped";
       if (step.kind === "gate") {
-        const look = GATE_LOOKS[gateState(step, gates.get(step.id))];
+        const gate = gates.get(step.id);
+        const turn = gate && gateTurn(gate);
+        const look = turn ? GATE_TURN_LOOKS[turn] : GATE_LOOKS[gateState(step, gate)];
         const title = [
           `Gate ${name} — ${look.label}`,
           step.instruction,

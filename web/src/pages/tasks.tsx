@@ -43,7 +43,9 @@ import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { TaskDetailPage } from "./task-detail";
 
-const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
+const STATUS_FILTERS = [
+  "all", "init", "running", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
 function statusBadge(status: string) {
@@ -99,6 +101,7 @@ const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];
 /** A status filter's name. */
 function filterLabel(filter: string): string {
   if (filter === READY_STATUS) return "Ready";
+  if (filter === "waiting_user") return "Waiting for you";
   return filter.charAt(0).toUpperCase() + filter.slice(1);
 }
 
