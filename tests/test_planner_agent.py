@@ -609,6 +609,34 @@ class TestReadOnly:
                             "runtime cannot refuse this; the files are left as they are"]
         assert [n for n in notes if n] == [{"planner_changed_files": ["notes.md"]}]
 
+    def test_a_turn_while_a_worker_runs_in_the_task_directory_is_not_checked(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        # s2's decision turn writes a file while s1's Worker still runs in the directory: whose change it is
+        # cannot be told, so the turn is not checked.
+        claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept"),
+                                writes={2: {"notes.md": "my plan\n"}})
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.until(lambda: len(claude.turns()) >= 2 and h.held)  # s2's decision turn has started
+            await h.release(WORK_OK)
+            await h.finished()
+
+        h = drive(claude, lambda e: None if e.payload["step_key"] == "s1" else WORK_OK, scenario)
+        assert h.final() is not None and h.final().payload["status"] == "completed"
+        assert not [line for line in activity(agent_db) if "changed files in its turn" in line]
+        assert not any(c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list)
+
 
 @pytest.mark.usefixtures("agent_db")
 class TestResidentClaude:
