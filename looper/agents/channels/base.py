@@ -8,10 +8,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Awaitable, Callable
 
 from ..bus import MessageBus
 from ..message import MessageEnvelope
+from ..task_notice import NotifyTarget
+
+
+class DeliveryFailure(StrEnum):
+    """Why a channel did not deliver an answer; stored with it (``chat_history.record_reply``)."""
+
+    NO_CHAT = "no_chat"  # the channel does not know the chat the message came from (it restarted meanwhile)
+    SEND_FAILED = "send_failed"  # the channel tried and could not send it
 
 
 @dataclass
@@ -21,6 +30,17 @@ class DeliveryReceipt:
     channel: str
     success: bool
     external_id: str | None = None
+    error: str | None = None
+    failure: DeliveryFailure | None = None  # when not ``success``: why, if not SEND_FAILED
+
+
+@dataclass(frozen=True)
+class PostReceipt:
+    """What posting a message to a chat did: the ids of the channel messages sent (several when it was split), or
+    why it failed."""
+
+    success: bool
+    external_ids: tuple[str, ...] = ()
     error: str | None = None
 
 
@@ -63,6 +83,12 @@ class ChannelAdapter(ABC):
         """Send ``text``, unprompted, to ``chat``: a schedule's message, or a task's end (``task_notice``)."""
         return DeliveryReceipt(channel=self.channel_type, success=False,
                                error=f"the {self.channel_type} channel cannot send notifications")
+
+    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None) -> PostReceipt:
+        """Send ``text``, unprompted, to ``target`` (a reply to the channel message ``reply_to`` when given) and return
+        the ids of the messages sent, so replies to them can be routed back: a user gate's messages
+        (``gate_courier``)."""
+        return PostReceipt(False, error=f"the {self.channel_type} channel cannot post messages")
 
     def healthcheck(self) -> dict[str, Any]:
         """Return channel health status. Override for richer diagnostics."""

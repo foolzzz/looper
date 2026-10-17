@@ -28,7 +28,7 @@ import {
   type TaskDetail,
   type UserGate,
 } from "@/lib/api";
-import { gateAnchor, gateLook, gateWaitsOn, isGateShown, isGateWaiting, sinceText } from "@/lib/gates";
+import { gateAnchor, gateLook, gatePostsText, gateWaitsOn, isGateShown, isGateWaiting, sinceText } from "@/lib/gates";
 import { errorText, useAction } from "@/lib/use-action";
 import { cn } from "@/lib/utils";
 
@@ -61,6 +61,23 @@ function When({ iso }: { iso: string | null }) {
     <time dateTime={iso} title={date.toLocaleString()}>
       {whenText(date)}
     </time>
+  );
+}
+
+/** The chat the gate's messages also go to, and how many could not be sent there; nothing when they go to no chat. */
+function GatePosts({ posts }: { posts: UserGate["channel_posts"] }) {
+  const text = gatePostsText(posts);
+  if (!text) return null;
+  return (
+    <span className="block space-y-0.5 text-xs">
+      <span className="block break-words text-muted-foreground">{text.where}</span>
+      {text.failure && (
+        <span role="status" title={text.error || undefined} className="flex items-start gap-1 text-destructive">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 [overflow-wrap:anywhere]">{text.failure}</span>
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -369,6 +386,7 @@ function WaitingGate({
             )}
           </span>
         </div>
+        <GatePosts posts={gate.channel_posts} />
         <p className="pt-1 text-xs font-medium text-muted-foreground">Why it stopped</p>
         <h2 id={`${anchor}-title`} className="break-words text-base font-semibold">
           {gate.topic}
@@ -545,6 +563,7 @@ function ClosedGate({
               )}
               {gate.ended_by_user && " · you ended the discussion"}
             </span>
+            <GatePosts posts={gate.channel_posts} />
           </span>
         </summary>
         <div className="space-y-3 border-t border-border py-3 pl-10 pr-4">

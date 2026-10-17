@@ -9,6 +9,11 @@ else is dropped with one log line and gets no reply, and an empty list keeps
 the adapter from starting. A direct message that reaches the Manager first
 gets the bot's 👀 reaction (``status_line.Reactions``).
 
+A user gate's messages are posted directly (``post``: plain text to the chat,
+optionally as a reply to a message, returning the id of every message sent), and
+a forwarded message's own ``message_id`` and the ``reply_to_message_id`` of the
+message it replies to reach the Manager in ``channel_context``.
+
 Fallback when the constructor's token is empty:
   LOOPER_TELEGRAM_BOT_TOKEN — Bot token from @BotFather
 """
@@ -30,8 +35,10 @@ from ..message import (
     MessageType,
     channel_address,
 )
+from ..task_notice import NotifyTarget
 from .allowlist import SenderAllowlist
-from .base import ChannelAdapter, DeliveryReceipt
+from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
+from .chat_history import record_reply
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
@@ -172,6 +179,32 @@ class TelegramChannelAdapter(ChannelAdapter):
             logger.warning("telegram notification to %s failed: %s", chat, exc)
             return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)))
 
+    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None) -> PostReceipt:
+        """Send ``text`` as plain text to the Telegram chat ``target.id``, in messages of at most 4,000 characters,
+        the first a reply to the message ``reply_to`` when given. The ids of the messages sent are kept when a later
+        one fails, so replies to them still route."""
+        if self._app is None:
+            return PostReceipt(False, error="the Telegram bot is not started")
+        try:
+            chat = int(target.id)
+        except ValueError:
+            return PostReceipt(False, error=f"not a Telegram chat id: {target.id!r}")
+        try:
+            reply = int(reply_to) if reply_to else None
+        except ValueError:
+            return PostReceipt(False, error=f"not a Telegram message id: {reply_to!r}")
+        sent: list[str] = []
+        try:
+            for chunk in self._split_message(text, max_len=4000):
+                extra = {"reply_to_message_id": reply} if reply is not None and not sent else {}
+                message = await self._app.bot.send_message(chat_id=chat, text=chunk, **extra)
+                sent.append(str(message.message_id))
+        except Exception as exc:
+            error = redact(str(exc))
+            logger.warning("telegram: a post to %s failed (%d of its messages sent): %s", target.id, len(sent), error)
+            return PostReceipt(False, external_ids=tuple(sent), error=error)
+        return PostReceipt(True, external_ids=tuple(sent))
+
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the Telegram user who wrote and close its status line."""
@@ -189,6 +222,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                 channel="telegram",
                 success=False,
                 error=f"no chat_id for correlation {corr_id}",
+                failure=DeliveryFailure.NO_CHAT,
             )
 
         if envelope.message_type is MessageType.STATUS_UPDATE:
@@ -350,6 +384,18 @@ class TelegramChannelAdapter(ChannelAdapter):
         correlation_id = str(_uuid.uuid4())
         self._remember(correlation_id, chat_id)
 
+        context: dict[str, Any] = {
+            "chat_id": chat_id,
+            "user_id": update.effective_user.id,
+            "username": update.effective_user.username or "",
+        }
+        if update.message is not None:  # None for an edited /new
+            # The message's own id and the one it replies to, so a reply to a gate's message reaches its gate.
+            context["message_id"] = str(update.message.message_id)
+            replied = getattr(update.message, "reply_to_message", None)
+            if replied is not None:
+                context["reply_to_message_id"] = str(replied.message_id)
+
         envelope = MessageEnvelope.create(
             source=self._address,
             target=MANAGER_ADDRESS,
@@ -357,11 +403,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             payload={
                 "text": text,
                 "language": "zh",
-                "channel_context": {
-                    "chat_id": chat_id,
-                    "user_id": update.effective_user.id,
-                    "username": update.effective_user.username or "",
-                },
+                "channel_context": context,
             },
             correlation_id=correlation_id,
             metadata={"origin_channel_id": self.channel_id},
@@ -376,7 +418,8 @@ class TelegramChannelAdapter(ChannelAdapter):
             async for envelope in self._bus.subscribe(self.channel_id):
                 if not self._running:
                     break
-                await self.deliver(envelope)
+                # An answer is stored once it was sent, or as not delivered (the Manager names its record).
+                await record_reply(self.channel_type, envelope, await self.deliver(envelope))
         except asyncio.CancelledError:
             pass
 

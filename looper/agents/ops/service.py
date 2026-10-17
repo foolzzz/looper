@@ -125,6 +125,11 @@ class ManagerOps:
 
     # --- The endpoint ---
 
+
+    @property
+    def platform(self) -> Platform:
+        """What the tools act on (the Manager routes a reply to a user gate through it before its model)."""
+        return self._platform
     def authorized(self, header: str | None) -> bool:
         """Whether an ``Authorization`` header carries this server's token."""
         scheme, _, value = (header or "").partition(" ")

@@ -1037,6 +1037,38 @@ BEGIN
         INSERT INTO schema_migrations (name) VALUES ('task_user_gate_messages_kind_late');
     END IF;
 END $$;
+-- Whether a message of the Planner's or Looper's went to the gate's chat (agents/gate_courier.py): NULL not yet
+-- handled, 'sent', 'failed' (post_error says why) or 'none' (the gate has no chat). The user's own messages are
+-- 'none'. Once: the discussions written before gate messages went to channels are not sent now.
+ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_state TEXT
+    CHECK (post_state IN ('sent', 'failed', 'none'));
+ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_error TEXT;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_messages_posted_before_channels') THEN
+        UPDATE task_user_gate_messages SET post_state = 'none' WHERE post_state IS NULL;
+        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_messages_posted_before_channels');
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_unposted ON task_user_gate_messages (id)
+    WHERE post_state IS NULL;
+-- A user's message that came from a channel, found by the channel message it is (a reply to it is about its gate).
+CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_external ON task_user_gate_messages (channel, external_id)
+    WHERE external_id IS NOT NULL;
+-- The channel messages Looper sent for a gate's discussion (a message split in several has several): a reply to
+-- any of them is about that gate. chat is the target sent to (a Lark user's open_id or group, a Telegram chat).
+CREATE TABLE IF NOT EXISTS task_user_gate_posts (
+    id           BIGSERIAL PRIMARY KEY,
+    message_id   BIGINT NOT NULL REFERENCES task_user_gate_messages(id) ON DELETE CASCADE,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    channel      TEXT NOT NULL CHECK (channel IN ('lark', 'telegram')),
+    chat         TEXT NOT NULL,
+    external_id  TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (channel, chat, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_message ON task_user_gate_posts (message_id);
+CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_external ON task_user_gate_posts (channel, external_id);
 
 -- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
 -- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns
@@ -1404,6 +1436,11 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 -- Which channel the turn came from (web, telegram, lark): so the console shows every channel's
 -- conversation, each labelled. A non-web session id is "<channel>:<chat_id>".
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'web';
+-- A Telegram or Lark answer is stored once its channel has tried to send it (channels/chat_history.py): one it could
+-- not send has why (channels.base.DeliveryFailure) and the channel's error. NULL for everything else.
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS delivery_failure TEXT
+    CHECK (delivery_failure IN ('no_chat', 'send_failed'));
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS delivery_error TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msg_unique ON chat_messages(session_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, id);

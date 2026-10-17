@@ -1,6 +1,6 @@
 # RFC：用户关卡（User Gate，v0）
 
-- **状态：** 已批准（第 4 节 D1–D4 由维护者在 2026-10-17 定下，Q4 同日由维护者确认；D5–D13 和第 19 节的问题同日按建议定下，包括和维护者原写法不同的几处：D8、D10、D12、D13 和代码里的 `user_gate` 命名）；G1 已实现（协议、规划者、存储、接口和任务页，这一期默认关闭），G2 未开始。
+- **状态：** 已批准（第 4 节 D1–D4 由维护者在 2026-10-17 定下，Q4 同日由维护者确认；D5–D13 和第 19 节的问题同日按建议定下，包括和维护者原写法不同的几处：D8、D10、D12、D13 和代码里的 `user_gate` 命名）；G1 已实现（协议、规划者、存储、接口和任务页，这一期默认关闭）；G2 实现中（渠道、路由、管家，并把默认改为开启），实现时定下的做法见第 9、10、12 节和第 19 节的 Q13–Q18。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 16 项。
 - **最近更新：** 2026-10-17
 
@@ -33,7 +33,7 @@
 | 回合 | PLAN、DECISION、CHAT、RESTART、SUPERVISE（另有 LESSONS、HANDOFF），一个接一个执行（消息循环加 `_turn_lock`），违约的回复有一次修复回合 |
 | 任务变更 | 补充说明存为 `supplement` 日志条目，`delivered_at` 为空即未送达。每个事件之后，`_deliver_changes` 在一轮 CHAT 里送达，回复执行完才标为已送达 |
 | 状态与分组 | 规划者经 `GOAL_STATUS` 报告状态，TaskRouter 把它存为任务状态。`STATUS_GROUPS` 是唯一的分组处，`ACTIVE_STATUSES`、`EDITABLE_STATUSES` 由分组推出；列表筛选、计数和 Dashboard 的计数都按状态分组。`task.py` 的重启判断里另有一个写死的状态列表 |
-| 规划者进程 | Claude Code 规划者常驻一个进程。进程停掉后，下一轮以 `--resume` 续接同一会话（`_run_turn`）。Codex、OMP 本来就每轮起一个进程。一个任务从开始到结束占项目规划者并发的一个名额（`TaskRouter._running_in`，内置每项目 8 个） |
+| 规划者进程 | Claude Code 规划者常驻一个进程。进程停掉后，下一轮以 `--resume` 续接同一会话（`_run_turn`）。Codex、OMP 本来就每轮起一个进程。#173 之后没有项目级的规划者并发：任务一开始就有自己的规划者，任务只限制自己的执行者和评审者 |
 | 渠道收消息 | 飞书：lark-cli 1.0.97 的扁平事件带 `reply_to`（直接回复的那条消息）、`root_id` 和 `thread_id`（`lark-cli event schema im.message.receive_v1`），适配器现在都没用；群里只处理 @ 了机器人的消息（#142）。Telegram：`update.message.reply_to_message` 可用，适配器没用，`channel_context` 里也没有消息编号。两个渠道都把消息交给管家 |
 | 渠道发消息 | 任务结束通知和规划者改并发的通知经 `CHAT_NOTICE` 发到任务的 `NotifyTarget`（飞书用户、飞书群并 @ 发起人、Telegram 聊天）。它走总线，拿不到发出消息的编号。`ChannelRegistry.notify` 直接调适配器、有回执：Telegram 的回执带 `external_id`；飞书的 `notify` 用 `run` 而不是 `run_json`，拿不到编号，而且只能发给用户。飞书的状态消息用 `run_json` 加 `sent_message_id` 拿到编号 |
 | 聊天记录 | `chat_messages` 按 `session_id` 存。`list_sessions` 和 `recent_conversations` 把不以 `planner-` 开头的会话都当作管家的会话，后者还会被读进管家的上下文 |
@@ -79,7 +79,7 @@
 - 在开启关卡的项目里（G2 起是默认），有人值守的任务的规划者回复约定多一节关卡说明，CHAT、DECISION 多一个可选键 `gates`，G1 实测多 3,077 个字符（约 3.0 KB）。这是模型可见的变化。`user_gates` 为 `off` 的项目和定时任务的规划者，prompt 逐字节不变。
 - 任务可能停下来等用户，默认没有超时。
 - 新任务状态 `waiting_user`、新分组 `needs_you`：`GET /api/tasks?group=` 多一个取值，Dashboard 多一格，`ACTIVE_STATUSES` 和由它推出的 `EDITABLE_STATUSES` 随之包括它（删除保护、服务重启后恢复、侧栏计数、规划者令牌的任务状态检查）。
-- `project_execution` 的约定「为空即今天的行为」对 `user_gates` 不再成立（G2 起为空即开启），模块说明随之改。
+- **G2 起 `user_gates` 为空即开启**：所有没设置过这一项的项目（也就是现有的全部项目），有人值守的任务的规划者都能开关卡，约定都多上面那一节。`project_execution` 的约定「为空即今天的行为」对 `user_gates` 不再成立，模块说明随之改。
 - 在飞书、Telegram 里回复关卡消息的消息，不再交给管家的模型（G2）。
 - 管家的工具约定多一个工具和一段用法；有关卡在等待时，消息前面多一节「Open gates」。这也是模型可见的变化，跑管家评测（G2）。
 
@@ -207,7 +207,7 @@ DECISION 和 CHAT（含变更回合和 RESTART）的回复多一个可选键：
 - **停止**：关卡保持原状，提醒暂停。这时用户回复关卡消息，消息存下，回复「任务已停止，消息已保存，任务继续后交给规划者」。
 - **接着做**（`continue`）：`_restart_plan` 不把 `waiting_user` 的关卡放回未开始。`[RESTART]` 的计划行写出每个关卡的状态，未读消息在那一轮之后的 `[GATE]` 里送达；仍打开的关卡发一条「任务继续了，仍在等你」。
 - **从头再来**：关卡、讨论记录和发件记录随步骤一起删（`reset_task_for_restart`）。已经存下的结论是补充说明，和其他补充说明一样保留，新计划在 PLAN 里看得到（Q9）。
-- **等待时的进程**：任务为 `waiting_user`、没有步骤在跑、15 分钟没有回合时，停掉常驻的 Claude Code 进程，下一轮以 `--resume` 续接（`_run_turn` 已有的路径）；续接不了而新开会话时，resume brief 带上等待中关卡的讨论记录（7.2）。PlannerAgent 本身和它占的规划者名额都保留（Q6）。
+- **等待时的进程**：任务为 `waiting_user`、没有步骤在跑、15 分钟没有回合时，停掉常驻的 Claude Code 进程，下一轮以 `--resume` 续接（`_run_turn` 已有的路径）；续接不了而新开会话时，resume brief 带上等待中关卡的讨论记录（7.2）。PlannerAgent 本身保留；#173 之后任务不占规划者名额（Q6）。
 - **计划行**：决策、巡检、聊天和讨论消息的计划行写出关卡，例如 `- g1 [gate: discussing, waited 3 h] "存储选型" (depends on: s1; agenda: 1 of 2 resolved)`；通过的加一行结论摘要，取消的加 `resolution`。没有关卡的任务，计划行不变。
 
 ## 9. 渠道与路由
@@ -222,8 +222,12 @@ DECISION 和 CHAT（含变更回合和 RESTART）的回复多一个可选键：
 | 网页（任务页、网页聊天） | 任务页；另外发到系统设置「Gates of dashboard tasks」指定的一个聊天：渠道加该渠道白名单里的一个聊天，同定时任务的通知目标。没有设置时只在任务页，Settings → Channels 上提示去设置（Q5） |
 | 定时任务 | 没有关卡 |
 
-- 关卡消息不走总线，直接调适配器（同 `Scheduler` 用 `registry.notify`，由 `serve.py` 传入发送函数），拿到发出的消息编号，写进发件记录。适配器新增 `post(target, text, reply_to=None) -> DeliveryReceipt`：飞书用 `+messages-send` 或 `+messages-reply` 加 `run_json` 和 `sent_message_id`（同状态消息）；Telegram 用 `send_message` 的 `reply_to_message_id`（python-telegram-bot 22.8 支持，内部转成 `reply_parameters`），回执本来就带 `external_id`。
-- 发送失败记 `failed` 和原因，任务页的关卡面板上写明「没能发到飞书：…」，活动里记一条 error，下一次提醒再发。
+- 关卡消息不走总线，直接调适配器，拿到发出的消息编号，写进发件记录。适配器新增 `post(target, text, reply_to=None) -> PostReceipt`（`success`、`external_ids`、`error`）：飞书用 `+messages-send` 或 `+messages-reply` 加 `run_json` 和 `sent_message_id`（同状态消息），发给群时 @ 发起人；Telegram 用 `send_message` 的 `reply_to_message_id`（python-telegram-bot 22.8 支持，内部转成 `reply_parameters`），超过 4,000 字分几条发，每条的编号都记下。
+- **发件人**（Q13）：`looper serve` 里的 `GateCourier` 每 2 秒取讨论记录里还没处理的规划者消息和 Looper 消息（`post_state` 为空，按编号先后），算出关卡的目标（第一个表），发出去，写发件记录，把 `post_state` 记为 `sent`、`failed`（带原因）或 `none`（没有目标）。规划者只写讨论记录，从不等渠道；服务重启后接着发。上线时已有的讨论记录在迁移里记为 `none`，不补发。
+- **发什么**（Q15）：卡片（`opened`）、更新（`updated`）、提醒（`reminder`）、取消（`cancelled`）、结论（`closed`）、规划者的回复（`reply`）、任务继续后仍在等（`resumed`）、规划者没能处理用户的消息（`error`）、关闭时才到的消息转成了补充说明（`late`）。用户自己的消息不发。
+- **线程**（Q14）：卡片是一条新消息，这个关卡后面的消息都回复在卡片下（飞书在卡片的话题里，Telegram 回复卡片那条）；规划者的回复例外：它回答的那条用户消息就来自这个聊天时，回复在那条消息下。
+- Telegram 发纯文本（Q16），飞书发 Markdown（链接要写成链接才可点）。
+- 发送失败记 `failed` 和原因，任务页的关卡面板上写明「没能发到飞书：…」，活动里记一条 error；下一次提醒带上卡片的问题，所以卡片没发出去也能从提醒里作答。
 - 文字由代码写（同管家 RFC 的 D7），规划者的 `reply` 原样发出。卡片的大意：
 
   ```
@@ -265,10 +269,12 @@ Telegram 的 `reply_to_message` 只给直接回复的那一条，飞书的 `root
 
 发送者白名单照旧先在适配器里检查；群里任何在白名单里的人都可以回答，讨论记录写出是谁。
 
+路由在管家的模型之前（`gate_routing`），由代码完成；对上并存进关卡的消息不写进管家的聊天记录（`chat_messages`），它在关卡的讨论记录里（Q18）。第 4 步的回复是代码写的：「任务已停止，你的回答已保存，任务继续后交给规划者。」
+
 ## 10. 管家（G2）
 
 - **上下文**：每条用户消息前面，在「Ready tasks」之后加「Open gates」（有等待中的关卡才加，至多 10 个，最近打开的在前）：任务编号、项目、关卡编号和话题、已经等了多久、在等谁、还开着的问题（每个截断到 80 字）。
-- **工具 `looper_task_gate_reply`**（write，只在回答用户的那一轮里）：`{"task_id", "gate": "<关卡编号>", "text": "<用户原话>", "end"?: true}`。存为关卡的用户消息（`via` `manager:<渠道>`），同时记下用户那条消息在渠道里的编号，规划者的回复回复在它下面；`end` 为真时同时要求结束讨论。关卡不在等用户时返回 `conflict`，说明它现在的状态。
+- **工具 `looper_task_gate_reply`**（write，只在回答用户的那一轮里）：`{"task_id", "gate": "<关卡编号>", "text": "<用户原话>", "end"?: true}`。存为关卡的用户消息（`via` `manager:<渠道>`，群聊记发言人），同时记下用户那条消息在渠道里的编号，规划者的回复回复在它下面；`end` 为真时同时要求结束讨论。走任务页同一段代码（`gate_service.post_message`）：关卡不在等用户、任务已完成时返回 `conflict`，说明它现在的状态；任务停止时存下（`delivered` 为 `kept`），任务继续后交给规划者。
 - `looper_tasks` 的 `get` 带出关卡（随 `GET /api/tasks/:id`），`looper_overview` 带出等待中的关卡数。
 - **约定**（加进 `TOOLS_CONTRACT`，大意）：「用户的话是在回答或谈论一个等待中的关卡时，用 looper_task_gate_reply 把原话转给它的规划者（用户想按现在的结论继续时加 end: true）；可能是几个关卡中的哪一个时，先问用户。不要替规划者回答关卡里的问题。」
 - **大小**：新工具的定义约 0.6 KB，管家的工具定义从 13.4 KB 到约 14 KB，仍在 15 KB 的预算内；T3 剩下的工具要连同它一起算，实测记入管家 RFC 第 11 节。
@@ -320,15 +326,17 @@ task_user_gate_messages        讨论记录，按 id 先后
   via                'dashboard' | 'lark' | 'telegram' | 'manager:<渠道>'
   agenda_item, option  任务页的选项按钮：哪一项、哪个选项
   channel, chat, external_id  来自渠道的用户消息在哪个聊天、编号是什么（规划者的回复回复在它下面）
+  post_state         规划者和 Looper 的消息发到渠道了没有：NULL 为还没处理，'sent' | 'failed' | 'none'（没有目标）
+  post_error         失败的原因
   created_at
 
-task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，也是发件记录
+task_user_gate_posts           Looper 发到渠道的关卡消息：路由表（一条讨论消息可能分几条发出）
   id
   message_id         → task_user_gate_messages ON DELETE CASCADE
+  task_id            → tasks ON DELETE CASCADE
   channel            'lark' | 'telegram'
-  chat, external_id  失败时 external_id 为 NULL
-  status             'sent' | 'failed'
-  error, created_at
+  chat, external_id
+  created_at
   UNIQUE (channel, chat, external_id)
 ```
 
@@ -336,7 +344,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 - `PlanStep` 加 `kind`；关卡的 `started` 为「不是 pending」。`PlanView` 加 `gates`（`{编号: 状态}`），供 `gates` 和 `replan` 的校验用。
 - 任务日志加 `gate_opened`、`gate_updated`、`gate_cancelled`、`gate_closed`，只给任务页看（同 `profile_choice`）；规划者从计划行看到关卡。
 - 项目执行设置：`user_gates`（`on` | `off`；G1 为空即 `off`，G2 起为空即 `on`）和 `gate_reminder_hours`（0–168，空为 24，0 为不提醒），随项目设置导出导入。
-- 系统设置 `user_gates.dashboard_target`：`{channel, chat}`，或为空（G2）。
+- 系统设置 `user_gates.dashboard_target`：`{channel, chat}`，或为空（G2）。只能是某个渠道白名单里已有的聊天（同定时任务的通知目标，`schedules.notify_targets`）；接口 `GET`、`PUT /api/gate-settings`（Q17）。只对不是从飞书、Telegram 来的任务生效。
 - `STATUS_GROUPS` 加 `"waiting_user": TaskGroup.NEEDS_YOU`；`ACTIVE_STATUSES` 改为包括 `NEEDS_YOU` 分组；`task.py` 重启判断里写死的状态列表改为由分组推出，或至少加上 `waiting_user`。
 
 ## 13. 提醒
@@ -414,7 +422,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 | 讨论不收尾 | 约定要求答清就关闭；消息写出回合数；用户随时可以结束讨论；每轮都计入花费，受任务的花费上限约束 |
 | 回复送错地方 | 只按渠道的消息编号对上；对不上交给管家，有歧义时管家先问；关卡已关时作为补充说明；群里只认白名单里的人 |
 | 无人值守的任务停住 | 定时任务由代码拒绝开关卡（D2），它的约定里不提关卡 |
-| 用户一直不回 | 默认每天提醒，任务页显示等了多久，任务进 Needs you；任务占着项目的一个规划者名额（Q6），空闲的进程会停掉；第二期可选超时后按假设继续 |
+| 用户一直不回 | 默认每天提醒，任务页显示等了多久，任务进 Needs you；空闲的进程会停掉；第二期可选超时后按假设继续 |
 | 结论挤占补充说明的预算 | 每条结论至多 3,000 字；补充说明的总预算是 8,000 字，超过时最早的被略去并说明数量。几个关卡的结论都很长时可能挤掉用户早先的补充说明，在评测里观察 |
 | 上下文变大 | 约定只在开启的、有人值守的任务里多一节，G1 实测约 3.0 KB；管家多约 0.6 KB |
 | 飞书群里回复忘了 @机器人 | 维护者确认的规则（Q4）。群里的每条关卡消息都写明「在群里回复请 @机器人」；没 @ 的回复到不了，用户可能以为已经答了，提醒会再来 |
@@ -440,10 +448,16 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 | Q3 | 默认开启从哪一期起 | **已定：G2**（D13）。只有 G1 时，飞书、Telegram 上的任务开了关卡没人收得到 |
 | Q4 | 飞书群里不 @ 机器人的回复要不要收 | **已定（维护者 2026-10-17）：不收**，群里回复关卡要 @机器人，群里的关卡消息写明「在群里回复请 @机器人」；#142「群里只处理 @」的规则不变。私聊和 Telegram 照第 9.2 节 |
 | Q5 | 网页建的任务，关卡发到哪里 | **已定：系统设置 `user_gates.dashboard_target`**（渠道加该渠道白名单里的一个聊天），代码里**默认为空**，即只在任务页，Settings → Channels 上提示去设置；部署时由运维者选定。代码里没有「运维者是谁」的类型化信息，按白名单里只有一个人去猜是推断 |
-| Q6 | 等待中的任务占不占项目的规划者名额 | **已定：占。** 项目的规划者上限常用来保护共享的目录（上限为 1 的项目一次只跑一个任务），而等待中的任务目录里有做了一半的工作，释放名额会让另一个任务进来跑。空闲的进程停掉，省内存 |
+| Q6 | 等待中的任务占不占项目的规划者名额 | **不再适用（#173）**：项目级的规划者并发已经去掉，任务一开始就有自己的规划者，等待中的任务不占任何名额。空闲的进程照旧停掉，省内存 |
 | Q7 | 要不要限制一个任务的关卡数 | **已定：第一期不限**，靠约定和评测，任务页可见；评测里出现多问时再加项目设置 |
 | Q8 | 打开的关卡能不能被 `replan` 直接去掉 | **已定：不能**（D8）：在 `gates` 里取消，并告诉用户 |
 | Q9 | 从头再来时，已经存下的结论（补充说明）删不删 | **已定：保留。** 补充说明从不删除，用户做的决定对新计划仍然有效；想彻底重来就改需求 |
 | Q10 | 任务停止时用户回复关卡 | **已定：存下，任务继续后交给规划者**，并告诉用户 |
 | Q11 | 用户结束讨论后，那一轮失败了 | **已定：关卡保持讨论中，告诉用户，可以再结束一次**；代码不替规划者关闭 |
 | Q12 | 关卡打开时，用户在 Chat 页的规划者线程里发的话要不要送进关卡 | **已定：不送**，仍是补充说明，规划者可以在 CHAT 回合里用 `gates` 更新或取消关卡；线程顶部提示去关卡面板。「有关卡就送进关卡」会让用户分不清哪句话进了哪里 |
+| Q13 | 关卡消息由谁、在什么时候发到渠道（G2 实现时定，按建议） | **已定：`GateCourier` 按讨论记录发**：讨论记录里每条规划者和 Looper 的消息带 `post_state`，后台每 2 秒发还没处理的。没有采用的做法：规划者存完讨论记录就同步调适配器（规划者要等渠道，渠道慢或失败会拖住回合，服务重启时还没发的就丢了）；经总线发（拿不到消息编号，路由对不上） |
+| Q14 | 关卡后面的消息发成新消息，还是回复在卡片下（G2，按建议） | **已定：回复在卡片下**，飞书成一个话题，Telegram 成一串回复；规划者的回复回复在它回答的那条用户消息下（那条消息来自这个聊天时）。这样回复其中任何一条都对得上关卡。没有采用的做法：每条都发新消息（群里刷屏，上下文散开） |
+| Q15 | 哪些关卡消息发到渠道（G2，按建议） | **已定：规划者和 Looper 的全部消息**，包括规划者没能处理（`error`）、关闭时才到（`late`）和任务继续（`resumed`）。只在渠道里作答的用户要知道自己的话没送到或变成了补充说明。用户自己的消息不发 |
+| Q16 | Telegram 的关卡消息用不用 MarkdownV2（G2，按建议） | **已定：纯文本。** 规划者的回复是任意 Markdown，MarkdownV2 要转义十几个字符，转义错了整条发不出去；任务结束通知现在先试 MarkdownV2、失败再发纯文本，关卡消息直接发纯文本。飞书照旧发 Markdown |
+| Q17 | 网页任务的目标怎么存、在哪里设置（G2，按建议） | **已定：系统设置 `user_gates.dashboard_target`（JSON `{channel, chat}`），`GET`、`PUT /api/gate-settings`，在 Settings → Channels 选**；候选只有渠道白名单里已有的聊天（同定时任务的通知目标），存之前再查一次。没有采用的做法：放进渠道配置（`channel_configs`）：它是「发给谁」的选择，跨两个渠道，不属于某一个渠道 |
+| Q18 | 渠道里回复关卡的消息要不要写进管家的聊天记录（G2，按建议） | **已定：不写。** 它在关卡的讨论记录里，任务页和规划者都看得到；写进管家的聊天记录会让管家以为这是它的对话，下一轮的「最近的对话」里还会重复出现 |
