@@ -253,6 +253,14 @@ def test_the_planners_refused_calls_are_counted_and_its_file_changes_can_be_boun
         expect={"max_planner_modified_files": 0}, now=0.0)
     assert result["planner_denials"] == 2  # the Planner's only
     assert result["problems"] == ["planner_modified_files 1 > 0"]
+    # A Write its runtime refused changed nothing.
+    records[0]["metadata"] = {"permission_denials": [{"tool": "Write", "input": "{}", "id": "toolu_w"}]}
+    write["message"]["content"][0]["id"] = "toolu_w"
+    refused = metrics.task_metrics(
+        detail={"status": "completed", "steps": [{"id": "step-1"}]}, activity=[], records=records,
+        events={1: [{"seq": 1, "event": write}]}, changes={}, work_dir=tmp_path, check_problem=None,
+        expect={"max_planner_modified_files": 0}, now=0.0)
+    assert (refused["planner_modified_files"], refused["problems"]) == (0, [])
 
 
 def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
