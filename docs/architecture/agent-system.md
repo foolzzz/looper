@@ -2290,7 +2290,8 @@ reason and what to do instead.
   the plan's own status stays `executing`). Once the task only waits for the
   user (no step in flight) and no turn came for 15 minutes
   (`GATE_IDLE_STOP_SEC`), its resident Claude stops; the next turn resumes
-  its session. It keeps its place under the project's Planner limit.
+  its session, and a new session's resume brief carries each waiting gate's
+  discussion so far. It keeps its place under the project's Planner limit.
 - **The discussion.** The user's messages (`task_user_gate_messages`, from
   the dashboard: `POST /api/tasks/:id/gates/:step/messages`, or `/end` to end
   the discussion) are stored first; `GATE_MESSAGE` only wakes the Planner,
@@ -2304,14 +2305,22 @@ reason and what to do instead.
   closing the last open step without new steps needs `final`. The summary
   is kept, in the transaction that closes the gate, as a delivered
   supplement (`via` `gate`, at most 3,000 characters) that every later
-  Worker and Reviewer reads. A turn that fails leaves the messages
-  undelivered and notes the error in the discussion. A message written while
-  the turn runs reaches the next one.
+  Worker and Reviewer reads; steps an `add_steps` adds are saved with it. A
+  turn that fails notes the error in the discussion and leaves the messages
+  undelivered (`failures`, `failed_through`): the gate then waits for the user
+  (`waiting_on` `user`, `not_delivered` counts them, reminders come again),
+  the Planner tries again on its own after 1 and 5 minutes
+  (`GATE_RETRY_WAIT_SEC`), and the user's next message sends them with it. A
+  message written while a `continue` turn runs reaches the next one; one
+  written while the turn that closes or cancels the gate runs becomes, in the
+  close's transaction, a supplement (`via` `gate_late`) that the next `[CHAT]`
+  turn gives the Planner, with a `late` note in the discussion.
 - **Changing a gate.** A `[DECISION]` or `[CHAT]` reply may carry `gates`:
   `{"id", "action": "update", "topic"?, "agenda"?, "findings"?, "note"}`
   (the note, for the user, is required for an open gate) or `{"id",
   "action": "cancel", "resolution"}`, applied before its decision or action;
-  a decision that cancels the other open gates and completes the task needs
+  a reply that cancels the other open gates and so completes the task (a
+  decision, or a `[CHAT]` or `[RESTART]` reply that adds no step) needs
   `final`.
 - **Restarts.** A server restart reads the gates back. Going on from the plan
   keeps a waiting gate waiting, with a `resumed` note, and gives it the
