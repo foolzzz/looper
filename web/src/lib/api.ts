@@ -1610,6 +1610,8 @@ export interface TaskStep {
   /** "gate": a user gate (`TaskDetail.gates`), whose instruction is its topic. */
   kind: "work" | "gate";
   instruction: string;
+  /** How to tell the step is done, as the Planner wrote it; checked by its Worker and its Reviewer. */
+  acceptance_criteria: string[];
   target_files: string[];
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];
