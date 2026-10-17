@@ -720,11 +720,25 @@ Claude Code 2.1.285).
 Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
 
 - a task's step killed or its task stopped or cancelled (a stopped task ends
-  its running Workers and the Reviewers of its steps in review);
+  its running Workers and the Reviewers of its steps in review, all at once);
 - `timeout_seconds`;
 - the per-run spend cap;
 - a resident session stopped or replaced;
-- server shutdown.
+- server shutdown: the worker pool stops first and ends every run at once,
+  then the TaskRouter stops its Planners together, each ending its Claude. A
+  pool that has stopped still answers a Planner's `KILL_WORK` at once
+  (`killed: false`), so a shutdown does not grow with the number of running
+  steps (with 3 tasks and 12 steps it took about 1 s on the real path). A
+  stop that cancels a message loop cancels it again every `RECANCEL_SEC`
+  (5 s) while it runs on (`supervisor.cancel_and_wait`): Python 3.11's
+  `asyncio.wait_for` drops a cancellation that arrives as what it waits for
+  completes, and the loop then waits for its next message for good. The
+  bus's request-reply does not use it. The whole shutdown has
+  `SHUTDOWN_DEADLINE_SEC` (15 s, under launchd's 20 s before SIGKILL): past
+  it the server logs `the shutdown did not finish within 15 s` and exits with
+  code 1, and a second SIGINT or SIGTERM during the shutdown exits at once the
+  same way. The next start ends what such an exit leaves: the agents'
+  processes (`proc_tree.sweep`) and their records (`end_unfinished_records`).
 
 Before it sends any signal, `proc_tree.end` reads the agent's tree from one
 `ps -A -o pid=,ppid=,pgid=,stat=` snapshot: the agent, every process whose
