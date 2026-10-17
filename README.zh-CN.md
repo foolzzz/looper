@@ -15,7 +15,7 @@
 ## Looper 是什么
 
 Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同运转的"规划—执行—验证"循环：
-**Manager** 负责与用户对话，**TaskRouter** 管理任务生命周期和并发，**Planner** 把工作拆成步骤，
+**Manager** 负责与用户对话，**TaskRouter** 管理任务生命周期，**Planner** 把工作拆成步骤，
 **WorkerPool** 运行 Claude CLI 子进程完成实际的编码。
 
 所有过程都能在内置的 Web 控制台里看到：实时流式输出、任务生命周期控制和 agent 配置。
@@ -25,7 +25,7 @@ Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同
           │
        Manager          （理解意图，分派任务）
           │
-       TaskRouter       （生命周期、并发、排队）
+       TaskRouter       （任务生命周期）
           │
        Planner          （拆解步骤，核验结果）
           │

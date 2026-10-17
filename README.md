@@ -14,7 +14,7 @@ Deploy autonomous coding agents that plan, decompose, and execute complex tasks 
 
 Looper is a self-hosted multi-agent system that turns a single task description
 into a coordinated plan–execute–verify loop. A **Manager** agent talks to users,
-a **TaskRouter** manages lifecycle and concurrency, a **Planner** decomposes work
+a **TaskRouter** manages task lifecycle, a **Planner** decomposes work
 into steps, and a **WorkerPool** runs Claude CLI subprocesses to do the actual
 coding.
 
@@ -26,7 +26,7 @@ User ─→ Chat / Lark / Telegram
           │
        Manager          (understands intent, routes tasks)
           │
-       TaskRouter       (lifecycle, concurrency, queuing)
+       TaskRouter       (task lifecycle)
           │
        Planner          (decomposes into steps, verifies results)
           │
