@@ -309,6 +309,8 @@ async def task_costs(
     whose cost is what a subscription's usage would cost at API prices
     (``EQUIVALENT``), and ``provider_price_runs`` the others Looper priced at
     their provider's prices.
+    ``by_model`` splits those runs and tokens by model, with costs adding up to ``cost_usd``.
+    ``manager_by_model`` splits the Manager's turns about the task by model, not in its cost or its spend cap.
     """
     if not task_ids:
         return {}
@@ -330,7 +332,8 @@ async def task_costs(
     )
     costs = {
         task_id: {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
-                  "provider_price_runs": 0, "by_role": {role: {"cost_usd": 0.0, "runs": 0} for role in TASK_ROLES}}
+                  "provider_price_runs": 0, "by_role": {role: {"cost_usd": 0.0, "runs": 0} for role in TASK_ROLES},
+                  "by_model": [], "manager_by_model": []}
         for task_id in task_ids
     }
     for row in rows:
@@ -339,6 +342,29 @@ async def task_costs(
             cost[key] += row[key]
         cost["cost_usd"] += row["cost_usd"]
         cost["by_role"][row["role"]] = {"cost_usd": row["cost_usd"], "runs": row["runs"]}
+    rows = await pool.fetch(
+        f"""
+        SELECT task_id, ({_ROLE_FILTERS['manager']}) AS manager, model, count(*) AS runs,
+               count(*) FILTER (WHERE status = 'running') AS running,
+               count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
+               count(*) FILTER (WHERE status = $2) AS interrupted_runs,
+               COALESCE(sum(input_tokens), 0)::bigint AS input_tokens,
+               COALESCE(sum(output_tokens), 0)::bigint AS output_tokens,
+               COALESCE(sum(cache_read_tokens), 0)::bigint AS cache_read_tokens,
+               COALESCE(sum(cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+               sum(cost_usd ORDER BY id) AS cost_usd  -- in one order, so a task's list and its page agree
+        FROM llm_records
+        WHERE task_id = ANY($1::text[]) AND ({_TASK_ROLE} IS NOT NULL OR {_ROLE_FILTERS['manager']})
+        GROUP BY task_id, manager, model
+        ORDER BY cost_usd DESC NULLS LAST, runs DESC, model NULLS LAST
+        """,
+        task_ids, RecordStatus.INTERRUPTED.value,
+    )
+    for row in rows:
+        model = dict(row)
+        cost = costs[model.pop("task_id")]
+        key = "manager_by_model" if model.pop("manager") else "by_model"
+        cost[key].append(model)
     return costs
 
 

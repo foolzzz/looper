@@ -100,6 +100,10 @@ def test_the_task_detail_and_list_carry_the_tasks_cost(monkeypatch: pytest.Monke
         status, detail = await _get("/api/tasks/task-a")
         assert status == 200
         cost = detail["cost"]
+        assert len(cost["manager_by_model"]) == 1
+        assert cost["manager_by_model"][0]["runs"] == 1
+        assert cost["manager_by_model"][0]["cost_usd"] == pytest.approx(7.0)
+        assert sum(r["runs"] for r in cost["by_model"]) == cost["runs"] == 5
         runs = [r for r in await llm_records.list_records(task_id="task-a", pool=pool) if r["agent_id"] != "manager"]
         assert len(runs) == cost["runs"] == 5
         assert cost["cost_usd"] == pytest.approx(sum(r["cost_usd"] for r in runs)) == pytest.approx(0.85)

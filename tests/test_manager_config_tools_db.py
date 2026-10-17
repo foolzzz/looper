@@ -535,7 +535,10 @@ def test_a_tasks_cost_is_the_task_pages(monkeypatch: pytest.MonkeyPatch, tmp_pat
             await _run_record(pool, agent_id, task_id="task-a", cost=cost)
         await _run_record(pool, "manager", task_id="task-a", cost=7.0)
         (answer,) = await _Chat(tmp_path).say("task-a 花了多少", ("looper_costs", {"task_id": "task-a"}))
-        assert answer["result"]["cost"] == (await _ok("GET", "/api/tasks/task-a"))["cost"]
+        page = await _ok("GET", "/api/tasks/task-a")
+        assert answer["result"]["cost"] == page["cost"]
+        assert answer["result"]["cost"]["by_model"] == page["cost"]["by_model"]
+        assert "manager_by_model" in answer["result"]["note"]
         assert answer["result"]["cost"]["cost_usd"] == pytest.approx(0.57)
         (mixed,) = await _Chat(tmp_path).say("task-a 今天花了多少", ("looper_costs", {"task_id": "task-a",
                                                                                      "period": "today"}))

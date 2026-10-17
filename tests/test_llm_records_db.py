@@ -170,6 +170,12 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
         assert (t1["runs"], t1["running"], t1["unpriced_runs"]) == (6, 1, 1)
         assert {role: (pytest.approx(row["cost_usd"]), row["runs"]) for role, row in t1["by_role"].items()} == {
             "planner": (0.3, 2), "worker": (0.3, 3), "reviewer": (0.05, 1)}
+        assert t1["manager_by_model"] == [
+            {"model": None, "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": pytest.approx(9.0)},
+        ]
+        assert sum(r["runs"] for r in t1["by_model"]) == t1["runs"]
         # The total is the sum of the task's runs as each is recorded.
         runs = [r for r in await llm_records.list_records(task_id="t1", pool=pool) if r["agent_id"] != "manager"]
         assert t1["cost_usd"] == pytest.approx(sum(r["cost_usd"] or 0 for r in runs))
@@ -178,8 +184,73 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
         assert costs["t3"] == {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                                "provider_price_runs": 0, "by_role": {
             "planner": {"cost_usd": 0.0, "runs": 0}, "worker": {"cost_usd": 0.0, "runs": 0},
-            "reviewer": {"cost_usd": 0.0, "runs": 0}}}
+            "reviewer": {"cost_usd": 0.0, "runs": 0}}, "by_model": [], "manager_by_model": []}
         assert await llm_records.task_costs([], pool=pool) == {}
+
+    _in_fresh_schema(test)
+
+
+def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_about_it() -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        for agent, model, status, cost, tokens in (
+            ("planner-t1", "claude-opus-4-1", "completed", 0.5, (100, 20, 1000, 50)),
+            ("worker-a", "claude-opus-4-1", "completed", 0.25, (10, 5, 0, 0)),
+            ("worker-b", "claude-haiku-4-5", "interrupted", None, (7, 0, 0, 0)),
+            ("reviewer-c", "claude-haiku-4-5", "completed", 0.01, (1, 1, 1, 1)),
+            # input_tokens is INTEGER; two runs prove its sum can exceed 2^31.
+            ("worker-d", "deepseek-flash", "completed", None, (2_000_000_000, 0, 0, 0)),
+            ("worker-d", "deepseek-flash", "completed", None, (2_000_000_000, 0, 0, 0)),
+        ):
+            record_id = await llm_records.start_record(agent_id=agent, task_id="t1", pool=pool)
+            await llm_records.finish_record(
+                record_id, model=model, status=status, cost_usd=cost, input_tokens=tokens[0], output_tokens=tokens[1],
+                cache_read_tokens=tokens[2], cache_creation_tokens=tokens[3], pool=pool,
+            )
+        await llm_records.start_record(agent_id="worker-e", task_id="t1", pool=pool)
+        for task_id, cost in (("t1", 0.02), ("t2", 5.0)):
+            record_id = await llm_records.start_record(agent_id="manager", task_id=task_id, pool=pool)
+            await llm_records.finish_record(
+                record_id, model="claude-haiku-4-5", status="completed", cost_usd=cost, input_tokens=30,
+                output_tokens=4, cache_read_tokens=50, cache_creation_tokens=6, pool=pool,
+            )
+        record_id = await llm_records.start_record(agent_id="worker-f", task_id="t2", pool=pool)
+        await llm_records.finish_record(
+            record_id, model="claude-opus-4-1", status="completed", input_tokens=42, cost_usd=1.0, pool=pool,
+        )
+
+        costs = await llm_records.task_costs(["t1", "t2"], pool=pool)
+        t1 = costs["t1"]
+        assert t1["by_model"] == [
+            {"model": "claude-opus-4-1", "runs": 2, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 110, "output_tokens": 25, "cache_read_tokens": 1000, "cache_creation_tokens": 50,
+             "cost_usd": pytest.approx(0.75)},
+            {"model": "claude-haiku-4-5", "runs": 2, "running": 0, "unpriced_runs": 1, "interrupted_runs": 1,
+             "input_tokens": 8, "output_tokens": 1, "cache_read_tokens": 1, "cache_creation_tokens": 1,
+             "cost_usd": pytest.approx(0.01)},
+            {"model": "deepseek-flash", "runs": 2, "running": 0, "unpriced_runs": 2, "interrupted_runs": 0,
+             "input_tokens": 4_000_000_000, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": None},
+            {"model": None, "runs": 1, "running": 1, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": None},
+        ]
+        assert all(isinstance(row[key], int) for row in t1["by_model"] for key in (
+            "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))
+        assert t1["manager_by_model"] == [
+            {"model": "claude-haiku-4-5", "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 30, "output_tokens": 4, "cache_read_tokens": 50, "cache_creation_tokens": 6,
+             "cost_usd": pytest.approx(0.02)},
+        ]
+        assert t1["cost_usd"] == pytest.approx(0.76)
+        assert sum(r["cost_usd"] or 0 for r in t1["by_model"]) == pytest.approx(t1["cost_usd"])
+        assert sum(r["runs"] for r in t1["by_model"]) == t1["runs"]
+        assert costs["t2"]["by_model"] == [
+            {"model": "claude-opus-4-1", "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 42, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": pytest.approx(1.0)},
+        ]
 
     _in_fresh_schema(test)
 
