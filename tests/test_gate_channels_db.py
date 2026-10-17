@@ -119,6 +119,7 @@ def test_a_lark_tasks_gate_posts_its_card_and_the_rest_under_it(monkeypatch: pyt
         await user_gates.add_user_message("task-a", "g1", {"kind": "message", "text": "PostgreSQL", "via": "lark",
                                                            "channel": "lark", "chat": "oc_dm",
                                                            "external_id": "om_user_1"})
+        assert await user_gates.unposted() == []  # the user's own messages are never posted
         await _say("task-a", "step-g1", "reply", "Which version?", role="planner", state="discussing")
         await _say("task-a", "step-g1", "updated", "the service runs 15", state="discussing")
         await courier.run_once()
@@ -295,6 +296,7 @@ def test_a_telegram_reply_is_matched_within_its_chat_only(monkeypatch: pytest.Mo
     async def test(pool: Any) -> None:
         from looper.agents.gate_courier import GateCourier
         from looper.agents.gate_routing import RouteKind, route
+        from looper.db import user_gates
 
         await _task_with_gate(pool, origin="channel-telegram", chat=TELEGRAM_CHAT, kind="chat")
         poster = _Poster()
@@ -314,6 +316,17 @@ def test_a_telegram_reply_is_matched_within_its_chat_only(monkeypatch: pytest.Mo
         same = await route(telegram(TELEGRAM_CHAT, "om_101"), has_planner=lambda _: True, bus=bus,
                            source=MANAGER_ADDRESS)
         assert same.kind is RouteKind.DELIVERED and len(bus.published) == 1
+
+        # The Planner's reply goes under the user's message 9 of the task's chat; after a message the user sent the
+        # Manager from another chat (its id means nothing in this one), under the card.
+        await _say("task-a", "step-g1", "reply", "Which version?", role="planner", state="discussing")
+        await GateCourier(poster).run_once()
+        await user_gates.add_user_message("task-a", "g1", {"kind": "message", "text": "15", "via": "telegram",
+                                                           "channel": "telegram", "chat": "5151", "external_id": "3"})
+        await _say("task-a", "step-g1", "reply", "15 then.", role="planner", state="discussing")
+        await GateCourier(poster).run_once()
+        assert [(p["target"].id, p["text"], p["reply_to"]) for p in poster.posts[1:]] == [
+            (TELEGRAM_CHAT, "Which version?", "9"), (TELEGRAM_CHAT, "15 then.", "om_101")]
 
     _run(test, monkeypatch)
 
