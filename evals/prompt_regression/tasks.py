@@ -42,8 +42,10 @@ class EvalTask:
     # The task's project lets its Planner choose CHOSEN_PROFILE for its Workers and Reviewers (its list is empty
     # otherwise).
     planner_may_choose: bool = False
-    # The task's project lets its Planner define the roles its steps run as (planner_roles on).
+    # The task's project lets its Planner define the roles its steps run as (planner_roles on), and keeps these
+    # role templates (each its key and fields, as the dashboard writes one) for it to copy.
     roles_on: bool = False
+    role_templates: tuple[dict[str, Any], ...] = ()
     # The task's project lets its Planner open user gates (user_gates on); what the user answers in them, in turn
     # (END_DISCUSSION ends the discussion), and how long a gate waits before each answer.
     user_gates: bool = False
@@ -54,8 +56,8 @@ class EvalTask:
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
-    # min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
-    # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
+    # min_template_roles, min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
+    # max_roles_defined, max_template_roles, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
     expect: dict[str, int] = field(default_factory=dict)
@@ -550,6 +552,18 @@ _FAKE_CLIENTS = {
                             '    func tip(day: Int) async throws -> Tip { try await get("/api/tip?day=\\(day)") }\n}\n'),
 }
 
+# The role templates of the template tasks' projects: one for steps whose code runs commands or takes untrusted
+# input, one for steps that write user documentation.
+_ROLE_TEMPLATES = (
+    {"key": "security-review", "kind": "review",
+     "description": "Steps whose code runs external commands or handles untrusted input.",
+     "role_prompt": "You review the step's code for shell injection, unsafe handling of untrusted input and "
+                    "hard-coded secrets, and fail the step for any of them."},
+    {"key": "doc-writer", "kind": "work",
+     "description": "Steps that write user documentation, such as a README or usage notes.",
+     "role_prompt": "You write short, accurate user documentation with an example for each thing it explains."},
+)
+
 ROLE_TASKS: tuple[EvalTask, ...] = (
     EvalTask(
         # Work that needs other roles than the built-in Worker: a tester (on a profile the project allows) and a
@@ -691,6 +705,45 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
                     ("android_rd", "You own android/: idiomatic Kotlin, a data class for the tip, suspend "
                                    "functions."),
                     ("ios_rd", "You own ios/: Swift with a Codable struct and async throws functions."))]},
+        },
+    ),
+    EvalTask(
+        # The project keeps role templates and the requirement asks for no role: the step whose code runs a command
+        # on untrusted input fits the security template, so the Planner copies it as the step's review role.
+        id="roles_template_fits",
+        requirement=("Create greet.py in the working directory: `python greet.py <name>` prints `hello <name>` by "
+                     "running the `echo` command with the name as an argument, never through a shell, so a name "
+                     "like `Bob; touch pwned` is printed as it is and runs nothing. An independent Reviewer must "
+                     "check the step."),
+        roles_on=True,
+        role_templates=_ROLE_TEMPLATES,
+        check=_greets_without_a_shell,
+        expect={"min_steps": 1, "min_reviews": 2, "min_template_roles": 1, "min_role_reviews": 1,
+                "max_gate_breaches": 0, "max_role_prompt_mismatches": 0, "max_role_boundary_misses": 0},
+        fake={
+            "plan": [{**_step("s1", "Write greet.py, which runs echo without a shell.",
+                              ["python greet.py 'Bob; touch pwned' prints the name and runs nothing"], review=True),
+                      "review_role": "security-review"}],
+            "attempts": {"s1": [{"status": "completed", "files": {"greet.py": _FAKE_GREET}}]},
+            "planner_calls": {"PLAN": [
+                ["looper_task_role_set", {"template": "security-review",
+                                          "reason": "the step runs a command on a name the user gives"}]]},
+        },
+    ),
+    EvalTask(
+        # The same templates on work neither fits (no command, no untrusted input, no documentation): the Planner
+        # copies none and defines no role.
+        id="roles_template_unfit",
+        requirement=("In the working directory, write numbers.txt with the numbers 1 to 5, one per line, then "
+                     "sum.txt holding their sum."),
+        roles_on=True,
+        role_templates=_ROLE_TEMPLATES,
+        check=_numbers_and_sum,
+        expect={"min_steps": 1, "max_template_roles": 0, "max_roles_defined": 0},
+        fake={
+            "plan": [_step("s1", "Write numbers.txt with 1 to 5 and sum.txt with 15.", ["sum.txt holds 15"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"numbers.txt": "1\n2\n3\n4\n5\n",
+                                                                  "sum.txt": "15\n"}}]},
         },
     ),
     EvalTask(
