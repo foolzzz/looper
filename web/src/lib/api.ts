@@ -364,6 +364,10 @@ export async function sendChat(
   return res.json();
 }
 
+/** Why a Lark or Telegram answer did not reach its chat: the channel no longer knew the chat (it restarted), or it
+ * could not send the answer. */
+export type DeliveryFailure = "no_chat" | "send_failed";
+
 export interface DbChatMessage {
   message_id: string;
   role: string;
@@ -371,6 +375,9 @@ export interface DbChatMessage {
   /** The channel the turn came in on: "web", "telegram" or "lark". */
   channel?: string;
   created_at: string;
+  /** Set for a Lark or Telegram answer its channel did not deliver, with the channel's error. */
+  delivery_failure?: DeliveryFailure | null;
+  delivery_error?: string | null;
 }
 
 /** A session's newest messages (up to 200), oldest first. */

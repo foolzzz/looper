@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 import { ChannelBadge, ConversationList } from "@/components/chat-conversations";
-import { channelLabel } from "@/lib/chat-channels";
+import { channelLabel, undeliveredText } from "@/lib/chat-channels";
 import {
   sendChat,
   saveChatMessage,
@@ -988,6 +988,7 @@ function ChannelMessages({ session, messages }: { session: ChatSession; messages
       )}
       {messages.map((msg) => {
         const isUser = msg.role === "user";
+        const undelivered = undeliveredText(session.channel, msg.delivery_failure, msg.delivery_error);
         return (
           <div key={msg.message_id} className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}>
             {!isUser && (
@@ -1007,6 +1008,11 @@ function ChannelMessages({ session, messages }: { session: ChatSession; messages
               <time dateTime={msg.created_at} className="mt-1 text-[10px] tabular-nums text-muted-foreground">
                 {new Date(msg.created_at).toLocaleString([], { hour12: false })}
               </time>
+              {undelivered && (
+                <p role="status" className="mt-1 text-xs text-destructive [overflow-wrap:anywhere]">
+                  {undelivered}
+                </p>
+              )}
             </div>
             {isUser && (
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent">
