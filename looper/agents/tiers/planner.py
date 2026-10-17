@@ -178,7 +178,8 @@ logger = logging.getLogger(__name__)
 from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
 from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
-from ...db import task_roles as db_roles, tasks as db_tasks, user_gates as db_user_gates
+from ...db import role_templates as db_templates, task_roles as db_roles, tasks as db_tasks
+from ...db import user_gates as db_user_gates
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
@@ -851,7 +852,7 @@ class PlannerAgent:
             await self._fail_plan(plan, reason=f"Planning failed: {problem}")
             return
         try:
-            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan),
+            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
                                     lambda text: parse_plan(text, self._roles, gate_policy=self._gate_policy))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
@@ -1995,7 +1996,8 @@ class PlannerAgent:
         await self._read_changes(plan, changes)
         view = plan.view()
         try:
-            reply: ChatReply | None = await self._ask(TurnKind.RESTART, self._restart_message(plan, why, changes),
+            message = self._restart_message(plan, why, changes, await self._template_lines(plan))
+            reply: ChatReply | None = await self._ask(TurnKind.RESTART, message,
                                                       lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
             await self._activity("error", f"Warning: the Planner could not take the restart: {exc}. The steps not "
@@ -2407,6 +2409,23 @@ class PlannerAgent:
                 return parse(reply)
             except ProtocolError as second:
                 raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+
+    async def _template_lines(self, plan: TaskPlan) -> list[str]:
+        """The project's role templates, one line each, for a turn that plans, where its project lets its Planner
+        define roles and has templates; nothing otherwise (or when they cannot be read)."""
+        if not self._execution.roles_on or not plan.project_id:
+            return []
+        try:
+            rows = await db_templates.list_templates(plan.project_id)
+        except Exception:
+            logger.warning("planner %s cannot read its project's role templates", self.agent_id, exc_info=True)
+            return []
+        if not rows:
+            return []
+        return ["This project's role templates (when one fits a step, define its role from it with "
+                "looper_task_role_set and template):",
+                *(f"- {row['template_key']} ({row['kind']})" + (f": {_clip(row['description'], 300)}"
+                                                               if row["description"] else "") for row in rows)]
 
     async def _read_roles(self) -> None:
         """Read the task's roles by key (``self._roles``) where its project lets its Planner define them; a failed
@@ -2829,7 +2848,7 @@ class PlannerAgent:
         section = journal.planner_section(plan.journal)
         return ["", *section] if section else []
 
-    def _plan_message(self, plan: TaskPlan) -> str:
+    def _plan_message(self, plan: TaskPlan, templates: Sequence[str] = ()) -> str:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
                                 "later one changes it)")
@@ -2837,6 +2856,7 @@ class PlannerAgent:
             "[PLAN] Plan the task in the Task section of your instructions"
             + (", with the supplements below." if added else "."),
             *(["", *added] if added else []),
+            *(["", *templates] if templates else []),
             "",
             "You may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         ])
@@ -2995,7 +3015,7 @@ class PlannerAgent:
             "Reply with the CHAT JSON.",
         ])
 
-    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges) -> str:
+    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = ()) -> str:
         """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
         it is now and the journal."""
         lines, section = self._change_lines(plan, changes)
@@ -3011,6 +3031,7 @@ class PlannerAgent:
             "",
             *self._plan_lines(plan),
             *(["", *section] if section else []),
+            *(["", *templates] if templates else []),
             "",
             "Build on what is done: decide whether the steps not started still fit the task as it is now.",
             "Allowed actions: none (run the steps not started as they are), add_steps, replan.",

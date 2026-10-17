@@ -115,7 +115,8 @@ _BOUNDARIES_LEAD = "## Boundaries\nLooper sets these boundaries."
 def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     """The roles the task's Planner defined and how their runs went: how many roles (``roles_defined``); the Worker
     and Reviewer runs as one (``role_runs``), on the role's own profile (``role_profile_runs``), as a review role
-    (``role_reviews``); role runs whose prompt is not a version the Planner defined (``role_prompt_mismatches``) or
+    (``role_reviews``); the roles it copied from a project role template (``template_roles``); role runs whose
+    prompt is not a version the Planner defined (``role_prompt_mismatches``) or
     whose system prompt lacks the boundaries before its contract (``role_boundary_misses``); the accepted steps with a
     review role that lack a passing built-in review, or a passing review by their role where it is required
     (``gate_breaches``); and the reviews by an advisory review role (``advisory_role_reviews``) and those of them that
@@ -147,6 +148,8 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
         "role_profile_runs": sum(1 for r in role_runs
                                  if ((r.get("metadata") or {}).get("profile") or {}).get("source") == "task_role"),
         "role_reviews": sum(1 for r in role_runs if role(r) == "reviewer"),
+        "template_roles": sum(1 for role_ in detail.get("roles") or []
+                              if any(version.get("template") for version in role_.get("versions") or [])),
         "role_prompt_mismatches": sum(1 for r in role_runs
                                       if defined.get((layer(r)["id"], layer(r)["version"])) != layer(r)["sha256"]),
         "role_boundary_misses": sum(1 for text in prompts if _BOUNDARIES_LEAD not in text
