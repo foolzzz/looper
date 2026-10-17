@@ -563,7 +563,12 @@ function DashboardGatesCard({ reloadKey }: { reloadKey: string }) {
               >
                 <option value="">Only the task page</option>
                 {targets.map((target) => (
-                  <option key={gateTargetKey(target)} value={gateTargetKey(target)}>
+                  // A chat on a channel that is off cannot be chosen (the API refuses it); a saved one stays shown.
+                  <option
+                    key={gateTargetKey(target)}
+                    value={gateTargetKey(target)}
+                    disabled={!target.channel_enabled && gateTargetKey(target) !== saved}
+                  >
                     {`${target.label}${target.channel_enabled ? "" : " (channel off)"}`}
                   </option>
                 ))}
@@ -573,7 +578,9 @@ function DashboardGatesCard({ reloadKey }: { reloadKey: string }) {
                 {chosen && !chosen.channel_enabled ? (
                   <span className="text-warning">This channel is turned off: nothing reaches the chat until it is on. </span>
                 ) : gone && choice === saved ? (
-                  <span className="text-warning">This chat is no longer in its channel&apos;s sender allowlist. </span>
+                  <span className="text-warning">
+                    {settings.dashboard_target_problem ?? "This chat is no longer in its channel's sender allowlist"}.{" "}
+                  </span>
                 ) : null}
                 Chats a channel&apos;s sender allowlist lets in.
               </p>

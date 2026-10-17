@@ -2926,6 +2926,8 @@ export interface GateTargetOption extends GateTarget {
 /** Where the gate messages of tasks started on the dashboard go besides the task page; null: only the task page. */
 export interface GateSettings {
   dashboard_target: GateTarget | null;
+  /** Set when the saved chat is no longer on its channel's sender allowlist: gates then go to the task page only. */
+  dashboard_target_problem?: string | null;
   targets: GateTargetOption[];
 }
 
