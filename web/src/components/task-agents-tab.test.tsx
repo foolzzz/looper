@@ -7,14 +7,14 @@ const profile = (name: string, effort: string | null = null) => ({
   value: { profile_id: name, name, model: "m", effort, runtime: "r", provider: "p" },
   source: "role" as const,
 });
-const limit = (value: number) => ({ value, source: "role_project" as const, task: null, project: { value, source: "role_project" as const } });
+const limit = (value: number) => ({ value, source: "role" as const, task: null, default: { value, source: "role" as const } });
 
 function agents(editable: boolean): TaskAgents {
   return {
     concurrency_max: 64,
     editable,
     roles: {
-      planner: { profile: profile("claude-code/opus"), concurrency: { value: 3, source: "role_project" } },
+      planner: { profile: profile("claude-code/opus") },
       worker: { profile: profile("codex/gpt-5", "high"), concurrency: limit(2) },
       reviewer: { profile: profile("claude-code/sonnet"), concurrency: limit(1) },
     },
@@ -129,6 +129,33 @@ describe("TaskAgentsTab", () => {
     for (const line of ["claude-code/opus", "codex/gpt-5 · high", "claude-code/sonnet", "The task has completed"]) {
       expect(text(html)).toContain(line);
     }
+  });
+
+  it("limits only the Worker and the Reviewer, each with where its limit comes from and the default as placeholder", () => {
+    const base = agents(true);
+    const withLimits: TaskAgents = {
+      ...base,
+      roles: {
+        ...base.roles,
+        worker: { ...base.roles.worker, concurrency: { value: 4, source: "task", task: 4, default: { value: 16, source: "role" } } },
+        reviewer: { ...base.roles.reviewer, concurrency: { value: 8, source: "builtin", task: null, default: { value: 8, source: "builtin" } } },
+      },
+    };
+    const html = renderToStaticMarkup(<TaskAgentsTab task={{ ...task(true), agents: withLimits }} onAgents={() => {}} />);
+    const [, planner, worker, reviewer] = html.split("<h4");
+    // The Planner's row shows its Agent Profile and nothing else: no limit, no field.
+    expect(planner).toContain(">Planner</h4>");
+    expect(text(planner).match(/Now:/g)).toHaveLength(1);
+    expect(planner).not.toContain("<input");
+    expect(text(worker)).toContain("Now: 4 · this task");
+    expect(worker).toContain('placeholder="Default: 16"');
+    expect(text(reviewer)).toContain("Now: 8 · built-in default");
+    expect(reviewer).toContain('placeholder="Default: 8"');
+  });
+
+  it("names a limit from the role layer as the Settings → Roles default", () => {
+    const html = renderToStaticMarkup(<TaskAgentsTab task={task(false)} onAgents={() => {}} />);
+    expect(text(html)).toContain("Now: 2 · Settings → Roles default");
   });
 
   it("lists the Planner's roles with their profiles, marking one the project no longer allows", () => {

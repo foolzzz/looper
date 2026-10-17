@@ -15,7 +15,7 @@
 ## Looper 是什么
 
 Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同运转的"规划—执行—验证"循环：
-**Manager** 负责与用户对话，**TaskRouter** 管理任务生命周期和并发，**Planner** 把工作拆成步骤，
+**Manager** 负责与用户对话，**TaskRouter** 管理任务生命周期，**Planner** 把工作拆成步骤，
 **WorkerPool** 运行 Claude CLI 子进程完成实际的编码。
 
 所有过程都能在内置的 Web 控制台里看到：实时流式输出、任务生命周期控制和 agent 配置。
@@ -25,7 +25,7 @@ Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同
           │
        Manager          （理解意图，分派任务）
           │
-       TaskRouter       （生命周期、并发、排队）
+       TaskRouter       （任务生命周期）
           │
        Planner          （拆解步骤，核验结果）
           │
@@ -157,7 +157,7 @@ Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
 | 层级 | 模块 | 职责 |
 |---|---|---|
 | **Manager** | `looper/agents/tiers/manager.py` | 面向用户的管家：识别意图、对话 |
-| **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期、按项目限制同时运行的任务数（默认 8 个）、排队 |
+| **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期：任务一开始就有自己的 Planner，同时运行的任务数不设上限 |
 | **Planner** | `looper/agents/tiers/planner.py` | 拆解步骤、派发、核验 |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI 子进程池，输出 stream-json |
 | **Scheduler** | `looper/agents/scheduler.py` | 触发各项目的定时任务：每次触发建一个完整任务并直接开始；漏掉的触发只补一次，重叠时跳过或排队，超时的运行被停止；前置检查决定这次值不值得建任务，失败那一轮的输入交给下一轮，每日花费上限，以及发到 Telegram 或飞书的通知和两条告警 |
@@ -186,7 +186,7 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 
 | 页面 | 功能 |
 |---|---|
-| **Dashboard** | 此刻在发生什么：按分组的任务数（点开即按该组筛选的 Tasks 页）、正在运行的 agent、各活跃项目相对上限的并发、定时任务（接下来的触发、正在失败的、今天跳过的）、今日花费，组件不健康时给出警告 |
+| **Dashboard** | 此刻在发生什么：按分组的任务数（点开即按该组筛选的 Tasks 页）、正在运行的 agent、各活跃项目正在运行的任务、Worker 和 Reviewer、定时任务（接下来的触发、正在失败的、今天跳过的）、今日花费，组件不健康时给出警告 |
 | **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（消息作为该任务的补充说明交给 Planner）；选中 Manager 时按渠道（网页对话、飞书、Telegram）列出它的对话，飞书和 Telegram 的只读；SSE 流式输出 |
 | **Tasks** | 任务列表、项目、状态和定时任务筛选，定时任务建出的任务带 Scheduled 标记，以及创建、开始、停止、删除操作 |
 | **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装、各角色在本项目覆盖的 Agent Profile 和其他 agent 设置、定时任务（时间规则、接下来的触发时刻、启用、立即运行、运行历史），以及项目设置 |
@@ -276,7 +276,7 @@ Manager 横跨所有项目，所以只有前两层。任务创建时还可以给
 - **max_turns**：对话轮数上限（0 表示不限）
 - **timeout_seconds**：一次运行或一轮的时长上限（0 表示不限）。对 worker 来说，它是一次运行的总时长（默认 86400），有输出也不会延长；worker 从下一个步骤起应用这两个限制
 
-每个项目同时运行多少个 Planner（每个任务一个）、Worker 和 Reviewer（默认 8、16、8）也属于分层设置：在 Settings → Roles 按角色设置，在项目的 Agent Profiles 标签页按项目里的角色覆盖。
+并发只按任务算：同时运行的任务数不设上限，每个任务同时最多运行多少个 Worker 和 Reviewer（默认 16、8）。所有任务的默认值在 Settings → Roles 按角色设置，任务可以在自己的 Agents 标签页另设，定时任务也可以给它建出的任务设定。
 
 ## 任务生命周期
 

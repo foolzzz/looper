@@ -28,9 +28,9 @@ change it records (``db.plans.save``); the model never writes one. The kinds
 - ``profile_choice``: the Planner chose (or cleared) the Agent Profile of the
   task's Workers or Reviewers with its tool, for the rest of the task or for
   one step (``ops.planner``), and why; for the task page only;
-- ``concurrency_change``: the Planner changed its task's or its project's
-  concurrency limits with its tool: each role's limit before and after, and
-  why; for the task page only;
+- ``concurrency_change``: the Planner changed its task's concurrency limits
+  with its tool (before, also its project's): each role's limit before and
+  after, and why; for the task page only;
 - ``role_defined``: the Planner defined a role for its steps, or a new version
   of one, with its tool (``ops.planner``, ``task_roles``): its kind, version,
   profile, harness and why; for the task page only;

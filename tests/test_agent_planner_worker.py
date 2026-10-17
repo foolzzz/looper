@@ -1147,8 +1147,8 @@ def _run_item(worker_id: str, task_id: str, work_dir: Path, *, review: bool = Fa
 
 
 class TestWorkerConcurrency:
-    """A Worker or Reviewer run starts once fewer of its role run in its task's project than that role's limit
-    there, read each time it checks."""
+    """A Worker or Reviewer run starts once fewer of its role run in its task than the task's limit (here the role
+    layer's, the default for every task), read each time it checks; runs of other tasks never hold it up."""
 
     @staticmethod
     def _projects(agent_db: Any, projects: dict[str, str]) -> None:
@@ -1157,7 +1157,7 @@ class TestWorkerConcurrency:
 
     @staticmethod
     def _limits(agent_db: Any, **roles: int) -> None:
-        """Store each role's limit on its role layer."""
+        """Store each role's limit on its role layer: the default for every task."""
         agent_db.list_layers.return_value = [
             {"scope": "role", "role": role, "project_id": None, "max_concurrency": limit} for role, limit in roles.items()]
 
@@ -1169,9 +1169,9 @@ class TestWorkerConcurrency:
             await asyncio.sleep(0.02)
         raise AssertionError(f"not all of {worker_ids} started: {pool.status()}")
 
-    def test_runs_wait_for_room_in_their_project_and_role(self, agent_db: Any) -> None:
+    def test_runs_wait_for_room_in_their_task_and_role_only(self, agent_db: Any) -> None:
         self._projects(agent_db, {"t-a": "proj-a", "t-a2": "proj-a", "t-b": "proj-b"})
-        self._limits(agent_db, worker=2, reviewer=1)
+        self._limits(agent_db, worker=1, reviewer=1)
 
         async def _run() -> tuple[dict[str, str], list[str], dict[str, str], dict[str, tuple[Any, ...]]]:
             with tempfile.TemporaryDirectory() as tmp:
@@ -1180,7 +1180,7 @@ class TestWorkerConcurrency:
                                   runtime_root=Path(tmp))
                 await pool.start(bus)
                 await asyncio.sleep(0)
-                # Three Workers in proj-a (two tasks), one in proj-b, and a Reviewer in proj-a.
+                # Two Workers in t-a, one in t-a2 (the same project), one in proj-b, and a Reviewer in t-a.
                 for worker_id, task_id in (("w1", "t-a"), ("w2", "t-a2"), ("w3", "t-a"), ("w4", "t-b")):
                     await bus.publish(_run_item(worker_id, task_id, Path(tmp)))
                 await bus.publish(_run_item("r1", "t-a", Path(tmp), review=True))
@@ -1192,7 +1192,7 @@ class TestWorkerConcurrency:
                 waits = [c.kwargs["summary"] for c in agent_db.insert_activity.await_args_list
                          if "waits for room" in c.kwargs["summary"]]
 
-                assert await pool.send_input("w1", "finish")  # w1 ends, which leaves room for w3
+                assert await pool.send_input("w1", "finish")  # w1 ends, which leaves room in t-a for w3
                 await self._until_running(pool, "w3")
                 after = {w: wp.status for w, wp in pool._active.items()}
                 await pool.stop()
@@ -1208,13 +1208,13 @@ class TestWorkerConcurrency:
                         "w4": ("worker", "running", "t-b", "proj-b", parser),
                         "r1": ("reviewer", "running", "t-a", "proj-a", parser)}
         # The task's activity says why the step has not started, once.
-        assert len(waits) == 1 and "2 running, limit 2" in waits[0]
+        assert waits == ["Worker waits for room in this task (1 running, limit 1)"]
         assert after == {"w2": "running", "w3": "running", "w4": "running", "r1": "running"}
 
-    # A task's Planner starts every ready step: its project's Worker limit alone decides how many run at once
-    # (16 when no layer sets one).
+    # A task's Planner starts every ready step: the task's Worker limit alone decides how many run at once (16 when
+    # neither the task nor the role's layer sets one).
     @pytest.mark.parametrize(("limit", "running"), [(None, 6), (6, 6), (3, 3)])
-    def test_one_tasks_six_parallel_steps_run_within_the_project_limit(
+    def test_one_tasks_six_parallel_steps_run_within_its_limit(
         self, agent_db: Any, limit: int | None, running: int,
     ) -> None:
         self._projects(agent_db, {"t-a": "proj-a"})
@@ -1268,6 +1268,36 @@ class TestWorkerConcurrency:
 
         assert asyncio.run(_run()) == {"w1": ("running", None),
                                        "w2": ("waiting", {"id": "fe_rd", "kind": "work", "version": 2})}
+
+    def test_a_runs_end_wakes_only_its_own_tasks_waiting_runs(self, agent_db: Any) -> None:
+        # With any number of tasks, a run's end makes only its task's waiting runs read their limit again.
+        self._projects(agent_db, {"t-a": "proj-a", "t-b": "proj-a"})
+        self._limits(agent_db, worker=1)
+
+        async def _run() -> list[str | None]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                for worker_id, task_id in (("a1", "t-a"), ("b1", "t-b"), ("a2", "t-a"), ("b2", "t-b")):
+                    await bus.publish(_run_item(worker_id, task_id, Path(tmp)))
+                await self._until_running(pool, "a1", "b1")
+                for _ in range(100):  # a2 and b2 have checked their limit and wait
+                    if sum(map(len, pool._slot_waiters.values())) == 2:
+                        break
+                    await asyncio.sleep(0.02)
+                reads = len(agent_db.list_layers.await_args_list)
+                assert await pool.send_input("a1", "finish")
+                await self._until_running(pool, "a2")
+                woken = [c.kwargs.get("task_id") for c in agent_db.list_layers.await_args_list[reads:]]
+                await pool.stop()
+                await bus.shutdown()
+                return woken
+
+        woken = asyncio.run(_run())
+        assert "t-a" in woken and "t-b" not in woken
 
     def test_a_raised_limit_starts_a_waiting_run_and_a_lowered_one_stops_none(self, agent_db: Any) -> None:
         self._projects(agent_db, {"t-a": "proj-a"})

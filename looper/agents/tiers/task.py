@@ -6,12 +6,12 @@ dashboard or through the Manager (TASK_START); the TaskRouter then creates a
 dedicated PlannerAgent for it and manages the Planner lifecycle. When a task
 completes or fails, the TaskRouter tears down the corresponding Planner and
 forwards results to the Manager. Every task belongs to a project
-(``project_id``), which can change while the task runs. At most the Planner's
-concurrency limit of a project's tasks run at once (``agent_settings.load_concurrency``,
-read each time one may start); the others wait, oldest first, without
-holding up another project's. At server start it resumes the tasks the
-previous server was running, from their plans in the database
-(``resume_tasks``). Each task that ends (completed, failed, cancelled or
+(``project_id``), which can change while the task runs. A started task gets its
+Planner at once: nothing limits how many tasks run (a task limits its own
+Workers and Reviewers, ``agent_settings.resolve_task_concurrency``). At server
+start it resumes the tasks the previous server was running, from their plans
+in the database (``resume_tasks``), and starts those it had not given a
+Planner yet (``start_tasks``). Each task that ends (completed, failed, cancelled or
 stopped) is reported to ``on_task_end``: the scheduler records a scheduled
 run's outcome there.
 """
@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 from .. import step_workspaces
-from ..agent_settings import AgentType, load_concurrency
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..message import (
@@ -118,11 +117,6 @@ class TaskRouter:
         self._planners: dict[str, PlannerAgent] = {}
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
-        # The tasks waiting for room in their project, oldest first, each with the message that starts it.
-        self._pending: list[tuple[str, MessageEnvelope]] = []
-        # Held to change the waiting tasks, and for a whole pass over them (``recheck``), so two passes cannot
-        # both take a project's last place.
-        self._admitting = asyncio.Lock()
         self._broadcaster = broadcaster
         # Each Planner's own platform tools (``ops.planner.PlannerOps``; set by ``looper serve``); None: it has none.
         self.planner_ops: Any = None
@@ -215,10 +209,7 @@ class TaskRouter:
                 await self._handle_restart(envelope)
 
     async def resume_tasks(self, task_ids: list[str]) -> None:
-        """Give each task the previous server was running a new Planner that carries on with its saved plan.
-
-        Like a new task, one waits while its project runs as many tasks as its limit.
-        """
+        """Give each task the previous server was running a new Planner that carries on with its saved plan."""
         for task_id in task_ids:
             try:
                 row = await db_tasks.get_task(task_id)
@@ -247,7 +238,45 @@ class TaskRouter:
                 correlation_id=task.correlation_id,
                 metadata={"origin_channel_id": task.origin_channel_id},
             )
-            await self._start_or_queue(task, envelope)
+            await self._start(task, envelope)
+
+    async def start_tasks(self, task_ids: list[str]) -> None:
+        """Start each task a previous server left started without a Planner (``pending``: it waited for room under
+        its project's limit before tasks ran without one, or the server ended before its Planner started): one with
+        a saved plan carries on with it, as a restart does, and any other is planned."""
+        for task_id in task_ids:
+            try:
+                row = await db_tasks.get_task(task_id)
+                saved = await db_plans.load(task_id) if row is not None else None
+            except Exception:
+                logger.exception("cannot read task %s to start it", task_id)
+                continue
+            if row is None:
+                continue
+            task = Task(
+                task_id=task_id,
+                requirement=row["requirement"],
+                goal_id=row.get("goal_id") or "",
+                work_dir=row.get("work_dir") or "",
+                project_id=row["project_id"],
+                correlation_id=row.get("correlation_id") or "",
+                origin_channel_id=row.get("origin_channel_id") or "",
+                notify=NotifyTarget.from_columns(row),
+                title=row.get("title") or "",
+            )
+            self._tasks[task_id] = task
+            carry_on = bool(saved and saved.get("steps"))
+            await self._start(task, MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_REQUEST,
+                payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
+                         "project_id": task.project_id,
+                         # Its restart was held back, and the server's end stopped it meanwhile.
+                         **({"restart": RestartMode.CONTINUE.value, "ended": "stopped"} if carry_on else {})},
+                correlation_id=task.correlation_id,
+                metadata={"origin_channel_id": task.origin_channel_id},
+            ))
 
     async def _handle_task_request(self, envelope: MessageEnvelope) -> None:
         """Create the requested task ready, without a Planner; it runs once a user starts it (``TASK_START``)."""
@@ -281,7 +310,7 @@ class TaskRouter:
         logger.info("task %s created ready in project %s", task_id, project_id)
 
     async def _handle_start(self, envelope: MessageEnvelope) -> None:
-        """Start a ready task, once: like a new task, it waits while its project runs as many tasks as its limit."""
+        """Start a ready task, once."""
         task_id = envelope.payload.get("task_id", "")
         try:
             row = await db_tasks.start_ready_task(task_id)
@@ -303,7 +332,7 @@ class TaskRouter:
             title=row.get("title") or "",
         )
         self._tasks[task_id] = task
-        await self._start_or_queue(task, MessageEnvelope.create(
+        await self._start(task, MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
             target=TASK_ROUTER_ADDRESS,
             message_type=MessageType.TASK_REQUEST,
@@ -314,41 +343,12 @@ class TaskRouter:
             metadata={"origin_channel_id": task.origin_channel_id},
         ))
 
-    async def _start_or_queue(self, task: Task, envelope: MessageEnvelope) -> None:
-        """Queue ``task`` behind its project's waiting tasks, then start every one that has room."""
-        async with self._admitting:
-            task.status = "pending"
-            self._pending = [(tid, env) for tid, env in self._pending if tid != task.task_id]
-            self._pending.append((task.task_id, envelope))
-        await self.recheck()
-        if task.status == "pending":
-            logger.info("task %s queued: project %s runs as many tasks as its limit", task.task_id, task.project_id)
-
-    def _running_in(self, project_id: str) -> int:
-        """The project's tasks with a Planner; a moved task counts in its new project."""
-        return sum(1 for task_id in self._planners
-                   if (task := self._tasks.get(task_id)) is not None and task.project_id == project_id)
-
-    async def recheck(self) -> None:
-        """Start the waiting tasks whose project has room under its limit, read now, oldest first in each project.
-
-        Runs when a task arrives or ends, and when a limit changes: a raised limit starts waiting tasks at
-        once, a lowered one stops nothing that runs.
-        """
-        async with self._admitting:
-            limits: dict[str, int] = {}
-            for task_id, envelope in list(self._pending):
-                task = self._tasks.get(task_id)
-                if task is None or task.status != "pending" or task_id in self._planners:
-                    self._pending.remove((task_id, envelope))  # stopped or cancelled while it waited
-                    continue
-                project_id = task.project_id
-                if project_id not in limits:
-                    limits[project_id] = await load_concurrency(AgentType.PLANNER, project_id)
-                if self._running_in(project_id) >= limits[project_id]:
-                    continue
-                self._pending.remove((task_id, envelope))
-                await self._assign_task(task, envelope)
+    async def _start(self, task: Task, envelope: MessageEnvelope) -> None:
+        """Give ``task`` its Planner now, unless it has one."""
+        if task.task_id in self._planners:
+            logger.warning("task %s already has a Planner; not starting it again", task.task_id)
+            return
+        await self._assign_task(task, envelope)
 
     async def _assign_task(self, task: Task, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -445,7 +445,6 @@ class TaskRouter:
         if ends_task(status):
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
-            await self.recheck()
 
     def _notice(self, task: Task, status: str, summary: str | None) -> Notice | None:
         """The end notice of a Telegram or Lark task that recorded who to tell (``task_notice``); None for any
@@ -476,7 +475,6 @@ class TaskRouter:
                 correlation_id=task.correlation_id,
             ))
             await self._teardown_task(task_id)
-            await self.recheck()
 
     async def _handle_stop(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -515,7 +513,6 @@ class TaskRouter:
 
         logger.info("task %s stopped", task_id)
         await self._task_ended(task_id, "stopped")
-        await self.recheck()
 
     @staticmethod
     async def _stop_note(task_id: str) -> str:
@@ -604,7 +601,7 @@ class TaskRouter:
             },
             correlation_id=task.correlation_id,
         )
-        await self._start_or_queue(task, restart_envelope)
+        await self._start(task, restart_envelope)
 
     async def _teardown_task(self, task_id: str) -> None:
         planner = self._planners.pop(task_id, None)
@@ -634,14 +631,3 @@ class TaskRouter:
         except Exception:
             logger.exception("the task-end listener failed for task %s", task_id)
 
-
-async def recheck_limits(task_router: TaskRouter, worker_pool: Any) -> None:
-    """After a concurrency limit changed: start the tasks and runs that wait for room a raised limit now gives; a
-    lowered limit stops nothing. A failure is logged: the limit stands, and what waits starts when a task or run
-    ends."""
-    try:
-        await task_router.recheck()
-        if worker_pool is not None:
-            await worker_pool.recheck()
-    except Exception:
-        logger.exception("re-checking the concurrency limits failed")

@@ -119,7 +119,7 @@ are any, "Ready tasks" (created, not started).
   the user to confirm an operation they asked for: call its tool. Looper asks
   them itself where it must: "needs_confirmation" (a new project, cancelling
   or starting over a task, deleting a project, an Agent Profile or a schedule,
-  the shared defaults, a project's or a role's concurrency, a higher spend cap)
+  the shared defaults, a role's default concurrency, a higher spend cap)
   means it did not run; say so and wait. When the next message starts with a
   [Looper] note naming the confirmation and the user confirms, call
   looper_confirm with its confirmation_id; otherwise do not.

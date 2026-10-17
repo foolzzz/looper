@@ -3,8 +3,8 @@
 A layer is ``system``, ``role`` (with a role), ``project`` (with a project)
 or ``role_project`` (with both). A NULL field is not set at its layer;
 ``env`` is a JSON list of ``{"key", "value"}`` (a null value unsets a key);
-``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (a task
-role's role or role-in-a-project layer only) how many of the role run at once in one project. A task may choose
+``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (the Workers'
+or the Reviewers' role layer only) how many of them run at once in a task that sets none. A task may choose
 the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
 (``task_concurrency_limits``): together, its task layer. Its Planner may choose the profile of its Workers or
 Reviewers, for the rest of the task or for one step (``task_planner_profiles``), under the task layer; a choice
@@ -134,6 +134,14 @@ async def set_profile_overrides(conn: asyncpg.Connection, task_id: str, profiles
     await conn.executemany(
         "INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES ($1, $2, $3)",
         [(task_id, role, profile_id) for role, profile_id in profiles.items()],
+    )
+
+
+async def set_task_limits(conn: asyncpg.Connection, task_id: str, limits: Mapping[str, int]) -> None:
+    """Give task ``task_id`` its concurrency limit of each role in ``limits`` (role -> limit)."""
+    await conn.executemany(
+        "INSERT INTO task_concurrency_limits (task_id, role, max_concurrency) VALUES ($1, $2, $3)",
+        [(task_id, role, limit) for role, limit in limits.items()],
     )
 
 

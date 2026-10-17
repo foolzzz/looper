@@ -7,8 +7,9 @@ role in a project), a role's timeout as Settings → Roles saves it
 (``db.role_configs``), and the list as the project's Settings tab does
 (``projects.set_allowed_profiles``, with the profiles the call adds and
 without those it removes), so each refuses with the dashboard's message. A change is ``write``, but ``high`` when it changes the shared
-defaults, a concurrency limit (as ``looper_concurrency`` asks for a project's)
-or raises a spend cap (a run's cap any role would run with goes up, or away):
+defaults, a role's default concurrency limit (how many of each task's Workers or
+Reviewers run at once when the task sets none) or raises a spend cap (a run's
+cap any role would run with goes up, or away):
 the user is shown each value before and after, and confirms first. A limit
 set lets what waits check again (``recheck_limits``), as the dashboard does.
 """
@@ -22,10 +23,10 @@ from typing import Any
 from ...db import agent_setting_layers as db_layers, profile_registry as db_profiles, role_configs as db_roles
 from .. import agent_settings, projects
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, LayerValues, SettingsError
-from ..agent_settings import index_layers, layer_update, resolve, resolve_concurrency
+from ..agent_settings import default_concurrency, index_layers, layer_update, resolve
 from ..project_execution import format_usd
 from ..tiers.journal import clip
-from ..tiers.task import recheck_limits
+from ..tiers.worker import recheck_limits
 from . import Call, ErrorCode, OpError, Risk, Tool
 from .concurrency import COUNTS, shown
 from .config import answered, by_id_or_name, project_named
@@ -171,8 +172,8 @@ async def _confirming(call: Call) -> str | None:
         if name == "max_concurrency" and place.role is not None:
             after = _after(layers, place, checked)
             lines.append(f"- {FIELD_WORDS[name]}（{COUNTS[place.role]}）："
-                         f"{shown(resolve_concurrency(place.role, layers, place.project_id).view())} → "
-                         f"{shown(resolve_concurrency(place.role, after, place.project_id).view())}")
+                         f"{shown(default_concurrency(place.role, layers).view())} → "
+                         f"{shown(default_concurrency(place.role, after).view())}")
         else:
             lines.append(f"- {FIELD_WORDS[name]}：{_shown_value(name, now[name], profiles)} → "
                          f"{_shown_value(name, value, profiles)}")
@@ -233,7 +234,7 @@ async def _set(call: Call) -> dict[str, Any]:
         if await db_roles.set_config(place.role.value, {"timeout_seconds": values["timeout_seconds"] or 0}) is None:
             raise OpError(ErrorCode.NOT_FOUND, f"role {place.role.value!r} has no configuration")
     if "max_concurrency" in data:
-        await recheck_limits(call.platform.task_router, call.platform.worker_pool)
+        await recheck_limits(call.platform.worker_pool)
     view = view or await _read(place)
     after = _own(place, view)
     changes = [{"setting": name, "before": _shown_value(name, before[name], profiles),
@@ -339,7 +340,9 @@ TOOLS: tuple[Tool, ...] = (
                                                                  "unsets an inherited one."},
                         "run_budget_usd": {"type": "number", "description": "Each run's spend cap."},
                         "max_concurrency": {"type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX,
-                                            "description": "Per project (planner: tasks); with role."},
+                                            "description": "Role worker or reviewer, no project: how many of "
+                                                           "each task's Workers or Reviewers run at once when the "
+                                                           "task sets none."},
                         "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": TIMEOUT_MAX_SECONDS,
                                             "description": "With role, no project; 0: none."},
                         "boundaries": {"type": "string", "description": "Shared defaults only: what every run of "

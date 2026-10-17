@@ -10,11 +10,11 @@ import type {
   EffectiveSettings,
   LayerUpdate,
   LayerValues,
-  ProjectRole,
   SettingLayer,
   SettingLimits,
   SettingSource,
   Sourced,
+  TaskLimitRole,
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
 import { profileName } from "@/lib/use-registry";
@@ -34,11 +34,10 @@ const LAYER_LABELS: Record<SettingSource, string> = {
   planner_step: "the Planner, for one step",
 };
 
-/** What a task role's concurrency limit counts, in one project. */
-const CONCURRENCY_LABELS: Record<ProjectRole, string> = {
-  planner: "Tasks running at once per project",
-  worker: "Workers running at once per project",
-  reviewer: "Reviewers running at once per project",
+/** What a Worker's or Reviewer's role layer limits: how many run at once in each task that sets none of its own. */
+const CONCURRENCY_LABELS: Record<TaskLimitRole, string> = {
+  worker: "Workers at once in each task (default)",
+  reviewer: "Reviewers at once in each task (default)",
 };
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
@@ -149,9 +148,9 @@ function NowValue<T>({
 }
 
 /**
- * One settings layer's harness, Agent Profile (which brings its model and effort), environment and per-run cap; a
- * Planner's, Worker's or Reviewer's role layer (in Settings → Roles or in a project) also has the role's concurrency
- * limit per project, and the system layer the boundaries of the roles a task's Planner defines. An empty field is not
+ * One settings layer's harness, Agent Profile (which brings its model and effort), environment and per-run cap; the
+ * Worker's and the Reviewer's role layer in Settings → Roles also has the role's default limit per task, and the
+ * system layer the boundaries of the roles a task's Planner defines. An empty field is not
  * set here and inherits; with `effective`, each field also says what applies now and where it comes from.
  * `profileFirst` puts the Agent Profile above the other fields, which follow as "More overrides".
  */
@@ -190,8 +189,8 @@ export function LayerSettingsForm({
   const [saved, setSaved] = useState(false);
   const isSystem = layer === "system";
   const [only] = roles;
-  const concurrencyRole: ProjectRole | null =
-    (layer === "role" || layer === "role_project") && roles.length === 1 && only !== "manager" ? only : null;
+  const concurrencyRole: TaskLimitRole | null =
+    layer === "role" && roles.length === 1 && (only === "worker" || only === "reviewer") ? only : null;
 
   const set = (fields: Partial<Draft>) => {
     setDraft((d) => ({ ...d, ...fields }));
@@ -376,7 +375,8 @@ export function LayerSettingsForm({
               )}
             </div>
             <p id={`${idPrefix}-concurrency-hint`} className="text-[11px] text-muted-foreground">
-              1–{limits.concurrency_max}. More wait their turn; lowering it stops nothing already running.
+              1–{limits.concurrency_max}. A task can set its own on its Agents tab. More wait their turn; lowering it
+              stops nothing already running.
             </p>
           </div>
         )}

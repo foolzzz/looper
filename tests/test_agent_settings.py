@@ -24,12 +24,15 @@ from looper.agents.agent_settings import (
     BUILTIN_SETTINGS,
     DEFAULT_HARNESS_PROMPT,
     AgentType,
+    Concurrency,
     Launch,
     Layer,
     LayerValues,
     SettingsError,
     index_layers,
     resolve,
+    resolve_task_concurrency,
+    task_agents_view,
 )
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.runtimes.claude_code import AGENT_TEAMS, TEAMMATE_MODE_ARGS
@@ -479,15 +482,17 @@ class TestSettingsApi:
         ("/api/agent-settings/roles/boss", {"profile_id": "agent-sonnet"}, 404, "no role"),
         ("/api/projects/proj-a/agent-settings/roles/manager", {"profile_id": "agent-sonnet"}, 400, "spans every project"),
         ("/api/projects/proj-zzz/agent-settings", {"profile_id": "agent-sonnet"}, 404, "not found"),
-        ("/api/agent-settings/system", {"max_concurrency": 2}, 400, "planner, worker or reviewer role layer"),
-        ("/api/agent-settings/roles/manager", {"max_concurrency": 2}, 400, "planner, worker or reviewer role layer"),
-        ("/api/projects/proj-a/agent-settings", {"max_concurrency": 2}, 400, "planner, worker or reviewer role layer"),
+        # Concurrency is per task: only the Workers' and the Reviewers' role layers take a limit, the default for
+        # every task; a project, a role in a project and the Planner have none.
+        *[(path, {"max_concurrency": 2}, 400, "concurrency is per task") for path in (
+            "/api/agent-settings/system", "/api/agent-settings/roles/manager", "/api/agent-settings/roles/planner",
+            "/api/projects/proj-a/agent-settings", "/api/projects/proj-a/agent-settings/roles/planner",
+            "/api/projects/proj-a/agent-settings/roles/worker", "/api/projects/proj-a/agent-settings/roles/reviewer")],
         ("/api/agent-settings/roles/worker", {"max_concurrency": 0}, 400, "from 1 to 64"),
         ("/api/agent-settings/roles/worker", {"max_concurrency": 65}, 400, "from 1 to 64"),
         ("/api/agent-settings/roles/worker", {"max_concurrency": 2.5}, 400, "from 1 to 64"),
         ("/api/agent-settings/roles/worker", {"max_concurrency": "3"}, 400, "from 1 to 64"),
-        ("/api/agent-settings/roles/worker", {"max_concurrency": True}, 400, "from 1 to 64"),
-        ("/api/projects/proj-a/agent-settings/roles/planner", {"max_concurrency": 99}, 400, "from 1 to 64"),
+        ("/api/agent-settings/roles/reviewer", {"max_concurrency": True}, 400, "from 1 to 64"),
     ])
     def test_refused_updates_change_nothing(
         self, layers: _Layers, path: str, body: Any, status: int, message: str,
@@ -499,13 +504,45 @@ class TestSettingsApi:
 
 
 class TestConcurrencyLimits:
-    """``max_concurrency``: how many of a task role run at once in one project, per role and per role in a
-    project."""
+    """``max_concurrency`` is per task: a task's Workers or Reviewers run at most its own limit at once, else the role
+    layer's (the default for every task), else the built-in one; nothing else counts."""
 
-    def test_each_task_role_has_a_builtin_limit_a_role_and_a_project_override_it(self, layers: _Layers) -> None:
+    @pytest.mark.parametrize(("rows", "worker", "reviewer"), [
+        ([], (16, Layer.BUILTIN), (8, Layer.BUILTIN)),
+        ([{"scope": "role", "role": "worker", "max_concurrency": 4}], (4, Layer.ROLE), (8, Layer.BUILTIN)),
+        ([{"scope": "task", "role": "reviewer", "max_concurrency": 1}], (16, Layer.BUILTIN), (1, Layer.TASK)),
+        # The task's own wins over the default, above it or below it: nothing caps it.
+        ([{"scope": "role", "role": "worker", "max_concurrency": 4},
+          {"scope": "task", "role": "worker", "max_concurrency": 32}], (32, Layer.TASK), (8, Layer.BUILTIN)),
+        ([{"scope": "role", "role": "reviewer", "max_concurrency": 6},
+          {"scope": "task", "role": "reviewer", "max_concurrency": 2}], (16, Layer.BUILTIN), (2, Layer.TASK)),
+        # A project's, a role's in a project or the Planner's stored before the upgrade counts for nothing.
+        ([{"scope": "role_project", "role": "worker", "project_id": "proj-a", "max_concurrency": 2},
+          {"scope": "role", "role": "planner", "max_concurrency": 3}], (16, Layer.BUILTIN), (8, Layer.BUILTIN)),
+    ])
+    def test_a_tasks_limit_is_its_own_else_the_role_layers_else_the_builtin_one(
+        self, rows: list[dict[str, Any]], worker: tuple[int, Layer], reviewer: tuple[int, Layer],
+    ) -> None:
+        layers = index_layers(rows, "proj-a")
+        assert resolve_task_concurrency(AgentType.WORKER, layers) == Concurrency(*worker)
+        assert resolve_task_concurrency(AgentType.REVIEWER, layers) == Concurrency(*reviewer)
+
+    def test_a_tasks_view_gives_the_planner_no_limit_and_a_worker_its_own_and_the_default(self) -> None:
+        layers = index_layers([{"scope": "role", "role": "worker", "max_concurrency": 4},
+                               {"scope": "task", "role": "worker", "max_concurrency": 9}], "proj-a")
+        view = task_agents_view(layers, "proj-a")
+        assert "concurrency" not in view["planner"]
+        assert view["worker"]["concurrency"] == {"value": 9, "source": "task", "task": 9,
+                                                 "default": {"value": 4, "source": "role"}}
+        assert view["reviewer"]["concurrency"] == {"value": 8, "source": "builtin", "task": None,
+                                                   "default": {"value": 8, "source": "builtin"}}
+
+    def test_the_workers_and_reviewers_role_layers_set_the_default_and_nothing_else_shows_one(
+        self, layers: _Layers,
+    ) -> None:
         body = _call("GET", "/api/agent-settings")[1]
-        assert {role: body["roles"][role]["effective"]["max_concurrency"] for role in TASK_ROLES} == {
-            "planner": {"value": 8, "source": "builtin"}, "worker": {"value": 16, "source": "builtin"},
+        assert {role: body["roles"][role]["effective"].get("max_concurrency") for role in TASK_ROLES} == {
+            "planner": None, "worker": {"value": 16, "source": "builtin"},
             "reviewer": {"value": 8, "source": "builtin"}}
         assert "max_concurrency" not in body["roles"]["manager"]["effective"]
         assert "max_concurrency" not in body["system"]["effective"]
@@ -513,29 +550,29 @@ class TestConcurrencyLimits:
         status, body = _call("PUT", "/api/agent-settings/roles/worker", {"max_concurrency": 3})
         assert status == 200 and body["roles"]["worker"]["values"]["max_concurrency"] == 3
         assert body["roles"]["worker"]["effective"]["max_concurrency"] == {"value": 3, "source": "role"}
-        status, body = _call("PUT", "/api/projects/proj-a/agent-settings/roles/worker", {"max_concurrency": 5})
-        assert status == 200 and body["roles"]["worker"]["effective"]["max_concurrency"] == {
-            "value": 5, "source": "role_project"}
-        assert body["roles"]["reviewer"]["effective"]["max_concurrency"] == {"value": 8, "source": "builtin"}
-        # Cleared, the project follows the role layer again.
-        body = _call("PUT", "/api/projects/proj-a/agent-settings/roles/worker", {"max_concurrency": None})[1]
-        assert body["roles"]["worker"]["effective"]["max_concurrency"] == {"value": 3, "source": "role"}
-        assert ("role_project", "worker", "proj-a") not in layers.rows
+        # A project shows none: it has no limits.
+        body = _call("GET", "/api/projects/proj-a/agent-settings")[1]
+        assert all("max_concurrency" not in body["roles"][role]["effective"] for role in TASK_ROLES)
+        # Cleared, the default is the built-in one again.
+        body = _call("PUT", "/api/agent-settings/roles/worker", {"max_concurrency": None})[1]
+        assert body["roles"]["worker"]["effective"]["max_concurrency"] == {"value": 16, "source": "builtin"}
+        assert ("role", "worker", None) not in layers.rows
 
     @pytest.mark.parametrize(("path", "body", "rechecked"), [
         ("/api/agent-settings/roles/worker", {"max_concurrency": 4}, True),
-        ("/api/projects/proj-a/agent-settings/roles/planner", {"max_concurrency": None}, True),
+        ("/api/agent-settings/roles/reviewer", {"max_concurrency": None}, True),
         ("/api/agent-settings/roles/worker", {"run_budget_usd": 1}, False),
         ("/api/agent-settings/roles/worker", {"max_concurrency": 0}, False),  # refused: nothing changed
+        ("/api/agent-settings/roles/planner", {"max_concurrency": 3}, False),  # refused: the Planner has none
     ])
-    def test_a_changed_limit_tells_the_router_and_the_pool_to_start_what_it_allows(
+    def test_a_changed_limit_tells_the_pool_to_start_what_it_allows(
         self, layers: _Layers, path: str, body: dict[str, Any], rechecked: bool,
     ) -> None:
         from unittest.mock import AsyncMock
 
-        router, pool = SimpleNamespace(recheck=AsyncMock()), SimpleNamespace(recheck=AsyncMock())
-        _call("PUT", path, body, router=router, pool=pool)
-        assert (router.recheck.await_count, pool.recheck.await_count) == ((1, 1) if rechecked else (0, 0))
+        pool = SimpleNamespace(recheck=AsyncMock())
+        _call("PUT", path, body, pool=pool)
+        assert pool.recheck.await_count == (1 if rechecked else 0)
 
 
 class TestMovedFields:

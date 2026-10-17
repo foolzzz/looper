@@ -25,11 +25,10 @@ run. With overlap ``parallel`` (reentrant) it starts beside the runs in
 progress, up to ``max_parallel_runs`` at once, but never while a run of the
 schedule checks its gate: only tasks overlap, so a gate can claim what it hands
 to its run (``gate_env`` tells it which run). Otherwise it creates the task (the schedule's requirement plus the
-code-written run context, ``run_context``; its profile overrides; its own
-spend cap) and starts it at once with ``TASK_START``: enabling the schedule was
-the approval (D6), and the TaskRouter's start path applies the project's
-concurrency limit. "Run now" is the same firing with ``trigger`` manual,
-leaving ``next_fire_at`` alone.
+code-written run context, ``run_context``; its profile overrides and task
+limits; its own spend cap) and starts it at once with ``TASK_START``: enabling
+the schedule was the approval (D6). "Run now" is the same firing with
+``trigger`` manual, leaving ``next_fire_at`` alone.
 
 Before the task (S2): a schedule with a ``daily_budget_usd`` whose runs fired
 since the server's local midnight cost that much records ``skipped_budget``.
@@ -558,6 +557,8 @@ class Scheduler:
         )
         if schedule["profile_overrides"]:
             await db_layers.set_profile_overrides(conn, task_id, schedule["profile_overrides"])
+        if schedule["task_limits"]:
+            await db_layers.set_task_limits(conn, task_id, schedule["task_limits"])
         return task_id, None
 
     @staticmethod
@@ -625,7 +626,7 @@ class Scheduler:
             logger.exception("could not finish the gate of schedule run %s", run_id)
 
     async def _start_task(self, task_id: str) -> None:
-        """Start the task through the TaskRouter's start path, which applies the project's concurrency limit."""
+        """Start the task through the TaskRouter's start path, as the dashboard's Start does."""
         await self._bus.publish(MessageEnvelope.create(
             source=SCHEDULER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
             payload={"task_id": task_id},

@@ -903,11 +903,9 @@ def test_runs_from_before_hand_on_only_what_the_old_rule_would_have(monkeypatch:
     _run(test, monkeypatch, tmp_path)
 
 
-def test_a_parallel_schedule_is_validated_and_warned_about_past_its_projects_planner_limit(
+def test_a_parallel_schedule_is_validated_and_answered_without_warnings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from looper.db import agent_setting_layers
-
     async def test(env: _Env) -> None:
         for value in (0, 11, "3", True, 2.5):
             status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
@@ -916,18 +914,16 @@ def test_a_parallel_schedule_is_validated_and_warned_about_past_its_projects_pla
             assert status == 400 and "max_parallel_runs must be a whole number from 1 to 10" in payload["error"]
         plain = await env.schedule()
         assert (plain["overlap"], plain["max_parallel_runs"]) == ("skip", 3)
-        await agent_setting_layers.put_layer("role_project", "planner", env.project_id, {"max_concurrency": 2},
-                                             pool=env.pool)
+        # Nothing limits how many tasks run, so a parallel schedule's runs all start: there is nothing to warn of.
         status, made = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
-            "name": "parallel", "cron": "*/5 * * * *", "requirement": "r", "overlap": "parallel"})
-        assert status == 201 and made["schedule"]["max_parallel_runs"] == 3
-        [warning] = made["warnings"]
-        assert "max_parallel_runs is 3, but its project runs at most 2 tasks at once" in warning
+            "name": "parallel", "cron": "*/5 * * * *", "requirement": "r", "overlap": "parallel",
+            "max_parallel_runs": 10})
+        assert status == 201 and made["schedule"]["max_parallel_runs"] == 10 and set(made) == {"schedule"}
         fixed = await env.ok("PUT", f"/api/schedules/{made['schedule']['schedule_id']}", {"max_parallel_runs": 2})
-        assert (fixed["schedule"]["max_parallel_runs"], fixed["warnings"]) == (2, [])
-        assert (await env.ok("PUT", f"/api/schedules/{plain['schedule_id']}", {"name": "renamed"}))["warnings"] == []
+        assert fixed["schedule"]["max_parallel_runs"] == 2 and set(fixed) == {"schedule"}
         listed = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
-        assert (listed["max_parallel_runs_limit"], listed["planner_limit"]) == (10, 2)
+        assert (listed["max_parallel_runs_limit"], listed["concurrency_max"]) == (10, 64)
+        assert "planner_limit" not in listed
 
     _run(test, monkeypatch, tmp_path)
 

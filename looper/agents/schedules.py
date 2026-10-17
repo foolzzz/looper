@@ -17,6 +17,10 @@ tell (``notify`` and a ``notify_target``: a chat that a channel's sender
 allowlist in Settings → Channels already allows; none means the dashboard
 only). Each schedule's view carries what its runs cost today and its active
 alerts; ``schedule_overview`` is the dashboard's summary.
+
+A schedule's ``profile_overrides`` and ``task_limits`` (how many of a run's
+Workers or Reviewers run at once in its task) become each run's task's own,
+as a task's own choices (``projects.set_task_agents``).
 """
 
 from __future__ import annotations
@@ -32,9 +36,10 @@ from .. import env
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, schedules as db_schedules
 from . import cron
-from .agent_settings import AgentType, budget_usd, load_concurrency
+from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
-from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _profile_overrides
+from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _concurrency_limits
+from .projects import _profile_overrides
 from .scheduler import GATE_TIMEOUT_DEFAULT_SECONDS, GATE_TIMEOUT_MAX_SECONDS
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import resolve_work_dir
@@ -194,6 +199,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "max_parallel_runs": row["max_parallel_runs"],
         "catch_up": row["catch_up"], "run_timeout_seconds": row["run_timeout_seconds"],
         "run_budget_usd": row["run_budget_usd"], "profile_overrides": dict(row.get("profile_overrides") or {}),
+        "task_limits": {role.value: (row.get("task_limits") or {}).get(role.value) for role in TASK_LIMIT_ROLES},
         "enabled": row["enabled"], "next_fire_at": row["next_fire_at"], "last_fired_at": row["last_fired_at"],
         "last_success_at": row["last_success_at"], "consecutive_failures": row["consecutive_failures"],
         "created_via": row["created_via"], "created_at": row["created_at"], "updated_at": row["updated_at"],
@@ -245,7 +251,7 @@ async def limits() -> dict[str, Any]:
         "run_timeout_max_seconds": RUN_TIMEOUT_MAX_SECONDS, "roles": list(TASK_PROFILE_ROLES),
         "gate_command_max_chars": GATE_COMMAND_MAX_CHARS, "gate_timeout_default_seconds": GATE_TIMEOUT_DEFAULT_SECONDS,
         "gate_timeout_max_seconds": GATE_TIMEOUT_MAX_SECONDS, "max_parallel_runs_limit": MAX_PARALLEL_RUNS_LIMIT,
-        "notify_targets": await notify_targets(),
+        "concurrency_max": CONCURRENCY_MAX, "notify_targets": await notify_targets(),
     }
 
 
@@ -334,7 +340,7 @@ _PARSERS = {
     "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
 }
 _ACCEPTED = (*(name for name in db_schedules.FIELDS if name not in ("notify_channel", "notify_chat")),
-             "notify_target", "profile_overrides")
+             "notify_target", "profile_overrides", "task_limits")
 
 
 async def _notify_target(raw: Any) -> dict[str, str | None]:
@@ -351,9 +357,19 @@ async def _notify_target(raw: Any) -> dict[str, str | None]:
     return {"notify_channel": raw["channel"], "notify_chat": raw["chat"]}
 
 
-async def _fields(data: Mapping[str, Any], *, update: bool) -> tuple[dict[str, Any], dict[str, str] | None]:
-    """The schedule fields in ``data``, validated, and the profile overrides when given; ``enabled`` is the
-    caller's. A new schedule needs a name, a rule and a requirement."""
+def _task_limits(raw: Any) -> dict[str, int]:
+    """``task_limits`` as role -> limit, the roles it sets: an object of ``worker`` and ``reviewer`` (a role left out
+    or null sets none), or null for none."""
+    if raw is None:
+        return {}
+    limits = _concurrency_limits(raw, field="task_limits")
+    return {role: limit for role, limit in limits.items() if limit is not None}
+
+
+async def _fields(data: Mapping[str, Any], *, update: bool,
+                  ) -> tuple[dict[str, Any], dict[str, str] | None, dict[str, int] | None]:
+    """The schedule fields in ``data``, validated, and the profile overrides and the task limits when given (each
+    replaces the schedule's); ``enabled`` is the caller's. A new schedule needs a name, a rule and a requirement."""
     accepted = (*_ACCEPTED, "enabled") if update else _ACCEPTED
     if "enabled" in data and not update:
         raise RequestError(HTTP_400, "a new schedule is created disabled; enable it with PUT /api/schedules/<id> "
@@ -374,8 +390,9 @@ async def _fields(data: Mapping[str, Any], *, update: bool) -> tuple[dict[str, A
         raise RequestError(HTTP_400, str(exc)) from None
     if "notify_target" in data:
         fields.update(await _notify_target(data["notify_target"]))
+    task_limits = _task_limits(data["task_limits"]) if "task_limits" in data else None
     profiles = await _profile_overrides(data["profile_overrides"]) if "profile_overrides" in data else None
-    return fields, profiles
+    return fields, profiles, task_limits
 
 
 async def _existing_project(project_id: str) -> dict[str, Any]:
@@ -418,11 +435,10 @@ async def _schedule_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def list_schedules(project_id: str) -> dict[str, Any]:
-    """The project's schedules, and the limits a schedule of it is checked against: the shared ones, and the
-    project's Planner limit (``planner_limit``), past which a parallel schedule's runs wait."""
+    """The project's schedules, and the limits a schedule is checked against."""
     await _existing_project(project_id)
     return {"schedules": await _schedule_views(await db_schedules.list_schedules(project_id)),
-            "limits": {**await limits(), "planner_limit": await load_concurrency(AgentType.PLANNER, project_id)}}
+            "limits": await limits()}
 
 
 async def list_all_schedules() -> dict[str, Any]:
@@ -433,7 +449,7 @@ async def list_all_schedules() -> dict[str, Any]:
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
                           now: datetime | None = None) -> dict[str, Any]:
     project = await _existing_project(project_id)
-    fields, profiles = await _fields(data, update=False)
+    fields, profiles, task_limits = await _fields(data, update=False)
     _check_rule(fields["cron"], fields["timezone"], now or _utcnow(), gated=bool(fields.get("gate_command")))
     fields["cron"] = cron.parse(fields["cron"]).text
     if not fields.get("work_dir") and not project["work_dir"]:
@@ -441,13 +457,14 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     try:
         async with db_connection.transaction() as conn:
             schedule_id = await db_schedules.create_schedule(conn, project_id=project_id, fields=fields,
-                                                             profiles=profiles or {}, created_via=created_via)
+                                                             profiles=profiles or {}, task_limits=task_limits,
+                                                             created_via=created_via)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:  # the project or a profile was removed meanwhile
         raise RequestError(HTTP_400, "the project or an Agent Profile the schedule chose was removed meanwhile") \
             from None
-    return await _with_warnings(await _schedule_answer(schedule_id))
+    return await _schedule_answer(schedule_id)
 
 
 async def get_schedule(schedule_id: str) -> dict[str, Any]:
@@ -460,7 +477,7 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
     if not data:
         raise RequestError(HTTP_400, "give at least one field to change")
     now = now or _utcnow()
-    fields, profiles = await _fields(data, update=True)
+    fields, profiles, task_limits = await _fields(data, update=True)
     enabled = data.get("enabled")
     if "enabled" in data and not isinstance(enabled, bool):
         raise RequestError(HTTP_400, "enabled must be true or false")
@@ -491,27 +508,13 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                 fields["enabled_at"] = now  # the no-success alert counts from here (``stale_deadline``)
             if rule.text != row["cron"] or zone_name != row["timezone"]:
                 fields["rule_changed_at"] = now  # so does it from a new rule or zone
-            await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles)
+            await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the schedule chose was removed meanwhile; choose again") \
             from None
-    return await _with_warnings(await _schedule_answer(schedule_id))
-
-
-async def _with_warnings(answer: dict[str, Any]) -> dict[str, Any]:
-    """A saved schedule's answer with what deserves a look (``warnings``): a parallel schedule allowed more runs at
-    once than its project's Planner limit, whose runs past it wait as pending while their run timeout counts."""
-    schedule = answer["schedule"]
-    warnings = []
-    if schedule["overlap"] == Overlap.PARALLEL.value:
-        limit = await load_concurrency(AgentType.PLANNER, schedule["project_id"])
-        if schedule["max_parallel_runs"] > limit:
-            warnings.append(f"max_parallel_runs is {schedule['max_parallel_runs']}, but its project runs at most "
-                            f"{limit} tasks at once (the Planner limit): the runs past it wait as pending, and their "
-                            "run timeout counts while they wait")
-    return {**answer, "warnings": warnings}
+    return await _schedule_answer(schedule_id)
 
 
 async def delete_schedule(schedule_id: str) -> dict[str, Any]:

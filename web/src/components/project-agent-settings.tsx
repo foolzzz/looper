@@ -42,19 +42,9 @@ const SOURCES: Partial<Record<SettingSource, string>> = {
   role_project: "this role in this project",
 };
 
+/** The Agent Profile in effect (with its effort) and where it comes from: a role's line. */
 const profileText = (effective: EffectiveSettings) =>
   `${profileName(effective.profile.value)} (${SOURCES[effective.profile.source] ?? effective.profile.source})`;
-
-/** A role's line: the Agent Profile in effect (with its effort) and where it comes from, the limit on how many run. */
-function roleSummary(role: ProjectRole, effective: EffectiveSettings) {
-  const limit = effective.max_concurrency?.value;
-  return [
-    profileText(effective),
-    limit == null ? "" : role === "planner" ? `up to ${limit} ${limit === 1 ? "task" : "tasks"} at once` : `up to ${limit} at once`,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
 
 /** The project row's line: the Agent Profile the roles that do not set one here run with, when they agree. */
 function projectSummary(settings: ProjectAgentSettings) {
@@ -281,7 +271,7 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
               id={`project-profiles-${role}`}
               {...row(role)}
               name={roleLabel(role)}
-              summary={roleSummary(role, settings.roles[role].effective)}
+              summary={profileText(settings.roles[role].effective)}
               marks={overridden(settings.roles[role].values)}
             >
               {(dirty) => (

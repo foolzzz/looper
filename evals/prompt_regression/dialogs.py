@@ -18,7 +18,9 @@ Cases (Manager tools RFC, section 12): asking for the project when the user
 named none; the whole ask → restate → 「确认」 → create → 「开始」 → start
 flow, with no raw JSON in any reply; creating, starting and stopping a task; a supplement, a
 requirement edit and an Agent Profile for a running task; cancelling only
-after the user's confirmation, and nothing after a refusal; and, for any
+after the user's confirmation, and nothing after a refusal; a running task's
+own Worker limit changed at once, and a project's limit, which no longer
+exists, explained and nothing changed (``concurrency``); and, for any
 runtime, a read-only status question (``status``). The configuration tools:
 a project created, a role's Agent Profile in a project, the project's
 allowed list, this week's spend and a project deleted only on the user's word
@@ -32,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -219,27 +222,6 @@ def _cancelled_on_confirmation(look: Look) -> str | None:
     return None if confirmed else "the task ended without a confirmed cancel"
 
 
-def _project_worker_limit(look: Look) -> int:
-    project = next(p for p in look.api.get("/api/projects")["projects"] if p["name"] == PROJECT)
-    roles = look.api.get(f"/api/projects/{project['project_id']}/agent-settings")["roles"]
-    return int(roles["worker"]["effective"]["max_concurrency"]["value"])
-
-
-def _limit_asked(look: Look) -> str | None:
-    if not _writes(look, status="needs_confirmation", tool="looper_concurrency"):
-        return "no change of the project's concurrency waits for the user's confirmation"
-    limit = _project_worker_limit(look)
-    return None if limit != 2 else "the project's Worker limit is 2 before the user confirmed"
-
-
-def _limit_confirmed(look: Look) -> str | None:
-    confirmed = [a for a in _writes(look, status="ok", tool="looper_concurrency") if a["confirmation_id"]]
-    if not confirmed:
-        return "no confirmed change of the project's concurrency"
-    limit = _project_worker_limit(look)
-    return None if limit == 2 else f"the project's Worker limit is {limit}, not 2"
-
-
 def _task_limit_set(look: Look) -> str | None:
     worker = look.detail()["agents"]["roles"]["worker"]["concurrency"]
     if (worker["task"], worker["source"]) != (1, "task"):
@@ -247,6 +229,38 @@ def _task_limit_set(look: Look) -> str | None:
     direct = [a for a in _writes(look, status="ok", tool="looper_concurrency")
               if a["task_id"] == look.task and not a["confirmation_id"]]
     return None if direct else "the task's limit did not change in the turn that asked for it"
+
+
+# A reply that says the limit was set to 2: "已改为 2", "已经把……调整为 2", "已更新为 2", "changed it to 2", "Updated … to 2".
+# Offering to change it ("可以改成 2", "Want me to set it to 2?") says nothing was done.
+_CLAIMED_CHANGE = re.compile(
+    r"已(经)?[^。\n？?，,；;：:]{0,40}(改|设置?|调整?|更新)(成|为|到)\s*2"
+    r"|(\b(I|I've|I have|has been|have been|was|is now)\s+|(^|[.!:]\s+|\n\s*))(changed|set|updated|lowered)\b"
+    r"[^.\n?]{0,30}\bto 2\b[^.!?\n]*(?:[.!\n]|$)",  # the sentence ends as a statement, not a question
+    re.IGNORECASE)
+
+
+def claims_change(reply: str) -> bool:
+    return bool(_CLAIMED_CHANGE.search(reply))
+
+
+def _project_limit_explained(look: Look) -> str | None:
+    """A project has no concurrency limit to change: the Manager says so, and nothing changes or waits for a
+    confirmation (not the default for every task in Settings → Roles either)."""
+    if _writes(look, status="needs_confirmation"):
+        return "a change waits for the user's confirmation, though a project has no limit to change"
+    changed = [a["tool"] for a in _writes(look, status="ok")
+               if not (a["tool"] == "looper_concurrency" and a["task_id"] == look.task)]
+    if changed:
+        return f"something changed though a project has no limit to change: {', '.join(changed)}"
+    default = look.api.get("/api/agent-settings")["roles"]["worker"]["effective"]["max_concurrency"]
+    if default["source"] != "builtin":
+        return f"the Workers' default limit changed to {default['value']}"
+    if look.task and look.detail()["agents"]["roles"]["worker"]["concurrency"]["task"] != 1:
+        return "the task's own Worker limit is no longer 1"
+    if claims_change(look.reply):
+        return "the reply says the limit changed, though nothing changed"
+    return None if look.reply.strip() else "no reply"
 
 
 def _answered_by_reading(look: Look) -> str | None:
@@ -413,11 +427,9 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("确认。", _cancelled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     ), running_task=True),
     Dialog("concurrency", (
-        Say(f"把项目 {PROJECT} 的 Worker 并发改成 2。", _limit_asked,
-            (("looper_concurrency", {"project": PROJECT, "limits": {"worker": 2}}),)),
-        Say("确认。", _limit_confirmed, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
         Say("把任务 <task> 的 Worker 并发改成 1。", _task_limit_set,
             (("looper_concurrency", {"task_id": "<task>", "limits": {"worker": 1}}),)),
+        Say(f"把项目 {PROJECT} 的 Worker 并发改成 2。", _project_limit_explained),
     ), running_task=True),
     Dialog("status", (
         Say("现在有哪些任务？简单列一下。", _answered_by_reading, (("looper_tasks", {"action": "list"}),)),
