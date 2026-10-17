@@ -63,33 +63,40 @@ describe("TaskAgentsSummary", () => {
   });
 });
 
+// Each role's records, as the API answers for it; a run's role is the one it was read as, whatever its id says.
+const runsOf = ({ worker = [], reviewer = [] }: { worker?: LlmRecord[]; reviewer?: LlmRecord[] }) => ({ worker, reviewer });
+
 describe("stepRuns", () => {
   it.each([
-    ["a Worker", record(1, "worker-a", "s1", "role_project"), { role: "Worker", source: "role in project" }],
-    ["a Reviewer", record(2, "reviewer-b", "s1", "project"), { role: "Reviewer", source: "project" }],
+    ["a Worker", "worker", record(1, "run-a", "s1", "role_project"), { role: "Worker", source: "role in project" }],
+    ["a Reviewer", "reviewer", record(2, "run-b", "s1", "project"), { role: "Reviewer", source: "project" }],
     [
       "a run as a role the Planner defined",
-      record(3, "worker-c", "s2", "task_role", { task_role: { id: "tester", kind: "work", version: 2 } }),
+      "worker",
+      record(3, "run-c", "s2", "task_role", { task_role: { id: "tester", kind: "work", version: 2 } }),
       { role: "tester · work", definedRole: true, source: "role the Planner defined" },
     ],
     [
       "a run on the Planner's choice for its step",
-      record(4, "reviewer-d", "s2", "planner_step"),
+      "reviewer",
+      record(4, "run-d", "s2", "planner_step"),
       { role: "Reviewer", source: "Planner's choice for this step" },
     ],
-  ])("names %s's role, Agent Profile and source", (_, run, expected) => {
-    const [row] = stepRuns(STEPS, [run]);
+  ] as const)("names %s's role, Agent Profile and source", (_, role, run, expected) => {
+    const [row] = stepRuns(STEPS, runsOf({ [role]: [run] }));
     expect(row).toMatchObject({ id: run.id, agentId: run.agent_id, profile: "codex/gpt-5", definedRole: false, ...expected });
     expect(row.step?.id).toBe(run.metadata?.step_id);
   });
 
   it("lists the runs by step in plan order, then by start, and a step not in the plan now last", () => {
-    const runs = stepRuns(STEPS, [
-      record(1, "worker-gone", "s0-replaced", "role"),
-      record(2, "reviewer-s2", "s2", "role", { created_at: "2026-10-16T10:05:00+00:00" }),
-      record(3, "worker-s2", "s2", "role", { created_at: "2026-10-16T10:01:00+00:00" }),
-      record(4, "worker-s1", "s1", "role"),
-    ]);
+    const runs = stepRuns(STEPS, runsOf({
+      worker: [
+        record(1, "worker-gone", "s0-replaced", "role"),
+        record(3, "worker-s2", "s2", "role", { created_at: "2026-10-16T10:01:00+00:00" }),
+        record(4, "worker-s1", "s1", "role"),
+      ],
+      reviewer: [record(2, "reviewer-s2", "s2", "role", { created_at: "2026-10-16T10:05:00+00:00" })],
+    }));
     expect(runs.map((run) => [run.agentId, run.step?.id ?? null])).toEqual([
       ["worker-s1", "s1"],
       ["worker-s2", "s2"],
@@ -99,7 +106,7 @@ describe("stepRuns", () => {
   });
 
   it("links each row to that run's history", () => {
-    const html = renderToStaticMarkup(<StepRunsTable runs={stepRuns(STEPS, [record(1, "worker-a", "s1", "role")])} taskId="t1" />);
+    const html = renderToStaticMarkup(<StepRunsTable runs={stepRuns(STEPS, runsOf({ worker: [record(1, "worker-a", "s1", "role")] }))} taskId="t1" />);
     expect(html).toContain('href="#history/worker-a?task=t1"');
   });
 });

@@ -9,6 +9,7 @@ import {
   type PlannerRole,
   type TaskAgents,
   type TaskDetail,
+  type TaskLimitRole,
   type TaskRole,
   type TaskStep,
 } from "@/lib/api";
@@ -81,21 +82,23 @@ export interface StepRun {
   status: LlmRecord["status"];
 }
 
-/** The task's Worker and Reviewer runs by step (in plan order), then by when each started. */
-export function stepRuns(steps: TaskStep[], records: LlmRecord[]): StepRun[] {
+/** The task's Worker and Reviewer runs (each role's records as `GET /api/llm-records` answers for it) by step (in
+ * plan order), then by when each started. */
+export function stepRuns(steps: TaskStep[], records: Record<TaskLimitRole, LlmRecord[]>): StepRun[] {
   const byId = new Map(steps.map((step) => [step.id, step]));
   const stepOf = (record: LlmRecord) => byId.get(record.metadata?.step_id ?? "") ?? null;
   const order = (record: LlmRecord) => stepOf(record)?.step_index ?? Number.MAX_SAFE_INTEGER;
-  return [...records]
-    .sort((a, b) => order(a) - order(b) || a.created_at.localeCompare(b.created_at) || a.id - b.id)
-    .map((record) => {
+  const runs = (["worker", "reviewer"] as const).flatMap((role) => records[role].map((record) => ({ role, record })));
+  return runs
+    .sort(({ record: a }, { record: b }) => order(a) - order(b) || a.created_at.localeCompare(b.created_at) || a.id - b.id)
+    .map(({ role, record }) => {
       const profile = runProfile(record);
       const defined = record.metadata?.prompt_layers?.task_role;
       return {
         id: record.id,
         agentId: record.agent_id,
         step: stepOf(record),
-        role: defined ? `${defined.id} · ${defined.kind}` : record.agent_id.startsWith("reviewer") ? "Reviewer" : "Worker",
+        role: defined ? `${defined.id} · ${defined.kind}` : roleLabel(role),
         definedRole: !!defined,
         profile: profile && profileName({ name: profile.name, effort: record.metadata?.model_choice?.effort ?? null }),
         source: profile && sourceName(profile.source),
@@ -163,7 +166,7 @@ export function StepRunsTable({ runs, taskId }: { runs: StepRun[]; taskId: strin
 
 /** What each of the task's step runs ran on, read again whenever a step changes. */
 function StepRuns({ task }: { task: TaskDetail }) {
-  const [records, setRecords] = useState<{ worker: LlmRecord[]; reviewer: LlmRecord[] } | null>(null);
+  const [records, setRecords] = useState<Record<TaskLimitRole, LlmRecord[]> | null>(null);
   const [error, setError] = useState("");
   const latest = useRef(0);
   const steps = task.steps || [];
@@ -193,7 +196,7 @@ function StepRuns({ task }: { task: TaskDetail }) {
   const clipped = records
     ? (["worker", "reviewer"] as const).filter((role) => records[role].length >= RUN_LIMIT).map(roleLabel)
     : [];
-  const runs = records ? stepRuns(steps, [...records.worker, ...records.reviewer]) : [];
+  const runs = records ? stepRuns(steps, records) : [];
   return (
     <section aria-labelledby="task-step-runs-title">
       <h3 id="task-step-runs-title" className="mb-1 text-sm font-semibold">
