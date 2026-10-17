@@ -111,6 +111,7 @@ const STATUS_VARIANTS: Record<LlmRecord["status"], "success" | "destructive" | "
   completed: "success",
   failed: "destructive",
   running: "warning",
+  interrupted: "warning",
 };
 
 const CELL = "px-4 py-2 align-top";
