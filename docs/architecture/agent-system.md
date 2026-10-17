@@ -720,11 +720,25 @@ Claude Code 2.1.285).
 Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
 
 - a task's step killed or its task stopped or cancelled (a stopped task ends
-  its running Workers and the Reviewers of its steps in review);
+  its running Workers and the Reviewers of its steps in review, all at once);
 - `timeout_seconds`;
 - the per-run spend cap;
 - a resident session stopped or replaced;
-- server shutdown.
+- server shutdown: the worker pool stops first and ends every run at once,
+  then the TaskRouter stops its Planners together, each ending its Claude. A
+  pool that has stopped still answers a Planner's `KILL_WORK` at once
+  (`killed: false`), so a shutdown does not grow with the number of running
+  steps (with 3 tasks and 12 steps it took about 1 s on the real path). A
+  stop that cancels a message loop cancels it again every `RECANCEL_SEC`
+  (5 s) while it runs on (`supervisor.cancel_and_wait`): Python 3.11's
+  `asyncio.wait_for` drops a cancellation that arrives as what it waits for
+  completes, and the loop then waits for its next message for good. The
+  bus's request-reply does not use it. The whole shutdown has
+  `SHUTDOWN_DEADLINE_SEC` (15 s, under launchd's 20 s before SIGKILL): past
+  it the server logs `the shutdown did not finish within 15 s` and exits with
+  code 1, and a second SIGINT or SIGTERM during the shutdown exits at once the
+  same way. The next start ends what such an exit leaves: the agents'
+  processes (`proc_tree.sweep`) and their records (`end_unfinished_records`).
 
 Before it sends any signal, `proc_tree.end` reads the agent's tree from one
 `ps -A -o pid=,ppid=,pgid=,stat=` snapshot: the agent, every process whose
@@ -752,18 +766,29 @@ resumes, `proc_tree.sweep` reads every record:
   orphaned, and its tree is ended as above;
 - a pid that no longer runs, or now belongs to another process, is left
   alone;
-- either way the record is removed, except one whose server still runs
-  (another server on the same runtime root): that record and its agent are
-  left alone.
+- while `proc_tree.end` ends an agent's tree, the record also lists that
+  tree's processes with their start times, until the end is done. A stop
+  that first asks the agent to exit on its own (a resident Claude's stdin
+  closed) records the tree before it asks (`begin_end`). Each listed
+  process that still runs with its recorded start time is ended too, so a
+  server that exited during an end (its shutdown deadline, a second signal)
+  has the rest ended now, the agent's children that outlived it included;
+- a pid is signalled only while it still has the recorded start time, checked
+  again right before its SIGTERM and its SIGKILL: what is left is the one
+  `ps` call between that check and the signal;
+- a record is removed once what it names has been ended, except one whose
+  server still runs (another server on the same runtime root), which is
+  left alone with its agent, and one whose start times could not be read,
+  which is kept for the next start.
 
 Two cases are not covered:
 
 - a process that left the tree before the stop, such as a command that
   daemonized itself (`nohup … &` whose shell exited). It has already been
   re-parented, with nothing linking it to the agent;
-- after a crash, what an agent that had already exited left behind. Its
-  children were re-parented, and only the agent itself is recorded
-  (plan §5.2).
+- after a crash, what an agent that had exited on its own, not during an
+  end, left behind. Its children were re-parented, and the record lists no
+  tree (plan §5.2).
 
 ### The supervisor: restarting resident agents
 
@@ -2664,7 +2689,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
-| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
+| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |

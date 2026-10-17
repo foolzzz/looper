@@ -1728,7 +1728,11 @@ export interface TaskStep {
   result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  /** The last time it went to review or ended; a step running again keeps it. */
   completed_at: string | null;
+  /** When its run was first dispatched, kept through its retries and reviews; null while it is not started (again,
+   * after a restart), and for a step from before starts were kept. */
+  started_at: string | null;
 }
 
 export interface ActivityEvent {
