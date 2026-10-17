@@ -45,13 +45,51 @@ role review where the role is required (`gate_breaches`), the reviews by an advi
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
-`planner_violation_reasons`) and whether the Planner modified files itself (its file-editing tool
-calls, and files changed while only a Planner turn ran).
+`planner_violation_reasons`), whether the Planner modified files itself (its file-editing tool
+calls, and files changed while only a Planner turn ran), the runs that ended in an error (`run_errors`,
+by their records' status) and the models each role's runs reported (`models`).
 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by
-git) and prints a Markdown table comparing it with the previous run of the
-same mode and model there, or else with the committed baseline in
-`evals/prompt_regression/baselines/`.
+git) and prints a Markdown table comparing it with a base: by default the
+committed baseline of the same mode and model in
+`evals/prompt_regression/baselines/` (`real-<model>.json`; there is none for
+fake mode); with `--baseline previous`, the newest earlier run of the same mode
+and model in `--out-dir`; or the run file `--baseline` names. It prints which
+base it used, with its commit and its reps. The default used to be the newest
+earlier run in `evals/runs/`, which differs from one checkout to the next: use
+`--baseline previous` for that.
+
+### Repetitions, outcomes and the table
+
+`--reps N` runs every task N times (default 1): rep 1 of every task, then rep
+2, and so on, so drift over time does not land on one task. Each (task, rep)
+has a working directory (`work/<task>/<rep>`) and a project of its own, and
+`--total-cap-usd` covers all the reps; the rows past it are `skipped`. One rep
+is a single sample: with sixteen tasks run once each, the pass rate's 95%
+interval is up to about ±25 points wide, so one task going from pass to fail
+is no regression by itself. Nothing is run again automatically: a rerun is a
+new run, and a run is never the best of several.
+
+Every row has `rep` and `outcome`: `pass`, `fail` (the task ended and its files
+or its flow are wrong) or `error`, which is neither and is not scored.
+`error_class` says why: `timeout` (cancelled after `--task-timeout`),
+`spending_cap` (cancelled at the cap) or `harness` (the eval itself failed: an
+API call, the server, a check that raised; the task is cancelled and the run
+goes on with the next), and `error` gives the message. `success` stays, true
+only for a pass. The JSON is written however the run ends; a run that stopped
+midway (an interrupt, a setup that failed) has `aborted` with the reason. Runs
+of the first schema are still read: a row without `rep` is rep 1, and one
+cancelled at its timeout or at the cap is an error.
+
+In the table, success is `k/n`, the passes over the scored reps, with ` · e
+err` when some reps are errors; the other columns are means over the scored
+reps. The total row has the passes over all scored rows with their Wilson 95%
+interval, such as `41/48 (85%, 73–93%)`, the errors by class, and the tasks'
+means added up (one pass through the set). Below it: the tasks whose pass rate
+changed, a note for a side that ran each task once, the tasks with no
+baseline, and the tasks of the base the new run lacks. The exit code is 0 only
+when every row ran and passed, 1 when a row failed, is an error or was
+skipped, and 2 when the run could not start or stopped midway.
 
 Both modes need a PostgreSQL server where the eval may create and drop a
 database: pass `--pg-url` (any database on the server except `loopx`) or set
@@ -115,8 +153,15 @@ built-in one of that type, such as `codex` or `omp` when on PATH, and the
 provider's key is read from the variable `api_key_env` names, never from the
 file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in Codex
 login instead, the operator's own ChatGPT login on this machine), `--tasks
-single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
-`--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`,
+single_step,chat_correction` (task ids, or a named set: `planner`, the tasks
+whose pass or fail turns on the Planner's judgment, `dependent_steps`,
+`parallel_parts`, `interface_first`, `supplement_replan`,
+`supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
+`roles_not_needed` and `roles_multi_platform`; a set is resolved against the
+tasks there are, so a task it names that does not exist yet is left out until
+it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
+`--max-budget-usd`, `--total-cap-usd` (for all the reps), `--baseline
+<run.json>|previous`, `--keep-work-dirs`,
 `--step-workspaces shared|worktree` (each working directory becomes a git
 repository on `main` with one commit, the task's project gets that setting, and
 each task reports the merge and checkpoint commits it added as
@@ -126,13 +171,28 @@ each task reports the merge and checkpoint commits it added as
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]
 ```
 
-A pull request that changes a recommended prompt, a contract or the injection
-order runs real mode on the change (comparing with the committed baseline, or
-with a run of the base branch via `--baseline`) and pastes the table into its
-description. Update the model's committed baseline
-(`baselines/real-haiku.json`, `real-sonnet.json` or `real-opus.json`) when an
-intended change moves the numbers; it holds numbers only, never transcripts or
-local paths.
+### Which tier to run
+
+A pull request runs real mode on its change and pastes the tables into its
+description; `--total-cap-usd` covers all the reps, so raise it with them:
+
+- any change to model-visible content (a recommended prompt, a contract, the
+  injection order, the injected context) runs the haiku tier on all tasks:
+  `run --mode real --reps 3`;
+- a change to the Planner's prompt, its contracts, the plan contract or the
+  context the Planner receives also runs the opus tier, `run --mode real
+  --model opus --reps 3 --tasks planner`, compared with
+  `baselines/real-opus.json`;
+- a change to the Manager's prompt or its tools runs `dialogs --mode real
+  --reps 3`, and also `dialogs --mode real --manager-model opus
+  --manager-effort xhigh --reps 3`.
+
+Each compares with the committed baseline of its model, or with a run of the
+base branch via `--baseline`. Update the model's committed baseline
+(`baselines/real-haiku.json`, `real-sonnet.json` or `real-opus.json`; for the
+dialogs, `dialogs-real-<model>.json` by the Manager's model) when an intended
+change moves the numbers; it holds numbers only, never transcripts or local
+paths.
 
 ### The Manager's dialogs
 
@@ -154,10 +214,17 @@ database, a disposable `looper serve`, and fake or real mode.
 | `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
 
-The dialogs that need a running task start a slow one first (`sleep 300`)
-and stop whatever is still running at their end. Fake mode plays the Manager
-with the stand-in, which makes each message's scripted calls over MCP; it
-takes about 20 seconds. Real mode costs about $0.30 with haiku and stops at
+Each (dialog, rep) runs on a database, a `looper serve`, a working directory
+and a project of its own, so nothing one dialog leaves behind (a ready task, a
+changed setting) reaches the next; their spend adds up for
+`--total-cap-usd`. The dialogs that need a running task start a slow one
+first (`sleep 300`) and stop whatever is still running at their end. A
+dialog's outcome is `pass`, `fail` (a check found something wrong) or `error`:
+no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
+such as the slow task not getting under way); after an error its remaining
+turns are not sent and the run goes on with the next dialog. Fake mode plays
+the Manager with the stand-in, which makes each message's scripted calls over
+MCP; it takes about a minute. Real mode costs about $0.30 with haiku and stops at
 `--total-cap-usd` (default 0.50):
 
 ```bash
@@ -170,9 +237,14 @@ Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 model, the other roles on `--model`; one `confirm_create_start` with opus at
 xhigh cost $0.12, so give it `--max-budget-usd 1.00`),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex or
-OMP agent checks that runtime's tool calls), `--max-budget-usd`,
-`--total-cap-usd`, `--timeout` (seconds for each reply and each check),
-`--keep-work-dirs`. The run's JSON and server log go to `evals/runs/`; the
-table shows each dialog's outcome, its tool calls per turn (a refused one with
-its error code) and its cost, and the JSON keeps what each refused call was
-told and the arguments it came with.
+OMP agent checks that runtime's tool calls), `--reps` (as for `run`),
+`--baseline <run.json>|previous` (the default is
+`baselines/dialogs-real-<model>.json` by the Manager's model, not committed
+yet), `--max-budget-usd`, `--total-cap-usd`, `--timeout` (seconds for each
+reply and each check), `--keep-work-dirs`. The run's JSON goes to
+`evals/runs/`, with a server log per (dialog, rep) in
+`<stamp>-dialogs-<mode>.server-logs/`. It prints the comparison (success
+`k/n`, errors and cost, as for `run`), then a table of each (dialog, rep)'s
+outcome, its tool calls per turn (a refused one with its error code) and its
+cost; the JSON keeps what each refused call was told and the arguments it came
+with.
