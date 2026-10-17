@@ -719,7 +719,8 @@ Claude Code 2.1.285).
 
 Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
 
-- a task's step killed or its task stopped or cancelled;
+- a task's step killed or its task stopped or cancelled (a stopped task ends
+  its running Workers and the Reviewers of its steps in review);
 - `timeout_seconds`;
 - the per-run spend cap;
 - a resident session stopped or replaced;
@@ -2003,11 +2004,27 @@ So:
 - **Compactions** (`compactions`) lists each `compact_boundary` as
   `{trigger, pre_tokens, post_tokens, duration_ms}`. It is `[]` when there
   were none, and null for runs recorded before M2.
+- **How a run's record ends** (`llm_records.status`, `RecordStatus`): it
+  opens `running` and ends `completed` (a successful result), `failed` (an
+  error, no result, the time limit or a spend cap) or `interrupted`: Looper
+  stopped the run before it ended (a kill, its task stopped or cancelled, the
+  server stopping), or the server running it died. Every run runs inside its
+  recorder (`async with ClaudeRunRecorder`), which closes a record the run
+  left open however the run ended: `interrupted` when it was cancelled,
+  `failed` after an error in Looper's handling of it. A close goes on when a
+  cancellation arrives meanwhile, for at most `CLOSE_TIMEOUT_SEC` (5 s). A
+  run that ends without a result keeps what its usage events added up to: its
+  tokens, and their cost when Looper prices the run; with Claude Code's own
+  pricing its cost is not known. At startup, before anything runs, `serve`
+  ends every record still `running` as `interrupted`
+  (`llm_records.end_unfinished_records`, logged with the count): each is a run
+  a previous server that was killed, crashed or stopped did not see end, and
+  its usage, held in memory until a run ends, is not known. A second start
+  changes nothing.
 - **A task's cost** (`llm_records.task_costs`) is the sum of its Planner's,
   Workers' and Reviewers' runs, in total and by role, with the run count. It
   also counts `running` runs (cost not known yet) and `unpriced_runs`
-  (finished without a reported cost). A Manager turn about the task is not
-  part of it.
+  (ended without a cost). A Manager turn about the task is not part of it.
 - **An agent's usage** (`llm_records.agent_usage`, `GET
   /api/agents/:id/usage`) gives its total cost, runs and compactions, its cost
   by session and by UTC day, and its latest turns (oldest first) with each
@@ -2553,7 +2570,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (a Planner, Worker or Reviewer `role` or `role_project` layer only); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
