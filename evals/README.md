@@ -35,8 +35,8 @@ directories), one at a time over the HTTP API:
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
 | `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
-| `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work |
-| `reviewer_unrelated_note` | the same, the other way: the retry note is about the file's separator, and the work it leads to still lacks a region, so the Reviewer must not pass it; the next attempt has it and passes |
+| `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work in its one review (the requirement leaves the regions to the step, so only the note can correct it) |
+| `reviewer_unrelated_note` | the same, the other way: the retry note is about the file's separator, and the work it leads to still lacks a region, so the Reviewer must not pass it; the next attempt has it and passes (exactly two reviews and two retries) |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step

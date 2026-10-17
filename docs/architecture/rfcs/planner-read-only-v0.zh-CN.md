@@ -58,7 +58,7 @@ agent-room 那一路已在 Claude Code 2.1.285 的 `--print` 模式（隔离参�
 
 | | Claude Code | Codex | OMP |
 |---|---|---|---|
-| 只读方式（`RuntimeAdapter.read_only`） | `permissions`：去掉 `--dangerously-skip-permissions`，加 `--disallowedTools Edit,Write,NotebookEdit` 和 `--allowedTools`（见 4.2） | 候选：`exec` 的 `--sandbox read-only` 加 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`。沙箱只管模型生成的 shell 命令，MCP 调用不受影响。**需要验证**：`exec resume` 是否沿用这些参数，MCP 工具调用是否仍能执行，被拒的命令在 `--json` 事件里怎样表示。验证通过前保持现状，用回退检查（`check`） | 候选：`--approval-mode write`（print 模式下没有界面可批，行为未知）或 `--tools` 白名单（去掉 bash 就没有 git log/diff）。**需要验证**；验证前用回退检查（`check`） |
+| 只读方式（`RuntimeAdapter.read_only`） | `permissions`：去掉 `--dangerously-skip-permissions`，钉住 `--permission-mode manual`（2.1.285 里默认模式的名字）和 `--permission-prompts none`（没有人回答确认，凡要确认的一律拒绝），加 `--disallowedTools Edit,Write,NotebookEdit` 和 `--allowedTools`（见 4.2） | 候选：`exec` 的 `--sandbox read-only` 加 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`。沙箱只管模型生成的 shell 命令，MCP 调用不受影响。**需要验证**：`exec resume` 是否沿用这些参数，MCP 工具调用是否仍能执行，被拒的命令在 `--json` 事件里怎样表示。验证通过前保持现状，用回退检查（`check`） | 候选：`--approval-mode write`（print 模式下没有界面可批，行为未知）或 `--tools` 白名单（去掉 bash 就没有 git log/diff）。**需要验证**；验证前用回退检查（`check`） |
 | 拒绝的记录 | `result.permission_denials`，每次拒绝一条 | 没有类型化的拒绝信号（被拒的命令只是失败） | 没有 |
 | 已核实 | Bash 的读命令放行、写命令拒绝并记录（第 2 节）；MCP 工具和技能在放行后可用、规划者照常完成任务：**需要验证**，由真实评测覆盖 | — | — |
 
@@ -72,21 +72,27 @@ agent-room 那一路已在 Claude Code 2.1.285 的 `--print` 模式（隔离参�
 
 - `Skill`：装给规划者的技能；
 - `WebFetch`、`WebSearch`：查文档，不改文件；
-- `mcp__<名称>`：给规划者的每个 MCP 服务器，Looper 自己的 `looper`（规划者工具）和目录里装给规划者的。
+- `mcp__<名称>`：给规划者的每个 MCP 服务器，Looper 自己的 `looper`（规划者工具）和目录里装给规划者的。名称里不是
+  字母、数字、`_`、`-` 的字符换成 `_`（`claude_cli.mcp_rule`，和 Claude Code 给工具起名的方式一致）；插件自带的 MCP
+  服务器在 `--strict-mcp-config` 下本来就不加载，不需要规则。
 
 被拒的典型是改文件的命令和 Claude Code 判断不了的命令，例如跑测试（`uv run pytest` 会写缓存）。规划者推荐 prompt 里
 「运行无害的命令（例如看看构建或测试）」随之改为只读的说法（4.5）；看测试结果是 Worker 和 Reviewer 的事。
 
-**已知缺口：** 项目自己的 `.claude/settings.json` 仍会加载（隔离参数保留 `--setting-sources project`），它若放开某些
-Bash 命令，规划者就能用它们写文件；目录里装给规划者的 MCP 服务器若会写文件，也拦不住（这是运维者装的）；技能里
+**权限模式钉住：** 项目自己的 `.claude/settings.json` 仍会加载（隔离参数保留 `--setting-sources project`），它的
+`permissions.defaultMode`（例如 `acceptEdits`、`auto`）会改变默认模式下放行的范围，所以命令行显式给出
+`--permission-mode manual`；`--permission-prompts none` 让「要确认」不依赖宿主检测的默认值，一律拒绝。
+
+**已知缺口：** 项目设置里的放行规则（`permissions.allow`）仍然有效，它若放开某些 Bash 命令，规划者就能用它们写文件；目录里装给规划者的 MCP 服务器若会写文件，也拦不住（这是运维者装的）；技能里
 `allowed-tools` 放行的工具在技能运行期间可以用。这几种情况不在本 RFC 解决，列入第 5.2 节待办。
 
 ### 4.3 拒绝的类型化记录
 
 `RuntimeAdapter.permission_denials(result_event)` 把一轮里被拒的调用读成 `[{tool, input}]`（Bash 记命令，其他工具记
 输入的 JSON，都截到 200 字符）；`ClaudeRunRecorder.finish` 把它记进这一轮运行记录的 `metadata.permission_denials`
-（任何角色的运行都适用，实际只有规划者会有）。规划者的动态里同时写一行：「The Planner runs read-only: Looper
-refused N of its tool calls (Bash: …)」。评测按此统计 `planner_denials`。
+（加上 `tool_use` 的 id；任何角色的运行都适用，实际只有规划者会有）。规划者的动态里同时写一行：「The Planner runs
+read-only: Looper refused N of its tool calls (Bash: …)」，每条输入先遮掉已知的密钥（`log_redaction.redact`）再截到
+80 字符。评测按此统计 `planner_denials`；被拒的改文件调用不算规划者改了文件（按 id 排除）。
 
 ### 4.4 回退：每轮检查任务目录
 
@@ -94,10 +100,16 @@ refused N of its tool calls (Bash: …)」。评测按此统计 `planner_denials
 和 `git status --porcelain` 列出的每个路径的状态、大小、修改时间；`--no-optional-locks`，不写索引），比较结果非空时：
 
 - 记进这一轮运行记录的 `metadata.planner_changed_files`；
-- 动态里写一条错误：「The Planner changed files in its turn, which it leaves to Workers: …」。
+- 动态里写一条中性的警告：「files changed in the task directory during a Planner turn, while no Worker, Reviewer or
+  other task ran there …」——用户、IDE 或 git 钩子在这一轮里改的也会出现在这里，所以不说是规划者改的。
 
-**只在比较有意义时做：** 这一轮里任务目录中没有 Worker 或 Reviewer 在跑（在自己 worktree 里跑的步骤不算），开始和
-结束时都是；任务目录不在 git 检出里时不做。**不回滚：** 改动里可能有用户或 Worker 的，回滚有丢东西的风险；记录和
+**只在比较有意义时做：** 开始和结束时，任务目录中都没有这个任务的 Worker 或 Reviewer 在跑（在自己 worktree 里跑的
+步骤不算），也没有别的进行中的任务共用这个目录（`tasks.others_active_in`；读不到时当作有）；任务目录不在 git 检出里
+时不做。每一轮记下怎样检查的：`metadata.read_only_check` 为 `compared`、`shared`（可能有别人在写）或 `no_checkout`，
+运行记录不会把没做的检查说成做了。
+
+**在自己 worktree 里跑的步骤：** worktree 在 runtime root 下，不在规划者能读的目录里；对这一步的决策回合写明 worktree、
+分支和起点提交，规划者用 git（`git diff <起点> <分支>`）看已提交的改动。**不回滚：** 改动里可能有用户或 Worker 的，回滚有丢东西的风险；记录和
 告知交给用户和规划者下一轮判断。
 
 ### 4.5 规划者推荐的角色 prompt
@@ -125,14 +137,15 @@ criterion that no note changes still holds.
 - <note>
 ```
 
-内置 Reviewer 和评审角色的 Reviewer 都拿到。没有重试说明时 prompt 逐字节不变。
+内置 Reviewer 和评审角色的 Reviewer 都拿到。没有重试说明时 prompt 逐字节不变。多行的说明后续行缩进在这一项下面
+（Worker 看到的说明同样处理），说明里自带的标题或列表不会打乱这一节的结构。
 
 ## 6. 决定
 
 | 编号 | 决定 | 理由 |
 |---|---|---|
 | **D1** | **规划者只读，由运行时强制；决策 8 对规划者修订。** Manager、Worker、Reviewer 不变 | 「不改文件」是维护者的要求，prompt 管不住模型的意外 |
-| D2 | Claude Code 用默认权限模式加 `--disallowedTools Edit,Write,NotebookEdit`，不用计划模式 | 计划模式下读以外的工具一概不试，规划者连自己的 MCP 工具也不会调；默认模式只拒绝要问的 |
+| D2 | Claude Code 用默认权限模式（钉住为 `manual`，确认交给 `none`）加 `--disallowedTools Edit,Write,NotebookEdit`，不用计划模式，也不用 `dontAsk` | 计划模式下读以外的工具一概不试，规划者连自己的 MCP 工具也不会调；默认模式只拒绝要问的；钉住是为了不让项目设置的 `defaultMode` 放宽它；`dontAsk` 是否仍放行只读的 Bash 命令见第 7 节的核实 |
 | D3 | 放行 `Skill`、`WebFetch`、`WebSearch` 和规划者的每个 MCP 服务器 | 规划者合法需要；都不改文件（装给规划者的 MCP 服务器是运维者的选择） |
 | D4 | 运行时拒绝不了的（`check`），每轮比较任务目录，只记录和告知，不回滚 | 回滚可能丢掉用户或 Worker 的改动；比较只在它能说明问题时做 |
 | D5 | Codex 和 OMP 的只读方式验证通过前不改它们的命令行，用 D4 的回退 | 不发布没核实过的命令行 |
@@ -148,5 +161,6 @@ criterion that no note changes still holds.
 - `reviewer_retry_note`、`reviewer_unrelated_note`：规划者和 Worker 按脚本走（重试说明是定死的），只有 Reviewer 是真实
   的 Claude（真实模式下 `fake_claude` 只把这类任务的评审运行交给真的 `claude`，其他任务整个直通）。前者的计划少数了
   一个地区，重试说明更正了它，Reviewer 要让更正后的一步通过；后者的重试说明与缺的那一行无关，Reviewer 必须判不通过，
-  下一次尝试补齐后才通过。
+  下一次尝试补齐后才通过。需求只说「团队报的各个地区」，不说是哪几个，所以只有重试说明能更正标准；评审和重试的次数
+  有上下限（前者各正好 1 次，后者各正好 2 次），评审错判后靠脚本里多出来的重试蒙混过关的情况会失败。
 - 层级：haiku 全部任务和 opus 的 `planner` 集合各 3 轮，与提交的基线比较；三个新任务另在 main 上跑一遍对照。

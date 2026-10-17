@@ -705,32 +705,47 @@ change goes to a Worker. How its runtime keeps it from changing files is the
 adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
 
 - **`permissions`** (Claude Code): `read_only_args` in place of
-  `permission_args`. Claude Code's default permission mode refuses, in
-  `--print` mode, every tool call it would ask about; `--disallowedTools
-  Edit,Write,NotebookEdit` leaves out the file-editing tools, and
-  `--allowedTools` lets through what the Planner may use without asking: its
-  skills (`Skill`), web reads (`WebFetch`, `WebSearch`) and each of its MCP
-  servers (`mcp__looper`, its own tools, and those installed for it). Bash
+  `permission_args`. `--permission-mode manual` (2.1.285's name for its
+  default mode) is pinned, so a project's own `permissions.defaultMode`
+  cannot loosen it, and `--permission-prompts none` leaves no one to answer
+  a prompt: in `--print` mode every tool call Claude Code would ask about is
+  refused. `--disallowedTools Edit,Write,NotebookEdit` leaves out the
+  file-editing tools, and `--allowedTools` lets through what the Planner may
+  use without asking: its skills (`Skill`), web reads (`WebFetch`,
+  `WebSearch`) and each of its MCP servers (`mcp_rule`: `mcp__<server>`,
+  with each character of the name that is not a letter, a digit, `_` or `-`
+  replaced by `_`, as Claude Code names the tools; `mcp__looper` is its own).
+  A plugin's own MCP servers never load (`--strict-mcp-config`). Bash
   runs `ls`, `cat`, `grep` and `git status`, `log`, `diff` and `show`, and
   refuses a redirect, `touch`, a script that writes or `git commit`
   (verified with Claude Code 2.1.285 and haiku). Each refused call is in the
   turn's `result.permission_denials`: the run record keeps it as
-  `metadata.permission_denials` (`[{tool, input}]`, the input cut to 200
-  characters) and the task's activity says "The Planner runs read-only:
-  Looper refused N of its tool calls (...)". Not covered: a project's own
-  `.claude/settings.json`, which still loads and may allow more, an MCP
-  server installed for the Planner that writes files, and the tools a skill's
-  `allowed-tools` grants while it runs.
+  `metadata.permission_denials` (`[{tool, input, id}]`, the input cut to
+  200 characters, the `tool_use` id) and the task's activity says "The
+  Planner runs read-only: Looper refused N of its tool calls (...)", each
+  input masked (`log_redaction.redact`) and cut to 80 characters. Not
+  covered: a project's own `.claude/settings.json` still loads and its allow
+  rules may let through Bash commands that write, an MCP server installed for
+  the Planner may write files, and a skill's `allowed-tools` grants its tools
+  while it runs.
 - **`check`** (Codex and OMP, whose read-only modes are not verified yet):
   the command is unchanged, and the Planner compares its task directory's git
   checkout before and after each turn (`step_workspaces.tree_state`: `HEAD`
   and each path `git status` lists with its status, size and modification
   time, read with `--no-optional-locks`). A change is recorded as the turn's
-  `metadata.planner_changed_files` and an activity error ("The Planner
-  changed files in its turn, which it leaves to Workers: ..."); the files are
-  left as they are. It compares only when no Worker or Reviewer of the task
-  runs in the task directory at the start and the end of the turn (a step in
-  a worktree of its own runs elsewhere), and only in a git checkout.
+  `metadata.planner_changed_files` and an activity warning ("files changed in
+  the task directory during a Planner turn, while no Worker, Reviewer or
+  other task ran there ..."); the files are left as they are. It compares
+  only when, at the start and the end of the turn, no Worker or Reviewer of
+  the task runs in the task directory (a step in a worktree of its own runs
+  elsewhere) and no other task in progress shares the directory
+  (`tasks.others_active_in`), and only in a git checkout. Each such turn
+  records how it was checked as `metadata.read_only_check`: `compared`,
+  `shared` (another writer may have run) or `no_checkout`.
+
+A step that runs in a worktree of its own is outside the directories the
+Planner reads; the decision on it names the worktree, its branch and the
+commit it started from, and git shows its committed changes.
 
 The Planner's recommended role prompt says it runs read-only and which
 commands it may run.
