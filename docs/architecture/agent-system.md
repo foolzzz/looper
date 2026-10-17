@@ -2748,7 +2748,8 @@ restart.
   chooses the app and so the bot: the channel's optional `profile` is passed
   as `--profile` on every call, and empty means lark-cli's active profile
   (`app_id_env` and `app_secret_env`, from before, are dropped from the row at
-  startup, and from an imported file). It receives with `lark-cli event
+  startup, and from an imported file; a row without `profile` gets an empty
+  one, so Settings shows the field). It receives with `lark-cli event
   consume im.message.receive_v1 --as bot`, one flat JSON event per line. It
   handles direct messages (`chat_type` `p2p`) and, in a group chat (`group`),
   only a message that @-mentions the bot: one whose `mentions` hold the bot's
