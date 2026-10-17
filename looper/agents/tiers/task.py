@@ -30,6 +30,7 @@ from typing import Any
 from .. import step_workspaces
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
+from ..supervisor import cancel_and_wait
 from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -138,13 +139,13 @@ class TaskRouter:
     async def stop(self) -> None:
         self._running = False
         if self._loop_task:
-            self._loop_task.cancel()
-            try:
-                await self._loop_task
-            except asyncio.CancelledError:
-                pass
-        for planner in list(self._planners.values()):
-            await planner.stop()
+            await cancel_and_wait(self._loop_task)
+        planners = list(self._planners.values())
+        # All at once: each waits for its runs and its Claude to end.
+        stopped = await asyncio.gather(*(planner.stop() for planner in planners), return_exceptions=True)
+        for planner, outcome in zip(planners, stopped):
+            if isinstance(outcome, Exception):
+                logger.error("planner %s did not stop cleanly", planner.agent_id, exc_info=outcome)
         self._planners.clear()
 
     def is_healthy(self) -> bool:

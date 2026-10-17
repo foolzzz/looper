@@ -161,12 +161,13 @@ const PHASE_CONFIG: Record<string, { label: string; icon: typeof Clock; color: s
   failed: { label: "Failed", icon: AlertCircle, color: "text-destructive" },
 };
 
-function phaseBadge(phase: string) {
+/** The task's phase, spinning only while the task runs (`live`); a task that has ended keeps the phase it was in. */
+function phaseBadge(phase: string, live: boolean) {
   const cfg = PHASE_CONFIG[phase] || PHASE_CONFIG.pending;
   const Icon = cfg.icon;
   return (
     <div className="flex items-center gap-1.5">
-      {(phase === "planning" || phase === "executing") ? (
+      {live && (phase === "planning" || phase === "executing") ? (
         <Loader2 className={cn("h-4 w-4 animate-spin", cfg.color)} />
       ) : (
         <Icon className={cn("h-4 w-4", cfg.color)} />
@@ -680,8 +681,8 @@ function OverviewTab({
           <div className="mt-1">{taskStatusBadge(task.status)}</div>
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
-          <p className="text-xs text-muted-foreground">Phase</p>
-          <div className="mt-1">{phaseBadge(task.phase || "pending")}</div>
+          <p className="text-xs text-muted-foreground">{isActive ? "Phase" : "Last phase"}</p>
+          <div className="mt-1">{phaseBadge(task.phase || "pending", isActive)}</div>
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Created</p>
@@ -1963,7 +1964,7 @@ function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               <span className="text-xs text-muted-foreground">{taskId}</span>
               {task && taskStatusBadge(task.status)}
               {task && <ScheduledBadge task={task} />}
-              {task && task.phase && task.phase !== task.status && phaseBadge(task.phase)}
+              {task && isActiveTask(task) && task.phase && task.phase !== task.status && phaseBadge(task.phase, true)}
               {task && (
                 <TaskProjectControl
                   task={task}
