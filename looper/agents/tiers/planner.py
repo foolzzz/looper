@@ -2494,8 +2494,8 @@ class PlannerAgent:
             return []
         if not rows:
             return []
-        return ["This project's role templates (when one fits a step, define its role from it with "
-                "looper_task_role_set and template):",
+        return ["This project's role templates (a template is not a role yet: when one fits a step, define a role "
+                "from it with looper_task_role_set and template before a step names it):",
                 *(f"- {row['template_key']} ({row['kind']})" + (f": {_clip(row['description'], 300)}"
                                                                if row["description"] else "") for row in rows)]
 

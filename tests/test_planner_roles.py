@@ -467,8 +467,9 @@ def test_a_planner_started_again_reads_its_steps_roles_back(agent_db: Any) -> No
         "tester", [StepReviewRole("security", True, 3), StepReviewRole("style", False, 1)], 2, ReviewStage.ROLE, 1)
 
 
-TEMPLATE_LINES = ("This project's role templates (when one fits a step, define its role from it with "
-                  "looper_task_role_set and template):\n- security (review): steps that change authentication\n"
+TEMPLATE_LINES = ("This project's role templates (a template is not a role yet: when one fits a step, define a role "
+                  "from it with looper_task_role_set and template before a step names it):\n"
+                  "- security (review): steps that change authentication\n"
                   "- tester (work)")
 
 

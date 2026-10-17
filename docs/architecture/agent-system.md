@@ -2294,7 +2294,8 @@ refused with that reason.
   /api/projects/:id/role-templates/:key`) and checked as a task role is
   (`check_definition`, `allowed_profile`), whatever the switch. With the
   switch on, its tasks' [PLAN] and [RESTART] messages list them, one line
-  each (`key (kind): description`), and `looper_task_role_set` with
+  each (`key (kind): description`), under a line that a template is no
+  role until the Planner defines one from it, and `looper_task_role_set` with
   `template` copies one as a task role: the id defaults to the key, the
   fields the call gives override the template's, and the template's profile
   comes along while the project still allows it (otherwise it is left out
