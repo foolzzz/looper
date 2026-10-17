@@ -7,7 +7,12 @@ run's database) and says what is wrong, if anything. A dialog may first
 start a slow task (``running_task``), which its messages name as
 ``<task>``. Fake mode plays the Manager with the stand-in (``fake_claude``),
 which makes each turn's scripted tool calls over MCP; real mode runs Claude
-Code. The run stops at the total spending cap.
+Code. Each (dialog, rep) runs on a database, a server, a working directory
+and a project of its own, so nothing one dialog leaves behind reaches the
+next; the run stops once their summed spend reaches the total spending cap.
+A dialog's outcome is ``pass``, ``fail`` (a check found something wrong) or
+``error``: no reply within the timeout (``timeout``) or the harness failed
+(``harness``); after an error its remaining turns are not sent.
 
 Cases (Manager tools RFC, section 12): asking for the project when the user
 named none; the whole ask → restate → 「确认」 → create → 「开始」 → start
@@ -28,8 +33,10 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
+import traceback
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -37,11 +44,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .compare import outcome
 from .runner import (
-    Api, EvalError, _git, fresh_database, install_claude, register_agent, running_server, scrub, select_agent,
+    Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, error_row, fresh_database, install_claude,
+    register_agent, running_server, select_agent, write_result,
 )
 
-SCHEMA = "looper-manager-dialogs/v1"
+# v2: every row has rep, outcome (with error_class and error when it is an error) and models; the run has reps,
+# manager_model and aborted. A v1 row is rep 1, its outcome read from success.
+SCHEMA = "looper-manager-dialogs/v2"
 PROJECT = "eval-calc"
 SLOW_TASK = ("Run `sleep 300` in the working directory, then create done.txt in it whose whole content is `done`.")
 # The stand-in Planner's script for the dialogs' tasks: one step whose Worker takes a while.
@@ -476,12 +487,30 @@ def _last_action(database_url: str) -> int:
     return int(rows[-1]["id"]) if rows else 0
 
 
-def _spent(api: Api) -> float:
-    return sum(float(r.get("cost_usd") or 0.0) for r in api.get("/api/llm-records", limit=500)["records"])
+def _usage(database_url: str) -> tuple[float, dict[str, list[str]]]:
+    """What a dialog's server spent, and the models each role's runs reported (by the agent id's first word:
+    manager, planner, worker, reviewer); read from its database once the server stopped, so every run is in."""
+    import asyncpg
+
+    async def read() -> tuple[float, dict[str, list[str]]]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            spent = await conn.fetchval("SELECT COALESCE(sum(cost_usd), 0) FROM llm_records")
+            rows = await conn.fetch("SELECT split_part(agent_id, '-', 1) AS role, array_agg(DISTINCT model ORDER BY "
+                                    "model) AS models FROM llm_records WHERE model IS NOT NULL GROUP BY 1 ORDER BY 1")
+        finally:
+            await conn.close()
+        return float(spent), {row["role"]: list(row["models"]) for row in rows}
+
+    return asyncio.run(read())
+
+
+class ReplyTimeout(EvalError):
+    """The Manager did not reply within the timeout."""
 
 
 def _ask(api: Api, session: str, text: str, *, timeout: float) -> str:
-    """Send ``text`` to the Manager in chat ``session`` and wait for its reply."""
+    """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one."""
     message_id = f"m-{uuid.uuid4().hex[:12]}"
     api.post("/api/chat/send", {"text": text, "session_id": session, "message_id": message_id})
     deadline = time.monotonic() + timeout
@@ -490,7 +519,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float) -> str:
             if message.get("message_id") == f"{message_id}:reply":
                 return str(message.get("content") or "")
         time.sleep(1.0)
-    raise EvalError(f"no reply to {text!r} within {timeout:g} s")
+    raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
 
 
 def _start_slow_task(api: Api, project_id: str, *, timeout: float) -> str:
@@ -516,43 +545,61 @@ def _make_schedule(api: Api, project_id: str) -> None:
 
 
 def _stop_leftovers(api: Api) -> None:
-    for task in api.get("/api/tasks")["tasks"]:
-        if task.get("status") in ACTIVE:
-            api.post("/api/tasks/stop", {"task_id": task["task_id"]})
+    """Stop the dialog's tasks still running, as the operator would before the server stops; best effort, as the
+    server may be gone after an error."""
+    try:
+        for task in api.get("/api/tasks")["tasks"]:
+            if task.get("status") in ACTIVE:
+                api.post("/api/tasks/stop", {"task_id": task["task_id"]})
+    except Exception:
+        pass
 
 
 def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, scenarios: Path, mode: str,
                timeout: float) -> dict[str, Any]:
-    started, spent_before, since = time.monotonic(), _spent(api), _last_action(database_url)
-    task = _start_slow_task(api, project_id, timeout=timeout) if dialog.running_task else None
-    if dialog.schedule:
-        _make_schedule(api, project_id)
-    session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
-    known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
+    """Run ``dialog`` on the server it has to itself; its row without its cost (read once the server stopped).
+    No reply within ``timeout`` is an error of class ``timeout``, and any other exception, such as the slow task
+    not getting under way, one of class ``harness``; the turns after an error are not sent."""
+    started, since = time.monotonic(), _last_action(database_url)
     turns: list[dict[str, Any]] = []
-    for say in dialog.says:
-        text = say.text.replace("<task>", task or "")
-        if mode == "fake":
-            data = json.loads(scenarios.read_text(encoding="utf-8"))
-            data.setdefault("manager", {})[text] = [[name, json.loads(json.dumps(arguments).replace(
-                "<task>", task or ""))] for name, arguments in say.fake]
-            scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        before = _last_action(database_url)
-        reply = _ask(api, session, text, timeout=timeout)
-        problem = say.check(Look(api, task, reply, database_url, since, known))
-        trail = _trail(database_url, before)
-        calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "") for a in trail]
-        # What a refused call was told, and the arguments it came with: what to fix in a tool or its description.
-        errors = [{"tool": a["tool"], "arguments": a["arguments"], "message": (a["result"] or {}).get("message")}
-                  for a in trail if a["status"] == "error"]
-        turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem})
-        if problem:
-            break
-    _stop_leftovers(api)
-    return {"id": dialog.id, "success": all(t["problem"] is None for t in turns) and len(turns) == len(dialog.says),
+    error: dict[str, Any] = {}
+    try:
+        task = _start_slow_task(api, project_id, timeout=timeout) if dialog.running_task else None
+        if dialog.schedule:
+            _make_schedule(api, project_id)
+        session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
+        known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
+        for say in dialog.says:
+            text = say.text.replace("<task>", task or "")
+            if mode == "fake":
+                data = json.loads(scenarios.read_text(encoding="utf-8"))
+                data.setdefault("manager", {})[text] = [[name, json.loads(json.dumps(arguments).replace(
+                    "<task>", task or ""))] for name, arguments in say.fake]
+                scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            before = _last_action(database_url)
+            reply = _ask(api, session, text, timeout=timeout)
+            problem = say.check(Look(api, task, reply, database_url, since, known))
+            trail = _trail(database_url, before)
+            calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
+                     for a in trail]
+            # What a refused call was told, and the arguments it came with: what to fix in a tool or its description.
+            errors = [{"tool": a["tool"], "arguments": a["arguments"], "message": (a["result"] or {}).get("message")}
+                      for a in trail if a["status"] == "error"]
+            turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem})
+            if problem:
+                break
+    except ReplyTimeout as exc:
+        error = error_row(ErrorClass.TIMEOUT, str(exc))
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        error = error_row(ErrorClass.HARNESS, f"{type(exc).__name__}: {exc}")
+    finally:
+        _stop_leftovers(api)
+    passed = all(t["problem"] is None for t in turns) and len(turns) == len(dialog.says)
+    return {"id": dialog.id, **(error or {"outcome": (Outcome.PASS if passed else Outcome.FAIL).value,
+                                          "success": passed}),
             "problems": [t["problem"] for t in turns if t["problem"]], "turns": turns,
-            "calls": sum(len(t["calls"]) for t in turns), "cost_usd": round(_spent(api) - spent_before, 6),
-            "duration_s": round(time.monotonic() - started, 1)}
+            "calls": sum(len(t["calls"]) for t in turns), "duration_s": round(time.monotonic() - started, 1)}
 
 
 def _manager_profile(api: Api, model: str, effort: str | None) -> dict[str, Any]:
@@ -570,79 +617,106 @@ def run(
     *, mode: str, dialogs: tuple[Dialog, ...], admin_url: str, out_dir: Path, model: str | None = None,
     agent: str | None = None, register: dict[str, Any] | None = None, max_budget_usd: float | None = None,
     total_cap_usd: float | None = None, timeout: float | None = None, keep_work_dirs: bool = False,
-    manager_model: str | None = None, manager_effort: str | None = None,
+    manager_model: str | None = None, manager_effort: str | None = None, reps: int = 1,
 ) -> tuple[dict[str, Any], Path]:
-    """Run ``dialogs`` in ``mode``; the run and the JSON file written to ``out_dir`` (``runner.run``'s setup). With
-    ``manager_model`` the Manager alone runs Claude Code with that model and ``manager_effort``."""
+    """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, each (dialog, rep) on a database, a server, a
+    working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
+    ``out_dir``, however the run ends (``runner.run``). With ``manager_model`` the Manager alone runs Claude Code
+    with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
+    every dialog after it."""
+    if reps < 1:
+        raise EvalError(f"reps must be at least 1, not {reps}")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = out_dir / f"{stamp}-dialogs-{mode}.server.log"
+    logs = out_dir / f"{stamp}-dialogs-{mode}.server-logs"  # a server log per (dialog, rep)
+    logs.mkdir()
     raw_root = Path(tempfile.mkdtemp(prefix="looper-dialogs-"))
     root = raw_root.resolve()
     timeout = timeout or (60.0 if mode == "fake" else 300.0)
     results: list[dict[str, Any]] = []
     stopped = False
+    aborted: str | None = None
+    chosen: dict[str, Any] = {}
+    manager: dict[str, Any] = {}
     try:
-        work_dir = root / "work" / "calc"
-        work_dir.mkdir(parents=True)
-        scenarios = root / "scenarios.json"
-        scenarios.write_text(json.dumps({os.path.realpath(work_dir): _SLOW_FAKE, "manager": {}}), encoding="utf-8")
-        install_claude(root / "bin", mode=mode, scenarios=scenarios,
-                       max_budget_usd=None if register is not None else max_budget_usd, real_claude=real_claude)
-        (root / "runtime").mkdir()
-        home = root / "home" if mode == "fake" else None
-        if home is not None:
-            home.mkdir()
-        with fresh_database(admin_url) as (database_url, _), running_server(
-            database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
-            home=home,
-        ) as api:
-            if register is not None:
-                agent = register_agent(api, register)["name"]
-            chosen = select_agent(api, agent=agent, model=model)
-            if register is not None:
-                api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
-                                                       "run_budget_usd": max_budget_usd})
-            manager = _manager_profile(api, manager_model, manager_effort) if manager_model else chosen
-            project = api.post("/api/projects", {"name": PROJECT, "work_dir": str(work_dir)})
-            project_id = project["project_id"]
+        for rep in range(1, reps + 1):
             for dialog in dialogs:
-                if stopped or (total_cap_usd is not None and _spent(api) >= total_cap_usd):
+                spent = sum(float(r.get("cost_usd") or 0.0) for r in results)
+                if stopped or (total_cap_usd is not None and spent >= total_cap_usd):
                     stopped = True
-                    results.append({"id": dialog.id, "skipped": "the spending cap was reached", "cost_usd": 0.0})
+                    results.append({"id": dialog.id, "rep": rep, "skipped": "the spending cap was reached",
+                                    "cost_usd": 0.0})
                     continue
-                results.append(run_dialog(api, dialog, database_url=database_url, project_id=project_id,
-                                          scenarios=scenarios, mode=mode, timeout=timeout))
-            total = _spent(api)
+                case = root / dialog.id / str(rep)
+                work_dir = case / "work" / "calc"
+                work_dir.mkdir(parents=True)
+                scenarios = case / "scenarios.json"
+                scenarios.write_text(json.dumps({os.path.realpath(work_dir): _SLOW_FAKE, "manager": {}}),
+                                     encoding="utf-8")
+                install_claude(case / "bin", mode=mode, scenarios=scenarios,
+                               max_budget_usd=None if register is not None else max_budget_usd,
+                               real_claude=real_claude)
+                (case / "runtime").mkdir()
+                home = case / "home" if mode == "fake" else None
+                if home is not None:
+                    home.mkdir()
+                with fresh_database(admin_url) as (database_url, _):
+                    with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
+                                        log_path=logs / f"{dialog.id}-{rep}.log", home=home) as api:
+                        named = register_agent(api, register)["name"] if register is not None else agent
+                        chosen = select_agent(api, agent=named, model=model)
+                        if register is not None:
+                            api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
+                                                                   "run_budget_usd": max_budget_usd})
+                        manager = _manager_profile(api, manager_model, manager_effort) if manager_model else chosen
+                        project_id = api.post("/api/projects",
+                                              {"name": PROJECT, "work_dir": str(work_dir)})["project_id"]
+                        row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
+                                         scenarios=scenarios, mode=mode, timeout=timeout)
+                    cost, models = _usage(database_url)
+                results.append({"id": dialog.id, "rep": rep, **row, "cost_usd": round(cost, 6), "models": models})
+    except BaseException as exc:
+        aborted = aborted_reason(exc)
+        if not isinstance(exc, Exception):
+            raise  # an interrupt: the JSON is still written below
     finally:
         if not keep_work_dirs:
             shutil.rmtree(root, ignore_errors=True)
-    result = scrub({
-        "schema": SCHEMA, "mode": mode, "model": chosen.get("model") if mode == "real" else None,
-        "agent": chosen["name"], "manager_agent": manager["name"], "started_at": stamp, "git": git,
-        "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "stopped_by_cap": stopped,
-        "total_cost_usd": round(total, 6), "dialogs": results,
-    }, {str(root): "<eval-root>", str(raw_root): "<eval-root>", str(Path.home()): "~"})
-    path = out_dir / f"{stamp}-dialogs-{mode}.json"
-    path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        path = out_dir / f"{stamp}-dialogs-{mode}.json"
+        result = write_result({
+            "schema": SCHEMA, "mode": mode, "model": chosen.get("model") if mode == "real" else None,
+            "agent": chosen.get("name"), "manager_agent": manager.get("name"),
+            "manager_model": manager.get("model") if mode == "real" else None, "started_at": stamp, "git": git,
+            "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "reps": reps,
+            "stopped_by_cap": stopped, "aborted": aborted,
+            "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6), "dialogs": results,
+        }, path, roots=(root, raw_root), rows="dialogs")
+        if aborted:
+            print(f"the run stopped midway ({result['aborted']}); what is done is in {path}", file=sys.stderr)
     return result, path
 
 
 def markdown(result: dict[str, Any]) -> str:
-    """The run as a table: each dialog's outcome, its tool calls per turn and its cost."""
+    """The run as a table: each (dialog, rep)'s outcome, its tool calls per turn and its cost."""
     lines = [f"Manager dialogs: {result['mode']}/{result.get('manager_agent') or result['agent']} "
              f"(other roles {result.get('model') or result['agent']}) @ "
              f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}",
-             "", "| dialog | success | turns | tool calls | cost (USD) |", "|---|---|---|---|---|"]
+             "", "| dialog | rep | outcome | turns | tool calls | cost (USD) |", "|---|---|---|---|---|---|"]
     for dialog in result["dialogs"]:
+        rep = dialog.get("rep", 1)
         if dialog.get("skipped"):
-            lines.append(f"| {dialog['id']} | skipped | | | |")
+            lines.append(f"| {dialog['id']} | {rep} | skipped | | | |")
             continue
         calls = "; ".join(", ".join(turn["calls"]) or "none" for turn in dialog["turns"])
-        outcome = "pass" if dialog["success"] else f"fail: {'; '.join(dialog['problems'])}"
-        lines.append(f"| {dialog['id']} | {outcome} | {len(dialog['turns'])} | {calls} | {dialog['cost_usd']:.4f} |")
-    lines.append(f"| **total** | {sum(bool(d.get('success')) for d in result['dialogs'])}/{len(result['dialogs'])} "
-                 f"| | | {result['total_cost_usd']:.4f} |")
+        shown = outcome(dialog)
+        if shown == Outcome.FAIL:
+            shown = f"fail: {'; '.join(dialog['problems'])}"
+        elif shown == Outcome.ERROR:
+            shown = f"error ({dialog.get('error_class')}): {dialog.get('error')}"
+        lines.append(f"| {dialog['id']} | {rep} | {shown} | {len(dialog['turns'])} | {calls} "
+                     f"| {dialog['cost_usd']:.4f} |")
+    lines.append(f"| **total** | | {sum(outcome(d) == Outcome.PASS for d in result['dialogs'])}/"
+                 f"{len(result['dialogs'])} | | | {result['total_cost_usd']:.4f} |")
     return "\n".join(lines)
