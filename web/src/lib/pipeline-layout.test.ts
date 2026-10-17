@@ -90,21 +90,28 @@ describe("the viewer's choice", () => {
 });
 
 describe("fitPadding", () => {
-  const frame = { top: 257, height: 450 };
+  const frame = { left: 0, top: 257, width: 390, height: 450 };
+  const controls = { left: 15, top: 257 + 450 - 15 - 82, width: 28, height: 82 }; // the zoom controls, bottom left
 
-  it("leaves the toolbar's room at the bottom by default", () => {
-    expect(FIT_PADDING).toEqual({ x: 0.12, top: 0.12, bottom: "80px" });
+  it("leaves the zoom controls' room on the left and the toolbar's at the bottom by default", () => {
+    expect(FIT_PADDING).toEqual({ top: 0.12, right: 0.12, left: "56px", bottom: "80px" });
     expect(fitPadding(frame, [])).toEqual(FIT_PADDING);
+    expect(fitPadding(frame, [controls, { left: 67, top: 257 + 450 - 15 - 54, width: 308, height: 54 }])).toEqual(FIT_PADDING);
   });
 
-  it("leaves more when the measured toolbar reaches higher (it wrapped)", () => {
-    expect(fitPadding(frame, [{ top: 257 + 450 - 15 - 100, height: 100 }]))
-      .toEqual({ ...FIT_PADDING, bottom: "123px" });
-    expect(fitPadding(frame, [{ top: 257 + 450 - 15 - 54, height: 54 }])).toEqual(FIT_PADDING); // a touch screen's
+  it("leaves more beside wider zoom controls, and at the bottom when the toolbar wraps", () => {
+    expect(fitPadding(frame, [{ ...controls, width: 44 }])).toMatchObject({ left: "67px", bottom: "80px" });
+    expect(fitPadding(frame, [{ left: 67, top: 257 + 450 - 15 - 100, width: 308, height: 100 }]))
+      .toMatchObject({ left: "56px", bottom: "123px" });
+  });
+
+  it("puts a column on the right on the right", () => {
+    expect(fitPadding(frame, [{ left: 390 - 15 - 28, top: 400, width: 28, height: 82 }])).toMatchObject({ right: "51px", left: "56px" });
   });
 
   it("leaves room under full screen's way out at the top", () => {
-    expect(fitPadding({ top: 0, height: 844 }, [{ top: 15, height: 52 }, { top: 765, height: 64 }]))
-      .toEqual({ x: 0.12, top: "75px", bottom: "87px" });
+    expect(fitPadding({ left: 0, top: 0, width: 390, height: 844 }, [{ left: 244, top: 15, width: 131, height: 52 },
+                                                                     { left: 67, top: 765, width: 308, height: 64 }]))
+      .toEqual({ top: "75px", right: 0.12, left: "56px", bottom: "87px" });
   });
 });
