@@ -32,6 +32,7 @@ import pytest
 
 from evals.prompt_regression.runner import fresh_database, running_server
 from looper.agents.agent_settings import HARNESS_BOUNDARIES, WORKING_STYLE
+from looper.agents.ops.planner import ROLES_GUIDE
 from looper.agents.system_prompt import BOUNDARIES_LEAD, REVIEW_CONTRACT, WORK_CONTRACT
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
@@ -261,7 +262,7 @@ def test_the_planner_defines_roles_with_its_tools_and_a_refused_definition_chang
     assert detail["status"] == "completed", ran["log"][-3000:]
     listed = _log(ran["state"], "planner.jsonl", "roles")[0]
     assert listed["tools"][-2:] == ["looper_task_roles", "looper_task_role_set"]
-    assert "looper_task_role_set" in listed["prompt"]
+    assert "looper_task_role_set" in listed["prompt"] and ROLES_GUIDE in listed["prompt"]
     assert "\"review_role_required\": false makes the" in listed["prompt"]
     answers = [(c["arguments"].get("id"), c["answer"]["status"]) for c in _calls(ran, "roles")
                if c["tool"] == "looper_task_role_set"]
@@ -344,6 +345,7 @@ def test_where_the_switch_is_off_the_planner_has_no_role_tools_and_no_step_runs_
     assert detail["status"] == "completed" and detail["roles"] == []
     listed = _log(ran["state"], "planner.jsonl", "off")[0]
     assert "looper_task_role_set" not in listed["tools"] and "review_role" not in listed["prompt"]
+    assert ROLES_GUIDE.splitlines()[2] not in listed["prompt"]  # how to split work by discipline: only with roles on
     (refused,) = _calls(ran, "off")
     assert refused["answer"]["error"]["code"] == "forbidden"
     turns = [t["text"] for t in _log(ran["state"], "turns.jsonl", "off")]

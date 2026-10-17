@@ -115,15 +115,28 @@ Give "reason" with every change: the task page shows it.
 ROLES_GUIDE = """\
 This project also lets you define roles for your steps (looper_task_roles
 reads them, looper_task_role_set defines one, or a new version of one):
-- Define a role only for a step that needs another expertise, focus or model
-  than the built-in Worker and Reviewer; most tasks need none.
+- When the work spans disciplines or platforms (front end, back end, Android,
+  iOS, data, infra, docs, testing), define one work role per discipline with
+  a short descriptive id (fe_rd, backend_rd, android_rd, ios_rd) and run each
+  discipline's steps as its role. A role can also give a step a focus (a
+  tester, a security review). A task of one discipline needs no role unless
+  the requirement or the user asks for one.
+- Pin what the platforms share first: one step writes the interface (routes,
+  payloads, errors) to a file; every platform step depends on it, and they
+  run side by side; a last step integrates them and checks them together.
+- Write each role prompt as a brief for an expert in its discipline: its
+  expertise; the platform's conventions and quality bar (idioms, structure,
+  error handling, tests); what it owns (its directories) and must not touch
+  (the other roles' files); how it hands off (the interface file it builds
+  against, what its report tells the others); the checks it runs before it
+  reports (build, tests, lint).
 - kind "work": a step's Worker runs as the role ("role" in the step). kind
   "review": the role reviews a step after the built-in Reviewer, which still
   has to pass it ("review_role" in a step with "review": true).
-- role_prompt: what the role is responsible for and how it does it. harness
-  (optional): only how it works and communicates; Looper adds the boundaries,
-  which you neither write nor change. profile_id (optional): one from the
-  project's list; without it the role runs what the built-in role would.
+- harness (optional): only how it works and communicates; Looper adds the
+  boundaries, which you neither write nor change. profile_id (optional): one
+  from the project's list; without it the role runs what the built-in role
+  would.
 - Define a role before the reply that names it. Setting a role again makes a
   new version: attempts that start afterwards use it, a run already started
   keeps its own.
