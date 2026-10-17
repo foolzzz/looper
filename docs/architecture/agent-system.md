@@ -2344,7 +2344,7 @@ refused with that reason.
   runs names it too; the task's progress and end notices there name no run.
   The CLI lists no runs.
 
-The two tools add 2.3 KB to the Planner's `tools/list`, their guide (after
+The two tools add 2.2 KB to the Planner's `tools/list`, their guide (after
 `TOOLS_GUIDE`, `ROLES_GUIDE`) 2.2 KB and the contract's role rules 0.5 KB, in
 a project with the switch on only; a project's templates add a line each to
 its [PLAN] and [RESTART] messages. The guide opens with the rule that a role
