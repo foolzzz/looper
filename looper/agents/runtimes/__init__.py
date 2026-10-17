@@ -90,8 +90,7 @@ class AuthKind(str, Enum):
 class Capability(str, Enum):
     """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
 
-    RUN = "run"  # one run of a prompt (a Worker, a Reviewer)
-    RUN_INPUT = "run_input"  # a run takes more user turns while it runs (a forwarded message, a room reminder)
+    RUN = "run"  # one run of a prompt, which takes more user turns while it runs (a Worker, a Reviewer)
     RESIDENT_SESSION = "resident_session"  # a process that stays up between user turns (the Manager, a Planner)
     RESUME = "resume"  # a new process continues a saved session (the Manager, a Planner)
     STRUCTURED_OUTPUT = "structured_output"  # the runtime enforces a reply schema itself
@@ -191,6 +190,9 @@ class RuntimeAdapter(ABC):
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset()
+    # Whether a run reads more user turns while it runs (``write_turn`` after the prompt): a forwarded message, a
+    # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
+    run_input: ClassVar[bool] = False
 
     # --- Registration ---
 

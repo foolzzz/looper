@@ -822,7 +822,7 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   and `OmpRuntime` (`codex`, `omp`, below) translate them at launch; both
   keep the Manager's and a Planner's session with one process per turn
   (`runtimes/per_turn.py`). Capabilities:
-  `run`, `run_input`, `resident_session`, `resume`, `structured_output`,
+  `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
   `autonomous_turns`, `cost_report` (Claude Code has all but
   `structured_output`; Codex has `run`, `resident_session`, `resume`,
@@ -2452,7 +2452,8 @@ before.
   without marking; `wait_seconds` waits, up to the project's
   `room_wait_max_seconds`, for a message for the seat or an interface post.
   Every tool's answer carries the seat's unread counts.
-- **Reminders.** A run on a runtime with `run_input` (Claude Code) that a
+- **Reminders.** A run on a runtime that reads user turns while it runs
+  (`RuntimeAdapter.run_input`: Claude Code; not a stored capability) that a
   message names, or that an interface post or a watch reaches, gets one line,
   never the message (`WorkerPool.remind`), at most every 60 s. It is written
   only while one of its tool calls runs (the stream's `tool_use` and

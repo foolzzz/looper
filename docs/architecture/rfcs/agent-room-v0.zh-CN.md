@@ -147,7 +147,7 @@
 
 ### 6.2 提醒
 
-- 只给能在运行中插话的运行时：新增运行时能力 `run_input`（运行中接受 user turn，只有 Claude Code 有），WorkerPool 按能力判断，不再靠写 stdin 失败来发现（今天 Codex、OMP 的运行也登记在 `_inputs` 里）。
+- 只给能在运行中插话的运行时：适配器上的类型化属性 `RuntimeAdapter.run_input`（只有 Claude Code 为真），WorkerPool 按它判断，不再靠写 stdin 失败来发现（今天 Codex、OMP 的运行也登记在 `_inputs` 里）。R1a 实现时没有做成运行时能力（`Capability`）：能力存在 `agent_runtimes.capabilities` 里，有 CHECK 约束，加一个值要迁移已有的库，而这一条只是适配器的事实，不需要存。
 - 触发：一条消息点名这个席位（或它的角色），或者是 `interface` 广播，或者它关注的事发生了；而这个席位有运行在跑、stdin 还开着（第一个 `result` 之前）。
 - 内容一行，不带正文（实现用英文，大意）：「[Looper room] 有新消息给你：fe_rd@s4 的一个问题、backend_rd@s2 的一条接口更新。在合适的停顿点用 looper_room_inbox 看。这只是提醒：你的步骤和报告不变。」
 - 节流：每个运行至多每 60 秒一条，期间到的合并进下一条；咨询运行不提醒。

@@ -53,7 +53,7 @@ from .. import proc_tree, reported_files
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
-from ..runtimes import Capability, RuntimeAdapter
+from ..runtimes import RuntimeAdapter
 from ..task_roles import TaskRole, run_role
 from ..project_execution import ProjectExecution
 from ..room import room_section, run_seat, run_session_dir
@@ -904,7 +904,7 @@ class WorkerPool:
         try:
             await runtime.write_turn(process.stdin, prompt)
             self._inputs[worker_id] = (process.stdin, runtime)
-            if seat is not None and Capability.RUN_INPUT in runtime.capabilities:
+            if seat is not None and runtime.run_input:
                 self._reminders[worker_id] = _Reminders()
         except (BrokenPipeError, ConnectionResetError):
             # Claude exited before reading; its output decides the outcome.
