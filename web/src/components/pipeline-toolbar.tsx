@@ -28,7 +28,9 @@ export function PipelineToolbar({
     let next = 0;
     const first = requestAnimationFrame(() => {
       next = requestAnimationFrame(() => {
-        const panels = [...(root?.querySelectorAll("[data-card-avoid]") ?? [])].map((panel) => panel.getBoundingClientRect());
+        // This toolbar's panels and React Flow's zoom controls.
+        const panels = [...(root?.querySelectorAll("[data-card-avoid], .react-flow__controls") ?? [])]
+          .map((panel) => panel.getBoundingClientRect());
         void fitView({ padding: root ? fitPadding(root.getBoundingClientRect(), panels) : undefined });
       });
     });
