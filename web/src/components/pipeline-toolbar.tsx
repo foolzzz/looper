@@ -34,7 +34,7 @@ export function PipelineToolbar({
   }, [full, hideSkipped, fitView]);
 
   const button =
-    "flex h-9 items-center gap-1.5 rounded-md px-2 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+    "flex h-9 items-center gap-1.5 rounded-md px-2 text-muted-foreground pointer-coarse:h-11 pointer-coarse:min-w-11 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
   // Over a node's card (z-10), so the controls and the way out of full screen are never covered.
   const panel = "flex items-center rounded-md border border-border bg-card text-xs";
   return (
@@ -44,7 +44,7 @@ export function PipelineToolbar({
                className={`${panel} max-w-[calc(100%-5rem)] flex-wrap justify-end gap-x-3 px-2 py-1`}>
           {skipped > 0 && (
             <span className="flex flex-wrap items-center gap-x-2">
-              <label className="flex min-h-9 cursor-pointer items-center gap-1.5">
+              <label className="flex min-h-9 cursor-pointer items-center gap-1.5 pointer-coarse:min-h-11">
                 <input
                   type="checkbox"
                   checked={hideSkipped}

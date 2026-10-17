@@ -35,6 +35,9 @@ export interface NodeCard {
   sections: CardSection[];
 }
 
+/** The id of a node's card, which the node names in its aria-details. */
+export const nodeCardId = (nodeId: string) => `node-card-${nodeId}`;
+
 /** `text` cut to its first `lines` lines and `chars` characters, with an ellipsis; undefined when it is short. */
 export function clipText(text: string, { lines = 4, chars = 320 } = {}): string | undefined {
   const whole = text.trimEnd();

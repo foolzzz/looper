@@ -1,8 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore } from "@xyflow/react";
-import { type Box, CARD_GAP, type HoverCard, hoverCard, intersect, placeCard } from "@/lib/hover-card";
+import {
+  type Box,
+  CARD_GAP,
+  type HoverCard,
+  type PointerAt,
+  cardKey,
+  hoverCard,
+  hovers,
+  intersect,
+  placeCard,
+  tapOn,
+} from "@/lib/hover-card";
 import { Markdown } from "@/components/markdown";
-import type { CardLook, CardSection, NodeCard } from "@/lib/node-cards";
+import { type CardLook, type CardSection, type NodeCard, nodeCardId } from "@/lib/node-cards";
 import { cn } from "@/lib/utils";
 
 function StatusPill({ look }: { look: CardLook }) {
@@ -34,7 +45,7 @@ function CardText({ section }: { section: Extract<CardSection, { kind: "text" }>
           type="button"
           onClick={() => setExpanded(!expanded)}
           aria-expanded={expanded}
-          className="mt-1 text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          className="mt-1 text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline pointer-coarse:min-h-11"
         >
           {expanded ? "Show less" : "Show more"}
         </button>
@@ -76,7 +87,7 @@ function CardBody({ section }: { section: CardSection }) {
                 {fact.href ? (
                   <a
                     href={fact.href}
-                    className="font-mono underline decoration-dotted underline-offset-2 hover:text-primary"
+                    className="font-mono underline decoration-dotted underline-offset-2 hover:text-primary pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center"
                   >
                     {fact.value}
                   </a>
@@ -91,7 +102,8 @@ function CardBody({ section }: { section: CardSection }) {
   }
 }
 
-export function NodeCardView({ card }: { card: NodeCard }) {
+/** A card's content; it renders again only for a new card, not as the graph pans and zooms. */
+export const NodeCardView = memo(function NodeCardView({ card }: { card: NodeCard }) {
   return (
     <div className="space-y-3">
       <header>
@@ -103,8 +115,9 @@ export function NodeCardView({ card }: { card: NodeCard }) {
           <p key={role} className="mt-1 font-mono text-xs text-muted-foreground">{role}</p>
         ))}
       </header>
-      {card.sections.map((section) => (
-        <section key={section.title}>
+      {/* By place: a title can change (a note's time) and a section keeps its Show more. */}
+      {card.sections.map((section, i) => (
+        <section key={`${i}:${section.kind}`}>
           <h4 className={cn("mb-1 text-[11px] font-medium text-muted-foreground",
                             section.kind === "text" && section.tone === "destructive" && "text-destructive")}>
             {section.title}
@@ -114,57 +127,52 @@ export function NodeCardView({ card }: { card: NodeCard }) {
       ))}
     </div>
   );
-}
-
-// The longest press and the farthest move that are still a tap.
-const TAP_MS = 500;
-const TAP_SLOP_PX = 10;
+});
 
 /** The cards of a React Flow graph's nodes (a child of `ReactFlow`), by node id. A card shows beside its node when
- * the mouse rests on the node or the node has keyboard focus, and a tap toggles it; it stays inside the graph's
- * visible part and follows the node as the graph pans and zooms. */
+ * the mouse rests on the node or the node has keyboard focus, and a tap toggles it; Enter takes focus into it and
+ * Esc closes it. It stays inside the graph's visible part and follows the node as the graph pans and zooms. */
 export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
   const root = useStore((s) => s.domNode);
   const transform = useStore((s) => s.transform);
   const [shown, setShown] = useState<string | null>(null);
   const [control] = useState<HoverCard>(() => hoverCard(setShown));
   const cardRef = useRef<HTMLDivElement>(null);
+  // Enter on a node opened its card: focus goes into the card once it has a place.
+  const focusCard = useRef(false);
   const card = shown ? cards[shown] : undefined;
 
   useEffect(() => () => control.dispose(), [control]);
 
   useEffect(() => {
     if (!root) return;
-    // A touch that went down on a node; it is a tap when it comes up there, soon and without moving (a drag pans).
-    // Taken from the pointer, not from click: the browser holds back the click of a quick second tap.
-    let touch: { id: string; x: number; y: number; at: number } | null = null;
+    let press: PointerAt | null = null;
     const inCard = (target: EventTarget | null) => target instanceof Node && !!cardRef.current?.contains(target);
-    const nodeOf = (target: EventTarget | null) =>
-      target instanceof Element && root.contains(target)
-        ? (target.closest<HTMLElement>(".react-flow__node")?.dataset.id ?? null)
-        : null;
+    const nodeElement = (target: EventTarget | null) =>
+      target instanceof Element && root.contains(target) ? target.closest<HTMLElement>(".react-flow__node") : null;
+    const nodeOf = (target: EventTarget | null) => nodeElement(target)?.dataset.id ?? null;
+    const at = (event: PointerEvent): PointerAt => ({
+      node: nodeOf(event.target), x: event.clientX, y: event.clientY, at: event.timeStamp, pointerType: event.pointerType,
+      onButton: event.target instanceof Element && !!event.target.closest(".react-flow__node button"),
+    });
     const over = (event: PointerEvent) => {
-      if (event.pointerType === "touch") return;
+      if (!hovers(event.pointerType)) return;
       if (inCard(event.target)) return control.enterCard();
       const id = nodeOf(event.target);
       if (id) control.enter(id);
       else control.leave();
     };
     const out = (event: PointerEvent) => {
-      if (event.pointerType !== "touch" && !root.contains(event.relatedTarget as Node | null)) control.leave();
+      if (hovers(event.pointerType) && !root.contains(event.relatedTarget as Node | null)) control.leave();
     };
     const down = (event: PointerEvent) => {
-      const id = nodeOf(event.target);
-      touch = event.pointerType === "touch" && id ? { id, x: event.clientX, y: event.clientY, at: event.timeStamp } : null;
-      if (!inCard(event.target) && !id) control.dismiss();
+      press = at(event);
+      if (!inCard(event.target) && !press.node) control.dismiss();
     };
     const up = (event: PointerEvent) => {
-      const start = touch;
-      touch = null;
-      if (start && event.pointerType === "touch" && nodeOf(event.target) === start.id && event.timeStamp - start.at < TAP_MS &&
-          Math.hypot(event.clientX - start.x, event.clientY - start.y) < TAP_SLOP_PX) {
-        control.tap(start.id);
-      }
+      const id = tapOn(press, at(event));
+      press = null;
+      if (id) control.tap(id);
     };
     const focusIn = (event: FocusEvent) => {
       const id = nodeOf(event.target);
@@ -175,15 +183,35 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
       if (inCard(event.relatedTarget) || (next && next === nodeOf(event.target))) return;
       control.blur();
     };
+    // On the document, first: Esc closes a card wherever focus is, and goes no further (not to full screen).
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && control.shown()) control.dismiss();
+      const focused = nodeElement(event.target);
+      const action = cardKey(event.key, {
+        shown: control.shown(),
+        focusInCard: inCard(document.activeElement),
+        focusedNode: focused && focused === event.target ? (focused.dataset.id ?? null) : null,
+      });
+      if (!action) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === "into-card") {
+        if (cardRef.current && control.shown() === focused?.dataset.id) cardRef.current.focus();
+        else {
+          focusCard.current = true;
+          control.focus(focused!.dataset.id!);
+        }
+        return;
+      }
+      const id = control.shown();
+      if (action === "close-to-node" && id) root.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`)?.focus();
+      control.dismiss();
     };
     root.addEventListener("pointerover", over);
     root.addEventListener("pointerout", out);
     root.addEventListener("pointerup", up);
     root.addEventListener("focusin", focusIn);
     root.addEventListener("focusout", focusOut);
-    root.addEventListener("keydown", key);
+    document.addEventListener("keydown", key, true);
     document.addEventListener("pointerdown", down, true);
     return () => {
       root.removeEventListener("pointerover", over);
@@ -191,45 +219,62 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
       root.removeEventListener("pointerup", up);
       root.removeEventListener("focusin", focusIn);
       root.removeEventListener("focusout", focusOut);
-      root.removeEventListener("keydown", key);
+      document.removeEventListener("keydown", key, true);
       document.removeEventListener("pointerdown", down, true);
     };
   }, [root, control]);
 
-  // Beside its node, inside the graph's part in the window; hidden while the node is out of sight. Set on the
-  // element, so following a pan or a scroll does not render the card again.
+  // Beside its node, inside the part of the graph in sight: the window, and every ancestor that clips (up to a
+  // fixed one, such as the full-screen overlay); hidden while the node is out of sight. Set on the element, so
+  // following a pan or a scroll does not render the card again, and measured without changing its height, so a
+  // card scrolled inside keeps its place.
   const place = useCallback(() => {
     const element = cardRef.current;
     const node = shown && root?.querySelector(`.react-flow__node[data-id="${CSS.escape(shown)}"]`);
     if (!root || !element || !node) return;
+    let sight: Box = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      const style = getComputedStyle(ancestor);
+      if (style.overflowX !== "visible" || style.overflowY !== "visible") sight = intersect(sight, ancestor.getBoundingClientRect());
+      if (style.position === "fixed") break;
+    }
     const frame = root.getBoundingClientRect();
     const local = (r: Box): Box => ({ left: r.left - frame.left, top: r.top - frame.top, width: r.width, height: r.height });
-    const area = local(intersect(frame, { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }));
+    const area = local(intersect(frame, sight));
     const at = local(node.getBoundingClientRect());
     const seen = intersect(at, area);
     if (!seen.width || !seen.height) {
       element.style.visibility = "hidden";
       return;
     }
-    element.style.maxHeight = `${Math.max(0, area.height - 2 * CARD_GAP)}px`;
-    const { left, top, height } = placeCard(at, { width: element.offsetWidth, height: element.offsetHeight }, area);
-    Object.assign(element.style, { left: `${left}px`, top: `${top}px`, maxHeight: `${height}px`, visibility: "visible",
-                                   opacity: "1" });
+    // Its whole height: what it scrolls, with its borders.
+    const natural = element.scrollHeight + element.offsetHeight - element.clientHeight;
+    const room = Math.max(0, area.height - 2 * CARD_GAP);
+    const { left, top, height } = placeCard(at, { width: element.offsetWidth, height: Math.min(natural, room) }, area);
+    Object.assign(element.style, { left: `${left}px`, top: `${top}px`, visibility: "visible", opacity: "1" });
+    if (element.style.maxHeight !== `${height}px`) element.style.maxHeight = `${height}px`;
+    if (focusCard.current) {
+      focusCard.current = false;
+      element.focus();
+    }
   }, [root, shown]);
 
   useLayoutEffect(place, [place, card, transform]);
 
-  // Placed again when the page scrolls or resizes, or the card's content changes its size.
+  // Placed again when the page scrolls (not the card itself) or resizes, or the card's content changes its size.
   useEffect(() => {
     const element = cardRef.current;
     if (!card || !element) return;
     const observer = new ResizeObserver(place);
     observer.observe(element);
-    window.addEventListener("scroll", place, { capture: true, passive: true });
+    const scrolled = (event: Event) => {
+      if (!(event.target instanceof Node && element.contains(event.target))) place();
+    };
+    window.addEventListener("scroll", scrolled, { capture: true, passive: true });
     window.addEventListener("resize", place);
     return () => {
       observer.disconnect();
-      window.removeEventListener("scroll", place, { capture: true });
+      window.removeEventListener("scroll", scrolled, { capture: true });
       window.removeEventListener("resize", place);
     };
   }, [card, place]);
@@ -239,10 +284,12 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
     <div
       key={shown}
       ref={cardRef}
+      id={nodeCardId(shown!)}
       role="dialog"
       aria-label={`${card.name}: details`}
+      tabIndex={-1}
       className={cn(
-        "nowheel nopan nodrag absolute z-10 w-80 max-w-[calc(100%-16px)] overflow-y-auto rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-md",
+        "nowheel nopan nodrag absolute z-10 w-80 max-w-[calc(100%-16px)] overflow-y-auto rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         // Shown by `place` once it has a place.
         "invisible left-0 top-0 opacity-0 motion-safe:transition-opacity motion-safe:duration-150",
       )}

@@ -32,7 +32,7 @@ import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
-import { type NodeCard, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { type NodeCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
 import { shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
@@ -1451,6 +1451,10 @@ function nodeStyle(look: NodeLook) {
   };
 }
 
+/** Nodes that name their card (`NodeCards`) for assistive technology. */
+const described = (nodes: Node[]): Node[] =>
+  nodes.map((node) => ({ ...node, domAttributes: { "aria-details": nodeCardId(node.id) } }));
+
 function NodeLabel({
   name,
   look,
@@ -1517,7 +1521,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
       cards.waiting = { name: "Steps", look, roles: [],
                         sections: [{ kind: "text", title: "Plan", text: "The Planner has not planned the steps yet." }] };
       es.push({ id: "e-planner-waiting", source: "planner", target: "waiting", animated: true, style: edgeStyle(true) });
-      return { nodes: ns, edges: es, rows: 2, cards, skipped };
+      return { nodes: described(ns), edges: es, rows: 2, cards, skipped };
     }
 
     // The steps drawn, laid out without the hidden ones; a card still names every step it depends on.
@@ -1564,7 +1568,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     for (const step of ends) {
       es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
     }
-    return { nodes: ns, edges: es, rows: depth + 3, cards, skipped };
+    return { nodes: described(ns), edges: es, rows: depth + 3, cards, skipped };
   }, [task, hideSkipped]);
   const changeHideSkipped = (hide: boolean) => {
     setHideSkipped(hide);
@@ -1591,6 +1595,8 @@ function PipelineTab({ task }: { task: TaskDetail }) {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
+        // A quick second tap on a node closes its card; it does not zoom too.
+        zoomOnDoubleClick={false}
         defaultEdgeOptions={{ type: "smoothstep" }}
       >
         <Background color="var(--color-border)" gap={20} />

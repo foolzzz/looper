@@ -152,3 +152,42 @@ export function intersect(box: Box, clip: Box): Box {
   const height = Math.max(0, Math.min(box.top + box.height, clip.top + clip.height) - top);
   return { left, top, width, height };
 }
+
+/** Whether a pointer hovers (a mouse) and opens cards by resting; any other (touch, a pen) taps them. */
+export const hovers = (pointerType: string) => pointerType === "mouse";
+
+/** The longest press and the farthest move that are still a tap; more is a drag that pans. */
+export const TAP_MS = 500;
+export const TAP_SLOP_PX = 10;
+
+/** Where a pointer went down or up: on which node (null: elsewhere), and whether on that node's own button. */
+export interface PointerAt {
+  node: string | null;
+  onButton: boolean;
+  x: number;
+  y: number;
+  at: number;
+  pointerType: string;
+}
+
+/** The node a press and its release tap, or null: a tap is a pointer that does not hover going down and up on one
+ * node, soon and without moving. Taken from the pointer, not from click: the browser holds back the click of a
+ * quick second tap. A tap on a node's own button (a gate's) is the button's. */
+export function tapOn(down: PointerAt | null, up: PointerAt): string | null {
+  if (!down?.node || down.onButton || hovers(down.pointerType) || up.pointerType !== down.pointerType) return null;
+  const still = Math.hypot(up.x - down.x, up.y - down.y) < TAP_SLOP_PX && up.at - down.at < TAP_MS;
+  return up.node === down.node && still ? down.node : null;
+}
+
+/** What a key does to the cards: Esc closes the one shown, focus going back to its node when it was in the card;
+ * Enter or Space on a focused node takes focus into its card. */
+export type CardKey = "close" | "close-to-node" | "into-card" | null;
+
+export function cardKey(
+  key: string,
+  { shown, focusInCard, focusedNode }: { shown: string | null; focusInCard: boolean; focusedNode: string | null },
+): CardKey {
+  if (key === "Escape") return shown === null ? null : focusInCard ? "close-to-node" : "close";
+  if ((key === "Enter" || key === " ") && focusedNode && !focusInCard) return "into-card";
+  return null;
+}

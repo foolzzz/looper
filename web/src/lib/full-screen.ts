@@ -18,8 +18,9 @@ export interface FullScreen {
   mode(): FullScreenMode;
   enter(): Promise<void>;
   exit(): Promise<void>;
-  /** A key pressed on the page, heard first: while full screen, Esc leaves it and goes no further. */
-  key(event: Pick<KeyboardEvent, "key" | "preventDefault" | "stopImmediatePropagation">): void;
+  /** A key pressed on the page, heard last: while full screen, an Esc nothing else took (a node's card takes it
+   * first) leaves it and goes no further. */
+  key(event: Pick<KeyboardEvent, "key" | "defaultPrevented" | "preventDefault" | "stopImmediatePropagation">): void;
   dispose(): void;
 }
 
@@ -71,7 +72,7 @@ export function fullScreen(
     },
     exit,
     key(event) {
-      if (mode === "off" || event.key !== "Escape") return;
+      if (mode === "off" || event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       void exit();
@@ -83,8 +84,9 @@ export function fullScreen(
   };
 }
 
-/** Full screen for the element `ref` holds: its mode, and a toggle. While it is on, Esc leaves it and reaches
- * nothing else on the page, and the overlay keeps the page under it from scrolling. */
+/** Full screen for the element `ref` holds: its mode, and a toggle. While it is on, Esc leaves it (after a node's
+ * card, which takes it first) and reaches nothing else on the page, and the overlay keeps the page under it from
+ * scrolling. */
 export function useFullScreen(ref: RefObject<HTMLElement | null>): [FullScreenMode, () => void] {
   const [mode, setMode] = useState<FullScreenMode>("off");
   const control = useRef<FullScreen | null>(null);
@@ -103,12 +105,12 @@ export function useFullScreen(ref: RefObject<HTMLElement | null>): [FullScreenMo
   useEffect(() => {
     if (mode === "off") return;
     const key = (event: KeyboardEvent) => control.current?.key(event);
-    window.addEventListener("keydown", key, true);
+    document.addEventListener("keydown", key);
     const root = document.documentElement;
     const overflow = root.style.overflow;
     if (mode === "overlay") root.style.overflow = "hidden";
     return () => {
-      window.removeEventListener("keydown", key, true);
+      document.removeEventListener("keydown", key);
       root.style.overflow = overflow;
     };
   }, [mode]);
