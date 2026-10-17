@@ -1,6 +1,6 @@
 # RFC：用户关卡（User Gate，v0）
 
-- **状态：** 已批准（第 4 节 D1–D4 由维护者在 2026-10-17 定下，Q4 同日由维护者确认；D5–D13 和第 19 节的问题同日按建议定下，包括和维护者原写法不同的几处：D8、D10、D12、D13 和代码里的 `user_gate` 命名）；G1 未开始，排在规划者定义的角色 R1（looper #161）合入之后。
+- **状态：** 已批准（第 4 节 D1–D4 由维护者在 2026-10-17 定下，Q4 同日由维护者确认；D5–D13 和第 19 节的问题同日按建议定下，包括和维护者原写法不同的几处：D8、D10、D12、D13 和代码里的 `user_gate` 命名）；G1 已实现（协议、规划者、存储、接口和任务页，这一期默认关闭），G2 未开始。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 16 项。
 - **最近更新：** 2026-10-17
 
@@ -76,7 +76,7 @@
 
 实现的 PR 在描述里逐条列出：
 
-- 在开启关卡的项目里（G2 起是默认），有人值守的任务的规划者回复约定多一节关卡说明，CHAT、DECISION 多一个可选键 `gates`，预计 2–3 KB，G1 实测后记入第 17 节。这是模型可见的变化。`user_gates` 为 `off` 的项目和定时任务的规划者，prompt 逐字节不变。
+- 在开启关卡的项目里（G2 起是默认），有人值守的任务的规划者回复约定多一节关卡说明，CHAT、DECISION 多一个可选键 `gates`，G1 实测多 2,746 个字符（约 2.7 KB）。这是模型可见的变化。`user_gates` 为 `off` 的项目和定时任务的规划者，prompt 逐字节不变。
 - 任务可能停下来等用户，默认没有超时。
 - 新任务状态 `waiting_user`、新分组 `needs_you`：`GET /api/tasks?group=` 多一个取值，Dashboard 多一格，`ACTIVE_STATUSES` 和由它推出的 `EDITABLE_STATUSES` 随之包括它（删除保护、服务重启后恢复、侧栏计数、规划者令牌的任务状态检查）。
 - `project_execution` 的约定「为空即今天的行为」对 `user_gates` 不再成立（G2 起为空即开启），模块说明随之改。
@@ -198,10 +198,10 @@ DECISION 和 CHAT（含变更回合和 RESTART）的回复多一个可选键：
 
 - **打开**：`_dispatch_ready` 先挑出就绪的关卡，它们不进 `_plan_round`、没有工作区，也不查花费。一个事务里写：步骤 `waiting_user`，关卡 `open` 和 `opened_at`，日志 `gate_opened`，一条 `looper` 消息（卡片）。然后经渠道发出（第 9 节），报告任务状态 `waiting_user`。
 - **唤醒**：新消息类型 `GATE_MESSAGE` 只唤醒规划者（同 `TASK_CHANGE`）。`_handle` 在每个事件之后先送达任务变更，再给每个有未读消息或结束请求的关卡做一轮 `[GATE]`。
-- **执行讨论回合的回复**：一个事务里写议程、`turns + 1`、`waiting_on`、规划者的回复消息，并推进送达游标。关闭时还写 `passed`、`summary`、`closed_at`、结论（补充说明，至多 3,000 字）、日志 `gate_closed`（怎么关的、几条决定和假设、计划改了什么），步骤改为 `verified`。然后执行 `action`（复用 `_apply_chat`），发出规划者的回复和结论消息，派发就绪的步骤。
+- **执行讨论回合的回复**：一个事务里写议程、`turns + 1`、规划者的回复消息，并推进送达游标。关卡在等谁不存：有用户消息还没送达时等规划者，否则等用户。关闭时还写 `passed`、`summary`、`closed_at`、结论（补充说明，至多 3,000 字）、日志 `gate_closed`（怎么关的、几条决定和假设、计划改了什么），步骤改为 `verified`。然后执行 `action`（复用 `_apply_chat`），发出规划者的回复和结论消息，派发就绪的步骤。
 - **关闭之后才到的消息**：这一轮读完消息之后、关卡关闭之前到的消息，转存为补充说明（`via` `gate_late`），在下一轮 CHAT 里送达，不会丢。
 - **更新、取消**：DECISION、CHAT 的 `gates` 由代码执行。更新写关卡和日志 `gate_updated`，已打开的关卡通知用户；取消写 `cancelled`、`resolution` 和日志 `gate_cancelled`，步骤改为 `verified`，打开过的通知用户。
-- **结束讨论**：`POST /api/tasks/:id/gates/:step/end` 或管家工具的 `end: true` 记下 `end_requested` 和一条用户消息，唤醒规划者，下一轮 `[GATE]` 必须关闭。这一轮修复后仍违约或失败时，关卡保持 `discussing`，用户收到错误，可以再结束一次。代码不替规划者关闭：关卡之后的步骤可能还没规划，代码关了它，任务会直接完成。
+- **结束讨论**：`POST /api/tasks/:id/gates/:step/end` 或管家工具的 `end: true` 记一条 `end` 类型的用户消息，唤醒规划者；只要这条消息还没送达，下一轮 `[GATE]` 就必须关闭（不另存标记）。这一轮修复后仍违约或失败时，关卡保持 `discussing`，用户收到错误，可以再结束一次。代码不替规划者关闭：关卡之后的步骤可能还没规划，代码关了它，任务会直接完成。
 - **讨论回合失败**：同 CHAT：告诉用户出错了，消息保持未送达，下一个事件之后再给。
 - **服务重启**（`_resume`）：关卡的状态在库里，不重新通知；未读的消息在第一个事件之后送达。
 - **停止**：关卡保持原状，提醒暂停。这时用户回复关卡消息，消息存下，回复「任务已停止，消息已保存，任务继续后交给规划者」。
@@ -281,10 +281,10 @@ Telegram 的 `reply_to_message` 只给直接回复的那一条，飞书的 `root
 | Tasks | 筛选多一个 Needs you，状态徽标「Waiting for you」 |
 | 任务页 Overview | 有关卡在等时，最上面是关卡面板：为什么停下（话题和规划者的发现）、已经等了多久、议程清单（开着的、已答的及答案、去掉的）、讨论记录（发言人、来自哪里、时间）、开着的问题的选项按钮、输入框、「End discussion, go on with current conclusions」按钮、关卡消息发到了哪里以及发送失败。通过后换成结论卡片（决定、假设、仍开着的）和计划的改动（关闭那一轮加了、去掉了、停掉了哪些步骤）；更早的关卡按时间先后收起 |
 | 任务页 Pipeline | 关卡节点的形状和步骤不同（带暂停图标的六边形），颜色和文字一起表示状态：等你（warning，「Waiting for you」）、讨论中（primary，「Discussing」）、通过（success，「Passed」）、取消和跳过（虚线，「Cancelled」「Skipped」）；点击打开关卡面板 |
-| Chat 页的规划者线程 | 有关卡在等时顶部一条提示，链接到关卡面板；在这里发的仍是补充说明（Q12） |
+| Chat 页的规划者线程 | 有关卡在等时顶部一条提示，链接到关卡面板；在这里发的仍是补充说明（Q12）（G2） |
 | 项目设置 → Execution | 「User gates」（On / Off）和「Gate reminders」（每 N 小时，0 为不提醒） |
 | Settings → Channels | 「Gates of dashboard tasks」：渠道和白名单里的一个聊天，空为只在任务页（G2） |
-| HTTP 接口 | `GET /api/tasks/:id` 多 `gates`（每个关卡的状态、议程、发现、等待时长、结论、计划改动、发件记录）；`GET /api/tasks/:id/gates/:step/messages`；`POST /api/tasks/:id/gates/:step/messages`（`{text, agenda_item?, option?}`，关卡不在等用户时 409，任务停止时 202 并说明）；`POST /api/tasks/:id/gates/:step/end`；`GET /api/tasks?group=needs_you`；项目的两个设置走 `PUT /api/projects/:id`，渠道的那一个走系统设置的接口 |
+| HTTP 接口 | `GET /api/tasks/:id` 多 `gates`（每个关卡的状态、议程、发现、等待时长、结论、计划改动、发件记录）；`GET /api/tasks/:id/gates/:step/messages`；`POST /api/tasks/:id/gates/:step/messages`（`{text, agenda_item?, option?}`，关卡不在等用户时 409；回答的 `delivered` 为 `queued`，任务没在运行时为 `kept`，即任务继续后才交给规划者）；`POST /api/tasks/:id/gates/:step/end`；`GET /api/tasks?group=needs_you`；项目的两个设置走 `PUT /api/projects/:id`，渠道的那一个走系统设置的接口 |
 | 实时 | 关卡的每次变化写一条活动，任务页随现有的活动流刷新 |
 | 飞书、Telegram | 第 9 节（G2） |
 | CLI | 不变：CLI 没有任务类命令 |
@@ -301,12 +301,9 @@ task_user_gates                一个关卡
   agenda             JSONB：[{id, question, options[], status: open | resolved | dropped, answer}]
   findings           规划者给用户看的发现；可空
   state              'pending' | 'open' | 'discussing' | 'passed' | 'cancelled' | 'skipped'
-  waiting_on         'user' | 'planner'；不在等待中为 NULL
-  end_requested      用户要求结束讨论：下一轮必须关闭
   ended_by_user      通过时：是不是用户结束的
-  summary            JSONB {decisions[], assumptions[], open[]}：只在 passed 时有
+  summary            JSONB {decisions[], assumptions[], open[]}：只在 passed 时有（约束）
   resolution         cancelled 时的原因
-  supplement_id      结论那条补充说明（task_journal.id）
   plan_change        JSONB：关闭那一轮加了、去掉、停掉的步骤
   delivered_through  规划者已经看过的最后一条用户消息（task_user_gate_messages.id）
   turns, reminders
@@ -317,7 +314,7 @@ task_user_gate_messages        讨论记录，按 id 先后
   step_id            → task_user_gates ON DELETE CASCADE
   role               'user' | 'planner' | 'looper'
   kind               user：'message' | 'end'；planner：'reply'；
-                     looper：'opened' | 'updated' | 'reminder' | 'cancelled' | 'closed' | 'resumed'
+                     looper：'opened' | 'updated' | 'reminder' | 'cancelled' | 'closed' | 'resumed' | 'error'
   text
   author             群聊里发言人的名字；私聊、任务页为 NULL
   via                'dashboard' | 'lark' | 'telegram' | 'manager:<渠道>'
@@ -344,7 +341,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 
 ## 13. 提醒
 
-`looper serve` 里一个后台循环（每 5 分钟一次）给满足以下条件的关卡发提醒：关卡为 `open` 或 `discussing`，`waiting_on` 为 `user`，任务在运行（停止的任务不提醒），项目的 `gate_reminder_hours` 不为 0，离「打开、用户上一条消息、规划者上一条回复、上一次提醒」中最晚的那个超过了这个间隔。提醒发到和卡片同样的目标，记一条 `reminder` 消息和发件记录，`reminders` 加一。提醒也是关卡消息，回复它同样送到关卡。G1 只有任务页，提醒只记一条活动，渠道里的提醒随 G2。
+`looper serve` 里一个后台循环（每 5 分钟一次）给满足以下条件的关卡发提醒：关卡为 `open` 或 `discussing`，在等用户（没有未送达的用户消息），任务在运行（停止的任务不提醒），项目的 `gate_reminder_hours` 不为 0，离「打开、用户上一条消息、规划者上一条回复、上一次提醒」中最晚的那个超过了这个间隔。提醒发到和卡片同样的目标，记一条 `reminder` 消息和发件记录，`reminders` 加一。提醒也是关卡消息，回复它同样送到关卡。G1 只有任务页，提醒只记一条活动，渠道里的提醒随 G2。
 
 ## 14. 与其他设计的关系
 
@@ -352,7 +349,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 |---|---|
 | 规划者定义的角色（#161） | 没有语义上的冲突：关卡不跑执行者和评审者，`role`、`review_role` 在关卡上一律拒绝，`_check_roles` 跳过关卡；`reply_contract(max_retries, *, roles, gates)` 两节各自可选、互不影响；按角色的统计不计关卡。文本上重叠：`planner_protocol.py` 的 `StepSpec`、`_step`、`_check_new_steps` 和约定，`planner.py` 的 `PlanStep`、`_step_row`、`_add_steps`，`db/plans.py`，`schema.sql` 里日志类型的约束（各自一个迁移），`task-detail.tsx` 的 Pipeline。所以在 #161 合入之后再开工 |
 | 并行步骤的目录隔离 | 关卡不进 `_plan_round`，没有工作区；依赖关卡的步骤在关卡通过后照常开 worktree |
-| Agent 讨论室（另一份 RFC，起草中） | 关卡是用户和规划者之间的讨论，讨论室是 agent 之间的。执行者需要用户决定时在讨论室里升级给规划者，由规划者决定是否开关卡；执行者自己不能开关卡，也不在运行中等关卡（它的步骤要么按假设做完，要么被规划者停掉、放到关卡之后）。两边的名字不重叠（`[GATE]` 与 `[ROOM]`，`task_user_gate*` 与 `room_*`） |
+| Agent 办公台（Agent Room，另一份 RFC） | 关卡是用户和规划者之间的讨论，办公台是 agent 之间的。执行者需要用户决定时在办公台里升级给规划者，由规划者决定是否开关卡；执行者自己不能开关卡，也不在运行中等关卡（它的步骤要么按假设做完，要么被规划者停掉、放到关卡之后）。两边的名字不重叠（`[GATE]` 与 `[ROOM]`，`task_user_gate*` 与 `room_*`） |
 | 管家平台工具（任务变更、CHAT 的 `replan`） | CHAT（含变更回合和 RESTART）多 `gates`；结论是补充说明，沿用 `supplement` 的存储和它在规划者、执行者、评审者、任务页的出现位置；`looper_task_instruct` 不变 |
 | 定时任务 | 定时任务建出的任务不能开关卡（D2），prompt 不变；运行上下文里「不要等用户回答」的约定和代码的拒绝一致。定时任务删除后 `schedule_id` 置空，剩下那次运行此后算有人值守，可以开关卡；这种情况少，按现有字段判断，不另加列 |
 | 花费上限 | 讨论回合计入任务的花费；讨论中达到上限的任务照旧停下 |
@@ -386,7 +383,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 
 **规划者评测，真实模式**（haiku，对照已提交的基线，`evals/README.md`）。评测运行器扮演用户：有关卡打开时，按任务的脚本经 `POST /api/tasks/:id/gates/:step/messages` 回答，或调用 `/end`。
 
-- 现有 12 个任务都是有人值守的，prompt 变了，这就是默认行为的变化：对比成功率、步骤数、花费和违约。新指标 `gates_opened` 预期都是 0，因为这些需求都清楚，开关卡就是多问。真有关卡打开时，运行器回答一次「没有偏好，你来定」，并记下来。
+- 现有 16 个任务都是有人值守的，prompt 变了，这就是默认行为的变化：对比成功率、步骤数、花费和违约。新指标 `gates_opened` 预期都是 0，因为这些需求都清楚，开关卡就是多问。真有关卡打开时，运行器回答一次「没有偏好，你来定」，并记下来。
 - 新增五个任务：
   - `gate_ambiguous`：需求留一个决定结果的选择给用户（例如配置文件用 JSON 还是 TOML），脚本回答 TOML 和一个键名。断言开了关卡、至少一轮讨论、关卡通过、结论记成了补充说明、执行者的任务一节里有结论、最终文件是 TOML 且键名对；
   - `gate_not_needed`：一个清楚的任务。断言一个关卡都没开；
@@ -412,13 +409,13 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 
 | 风险 | 处理 |
 |---|---|
-| 多问：清楚的任务也开关卡，打扰用户 | 约定写明三条都成立才开（7.4）；现有 12 个评测任务的 `gates_opened` 应为 0；任务页和指标显示关卡数；一个关卡里一次问完；项目可以关闭 |
+| 多问：清楚的任务也开关卡，打扰用户 | 约定写明三条都成立才开（7.4）；现有 16 个评测任务的 `gates_opened` 应为 0；任务页和指标显示关卡数；一个关卡里一次问完；项目可以关闭 |
 | 讨论不收尾 | 约定要求答清就关闭；消息写出回合数；用户随时可以结束讨论；每轮都计入花费，受任务的花费上限约束 |
 | 回复送错地方 | 只按渠道的消息编号对上；对不上交给管家，有歧义时管家先问；关卡已关时作为补充说明；群里只认白名单里的人 |
 | 无人值守的任务停住 | 定时任务由代码拒绝开关卡（D2），它的约定里不提关卡 |
 | 用户一直不回 | 默认每天提醒，任务页显示等了多久，任务进 Needs you；任务占着项目的一个规划者名额（Q6），空闲的进程会停掉；第二期可选超时后按假设继续 |
 | 结论挤占补充说明的预算 | 每条结论至多 3,000 字；补充说明的总预算是 8,000 字，超过时最早的被略去并说明数量。几个关卡的结论都很长时可能挤掉用户早先的补充说明，在评测里观察 |
-| 上下文变大 | 约定只在开启的、有人值守的任务里多一节，目标 3 KB 以内，G1 实测；管家多约 0.6 KB |
+| 上下文变大 | 约定只在开启的、有人值守的任务里多一节，G1 实测约 2.7 KB；管家多约 0.6 KB |
 | 飞书群里回复忘了 @机器人 | 维护者确认的规则（Q4）。群里的每条关卡消息都写明「在群里回复请 @机器人」；没 @ 的回复到不了，用户可能以为已经答了，提醒会再来 |
 | 关卡消息发不出去（渠道没开、登录失效） | 发件记录写失败原因，任务页显示，活动记 error，下一次提醒再发 |
 | 用户的回复里有提示注入 | 和补充说明同一信任级：发言人都在白名单里；回复不改契约、工具和权限 |
@@ -427,7 +424,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 
 | 期 | 内容 | 依赖 |
 |---|---|---|
-| G1 | 协议（关卡步骤、`[GATE]`、`gates`）、约定和用法（只在能开关卡的任务里）、对定时任务和关闭的项目的拒绝；数据模型；规划者的打开、送达、关闭、更新、取消、强制关闭、停止和重启、服务重启、等待时停掉进程；`waiting_user` 和 Needs you；结论补充说明；四类日志；接口；项目的两个设置（这一期 `user_gates` 为空即关闭）；提醒循环（这一期只记活动）；任务页的关卡面板、Pipeline 节点、Dashboard 和 Tasks 的分组；规划者评测（现有 12 个的对比、5 个新任务、替身模式） | #161 合入 |
+| G1 | 协议（关卡步骤、`[GATE]`、`gates`）、约定和用法（只在能开关卡的任务里）、对定时任务和关闭的项目的拒绝；数据模型；规划者的打开、送达、关闭、更新、取消、强制关闭、停止和重启、服务重启、等待时停掉进程；`waiting_user` 和 Needs you；结论补充说明；四类日志；接口；项目的两个设置（这一期 `user_gates` 为空即关闭）；提醒循环（这一期只记活动）；任务页的关卡面板、Pipeline 节点、Dashboard 和 Tasks 的分组；规划者评测（现有 16 个的对比、5 个新任务、替身模式）。✅ 已实现 | #161 合入 |
 | G2 | 渠道：适配器的 `post` 和回复引用，发卡片、更新、提醒、取消、结论，规划者的回复在线程里；路由；网页任务的通知目标；管家的「Open gates」、`looper_task_gate_reply` 和约定，以及管家评测；飞书群、Telegram 群各一条渠道事实的真实验证（征得维护者同意，用测试群）；`user_gates` 为空改为开启（默认行为的变化） | G1 |
 | 第二期（维护者的 D4） | 计划确认模式（按项目开关，默认关闭）；超时后按假设继续（项目设置，默认不超时）；关卡统计页（第 15 节的指标，按项目） | G2 |
 | 非核心 | 飞书交互卡片上的按钮（要消费 `card.action.trigger` 事件）、Telegram inline 按钮；侧栏的等待数；Dashboard 上的「Waiting for you」列表 | G2 |
