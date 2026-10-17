@@ -16,7 +16,8 @@ import asyncpg
 from .connection import get_pool
 
 _COLUMNS = ("id", "task_id", "step_id", "repo_dir", "subdir", "target_branch", "path", "branch", "base_commit",
-            "checkpoint", "result_commit", "merge_commit", "state", "merge_error", "detail", "removed_at")
+            "checkpoint", "result_commit", "merge_commit", "state", "merge_error", "detail", "removed_at", "links",
+            "merge_files")
 
 _SAVE = f"""
 INSERT INTO step_workspaces ({", ".join(_COLUMNS)})
@@ -24,7 +25,7 @@ VALUES ({", ".join(f"${i}" for i in range(1, len(_COLUMNS) + 1))})
 ON CONFLICT (id) DO UPDATE
 SET result_commit = EXCLUDED.result_commit, merge_commit = EXCLUDED.merge_commit, state = EXCLUDED.state,
     merge_error = EXCLUDED.merge_error, detail = EXCLUDED.detail, removed_at = EXCLUDED.removed_at,
-    updated_at = now()
+    links = EXCLUDED.links, merge_files = EXCLUDED.merge_files, updated_at = now()
 """
 
 
@@ -34,10 +35,16 @@ async def next_id(*, pool: asyncpg.Pool | None = None) -> int:
     return int(await pool.fetchval("SELECT nextval(pg_get_serial_sequence('step_workspaces', 'id'))"))
 
 
-async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
+async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     """Write a workspace (``StepWorkspace.row``): its row the first time, then what changes."""
     pool = pool or get_pool()
     await pool.execute(_SAVE, *(row.get(column) for column in _COLUMNS))
+
+
+async def get(workspace_id: int, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, Any] | None:
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT * FROM step_workspaces WHERE id = $1", workspace_id)
+    return dict(row) if row else None
 
 
 async def list_for_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
@@ -45,6 +52,19 @@ async def list_for_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     pool = pool or get_pool()
     rows = await pool.fetch("SELECT * FROM step_workspaces WHERE task_id = $1 ORDER BY id", task_id)
     return [dict(row) for row in rows]
+
+
+async def lock_task(conn: asyncpg.Connection, task_id: str) -> str | None:
+    """In the caller's transaction, lock the task's row until it ends (a restart, which updates the row, waits for
+    it); the task's status, or None when there is no such task."""
+    return await conn.fetchval("SELECT status FROM tasks WHERE id = $1 FOR UPDATE", task_id)
+
+
+async def task_start(task_id: str, *, pool: asyncpg.Pool | None = None) -> tuple[str, str]:
+    """Where the task's branch was when it dispatched its first step (``task_plans``): ('', '') when not recorded."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT start_branch, start_commit FROM task_plans WHERE task_id = $1", task_id)
+    return (str(row["start_branch"]), str(row["start_commit"])) if row else ("", "")
 
 
 async def list_kept(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:

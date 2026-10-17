@@ -47,7 +47,7 @@ from typing import Any
 
 from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limit
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, budget_error
+from ..claude_cli import ClaudeRunRecorder, budget_error, ended_by
 from .. import proc_tree, reported_files
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
@@ -775,186 +775,187 @@ class WorkerPool:
             step_id=payload.get("task_id") or None,
             system_prompt=system_prompt,
             launch=launch,
+            whole_process=True,
         )
-        await recorder.start()
+        async with recorder:  # whatever ends the run (a kill, its task or the server stopping) ends its record
+            logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], work_dir)
+            try:
+                process = await proc_tree.spawn(
+                    *command,
+                    cwd=work_dir,
+                    env=launch.environment(),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
+                wp = self._active.get(worker_id)
+                if wp is not None:
+                    wp.process = process
+            except OSError as exc:
+                logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
+                error = f"Cannot start Claude Code: {exc}"
+                await recorder.finish(output_text=None, result_event=None, error=error,
+                                      outcome=RunOutcome.RUN_FAILED.value)
+                return {"status": "failed", "error": error}
 
-        logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], work_dir)
-        try:
-            process = await proc_tree.spawn(
-                *command,
-                cwd=work_dir,
-                env=launch.environment(),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
-            wp = self._active.get(worker_id)
-            if wp is not None:
-                wp.process = process
-        except OSError as exc:
-            logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
-            error = f"Cannot start Claude Code: {exc}"
-            await recorder.finish(output_text=None, result_event=None, error=error, outcome=RunOutcome.RUN_FAILED.value)
-            return {"status": "failed", "error": error}
+            assert process.stdin is not None
+            try:
+                await runtime.write_turn(process.stdin, prompt)
+                self._inputs[worker_id] = (process.stdin, runtime)
+            except (BrokenPipeError, ConnectionResetError):
+                # Claude exited before reading; its output decides the outcome.
+                logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
 
-        assert process.stdin is not None
-        try:
-            await runtime.write_turn(process.stdin, prompt)
-            self._inputs[worker_id] = (process.stdin, runtime)
-        except (BrokenPipeError, ConnectionResetError):
-            # Claude exited before reading; its output decides the outcome.
-            logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
+            def _end_input() -> None:
+                # Without this Claude would wait on stdin for another user turn.
+                if self._inputs.pop(worker_id, None) is not None and not process.stdin.is_closing():
+                    process.stdin.close()
 
-        def _end_input() -> None:
-            # Without this Claude would wait on stdin for another user turn.
-            if self._inputs.pop(worker_id, None) is not None and not process.stdin.is_closing():
-                process.stdin.close()
+            result_event: dict[str, Any] | None = None
+            finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
 
-        result_event: dict[str, Any] | None = None
-        finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
+            async def _read_stream() -> None:
+                nonlocal result_event, finished
+                assert process.stdout is not None
+                async for event in runtime.parse(process.stdout, model=launch.model):
+                    await recorder.record(event)
+                    if (capped := recorder.cap_stop) is not None:
+                        # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
+                        result_event = capped.result_event
+                        _end_input()
+                        await proc_tree.end(process, label=f"worker {worker_id}")
+                        return
 
-        async def _read_stream() -> None:
-            nonlocal result_event, finished
-            assert process.stdout is not None
-            async for event in runtime.parse(process.stdout, model=launch.model):
-                await recorder.record(event)
-                if (capped := recorder.cap_stop) is not None:
-                    # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
-                    result_event = capped.result_event
-                    _end_input()
-                    await proc_tree.end(process, label=f"worker {worker_id}")
-                    return
+                    event_type = event.get("type", "")
 
-                event_type = event.get("type", "")
-
-                if event_type == "assistant":
-                    msg = event.get("message", {})
-                    content_blocks = msg.get("content", [])
-                    if not isinstance(content_blocks, list):
-                        content_blocks = []
-                    for block in content_blocks:
-                        block_type = block.get("type", "")
-                        if block_type == "tool_use":
-                            tool_name = block.get("name", "unknown")
-                            tool_input = block.get("input", {})
-                            summary = runtime.tool_summary(tool_name, tool_input)
-                            if parent_task_id:
-                                try:
-                                    await db_activity.insert_activity(
-                                        task_id=parent_task_id,
-                                        worker=worker_id,
-                                        kind="tool_use",
-                                        summary=summary,
-                                    )
-                                except Exception:
-                                    logger.debug("failed to insert tool_use activity", exc_info=True)
-                        elif block_type == "text":
-                            text = block.get("text", "")
-                            if text:
-                                if parent_task_id and len(text.strip()) > 5:
+                    if event_type == "assistant":
+                        msg = event.get("message", {})
+                        content_blocks = msg.get("content", [])
+                        if not isinstance(content_blocks, list):
+                            content_blocks = []
+                        for block in content_blocks:
+                            block_type = block.get("type", "")
+                            if block_type == "tool_use":
+                                tool_name = block.get("name", "unknown")
+                                tool_input = block.get("input", {})
+                                summary = runtime.tool_summary(tool_name, tool_input)
+                                if parent_task_id:
                                     try:
                                         await db_activity.insert_activity(
                                             task_id=parent_task_id,
                                             worker=worker_id,
-                                            kind="text",
-                                            summary=text[:300],
+                                            kind="tool_use",
+                                            summary=summary,
                                         )
                                     except Exception:
-                                        logger.debug("failed to insert text activity", exc_info=True)
+                                        logger.debug("failed to insert tool_use activity", exc_info=True)
+                            elif block_type == "text":
+                                text = block.get("text", "")
+                                if text:
+                                    if parent_task_id and len(text.strip()) > 5:
+                                        try:
+                                            await db_activity.insert_activity(
+                                                task_id=parent_task_id,
+                                                worker=worker_id,
+                                                kind="text",
+                                                summary=text[:300],
+                                            )
+                                        except Exception:
+                                            logger.debug("failed to insert text activity", exc_info=True)
 
-                elif event_type == "result":
-                    # Background work (an agent team's teammates) can end in turns of Claude's own after this
-                    # one, each with a result of its own, also once stdin is closed: the run's last result is
-                    # its outcome.
-                    result_event = finished = event
-                    _end_input()
+                    elif event_type == "result":
+                        # Background work (an agent team's teammates) can end in turns of Claude's own after this
+                        # one, each with a result of its own, also once stdin is closed: the run's last result is
+                        # its outcome.
+                        result_event = finished = event
+                        _end_input()
 
-        async def _report_finished(event: dict[str, Any]) -> None:
-            # The run's cost as recorded: Claude Code's figure, or its tokens at the provider's prices.
-            cost = run_usage(event, price=launch.price).cost_usd if launch.price is not None \
-                else event.get("total_cost_usd", event.get("cost_usd"))
-            duration_ms = event.get("duration_ms")
-            if parent_task_id:
-                try:
-                    parts = ["Worker finished"]
-                    if cost is not None:
-                        parts[0] = f"Worker finished (cost: ${cost:.4f})"
-                    meta: dict[str, Any] = {}
-                    if cost is not None:
-                        meta["cost_usd"] = cost
-                    if duration_ms is not None:
-                        meta["duration_ms"] = duration_ms
-                    await db_activity.insert_activity(
-                        task_id=parent_task_id,
-                        worker=worker_id,
-                        kind="phase",
-                        summary=parts[0],
-                        metadata=meta or None,
-                    )
-                except Exception:
-                    logger.debug("failed to insert result activity", exc_info=True)
+            async def _report_finished(event: dict[str, Any]) -> None:
+                # The run's cost as recorded: Claude Code's figure, or its tokens at the provider's prices.
+                cost = run_usage(event, price=launch.price).cost_usd if launch.price is not None \
+                    else event.get("total_cost_usd", event.get("cost_usd"))
+                duration_ms = event.get("duration_ms")
+                if parent_task_id:
+                    try:
+                        parts = ["Worker finished"]
+                        if cost is not None:
+                            parts[0] = f"Worker finished (cost: ${cost:.4f})"
+                        meta: dict[str, Any] = {}
+                        if cost is not None:
+                            meta["cost_usd"] = cost
+                        if duration_ms is not None:
+                            meta["duration_ms"] = duration_ms
+                        await db_activity.insert_activity(
+                            task_id=parent_task_id,
+                            worker=worker_id,
+                            kind="phase",
+                            summary=parts[0],
+                            metadata=meta or None,
+                        )
+                    except Exception:
+                        logger.debug("failed to insert result activity", exc_info=True)
 
-        try:
-            await asyncio.wait_for(_read_stream(), timeout=run_timeout if run_timeout > 0 else None)
-            _end_input()
-            await process.wait()
-        except BaseException as exc:
-            _end_input()
-            # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
-            await proc_tree.end(process, label=f"worker {worker_id}")
-            timed_out = isinstance(exc, asyncio.TimeoutError)
-            error = (
-                f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
-                else f"worker stopped reading Claude: {type(exc).__name__}"
+            try:
+                await asyncio.wait_for(_read_stream(), timeout=run_timeout if run_timeout > 0 else None)
+                _end_input()
+                await process.wait()
+            except BaseException as exc:
+                _end_input()
+                # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
+                await proc_tree.end(process, label=f"worker {worker_id}")
+                timed_out = isinstance(exc, asyncio.TimeoutError)
+                error = (
+                    f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
+                    else f"worker stopped reading Claude: {type(exc).__name__}"
+                )
+                await recorder.finish(output_text=None, result_event=result_event, error=error,
+                                      outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
+                if timed_out:
+                    raise asyncio.TimeoutError(error) from exc
+                raise
+            if finished is not None and finished is result_event:
+                await _report_finished(finished)
+
+            final_text = str((result_event or {}).get("result") or "") or None
+            return_code = process.returncode or 0
+            # A successful result decides the outcome even when the process then
+            # exits non-zero: Claude Code can exit 1 for reasons unrelated to the
+            # work (an MCP server or hook erroring on teardown, for example). Only
+            # when there is no usable result does the exit code become the failure.
+            result_ok = (
+                result_event is not None
+                and not result_event.get("is_error")
+                and result_event.get("subtype") == "success"
             )
-            await recorder.finish(output_text=None, result_event=result_event, error=error,
-                                  outcome=RunOutcome.RUN_FAILED.value)
-            if timed_out:
-                raise asyncio.TimeoutError(error) from exc
-            raise
-        if finished is not None and finished is result_event:
-            await _report_finished(finished)
+            # A run stopped at its spend cap exits non-zero too; its result says why.
+            if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None:
+                stderr = ""
+                if process.stderr:
+                    stderr_bytes = await process.stderr.read()
+                    stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+                error = f"Claude Code exited with code {return_code}"
+                await recorder.finish(output_text=final_text, result_event=result_event, error=error,
+                                      outcome=RunOutcome.RUN_FAILED.value)
+                return {"status": "failed", "error": error, "stderr": stderr[:500]}
+            if return_code != 0:
+                logger.warning(
+                    "worker %s: Claude exited %d but produced a successful result; judging the result",
+                    worker_id, return_code,
+                )
 
-        final_text = str((result_event or {}).get("result") or "") or None
-        return_code = process.returncode or 0
-        # A successful result decides the outcome even when the process then
-        # exits non-zero: Claude Code can exit 1 for reasons unrelated to the
-        # work (an MCP server or hook erroring on teardown, for example). Only
-        # when there is no usable result does the exit code become the failure.
-        result_ok = (
-            result_event is not None
-            and not result_event.get("is_error")
-            and result_event.get("subtype") == "success"
-        )
-        # A run stopped at its spend cap exits non-zero too; its result says why.
-        if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None:
-            stderr = ""
-            if process.stderr:
-                stderr_bytes = await process.stderr.read()
-                stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-            error = f"Claude Code exited with code {return_code}"
+            outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
+                                              started_at=started_at)
+            if (elsewhere := outcome.get("found_elsewhere")) and parent_task_id:
+                await self._activity(parent_task_id, worker_id, "phase",
+                                     ("Reported files found outside the working directory: "
+                                      + "; ".join(f"{path} {where}" for path, where in elsewhere.items()))[:500])
+            # A review that says "not passed" is still a successful run; only work
+            # failures are the run's error.
+            error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
             await recorder.finish(output_text=final_text, result_event=result_event, error=error,
-                                  outcome=RunOutcome.RUN_FAILED.value)
-            return {"status": "failed", "error": error, "stderr": stderr[:500]}
-        if return_code != 0:
-            logger.warning(
-                "worker %s: Claude exited %d but produced a successful result; judging the result",
-                worker_id, return_code,
-            )
-
-        outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
-                                          started_at=started_at)
-        if (elsewhere := outcome.get("found_elsewhere")) and parent_task_id:
-            await self._activity(parent_task_id, worker_id, "phase",
-                                 ("Reported files found outside the working directory: "
-                                  + "; ".join(f"{path} {where}" for path, where in elsewhere.items()))[:500])
-        # A review that says "not passed" is still a successful run; only work
-        # failures are the run's error.
-        error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
-        await recorder.finish(output_text=final_text, result_event=result_event, error=error,
-                              outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
-        return outcome
+                                  outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
+            return outcome
 
     @staticmethod
     def _task_section(payload: dict[str, Any], work_dir: str, *, is_verify: bool) -> str:

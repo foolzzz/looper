@@ -10,6 +10,7 @@ with ``git`` directly, without hooks.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -386,6 +387,7 @@ def test_a_merge_that_cannot_be_made_leaves_the_task_directory_as_it_was(
     assert snapshot(repo) == before
     assert (outcome.workspace.state, outcome.workspace.merge_error, outcome.files) == (
         StepWorkspaceState.UNMERGED, error, files)
+    assert outcome.workspace.merge_files == files  # kept on the workspace for the task page
     assert detail in outcome.workspace.detail
 
 
@@ -452,32 +454,102 @@ def test_a_merge_cut_off_by_a_restart_is_done_once(repo: Path, tmp_path: Path) -
         StepWorkspaceState.MERGED, (), tip)
 
 
-def test_the_rollback_commands_undo_a_step_or_the_whole_task(repo: Path, tmp_path: Path) -> None:
-    root = tmp_path / "runtime"
+def shell(cwd: Path, command: str) -> str:
+    """A command the task page shows, run as the user would paste it (no hooks, no signing, in this test)."""
+    env = {**os.environ, "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null",
+           "GIT_CONFIG_KEY_1": "commit.gpgSign", "GIT_CONFIG_VALUE_1": "false", "GIT_EDITOR": "true"}
+    return subprocess.run(command, shell=True, cwd=cwd, env=env, capture_output=True, text=True,
+                          check=True).stdout.rstrip()
+
+
+def _two_merged_steps(repo: Path, root: Path) -> tuple[str, list[StepWorkspace], list[dict[str, str]]]:
+    """A task on the repository's branch: a checkpoint and two merged steps; where it started, the steps and the
+    undo commands the task page shows for them."""
     start = git(repo, "rev-parse", "HEAD")
+    branch = git(repo, "symbolic-ref", "HEAD")
     (repo / "base.txt").write_text("serial\n")
     base, _ = run(ws.checkpoint(inspected(repo), task_id="task-1"))
     one, two = (workspace(inspected(repo), root, i, f"s{i}", base, checkpointed=True) for i in (1, 2))
     (Path(one.path) / "one.txt").write_text("one\n")
     (Path(two.path) / "two.txt").write_text("two\n")
-    merge(one, "s1")
-    second = merge(two, "s2").workspace
+    merged = [merge(one, "s1").workspace, merge(two, "s2").workspace]
+    commands = ws.undo_commands("task-1", start_branch=branch, start_commit=start,
+                                merged=[(f"s{i}", str(w.merge_commit)) for i, w in enumerate(merged, start=1)])
+    return start, merged, commands
 
-    listed = git(repo, "log", "--first-parent", "--format=%s", "--grep=^Looper-Task: task-1$").splitlines()
+
+def test_the_undo_commands_undo_a_step_or_the_whole_task(repo: Path, tmp_path: Path) -> None:
+    start, (first, second), commands = _two_merged_steps(repo, tmp_path / "runtime")
+    command = {c["what"]: c["command"] for c in commands}
+    assert list(command) == [
+        "List the task's commits on main", "Undo step s1", "Undo step s2",
+        "Undo the whole task, keeping its changes as uncommitted changes",
+        "Undo the whole task and drop its changes (and any other uncommitted change)",
+        "Move the task's commits to a new branch and put main back where the task started"]
+    assert command["Undo step s2"] == f"git switch main && git revert -m 1 {second.merge_commit}"
+
+    listed = shell(repo, command["List the task's commits on main"] + " --format=%s").splitlines()
     assert listed == ["looper: merge step s2: do s2", "looper: merge step s1: do s1",
                       "looper: checkpoint before parallel steps"]
-    git(repo, "revert", "--no-edit", "-m", "1", str(second.merge_commit))
+    shell(repo, command["Undo step s2"] + " --no-edit")  # only that step
     assert (repo / "one.txt").exists() and not (repo / "two.txt").exists()
     git(repo, "reset", "-q", "--hard", "HEAD~1")
 
-    git(repo, "switch", "-q", "-c", "task-1-work")  # the commits move to a branch of their own
-    git(repo, "branch", "-f", "main", start)
+    shell(repo, command["Move the task's commits to a new branch and put main back where the task started"])
+    assert git(repo, "symbolic-ref", "--short", "HEAD") == "main-task-1"
     assert git(repo, "rev-parse", "main") == start and git(repo, "rev-parse", "HEAD") == second.merge_commit
     git(repo, "switch", "-q", "main")
-    git(repo, "merge", "-q", "--ff-only", "--no-verify-signatures", "task-1-work")
-    git(repo, "reset", "-q", start)  # the whole task, its changes kept uncommitted
+    git(repo, "merge", "-q", "--ff-only", "--no-verify-signatures", "main-task-1")
+
+    shell(repo, command["Undo the whole task, keeping its changes as uncommitted changes"])
+    assert git(repo, "rev-parse", "HEAD") == start
     assert git(repo, "status", "--porcelain", "--untracked-files=all").splitlines() == [
         " M base.txt", "?? one.txt", "?? two.txt"]
+    git(repo, "reset", "-q", "--hard", str(second.merge_commit))  # the task's commits, back
+    shell(repo, command["Undo the whole task and drop its changes (and any other uncommitted change)"])
+    assert git(repo, "rev-parse", "HEAD") == start
+    assert git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+    assert (repo / "base.txt").read_text() == "base\n"
+
+
+def test_the_undo_commands_quote_a_branch_the_shell_would_split(tmp_path: Path) -> None:
+    path = tmp_path / "odd"
+    path.mkdir()
+    git(path, "init", "-q", "-b", "fix;$HOME'x")
+    git(path, "config", "user.name", "User")
+    git(path, "config", "user.email", "user@example.com")
+    (path / "shared.txt").write_text("a\n")
+    git(path, "add", "-A")
+    git(path, "commit", "-qm", "init")
+    start, _, commands = _two_merged_steps(path, tmp_path / "runtime")
+    assert len(shell(path, commands[0]["command"] + " --oneline").splitlines()) == 3
+    shell(path, commands[-1]["command"])
+    assert git(path, "rev-parse", "refs/heads/fix;$HOME'x") == start
+    assert git(path, "symbolic-ref", "--short", "HEAD") == "fix;$HOME'x-task-1"
+    assert shell(path, commands[0]["command"] + " --oneline") == ""  # the branch is back where the task started
+
+
+def test_without_its_start_only_the_list_and_the_steps_can_be_undone() -> None:
+    commands = ws.undo_commands("task-1", start_branch="refs/heads/main", start_commit="", merged=[("s1", "abc")])
+    assert [c["command"] for c in commands] == ["git log --first-parent --grep='^Looper-Task: task-1$' main",
+                                                "git switch main && git revert -m 1 abc"]
+
+
+def test_the_undo_commands_change_the_task_s_branch_whatever_is_checked_out(repo: Path, tmp_path: Path) -> None:
+    start, (_, second), commands = _two_merged_steps(repo, tmp_path / "runtime")
+    command = {c["what"]: c["command"] for c in commands}
+    git(repo, "switch", "-q", "-c", "feature")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "the user's own work")
+    feature = git(repo, "rev-parse", "feature")
+
+    shell(repo, command["Move the task's commits to a new branch and put main back where the task started"])
+    assert git(repo, "rev-parse", "main-task-1") == second.merge_commit  # from main, not from feature
+    assert git(repo, "rev-parse", "main") == start and git(repo, "rev-parse", "feature") == feature
+    git(repo, "branch", "-f", "main", str(second.merge_commit))
+    git(repo, "switch", "-q", "feature")
+    shell(repo, command["Undo the whole task, keeping its changes as uncommitted changes"])
+    assert git(repo, "symbolic-ref", "--short", "HEAD") == "main"
+    assert (git(repo, "rev-parse", "main"), git(repo, "rev-parse", "feature")) == (start, feature)
 
 
 # --- Worktrees lost and removed ---
@@ -536,6 +608,196 @@ def test_the_startup_sweep_keeps_what_tasks_keep(repo: Path, tmp_path: Path, mon
     assert not Path(done.path).exists() and not Path(merged.path).exists() and not Path(orphan.path).exists()
     assert Path(kept.path).exists()
     assert git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/looper/") == "looper/task-1/s2-2"
+
+
+# --- Links back to the task directory ---
+
+
+def _local_state(repo: Path) -> None:
+    """Ignored local state in the task directory: a dependencies directory under a directory-only rule (which does
+    not match a link) and a virtualenv and an env file under plain rules."""
+    (repo / ".gitignore").write_text(".env\n.venv\nnode_modules/\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "ignore local state")
+    (repo / "node_modules" / "pkg").mkdir(parents=True)
+    (repo / "node_modules" / "pkg" / "index.js").write_text("module\n")
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "pyvenv.cfg").write_text("home = /usr\n")
+    (repo / ".env").write_text("TOKEN=local\n")
+
+
+def test_a_worktree_links_the_listed_paths_it_does_not_have(repo: Path, tmp_path: Path) -> None:
+    _local_state(repo)
+    (repo / "lib").symlink_to(tmp_path)  # a tracked link out of the repository
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "lib")
+    step = workspace(inspected(repo), tmp_path / "runtime", 1, "s1", git(repo, "rev-parse", "HEAD"))
+    linked, skipped = ws.link(step, (".venv", "node_modules", ".env", "missing", "base.txt", "lib/x"))
+    assert linked.links == (".venv", "node_modules", ".env")
+    assert skipped == ["missing: the task directory has none", "base.txt: the repository tracks it",
+                       "lib/x: the task directory has none"]
+    for path in linked.links:
+        assert os.readlink(Path(step.path) / path) == str(repo / path)
+    assert (Path(step.path) / ".venv" / "pyvenv.cfg").read_text() == "home = /usr\n"
+    assert (Path(step.path) / "base.txt").read_text() == "base\n"  # a checked-out file is never replaced
+
+    (tmp_path / "x").write_text("outside\n")
+    (repo / "lib").unlink()
+    (repo / "lib").mkdir()  # the task directory has lib/x; the worktree's lib leads out of it
+    (repo / "lib" / "x").write_text("in the task directory\n")
+    assert ws.link(step, ("lib/x",))[1] == ["lib/x: its directory is outside the worktree"]
+
+
+def test_a_task_directory_inside_the_repository_links_from_its_place(repo: Path, tmp_path: Path) -> None:
+    (repo / "app").mkdir()
+    (repo / "app" / "main.txt").write_text("app\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "app")
+    (repo / "app" / ".env").write_text("TOKEN=app\n")
+    step = workspace(inspected(repo / "app"), tmp_path / "runtime", 1, "s1", git(repo, "rev-parse", "HEAD"))
+    linked, _ = ws.link(step, (".env", "deps/cache"))
+    assert linked.links == (".env",)
+    assert os.readlink(Path(step.work_dir) / ".env") == str(repo / "app" / ".env")
+
+
+def test_a_link_is_never_part_of_the_step_s_result(repo: Path, tmp_path: Path) -> None:
+    _local_state(repo)
+    root = tmp_path / "runtime"
+    step, _ = ws.link(workspace(inspected(repo), root, 1, "s1", git(repo, "rev-parse", "HEAD")),
+                      (".venv", "node_modules", ".env"))
+    (Path(step.path) / "one.txt").write_text("one\n")
+    git(step.path, "add", "-A")  # node_modules/ does not match the link: the Worker commits it
+    git(step.path, "commit", "-qm", "worker: one")
+    assert "node_modules" in git(step.path, "ls-tree", "--name-only", "HEAD").split()
+    (Path(step.path) / "two.txt").write_text("two\n")
+    outcome = merge(step, "s1")
+    assert outcome.workspace.state is StepWorkspaceState.MERGED
+    assert git(repo, "ls-tree", "--name-only", "HEAD").split() == [".gitignore", "base.txt", "one.txt", "shared.txt",
+                                                                   "two.txt"]
+    # The task directory's local state is as it was, not a link to itself.
+    assert (repo / "node_modules").is_dir() and not (repo / "node_modules").is_symlink()
+    assert (repo / "node_modules" / "pkg" / "index.js").read_text() == "module\n"
+    assert (repo / ".venv" / "pyvenv.cfg").exists() and (repo / ".env").read_text() == "TOKEN=local\n"
+
+    # A step that only has its links changed nothing.
+    quiet, _ = ws.link(workspace(inspected(repo), root, 2, "s2", git(repo, "rev-parse", "HEAD")), (".venv", "node_modules"))
+    head = git(repo, "rev-parse", "HEAD")
+    done = merge(quiet, "s2")
+    assert (done.workspace.state, done.leftovers, git(repo, "rev-parse", "HEAD")) == (
+        StepWorkspaceState.MERGED, None, head)
+
+
+def test_removing_a_worktree_with_links_leaves_what_they_point_to(repo: Path, tmp_path: Path) -> None:
+    _local_state(repo)
+    step, _ = ws.link(workspace(inspected(repo), tmp_path / "runtime", 1, "s1", git(repo, "rev-parse", "HEAD")),
+                      (".venv", "node_modules"))
+    removed = run(ws.remove(step))
+    assert removed.removed_at is not None and not Path(step.path).exists()
+    assert (repo / "node_modules" / "pkg" / "index.js").exists() and (repo / ".venv" / "pyvenv.cfg").exists()
+
+
+def test_a_lost_worktree_gets_its_links_back(repo: Path, tmp_path: Path) -> None:
+    _local_state(repo)
+    step, _ = ws.link(workspace(inspected(repo), tmp_path / "runtime", 1, "s1", git(repo, "rev-parse", "HEAD")),
+                      (".venv",))
+    subprocess.run(["rm", "-rf", step.path], check=True)  # rm -rf does not follow the link
+    assert (repo / ".venv" / "pyvenv.cfg").exists()
+    run(ws.ensure_worktree(step))
+    assert os.readlink(Path(step.path) / ".venv") == str(repo / ".venv")
+
+
+# --- The checkout size limit ---
+
+
+def test_a_checkout_over_the_size_limit_has_no_workspaces(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    size = run(ws.checkout_size(str(repo)))
+    assert size == sum(len(p.read_bytes()) for p in repo.iterdir() if p.is_file())
+    monkeypatch.setattr(ws, "CHECKOUT_LIMIT_BYTES", size)
+    assert isinstance(run(ws.inspect(str(repo))), Repo)  # at the limit
+    (repo / "more.txt").write_text("x")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "one byte more")
+    assert run(ws.inspect(str(repo))) == Unusable(
+        f"the checkout is {size + 1} B, over the {size} B limit for step worktrees", repository=True)
+    monkeypatch.setattr(ws, "CHECKOUT_LIMIT_BYTES", 1 << 30)
+    assert isinstance(run(ws.inspect(str(repo))), Repo)
+
+
+@pytest.mark.parametrize(("size", "text"), [(0, "0 B"), (1023, "1023 B"), (1 << 20, "1 MiB"),
+                                           (int(1.5 * (1 << 30)), "1.5 GiB")])
+def test_a_checkout_size_reads_in_binary_units(size: int, text: str) -> None:
+    assert ws._size_text(size) == text
+
+
+# --- Discarding one, and the row ---
+
+
+def test_the_user_discards_a_workspace_a_stopped_task_keeps(repo: Path, tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    head = git(repo, "rev-parse", "HEAD")
+    unmerged = merge(_conflict(repo, tmp_path / "other"), "s2").workspace  # workspaces 1 and 2
+    active = workspace(inspected(repo), root, 5, "s5", head)
+    kept_branch = run(ws.remove(workspace(inspected(repo), root, 3, "s3", head).moved(StepWorkspaceState.DISCARDED),
+                                keep_branch=True))
+    for found in (active, unmerged, kept_branch):
+        assert found.discardable and run(ws.branch_exists(found.repo_dir, found.branch))
+        gone = run(ws.discard(found))
+        assert (gone.state, gone.removed_at is not None, gone.discardable) == (StepWorkspaceState.DISCARDED, True, False)
+        assert not Path(found.path).exists() and not run(ws.branch_exists(found.repo_dir, found.branch))
+        with pytest.raises(IllegalTransition, match="is gone"):
+            run(ws.discard(gone))
+    merged = merge(workspace(inspected(repo), root, 4, "s4", git(repo, "rev-parse", "HEAD")), "s4").workspace
+    with pytest.raises(IllegalTransition, match="is merged"):
+        run(ws.discard(merged))
+    assert not run(ws.branch_exists(str(tmp_path / "nowhere"), "looper/task-1/s1-1"))
+
+
+def test_a_workspace_row_reads_back_as_it_was_written() -> None:
+    written = StepWorkspace(id=7, task_id="t", step_id="s", repo_dir="/r", subdir="app", target_branch="refs/heads/main",
+                            path="/w", branch="looper/t/s-7", base_commit="abc", checkpoint=True, result_commit="def",
+                            state=StepWorkspaceState.UNMERGED, merge_error=MergeError.CONFLICT, detail="conflicts",
+                            links=(".venv", ".env"), merge_files=("a.py",))
+    assert StepWorkspace.from_row(written.row()) == written
+    assert written.view() == {
+        "id": 7, "step_id": "s", "branch": "looper/t/s-7", "target_branch": "main", "base_commit": "abc",
+        "checkpoint": True, "result_commit": "def", "merge_commit": None, "state": "unmerged",
+        "merge_error": "conflict", "merge_files": ["a.py"], "detail": "conflicts", "links": [".venv", ".env"],
+        "path": "/w", "removed_at": None, "discardable": True}
+    view = ws.task_view("t", [written.row()], start_branch="refs/heads/main", start_commit="r0",
+                        step_keys={"s": "s2"})
+    assert view["start"] == {"branch": "main", "commit": "r0"}
+    assert view["workspaces"] == [{**written.view(), "step_key": "s2"}]
+    assert [c["command"] for c in view["undo"]][0] == "git log --first-parent --grep='^Looper-Task: t$' main"
+
+
+def test_a_link_the_worker_replaced_with_its_own_file_is_its_change(repo: Path, tmp_path: Path) -> None:
+    _local_state(repo)
+    step, _ = ws.link(workspace(inspected(repo), tmp_path / "runtime", 1, "s1", git(repo, "rev-parse", "HEAD")),
+                      (".env", "node_modules"))
+    (Path(step.path) / ".env").unlink()
+    (Path(step.path) / ".env").write_text("TOKEN=example\n")
+    git(step.path, "add", "-f", ".env")  # the step's own example file, deliberately committed
+    git(step.path, "commit", "-qm", "worker: .env example")
+    outcome = merge(step, "s1")
+    assert (outcome.workspace.state, outcome.replaced_links) == (StepWorkspaceState.MERGED, (".env",))
+    assert git(repo, "show", "HEAD:.env") == "TOKEN=example"
+    assert "node_modules" not in git(repo, "ls-tree", "--name-only", "HEAD").split()
+
+
+def test_looper_forgets_only_its_own_worktrees(repo: Path, tmp_path: Path) -> None:
+    """``git worktree prune`` would also drop the record of the user's worktree whose directory is gone."""
+    users = tmp_path / "users-worktree"
+    git(repo, "worktree", "add", "-q", "-b", "mine", str(users), "HEAD")
+    subprocess.run(["rm", "-rf", str(users)], check=True)  # an unmounted disk, say
+    root = tmp_path / "runtime"
+    lost = workspace(inspected(repo), root, 1, "s1", git(repo, "rev-parse", "HEAD"))
+    subprocess.run(["rm", "-rf", lost.path], check=True)
+    run(ws.ensure_worktree(lost))  # its own stale record goes, so it comes back
+    run(ws.remove(lost))
+    run(ws.remove_orphan(Path(workspace(inspected(repo), root, 2, "s2", git(repo, "rev-parse", "HEAD")).path)))
+    listed = git(repo, "worktree", "list", "--porcelain")
+    assert f"worktree {users.resolve()}" in listed or f"worktree {users}" in listed
+    assert "looper/" not in listed and str(root) not in listed
 
 
 # --- Whether a turn changed the task directory ---

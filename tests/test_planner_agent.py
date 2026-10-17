@@ -714,6 +714,48 @@ class TestResidentClaude:
         assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, None, 0.25]
         assert h.planner._plan.session_totals == Usage(cost_usd=0.5)  # type: ignore[union-attr]
 
+    @pytest.mark.parametrize(("ends", "status", "cost"), [
+        ("claude_killed", "failed", None), ("stopped_mid_turn", "interrupted", None),
+        ("stopped_while_saving", "completed", 0.25),
+    ])
+    def test_a_turn_ends_its_record_however_the_turn_ends(
+        self, planner_claude: Any, agent_db: Any, ends: str, status: str, cost: float | None,
+    ) -> None:
+        """A turn whose Claude is killed mid-turn ends ``failed``; one its task's stop cuts off mid-turn ends
+        ``interrupted``; one stopped after Claude answered, while the Planner saves its session, is recorded
+        already, with its cost. No record is left ``running``."""
+        import signal
+
+        claude = planner_claude(plan(step("s1")) if ends == "stopped_while_saving" else "<hang>")
+        saving = asyncio.Event()
+        save = agent_db.save_session.side_effect
+
+        async def save_session(agent_id: str, session_id: Any, totals: dict[str, Any], **fields: Any) -> None:
+            if totals.get("cost_usd"):  # the save after the turn's result
+                saving.set()
+                await asyncio.sleep(60)
+            await save(agent_id, session_id, totals, **fields)
+
+        agent_db.save_session.side_effect = save_session
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            if ends == "claude_killed":
+                await h.until(lambda: claude.turns())
+                os.kill(claude.pids()[0], signal.SIGKILL)
+                await h.until(lambda: agent_db.finish_record.await_count)
+            elif ends == "stopped_mid_turn":
+                await h.until(lambda: claude.turns())  # then the task stops
+            else:
+                await h.until(saving.is_set)  # then the task stops
+
+        drive(claude, lambda envelope: None, scenario)
+        finishes = agent_db.finish_record.await_args_list
+        assert agent_db.start_record.await_count == len(finishes)
+        assert (finishes[0].kwargs["status"], finishes[0].kwargs["cost_usd"]) == (status, cost)
+        if ends == "claude_killed":
+            assert "exit code -9" in finishes[0].kwargs["error"]
+
     def test_a_session_that_no_longer_exists_is_dropped_and_the_turn_retried(
         self, planner_claude: Any, agent_db: Any,
     ) -> None:
@@ -1512,6 +1554,23 @@ class TestTaskEnd:
         final = agent_db.update_task_status.await_args_list
         assert any(call.args[1] == "completed" and call.kwargs.get("result_summary") == FINAL_RESULT
                    for call in final)
+
+    def test_a_stopped_task_stops_its_running_workers_and_reviewers(self, planner_claude: Any) -> None:
+        """A task's stop ends every step run it has going: s2's Worker and the Reviewer of s1."""
+        claude = planner_claude(plan(step("s1", review=True), step("s2")), decide("review"))
+
+        def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
+            if envelope.message_type == MessageType.VERIFY_REQUEST or envelope.payload["instruction"] == "do s2":
+                return None  # still running
+            return WORK_OK
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.reviews)  # then the task stops
+
+        h = drive(claude, outcome, scenario)
+        s2 = next(item for item in h.work_items if item.payload["instruction"] == "do s2")
+        assert {envelope.target for envelope in h.killed} == {s2.target, h.reviews[0].target}
 
     def test_server_stop_during_a_teardown_still_reaps_claude(self, planner_claude: Any) -> None:
         """Stopping the router while it ends a Planner neither hangs nor leaves Claude running."""

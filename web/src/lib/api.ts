@@ -89,6 +89,9 @@ export interface ProjectExecution {
   /** Where a step that runs alongside others works: the task directory ("shared", also when null) or, in a git
    * checkout on a branch, a worktree of its own merged into the branch when the step is accepted ("worktree"). */
   step_workspaces: "shared" | "worktree" | null;
+  /** The paths, relative to the task directory, that such a worktree links back to the task directory's (its
+   * ignored local state, such as .venv or .env); null = none. */
+  step_workspace_links: string[] | null;
   /** How many times the Planner may retry one step, 0 to 20; null = 2. */
   max_step_retries: number | null;
   /** Whether the project's Planners may define the roles their steps run as; null = "off". */
@@ -505,6 +508,14 @@ export async function continueTaskAtCap(taskId: string, taskBudgetUsd: number): 
     body: JSON.stringify({ task_budget_usd: taskBudgetUsd }),
   });
   if (!res.ok) await failed(res, "continue");
+}
+
+/** Drop a step worktree a task that is not running keeps: its directory and branch are deleted. */
+export async function discardStepWorkspace(taskId: string, workspaceId: number): Promise<StepWorkspace> {
+  const res = await fetch(
+    `${API_BASE}/tasks/${encodeURIComponent(taskId)}/workspaces/${workspaceId}/discard`, { method: "POST" });
+  if (!res.ok) await failed(res, "discard");
+  return (await res.json()).workspace;
 }
 
 export interface NewProjectFields {
@@ -1385,6 +1396,58 @@ export interface TaskDetail extends TaskInfo {
   gates: UserGate[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
+  /** Its steps' git worktrees, in a project whose parallel steps work in worktrees of their own; null (or absent)
+   * when it had none. */
+  step_workspaces?: TaskWorkspaces | null;
+}
+
+/** Where a step's worktree stands: its step works in it ("active"), its branch is being merged, was merged, could
+ * not be merged ("unmerged", with `merge_error`), or it was dropped ("discarded"). */
+export type StepWorkspaceState = "active" | "merging" | "merged" | "unmerged" | "discarded";
+export type MergeError = "conflict" | "local_changes" | "branch_changed" | "step_branch_changed" | "git_failed";
+
+/** A step's git worktree: a branch of its own, merged into the task directory's branch when the step is accepted. */
+export interface StepWorkspace {
+  id: number;
+  step_id: string;
+  /** Its step's label. */
+  step_key: string;
+  branch: string;
+  /** The task directory's branch it merges into, without refs/heads/. */
+  target_branch: string;
+  /** Where its branch starts; a checkpoint of the task directory's pending changes when `checkpoint`. */
+  base_commit: string;
+  checkpoint: boolean;
+  result_commit: string | null;
+  /** The merge commit on the task directory's branch; null until there is one (none for a step that changed nothing). */
+  merge_commit: string | null;
+  state: StepWorkspaceState;
+  merge_error: MergeError | null;
+  /** The files that conflicted or were in the way, when it could not be merged. */
+  merge_files: string[];
+  /** What kept it from merging, as git said it; "" otherwise. */
+  detail: string;
+  /** The paths linked back to the task directory's in it. */
+  links: string[];
+  path: string;
+  /** When its directory and branch were removed; null while either is there. */
+  removed_at: string | null;
+  /** The user may discard it while its task is not running. */
+  discardable: boolean;
+}
+
+/** A command, run in the task directory, that undoes some of what the task did to its branch. */
+export interface UndoCommand {
+  what: string;
+  command: string;
+}
+
+export interface TaskWorkspaces {
+  /** The task directory's branch and its commit when the task dispatched its first step; null when not recorded. */
+  start: { branch: string; commit: string } | null;
+  /** Oldest first; a step retried after a failed merge has more than one. */
+  workspaces: StepWorkspace[];
+  undo: UndoCommand[];
 }
 
 /** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),
@@ -1811,7 +1874,9 @@ export interface LlmRecord {
   agent_id: string;
   task_id: string | null;
   session_id: string | null;
-  status: "running" | "completed" | "failed";
+  /** `interrupted`: Looper stopped the run before it ended (a kill, its task or the server stopping), or the server
+   * running it died. */
+  status: "running" | "completed" | "failed" | "interrupted";
   input_summary: string | null;
   output_summary: string | null;
   input_text: string | null;

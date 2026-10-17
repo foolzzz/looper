@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 import asyncpg
 
 from .connection import get_pool
+
+
+class RecordStatus(str, Enum):
+    """Where one run stands (``llm_records.status``). Every status but ``running`` is a run that has ended."""
+
+    RUNNING = "running"
+    COMPLETED = "completed"  # it ended with a successful result
+    FAILED = "failed"  # it ended without one: an error, no result, its time limit or its spend cap
+    # Looper stopped it before it ended (a kill, its task stopped or cancelled, the server stopping), or the server
+    # running it died (``end_unfinished_records``): how it would have ended is not known.
+    INTERRUPTED = "interrupted"
+
+
+# Why a record found running at startup ended.
+UNFINISHED_AT_START = "the server stopped before this run ended; it was found still running at the next start"
 
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
@@ -45,6 +61,24 @@ async def start_record(
         json.dumps(metadata) if metadata else None,
     )
     return row["id"]
+
+
+async def end_unfinished_records(*, pool: asyncpg.Pool | None = None) -> int:
+    """End every record still ``running`` as ``interrupted``; returns how many.
+
+    Called at startup before any agent runs, when each such record is a run the
+    previous server did not see end: it was killed, crashed or stopped first.
+    It ended at its last output as far as anyone knows (its start without
+    one). What the run had recorded stays; its usage, kept in memory until a
+    run ends, is not known. Running it again changes nothing.
+    """
+    pool = pool or get_pool()
+    result = await pool.execute(
+        "UPDATE llm_records SET status = $1, finished_at = COALESCE(last_output_at, created_at), "
+        "error = COALESCE(error, $2) WHERE status = $3",
+        RecordStatus.INTERRUPTED.value, UNFINISHED_AT_START, RecordStatus.RUNNING.value,
+    )
+    return int(result.split()[-1])
 
 
 async def append_events(
@@ -276,10 +310,11 @@ async def task_costs(
 
     Every given task id gets an entry. ``runs`` counts every run; ``running``
     those still going, whose cost is not known yet; ``unpriced_runs`` the
-    finished ones that ended without a reported cost (Claude exited first, or
-    their model has no price); ``equivalent_runs`` those whose cost is what a
-    subscription's usage would cost at API prices (``EQUIVALENT``), and
-    ``provider_price_runs`` the others Looper priced at their provider's prices.
+    ended ones without a cost (Claude exited or was interrupted before it
+    reported one, or their model has no price); ``equivalent_runs`` those
+    whose cost is what a subscription's usage would cost at API prices
+    (``EQUIVALENT``), and ``provider_price_runs`` the others Looper priced at
+    their provider's prices.
     """
     if not task_ids:
         return {}
