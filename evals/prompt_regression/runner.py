@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import metrics
-from .tasks import CHOSEN_PROFILE, EvalTask
+from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EvalTask
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FAKE_CLAUDE = Path(__file__).resolve().with_name("fake_claude.py")
@@ -282,13 +282,17 @@ def run_task(
     settle: float = 15.0,
     step_workspaces: str | None = None,
     chosen_profile_id: str | None = None,
+    user_gates: str | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
     The task is cancelled when its cost reaches ``cap_left`` or it runs longer
     than ``timeout`` seconds. With ``step_workspaces``, ``work_dir`` is a git
     repository and the task's project has that setting. A task whose Planner may
-    choose a profile gets ``chosen_profile_id`` on its project's list first.
+    choose a profile gets ``chosen_profile_id`` on its project's list first. Its
+    project has ``user_gates`` (``on`` or ``off``) when given, else ``on`` for a
+    task that asks for gates; while one of its gates waits for the user, the
+    runner answers it from the task's script (``answer_gates``).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     for name, content in task.files.items():
@@ -307,7 +311,11 @@ def run_task(
         api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
     if task.roles_on:
         api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
+    gates = user_gates or ("on" if task.user_gates else None)
+    if gates is not None:
+        api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
     api.post("/api/tasks/start", {"task_id": task_id})
+    answered: dict[str, int] = {}  # each gate's script entries posted so far
 
     chat_pending = task.chat is not None
     edit_pending = task.edit_requirement is not None
@@ -324,6 +332,8 @@ def run_task(
         elif time.monotonic() - started > timeout and not timed_out:
             timed_out = True
             api.post("/api/tasks/cancel", {"task_id": task_id})
+        elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset):
+            pass  # the user answered a gate; look again at the next poll
         elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
             try:
                 api.post("/api/chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
@@ -368,6 +378,33 @@ def run_task(
         result["looper_commits"] = looper_commits(work_dir, task_id)
     return {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
             "timed_out": timed_out}
+
+
+def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any], answered: dict[str, int], *,
+                 now: float) -> bool:
+    """Play the user: post the next entry of ``task``'s gate script (``DEFAULT_GATE_SCRIPT`` without one) in each of
+    the task's gates that waits for the user, once it has waited ``gate_reply_after_s`` since it opened;
+    ``END_DISCUSSION`` ends the discussion. Whether anything was posted."""
+    script = task.gate_script or DEFAULT_GATE_SCRIPT
+    posted = False
+    for gate in detail.get("gates") or []:
+        label, done = gate.get("step"), answered.get(gate.get("step"), 0)
+        if gate.get("waiting_on") != "user" or done >= len(script):
+            continue
+        opened = metrics.timestamp(gate.get("opened_at")) or now
+        if now - opened < task.gate_reply_after_s:
+            continue
+        entry = script[done]
+        try:
+            if entry == END_DISCUSSION:
+                api.post(f"/api/tasks/{task_id}/gates/{label}/end", {})
+            else:
+                api.post(f"/api/tasks/{task_id}/gates/{label}/messages", {"text": entry})
+        except EvalError:
+            continue  # it stopped waiting meanwhile; look again at the next poll
+        answered[label] = done + 1
+        posted = True
+    return posted
 
 
 # --- The task set -------------------------------------------------------------------------------------
@@ -436,6 +473,7 @@ def run(
     task_timeout: float | None = None,
     keep_work_dirs: bool = False,
     step_workspaces: str | None = None,
+    user_gates: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` in ``mode`` (``fake`` or ``real``); returns the run and the JSON file written to ``out_dir``.
 
@@ -444,6 +482,7 @@ def run(
     agent. ``register`` registers an agent first (``register_agent``), which every role then runs. With a
     provider or a registered agent, Looper prices the runs at its prices, so ``max_budget_usd`` is the per-run
     cap Looper keeps (the system layer's ``run_budget_usd``) instead of Claude Code's ``--max-budget-usd``.
+    ``user_gates`` (``on`` or ``off``) is every task's project's setting, over the task's own.
     """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
@@ -489,7 +528,7 @@ def run(
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
                                                 cap_left=cap_left, clock_offset=clock_offset,
                                                 step_workspaces=step_workspaces,
-                                                chosen_profile_id=chosen_profile_id),
+                                                chosen_profile_id=chosen_profile_id, user_gates=user_gates),
                 total_cap_usd=total_cap_usd,
             )
     finally:
@@ -506,6 +545,7 @@ def run(
         "git": git,
         "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
         "step_workspaces": step_workspaces,
+        "user_gates": user_gates,
         "stopped_by_cap": stopped,
         "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6),
         "tasks": results,

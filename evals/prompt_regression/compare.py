@@ -12,6 +12,7 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("parallel Workers", "parallel_workers"),
     ("retries", "retries"),
     ("reviews", "reviews"),
+    ("gates", "gates_opened"),
     ("contract violations", "violations"),
     ("Planner file edits", "planner_modified_files"),
     ("tokens (prompt / output)", "tokens"),
@@ -72,6 +73,9 @@ def totals(run: Mapping[str, Any]) -> dict[str, Any]:
         "parallel_workers": max((int(t["parallel_workers"]) for t in ran if "parallel_workers" in t), default=None),
         "retries": sum(int(t.get("retries") or 0) for t in ran),
         "reviews": sum(int(t.get("reviews") or 0) for t in ran),
+        # None from a run before gates were counted.
+        "gates_opened": sum(int(t["gates_opened"]) for t in ran if "gates_opened" in t)
+        if any("gates_opened" in t for t in ran) else None,
         "violations": sum(int((t.get("contract_violations") or {}).get("total", 0)) for t in ran),
         "planner_modified_files": sum(int(t.get("planner_modified_files") or 0) for t in ran),
         "tokens": _tokens(ran),

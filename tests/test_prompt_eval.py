@@ -232,10 +232,11 @@ def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     lines = table.splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 → real/haiku @ abcdef123+local changes"
     # A run from before tokens were read has none: only the new side shows them.
-    assert "| single_step | pass | 1 | – | 0 | 0 | 0 | 0 | 32k / 2.5k | 0.0200 → **0.0300** |" in lines
-    assert "| chat_correction | pass → **FAIL** | 1 | – | 0 | 0 | 0 → **2** | 0 | – | 0.0200 |" in lines
-    assert ("| **total** | 2/2 → **1/2** | 2 | – | 0 | 0 | 0 → **2** | 0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |"
-            in lines)
+    # A run from before gates were counted has none either.
+    assert "| single_step | pass | 1 | – | 0 | 0 | – | 0 | 0 | 32k / 2.5k | 0.0200 → **0.0300** |" in lines
+    assert "| chat_correction | pass → **FAIL** | 1 | – | 0 | 0 | – | 0 → **2** | 0 | – | 0.0200 |" in lines
+    assert ("| **total** | 2/2 → **1/2** | 2 | – | 0 | 0 | – | 0 → **2** | 0 | – → **32k / 2.5k** | 0.0400 → "
+            "**0.0500** |" in lines)
     assert "- chat_correction: color.txt holds 'red', expected 'blue'" in lines
 
 
@@ -245,8 +246,8 @@ def test_comparison_without_a_base_and_with_skipped_tasks() -> None:
     lines = compare.markdown(new).splitlines()
     assert lines[0].endswith("(no earlier run to compare with)")
     assert ("| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped "
-            "| skipped |" in lines)
-    assert "| **total** | 1/1 | 1 | – | 0 | 0 | 0 | 0 | – | 0.0200 |" in lines
+            "| skipped | skipped |" in lines)
+    assert "| **total** | 1/1 | 1 | – | 0 | 0 | – | 0 | 0 | – | 0.0200 |" in lines
     assert "- stopped at the spending cap (0.8 USD)" in lines
 
 
@@ -354,7 +355,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "supplement_no_change": (2, 0, 0, 1), "profile_choice": (1, 0, 0, 0),
                     # The security review role reviews its step after the built-in Reviewer.
                     "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
-                    "roles_advisory_review": (1, 0, 2, 0), "roles_not_needed": (1, 0, 0, 0)}
+                    "roles_advisory_review": (1, 0, 2, 0), "roles_not_needed": (1, 0, 0, 0),
+                    # A gate is a step; the steps its closing turn added follow it.
+                    "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
+                    "gate_parallel_branch": (3, 0, 0, 0), "gate_explore_cancel": (2, 0, 0, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -367,7 +371,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1),
                      "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1),
                      "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
-                     "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1)}
+                     "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1),
+                     "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
+                     # The clear part runs beside the gate and then beside the step the gate's answer planned.
+                     "gate_parallel_branch": (2, 0, 2), "gate_explore_cancel": (1, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
@@ -381,6 +388,16 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
              for t in by_id if by_id[t]["roles_defined"] or by_id[t]["role_runs"]}
     assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
                      "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1)}
+    # Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
+    # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels its
+    # gate while it waits.
+    gates = {t: tuple(by_id[t][k] for k in ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user",
+                                             "gates_cancelled", "assumptions_stated", "gate_parallel_runs",
+                                             "conclusion_reads"))
+             for t in by_id if by_id[t]["gates_opened"]}
+    assert gates == {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
+                     "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1), "gate_explore_cancel": (1, 0, 0, 0, 1, 0, 1, 0)}
+    assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
         "supplement_replan": 1, "requirement_edit": 1}

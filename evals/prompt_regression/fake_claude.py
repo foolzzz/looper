@@ -13,7 +13,11 @@ agent system started it in:
   with a progress note, and an accept with the task's final summary;
   [CHAT] (a change to the task) with the script's ``change_replan`` steps
   when it gives them, else by forwarding the new supplements to the running
-  step, if any; [SUPERVISE] with no review and a progress note. With
+  step, if any; [GATE] by closing the gate, every item resolved with the
+  user's last message (or, when the user ended the discussion, left open
+  with an assumption), adding the script's ``gate_close_steps``; a decision
+  on a step that ``decision_gates`` names also makes those gate changes;
+  [SUPERVISE] with no review and a progress note. With
   ``planner_calls`` (``{"PLAN": [[tool, arguments], ...]}``), it first makes
   that turn kind's calls over its ``looper`` MCP server;
 - a Worker (its task section says "Your step:") writes the files its step's
@@ -118,12 +122,14 @@ FINAL = {"delivered": "the task's files", "how_to_use": "read them", "verificati
          "open_issues": "none"}
 
 
-def _decide(message: str) -> dict[str, Any]:
+def _decide(script: dict[str, Any], message: str) -> dict[str, Any]:
     allowed_line = re.search(r"^Allowed decisions now: (.*)\.$", message, re.MULTILINE)
     allowed = {item.split(" ")[0] for item in (allowed_line.group(1).split(", ") if allowed_line else [])}
+    step = re.match(r"\[DECISION\] Step (\S+)", message)
+    gates = (script.get("decision_gates") or {}).get(step.group(1) if step else "")
     if "accept" in allowed:
         return {"decision": "accept", "reason": "meets the acceptance criteria", "summary": "The step is done.",
-                "final": FINAL}
+                "final": FINAL, **({"gates": gates} if gates else {})}
     if "review" in allowed and "needs a passing review" in message:
         return {"decision": "review", "reason": "the step asks for an independent review"}
     if "retry" in allowed:
@@ -141,6 +147,27 @@ def _chat(script: dict[str, Any], message: str) -> dict[str, Any]:
         return {"reply": "Passing it on to the running step.", "action": "forward", "step": running.group(1),
                 "text": text}
     return {"reply": "Noted.", "action": "none"}
+
+
+def _gate(script: dict[str, Any], message: str) -> dict[str, Any]:
+    """Close the gate: each item resolved with the user's last message, or, when the user ended the discussion, left
+    open with an assumption; with the script's ``gate_close_steps`` added."""
+    items = re.findall(r"^- (q\d+) \[\w+\] (.+?)(?: \(options: .*\))?$", message, re.MULTILINE)
+    said = re.findall(r"^- \([^)]*\) (.+)$", message.split("New messages from the user (oldest first):\n", 1)[-1],
+                      re.MULTILINE)
+    ended = "The user ended the discussion" in message
+    answer = said[-1] if said else "as discussed"
+    agenda = [{"id": item_id, "question": question, **({"status": "open"} if ended
+                                                        else {"status": "resolved", "answer": answer})}
+              for item_id, question in items]
+    summary = {"decisions": [] if ended else [answer],
+               "assumptions": ["the most common choice, as the user left it to me"] if ended else [], "open": []}
+    steps = script.get("gate_close_steps") or []
+    reply: dict[str, Any] = {"reply": "Thanks; going on.", "gate": "close", "agenda": agenda, "summary": summary,
+                             "action": "add_steps" if steps else "none", **({"steps": steps} if steps else {})}
+    if not steps and "closing it without adding steps completes the" in message:
+        reply["final"] = FINAL
+    return reply
 
 
 def _mcp(args: list[str]) -> Any:
@@ -182,7 +209,9 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {"steps": script["plan"]}
             writes = script.get("planner_writes")
         elif message.startswith("[DECISION]"):
-            reply = {**_decide(message), "progress": PROGRESS}
+            reply = {**_decide(script, message), "progress": PROGRESS}
+        elif message.startswith("[GATE]"):
+            reply = _gate(script, message)
         elif message.startswith("[CHAT]"):
             reply = _chat(script, message)
         else:

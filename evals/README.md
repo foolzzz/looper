@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs sixteen small tasks through a disposable `looper serve` (a new
+It runs twenty-one small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -28,6 +28,11 @@ directories), one at a time over the HTTP API:
 | `roles_security_review` | the same switch; a script that must not run a shell, reviewed by the built-in Reviewer and by a security review role: the role reviews after the built-in Reviewer, and the step is accepted only with both reviews passed |
 | `roles_advisory_review` | the same switch; a greeting script reviewed by the built-in Reviewer and by an advisory review role (`review_role_required` false) that wants a CHANGELOG.md the task turns down: the role does not pass the step, the built-in Reviewer does, and the Planner decides (accept, or retry with the role's findings) |
 | `roles_not_needed` | the same switch on a one-file task: the Planner defines no role and plans at most two steps |
+| `gate_ambiguous` | the task's project lets its Planner open user gates (`user_gates` on); the settings file's format, name and key are the user's choice, written down nowhere: the Planner asks at a gate, the scripted user answers (TOML, `settings.toml`, `[service]`), the gate passes, a Worker reads the conclusion and the file follows the answer |
+| `gate_not_needed` | the same switch on a one-file task: no gate, at most two steps |
+| `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
+| `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
+| `gate_explore_cancel` | the port is what a step's `probe.sh` prints and the user cannot answer (the scripted user only ends a gate after 120 s): an observation of whether the Planner opens a gate and cancels it once the step reports; only the file counts |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -41,7 +46,11 @@ and the runs as one (`role_runs`; on the role's own profile, `role_profile_runs`
 `role_reviews`; on a prompt that is no version it defined, `role_prompt_mismatches`; without the boundaries after
 the task section, `role_boundary_misses`), the accepted steps with a review role that lack a passing built-in or
 role review where the role is required (`gate_breaches`), the reviews by an advisory review role that did not pass
-(`advisory_role_fails`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+(`advisory_role_fails`), the user gates the Planner opened (`gates_opened`; their [GATE] turns, `gate_turns`;
+passed, `gates_passed`, of them ended by the user, `gates_ended_by_user`; cancelled, `gates_cancelled`; the
+assumptions their summaries stated, `assumptions_stated`; the steps the closing turns added, dropped or stopped,
+`gate_plan_changes`; Worker runs while a gate waited, `gate_parallel_runs`; Worker and Reviewer runs that read a
+gate's conclusion, `conclusion_reads`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
@@ -120,7 +129,13 @@ single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--step-workspaces shared|worktree` (each working directory becomes a git
 repository on `main` with one commit, the task's project gets that setting, and
 each task reports the merge and checkpoint commits it added as
-`looper_commits`). To print a comparison again:
+`looper_commits`), `--user-gates on|off` (every task's project gets that
+`user_gates` setting, over the task's own: `on` runs the other tasks with the
+gate contract, so `gates_opened` there shows how often the Planner asks when
+it need not). The runner plays the user in a task's gates: when one waits for
+the user it posts the task's `gate_script` in turn (`<end>` ends the
+discussion; a task without one answers "No preference: decide yourself and
+state your assumptions." and then ends it). To print a comparison again:
 
 ```bash
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]
