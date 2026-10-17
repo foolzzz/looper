@@ -352,6 +352,10 @@ class TaskRouter:
         except task_workspaces.TaskWorkspaceError as exc:
             await self._workspace_failed(task, envelope, str(exc))
             return
+        except Exception as exc:  # git or the database failed under it: the task fails with why, not stuck
+            logger.exception("cannot prepare the workspace of task %s", task.task_id)
+            await self._workspace_failed(task, envelope, f"its workspace could not be prepared: {exc}")
+            return
         if work_dir != task.work_dir:
             task.work_dir = work_dir
             if "work_dir" in envelope.payload:

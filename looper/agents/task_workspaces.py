@@ -235,13 +235,17 @@ async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides
         git = {"repository": repo.toplevel, "branch": ws.short_branch(repo.branch) or None, "head": repo.head}
         if mode is TaskWorkspaces.WORKTREE:
             git["base_commit"] = await _base_commit(repo, base)
-            pending = await ws._pending(repo.toplevel, repo.subdir or ".")
+            try:
+                pending = await ws._pending(repo.toplevel, repo.subdir or ".")
+                size = await ws.checkout_size(repo.toplevel)
+            except ws.GitError:  # a warning git cannot say is left out, not the check
+                logger.warning("cannot read the state of %s", repo.toplevel, exc_info=True)
+                pending, size = [], 0
             if pending:
                 warnings.append({"kind": WarningKind.UNCOMMITTED.value, "files": pending[:50],
                                  "text": f"{len(pending)} uncommitted change(s) in the workspace will not be in the "
                                          f"task's worktree: {_files(pending)}. Commit them first if the task "
                                          "needs them."})
-            size = await ws.checkout_size(repo.toplevel)
             if size > ws.CHECKOUT_LIMIT_BYTES:
                 warnings.append({"kind": WarningKind.LARGE_CHECKOUT.value, "bytes": size,
                                  "text": f"The checkout is {ws._size_text(size)}: the task's worktree is a copy of "
@@ -332,7 +336,10 @@ async def prepare(task: Mapping[str, Any], *, runtime_root: Path, links: Sequenc
                         f"{base[:12]}" + (f"; linked {', '.join(linked)}" if linked else ""))
     if skipped:
         await note("phase", f"The task's worktree did not link {'; '.join(skipped)}"[:500])
-    pending = await ws._pending(repo.toplevel, repo.subdir or ".")
+    try:
+        pending = await ws._pending(repo.toplevel, repo.subdir or ".")
+    except ws.GitError:
+        pending = []  # only a note goes without it
     if pending:
         await note("phase", f"{len(pending)} uncommitted change(s) in the workspace are not in the task's worktree: "
                             f"{_files(pending)}"[:500])
