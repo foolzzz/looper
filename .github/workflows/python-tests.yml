@@ -1,7 +1,8 @@
 name: Python Tests
 
 # The agent system's tests (pyproject.toml: testpaths = ["tests"]), with the
-# PostgreSQL ones run against the service database.
+# PostgreSQL ones run against the service database; and the dashboard's tests
+# (web/, npm test).
 on:
   pull_request:
   workflow_dispatch:
@@ -44,3 +45,20 @@ jobs:
 
       - name: Run the tests
         run: uv run --extra test python -m pytest -q -n auto -rs
+
+  dashboard:
+    name: Dashboard tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Run the tests
+        run: npm ci && npm test
