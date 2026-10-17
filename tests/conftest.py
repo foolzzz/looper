@@ -276,6 +276,19 @@ def _no_operator_codex_login(tmp_path_factory: pytest.TempPathFactory) -> Any:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _no_operator_grok_login(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """No test reaches the operator's Grok login: the login file a Grok run links to is ``auth.json`` in the
+    server's ``GROK_HOME`` (``runtimes.grok_login.login_file``), here an empty directory of the session's."""
+    previous = os.environ.get("GROK_HOME")
+    os.environ["GROK_HOME"] = str(tmp_path_factory.mktemp("grok-home"))
+    yield
+    if previous is None:
+        os.environ.pop("GROK_HOME", None)
+    else:
+        os.environ["GROK_HOME"] = previous
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _no_real_lark_cli(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """No test reaches the operator's lark-cli (its signed-in bot and user): a ``lark-cli`` that refuses every call
     comes first on PATH; a test that needs one puts the stand-in of ``lark_cli_stand_in`` before it."""
