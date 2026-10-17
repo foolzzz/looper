@@ -34,6 +34,8 @@ directories), one at a time over the HTTP API:
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
+| `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
+| `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -190,7 +192,8 @@ it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
 `--step-workspaces shared|worktree` (each working directory becomes a git
 repository on `main` with one commit, the task's project gets that setting, and
 each task reports the merge and checkpoint commits it added as
-`looper_commits`), `--user-gates on|off` (every task's project but a gate
+`looper_commits`; every task's project runs its tasks in place, as before task
+workspaces, so the checks read the working directory), `--user-gates on|off` (every task's project but a gate
 task's gets that `user_gates` setting; a gate task always has gates on, so
 `--tasks planner` runs its gate tasks as they are meant to: `on` runs the
 other tasks with the gate contract, so `gates_opened` there shows how often
@@ -252,6 +255,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
 | `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
+| `workspace_in_place` | the user asks for the task to change the project directory itself, no worktree or branch: it is created ready and runs in place (`workspace_mode` `in_place`) |
+| `workspace_default` | the user says nothing about how the task runs: it is created ready, and the Manager passes no `workspace_mode` |
 
 Each (dialog, rep) runs on a database, a `looper serve`, a working directory
 and a project of its own, so nothing one dialog leaves behind (a ready task, a

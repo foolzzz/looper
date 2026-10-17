@@ -54,6 +54,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 
 - 新建的 Task 处于 ready（`init`，界面显示「Ready — not started」），不自动开始：用户在聊天里让 Manager 开始，或在 Tasks 页面点 Start 之后才进入 `pending`
 - 每个开始了的 Task 分配独立的 Planner 实例
+- Task 有一个工作区：建任务时点名的目录（不点名就是项目的默认目录）。按运行方式，任务直接在工作区里跑（原地），或在工作区所在仓库的一个 git worktree 里、自己的分支 `looper/<task_id>/task` 上跑：默认是新项目和点名了别的目录的任务用 worktree，已有项目原地；任务完成后 worktree 删掉、分支留给用户自己合并，Looper 不合并。同一个仓库上同时有几个任务、工作区里有没提交的改动、目录不在 git 里，建任务时都只提醒、不阻止。项目打开「操作者的笔记」时，规划者、执行者、评审者在提示词里拿到操作者的 Claude Code 为这个目录记下的自动记忆的只读副本，Looper 从不改它。设计见[任务的工作区 RFC](architecture/rfcs/task-workspaces-v0.zh-CN.md)，实现见 [Agent 系统架构](architecture/agent-system.md#task-workspaces)
 - Task 结束（完成、失败、停止、取消）时 TaskRouter 停掉 Planner，连同它的 Claude 进程
 - 最多 3 个 Task 并发执行，超出排队
 - Task 的花费是它的 Planner、Worker、Reviewer 各次运行自身花费之和，按角色分开计，并附运行次数（见下文「花费与上下文」）；Manager 不计入。默认不设花费上限（RFC 决策 2），上限留给 M5 的项目执行配置
@@ -288,7 +289,7 @@ Telegram 和 Lark 不需要启动参数，见「接入渠道」。
 - **Worker 级并发**：WorkerPool 按项目和角色计数，满了的运行等待；Planner 把就绪的步骤都派出去，由这些上限决定同时跑几个。没结束的 Task 还可以给自己的 Worker、Reviewer 各设一个上限，在项目上限之内生效，在任务页或通过管家修改；不设时与以前相同
 - **Task 隔离**：每个 Task 有独立的 Planner、Plan、状态持久化目录和 Planner 的 Claude 会话
 - **Worker 隔离**：每个 Worker 在独立子进程中运行 `claude --print`
-- **并行步骤的工作目录**：默认共用任务目录。项目设置 `step_workspaces` 为 `worktree` 时，任务目录是 git 检出、在分支上，和别的步骤同时跑的步骤各在自己的 git worktree 和分支上做；步骤被接受时，代码把它合并进任务目录的分支（每步一个合并提交），再派出依赖它的步骤，合不进去就交给 Planner 决定。被忽略的本地状态（`.venv`、`.env` 等）按项目设置 `step_workspace_links` 以符号链接指回任务目录，链接从不进入步骤的结果；检出超过 1 GiB 时一次只派一个步骤。任务页的 Steps 列表和 Pipeline 卡片标出每个步骤的 worktree 状态，Overview 的 Step worktrees 一节列出任务开始时的分支和提交、每个 worktree（合不进去的类型和文件）、撤销命令，任务不在运行时可以丢弃还留着的 worktree。设计见[并行步骤的工作目录隔离 RFC](architecture/rfcs/step-workdir-isolation-v0.zh-CN.md)，实现见 [Agent 系统架构](architecture/agent-system.md#step-workspaces)
+- **并行步骤的工作目录**：默认共用任务目录。项目设置 `step_workspaces` 为 `worktree` 时，任务目录是 git 检出、在分支上，和别的步骤同时跑的步骤各在自己的 git worktree 和分支上做；步骤被接受时，代码把它合并进任务目录的分支（每步一个合并提交），再派出依赖它的步骤，合不进去就交给 Planner 决定。被忽略的本地状态（`.venv`、`.env` 等）按项目设置 `workspace_links` 以符号链接指回任务目录（任务自己的 worktree 同样链接回工作区），链接从不进入步骤的结果；检出超过 1 GiB 时一次只派一个步骤。任务页的 Steps 列表和 Pipeline 卡片标出每个步骤的 worktree 状态，Overview 的 Step worktrees 一节列出任务开始时的分支和提交、每个 worktree（合不进去的类型和文件）、撤销命令，任务不在运行时可以丢弃还留着的 worktree。设计见[并行步骤的工作目录隔离 RFC](architecture/rfcs/step-workdir-isolation-v0.zh-CN.md)，实现见 [Agent 系统架构](architecture/agent-system.md#step-workspaces)
 
 ---
 
