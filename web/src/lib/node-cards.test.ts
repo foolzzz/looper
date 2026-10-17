@@ -87,12 +87,6 @@ describe("stepCard", () => {
     expect(section(byRole.sections, "Review")).toMatchObject({ text: "Review by role security did not pass it:\nshell injection" });
   });
 
-  it("reads the result from the JSON text the task detail sends", () => {
-    const card = cardOf(step("s3", { status: "failed", result: JSON.stringify({ status: "failed", error: "the build broke" }) }));
-    expect(section(card.sections, "Result: failed")).toMatchObject({ text: "the build broke" });
-    expect(titles(cardOf(step("s3", { status: "failed", result: "not json" })).sections)).toEqual(["Timing"]);
-  });
-
   it("shows no result for a running step, whose result is its previous attempt's", () => {
     const card = cardOf(step("s1", { status: "dispatched", result: { status: "failed", error: "old" } }));
     expect(titles(card.sections)).not.toContain("Result: failed");

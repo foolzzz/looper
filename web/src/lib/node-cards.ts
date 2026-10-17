@@ -81,21 +81,10 @@ function stepRoleLines(step: TaskStep) {
   ].filter((line): line is string => !!line);
 }
 
-/** The step's result as an object, from the JSON text the task detail sends (or an object). */
-function resultOf(step: TaskStep): Record<string, unknown> | null {
-  if (typeof step.result !== "string") return step.result;
-  try {
-    const value: unknown = JSON.parse(step.result);
-    return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
 /** What the step's latest attempt reported, once that attempt ended: the Worker's summary, or why the attempt
  * failed; and the review that did not pass it. A running step's result is its previous attempt's, so none. */
 function stepResult(step: TaskStep): CardSection[] {
-  const result = resultOf(step);
+  const result = step.result;
   if (!result || !["completed", "deciding", "verified", "failed"].includes(step.status)) return [];
   const worked = result.status === "completed";
   const report = worked ? str(result.summary) : str(result.error) || str(result.summary);

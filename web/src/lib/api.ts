@@ -1484,8 +1484,7 @@ export interface TaskStep {
   retries: number;
   worker_id: string | null;
   reviewer_id: string | null;
-  /** Its latest attempt's result; `GET /api/tasks/<id>` sends the column's JSON text. */
-  result: Record<string, unknown> | string | null;
+  result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;

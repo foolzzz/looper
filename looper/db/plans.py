@@ -118,7 +118,8 @@ async def write(
     await db_journal.insert(conn, task_id, journal)
 
 
-def _step(row: Mapping[str, Any]) -> dict[str, Any]:
+def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``task_steps`` row as the plan and the task page read it: ``result`` decoded, the array columns as lists."""
     step = dict(row)
     if isinstance(step.get("result"), str):
         step["result"] = json.loads(step["result"])
@@ -147,7 +148,7 @@ async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, A
     if row is None:
         return None
     steps = await pool.fetch("SELECT * FROM task_steps WHERE task_id = $1 ORDER BY step_index, created_at", task_id)
-    return {"plan": dict(row), "steps": [_step(step) for step in steps],
+    return {"plan": dict(row), "steps": [step_row(step) for step in steps],
             "journal": await db_journal.list_entries(task_id, pool=pool)}
 
 

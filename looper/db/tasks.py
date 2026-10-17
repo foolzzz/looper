@@ -13,6 +13,7 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import get_pool
+from .plans import step_row
 
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
@@ -264,7 +265,7 @@ async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None)
         task_id,
     )
     result = _task(task_row)
-    result["steps"] = [dict(r) for r in step_rows]
+    result["steps"] = [step_row(r) for r in step_rows]
     result["journal"] = await db_journal.list_entries(task_id, pool=pool)
     return result
 
