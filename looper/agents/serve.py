@@ -745,6 +745,7 @@ async def _run_agent_system(
         *await asyncio.to_thread(self_check.check_claude, claude_bin),
         await self_check.codex_login_check(),
         self_check.check_lark_cli(lark_enabled),
+        await asyncio.to_thread(self_check.check_git),
     ]
     self_check.log_problems(checks)
 
