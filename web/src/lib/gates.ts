@@ -23,13 +23,18 @@ export const GATE_TURNS: Record<"user" | "planner", GateLook> = {
   planner: { label: "Planner answering", variant: "default", tone: "text-primary" },
 };
 
-/** Whose turn a discussing gate shows; null for a gate in any other state. */
-export const gateTurn = (gate: Pick<UserGate, "state" | "waiting_on">) =>
-  gate.state === "discussing" ? gate.waiting_on : null;
+/** Whom a gate waits for, as the task page says it: the Planner only while its task runs (`active`); a stopped
+ * task keeps the user's messages for its restart, so then it is the user's turn. */
+export const gateWaitsOn = (gate: Pick<UserGate, "waiting_on">, active: boolean) =>
+  gate.waiting_on === "planner" && !active ? "user" : gate.waiting_on;
+
+/** Whose turn a discussing gate shows (`gateWaitsOn`); null for a gate in any other state. */
+export const gateTurn = (gate: Pick<UserGate, "state" | "waiting_on">, active: boolean) =>
+  gate.state === "discussing" ? gateWaitsOn(gate, active) : null;
 
 /** How a gate reads: by its state, but a discussing one by whose turn it is. */
-export function gateLook(gate: Pick<UserGate, "state" | "waiting_on">): GateLook {
-  const turn = gateTurn(gate);
+export function gateLook(gate: Pick<UserGate, "state" | "waiting_on">, active: boolean): GateLook {
+  const turn = gateTurn(gate, active);
   return turn ? GATE_TURNS[turn] : GATE_STATES[gate.state];
 }
 
