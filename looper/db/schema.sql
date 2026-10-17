@@ -1021,6 +1021,20 @@ CREATE TABLE IF NOT EXISTS task_user_gate_messages (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_step ON task_user_gate_messages (step_id, id);
+-- Gate tables made by an earlier build of this schema: the columns of failed turns and the late kind.
+ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failed_through BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_messages_kind_late') THEN
+        ALTER TABLE task_user_gate_messages DROP CONSTRAINT IF EXISTS task_user_gate_messages_kind_check;
+        ALTER TABLE task_user_gate_messages ADD CONSTRAINT task_user_gate_messages_kind_check CHECK (kind IN (
+            'message', 'end', 'reply', 'opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error',
+            'late'));
+        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_messages_kind_late');
+    END IF;
+END $$;
 
 -- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
 -- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns

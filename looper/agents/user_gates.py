@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -45,6 +45,8 @@ MESSAGE_MAX_CHARS = 8_000
 CONCLUSION_MAX_CHARS = 3_000
 # What a new session's resume brief gets of each waiting gate's discussion so far.
 THREAD_MAX_CHARS = 8_000
+# A [GATE] turn that failed is tried again on its own once after each of these waits (seconds since it failed).
+RETRY_WAIT_SEC = (60, 300)
 
 
 class GateState(str, Enum):
@@ -236,6 +238,14 @@ class MessageKind(str, Enum):
     LATE = "late"  # the user's message reached the gate as it closed: it became a supplement of the task
 
 
+def retry_at(failures: int, failed_at: datetime | None, waits: Sequence[float] = RETRY_WAIT_SEC) -> datetime | None:
+    """When a gate whose last ``failures`` [GATE] turns failed, the latest at ``failed_at``, is tried again on its own:
+    after ``waits[failures - 1]``; None when none failed or no retry is left."""
+    if not 0 < failures <= len(waits) or failed_at is None:
+        return None
+    return failed_at + timedelta(seconds=waits[failures - 1])
+
+
 @dataclass
 class Gate:
     """A gate as its task's Planner keeps it (the Planner's columns of its ``task_user_gates`` row)."""
@@ -258,6 +268,11 @@ class Gate:
     closed_at: datetime | None = None
     # Not the Planner's: the API sets it with the user's first message.
     first_reply_at: datetime | None = field(default=None, compare=False)
+
+    def retry_at(self, waits: Sequence[float] = RETRY_WAIT_SEC) -> datetime | None:
+        """When its failed [GATE] turn is tried again on its own (after ``waits``, one for each retry); None when no
+        turn failed or no retry is left."""
+        return retry_at(self.failures, self.failed_at, waits)
 
     def row(self, step_id: str) -> dict[str, Any]:
         """The gate as ``db.user_gates.write`` writes it."""

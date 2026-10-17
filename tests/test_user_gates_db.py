@@ -209,21 +209,60 @@ def test_a_message_a_turn_failed_on_waits_for_the_user_and_reminders_come_again(
         await pool.execute("UPDATE task_user_gate_messages SET created_at = $1", long_ago)
         assert await user_gates.due_reminders(pool=pool) == []  # it waits for the Planner
 
-        # The turn on it failed: the gate waits for the user, the message counted as not delivered.
+        # The turn on it failed: the gate waits for the user, the message counted as not delivered, until the
+        # Planner's automatic retry is due.
+        failed = datetime.now(timezone.utc)
         await plans.save("task-a", gates=[_gate(state="discussing", opened_at=long_ago, failures=1,
-                                                failed_through=message["id"], failed_at=long_ago)], pool=pool)
+                                                failed_through=message["id"], failed_at=failed)], pool=pool)
         (row,) = await user_gates.list_for_task("task-a", pool=pool)
         assert (row["waiting_for_planner"], row["not_delivered"], row["failures"]) == (False, 1, 1)
         view = gate_view(row)
-        assert (view["waiting_on"], view["not_delivered"]) == ("user", 1)
+        assert (view["waiting_on"], view["not_delivered"], view["retry_at"]) == ("user", 1, failed + timedelta(minutes=1))
         assert [r["step_id"] for r in await user_gates.due_reminders(pool=pool)] == ["step-g1"]
         assert [m["text"] for m in await user_gates.pending("task-a", pool=pool)] == ["PostgreSQL"]
+        assert gate_view({**row, "failed_at": failed - timedelta(minutes=2)})["waiting_on"] == "planner"  # retry due
+        # After the last retry failed, none is left.
+        await plans.save("task-a", gates=[_gate(state="discussing", opened_at=long_ago, failures=3,
+                                                failed_through=message["id"], failed_at=long_ago)], pool=pool)
+        (row,) = await user_gates.list_for_task("task-a", pool=pool)
+        assert (gate_view(row)["waiting_on"], gate_view(row)["retry_at"]) == ("user", None)
 
         # The user's next message waits for the Planner again, with the one not delivered.
         await _user("task-a", "and keep 90 days")
         (row,) = await user_gates.list_for_task("task-a", pool=pool)
         assert (gate_view(row)["waiting_on"], row["not_delivered"]) == ("planner", 1)
         assert await user_gates.due_reminders(pool=pool) == []
+
+    _run(test, monkeypatch)
+
+
+def test_gate_tables_from_an_earlier_schema_gain_the_failure_columns_and_the_late_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        import asyncpg
+
+        from looper.db import connection
+
+        # As an earlier build of this schema left them.
+        await pool.execute(
+            "ALTER TABLE task_user_gates DROP COLUMN failures, DROP COLUMN failed_through, DROP COLUMN failed_at; "
+            "ALTER TABLE task_user_gate_messages DROP CONSTRAINT task_user_gate_messages_kind_check; "
+            "ALTER TABLE task_user_gate_messages ADD CONSTRAINT task_user_gate_messages_kind_check CHECK (kind IN "
+            "('message', 'end', 'reply', 'opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error')); "
+            "DELETE FROM schema_migrations WHERE name = 'task_user_gate_messages_kind_late'")
+        project = await _project(pool)
+        await _task(pool, "task-a", "waiting_user", project)
+        with pytest.raises(asyncpg.UndefinedColumnError):
+            await _plan_with_gate(pool, state="open")
+
+        await connection.ensure_schema(pool)
+        await connection.ensure_schema(pool)  # once is enough; again changes nothing
+        await _plan_with_gate(pool, state="open", failures=1, failed_through=7)
+        await pool.execute("INSERT INTO task_user_gate_messages (step_id, task_id, role, kind) "
+                           "VALUES ('step-g1', 'task-a', 'looper', 'late')")
+        row = await pool.fetchrow("SELECT failures, failed_through FROM task_user_gates")
+        assert (row["failures"], row["failed_through"]) == (1, 7)
 
     _run(test, monkeypatch)
 

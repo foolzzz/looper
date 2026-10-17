@@ -119,6 +119,7 @@ from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, Step
 from ..task_roles import RoleKind, TaskRole
 from ..user_gates import (
     MESSAGE_MAX_CHARS,
+    RETRY_WAIT_SEC,
     THREAD_MAX_CHARS,
     WAITING_USER,
     Gate,
@@ -197,9 +198,9 @@ _IN_FLIGHT = ("dispatched", "deciding", "completed")
 # Claude without a turn, and how often that is checked; the next turn resumes the session.
 GATE_IDLE_STOP_SEC = 900
 GATE_IDLE_CHECK_SEC = 60
-# A [GATE] turn that failed is tried again on its own once for each wait (seconds since it failed), checked every
-# ``GATE_IDLE_CHECK_SEC``; after the last, the user's next message sends the messages again.
-GATE_RETRY_WAIT_SEC = (60, 300)
+# A [GATE] turn that failed is tried again on its own once for each wait (``user_gates.RETRY_WAIT_SEC``), checked
+# every ``GATE_IDLE_CHECK_SEC``; after the last, the user's next message sends the messages again.
+GATE_RETRY_WAIT_SEC = RETRY_WAIT_SEC
 # Why an accepted step's branch could not be merged, for the decision turn.
 _MERGE_REASONS = {
     MergeError.CONFLICT: "its changes conflict with what the branch has now",
@@ -547,8 +548,8 @@ def _message_line(message: Mapping[str, Any]) -> str:
 def _retry_due(gate: Gate, now: datetime) -> bool:
     """Whether ``gate``'s failed [GATE] turn is due for its automatic retry: one is left (``GATE_RETRY_WAIT_SEC``),
     and its wait since the failure is over."""
-    return 0 < gate.failures <= len(GATE_RETRY_WAIT_SEC) and gate.failed_at is not None and \
-        (now - gate.failed_at).total_seconds() >= GATE_RETRY_WAIT_SEC[gate.failures - 1]
+    due = gate.retry_at(GATE_RETRY_WAIT_SEC)
+    return due is not None and now >= due
 
 
 def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int) -> list[str]:
@@ -1169,32 +1170,37 @@ class PlannerAgent:
         return bool(plan.waiting_gates()) and not any(s.status in _IN_FLIGHT for s in plan.steps)
 
     async def _idle_loop(self) -> None:
-        """Wake every ``GATE_IDLE_CHECK_SEC`` and post a tick in the message loop: when a gate's failed turn is due
-        for its automatic retry (the tick's event ends with the gates' messages), or once the task has only waited
-        for the user for ``GATE_IDLE_STOP_SEC`` with Claude resident (the tick stops it)."""
-        assert self._bus is not None
+        """Wake every ``GATE_IDLE_CHECK_SEC`` and post the tick ``_idle_tick`` decides on, in the message loop: a
+        retry tick's event ends with the gates' messages, an idle tick stops Claude."""
         while self._running:
             try:
                 await asyncio.sleep(GATE_IDLE_CHECK_SEC)
             except asyncio.CancelledError:
                 return
-            plan = self._plan
-            if plan is None:
-                continue
-            now = datetime.now(timezone.utc)
-            if any(_retry_due(s.gate, now) for s in plan.waiting_gates() if s.gate is not None):
-                tick = "gate_retry"
-            elif self._claude.started and self._idle_waiting(plan) and \
-                    time.monotonic() - self._last_turn_at >= GATE_IDLE_STOP_SEC:
-                tick = "idle"
-            else:
-                continue
             try:
-                await self._bus.publish(MessageEnvelope.create(
-                    source=self.agent_address, target=self.agent_address, message_type=MessageType.SYSTEM_EVENT,
-                    payload={"type": tick}))
+                await self._idle_tick()
             except Exception:
-                logger.debug("planner %s could not post a %s tick", self.agent_id, tick, exc_info=True)
+                # The loop drives the gates' automatic retries: it keeps going.
+                logger.warning("planner %s: the idle check failed", self.agent_id, exc_info=True)
+
+    async def _idle_tick(self) -> None:
+        """Post a ``gate_retry`` tick when a gate's failed turn is due for its retry, else an ``idle`` one when the task
+        has only waited for the user for ``GATE_IDLE_STOP_SEC`` with Claude resident."""
+        assert self._bus is not None
+        plan = self._plan
+        if plan is None:
+            return
+        now = datetime.now(timezone.utc)
+        if any(_retry_due(s.gate, now) for s in plan.waiting_gates() if s.gate is not None):
+            tick = "gate_retry"
+        elif self._claude.started and self._idle_waiting(plan) and \
+                time.monotonic() - self._last_turn_at >= GATE_IDLE_STOP_SEC:
+            tick = "idle"
+        else:
+            return
+        await self._bus.publish(MessageEnvelope.create(
+            source=self.agent_address, target=self.agent_address, message_type=MessageType.SYSTEM_EVENT,
+            payload={"type": tick}))
 
     async def _stop_idle_claude(self) -> None:
         """Stop Claude while the task only waits for the user; the next turn resumes its session."""
@@ -2003,11 +2009,12 @@ class PlannerAgent:
             await self._dispatch_ready(plan)
         else:
             await self._apply_chat(plan, reply, None, at="the restart")
-        if cancelled:
-            await self._settle_plan(plan)
         if reply is not None:
             await self._activity("phase", f"Planner answered the restart ({reply.action.value}): {reply.reply}"[:300])
+            # Before the task may end below, which first gives the Planner what came meanwhile.
             await self._mark_delivered(changes)
+        if cancelled:
+            await self._settle_plan(plan)
 
     @staticmethod
     def _ended(status: str, fail_reason: str) -> str:
@@ -2125,14 +2132,15 @@ class PlannerAgent:
         if reply.final is not None:
             plan.final_summary = reply.final.markdown()
         text = await self._apply_chat(plan, reply, envelope)
-        if cancelled:
-            await self._settle_plan(plan)
         # The answer to a change made on the task page has no chat to go to: the activity keeps it.
         await self._activity("phase", f"Planner answered a change to the task ({reply.action.value}): "
                                       f"{reply.reply}"[:300])
+        # Before the task may end below, which first gives the Planner what came meanwhile.
         await self._mark_delivered(changes)
         for supplement in changes.supplements:
             self._replies[supplement.id] = text
+        if cancelled:
+            await self._settle_plan(plan)
         return text
 
     async def _apply_chat(self, plan: TaskPlan, reply: ChatReply, envelope: MessageEnvelope | None, *,
@@ -3028,8 +3036,20 @@ class PlannerAgent:
 
     # --- Endings ---
 
+    async def _late_messages_taken(self, plan: TaskPlan) -> bool:
+        """Before a task with gates completes: what the user wrote in a gate as it closed (a ``gate_late``
+        supplement) reaches the Planner in a CHAT turn first; whether the task goes on, as the reply added steps."""
+        if not any(s.gate is not None for s in plan.steps):
+            return False
+        if not any(s.via == db_user_gates.LATE_VIA for s in (await self._pending_changes()).supplements):
+            return False
+        await self._deliver_changes(plan)
+        return plan.status in _LIVE and not plan.is_complete
+
     async def _complete_plan(self, plan: TaskPlan) -> None:
         assert self._bus is not None
+        if await self._late_messages_taken(plan):
+            return  # its steps run, and their decisions complete the task
         plan.status = "completed"
         await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "completed")

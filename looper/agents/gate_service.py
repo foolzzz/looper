@@ -23,7 +23,7 @@ from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_us
 from .bus import MessageBus
 from .message import AgentAddress, MessageEnvelope, MessageType, planner_address
 from .projects import RequestError
-from .user_gates import MESSAGE_MAX_CHARS, GateState, MessageKind
+from .user_gates import MESSAGE_MAX_CHARS, GateState, MessageKind, retry_at
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +38,16 @@ REMINDER_CHECK_SEC = 300
 def gate_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """A gate as the API shows it: its step's label, state, agenda and how it closed, whom it waits for
     (``waiting_on``: ``user``, ``planner`` while one of the user's messages is undelivered and no turn failed on it,
-    None once closed or before it opens), and how many of the user's messages a turn failed on and none has taken
-    since (``not_delivered``: the user's next message sends them again)."""
+    or the automatic retry of a failed turn is due; None once closed or before it opens), and how many of the user's
+    messages a turn failed on and none has taken since (``not_delivered``: the user's next message sends them
+    again), with when the Planner tries them again on its own (``retry_at``, None when no retry is left)."""
     state = GateState(row["state"])
     waiting_on = None
+    retry = retry_at(int(row.get("failures") or 0), row.get("failed_at")) if state.waiting else None
     if state.waiting:
-        waiting_on = "planner" if row.get("waiting_for_planner") else "user"
+        # Past its retry_at, the Planner's automatic retry of a failed turn is due or under way.
+        retrying = retry is not None and retry <= datetime.now(timezone.utc)
+        waiting_on = "planner" if row.get("waiting_for_planner") or retrying else "user"
     return {
         "step": row.get("step_key"), "step_id": row["step_id"], "state": state.value, "topic": row["topic"],
         "agenda": list(row.get("agenda") or []), "findings": row.get("findings") or "",
@@ -51,6 +55,7 @@ def gate_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "ended_by_user": bool(row.get("ended_by_user")), "plan_change": row.get("plan_change"),
         "depends_on": list(row.get("depends_on") or []), "waiting_on": waiting_on, "turns": row.get("turns") or 0,
         "not_delivered": int(row.get("not_delivered") or 0) if state.waiting else 0,
+        "retry_at": retry,
         "reminders": row.get("reminders") or 0, "opened_at": row.get("opened_at"),
         "first_reply_at": row.get("first_reply_at"), "closed_at": row.get("closed_at"),
     }

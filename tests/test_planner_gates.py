@@ -719,3 +719,96 @@ def test_a_restart_gives_the_messages_a_failed_turn_kept_whatever_retries_were_s
     assert "[RESTART]" in texts[3] and "[GATE]" in texts[4] and "- (dashboard) PostgreSQL" in texts[4]
     error = next(m for m in agent_db.store.gate_messages if m["kind"] == "error")
     assert error["text"].endswith("your message is kept, and your next message sends it again.")
+
+
+@pytest.mark.parametrize("then", ["add_steps", "none"])
+def test_a_message_that_reaches_the_gate_as_its_close_completes_the_task_goes_to_the_planner_first(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch, then: str,
+) -> None:
+    _while_turn(monkeypatch, TurnKind.GATE, agent_db, "wait, actually SQLite")
+    after = (reply({"reply": "SQLite then: one more step.", "action": "add_steps", "steps": [step("s1", "g1")]}),
+             decide("accept")) if then == "add_steps" else (reply({"reply": "Noted; nothing to change.",
+                                                                   "action": "none"}),)
+    claude = planner_claude(
+        plan(GATE),
+        gate_reply("PostgreSQL, and that's all.", "close", SETTLED, summary=SUMMARY, final=FINAL),
+        *after,
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await _write(h, agent_db, "PostgreSQL")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    final = h.final()
+    assert final is not None and final.payload["status"] == "completed"
+    texts = [turn["text"] for turn in claude.turns()]
+    # The close would complete the task: the late message reaches a CHAT turn first.
+    assert texts[2].startswith("[CHAT] The task changed.") and "Written in gate g1 as it closed: wait, actually SQLite" \
+        in texts[2]
+    assert [e["delivered"] for e in _late(agent_db)] == [True]
+    assert [w.payload["step_key"] for w in h.work_items] == (["s1"] if then == "add_steps" else [])
+
+
+def test_a_late_message_after_a_chat_cancel_that_completes_the_task_comes_alone(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _while_turn(monkeypatch, TurnKind.CHAT, agent_db, "wait, PostgreSQL after all")
+    cancel = {"reply": "Fine, SQLite then.", "action": "none", "final": FINAL,
+              "gates": [{"id": "g1", "action": "cancel", "resolution": "the user said SQLite in chat"}]}
+    claude = planner_claude(plan(GATE), reply(cancel), reply({"reply": "Noted.", "action": "none"}))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await agent_db.store.add_supplement("t1", "Use SQLite, skip the question", via="chat")
+        await h.bus.publish(MessageEnvelope.create(source=WEB, target=planner_address("t1"),
+                                                   message_type=MessageType.TASK_CHANGE, payload={"task_id": "t1"}))
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+    texts = [turn["text"] for turn in claude.turns()]
+    # The cancel's own change counts as delivered: the turn before the end has only the late message.
+    assert "Written in gate g1 as it closed: wait, PostgreSQL after all" in texts[2]
+    assert "Use SQLite, skip the question" not in texts[2].split("The user added to the task")[1].split("\n\n")[0]
+
+
+def test_the_idle_check_goes_on_after_it_fails(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 0.05)
+    monkeypatch.setattr(planner_module, "GATE_RETRY_WAIT_SEC", (0.1,))
+    original = PlannerAgent._idle_tick
+    calls: list[int] = []
+
+    async def flaky(self: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("the check broke once")
+        await original(self)
+
+    monkeypatch.setattr(PlannerAgent, "_idle_tick", flaky)
+    broken = reply({"reply": "hmm", "gate": "continue", "action": "none"})  # no agenda: always refused
+    claude = planner_claude(
+        plan(GATE),
+        broken, broken,
+        gate_reply("PostgreSQL then.", "close", SETTLED, summary=SUMMARY, action="add_steps", steps=[step("s1", "g1")]),
+        decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await _write(h, agent_db, "PostgreSQL")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    # The automatic retry still came, from a later check.
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+    assert len(calls) > 1 and "- (dashboard) PostgreSQL" in claude.turns()[3]["text"]
