@@ -6,7 +6,14 @@ directories. The server is the same entry point ``looper serve`` runs
 (``looper.agents.serve.serve_agent``); ``claude`` on its PATH is either the
 scripted stand-in (fake mode) or a wrapper that adds ``--max-budget-usd`` to
 every real Claude Code run (real mode). Tasks go through the HTTP API one at
-a time; the run stops at the total spending cap.
+a time, each ``reps`` times (rep 1 of every task, then rep 2, ...), each run in
+a working directory and a project of its own; the run stops at the total
+spending cap.
+
+Every row has an outcome: ``pass``, ``fail`` (the model's work was wrong) or
+``error`` (the run could not be scored: a timeout, the spending cap, or the
+harness itself), so a slow or broken run is never counted as the model's
+failure.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,10 +39,12 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from . import metrics
+from . import tasks as task_list
 from .tasks import CHOSEN_PROFILE, EvalTask
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,7 +53,10 @@ BASELINES_DIR = Path(__file__).resolve().with_name("baselines")
 DEFAULT_OUT_DIR = REPO_ROOT / "evals" / "runs"
 RESERVED_PORT = 8767  # the operator's own server
 RESERVED_DATABASE = "loopx"  # the operator's own database
-SCHEMA = "looper-prompt-eval/v1"
+# v2: every row has rep and outcome (and error_class and error when it is an error); the run has reps and
+# aborted. A v1 row is rep 1, its outcome read from success, timed_out and stopped_by_cap (``compare.outcome``).
+SCHEMA = "looper-prompt-eval/v2"
+ERROR_TEXT_LIMIT = 300  # characters of an error row's message (and of the reason a run was aborted)
 
 # The server, started the way ``looper serve`` starts it, without depending on the CLI module.
 _SERVE = (
@@ -56,6 +69,40 @@ _SERVE = (
 
 class EvalError(RuntimeError):
     """The eval could not run (no database, the server did not start, an API call failed)."""
+
+
+class TaskError(EvalError):
+    """A task the harness could not follow to its end; it was cancelled, and it had cost ``cost_usd``."""
+
+    def __init__(self, message: str, *, cost_usd: float) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
+
+
+class Outcome(StrEnum):
+    PASS = "pass"
+    FAIL = "fail"  # the run ended and its result or flow is wrong: the model's failure
+    ERROR = "error"  # the run could not be scored (ErrorClass): neither a pass nor a fail
+
+
+class ErrorClass(StrEnum):
+    TIMEOUT = "timeout"  # cancelled after the task's timeout, or no reply within the dialog's
+    SPENDING_CAP = "spending_cap"  # cancelled at the run's spending cap
+    HARNESS = "harness"  # the eval itself failed: an API call, the server, a check that raised
+
+
+def error_row(error_class: ErrorClass, message: str, **values: Any) -> dict[str, Any]:
+    """The fields of a row that is an error of ``error_class``."""
+    return {"outcome": Outcome.ERROR.value, "success": False, "error_class": error_class.value, "error": message,
+            **values}
+
+
+def clip_errors(rows: list[dict[str, Any]]) -> None:
+    """Shorten every row's error message to ERROR_TEXT_LIMIT; done after ``scrub``, so no local path is cut in
+    two and left unreplaced."""
+    for row in rows:
+        if isinstance(row.get("error"), str):
+            row["error"] = row["error"][:ERROR_TEXT_LIMIT]
 
 
 # --- Database ------------------------------------------------------------------------------------------
@@ -302,102 +349,161 @@ def run_task(
     started = time.monotonic()
     created = api.post("/api/tasks/create", {"requirement": task.requirement, "project": project})
     task_id = created["task_id"]
-    if task.planner_may_choose:
-        if chosen_profile_id is None:
-            raise EvalError(f"{task.id} needs the profile its Planner may choose")
-        api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
-    if task.roles_on:
-        api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
-    api.post("/api/tasks/start", {"task_id": task_id})
+    try:
+        if task.planner_may_choose:
+            if chosen_profile_id is None:
+                raise EvalError(f"{task.id} needs the profile its Planner may choose")
+            api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
+        if task.roles_on:
+            api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
+        api.post("/api/tasks/start", {"task_id": task_id})
 
-    chat_pending = task.chat is not None
-    edit_pending = task.edit_requirement is not None
-    stopped_by_cap = timed_out = False
-    while True:
+        chat_pending = task.chat is not None
+        edit_pending = task.edit_requirement is not None
+        stopped_by_cap = timed_out = False
+        while True:
+            detail = api.get(f"/api/tasks/{task_id}")
+            status = detail.get("status")
+            if status in metrics.TERMINAL_STATUSES:
+                break
+            cost = float((detail.get("cost") or {}).get("cost_usd") or 0.0)
+            if cap_left is not None and cost >= cap_left and not stopped_by_cap:
+                stopped_by_cap = True
+                api.post("/api/tasks/cancel", {"task_id": task_id})
+            elif time.monotonic() - started > timeout and not timed_out:
+                timed_out = True
+                api.post("/api/tasks/cancel", {"task_id": task_id})
+            elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
+                try:
+                    api.post("/api/chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
+                    chat_pending = False
+                except EvalError:
+                    pass  # the Planner is not live yet; try again at the next poll
+            elif edit_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
+                api.put(f"/api/tasks/{task_id}/requirement", {"requirement": task.edit_requirement})
+                edit_pending = False
+            time.sleep(poll)
+        duration = time.monotonic() - started
+
+        # The Planner's last turn and the step runs finish their records as the task ends.
+        deadline = time.monotonic() + settle
+        while True:
+            records = api.get("/api/llm-records", task_id=task_id, limit=500)["records"]
+            if all(r.get("status") != "running" for r in records) or time.monotonic() > deadline:
+                break
+            time.sleep(poll)
         detail = api.get(f"/api/tasks/{task_id}")
-        status = detail.get("status")
-        if status in metrics.TERMINAL_STATUSES:
-            break
-        cost = float((detail.get("cost") or {}).get("cost_usd") or 0.0)
-        if cap_left is not None and cost >= cap_left and not stopped_by_cap:
-            stopped_by_cap = True
-            api.post("/api/tasks/cancel", {"task_id": task_id})
-        elif time.monotonic() - started > timeout and not timed_out:
-            timed_out = True
-            api.post("/api/tasks/cancel", {"task_id": task_id})
-        elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
-            try:
-                api.post("/api/chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
-                chat_pending = False
-            except EvalError:
-                pass  # the Planner is not live yet; try again at the next poll
-        elif edit_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
-            api.put(f"/api/tasks/{task_id}/requirement", {"requirement": task.edit_requirement})
-            edit_pending = False
-        time.sleep(poll)
-    duration = time.monotonic() - started
-
-    # The Planner's last turn and the step runs finish their records as the task ends.
-    deadline = time.monotonic() + settle
-    while True:
-        records = api.get("/api/llm-records", task_id=task_id, limit=500)["records"]
-        if all(r.get("status") != "running" for r in records) or time.monotonic() > deadline:
-            break
-        time.sleep(poll)
-    detail = api.get(f"/api/tasks/{task_id}")
-    records = sorted(records, key=lambda r: int(r["id"]))
-    events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
-    result = metrics.task_metrics(
-        detail=detail,
-        activity=_all_activity(api, task_id),
-        records=records,
-        events=events,
-        changes=changed_files(before, snapshot(work_dir)),
-        work_dir=work_dir,
-        check_problem=task.check(work_dir),
-        expect=task.expect,
-        disciplines=task.disciplines,
-        clock_offset=clock_offset,
-        now=time.time() + clock_offset,
-    )
+        records = sorted(records, key=lambda r: int(r["id"]))
+        events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
+        result = metrics.task_metrics(
+            detail=detail,
+            activity=_all_activity(api, task_id),
+            records=records,
+            events=events,
+            changes=changed_files(before, snapshot(work_dir)),
+            work_dir=work_dir,
+            check_problem=task.check(work_dir),
+            expect=task.expect,
+            disciplines=task.disciplines,
+            clock_offset=clock_offset,
+            now=time.time() + clock_offset,
+        )
+        if step_workspaces:
+            result["looper_commits"] = looper_commits(work_dir, task_id)
+    except Exception as exc:
+        raise TaskError(f"{type(exc).__name__}: {exc}", cost_usd=_cancel_after_error(api, task_id)) from exc
     if stopped_by_cap:
         result["problems"].append("cancelled at the spending cap")
-        result["success"] = False
     if timed_out:
         result["problems"].append(f"cancelled after {timeout:g} s")
-        result["success"] = False
-    if step_workspaces:
-        result["looper_commits"] = looper_commits(work_dir, task_id)
-    return {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
-            "timed_out": timed_out}
+    row = {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
+           "timed_out": timed_out, "work_dir": str(work_dir)}
+    # A task cancelled at the cap or after its timeout is not scored: what it delivered says nothing of the model.
+    if stopped_by_cap:
+        return {**row, **error_row(ErrorClass.SPENDING_CAP, "cancelled at the spending cap")}
+    if timed_out:
+        return {**row, **error_row(ErrorClass.TIMEOUT, f"cancelled after {timeout:g} s")}
+    return {**row, "outcome": (Outcome.PASS if result["success"] else Outcome.FAIL).value}
+
+
+def _cancel_after_error(api: Api, task_id: str) -> float:
+    """Cancel a task the harness could not follow (so it runs alongside nothing), and return its cost so far;
+    best effort, as the server may be gone."""
+    try:
+        api.post("/api/tasks/cancel", {"task_id": task_id})
+    except Exception:  # it may have ended, or the server may be gone
+        pass
+    try:
+        return float((api.get(f"/api/tasks/{task_id}").get("cost") or {}).get("cost_usd") or 0.0)
+    except Exception:
+        return 0.0
 
 
 # --- The task set -------------------------------------------------------------------------------------
 
 
+# Named sets of tasks for ``--tasks``, resolved against the task set: an id it does not have (yet) is left out.
+TASK_SETS: dict[str, tuple[str, ...]] = {
+    # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
+    "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
+                "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform"),
+}
+
+
+def select_tasks(names: list[str] | None) -> tuple[EvalTask, ...]:
+    """The tasks named, a set of TASK_SETS standing for those of its tasks the task set has (all tasks without
+    names), in the task set's order; raises ``ValueError`` for an unknown id or a set none of whose tasks exist."""
+    if not names:
+        return task_list.select(None)
+    known = {task.id for task in task_list.TASKS}
+    ids: list[str] = []
+    for name in names:
+        if name not in TASK_SETS:
+            ids.append(name)
+            continue
+        found = [task_id for task_id in TASK_SETS[name] if task_id in known]
+        if not found:
+            raise ValueError(f"the task set {name!r} has none of its tasks in the task set")
+        ids += found
+    return task_list.select(ids)
+
+
 def run_suite(
     tasks: tuple[EvalTask, ...],
-    run_one: Callable[[EvalTask, float | None], dict[str, Any]],
+    run_one: Callable[[EvalTask, int, float | None], dict[str, Any]],
     *,
     total_cap_usd: float | None,
+    reps: int = 1,
+    results: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Run the tasks in order until their summed cost reaches ``total_cap_usd``; the rest are skipped.
+    """Run every task ``reps`` times, rep-major (rep 1 of every task, then rep 2, ...), so drift over time does not
+    land on one task, until their summed cost reaches ``total_cap_usd``; the rest are skipped.
 
-    ``run_one(task, cap_left)`` runs one task with the budget left. Returns the
-    results and whether the cap stopped the run.
+    ``run_one(task, rep, cap_left)`` runs one case with the budget left. A case that raises is an error row of
+    class ``harness`` and the run goes on with the next. The rows go into ``results`` as they are made (a new list
+    without), so a caller keeps what is done when the run stops midway. Returns the rows and whether the cap
+    stopped the run.
     """
-    results: list[dict[str, Any]] = []
+    results = [] if results is None else results
     spent = 0.0
     stopped = False
-    for task in tasks:
-        if stopped or (total_cap_usd is not None and spent >= total_cap_usd):
-            stopped = True
-            results.append({"id": task.id, "skipped": "the spending cap was reached", "cost_usd": 0.0})
-            continue
-        result = run_one(task, None if total_cap_usd is None else total_cap_usd - spent)
-        spent += float(result.get("cost_usd") or 0.0)
-        stopped = stopped or bool(result.get("stopped_by_cap"))
-        results.append(result)
+    for rep in range(1, reps + 1):
+        for task in tasks:
+            if stopped or (total_cap_usd is not None and spent >= total_cap_usd):
+                stopped = True
+                results.append({"id": task.id, "rep": rep, "skipped": "the spending cap was reached",
+                                "cost_usd": 0.0})
+                continue
+            try:
+                row = run_one(task, rep, None if total_cap_usd is None else total_cap_usd - spent)
+            except Exception as exc:
+                traceback.print_exc(file=sys.stderr)
+                cost = exc.cost_usd if isinstance(exc, TaskError) else 0.0
+                message = str(exc) if isinstance(exc, TaskError) else f"{type(exc).__name__}: {exc}"
+                row = error_row(ErrorClass.HARNESS, message, cost_usd=cost)
+            spent += float(row.get("cost_usd") or 0.0)
+            stopped = stopped or bool(row.get("stopped_by_cap"))
+            results.append({"id": task.id, "rep": rep, **row})
     return results, stopped
 
 
@@ -423,6 +529,22 @@ def scrub(value: Any, replacements: dict[str, str]) -> Any:
     return value
 
 
+def write_result(result: dict[str, Any], path: Path, *, roots: tuple[Path, ...], rows: str) -> dict[str, Any]:
+    """``result`` with the local paths of ``roots`` and the home directory replaced (``scrub``) and the error texts
+    of its ``rows`` and its ``aborted`` reason shortened, written to ``path``; returns it."""
+    result = scrub(result, {**{str(root): "<eval-root>" for root in roots}, str(Path.home()): "~"})
+    clip_errors(result[rows])
+    if result.get("aborted"):
+        result["aborted"] = result["aborted"][:ERROR_TEXT_LIMIT]
+    path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return result
+
+
+def aborted_reason(exc: BaseException) -> str:
+    """Why a run stopped midway, for its ``aborted`` field."""
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+
+
 def run(
     *,
     mode: str,
@@ -438,8 +560,12 @@ def run(
     task_timeout: float | None = None,
     keep_work_dirs: bool = False,
     step_workspaces: str | None = None,
+    reps: int = 1,
 ) -> tuple[dict[str, Any], Path]:
-    """Run ``tasks`` in ``mode`` (``fake`` or ``real``); returns the run and the JSON file written to ``out_dir``.
+    """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``); returns the run and the JSON file
+    written to ``out_dir``. Each (task, rep) runs in a working directory of its own, ``<root>/work/<task>/<rep>``.
+    The JSON is written however the run ends: when it stops midway, with what is done and ``aborted`` saying why
+    (an interrupt is raised again once it is written).
 
     Every role runs ``agent`` (by name), else Claude Code with ``provider`` (registered for the run from a preset),
     else the Claude Code agent of ``model`` (``claude-code/<model>``, registered for the run), else the built-in
@@ -451,6 +577,8 @@ def run(
         raise EvalError(f"mode must be fake or real, not {mode!r}")
     if provider is not None and not provider.api_key:
         raise EvalError(f"a provider needs its API key in ${API_KEY_ENV}")
+    if reps < 1:
+        raise EvalError(f"reps must be at least 1, not {reps}")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -460,10 +588,16 @@ def run(
     root = raw_root.resolve()
     timeout = task_timeout or (60.0 if mode == "fake" else 900.0)
     poll = 0.3 if mode == "fake" else 2.0
+    results: list[dict[str, Any]] = []
+    stopped = False
+    aborted: str | None = None
+    chosen: dict[str, Any] = {}
     try:
         scenarios = root / "scenarios.json"
-        work_dirs = {task.id: root / "work" / task.id for task in tasks}
-        scenarios.write_text(json.dumps({os.path.realpath(work_dirs[t.id]): t.fake for t in tasks}), encoding="utf-8")
+        work_dirs = {(task.id, rep): root / "work" / task.id / str(rep) for rep in range(1, reps + 1) for task in tasks}
+        fake = {task.id: task.fake for task in tasks}
+        scenarios.write_text(json.dumps({os.path.realpath(path): fake[task_id]
+                                         for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
                        real_claude=real_claude)
@@ -486,35 +620,42 @@ def run(
                 chosen_profile_id = api.post("/api/agent-profiles", {
                     "name": CHOSEN_PROFILE, **{key: chosen[key] for key in ("runtime_id", "provider_id", "model",
                                                                              "effort")}})["profile"]["profile_id"]
-            results, stopped = run_suite(
+            _, stopped = run_suite(
                 tasks,
-                lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
-                                                cap_left=cap_left, clock_offset=clock_offset,
-                                                step_workspaces=step_workspaces,
-                                                chosen_profile_id=chosen_profile_id),
+                lambda task, rep, cap_left: run_task(api, task, work_dirs[task.id, rep], timeout=timeout, poll=poll,
+                                                     cap_left=cap_left, clock_offset=clock_offset,
+                                                     step_workspaces=step_workspaces,
+                                                     chosen_profile_id=chosen_profile_id),
                 total_cap_usd=total_cap_usd,
+                reps=reps,
+                results=results,
             )
+    except BaseException as exc:
+        aborted = aborted_reason(exc)
+        if not isinstance(exc, Exception):
+            raise  # an interrupt: the JSON is still written below
     finally:
         if not keep_work_dirs:
             shutil.rmtree(root, ignore_errors=True)
-
-    run_result = {
-        "schema": SCHEMA,
-        "mode": mode,
-        "model": chosen["model"] if mode == "real" else None,
-        "agent": chosen["name"],
-        "provider_preset": provider.preset if provider is not None else None,
-        "started_at": stamp,
-        "git": git,
-        "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
-        "step_workspaces": step_workspaces,
-        "stopped_by_cap": stopped,
-        "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6),
-        "tasks": results,
-    }
-    run_result = scrub(run_result, {str(root): "<eval-root>", str(raw_root): "<eval-root>", str(Path.home()): "~"})
-    path = out_dir / f"{stamp}-{mode}.json"
-    path.write_text(json.dumps(run_result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        path = out_dir / f"{stamp}-{mode}.json"
+        run_result = write_result({
+            "schema": SCHEMA,
+            "mode": mode,
+            "model": chosen.get("model") if mode == "real" else None,
+            "agent": chosen.get("name"),
+            "provider_preset": provider.preset if provider is not None else None,
+            "started_at": stamp,
+            "git": git,
+            "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
+            "step_workspaces": step_workspaces,
+            "reps": reps,
+            "stopped_by_cap": stopped,
+            "aborted": aborted,
+            "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6),
+            "tasks": results,
+        }, path, roots=(root, raw_root), rows="tasks")
+        if aborted:
+            print(f"the run stopped midway ({run_result['aborted']}); what is done is in {path}", file=sys.stderr)
     return run_result, path
 
 
@@ -607,12 +748,49 @@ def select_agent(api: Api, *, agent: str | None, model: str | None, provider: Pr
     return chosen
 
 
-def previous_run(out_dir: Path, current: Path, *, mode: str, model: str | None) -> dict[str, Any] | None:
-    """The latest earlier run in ``out_dir`` of the same mode and model, else the committed baseline for them."""
+def baseline_path(*, mode: str, model: str | None, dialogs: bool = False) -> Path:
+    """The committed baseline of the task set's runs (or the dialogs') of ``mode`` and ``model``; for dialogs,
+    ``model`` is the Manager's."""
+    name = f"real-{model}.json" if mode == "real" else "fake.json"
+    return BASELINES_DIR / (f"dialogs-{name}" if dialogs else name)
+
+
+def compared_model(run: dict[str, Any]) -> str | None:
+    """The model a run is compared by: the Manager's for dialogs (``manager_model``, else every role's)."""
+    return run.get("manager_model", run.get("model")) if "dialogs" in run else run.get("model")
+
+
+def previous_run(out_dir: Path, current: Path, *, mode: str, model: str | None, dialogs: bool = False) -> Path | None:
+    """The newest earlier run in ``out_dir`` of the same kind (the task set's or the dialogs'), mode and model."""
     earlier = sorted(p for p in out_dir.glob(f"*-{mode}.json") if p.name < current.name)
     for path in reversed(earlier):
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("model") == model:
-            return data
-    baseline = BASELINES_DIR / (f"real-{model}.json" if mode == "real" else "fake.json")
-    return json.loads(baseline.read_text(encoding="utf-8")) if baseline.is_file() else None
+        if ("dialogs" in data) == dialogs and compared_model(data) == model:
+            return path
+    return None
+
+
+def comparison_base(choice: str | None, *, out_dir: Path, current: Path, mode: str, model: str | None,
+                    dialogs: bool = False) -> tuple[dict[str, Any] | None, str]:
+    """The run to compare a new one with, and where it is from: the committed baseline of its kind, mode and
+    model (``choice`` None), the newest earlier run in ``out_dir`` (``"previous"``) or the file ``choice`` names.
+    None when there is no such run."""
+    if choice == "previous":
+        path = previous_run(out_dir, current, mode=mode, model=model, dialogs=dialogs)
+        if path is None:
+            return None, f"no earlier {mode} run of {model or 'the built-in agent'} in {_shown(out_dir)}"
+    elif choice is None:
+        path = baseline_path(mode=mode, model=model, dialogs=dialogs)
+        if not path.is_file():
+            return None, f"no committed baseline {_shown(path)}"
+    else:
+        path = Path(choice)
+    return json.loads(path.read_text(encoding="utf-8")), _shown(path)
+
+
+def _shown(path: Path) -> str:
+    """``path`` relative to the repository when it is in it, else its name: no local path is printed for a PR."""
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.name
