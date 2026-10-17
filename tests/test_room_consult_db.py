@@ -24,7 +24,7 @@ from tests.test_usage_api_db import DSN, _run
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 # A Claude Code that answers a consult: it records how it was started, then answers every question its prompt names
-# (#<id>), or, as the test asks, fails to find the session, writes no JSON, or leaves one unanswered.
+# (#<id>), or, as the test asks, fails to find the session, writes no JSON, leaves one unanswered or hangs.
 _CONSULTED = """
 import json, os, re, sys
 prompt = json.loads(sys.stdin.readline())["message"]["content"]
@@ -36,6 +36,9 @@ if mode == "gone":
                       "errors": ["No conversation found with session ID: s-1"]}), flush=True)
     sys.exit(1)
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s-fork"}), flush=True)
+if mode == "hang":
+    import time
+    time.sleep(60)
 ids = [int(i) for i in re.findall(r"^- #(\\d+) from", prompt, re.MULTILINE)]
 if mode == "prose":
     text = "I think it is qty."
@@ -76,10 +79,14 @@ def _service(tmp_path: Path, room: RoomService, pool_runs: _Pool) -> Any:
     return service
 
 
-async def _settled(pool: Any) -> dict[str, Any]:
+async def _settled(pool: Any, *, noted: bool = True) -> dict[str, Any]:
+    """The last consult once it ended: its row moved, its answers and escalations posted, and (``noted``, all but a
+    consult that never started) the outcome noted in the task's activity, last."""
     for _ in range(750):
         row = await pool.fetchrow("SELECT * FROM room_consults ORDER BY id DESC LIMIT 1")
-        if row is not None and row["state"] not in ("queued", "running"):
+        done = not noted or await pool.fetchval("SELECT count(*) FROM activity WHERE summary LIKE 'Consulted %' "
+                                                "OR summary LIKE 'Could not consult %'")
+        if row is not None and row["state"] not in ("queued", "running") and done:
             return dict(row)
         await asyncio.sleep(0.02)
     raise AssertionError("the consult did not end")
@@ -118,6 +125,42 @@ def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_sess
 
     _run(test, monkeypatch)
 
+
+
+def test_a_running_consult_is_recorded_for_the_next_start_and_a_shutdown_ends_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A server that exits without finishing its shutdown (its deadline, a second signal, a crash) leaves a running
+    # consult to the next start's sweep, which ends only the agents it finds recorded (proc_tree.spawn).
+    from looper.agents import proc_tree
+
+    for name, value in (("_records", None), ("_server", None), ("_recorded", {}), ("_ending", set())):
+        monkeypatch.setattr(proc_tree, name, value)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.5)
+    monkeypatch.setenv("SEEN", str(tmp_path / "seen.jsonl"))
+    monkeypatch.setenv("CONSULT_MODE", "hang")
+    records = tmp_path / "runtime" / proc_tree.RECORDS_DIR
+
+    async def test(pool: Any) -> None:
+        await proc_tree.sweep(tmp_path / "runtime")  # this server records its agents from here on
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        await room.post("task-r", FE, kind="question", body="qty or quantity?", to=["backend_rd@s1"])
+        for _ in range(500):
+            if listed := sorted(records.glob("*.json")):
+                break
+            await asyncio.sleep(0.02)
+        assert len(listed) == 1
+        pid = json.loads(listed[0].read_text())["pid"]
+        assert proc_tree._start_time(pid) is not None
+        await service.stop()  # the shutdown's first step
+        assert proc_tree._start_time(pid) is None and not list(records.glob("*.json"))
+        consult = await pool.fetchrow("SELECT state FROM room_consults")
+        assert consult["state"] == "running"  # the next start runs it again (resume_all)
+
+    _run(test, monkeypatch)
 
 @pytest.mark.parametrize(("setup", "mode", "reason"), [
     ("no_record", "answer", "no_session"),
@@ -269,7 +312,7 @@ def test_a_consult_whose_task_ended_while_it_waited_does_not_start(monkeypatch: 
         await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
         await pool.execute("UPDATE tasks SET status = 'stopped'")
         start(held[0])
-        consult = await _settled(pool)
+        consult = await _settled(pool, noted=False)
         assert (consult["state"], consult["detail"]) == ("failed", "its task ended first")
         assert not seen.exists()  # nothing ran
 
