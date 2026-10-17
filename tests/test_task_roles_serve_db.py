@@ -345,7 +345,7 @@ def test_where_the_switch_is_off_the_planner_has_no_role_tools_and_no_step_runs_
     assert detail["status"] == "completed" and detail["roles"] == []
     listed = _log(ran["state"], "planner.jsonl", "off")[0]
     assert "looper_task_role_set" not in listed["tools"] and "review_role" not in listed["prompt"]
-    assert ROLES_GUIDE.splitlines()[2] not in listed["prompt"]  # how to split work by discipline: only with roles on
+    assert "define one work role per discipline" not in listed["prompt"]  # the roles guide: only with roles on
     (refused,) = _calls(ran, "off")
     assert refused["answer"]["error"]["code"] == "forbidden"
     turns = [t["text"] for t in _log(ran["state"], "turns.jsonl", "off")]
