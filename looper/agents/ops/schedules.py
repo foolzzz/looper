@@ -83,7 +83,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
     if action in ("enable", "disable"):
         enabled = action == "enable"
         answer = await answered(schedules.update_schedule(row["id"], {"enabled": enabled}))
-        result = {"schedule": _listed(answer["schedule"]), "warnings": answer["warnings"]}
+        result = {"schedule": _listed(answer["schedule"])}
         if row["enabled"] is enabled:
             result["note"] = f"it was {action}d already"
         return result

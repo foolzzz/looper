@@ -168,6 +168,11 @@ def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     ({"work_dir": "relative/dir"}, "absolute path"),
     ({"profile_overrides": {"manager": "agent-claude-code-opus"}}, "not 'manager'"),
     ({"profile_overrides": {"planner": "agent-nope"}}, "planner:"),
+    ({"task_limits": {"planner": 2}}, "task_limits: one Planner runs a task"),
+    ({"task_limits": {"manager": 2}}, "task_limits: unknown role 'manager'"),
+    ({"task_limits": {"worker": 0}}, "task_limits.worker: max_concurrency must be a whole number from 1 to 64"),
+    ({"task_limits": {"reviewer": 65}}, "task_limits.reviewer:"),
+    ({"task_limits": [8]}, "task_limits must be an object"),
     ({"enabled": True}, "created disabled"),
     ({"gate": "true"}, "unknown field 'gate'"),
 ])
@@ -193,6 +198,7 @@ def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeyp
         assert schedule["description"] == "Weekdays at 09:00 (America/Los_Angeles)"
         assert schedule["profile_overrides"] == {"planner": "agent-claude-code-opus",
                                                  "worker": "agent-claude-code-opus"}
+        assert schedule["task_limits"] == {"worker": None, "reviewer": None}
 
         status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
             "name": "triage", "cron": "*/5 * * * *", "requirement": "r"})
@@ -352,6 +358,37 @@ def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.Monkey
 
 
 # --- Firing ---
+
+
+def test_a_schedules_task_limits_are_replaced_whole_and_given_to_each_task_it_fires(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(env: _Env) -> None:
+        schedule = await env.schedule(task_limits={"worker": 8, "reviewer": 3})
+        sid = schedule["schedule_id"]
+        assert schedule["task_limits"] == {"worker": 8, "reviewer": 3}
+        # A given object replaces the schedule's limits (a role left out has none), null clears both, and a change
+        # of another field keeps them.
+        changed = await env.ok("PUT", f"/api/schedules/{sid}", {"task_limits": {"worker": 2, "reviewer": None}})
+        assert changed["schedule"]["task_limits"] == {"worker": 2, "reviewer": None}
+        cleared = await env.ok("PUT", f"/api/schedules/{sid}", {"task_limits": None})
+        assert cleared["schedule"]["task_limits"] == {"worker": None, "reviewer": None}
+        await env.ok("PUT", f"/api/schedules/{sid}", {"task_limits": {"reviewer": 3, "worker": 8}})
+        kept = await env.ok("PUT", f"/api/schedules/{sid}", {"name": "renamed", "enabled": True})
+        assert kept["schedule"]["task_limits"] == {"worker": 8, "reviewer": 3}
+
+        await env.due(sid)
+        await env.scheduler.tick()
+        [run] = await env.runs(sid)
+        assert {r["role"]: r["max_concurrency"] for r in await env.pool.fetch(
+            "SELECT role, max_concurrency FROM task_concurrency_limits WHERE task_id = $1", run["task_id"])} == {
+            "worker": 8, "reviewer": 3}
+        # They are the task's own, as if set on its Agents tab.
+        status, task = await env.call("GET", f"/api/tasks/{run['task_id']}")
+        assert status == 200 and task["agents"]["roles"]["worker"]["concurrency"] == {
+            "value": 8, "source": "task", "task": 8, "default": {"value": 16, "source": "builtin"}}
+
+    _run(test, monkeypatch, tmp_path)
 
 
 def test_a_due_schedule_fires_a_started_task_with_its_settings_and_run_context(monkeypatch: pytest.MonkeyPatch,

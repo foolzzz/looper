@@ -343,7 +343,7 @@ function viaLabel(via: string): string {
 /** A started task's requirement: the current text, its earlier versions, and an edit its Planner gets in a turn. */
 function TaskRequirement({ task }: { task: TaskDetail }) {
   const versions = task.requirement_versions ?? [];
-  // Queued or running, whatever its Planner is doing; one not started edits it above.
+  // Starting or running, whatever its Planner is doing; one not started edits it above.
   const editable = isActiveTask(task);
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(task.requirement);
@@ -1490,7 +1490,7 @@ function gateState(step: TaskStep, gate: UserGate | undefined): GateState {
 function taskLook(status: string, live: string): NodeLook {
   if (status === "completed") return { ...STEP_LOOKS.verified, label: "Completed" };
   if (status === "failed") return { ...STEP_LOOKS.failed, label: "Failed" };
-  const quiet: Record<string, string> = { stopped: "Stopped", cancelled: "Cancelled", pending: "Queued",
+  const quiet: Record<string, string> = { stopped: "Stopped", cancelled: "Cancelled", pending: "Starting",
                                          [READY_STATUS]: READY_LABEL };
   return status in quiet ? { ...STEP_LOOKS.pending, label: quiet[status] } : { ...STEP_LOOKS.dispatched, label: live };
 }

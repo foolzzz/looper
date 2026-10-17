@@ -223,12 +223,10 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         system = (await agent_settings.settings_view())["system"]["values"]
         assert [e["key"] for e in system["env"]] == ["TZ", "LANG"]
 
-        # A concurrency limit on a role, and on a role in the project; one alone keeps its layer's row.
+        # A concurrency limit on the Workers' role layer, the default for every task; one alone keeps its row.
         await agent_settings.update_role("worker", {"max_concurrency": 3})
-        view = await agent_settings.update_project(pid, {"max_concurrency": 2}, role="planner")
-        assert view["roles"]["planner"]["effective"]["max_concurrency"] == {"value": 2, "source": "role_project"}
-        assert [await agent_settings.load_concurrency(agent_settings.AgentType(role), pid)
-                for role in ("planner", "worker", "reviewer")] == [2, 3, 8]
+        assert [await agent_settings.load_task_limit(agent_settings.AgentType(role), None)
+                for role in ("worker", "reviewer")] == [3, 8]
         await agent_settings.update_role("worker", {"max_concurrency": None})
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE scope = 'role'") == 1  # reviewer
 
@@ -240,7 +238,8 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         with pytest.raises(asyncpg.CheckViolationError):
             await agent_setting_layers.put_layer("system", "worker", None, {"harness_prompt": "x"}, pool=pool)
         for scope, role, project_id, limit in (("system", None, None, 2), ("role", "manager", None, 2),
-                                               ("project", None, pid, 2), ("role", "worker", None, 65)):
+                                               ("role", "planner", None, 2), ("project", None, pid, 2),
+                                               ("role_project", "worker", pid, 2), ("role", "worker", None, 65)):
             with pytest.raises(asyncpg.CheckViolationError):
                 await agent_setting_layers.put_layer(scope, role, project_id, {"max_concurrency": limit}, pool=pool)
         with pytest.raises(asyncpg.ForeignKeyViolationError):

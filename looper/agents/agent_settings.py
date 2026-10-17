@@ -1,5 +1,5 @@
 """What every agent inherits: the harness prompt, the Agent Profile, the environment and the per-run cap; and how
-many of a task role run at once in one project.
+many of a task's Workers or Reviewers run at once.
 
 The harness prompt is an agent's character and stability (working principles,
 boundaries, how it communicates); the role prompt (``role_configs``) says
@@ -35,16 +35,13 @@ layer uses the Workers' harness at that same layer (``Harness.from_role``).
 A stored value that no longer validates is ignored with a warning, as if
 unset.
 
-The concurrency limit (``max_concurrency``) is set on the role and the
-role-in-a-project layers of the Planner, the Workers and the Reviewers: at
-most that many of the role run at once in one project (for the Planner, its
-tasks, one Planner each). It resolves built-in (``BUILTIN_CONCURRENCY``) →
-role → role in the project (``resolve_concurrency``); the TaskRouter and the
-WorkerPool read it each time they start one (``load_concurrency``). A task
-may also limit its own Workers or Reviewers (``Layer.TASK``,
-``TASK_LIMIT_ROLES``): at most that many of them run at once, and never more
-than its project's limit lets run (``resolve_task_concurrency``,
-``load_task_limits``).
+The concurrency limit (``max_concurrency``) is per task: at most that many of
+one task's Workers or Reviewers run at once (``TASK_LIMIT_ROLES``). Nothing
+limits how many tasks run at once, and nothing counts a project's runs. A
+task's limit is its own (``Layer.TASK``), else its role's layer (Settings →
+Roles: the default for every task, ``default_concurrency``), else the built-in
+one (``BUILTIN_CONCURRENCY``; ``resolve_task_concurrency``); the WorkerPool
+reads it each time a run may start (``load_task_limit``).
 
 Every run records each setting's value and the layer it came from (the
 harness in ``prompt_layers.harness``, the profile in ``profile``, its model in
@@ -141,13 +138,13 @@ class AgentType(str, Enum):
 
 
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
-# The roles a task may limit the concurrency of: one Planner runs a task.
+# The roles whose concurrency a limit counts, in one task: one Planner runs a task, and any number of tasks run.
 TASK_LIMIT_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
 # The roles a task's Planner may choose the Agent Profile of: never its own.
 PLANNER_CHOICE_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
-# At most this many of each task role run at once in one project when no layer sets max_concurrency. Each role has
-# its own limit: a count shared by all three would let resident Planners hold every slot, and no Worker could start.
-BUILTIN_CONCURRENCY = {AgentType.PLANNER: 8, AgentType.WORKER: 16, AgentType.REVIEWER: 8}
+# At most this many of a task's Workers, or of its Reviewers, run at once when neither the task nor the role's layer
+# sets a limit.
+BUILTIN_CONCURRENCY = {AgentType.WORKER: 16, AgentType.REVIEWER: 8}
 
 
 class Layer(str, Enum):
@@ -374,8 +371,8 @@ def _stored_profile(raw: Any) -> AgentProfile:
 def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict[str, Any]:
     """The fields of a layer update, validated, as stored: ``None`` (or ``""``) unsets one. Raises
     ``SettingsError``; every field is checked before anything is written. Whether the profile exists and can run
-    the layer's roles is ``_check_profile``'s. ``max_concurrency`` is set only on a task role's role or
-    role-in-a-project layer (``role``)."""
+    the layer's roles is ``_check_profile``'s. ``max_concurrency`` is set only on the Workers' or the Reviewers'
+    role layer (``role``): the default for every task."""
     if not isinstance(data, dict):
         raise SettingsError("body must be a JSON object")
     if "model" in data:
@@ -410,11 +407,11 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
             text = boundaries_text(raw)
             values[name] = None if not text or _is_builtin_boundaries(text) else text
         elif name == "max_concurrency":
-            if scope not in (Layer.ROLE, Layer.ROLE_PROJECT) or role not in TASK_ROLES:
+            if scope is not Layer.ROLE or role not in TASK_LIMIT_ROLES:
                 raise SettingsError(
-                    "max_concurrency is how many Planners (tasks), Workers or Reviewers run at once in one project: "
-                    "set it on the planner, worker or reviewer role layer (Settings → Roles), or on that role in a "
-                    "project")
+                    "concurrency is per task: max_concurrency is how many of one task's Workers or Reviewers run at "
+                    "once, and nothing limits how many tasks run. Set the default for every task on the worker or "
+                    "reviewer role (Settings → Roles), or a task's own limit (its Agents tab)")
             values[name] = concurrency(raw)
         else:
             values[name] = budget_usd(raw)
@@ -600,7 +597,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
 
 @dataclass(frozen=True)
 class Concurrency:
-    """How many of a task role run at once in one project, and the layer it came from."""
+    """How many of one task's Workers or Reviewers run at once, and the layer it came from."""
 
     value: int
     source: Layer = Layer.BUILTIN
@@ -609,63 +606,47 @@ class Concurrency:
         return {"value": self.value, "source": self.source.value}
 
 
-def resolve_concurrency(role: AgentType, layers: Mapping[Place, LayerValues],
-                        project_id: str | None = None) -> Concurrency:
-    """The concurrency limit of task role ``role`` (in ``project_id``, if any): built-in → role → role in the
-    project."""
-    limit = Concurrency(BUILTIN_CONCURRENCY[role])
-    for layer in (Layer.ROLE, Layer.ROLE_PROJECT) if project_id else (Layer.ROLE,):
-        value = layers.get((layer, role), EMPTY_LAYER).max_concurrency
-        if value is not None:
-            limit = Concurrency(value, layer)
-    return limit
+def default_concurrency(role: AgentType, layers: Mapping[Place, LayerValues]) -> Concurrency:
+    """How many of a task's ``role`` (Workers or Reviewers) run at once when the task sets no limit of its own: the
+    role layer's (Settings → Roles), else the built-in one."""
+    value = layers.get((Layer.ROLE, role), EMPTY_LAYER).max_concurrency
+    return Concurrency(value, Layer.ROLE) if value is not None else Concurrency(BUILTIN_CONCURRENCY[role])
 
 
-def resolve_task_concurrency(role: AgentType, layers: Mapping[Place, LayerValues],
-                             project_id: str | None = None) -> Concurrency:
-    """How many of one task's ``role`` run at once: the task's own limit (``Layer.TASK``) when its project's lets
-    that many run, else the project's (``resolve_concurrency``)."""
-    limit = resolve_concurrency(role, layers, project_id)
-    own = layers.get((Layer.TASK, role), EMPTY_LAYER).max_concurrency if role in TASK_LIMIT_ROLES else None
-    return Concurrency(own, Layer.TASK) if own is not None and own <= limit.value else limit
+def resolve_task_concurrency(role: AgentType, layers: Mapping[Place, LayerValues]) -> Concurrency:
+    """How many of one task's ``role`` (Workers or Reviewers; ``layers`` read with the task) run at once: the task's
+    own limit (``Layer.TASK``), else the default (``default_concurrency``)."""
+    own = layers.get((Layer.TASK, role), EMPTY_LAYER).max_concurrency
+    return Concurrency(own, Layer.TASK) if own is not None else default_concurrency(role, layers)
 
 
 def task_agents_view(layers: Mapping[Place, LayerValues], project_id: str | None) -> dict[str, Any]:
-    """Each task role's Agent Profile and concurrency for one task (``layers`` read with its task), each with where
-    it comes from (``task`` for the task's own choice). The Planner's concurrency is its project's, how many of the
-    project's tasks run at once; a Worker's or Reviewer's is what applies to the task, with the task's own limit
-    (``task``, None for none) and its project's."""
+    """Each task role's Agent Profile for one task (``layers`` read with its task) and a Worker's or Reviewer's
+    concurrency, each with where it comes from (``task`` for the task's own choice). The concurrency is what applies
+    to the task, with the task's own limit (``task``, None for none) and the ``default`` it has without one."""
     view: dict[str, Any] = {}
     for role in TASK_ROLES:
-        concurrency = resolve_concurrency(role, layers, project_id).view()
+        view[role.value] = {"profile": resolve(role, layers, project_id).view()["profile"]}
         if role in TASK_LIMIT_ROLES:
-            concurrency = {**resolve_task_concurrency(role, layers, project_id).view(),
-                           "task": layers.get((Layer.TASK, role), EMPTY_LAYER).max_concurrency, "project": concurrency}
-        view[role.value] = {"profile": resolve(role, layers, project_id).view()["profile"], "concurrency": concurrency}
+            view[role.value]["concurrency"] = {
+                **resolve_task_concurrency(role, layers).view(),
+                "task": layers.get((Layer.TASK, role), EMPTY_LAYER).max_concurrency,
+                "default": default_concurrency(role, layers).view()}
     return view
 
 
-async def load_concurrency(role: AgentType, project_id: str | None) -> int:
-    """At most this many of ``role`` may run at once in ``project_id``, read now; the built-in limit when the
-    layers cannot be read."""
-    return (await load_task_limits(role, project_id, None))[0]
-
-
-async def load_task_limits(role: AgentType, project_id: str | None, task_id: str | None) -> tuple[int, int | None]:
-    """The limits a run of ``role`` in task ``task_id`` waits for, read now: at most this many of ``role`` run at
-    once in ``project_id``, and in the task (None: the task sets none). The built-in project limit, and none of the
-    task's, when the layers cannot be read."""
+async def load_task_limit(role: AgentType, task_id: str | None) -> int:
+    """At most this many of ``role`` (Workers or Reviewers) run at once in task ``task_id`` (None: outside any task,
+    the default), read now; the built-in limit when the layers cannot be read."""
     from ..db import agent_setting_layers
 
     try:
-        rows = await agent_setting_layers.list_layers(project_id, task_id=task_id)
+        rows = await agent_setting_layers.list_layers(None, task_id=task_id)
     except Exception:
         logger.warning("cannot read the agent settings; the %s limit is the built-in %d", role.value,
                        BUILTIN_CONCURRENCY[role], exc_info=True)
-        return BUILTIN_CONCURRENCY[role], None
-    layers = index_layers(rows, project_id)
-    own = layers.get((Layer.TASK, role), EMPTY_LAYER).max_concurrency if task_id and role in TASK_LIMIT_ROLES else None
-    return resolve_concurrency(role, layers, project_id).value, own
+        return BUILTIN_CONCURRENCY[role]
+    return resolve_task_concurrency(role, index_layers(rows, None)).value
 
 
 async def load_agent_settings(
@@ -869,10 +850,11 @@ def _limits() -> dict[str, Any]:
 
 def _effective(role: AgentType, layers: Mapping[Place, LayerValues], project_id: str | None = None,
                ) -> dict[str, Any]:
-    """What applies to ``role``, with a task role's concurrency limit."""
+    """What applies to ``role``; outside any project, a Worker's or Reviewer's concurrency limit in a task that sets
+    none of its own too."""
     view = resolve(role, layers, project_id).view()
-    if role in TASK_ROLES:
-        view["max_concurrency"] = resolve_concurrency(role, layers, project_id).view()
+    if role in TASK_LIMIT_ROLES and project_id is None:
+        view["max_concurrency"] = default_concurrency(role, layers).view()
     return view
 
 

@@ -18,8 +18,8 @@ import asyncpg
 
 from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
 from ...db import steps as db_steps, task_changes as db_changes, task_roles as db_roles, tasks as db_tasks
-from ..agent_settings import TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, load_concurrency, resolve
-from ..agent_settings import resolve_concurrency
+from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
+from ..agent_settings import resolve_task_concurrency
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
@@ -183,8 +183,9 @@ async def _task_view(task_id: str) -> dict[str, Any]:
         "latest_progress": progress[-1]["summary"] if progress else None,
         "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
         "cost_usd": ((await task_costs([task_id])).get(task_id) or {}).get("cost_usd"),
-        # How many of each role run at once for it, with the source; its own Worker and Reviewer limits (task).
-        "concurrency": {role: view["concurrency"] for role, view in (await agents_view(task))["roles"].items()},
+        # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
+        "concurrency": {role: view["concurrency"] for role, view in (await agents_view(task))["roles"].items()
+                        if "concurrency" in view},
     }
 
 
@@ -294,7 +295,7 @@ async def configuration_block(
         f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
         f"- 目录：{work_dir}",
     ]
-    limit: int | None = None
+    limits: list[int] = []
     try:
         layers = index_layers(await db_layers.list_layers(project_id, task_id=task_id), project_id)
     except Exception as exc:
@@ -302,7 +303,7 @@ async def configuration_block(
         lines.append(f"- Agent 设置：暂时读不到（{type(exc).__name__}），可以在项目的 Settings 页查看")
     else:
         lines += [_role_line(role, resolve(role, layers, project_id)) for role in TASK_ROLES]
-        limit = resolve_concurrency(AgentType.PLANNER, layers, project_id).value
+        limits = [resolve_task_concurrency(role, layers).value for role in TASK_LIMIT_ROLES]
     execution = ProjectExecution.from_row(project)
     lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
                  else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
@@ -317,8 +318,8 @@ async def configuration_block(
         LessonsMode.DRAFT: "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",
         LessonsMode.WRITE: "- 经验沉淀：任务完成后直接写入项目知识",
     }[execution.distill_lessons])
-    if limit is not None:
-        lines.append(f"- 并发：这个项目同时最多运行 {limit} 个任务")
+    if limits:
+        lines.append(f"- 并发：这个任务同时最多运行 {limits[0]} 个 Worker、{limits[1]} 个 Reviewer")
     return "\n".join([*lines, "", START_QUESTION])
 
 
@@ -354,7 +355,7 @@ async def _cancellable(task_id: str) -> dict[str, Any]:
     task = await _task(task_id)
     if _group(task) not in (db_tasks.TaskGroup.IN_PROGRESS, db_tasks.TaskGroup.NEEDS_YOU):
         raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: only a running task can be "
-                                          "cancelled (stop a queued one)")
+                                          "cancelled")
     return task
 
 
@@ -383,13 +384,10 @@ async def _control(call: Call) -> dict[str, Any]:
             await start_ready_task(task_id, call.platform.bus, MANAGER_ADDRESS)
         except RequestError as exc:
             raise _request_error(exc) from None
-        limit = await load_concurrency(AgentType.PLANNER, task["project_id"])
-        return {"task_id": task_id, "started": True,
-                "note": f"its project runs at most {limit} task(s) at once; when full, it waits for one to end"}
+        return {"task_id": task_id, "started": True}
     if action == "stop":
         if status not in db_tasks.ACTIVE_STATUSES:
-            raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {status}: only a queued or running task can be "
-                                              "stopped")
+            raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {status}: only a running task can be stopped")
         await _publish(call, MessageType.TASK_STOP, task_id)
         return {"task_id": task_id, "stopped": True}
     if action == "restart":
@@ -418,8 +416,8 @@ async def _instruct(call: Call) -> dict[str, Any]:
         raise OpError(ErrorCode.CONFLICT, f"task {task_id} has not started, so no Planner can take a supplement: "
                                           "change its requirement with looper_task_update instead")
     if task["status"] not in db_tasks.ACTIVE_STATUSES:
-        raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: only a queued or running task takes "
-                                          "a supplement")
+        raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: only a running task takes a "
+                                          "supplement")
     supplement = await db_changes.add_supplement(
         task_id, kept_text(call.arguments["text"], SUPPLEMENTS_MAX_CHARS), via=_via(call.turn))
     if call.platform.task_router.has_planner(task_id):
@@ -494,8 +492,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_overview",
         description="What is happening now: task counts by group, the running tasks (with their own concurrency "
-                    "limits) and step runs, each active project's load against its limits, today's spend, unhealthy "
-                    "components.",
+                    "limits) and step runs, each active project's running tasks and step runs, today's spend, "
+                    "unhealthy components.",
         schema={"type": "object", "properties": {}, "additionalProperties": False},
         risk=Risk.READ, run=_overview,
     ),
@@ -544,7 +542,7 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_task_control",
-        description="start a ready task; stop a queued or running one; restart a stopped, failed or cancelled one "
+        description="start a ready task; stop a running one; restart a stopped, failed or cancelled one "
                     "(it goes on from its saved plan: accepted steps are kept and not run again); start_over one "
                     "instead only when the user asks to start from scratch (its steps and plan are deleted and it "
                     "plans anew; the user confirms it first); cancel a running one (the user confirms it first).",
@@ -558,7 +556,7 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_task_instruct",
-        description="Add what the user said to a queued or running task as a supplement: stored with the task, its "
+        description="Add what the user said to a running task as a supplement: stored with the task, its "
                     "Planner gets it in a turn and decides whether to change the plan, and every later Worker and "
                     "Reviewer sees it. To change a task that has not started, use looper_task_update.",
         schema={

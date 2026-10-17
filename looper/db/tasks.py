@@ -23,8 +23,7 @@ class TaskGroup(str, Enum):
     """What a task's status means at a glance: the dashboard counts tasks by group, the Tasks page filters by one."""
 
     NEEDS_YOU = "needs_you"  # its Planner runs, and a user gate of its plan waits for the user
-    IN_PROGRESS = "in_progress"  # its Planner runs
-    QUEUED = "queued"  # waiting for room under its project's Planner limit
+    IN_PROGRESS = "in_progress"  # its Planner runs, or is starting
     READY = "ready"  # created, never started
     ATTENTION = "attention"  # failed or stopped: it needs a look, a restart or a continue
     COMPLETED = "completed"
@@ -43,7 +42,8 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
     "stopping": TaskGroup.IN_PROGRESS,
     # What the Planner reports while a user gate of the plan waits for the user (other steps may run meanwhile).
     "waiting_user": TaskGroup.NEEDS_YOU,
-    "pending": TaskGroup.QUEUED,
+    # Started, its Planner starting (it used to wait here for room under its project's Planner limit).
+    "pending": TaskGroup.IN_PROGRESS,
     READY: TaskGroup.READY,
     "failed": TaskGroup.ATTENTION,
     "stopped": TaskGroup.ATTENTION,
@@ -55,10 +55,10 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
 # The statuses a Planner ends its task with (its final GOAL_STATUS); a user's stop or cancel ends it otherwise.
 PLANNER_END_STATUSES = frozenset({"completed", "failed"})
 
-# A task in one of these is queued or running: the sidebar's active count, the guard on deleting, and what a server
-# start resumes (with a live plan) or else marks stopped.
+# A task in one of these is running or starting: the sidebar's active count, the guard on deleting, and what a server
+# start resumes (with a live plan), starts (``pending``) or else marks stopped.
 ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
-                        if group in (TaskGroup.NEEDS_YOU, TaskGroup.IN_PROGRESS, TaskGroup.QUEUED))
+                        if group in (TaskGroup.NEEDS_YOU, TaskGroup.IN_PROGRESS))
 
 # A task in one of these ended without completing (failed, stopped or cancelled): a restart runs it again, from its
 # saved plan or planned anew.
@@ -330,13 +330,25 @@ async def reset_task_for_restart(
 
 
 async def start_ready_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """Move a ready task to ``pending``, once: its row, or None when there is no such task or it is not ready."""
+    """Move a ready task to ``pending`` (its Planner starting), once: its row, or None when there is no such task or
+    it is not ready."""
     pool = pool or get_pool()
     row = await pool.fetchrow(
         "UPDATE tasks SET status = 'pending', updated_at = now() WHERE id = $1 AND status = $2 RETURNING *",
         task_id, READY,
     )
     return _task(row) if row is not None else None
+
+
+async def started_task_ids(*, besides: list[str], pool: asyncpg.Pool | None = None) -> list[str]:
+    """The tasks a previous server left started without a Planner (``pending``), but ``besides`` (resumed instead),
+    oldest first."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT id FROM tasks WHERE status = 'pending' AND completed_at IS NULL AND NOT (id = ANY($1::text[])) "
+        "ORDER BY created_at, id", list(besides),
+    )
+    return [row["id"] for row in rows]
 
 
 async def mark_orphaned_tasks_stopped(

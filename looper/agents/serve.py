@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -544,6 +545,39 @@ async def _back_up_before_schema_change(pool: Any, dsn: str, runtime_root: Path,
                 path, path.stat().st_size, checked, shown, path)
 
 
+@dataclass(frozen=True)
+class LeftRunning:
+    """The tasks a previous server was running that carry on: from their live plan (``resumable``), or from the start
+    (``starting``: it had started them without giving them a Planner yet)."""
+
+    resumable: list[str]
+    starting: list[str]
+
+
+async def tasks_left_running(pool: Any) -> LeftRunning:
+    """The tasks the previous server was running that carry on (``carry_on_tasks``, once the agents are up); every
+    other task it was running is marked stopped now."""
+    from ..db.plans import resumable_task_ids
+    from ..db.tasks import ACTIVE_STATUSES, mark_orphaned_tasks_stopped, started_task_ids
+
+    resumable = await resumable_task_ids(ACTIVE_STATUSES, pool=pool)
+    starting = await started_task_ids(besides=resumable, pool=pool)
+    orphan_count = await mark_orphaned_tasks_stopped(keep=resumable + starting, pool=pool)
+    if orphan_count:
+        logger.info("marked %d orphaned task(s) as stopped", orphan_count)
+    return LeftRunning(resumable, starting)
+
+
+async def carry_on_tasks(task_router: TaskRouter, left: LeftRunning) -> None:
+    """Resume the tasks with a live plan and start those the previous server had not given a Planner yet."""
+    if left.resumable:
+        logger.info("resuming %d task(s) from their saved plans", len(left.resumable))
+        await task_router.resume_tasks(left.resumable)
+    if left.starting:
+        logger.info("starting %d task(s) the previous server had not given a Planner yet", len(left.starting))
+        await task_router.start_tasks(left.starting)
+
+
 def _local_url(host: str, port: int) -> str:
     """This server's address for a client on the same machine: loopback when it listens on every address."""
     if host in ("", "0.0.0.0"):
@@ -613,14 +647,8 @@ async def _run_agent_system(
     except Exception:
         logger.exception("could not sweep the agents a previous server left running")
 
-    # The tasks the previous server was running: those with a live plan carry
-    # on once the agents are up; the others are stopped.
-    from ..db.plans import resumable_task_ids
-    from ..db.tasks import ACTIVE_STATUSES, mark_orphaned_tasks_stopped
-    resumable = await resumable_task_ids(ACTIVE_STATUSES, pool=pool)
-    orphan_count = await mark_orphaned_tasks_stopped(keep=resumable, pool=pool)
-    if orphan_count:
-        logger.info("marked %d orphaned task(s) as stopped", orphan_count)
+    # The tasks the previous server was running: they carry on once the agents are up, or are stopped now.
+    left_running = await tasks_left_running(pool)
 
     # The step worktrees no task keeps any more (after the orphaned tasks stopped: those keep their unmerged ones).
     from . import step_workspaces
@@ -726,9 +754,7 @@ async def _run_agent_system(
     # --- Start ---
 
     await supervisor.start_all()
-    if resumable:
-        logger.info("resuming %d task(s) from their saved plans", len(resumable))
-        await task_router.resume_tasks(resumable)
+    await carry_on_tasks(task_router, left_running)
 
     # --- HTTP Server ---
 

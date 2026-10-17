@@ -95,27 +95,28 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
 
         status, body = await _get(_server(), "/api/overview")
         assert status == 200
-        assert body["tasks"] == {"needs_you": 0, "in_progress": 5, "queued": 2, "ready": 3, "attention": 2,
-                                 "completed": 205, "cancelled": 1, "other": 1, "total": total,
-                                 "other_statuses": {"archived": 1}}
+        # A started task whose Planner is starting (pending) is in progress: no task waits for room any more.
+        assert body["tasks"] == {"needs_you": 0, "in_progress": 7, "ready": 3, "attention": 2, "completed": 205,
+                                 "cancelled": 1, "other": 1, "total": total, "other_statuses": {"archived": 1}}
         # The CLI's status line reads the same counts.
         status, body = await _get(_server(), "/api/status")
-        assert body["tasks"] == {"total": total, "running": 5, "pending": 2, "completed": 205}
+        assert body["tasks"] == {"total": total, "running": 7, "completed": 205}
 
         for group, statuses in (("attention", {"failed", "stopped"}), ("in_progress",
-                                {"executing", "planning", "verifying", "assigned"}), ("other", {"archived"})):
+                                {"executing", "planning", "verifying", "assigned", "pending"}), ("other", {"archived"})):
             status, body = await _get(_server(), "/api/tasks", {"group": group})
             assert status == 200
             assert {t["status"] for t in body["tasks"]} == statuses
         status, body = await _get(_server(), "/api/tasks", {"group": "completed", "project_id": b["id"]})
         assert body["tasks"] == []
-        status, body = await _get(_server(), "/api/tasks", {"group": "busy"})
-        assert status == 400 and "in_progress" in body["error"]
+        for unknown in ("busy", "queued"):
+            status, body = await _get(_server(), "/api/tasks", {"group": unknown})
+            assert status == 400 and "in_progress" in body["error"]
 
     _run(test, monkeypatch)
 
 
-def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import agent_setting_layers, projects
 
     async def test(pool: Any) -> None:
@@ -124,11 +125,9 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
         c = await projects.create_project(name="gamma", pool=pool)
         await projects.create_project(name="delta", pool=pool)  # no tasks
         await _tasks(pool, a["id"], "executing", 1)
-        await _tasks(pool, a["id"], "pending", 2)
         await _tasks(pool, b["id"], "init", 1)
         await _tasks(pool, c["id"], "completed", 4)
-        await agent_setting_layers.put_layer("role", "planner", None, {"max_concurrency": 3}, pool=pool)
-        await agent_setting_layers.put_layer("role_project", "worker", a["id"], {"max_concurrency": 2}, pool=pool)
+        await agent_setting_layers.put_layer("role", "worker", None, {"max_concurrency": 2}, pool=pool)
 
         now = datetime.now(timezone.utc)
         router = SimpleNamespace(running_planners=lambda: [
@@ -172,14 +171,13 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
         assert agents["workers"][1]["task_role"] == {"id": "fe_rd", "kind": "work", "version": 1}
         assert agents["reviewers"][0]["task_role"] == {"id": "security_review", "kind": "review", "version": 3}
         assert "task_role" not in agents["workers"][0]
-        # Only the projects with a task in progress, queued or ready, each against its limits read now.
+        # Only the projects with a task in progress or ready, each with what runs and waits there; a project has no
+        # limits (a waiting run waits for its task's).
         assert body["projects"] == [
-            {"project_id": a["id"], "name": "alpha", "tasks": {"running": 1, "queued": 2, "ready": 0, "limit": 3},
-             "workers": {"running": 1, "waiting": 1, "limit": 2},
-             "reviewers": {"running": 1, "waiting": 0, "limit": 8}},
-            {"project_id": b["id"], "name": "beta", "tasks": {"running": 0, "queued": 0, "ready": 1, "limit": 3},
-             "workers": {"running": 0, "waiting": 0, "limit": 16},
-             "reviewers": {"running": 0, "waiting": 0, "limit": 8}},
+            {"project_id": a["id"], "name": "alpha", "tasks": {"running": 1, "ready": 0},
+             "workers": {"running": 1, "waiting": 1}, "reviewers": {"running": 1, "waiting": 0}},
+            {"project_id": b["id"], "name": "beta", "tasks": {"running": 0, "ready": 1},
+             "workers": {"running": 0, "waiting": 0}, "reviewers": {"running": 0, "waiting": 0}},
         ]
         assert body["idle_projects"] == 2
         # The Manager's looper_overview, which it answers a chat's "what is running" from, names the role too.
@@ -257,7 +255,7 @@ def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_g
         assert (listed["task_count"], listed["active_count"]) == (6, 4)
         status, body = await _get(_server(), "/api/tasks")
         assert {t["task_id"]: t["group"] for t in body["tasks"]} == {
-            "planning": "in_progress", "verifying": "in_progress", "executing": "in_progress", "pending": "queued",
+            "planning": "in_progress", "verifying": "in_progress", "executing": "in_progress", "pending": "in_progress",
             "init": "ready", "completed": "completed"}
 
         server, writer = _server(), _Writer()

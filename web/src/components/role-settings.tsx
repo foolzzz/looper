@@ -223,17 +223,15 @@ function sharedSummary(effective: EffectiveSettings, roles: number) {
   ].join(" · ");
 }
 
-/** A role's line: its job, then its Agent Profile (with its effort) and where that comes from, and its concurrency
- * limit. */
+/** A role's line: its job, then its Agent Profile (with its effort) and where that comes from, and for the Worker and
+ * the Reviewer the default limit in each task. */
 function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined) {
   const parts = [ROLE_JOBS[role]];
   if (effective) {
     const own = effective.profile.source === "role";
     parts.push(`${profileName(effective.profile.value)} (${own ? "own" : "shared"})`);
     const limit = effective.max_concurrency?.value;
-    if (limit != null) {
-      parts.push(role === "planner" ? `up to ${count(limit, "task")} per project` : `up to ${limit} per project`);
-    }
+    if (limit != null && (role === "worker" || role === "reviewer")) parts.push(`up to ${limit} per task`);
   }
   return parts.join(" · ");
 }

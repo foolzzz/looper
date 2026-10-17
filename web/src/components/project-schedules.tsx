@@ -29,10 +29,25 @@ import {
   type ScheduleRunsPage,
   type ScheduleRunStatus,
   type ScheduleUpdate,
+  type TaskLimitRole,
   type TaskRole,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { NOTIFY_OPTIONS, RUN_STATUS, omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
+import {
+  NOTIFY_OPTIONS,
+  RUN_STATUS,
+  TASK_LIMIT_ROLES,
+  badTaskLimit,
+  changedTaskLimits,
+  createTaskLimits,
+  omit,
+  runNotice,
+  taskLimitsDraft,
+  taskLimitsOf,
+  useNotices,
+  type Notice,
+  type TaskLimitsDraft,
+} from "@/lib/schedules";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { errorText } from "@/lib/use-action";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
@@ -45,6 +60,10 @@ const REFRESH_MS = 10_000;
 const PREVIEW_DELAY_MS = 300;
 const PREVIEW_COUNT = 5;
 const ROLES: TaskRole[] = ["planner", "worker", "reviewer"];
+const TASK_LIMIT_LABELS: Record<TaskLimitRole, string> = {
+  worker: "Workers at once in each run's task",
+  reviewer: "Reviewers at once in each run's task",
+};
 const TEXTAREA =
   "w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-invalid:border-destructive";
 
@@ -150,6 +169,7 @@ interface Draft {
   /** USD; "" = the project's task cap. */
   budget: string;
   profiles: Partial<Record<TaskRole, string>>;
+  taskLimits: TaskLimitsDraft;
   /** "" = no gate. */
   gateCommand: string;
   /** Seconds; "" = the default. */
@@ -184,6 +204,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       timeout: "",
       budget: "",
       profiles: {},
+      taskLimits: { worker: "", reviewer: "" },
       gateCommand: "",
       gateTimeout: "",
       dailyBudget: "",
@@ -202,6 +223,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     timeout: schedule.run_timeout_seconds == null ? "" : String(schedule.run_timeout_seconds / 60),
     budget: schedule.run_budget_usd == null ? "" : String(schedule.run_budget_usd),
     profiles: { ...schedule.profile_overrides },
+    taskLimits: taskLimitsDraft(schedule.task_limits),
     gateCommand: schedule.gate_command ?? "",
     gateTimeout: schedule.gate_timeout_seconds == null ? "" : String(schedule.gate_timeout_seconds),
     dailyBudget: schedule.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
@@ -231,6 +253,7 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields
     run_timeout_seconds: minutes == null ? null : Math.round(minutes * 60),
     run_budget_usd: numberOf(draft.budget),
     profile_overrides: Object.fromEntries(Object.entries(draft.profiles).filter(([, profile]) => profile)),
+    task_limits: taskLimitsOf(draft.taskLimits),
     gate_command: draft.gateCommand.trim() || null,
     gate_timeout_seconds: numberOf(draft.gateTimeout),
     daily_budget_usd: numberOf(draft.dailyBudget),
@@ -242,7 +265,8 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields
 const sameProfiles = (a: Partial<Record<TaskRole, string>>, b: Partial<Record<TaskRole, string>>) =>
   ROLES.every((role) => (a[role] || "") === (b[role] || ""));
 
-/** What the fields change, as a PUT takes it; `profile_overrides` is sent whole, and a cleared field as null. */
+/** What the fields change, as a PUT takes it; `profile_overrides` and `task_limits` are sent whole, and a cleared
+ * field as null. */
 function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): ScheduleUpdate {
   const changes: ScheduleUpdate = {};
   for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up", "notify"] as const) {
@@ -255,6 +279,7 @@ function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): Sc
   if (fields.run_budget_usd !== schedule.run_budget_usd) changes.run_budget_usd = fields.run_budget_usd;
   if (!sameProfiles(fields.profile_overrides, schedule.profile_overrides))
     changes.profile_overrides = fields.profile_overrides;
+  Object.assign(changes, changedTaskLimits(fields.task_limits, schedule.task_limits));
   if ((fields.gate_command ?? "") !== (schedule.gate_command ?? "")) changes.gate_command = fields.gate_command;
   if (fields.gate_timeout_seconds !== schedule.gate_timeout_seconds)
     changes.gate_timeout_seconds = fields.gate_timeout_seconds;
@@ -271,6 +296,7 @@ function createFields(fields: Required<ScheduleFields>): ScheduleFields {
     run_timeout_seconds,
     run_budget_usd,
     profile_overrides,
+    task_limits,
     gate_command,
     gate_timeout_seconds,
     daily_budget_usd,
@@ -284,6 +310,7 @@ function createFields(fields: Required<ScheduleFields>): ScheduleFields {
     ...(run_timeout_seconds != null ? { run_timeout_seconds } : {}),
     ...(run_budget_usd != null ? { run_budget_usd } : {}),
     ...(Object.keys(profile_overrides).length ? { profile_overrides } : {}),
+    ...createTaskLimits(task_limits),
     ...(gate_command ? { gate_command } : {}),
     ...(gate_timeout_seconds != null ? { gate_timeout_seconds } : {}),
     ...(daily_budget_usd != null ? { daily_budget_usd } : {}),
@@ -656,9 +683,12 @@ function ScheduleForm({
   const badMaxParallel =
     fields.overlap === "parallel" &&
     !(Number.isInteger(maxParallel) && maxParallel >= 1 && maxParallel <= limits.max_parallel_runs_limit);
+  const badLimit = (role: TaskLimitRole) => badTaskLimit(fields.task_limits?.[role] ?? null, limits.concurrency_max);
+  const badLimits = TASK_LIMIT_ROLES.some(badLimit);
   const invalid =
     missing.length > 0 ||
     badMaxParallel ||
+    badLimits ||
     tooLong ||
     ruleInvalid ||
     badTimeout ||
@@ -832,21 +862,11 @@ function ScheduleForm({
           />
           <p
             id={id("max-parallel-hint")}
-            className={cn(
-              "text-xs",
-              badMaxParallel
-                ? "text-destructive"
-                : limits.planner_limit != null && maxParallel > limits.planner_limit
-                  ? "text-warning"
-                  : "text-muted-foreground",
-            )}
+            className={cn("text-xs", badMaxParallel ? "text-destructive" : "text-muted-foreground")}
           >
             {badMaxParallel
               ? `A whole number from 1 to ${limits.max_parallel_runs_limit}.`
-              : limits.planner_limit != null && maxParallel > limits.planner_limit
-                ? `This project runs at most ${limits.planner_limit} tasks at once (its Planner limit): runs past it ` +
-                  "wait as pending, and their run timeout counts while they wait."
-                : "Runs of this schedule in progress at once; a firing past it is skipped as busy."}
+              : "Runs of this schedule in progress at once; a firing past it is skipped as busy."}
           </p>
         </div>
       )}
@@ -913,6 +933,31 @@ function ScheduleForm({
           {AGENT_PROFILE.plural} tab and Settings → Roles.
         </p>
       </fieldset>
+
+      <div className="space-y-1">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {TASK_LIMIT_ROLES.map((role) => (
+            <div key={role} className="space-y-1">
+              <label htmlFor={id(`limit-${role}`)} className={LABEL}>{TASK_LIMIT_LABELS[role]}</label>
+              <Input
+                id={id(`limit-${role}`)}
+                inputMode="numeric"
+                value={draft.taskLimits[role]}
+                onChange={(e) => set("taskLimits", { ...draft.taskLimits, [role]: e.target.value })}
+                placeholder="Default"
+                aria-invalid={badLimit(role)}
+                aria-describedby={id("limits-hint")}
+                className="aria-invalid:border-destructive"
+              />
+            </div>
+          ))}
+        </div>
+        <p id={id("limits-hint")} className={cn("text-xs", badLimits ? "text-destructive" : "text-muted-foreground")}>
+          {badLimits
+            ? `Enter whole numbers from 1 to ${limits.concurrency_max}, or leave them empty.`
+            : `Optional. Each run's task gets these as its own limits, 1 to ${limits.concurrency_max}. Empty: the default in Settings → Roles.`}
+        </p>
+      </div>
 
       <GateBudgetNotify
         id={id}

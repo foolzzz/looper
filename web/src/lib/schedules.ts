@@ -1,7 +1,15 @@
 // What a schedule's row shows the same way wherever it is listed: its project's Schedules tab and the Schedules
-// page.
+// page; and how the schedule form sends the task limits.
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ScheduleNotify, ScheduleRunInfo, ScheduleRunStatus } from "@/lib/api";
+import type {
+  ScheduleFields,
+  ScheduleNotify,
+  ScheduleRunInfo,
+  ScheduleRunStatus,
+  ScheduleTaskLimits,
+  ScheduleUpdate,
+  TaskLimitRole,
+} from "@/lib/api";
 
 /** How long the answer to "Run now" or a note stays beside the row's controls; errors stay. */
 const NOTICE_MS = 10_000;
@@ -40,6 +48,48 @@ export const NOTIFY_OPTIONS: { value: ScheduleNotify; label: string; hint: strin
   { value: "always", label: "Always", hint: "Every run that ran a task, plus the alerts." },
   { value: "never", label: "Never", hint: "Nothing is sent; the dashboard still shows failing schedules." },
 ];
+
+/** The roles a schedule may limit in each task it creates. */
+export const TASK_LIMIT_ROLES: TaskLimitRole[] = ["worker", "reviewer"];
+
+/** A schedule's task limits as its form holds them: text as typed, "" = the default (Settings → Roles). */
+export type TaskLimitsDraft = Record<TaskLimitRole, string>;
+
+export const taskLimitsDraft = (limits: ScheduleTaskLimits): TaskLimitsDraft => ({
+  worker: limits.worker == null ? "" : String(limits.worker),
+  reviewer: limits.reviewer == null ? "" : String(limits.reviewer),
+});
+
+/** The draft as the API takes it: null when empty, NaN when it is not a number (`badTaskLimit` tells). */
+export function taskLimitsOf(draft: TaskLimitsDraft): ScheduleTaskLimits {
+  const of = (text: string) => (text.trim() === "" ? null : Number(text.trim()));
+  return { worker: of(draft.worker), reviewer: of(draft.reviewer) };
+}
+
+/** A limit the server would refuse: set, and not a whole number from 1 to `max`. */
+export const badTaskLimit = (value: number | null, max: number) =>
+  value != null && !(Number.isInteger(value) && value >= 1 && value <= max);
+
+/** Both roles' limits, a role left out as null. */
+const both = (limits: Partial<ScheduleTaskLimits> | null): ScheduleTaskLimits => ({
+  worker: limits?.worker ?? null,
+  reviewer: limits?.reviewer ?? null,
+});
+
+/** What a new schedule sends: its limits only when one is set, so a schedule without them sends none. */
+export function createTaskLimits(limits: Partial<ScheduleTaskLimits> | null): Pick<ScheduleFields, "task_limits"> {
+  const all = both(limits);
+  return TASK_LIMIT_ROLES.some((role) => all[role] != null) ? { task_limits: all } : {};
+}
+
+/** What an update sends when a limit changed: the whole object, a cleared role as null (the server replaces both). */
+export function changedTaskLimits(
+  limits: Partial<ScheduleTaskLimits> | null,
+  saved: ScheduleTaskLimits,
+): Pick<ScheduleUpdate, "task_limits"> {
+  const all = both(limits);
+  return TASK_LIMIT_ROLES.some((role) => all[role] !== saved[role]) ? { task_limits: all } : {};
+}
 
 /** `record` without `key`. */
 export function omit<T>(record: Record<string, T>, key: string): Record<string, T> {

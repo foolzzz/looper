@@ -14,7 +14,7 @@ Deploy autonomous coding agents that plan, decompose, and execute complex tasks 
 
 Looper is a self-hosted multi-agent system that turns a single task description
 into a coordinated plan–execute–verify loop. A **Manager** agent talks to users,
-a **TaskRouter** manages lifecycle and concurrency, a **Planner** decomposes work
+a **TaskRouter** manages task lifecycle, a **Planner** decomposes work
 into steps, and a **WorkerPool** runs Claude CLI subprocesses to do the actual
 coding.
 
@@ -26,7 +26,7 @@ User ─→ Chat / Lark / Telegram
           │
        Manager          (understands intent, routes tasks)
           │
-       TaskRouter       (lifecycle, concurrency, queuing)
+       TaskRouter       (task lifecycle)
           │
        Planner          (decomposes into steps, verifies results)
           │
@@ -189,7 +189,7 @@ Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
 | Tier | Module | Role |
 |---|---|---|
 | **Manager** | `looper/agents/tiers/manager.py` | User-facing steward, intent classification, chat |
-| **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle, a limit of running tasks per project (8 by default), queue |
+| **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle: a started task gets its Planner at once, with no limit on how many run |
 | **Planner** | `looper/agents/tiers/planner.py` | Step decomposition, dispatch, verification |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI subprocess pool with stream-json output |
 | **Scheduler** | `looper/agents/scheduler.py` | Fires each project's schedules: a full task per firing, started at once; missed fires run once, an overlapping firing is skipped or queued, a run past its timeout is stopped; a gate command decides whether a run is worth a task, a failed run's input goes to the next, a daily budget, and messages with two alerts to Telegram or Lark |
@@ -222,7 +222,7 @@ release wheel serves the copy packaged with it.
 
 | Page | Features |
 |---|---|
-| **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's concurrency against its limits, the schedules (next fires, failing ones, today's skips), today's spend, and a warning when a component is unhealthy |
+| **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's running tasks, Workers and Reviewers, the schedules (next fires, failing ones, today's skips), today's spend, and a warning when a component is unhealthy |
 | **Chat** | Talk to the global Manager, or to a running task's Planner (a message reaches it as a supplement to the task); with the Manager selected, its conversations by channel (dashboard chat, Lark, Telegram), the Lark and Telegram ones read-only; SSE streaming |
 | **Tasks** | Task list, project, status and schedule filters, a Scheduled badge on the tasks a schedule created, create/start/stop/delete controls |
 | **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, its schedules (rule, next fire times, enable, Run now, run history) and its settings |
@@ -363,9 +363,10 @@ for the details.
   Workers it is one run's total time (default 86400); output does not extend
   it. Workers apply both limits from the next step on
 
-How many Planners (one per task), Workers and Reviewers run at once in a
-project (8, 16 and 8 by default) is a layered setting too: per role in
-Settings → Roles, and per role in a project on its Agent Profiles tab.
+Concurrency is per task: nothing limits how many tasks run, and a task runs at
+most so many of its Workers and Reviewers at once (16 and 8 by default). The
+default for every task is set per role in Settings → Roles; a task sets its own
+on its Agents tab, and a schedule gives the tasks it creates theirs.
 
 ## Task Lifecycle
 

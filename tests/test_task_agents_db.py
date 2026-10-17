@@ -1,7 +1,7 @@
 """A task's own choices per role on a real PostgreSQL: its concurrency limit, which the WorkerPool holds its
-Workers to within its project's limit, and its Agent Profile, which its next step runs; the task API sets and
-shows both, and the Manager's ``looper_concurrency`` changes a task's limit at once and a project's only after the
-user confirms.
+Workers to (a project counts nothing: each task its own), and its Agent Profile, which its next step runs; the task
+API sets and shows both, and the Manager's ``looper_concurrency`` changes a task's limit at once and refuses a
+project's, which no longer exists.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
 """
@@ -39,7 +39,7 @@ _LISTENING = (
 
 
 class _Rechecks:
-    """A TaskRouter or WorkerPool stand-in that counts the rechecks it is asked for."""
+    """A WorkerPool stand-in that counts the rechecks it is asked for (or a TaskRouter's, which is asked for none)."""
 
     def __init__(self, **parts: Any) -> None:
         self.rechecks = 0
@@ -152,20 +152,44 @@ def test_a_tasks_limit_holds_its_workers_and_the_next_starts_as_one_ends(
     _run(test, monkeypatch)
 
 
-def test_the_projects_limit_binds_when_it_is_lower_than_the_tasks(
+def test_two_tasks_of_one_project_each_run_their_own_limit_at_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        for task_id in ("task-a", "task-b"):
+            await _task(pool, task_id, "running", project)
+            assert (await _call("PUT", f"/api/tasks/{task_id}/agents", {"concurrency": {"worker": 2}}))[0] == 200
+        async with _Pool(tmp_path) as runs:
+            for worker_id in ("a1", "a2", "a3", "b1", "b2", "b3"):
+                await runs.send(worker_id, f"task-{worker_id[0]}")
+            running, waiting = await runs.settled(4, 2)
+        # Four Workers of one project at once: two in each task, one of each waiting.
+        assert sorted(w[0] for w in running) == ["a", "a", "b", "b"] and sorted(w[0] for w in waiting) == ["a", "b"]
+        for task_id in ("task-a", "task-b"):
+            assert await _waits(pool, task_id) == ["Worker waits for room in this task (2 running, limit 2)"]
+
+    _run(test, monkeypatch)
+
+
+def test_a_tasks_own_limit_above_the_default_applies_and_a_task_without_one_runs_the_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
-        assert (await _call("PUT", f"/api/projects/{project['id']}/agent-settings/roles/worker",
-                            {"max_concurrency": 1}))[0] == 200
-        assert (await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 3}}))[0] == 200
+        await _task(pool, "task-b", "running", project)
+        assert (await _call("PUT", "/api/agent-settings/roles/worker", {"max_concurrency": 1}))[0] == 200
+        # Nothing caps a task's own limit but the most a limit may be: 3 over the default 1 is taken as it is.
+        status, answer = await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 3}})
+        assert status == 200 and answer["agents"]["roles"]["worker"]["concurrency"] == {
+            "value": 3, "source": "task", "task": 3, "default": {"value": 1, "source": "role"}}
         async with _Pool(tmp_path) as runs:
-            for worker_id in ("w1", "w2", "w3"):
-                await runs.send(worker_id, "task-a")
-            await runs.settled(1, 2)
-        assert await _waits(pool, "task-a") == ["Worker waits for room in this project (1 running, limit 1)"] * 2
+            for worker_id in ("a1", "a2", "a3", "b1", "b2"):
+                await runs.send(worker_id, f"task-{worker_id[0]}")
+            running, waiting = await runs.settled(4, 1)
+        assert sorted(running) == ["a1", "a2", "a3", "b1"] or sorted(running) == ["a1", "a2", "a3", "b2"]
+        assert await _waits(pool, "task-b") == ["Worker waits for room in this task (1 running, limit 1)"]
 
     _run(test, monkeypatch)
 
@@ -217,8 +241,9 @@ async def _profiles(pool: Any) -> None:
     ({"concurrency": {"reviewer": True}}, "got True"),
     ({"concurrency": {"worker": "2"}}, "got '2'"),
     ({"concurrency": {"worker": 2.0}}, "got 2.0"),
-    ({"concurrency": {"planner": 2}}, "one Planner runs a task"),
-    ({"concurrency": {"manager": 1}}, "unknown role 'manager'"),
+    ({"concurrency": {"planner": 2}}, "concurrency: one Planner runs a task, so a task has no Planner limit, and "
+                                      "nothing limits how many tasks run at once"),
+    ({"concurrency": {"manager": 1}}, "concurrency: unknown role 'manager'"),
     ({"concurrency": [2]}, "concurrency must be an object"),
     ({"profiles": {"worker": "nope"}}, "profiles.worker: no Agent Profile 'nope'; registered: "),
     ({"profiles": {"planner": "one-off/opus"}}, "profiles.planner: Agent Profile 'one-off/opus' cannot run the "
@@ -315,24 +340,21 @@ def test_the_task_shows_each_roles_profile_and_limit_with_their_sources(monkeypa
         assert (shown["concurrency_max"], shown["editable"]) == (64, True)
         assert {role: (v["profile"]["value"]["name"], v["profile"]["source"]) for role, v in shown["roles"].items()} \
             == {role: ("claude-code/opus", "builtin") for role in ("planner", "worker", "reviewer")}
-        assert {role: v["concurrency"] for role, v in shown["roles"].items()} == {
-            "planner": {"value": 8, "source": "builtin"},
-            "worker": {**builtin, "task": None, "project": builtin},
-            "reviewer": {"value": 8, "source": "builtin", "task": None, "project": {"value": 8, "source": "builtin"}},
+        # The Planner has no limit: one Planner runs a task, and nothing limits how many tasks run.
+        assert {role: v.get("concurrency") for role, v in shown["roles"].items()} == {
+            "planner": None,
+            "worker": {**builtin, "task": None, "default": builtin},
+            "reviewer": {"value": 8, "source": "builtin", "task": None, "default": {"value": 8, "source": "builtin"}},
         }
         assert (await _call("PUT", "/api/agent-settings/roles/worker", {"max_concurrency": 10}))[0] == 200
-        status, answer = await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 2}})
         role = {"value": 10, "source": "role"}
-        assert await limit("task-a", "worker") == {"value": 2, "source": "task", "task": 2, "project": role}
+        assert await limit("task-a", "worker") == {**role, "task": None, "default": role}
+        status, answer = await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": 2}})
+        assert await limit("task-a", "worker") == {"value": 2, "source": "task", "task": 2, "default": role}
         assert answer["agents"] == await agents("task-a") and "note" not in answer
-        # Over its project's limit, the project's applies.
-        assert (await _call("PUT", f"/api/projects/{project['id']}/agent-settings/roles/worker",
-                            {"max_concurrency": 1}))[0] == 200
-        in_project = {"value": 1, "source": "role_project"}
-        assert await limit("task-a", "worker") == {**in_project, "task": 2, "project": in_project}
-        # Cleared, the task follows its project again.
+        # Cleared, the task follows the default again.
         await _call("PUT", "/api/tasks/task-a/agents", {"concurrency": {"worker": None}})
-        assert await limit("task-a", "worker") == {**in_project, "task": None, "project": in_project}
+        assert await limit("task-a", "worker") == {**role, "task": None, "default": role}
 
         # A profile, by name or by id, and a limit of the same role are one task layer, set together.
         status, answer = await _call("PUT", "/api/tasks/task-a/agents", {
@@ -398,61 +420,6 @@ def _concurrency_chat(tmp: Path, **parts: Any) -> _Chat:
     return chat
 
 
-async def _project_limits(pool: Any, project_id: str) -> dict[str, int]:
-    return {r["role"]: r["max_concurrency"] for r in await pool.fetch(
-        "SELECT role, max_concurrency FROM agent_setting_layers WHERE scope = 'role_project' AND project_id = $1 "
-        "AND max_concurrency IS NOT NULL", project_id)}
-
-
-def test_a_projects_limits_change_only_after_the_user_confirms(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    from looper.db import manager_actions
-
-    async def test(pool: Any) -> None:
-        project = await _project(pool)
-        chat = _concurrency_chat(tmp_path)
-        change = {"project": "CALC", "limits": {"worker": 2, "planner": 3}}
-        (asked,) = await chat.say("把项目 calc 的 Worker 并发改成 2，任务并发改成 3", ("looper_concurrency", change))
-        assert asked["status"] == "needs_confirmation"
-        assert await _project_limits(pool, project["id"]) == {} and chat.workers.rechecks == 0
-        (block,) = chat.turns[0].blocks
-        assert block.splitlines()[1:4] == [
-            "要修改项目「calc」的并发上限吗？",
-            "- Worker（同时运行的 Worker 数）：16（内置默认） → 2（本项目里的这个角色）",
-            "- Planner（同时运行的任务数）：8（内置默认） → 3（本项目里的这个角色）",
-        ]
-        assert "调低不会停止正在运行的工作" in block
-        (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
-        assert done["status"] == "ok", done
-        assert done["result"]["changes"] == [
-            {"role": "worker", "before": {"value": 16, "source": "builtin"},
-             "after": {"value": 2, "source": "role_project"}},
-            {"role": "planner", "before": {"value": 8, "source": "builtin"},
-             "after": {"value": 3, "source": "role_project"}},
-        ]
-        assert "stops nothing that runs" in done["result"]["note"]
-        assert await _project_limits(pool, project["id"]) == {"worker": 2, "planner": 3}
-        assert (chat.router.rechecks, chat.workers.rechecks) == (1, 1)
-
-        # Clearing asks too, and shows what the role inherits.
-        (asked,) = await chat.say("Worker 并发恢复默认", ("looper_concurrency",
-                                                    {"project": "calc", "limits": {"worker": None}}))
-        assert "- Worker（同时运行的 Worker 数）：2（本项目里的这个角色） → 16（内置默认）" in chat.turns[2].blocks[0]
-        # A message that does not confirm it leaves the limit as it is.
-        assert await chat.say("算了") == []
-        assert await _project_limits(pool, project["id"]) == {"worker": 2, "planner": 3}
-
-        trail = [(a["tool"], a["risk"], a["status"]) for a in await pool.fetch(
-            "SELECT tool, risk, status FROM manager_actions ORDER BY id")]
-        assert trail == [("looper_concurrency", "high", "needs_confirmation"),
-                         ("looper_concurrency", "high", "ok"),
-                         ("looper_concurrency", "high", "needs_confirmation")]
-        assert await manager_actions.for_task("task-x", pool=pool) == []
-
-    _run(test, monkeypatch)
-
-
 def test_a_tasks_limit_changes_at_once_and_reads_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import manager_actions
 
@@ -465,26 +432,27 @@ def test_a_tasks_limit_changes_at_once_and_reads_back(monkeypatch: pytest.Monkey
         assert answer["status"] == "ok", answer
         assert answer["result"]["changes"] == [{
             "role": "worker", "before": {"value": 16, "source": "builtin"}, "after": {"value": 1, "source": "task"},
-            "task_limit": 1, "project_limit": {"value": 16, "source": "builtin"}}]
+            "task_limit": 1, "default": {"value": 16, "source": "builtin"}}]
         assert chat.turns[0].blocks == [] and chat.workers.rechecks == 1
         assert await pool.fetchval("SELECT max_concurrency FROM task_concurrency_limits WHERE task_id = 'task-a' "
                                    "AND role = 'worker'") == 1
         (trail,) = await manager_actions.for_task("task-a", pool=pool)
         assert (trail["tool"], trail["risk"], trail["status"]) == ("looper_concurrency", "write", "ok")
 
-        # Over the project's limit, the answer says the project's applies.
-        await pool.execute("INSERT INTO agent_setting_layers (scope, role, project_id, max_concurrency) VALUES "
-                           "('role_project', 'reviewer', $1, 2)", project["id"])
+        # Over the default, the task's own applies as it is.
+        await pool.execute("INSERT INTO agent_setting_layers (scope, role, max_concurrency) VALUES "
+                           "('role', 'reviewer', 2)")
         (answer,) = await chat.say("Reviewer 并发 5", ("looper_concurrency", {
             "task_id": "task-a", "limits": {"reviewer": 5}}))
         (change,) = answer["result"]["changes"]
-        assert (change["after"], change["task_limit"]) == ({"value": 2, "source": "role_project"}, 5)
-        assert "project's own limit is lower than the task's for reviewer" in answer["result"]["note"]
+        assert (change["before"], change["after"], change["task_limit"], change["default"]) == (
+            {"value": 2, "source": "role"}, {"value": 5, "source": "task"}, 5, {"value": 2, "source": "role"})
 
         # looper_tasks get and looper_overview show the task's own limits.
         (got,) = await chat.say("看看 task-a", ("looper_tasks", {"action": "get", "task_id": "task-a"}))
         assert got["result"]["concurrency"]["worker"] == {
-            "value": 1, "source": "task", "task": 1, "project": {"value": 16, "source": "builtin"}}
+            "value": 1, "source": "task", "task": 1, "default": {"value": 16, "source": "builtin"}}
+        assert set(got["result"]["concurrency"]) == {"worker", "reviewer"}
         chat.router.running_planners = lambda: [{"planner_id": "planner-task-a", "task_id": "task-a",
                                                  "project_id": project["id"], "requirement": "r", "name": "a"}]
         chat.workers.runs = lambda: []
@@ -530,17 +498,19 @@ def test_the_manager_changes_the_agents_of_a_task_that_ended_but_not_its_require
 
 
 @pytest.mark.parametrize(("arguments", "code", "message"), [
-    ({"task_id": "task-a", "limits": {"planner": 2}}, "invalid", "one Planner runs a task"),
-    ({"task_id": "task-a", "project": "calc", "limits": {"worker": 2}}, "invalid", "exactly one of project"),
-    ({"limits": {"worker": 2}}, "invalid", "exactly one of project"),
+    # A project has no limits, nor does the Planner: the call is refused, and nothing is asked or changed.
+    ({"project": "calc", "limits": {"worker": 2}}, "invalid", "unknown argument 'project'"),
+    ({"task_id": "task-a", "project": "calc", "limits": {"worker": 2}}, "invalid", "unknown argument 'project'"),
+    ({"task_id": "task-a", "limits": {"planner": 2}}, "invalid", "unknown key 'planner'; its keys are: worker, "
+                                                                 "reviewer"),
+    ({"limits": {"worker": 2}}, "invalid", "task_id is required"),
     ({"task_id": "task-a", "limits": {}}, "invalid", "at least one role"),
     ({"task_id": "task-a", "limits": {"worker": 0}}, "invalid", "limits.worker must be from 1 to 64"),
     ({"task_id": "task-a", "limits": {"worker": True}}, "invalid", "limits.worker must be an integer"),
     ({"task_id": "task-a", "limits": {"worker": "2"}}, "invalid", "limits.worker must be an integer"),
-    ({"project": "calc", "limits": {"manager": 2}}, "invalid", "unknown key 'manager'"),
+    ({"task_id": "task-a", "limits": {"manager": 2}}, "invalid", "unknown key 'manager'"),
     ({"task_id": "task-done", "limits": {"worker": 2}}, "conflict", "the task is completed"),
     ({"task_id": "task-nope", "limits": {"worker": 2}}, "not_found", "no task task-nope"),
-    ({"project": "nope", "limits": {"worker": 2}}, "not_found", "no project named 'nope'"),
 ])
 def test_the_manager_is_told_why_a_change_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: dict[str, Any], code: str, message: str,
@@ -552,9 +522,10 @@ def test_the_manager_is_told_why_a_change_is_refused(
         chat = _concurrency_chat(tmp_path)
         (answer,) = await chat.say("改并发", ("looper_concurrency", arguments))
         assert _error(answer) == code and message in answer["error"]["message"], answer
-        assert chat.turns[0].blocks == []
+        assert chat.turns[0].blocks == [] and (chat.router.rechecks, chat.workers.rechecks) == (0, 0)
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
-        assert await _project_limits(pool, project["id"]) == {}
+        assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE max_concurrency IS NOT NULL") == 0
+        assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE status = 'needs_confirmation'") == 0
 
     _run(test, monkeypatch)
 

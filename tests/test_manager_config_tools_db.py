@@ -295,30 +295,34 @@ def test_the_shared_defaults_change_only_after_the_user_confirms(
     _run(test, monkeypatch)
 
 
-def test_a_limit_changes_only_after_the_user_confirms_and_lets_what_waits_check_again(
+def test_a_roles_default_limit_changes_only_after_the_user_confirms_and_a_projects_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
         chat = _concurrency_chat(tmp_path)
-        (asked,) = await chat.say("calc 的 Worker 并发改成 3", ("looper_settings", {
+        # A project has no limits: refused with the reason, nothing asked or stored.
+        (refused,) = await chat.say("calc 的 Worker 并发改成 3", ("looper_settings", {
             "action": "set", "project": "calc", "role": "worker", "values": {"max_concurrency": 3}}))
+        assert refused["status"] == "error" and "concurrency is per task" in refused["error"]["message"]
+        assert chat.turns[0].blocks == [] and chat.workers.rechecks == 0
+        assert "max_concurrency" not in (await _project_settings(project["id"]))["roles"]["worker"]["effective"]
+
+        (asked,) = await chat.say("Worker 的默认并发改成 3", ("looper_settings", {
+            "action": "set", "role": "worker", "values": {"max_concurrency": 3}}))
         assert asked["status"] == "needs_confirmation"
-        lines = chat.turns[0].blocks[0].splitlines()
-        assert lines[1:3] == ["要修改项目「calc」里 Worker 的设置吗？",
-                              "- 并发上限（同时运行的 Worker 数）：16（内置默认） → 3（本项目里的这个角色）"]
+        lines = chat.turns[1].blocks[0].splitlines()
+        assert lines[2] == "- 并发上限（每个任务同时运行的 Worker 数）：16（内置默认） → 3（角色默认）"
         assert "调低不会停止正在运行的工作" in lines[3]
         assert chat.workers.rechecks == 0
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert done["status"] == "ok", done
-        assert (chat.router.rechecks, chat.workers.rechecks) == (1, 1)
-        worker = (await _project_settings(project["id"]))["roles"]["worker"]
-        assert worker["effective"]["max_concurrency"] == {"value": 3, "source": "role_project"}
-        # A role's own limit, in every project, asks too.
-        (role,) = await chat.say("Reviewer 全局并发 2", ("looper_settings", {
-            "action": "set", "role": "reviewer", "values": {"max_concurrency": 2}}))
-        assert role["status"] == "needs_confirmation"
-        assert "- 并发上限（同时运行的 Reviewer 数）：8（内置默认） → 2（角色默认）" in chat.turns[2].blocks[0]
+        assert (chat.router.rechecks, chat.workers.rechecks) == (0, 1)
+        assert done["result"]["effective"]["worker"]["max_concurrency"] == {"value": 3, "source": "role"}
+        # The Planner has none.
+        (planner,) = await chat.say("Planner 并发 2", ("looper_settings", {
+            "action": "set", "role": "planner", "values": {"max_concurrency": 2}}))
+        assert planner["status"] == "error" and "concurrency is per task" in planner["error"]["message"]
 
     _run(test, monkeypatch)
 
@@ -388,7 +392,7 @@ def test_a_roles_timeout_is_set_as_settings_roles_saves_it(monkeypatch: pytest.M
 @pytest.mark.parametrize(("arguments", "message"), [
     ({"role": "worker", "values": {"effort": "high"}}, "values has an unknown key 'effort'"),
     ({"role": "worker", "values": {"env": {"MY_TOKEN": "x"}}}, "MY_TOKEN looks like a credential"),
-    ({"values": {"max_concurrency": 2}}, "max_concurrency is how many Planners (tasks), Workers or Reviewers"),
+    ({"values": {"max_concurrency": 2}}, "concurrency is per task: max_concurrency is how many of one task's"),
     ({"role": "manager", "values": {"max_concurrency": 2}}, "max_concurrency is how many"),
     ({"role": "manager", "project": "calc", "values": {"harness_prompt": "x"}}, "the manager spans every project"),
     ({"role": "worker", "values": {"profile": "nope"}}, "no Agent Profile 'nope'; there are: claude-code/opus"),

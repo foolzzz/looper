@@ -258,9 +258,7 @@ function DefinedRoles({ roles }: { roles: PlannerRole[] }) {
 export function TaskAgentsTab({ task, onAgents }: { task: TaskDetail; onAgents: (agents: TaskAgents) => void }) {
   return (
     <div className="space-y-6 p-5">
-      {task.agents && (
-        <TaskAgentsSection taskId={task.task_id} projectId={task.project_id} agents={task.agents} onSaved={onAgents} />
-      )}
+      {task.agents && <TaskAgentsSection taskId={task.task_id} agents={task.agents} onSaved={onAgents} />}
       {task.roles?.length ? <DefinedRoles roles={task.roles} /> : null}
       <StepRuns task={task} />
     </div>

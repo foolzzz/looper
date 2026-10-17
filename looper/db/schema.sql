@@ -313,8 +313,9 @@ ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL D
 -- permission_mode was never applied: every agent runs with
 -- --dangerously-skip-permissions (claude_cli.permission_args).
 ALTER TABLE role_configs DROP COLUMN IF EXISTS permission_mode;
--- Once: max_concurrency was never enforced. How many of a role run at once in
--- a project is its layer's max_concurrency (agent_setting_layers, below).
+-- Once: max_concurrency was never enforced. How many of a task's Workers or
+-- Reviewers run at once is its own limit, else its role layer's
+-- max_concurrency (agent_setting_layers, below).
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'role_configs_max_concurrency_removed') THEN
@@ -775,8 +776,7 @@ CREATE TABLE IF NOT EXISTS agent_setting_layers (
     env             JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(env) = 'array'),
     run_budget_usd  DOUBLE PRECISION CHECK (run_budget_usd > 0),
     max_concurrency INTEGER CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
-                        OR (max_concurrency BETWEEN 1 AND 64 AND scope IN ('role', 'role_project')
-                            AND role <> 'manager')),
+                        OR (max_concurrency BETWEEN 1 AND 64 AND scope = 'role' AND role IN ('worker', 'reviewer'))),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((role IS NOT NULL) = (scope IN ('role', 'role_project'))),
     CHECK ((project_id IS NOT NULL) = (scope IN ('project', 'role_project'))),
@@ -885,13 +885,15 @@ BEGIN
         INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers_agent');
     END IF;
 END $$;
--- How many of a task role run at once in one project (agent_settings.resolve_concurrency): set only on a
--- planner, worker or reviewer role layer, or on that role's layer in a project.
+-- How many of a task's Workers or Reviewers run at once when the task sets no limit of its own
+-- (agent_settings.default_concurrency): set only on the worker or reviewer role layer. A project and the Planner
+-- have none: nothing limits how many tasks run. Before, a role in a project and the Planner had one too; the upgrade
+-- converted them (looper/db/task_concurrency.py).
 ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER
     CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
-        OR (max_concurrency BETWEEN 1 AND 64 AND scope IN ('role', 'role_project') AND role <> 'manager'));
--- A task's own concurrency limit: at most this many of its Workers or Reviewers run at once, within its project's
--- limit (agent_settings.resolve_task_concurrency). One Planner runs a task, so the Planner has none. With the
+        OR (max_concurrency BETWEEN 1 AND 64 AND scope = 'role' AND role IN ('worker', 'reviewer')));
+-- A task's own concurrency limit: at most this many of its Workers or Reviewers run at once
+-- (agent_settings.resolve_task_concurrency). One Planner runs a task, so the Planner has none. With the
 -- task's profile overrides it is the task layer (agent_setting_layers.list_layers).
 CREATE TABLE IF NOT EXISTS task_concurrency_limits (
     task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -1210,6 +1212,14 @@ CREATE TABLE IF NOT EXISTS schedule_profile_overrides (
     schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
     role        TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
     profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),
+    PRIMARY KEY (schedule_id, role)
+);
+-- How many of their Workers or Reviewers a schedule's tasks run at once, copied into each task's
+-- task_concurrency_limits when it fires (its task_limits).
+CREATE TABLE IF NOT EXISTS schedule_task_limits (
+    schedule_id      TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    role             TEXT NOT NULL CHECK (role IN ('worker', 'reviewer')),
+    max_concurrency  INTEGER NOT NULL CHECK (max_concurrency BETWEEN 1 AND 64),
     PRIMARY KEY (schedule_id, role)
 );
 -- One firing of a schedule: on time ('scheduled'), for missed fires ('catch_up', missed = how many it stands in
