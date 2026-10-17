@@ -26,6 +26,8 @@ DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 UTC = timezone.utc
+# Noon in Los Angeles, where the scheduler's day (``_run``, ``_setup``) starts at midnight: far from a day's end.
+NOON = datetime(2030, 1, 15, 20, 0, tzinfo=UTC)
 
 
 class _Bus:
@@ -134,7 +136,8 @@ def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
             monkeypatch.setattr(schedules, "_min_interval", schedules.DEFAULT_MIN_INTERVAL_SECONDS)
             project = await projects.create_project(name="alerts", work_dir=str(tmp_path), pool=pool)
             bus, clock = _Bus(), _Clock()
-            env = _Env(pool=pool, bus=bus, clock=clock, scheduler=Scheduler(bus=bus, clock=clock),
+            env = _Env(pool=pool, bus=bus, clock=clock,
+                       scheduler=Scheduler(bus=bus, clock=clock, day_zone="America/Los_Angeles"),
                        project_id=project["id"], work_dir=str(tmp_path))
             await test(env)
         finally:
@@ -477,6 +480,7 @@ def test_a_schedule_that_cannot_fire_holds_up_no_other(monkeypatch: pytest.Monke
 def test_a_firing_while_the_previous_task_runs_is_skipped_or_queued_once(monkeypatch: pytest.MonkeyPatch,
                                                                          tmp_path: Path, overlap: str) -> None:
     async def test(env: _Env) -> None:
+        env.clock.now = NOON
         sid = (await env.enabled(overlap=overlap))["schedule_id"]
         await env.due(sid)
         await env.scheduler.tick()

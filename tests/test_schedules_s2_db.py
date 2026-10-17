@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from looper.agents import cron
-from tests.test_schedules_db import DSN, _Env, _run
+from tests.test_schedules_db import DSN, NOON, _Env, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -276,6 +276,7 @@ def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_n
 
     async def test(env: _Env) -> None:
         _setup(env)
+        env.clock.now = NOON
         await _allow_telegram(env)
         sid = (await env.enabled(gate_command="exit 3",
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
@@ -434,8 +435,6 @@ def test_a_database_from_before_takes_notify_alerts(monkeypatch: pytest.MonkeyPa
     _run(test, monkeypatch, tmp_path)
 
 
-# Noon in Los Angeles, where the scheduler's day (``_setup``) starts at midnight: far from a day's end.
-NOON = datetime(2030, 1, 15, 20, 0, tzinfo=timezone.utc)
 MINUTE = timedelta(minutes=1)
 
 
@@ -507,6 +506,31 @@ def test_a_skip_on_a_new_day_is_a_run_of_its_own(monkeypatch: pytest.MonkeyPatch
         env.clock.now = datetime(2030, 1, 16, 7, 58, 30, tzinfo=timezone.utc)  # 23:58:30 in Los Angeles
         await _next_minute(env, sid)
         assert _shape(await _next_minute(env, sid)) == [("skipped_gate", 1), ("skipped_gate", 1)]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_busy_streak_and_the_daily_budget_start_again_at_midnight(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        (tmp_path / "items.txt").write_text("alert-1\n")
+        sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt",
+                                 daily_budget_usd=0.5))["schedule_id"]
+        env.clock.now = datetime(2030, 1, 16, 7, 56, 30, tzinfo=timezone.utc)  # 23:56:30 in Los Angeles
+        [run] = await _next_minute(env, sid)  # 23:57
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
+        for _ in range(3):  # its task still runs: 23:58 and 23:59 are one busy skip, 00:00 a new day's
+            runs = await _next_minute(env, sid)
+        assert _shape(runs) == [("skipped_overlap", 1), ("skipped_overlap", 2), ("running", 1)]
+
+        # The run fired yesterday: its cost is yesterday's, so 00:01 runs; that run's own cost counts today.
+        await env.end_task(run["task_id"], "completed", cost=0.6)
+        today = (await _next_minute(env, sid))[0]
+        assert today["status"] == "running"
+        await env.end_task(today["task_id"], "completed", cost=0.6)
+        over = (await _next_minute(env, sid))[0]  # 00:02
+        assert over["status"] == "skipped_budget" and "today's runs cost $0.6000" in over["error"]
 
     _run(test, monkeypatch, tmp_path)
 
@@ -789,6 +813,7 @@ def test_a_parallel_schedules_daily_budget_counts_every_run_in_progress(monkeypa
                                                                          tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         _setup(env)
+        env.clock.now = NOON
         sid = (await env.enabled(overlap="parallel", daily_budget_usd=0.5))["schedule_id"]
         for cost in (0.3, 0.25):  # two runs still in progress, each having spent this much so far
             run = await _fire(env, sid)
