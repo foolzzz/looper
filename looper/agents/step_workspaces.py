@@ -246,6 +246,46 @@ async def _changed(cwd: str | Path, old: str, new: str) -> list[str]:
     return [f for f in (await _git(cwd, "diff", "--name-only", "-z", old, new)).fields if f]
 
 
+async def tree_state(cwd: str | Path) -> dict[str, str] | None:
+    """What the git checkout of ``cwd`` holds now, to tell whether something changed it in between
+    (``changed_between``): its ``HEAD`` (under the key ``""``) and each path ``git status`` lists, untracked ones too
+    and ignored ones not, with its status, size and modification time. Reads only: git takes no optional lock and
+    writes no index. None when ``cwd`` is in no git checkout or git fails."""
+    if not Path(cwd).is_dir() or not _in_repository(Path(cwd)):
+        return None
+    try:
+        toplevel = await _git(cwd, "rev-parse", "--show-toplevel", check=False)
+        if toplevel.returncode != 0:
+            return None
+        head = await _git(cwd, "rev-parse", "-q", "--verify", "HEAD", check=False)
+        status = await _git(cwd, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    except GitError:
+        return None
+    state = {"": head.text}
+    fields = [f for f in status.fields if f]
+    index = 0
+    while index < len(fields):
+        entry, paths = fields[index], [fields[index][3:]]
+        if entry[:1] in ("R", "C"):  # a rename or copy: its source path follows
+            index += 1
+            paths.append(fields[index])
+        for path in paths:
+            try:
+                info = os.lstat(Path(toplevel.text) / path)
+                state[path] = f"{entry[:2]} {info.st_size} {info.st_mtime_ns}"
+            except OSError:
+                state[path] = f"{entry[:2]} gone"
+        index += 1
+    return state
+
+
+def changed_between(before: Mapping[str, str], after: Mapping[str, str]) -> list[str]:
+    """The paths whose ``tree_state`` differs between ``before`` and ``after``, sorted; ``HEAD`` when the checkout's
+    commit moved."""
+    paths = sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+    return ["HEAD" if path == "" else path for path in paths]
+
+
 _version: tuple[int, int] | None = None
 
 

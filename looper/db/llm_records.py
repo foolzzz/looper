@@ -102,11 +102,13 @@ async def finish_record(
     error: str | None = None,
     cost_source: str | None = None,
     outcome: str | None = None,
+    metadata: dict[str, Any] | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
     """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
     context and its compactions; a Worker's or Reviewer's run also keeps how its report or verdict read
-    (``metadata.outcome``, ``worker.RunOutcome``)."""
+    (``metadata.outcome``, ``worker.RunOutcome``), and ``metadata``'s keys are added to the record's (a run's
+    refused tool calls, ``permission_denials``; the files a Planner's turn changed, ``planner_changed_files``)."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -126,8 +128,11 @@ async def finish_record(
             context_tokens = $14,
             compactions = $15::jsonb,
             cost_source = $16,
-            metadata = CASE WHEN $17::text IS NULL THEN metadata
-                            ELSE COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('outcome', $17::text) END,
+            metadata = CASE WHEN $17::text IS NULL AND $18::jsonb IS NULL THEN metadata
+                            ELSE COALESCE(metadata, '{}'::jsonb)
+                                 || CASE WHEN $17::text IS NULL THEN '{}'::jsonb
+                                         ELSE jsonb_build_object('outcome', $17::text) END
+                                 || COALESCE($18::jsonb, '{}'::jsonb) END,
             finished_at = now(),
             last_output_at = COALESCE(last_output_at, now())
         WHERE id = $1
@@ -136,6 +141,7 @@ async def finish_record(
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
         cache_read_tokens, cache_creation_tokens, context_tokens,
         json.dumps(compactions) if compactions is not None else None, cost_source, outcome,
+        json.dumps(metadata, ensure_ascii=False) if metadata else None,
     )
 
 
