@@ -716,11 +716,14 @@ CREATE TABLE IF NOT EXISTS library_installs (
     CHECK (scope = 'global' OR NOT 'manager' = ANY (roles))
 );
 -- Before 'task_role' (v2.7.0), the roles were the four built-in ones.
+-- The definition is read only for this schema's table: another schema's same-named constraint, whose table may be
+-- dropped meanwhile, is never looked at.
 DO $$
+DECLARE def TEXT;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'library_installs_roles_check'
-                   AND conrelid = to_regclass('library_installs')
-                   AND pg_get_constraintdef(oid) LIKE '%task_role%') THEN
+    SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
+     WHERE c.conrelid = to_regclass('library_installs') AND c.conname = 'library_installs_roles_check';
+    IF def IS NULL OR def NOT LIKE '%task_role%' THEN
         ALTER TABLE library_installs DROP CONSTRAINT IF EXISTS library_installs_roles_check;
         ALTER TABLE library_installs ADD CONSTRAINT library_installs_roles_check CHECK (cardinality(roles) > 0
             AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer', 'task_role']);
