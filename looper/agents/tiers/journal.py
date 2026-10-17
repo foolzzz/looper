@@ -30,7 +30,10 @@ change it records (``db.plans.save``); the model never writes one. The kinds
   one step (``ops.planner``), and why; for the task page only;
 - ``concurrency_change``: the Planner changed its task's or its project's
   concurrency limits with its tool: each role's limit before and after, and
-  why; for the task page only.
+  why; for the task page only;
+- ``role_defined``: the Planner defined a role for its steps, or a new version
+  of one, with its tool (``ops.planner``, ``task_roles``): its kind, version,
+  profile, harness and why; for the task page only.
 
 The entries come back as bounded sections:
 
@@ -92,6 +95,7 @@ class JournalKind(str, Enum):
     PROGRESS = "progress"
     PROFILE_CHOICE = "profile_choice"
     CONCURRENCY_CHANGE = "concurrency_change"
+    ROLE_DEFINED = "role_defined"
 
 
 # How a section heads each kind, in the order the Planner's section shows them: pitfalls first.

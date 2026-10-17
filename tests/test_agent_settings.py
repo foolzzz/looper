@@ -347,7 +347,8 @@ class _Layers:
                         **_: Any) -> None:
         self.writes += 1
         row = self.rows.setdefault((scope, role, project_id), {
-            "harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd": None, "max_concurrency": None})
+            "harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd": None, "max_concurrency": None,
+            "boundaries": None})
         row.update({k: (list(v or []) if k == "env" else v) for k, v in values.items()})
         if not any(row.values()):
             del self.rows[(scope, role, project_id)]
@@ -397,7 +398,8 @@ def _call(method: str, path: str, body: Any = None, *, router: Any = None, pool:
     return int(head.split()[1]), json.loads(payload)
 
 
-UNSET = {"harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd": None, "max_concurrency": None}
+UNSET = {"harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd": None, "max_concurrency": None,
+         "boundaries": None}
 
 
 def _now(profile: AgentProfile, source: str) -> dict[str, Any]:
@@ -424,7 +426,7 @@ class TestSettingsApi:
             "harness_prompt": "\nBe careful.\n", "profile_id": sonnet.id, "env": [{"key": "TZ", "value": "UTC"}]})
         assert status == 200 and body["system"]["values"] == {
             "harness_prompt": "Be careful.", "profile_id": sonnet.id, "env": [{"key": "TZ", "value": "UTC"}],
-            "run_budget_usd": None, "max_concurrency": None}
+            "run_budget_usd": None, "max_concurrency": None, "boundaries": None}
         status, body = _call("PUT", "/api/agent-settings/roles/worker", {"profile_id": haiku.id, "run_budget_usd": 2})
         assert status == 200
         worker = body["roles"]["worker"]["effective"]

@@ -637,6 +637,37 @@ class TestResidentClaude:
 
         assert asyncio.run(_run()).cancelled()
 
+    def test_a_stopping_planners_token_files_are_gone_once_its_token_no_longer_works(self) -> None:
+        """The MCP configuration that carries the Planner's token is deleted with the token, before stop() waits for
+        its Claude to end: a stop the server's shutdown cuts off then leaves no token on disk."""
+        from types import SimpleNamespace
+
+        from looper.agents.ops.planner import PlannerOps
+
+        async def _run() -> tuple[bool, bool, bool]:
+            with tempfile.TemporaryDirectory() as tmp:
+                ops = PlannerOps(SimpleNamespace(bus=None, task_router=None, worker_pool=None), url="http://x")
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp), ops=ops)
+                planner._token = token = ops.issue("t1")
+                config = Path(tmp) / "mcp.json"
+                config.write_text(token)
+                planner._token_files.add(str(config))
+                exiting = asyncio.Event()
+
+                async def claude_exiting_slowly(*, kill: bool = False) -> None:
+                    exiting.set()
+                    await asyncio.sleep(60)  # a Claude that takes its time to exit
+
+                planner._claude.stop = claude_exiting_slowly  # type: ignore[method-assign]
+                stopper = asyncio.create_task(planner.stop())
+                await exiting.wait()
+                revoked, gone_while_waiting = not ops.authorized(f"Bearer {token}"), not config.exists()
+                stopper.cancel()  # the server shuts down meanwhile
+                await asyncio.wait([stopper])
+                return revoked, gone_while_waiting, not config.exists()
+
+        assert asyncio.run(_run()) == (True, True, True)
+
     def test_claude_runs_unrestricted_in_the_task_directory(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

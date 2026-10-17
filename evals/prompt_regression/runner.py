@@ -305,6 +305,8 @@ def run_task(
         if chosen_profile_id is None:
             raise EvalError(f"{task.id} needs the profile its Planner may choose")
         api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
+    if task.roles_on:
+        api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
     api.post("/api/tasks/start", {"task_id": task_id})
 
     chat_pending = task.chat is not None

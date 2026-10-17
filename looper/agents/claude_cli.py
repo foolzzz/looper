@@ -1025,8 +1025,10 @@ class ClaudeRunRecorder:
         result_event: dict[str, Any] | None,
         error: str | None = None,
         usage: Usage | None = None,
+        outcome: str | None = None,
     ) -> None:
         """Close the record with the run's own ``usage``; without one, all the result reports is the run's.
+        ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``).
 
         Claude reports the running totals of its session, so a run that is
         one turn of a longer-lived session passes its own share
@@ -1065,6 +1067,7 @@ class ClaudeRunRecorder:
                 duration_ms=int((_clock() - self._started) * 1000),
                 model=self._model,
                 error=error or (None if succeeded else f"Claude run ended: {result.get('subtype') or 'no result'}"),
+                outcome=outcome,
             )
         except Exception:
             logger.warning("could not close llm record for %s", self._agent_id, exc_info=True)

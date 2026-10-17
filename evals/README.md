@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs twelve small tasks through a disposable `looper serve` (a new
+It runs sixteen small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -24,6 +24,10 @@ directories), one at a time over the HTTP API:
 | `requirement_edit` | the same change as an edit of the requirement |
 | `supplement_no_change` | a message that changes nothing: the plan must stay as it is |
 | `profile_choice` | the task's project lets its Planner choose one more Agent Profile (`eval/chosen`, the run's own profile under another name, so it costs the same) and the requirement asks for it: the Planner must choose it with its own tool (`looper_task_profile_set`) before the step runs, and the Worker run on it |
+| `roles_tester_docs` | the task's project lets its Planner define roles (`planner_roles` on) and choose `eval/chosen`; a module, its tests and its usage notes, the tests by a tester role on `eval/chosen` and the notes by a doc-writer role: at least two work roles, their steps run as them on the version defined, the tester on its profile, each role run with the boundaries before its contract |
+| `roles_security_review` | the same switch; a script that must not run a shell, reviewed by the built-in Reviewer and by a security review role: the role reviews after the built-in Reviewer, and the step is accepted only with both reviews passed |
+| `roles_advisory_review` | the same switch; a greeting script reviewed by the built-in Reviewer and by an advisory review role (`review_role_required` false) that wants a CHANGELOG.md the task turns down: the role does not pass the step, the built-in Reviewer does, and the Planner decides (accept, or retry with the role's findings) |
+| `roles_not_needed` | the same switch on a one-file task: the Planner defines no role and plans at most two steps |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -32,10 +36,16 @@ count, the pairs of steps the plan lets run at the same time
 that depends on both (`bracketed_pairs`), and the most Workers that ran at once
 (`parallel_workers`, from the runs' records), the changes to the task the
 Planner answered by changing the plan (`plan_changes`), the Worker and Reviewer
-runs on a profile the Planner chose (`planner_profile_runs`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+runs on a profile the Planner chose (`planner_profile_runs`), the roles the Planner defined (`roles_defined`)
+and the runs as one (`role_runs`; on the role's own profile, `role_profile_runs`; as a review role,
+`role_reviews`; on a prompt that is no version it defined, `role_prompt_mismatches`; without the boundaries after
+the task section, `role_boundary_misses`), the accepted steps with a review role that lack a passing built-in or
+role review where the role is required (`gate_breaches`), the reviews by an advisory review role that did not pass
+(`advisory_role_fails`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
-rejected) and whether the Planner modified files itself (its file-editing tool
+rejected; the JSON keeps why the parser rejected each Planner reply,
+`planner_violation_reasons`) and whether the Planner modified files itself (its file-editing tool
 calls, and files changed while only a Planner turn ran).
 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by

@@ -20,7 +20,9 @@ agent system started it in:
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
   waits for a forwarded user turn and then writes the files given there;
-- a Reviewer ("The step under review:") passes the step;
+- a Reviewer ("The step under review:") passes the step, unless its system
+  prompt holds one of the script's ``failing_reviews`` (a review role's
+  marker): then it fails it;
 - the Manager (its system prompt has Looper's tools contract) starts the
   ``looper`` MCP server of its ``--mcp-config`` and, for each user message,
   makes the calls ``scenarios.json``'s ``manager`` lists for that message's
@@ -218,10 +220,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
 
 
-def _reviewer(stdin: _Stdin) -> None:
+def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
     stdin.readline()  # the Worker's report
-    _answer("fake-reviewer", json.dumps({"passed": True, "findings": [], "summary": "Meets the criteria."}),
-            REVIEWER_RUN_COST)
+    if any(marker in system_prompt for marker in script.get("failing_reviews") or []):
+        verdict = {"passed": False, "findings": ["the greeting is not what this role asks for"],
+                   "summary": "Not to this role's liking."}
+    else:
+        verdict = {"passed": True, "findings": [], "summary": "Meets the criteria."}
+    _answer("fake-reviewer", json.dumps(verdict), REVIEWER_RUN_COST)
 
 
 def _main_checkout() -> str:
@@ -271,7 +277,7 @@ def main(argv: list[str]) -> int:
     if "## Looper's tools (required)" in system_prompt:
         _manager(scenarios_path, args, stdin)
     elif re.search(r"^The step under review:", system_prompt, re.MULTILINE):
-        _reviewer(stdin)
+        _reviewer(script, system_prompt, stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
         _worker(script, system_prompt, stdin)
     else:
