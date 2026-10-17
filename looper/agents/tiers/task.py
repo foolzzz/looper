@@ -556,7 +556,8 @@ class TaskRouter:
             logger.warning("task %s not found in DB, ignoring restart", task_id)
             return
 
-        restartable = (*db_tasks.RESTARTABLE_STATUSES, "running", "executing", "assigned", db_tasks.READY)
+        restartable = (*db_tasks.RESTARTABLE_STATUSES, "running", "executing", "waiting_user", "assigned",
+                       db_tasks.READY)
         if db_row["status"] not in restartable:
             logger.warning("task %s status=%s not restartable", task_id, db_row["status"])
             return

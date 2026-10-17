@@ -3,8 +3,10 @@
 The Planner writes each change as it happens, one row per changed step; a
 change to several rows (a new plan, a replan, added steps, a settled step and
 the plan's summary, with the step's ``task_journal`` entry when it was
-accepted) is one transaction. On a restart the Planner reads the plan and its
-journal back with ``load``.
+accepted) is one transaction, and so is a gate step's change with its gate and
+the messages it adds to the gate's discussion (``user_gates.write``). On a
+restart the Planner reads the plan, its journal and its gates back with
+``load``.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from typing import Any
 
 import asyncpg
 
-from . import journal as db_journal
+from . import journal as db_journal, user_gates as db_user_gates
 from .connection import get_pool
 
 # Every status a plan can have (task_plans.status).
@@ -40,10 +42,10 @@ _SAVE_STEP = f"""
 INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, target_files, validation_commands,
                         acceptance_criteria, depends_on, review, status, result, worker_id, reviewer_id,
                         retries, feedback, missed_messages, role_key, review_role_key, role_version,
-                        review_role_version, review_stage, review_role_required, created_at, updated_at,
+                        review_role_version, review_stage, review_role_required, kind, created_at, updated_at,
                         completed_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END)
+        $23, $24, now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END)
 ON CONFLICT (id) DO UPDATE
 SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction = EXCLUDED.instruction,
     target_files = EXCLUDED.target_files, validation_commands = EXCLUDED.validation_commands,
@@ -53,7 +55,7 @@ SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction 
     feedback = EXCLUDED.feedback, missed_messages = EXCLUDED.missed_messages, role_key = EXCLUDED.role_key,
     review_role_key = EXCLUDED.review_role_key, role_version = EXCLUDED.role_version,
     review_role_version = EXCLUDED.review_role_version, review_stage = EXCLUDED.review_stage,
-    review_role_required = EXCLUDED.review_role_required, updated_at = now(),
+    review_role_required = EXCLUDED.review_role_required, kind = EXCLUDED.kind, updated_at = now(),
     completed_at = COALESCE(EXCLUDED.completed_at, task_steps.completed_at)
 """
 
@@ -69,7 +71,7 @@ def _step_args(task_id: str, step: Mapping[str, Any]) -> tuple[Any, ...]:
         step.get("worker_id"), step.get("reviewer_id"), int(step.get("retries") or 0),
         list(step.get("feedback") or []), list(step.get("missed_messages") or []),
         step.get("role_key"), step.get("review_role_key"), step.get("role_version"), step.get("review_role_version"),
-        step.get("review_stage"), bool(step.get("review_role_required", True)),
+        step.get("review_stage"), bool(step.get("review_role_required", True)), step.get("kind") or "work",
     )
 
 
@@ -79,9 +81,12 @@ async def save(
     plan: Mapping[str, Any] | None = None,
     steps: Sequence[Mapping[str, Any]] = (),
     journal: Sequence[Mapping[str, Any]] = (),
+    gates: Sequence[Mapping[str, Any]] = (),
+    gate_messages: Sequence[Mapping[str, Any]] = (),
     pool: asyncpg.Pool | None = None,
 ) -> None:
-    """Write the plan's own row (when given), ``steps``' rows and ``journal``'s entries, in one transaction.
+    """Write the plan's own row (when given), ``steps``' rows, ``journal``'s entries and the gates of gate steps
+    with the messages they add to their discussions (``user_gates.write``), in one transaction.
 
     ``plan`` has ``plan_id``, ``status``, ``correlation_id``,
     ``origin_channel_id``, ``final_summary`` and ``fail_reason``, and may have
@@ -90,11 +95,12 @@ async def save(
     a step's columns, a missing one written as empty; each journal entry has
     ``step_id``, ``kind``, ``summary`` and ``learnings`` (``journal.insert``).
     """
-    if plan is None and not steps and not journal:
+    if plan is None and not steps and not journal and not gates and not gate_messages:
         return
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        await write(conn, task_id, plan=plan, steps=steps, journal=journal)
+        await write(conn, task_id, plan=plan, steps=steps, journal=journal, gates=gates,
+                    gate_messages=gate_messages)
 
 
 async def write(
@@ -104,6 +110,8 @@ async def write(
     plan: Mapping[str, Any] | None = None,
     steps: Sequence[Mapping[str, Any]] = (),
     journal: Sequence[Mapping[str, Any]] = (),
+    gates: Sequence[Mapping[str, Any]] = (),
+    gate_messages: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     """``save``'s writes on ``conn``, in the caller's transaction."""
     if plan is not None:
@@ -114,8 +122,9 @@ async def write(
         )
     if steps:
         await conn.executemany(_SAVE_STEP, [_step_args(task_id, step) for step in steps])
-    # After the steps: an entry belongs to a step saved with it.
+    # After the steps: an entry, a gate and its messages belong to a step saved with them.
     await db_journal.insert(conn, task_id, journal)
+    await db_user_gates.write(conn, task_id, gates, gate_messages)
 
 
 def _step(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -131,10 +140,11 @@ def _step(row: Mapping[str, Any]) -> dict[str, Any]:
 async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     """The task's plan, or None when it has none.
 
-    ``{"plan": ..., "steps": [...], "journal": [...]}``: the plan's row with
-    the task's ``requirement``, ``goal_id``, ``work_dir`` and ``project_id``,
-    its steps in order, each ``result`` decoded, and its journal oldest first
-    (``journal.list_entries``).
+    ``{"plan": ..., "steps": [...], "journal": [...], "gates": {...}}``: the
+    plan's row with the task's ``requirement``, ``goal_id``, ``work_dir`` and
+    ``project_id``, its steps in order, each ``result`` decoded, its journal
+    oldest first (``journal.list_entries``) and its gates by step id
+    (``user_gates.list_for_task``).
     """
     pool = pool or get_pool()
     row = await pool.fetchrow(
@@ -148,7 +158,8 @@ async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, A
         return None
     steps = await pool.fetch("SELECT * FROM task_steps WHERE task_id = $1 ORDER BY step_index, created_at", task_id)
     return {"plan": dict(row), "steps": [_step(step) for step in steps],
-            "journal": await db_journal.list_entries(task_id, pool=pool)}
+            "journal": await db_journal.list_entries(task_id, pool=pool),
+            "gates": {gate["step_id"]: gate for gate in await db_user_gates.list_for_task(task_id, pool=pool)}}
 
 
 async def resumable_task_ids(
