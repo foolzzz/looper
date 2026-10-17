@@ -117,7 +117,7 @@ def test_a_step_runs_as_its_role_and_is_accepted_only_once_both_reviews_pass(
     assert "Reviewer dispatched for step 1 (s1) as security v1" in activity(agent_db)
     assert any(line.startswith("Worker dispatched as tester v2:") for line in activity(agent_db))
     # Its contract says how to name roles; the steps' saved rows keep the roles and the versions they ran.
-    assert "review_role (optional, with \"review\": true)" in claude.prompts()[0]
+    assert "\"review_role\", a review role you defined" in claude.prompts()[0]
     saved = agent_db.store.steps["t1"]
     (row,) = saved.values()
     assert (row["role_key"], row["review_role_key"], row["role_version"], row["review_role_version"]) == (

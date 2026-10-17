@@ -257,7 +257,8 @@ def test_the_planner_defines_roles_with_its_tools_and_a_refused_definition_chang
     assert detail["status"] == "completed", ran["log"][-3000:]
     listed = _log(ran["state"], "planner.jsonl", "roles")[0]
     assert listed["tools"][-2:] == ["looper_task_roles", "looper_task_role_set"]
-    assert "looper_task_role_set" in listed["prompt"] and "review_role (optional" in listed["prompt"]
+    assert "looper_task_role_set" in listed["prompt"]
+    assert "The five keys above are in every step." in listed["prompt"]
     answers = [(c["arguments"].get("id"), c["answer"]["status"]) for c in _calls(ran, "roles")
                if c["tool"] == "looper_task_role_set"]
     assert answers == [("worker", "error"), ("tester", "ok"), ("security", "ok"), ("tester", "ok")]
