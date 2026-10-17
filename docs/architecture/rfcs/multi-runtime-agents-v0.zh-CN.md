@@ -174,6 +174,8 @@ OMP 的其他核实结果：
   `error`（带 `errorMessage`），退出码 1。被 SIGTERM 时正在跑的 shell 命令一并结束，没有 `agent_end`。
   skill 描述压缩成路由提示（用 smol 角色的模型，结果缓存在家目录）、压缩摘要等后台请求不在事件流里。
 
+Grok CLI（1.0.62）的能力、命令行和核实结果单列在 [Grok 运行时 RFC](grok-runtime-v0.zh-CN.md) 第 2、12 节。
+
 决策 10 要求所有运行时都支持所有角色。矩阵里 ❓ 的项，在对应阶段开工时第一件事就是实测，结果写回本表。
 
 ## 7. provider 绑定
@@ -234,6 +236,7 @@ OMP 的其他核实结果：
 | Codex + CPA | codex | CPA（OpenAI 类 provider，预设 `cpa`） | openai-responses | 已支持（M9c） |
 | Codex + Codex 登录 | codex | 内置 `codex-login`（ChatGPT OAuth） | openai-responses | 已支持（计划第 5.0 节第 3 项） |
 | OMP + CPA | omp | CPA（预设 `cpa`） | openai-responses（也支持 `openai-chat`、`anthropic-messages`） | 已支持（M9e） |
+| Grok + Grok 登录 | grok | 内置 `grok-login`（Grok 的 OAuth 登录） | openai-responses | 进行中（M9f，[Grok 运行时 RFC](grok-runtime-v0.zh-CN.md)） |
 
 GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Claude Code；M9b 内置它们的 provider 预设（两种协议的接口地址按官方文档核实），用户只填 key。
 
@@ -298,6 +301,7 @@ GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Cla
 | M9c | Codex 运行时：先做常驻会话的技术验证，再实现四类角色；隔离与登录（P1）、MCP 翻译、目录兼容 | M9a |
 | M9d | SDK 运行时与 norma | M9a，norma 就绪 |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再实现四类角色（P10） | M9c |
+| M9f | Grok 运行时：Grok 自己的登录，四类角色（[Grok 运行时 RFC](grok-runtime-v0.zh-CN.md)） | M9c、M9e |
 
 M9b 与 M9c 并行。
 
