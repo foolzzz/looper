@@ -50,6 +50,22 @@ export interface TaskInfo {
 /** The agents that work on one task; their runs make up its cost. */
 export type TaskRole = "planner" | "worker" | "reviewer";
 
+/** A task's runs, tokens and cost on one model. */
+export interface TaskModelCost {
+  /** The recorded model, or null when none was recorded. */
+  model: string | null;
+  runs: number;
+  running: number;
+  unpriced_runs: number;
+  interrupted_runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  /** Null when none of the model's runs has a cost. */
+  cost_usd: number | null;
+}
+
 /** A task's cost: the sum of its runs' own costs, in total and by the role of the agent that ran. */
 export interface TaskCost {
   cost_usd: number;
@@ -64,6 +80,9 @@ export interface TaskCost {
   /** Runs Looper priced at their provider's prices. */
   provider_price_runs?: number;
   by_role: Record<TaskRole, { cost_usd: number; runs: number }>;
+  by_model: TaskModelCost[];
+  /** The Manager's turns about the task, by model; not in cost_usd or the spend cap. */
+  manager_by_model: TaskModelCost[];
 }
 
 /** The most characters a project background may have. */
