@@ -36,7 +36,7 @@ import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
-import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
@@ -612,6 +612,12 @@ function showGate(step: TaskStep) {
   target?.focus({ preventScroll: true });
 }
 
+/** How long a step took to finish first, or has run (`stepSpan`); nothing before it started. */
+function StepSpan({ step }: { step: TaskStep }) {
+  const span = stepSpan(step);
+  return span && <span className="text-xs tabular-nums text-muted-foreground">{span.label} {span.text}</span>;
+}
+
 function OverviewTab({
   task,
   onContinued,
@@ -751,6 +757,7 @@ function OverviewTab({
                         </a>
                       )}
                       {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
+                      <StepSpan step={step} />
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
                           Waiting for{" "}
@@ -1870,7 +1877,13 @@ interface TaskDetailPageProps {
   onBack: () => void;
 }
 
-export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
+/** A task's page, new for each task: when the hash moves to another task, its page opens as a fresh load opens it,
+ * on its Overview, without the previous task's data, tab, start error or open confirmation. */
+export function TaskDetailRoute(props: TaskDetailPageProps) {
+  return <TaskDetailPage key={props.taskId} {...props} />;
+}
+
+function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");

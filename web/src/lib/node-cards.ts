@@ -52,9 +52,30 @@ export function formatWhen(iso: string) {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
+/** A span of time for people: 45s, 3m 12s, 2h 5m. */
+export function formatSeconds(seconds: number) {
+  const sec = Math.max(0, Math.floor(seconds));
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor(sec / 60) % 60}m`;
+}
+
 function formatSpan(start: string, end: string) {
-  const sec = Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000));
-  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  return formatSeconds((new Date(end).getTime() - new Date(start).getTime()) / 1000);
+}
+
+/** How long a step has run, from its first attempt's dispatch: until the first time it went to review or ended
+ * ("took"; "ran for" when it was dropped), or until `now` while its attempt runs or awaits a decision ("running
+ * for"). Null before it started, while it waits to start again (restarted), and for a step from before starts were
+ * kept. */
+export function stepSpan(
+  step: Pick<TaskStep, "started_at" | "completed_at" | "status">,
+  now: number = Date.now(),
+): { label: "took" | "ran for" | "running for"; text: string } | null {
+  if (!step.started_at) return null;
+  if (step.completed_at) return { label: step.status === "skipped" ? "ran for" : "took", text: formatSpan(step.started_at, step.completed_at) };
+  if (step.status !== "dispatched" && step.status !== "deciding") return null;
+  return { label: "running for", text: formatSeconds((now - new Date(step.started_at).getTime()) / 1000) };
 }
 
 interface TextOptions {
@@ -121,6 +142,7 @@ export interface StepCardContext {
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
 export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skippedBecause }: StepCardContext): NodeCard {
   const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
+  const span = stepSpan(step);
   // completed_at is kept from the first time the step went to review or ended, so a retried step's may be earlier.
   const finished = step.completed_at && (step.status === "skipped" ? "Dropped" : step.retries ? "First finished" : "Finished");
   return {
@@ -148,7 +170,9 @@ export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skip
       ...(step.status === "skipped" ? text("Skipped", skippedBecause || "Dropped from the plan by a replan") : []),
       ...facts("Timing", [
         { label: "Planned", value: formatWhen(step.created_at) },
+        step.started_at && { label: "Started", value: formatWhen(step.started_at) },
         finished && { label: finished, value: formatWhen(step.completed_at!) },
+        span && { label: span.label === "took" ? "Took" : span.label === "ran for" ? "Ran for" : "Running for", value: span.text },
       ]),
     ],
   };
