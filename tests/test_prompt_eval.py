@@ -261,6 +261,12 @@ def test_the_planners_refused_calls_are_counted_and_its_file_changes_can_be_boun
         events={1: [{"seq": 1, "event": write}]}, changes={}, work_dir=tmp_path, check_problem=None,
         expect={"max_planner_modified_files": 0}, now=0.0)
     assert (refused["planner_modified_files"], refused["problems"]) == (0, [])
+    # A Write the run does not have, answered with an error, changed nothing either.
+    records[0]["metadata"] = {}
+    disabled = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_w",
+                                                         "is_error": True, "content": "Write is disabled"}]}}
+    assert metrics.edit_tool_paths([{"event": write}, {"event": disabled}], tmp_path) == []
+    assert metrics.edit_tool_paths([{"event": write}], tmp_path) == ["PLAN.md"]
 
 
 def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:

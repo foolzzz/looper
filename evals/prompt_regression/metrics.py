@@ -269,8 +269,16 @@ def _relative(path: str, work_dir: Path) -> str:
 
 def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path, refused: Iterable[str] = ()) -> list[str]:
     """The files a run's file-editing tool calls named, relative to ``work_dir`` (only a name outside it), but for
-    the calls its runtime refused (``refused``, their ``tool_use`` ids): those changed nothing."""
+    the calls its runtime refused (``refused``, their ``tool_use`` ids) or answered with an error (a tool the run
+    does not have: "Write is disabled for this session"): those changed nothing."""
+    events = list(events)
     refused = {tool_use_id for tool_use_id in refused if tool_use_id}
+    for row in events:
+        event = row.get("event", row)
+        content = (event.get("message") or {}).get("content") if isinstance(event, Mapping) else None
+        if isinstance(event, Mapping) and event.get("type") == "user" and isinstance(content, list):
+            refused |= {block.get("tool_use_id") for block in content if isinstance(block, Mapping)
+                        and block.get("type") == "tool_result" and block.get("is_error")}
     paths = []
     for row in events:
         event = row.get("event", row)
