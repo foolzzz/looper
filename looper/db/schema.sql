@@ -716,21 +716,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_library_items_project_name ON library_item
 
 -- Where a catalog item is installed: everywhere ('global') or in one project,
 -- for some roles. Every agent run loads the enabled global installs and its
--- project's that name its role. A project install never names the Manager,
--- which spans every project. One install per item and place.
+-- project's that name its role. 'task_role' is the roles a task's Planner
+-- defines: such an install loads only for a run of a role that names its item
+-- (task_roles.items). A project install never names the Manager, which spans
+-- every project. One install per item and place.
 CREATE TABLE IF NOT EXISTS library_installs (
     id          TEXT PRIMARY KEY,
     item_id     TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
     scope       TEXT NOT NULL CHECK (scope IN ('global', 'project')),
     project_id  TEXT REFERENCES projects(id) ON DELETE CASCADE,
     roles       TEXT[] NOT NULL CHECK (cardinality(roles) > 0
-                                       AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer']),
+                                       AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer', 'task_role']),
     enabled     BOOLEAN NOT NULL DEFAULT true,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((scope = 'project') = (project_id IS NOT NULL)),
     CHECK (scope = 'global' OR NOT 'manager' = ANY (roles))
 );
+-- Before 'task_role' (v2.7.0), the roles were the four built-in ones.
+-- The definition is read only for this schema's table: another schema's same-named constraint, whose table may be
+-- dropped meanwhile, is never looked at.
+DO $$
+DECLARE def TEXT;
+BEGIN
+    SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
+     WHERE c.conrelid = to_regclass('library_installs') AND c.conname = 'library_installs_roles_check';
+    IF def IS NULL OR def NOT LIKE '%task_role%' THEN
+        ALTER TABLE library_installs DROP CONSTRAINT IF EXISTS library_installs_roles_check;
+        ALTER TABLE library_installs ADD CONSTRAINT library_installs_roles_check CHECK (cardinality(roles) > 0
+            AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer', 'task_role']);
+    END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_library_installs_place
     ON library_installs (item_id, scope, COALESCE(project_id, ''));
 CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (project_id)
@@ -964,9 +980,12 @@ CREATE TABLE IF NOT EXISTS task_roles (
 ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT 'planner'
     CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user'));
 ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS template_key TEXT;
+-- The catalog items a version loads besides its kind's built-in role's installs: item ids, each installed for
+-- 'task_role' (library_installs) globally or in the task's project.
+ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS items TEXT[] NOT NULL DEFAULT '{}';
 -- A project's role templates: roles its tasks' Planners copy as task roles (looper_task_role_set's template), the
--- copy a version of the task role of its own. Checked like a task role (looper/agents/role_templates.py); its
--- profile counts only while the project allows it.
+-- copy a version of the task role of its own. Checked like a task role (looper/agents/role_api.py); its
+-- profile counts only while the project allows it, and its items (as a task role's) only while installed so.
 CREATE TABLE IF NOT EXISTS project_role_templates (
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     template_key  TEXT NOT NULL,
@@ -978,22 +997,39 @@ CREATE TABLE IF NOT EXISTS project_role_templates (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (project_id, template_key)
 );
--- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the review role that reviews
--- it after the built-in Reviewer (NULL: none; only on a reviewed step) and whether that review blocks the step
--- (review_role_required) or only advises the Planner, the versions its latest attempt and its latest role review
--- ran with, and which review a step in review waits for ('builtin' or 'role').
+ALTER TABLE project_role_templates ADD COLUMN IF NOT EXISTS items TEXT[] NOT NULL DEFAULT '{}';
+-- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the version its latest attempt
+-- ran with; the review roles that review it after the built-in Reviewer, in order (review_roles, only on a
+-- reviewed step: each {role, required, version}, required false for one that only advises the Planner, version
+-- the one its latest review ran with); and which review a step in review waits for ('builtin' or 'role', then
+-- review_position, the index in review_roles).
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_key TEXT;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_key TEXT;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_required BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_version INTEGER;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_version INTEGER;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_stage TEXT CHECK (review_stage IN ('builtin', 'role'));
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_roles JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_position INTEGER;
+-- Before a step had a list (v2.7.0), it had one review role: review_role_key, review_role_required and
+-- review_role_version, and its result one verdict (role_review). They become a list of one, and go.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_role_reviewed'
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+               AND table_name = 'task_steps' AND column_name = 'review_role_key') THEN
+        UPDATE task_steps SET review_roles = jsonb_build_array(jsonb_build_object(
+                'role', review_role_key, 'required', review_role_required, 'version', review_role_version)),
+            review_position = CASE WHEN review_stage = 'role' THEN 0 END
+            WHERE review_role_key IS NOT NULL;
+        UPDATE task_steps SET result = (result - 'role_review') || jsonb_build_object('role_reviews',
+                jsonb_build_array((result -> 'role_review') || jsonb_build_object('required', review_role_required)))
+            WHERE jsonb_typeof(result -> 'role_review') = 'object';
+        ALTER TABLE task_steps DROP CONSTRAINT IF EXISTS task_steps_review_role_reviewed;
+        ALTER TABLE task_steps DROP COLUMN review_role_key;
+        ALTER TABLE task_steps DROP COLUMN review_role_required;
+        ALTER TABLE task_steps DROP COLUMN review_role_version;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_roles_reviewed'
                    AND conrelid = to_regclass('task_steps')) THEN
-        ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_role_reviewed
-            CHECK (review_role_key IS NULL OR review);
+        ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_roles_reviewed
+            CHECK (jsonb_typeof(review_roles) = 'array' AND (jsonb_array_length(review_roles) = 0 OR review));
     END IF;
 END $$;
 

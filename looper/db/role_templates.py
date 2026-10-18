@@ -15,12 +15,11 @@ from .connection import get_pool
 
 # A template with its profile's name, and whether its project allows that profile now.
 _TEMPLATE = (
-    "SELECT t.project_id, t.template_key, t.kind, t.description, t.role_prompt, t.harness, t.profile_id, "
+    "SELECT t.project_id, t.template_key, t.kind, t.description, t.role_prompt, t.harness, t.profile_id, t.items, "
     "t.updated_at, a.name AS profile_name, (l.profile_id IS NOT NULL) AS profile_allowed "
     "FROM project_role_templates t LEFT JOIN agent_profiles a ON a.id = t.profile_id "
     "LEFT JOIN project_allowed_profiles l ON l.project_id = t.project_id AND l.profile_id = t.profile_id "
 )
-_FIELDS = ("kind", "description", "role_prompt", "harness", "profile_id")
 
 
 async def list_templates(project_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
@@ -40,15 +39,16 @@ async def get_template(project_id: str, key: str, *, pool: asyncpg.Pool | None =
 async def put_template(project_id: str, key: str, values: Mapping[str, Any], *,
                        pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     """Create template ``key`` of project ``project_id``, or replace it, with ``values`` (``kind``,
-    ``description``, ``role_prompt``, ``harness``, ``profile_id``). Raises ``asyncpg.ForeignKeyViolationError`` for
-    an unknown project or profile."""
+    ``description``, ``role_prompt``, ``harness``, ``profile_id``, ``items``). Raises
+    ``asyncpg.ForeignKeyViolationError`` for an unknown project or profile."""
     pool = pool or get_pool()
     await pool.execute(
         "INSERT INTO project_role_templates (project_id, template_key, kind, description, role_prompt, harness, "
-        "profile_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (project_id, template_key) DO UPDATE SET "
-        "kind = EXCLUDED.kind, description = EXCLUDED.description, role_prompt = EXCLUDED.role_prompt, "
-        "harness = EXCLUDED.harness, profile_id = EXCLUDED.profile_id, updated_at = now()",
-        project_id, key, *(values.get(name) if name != "description" else values.get(name) or "" for name in _FIELDS))
+        "profile_id, items) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (project_id, template_key) DO UPDATE "
+        "SET kind = EXCLUDED.kind, description = EXCLUDED.description, role_prompt = EXCLUDED.role_prompt, "
+        "harness = EXCLUDED.harness, profile_id = EXCLUDED.profile_id, items = EXCLUDED.items, updated_at = now()",
+        project_id, key, values["kind"], values.get("description") or "", values["role_prompt"], values.get("harness"),
+        values.get("profile_id"), list(values.get("items") or ()))
 
 
 async def delete_template(project_id: str, key: str, *, pool: asyncpg.Pool | None = None) -> bool:
