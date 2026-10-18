@@ -171,8 +171,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 work = root / f"work-{variant}"
                 work.mkdir()
                 project = api.post("/api/projects", {"name": f"calc-{variant}", "work_dir": str(work)})
-                if variant != "off":
-                    api.put(f"/api/projects/{project['project_id']}", {"user_gates": "on"})
+                # Unset is on: the off variant turns them off.
+                api.put(f"/api/projects/{project['project_id']}", {"user_gates": "off" if variant == "off" else "on"})
                 ids[variant] = api.post("/api/tasks/create", {"requirement": f"build calc variant={variant}",
                                                               "project_id": project["project_id"]})["task_id"]
                 api.post("/api/tasks/start", {"task_id": ids[variant]})

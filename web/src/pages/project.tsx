@@ -272,8 +272,8 @@ function executionRows(project: Project): [string, string][] {
   if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);
   if (project.role_text_max_chars != null)
     rows.push(["Role text limit", `${project.role_text_max_chars.toLocaleString()} characters`]);
-  if (project.user_gates === "on") rows.push(["User gates", "On"]);
-  if (project.user_gates === "on" && project.gate_reminder_hours != null)
+  if (project.user_gates === "off") rows.push(["User gates", "Off"]);
+  if (project.user_gates !== "off" && project.gate_reminder_hours != null)
     rows.push([
       "Gate reminders",
       project.gate_reminder_hours === 0 ? "None" : `Every ${project.gate_reminder_hours} h`,

@@ -120,9 +120,10 @@ def test_the_user_decides_at_a_gate_while_another_branch_runs_and_closing_it_pla
     assert "[GATE]: the user wrote in a gate's discussion" in claude.prompts()[0]
 
 
-def test_without_user_gates_a_gate_is_refused_and_the_contract_is_as_before(
+def test_a_project_that_turned_gates_off_refuses_a_gate_and_its_contract_is_as_before(
     planner_claude: Any, agent_db: Any,
 ) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "user_gates": "off"}
     claude = planner_claude(plan(GATE), plan(step("s1")), decide("accept"))
     h = drive(claude, always(WORK_OK))
 
@@ -130,6 +131,26 @@ def test_without_user_gates_a_gate_is_refused_and_the_contract_is_as_before(
     repair = claude.turns()[1]["text"]
     assert "step g1: this project does not let you open gates (user_gates is off)" in repair
     assert reply_contract(2) in claude.prompts()[0] and "[GATE]" not in claude.prompts()[0]
+
+
+def test_a_project_that_never_set_user_gates_lets_its_planner_open_one(planner_claude: Any, agent_db: Any) -> None:
+    agent_db.get_task_project.return_value = _project()  # no user_gates: on, by default
+    claude = planner_claude(
+        plan(GATE),
+        gate_reply("PostgreSQL then.", "close", SETTLED, summary=SUMMARY, action="add_steps", steps=[step("s1", "g1")]),
+        decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await _write(h, agent_db, "PostgreSQL")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+    assert reply_contract(2, gates=True) in claude.prompts()[0]
 
 
 def test_a_task_a_schedule_started_may_not_open_a_gate(planner_claude: Any, agent_db: Any) -> None:

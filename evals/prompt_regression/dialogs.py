@@ -5,7 +5,8 @@ disposable ``looper serve`` (``runner``). After each reply, its ``check``
 reads the platform's state (the API, and the ``manager_actions`` trail in the
 run's database) and says what is wrong, if anything. A dialog may first
 start a slow task (``running_task``), which its messages name as
-``<task>``. Fake mode plays the Manager with the stand-in (``fake_claude``),
+``<task>``. ``task_cost`` instead seeds fixed runs without starting any task agent.
+Fake mode plays the Manager with the stand-in (``fake_claude``),
 which makes each turn's scripted tool calls over MCP; real mode runs Claude
 Code. Each (dialog, rep) runs on a database, a server, a working directory
 and a project of its own, so nothing one dialog leaves behind reaches the
@@ -24,9 +25,14 @@ exists, explained and nothing changed (``concurrency``); and, for any
 runtime, a read-only status question (``status``). The configuration tools:
 a project created, a role's Agent Profile in a project, the project's
 allowed list, this week's spend and a project deleted only on the user's word
-(``config_tools``); a provider registered without the key the user pasted
+(``config_tools``); a running task's cost read and told by model, nothing
+changed (``task_cost``); a provider registered without the key the user pasted
 (``provider_key``). The schedules tool: a schedule listed, disabled, and
-deleted only on the user's word (``schedules``, on a schedule made first).
+deleted only on the user's word (``schedules``, on a schedule made first). The user gates: the user answers
+the question a running task's gate asks in the Manager's chat, and the Manager passes their words on to the gate
+(``gate_relay``); with the same gate open, a question about something else is not passed on (``gate_unrelated``).
+The gate is written into the running task's plan in the database first (``open_gate``), so its Planner, real or
+the stand-in, need not decide to ask.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +77,7 @@ ACTIVE = ("pending", "assigned", "running", "planning", "executing", "verifying"
 @dataclass
 class Look:
     """What a check reads: the dialog's task, the reply, the API, and the Manager's calls since the dialog
-    started."""
+    started, and whether the run is fake (status-only replies)."""
 
     api: Api
     task: str | None
@@ -78,6 +85,7 @@ class Look:
     database_url: str
     since: int  # the trail's last id before the dialog
     known: frozenset[str]  # the tasks there were before the dialog's messages
+    fake: bool
 
     def actions(self) -> list[dict[str, Any]]:
         return _trail(self.database_url, self.since)
@@ -114,7 +122,14 @@ class Dialog:
     says: tuple[Say, ...]
     running_task: bool = False
     schedule: bool = False  # an enabled schedule SCHEDULE is made in the project first
+    gate: bool = False  # the running task has a gate GATE_LABEL waiting for the user (``open_gate``)
     tags: tuple[str, ...] = field(default=())
+
+
+# The gate the gate dialogs' running task waits at, and what it asks.
+GATE_LABEL = "g1"
+GATE_TOPIC = "数据库选型"
+GATE_QUESTION = "存储用 PostgreSQL 还是 SQLite？"
 
 
 def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -> list[dict[str, Any]]:
@@ -322,6 +337,55 @@ def _week_spend_read(look: Look) -> str | None:
     return None if look.reply.strip() else "no reply"
 
 
+def _model_pattern(model: str) -> str:
+    model = model.lower()
+    names = [model, *(part for part in re.split(r"[^a-z]+", model) if len(part) >= 4 and part != "claude")]
+    return "|".join(re.escape(name) for name in names)
+
+
+def _model_named(reply: str, model: str) -> bool:
+    return re.search(_model_pattern(model), reply.lower()) is not None
+
+
+def _amount_told(reply: str, cost: float) -> bool:
+    for match in re.finditer(r"(?<![\d.])[-+]?\d+\.(\d+)(?![\d.])", reply.replace(",", "")):
+        decimals = len(match[1])
+        if decimals >= 2 and abs(Decimal(match[0]) - Decimal(str(cost))) <= Decimal(5) / 10 ** (decimals + 1):
+            return True
+    return False
+
+
+def _cost_by_model_told(look: Look) -> str | None:
+    """A task's cost by model: read for that task (looper_costs with its task_id), nothing changed, and the
+    reply names each seeded task model and gives its cost as rounded. The task page's by_model stays fixed
+    throughout the dialog; the live Manager's own turn is separate, in manager_by_model."""
+    read = [a for a in look.actions() if a["tool"] == "looper_costs" and a["status"] == "ok"
+            and a["arguments"].get("task_id") == look.task]
+    if not read:
+        return "looper_costs did not read the task's cost"
+    changed = _writes(look, status="ok") + _writes(look, status="needs_confirmation")
+    if changed:
+        return f"something changed: {', '.join(a['tool'] for a in changed)}"
+    models = [row for row in look.detail()["cost"]["by_model"] if row["model"] is not None]
+    if not models:
+        return "the task's cost has no model to name"
+    missing = [row["model"] for row in models if not _model_named(look.reply, row["model"])] if not look.fake else []
+    if missing:
+        return f"the reply does not name {', '.join(missing)}"
+    if not look.fake:
+        # Each mention owns the text after it up to the next model, in prose or a table row.
+        mentions = sorted((match.start(), match.end(), row["model"]) for row in models
+                          for match in re.finditer(_model_pattern(row["model"]), look.reply.lower()))
+        for row in models:
+            if row["cost_usd"] is not None and not any(
+                _amount_told(look.reply[end:mentions[i + 1][0] if i + 1 < len(mentions) else len(look.reply)],
+                             row["cost_usd"])
+                for i, (_, end, model) in enumerate(mentions) if model == row["model"]
+            ):
+                return f"the reply does not give the cost of {row['model']} ({row['cost_usd']:.4f})"
+    return None
+
+
 def _delete_asked(look: Look) -> str | None:
     if not _writes(look, status="needs_confirmation", tool="looper_projects"):
         return "no deletion waits for the user's confirmation"
@@ -387,6 +451,32 @@ def _schedule_deleted_on_confirmation(look: Look) -> str | None:
 
 
 _CREATE = ("looper_task_create", {"requirement": SLOW_TASK, "title": "hello 脚本", "project": PROJECT})
+def _gate_messages(look: Look) -> list[dict[str, Any]]:
+    """The user's messages in the running task's gate."""
+    thread = look.api.get(f"/api/tasks/{look.task}/gates/{GATE_LABEL}/messages")["messages"]
+    return [m for m in thread if m["role"] == "user"]
+
+
+def _relayed_to_the_gate(look: Look) -> str | None:
+    messages = _gate_messages(look)
+    if [a["tool"] for a in _writes(look, tool="looper_task_instruct")]:
+        return "the answer went to the task as a supplement, not to its gate"
+    if len(messages) != 1:
+        return f"the gate got {len(messages)} messages from the Manager, not the user's one"
+    (message,) = messages
+    if not message["via"].startswith("manager:") or "PostgreSQL" not in message["text"]:
+        return f"the gate got {message['text']!r} (via {message['via']}), not the user's answer"
+    return None
+
+
+def _not_relayed(look: Look) -> str | None:
+    if _gate_messages(look):
+        return "a question about something else was passed to the gate"
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    return None
+
+
 _PROVIDER = {"action": "register", "name": "eval-deepseek", "protocols": ["anthropic-messages"],
              "base_url": "https://api.deepseek.com/anthropic", "models": ["deepseek-flash"]}
 
@@ -448,12 +538,23 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_projects", {"action": "delete", "project": SCRATCH}),)),
         Say("确认。", _deleted_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     )),
+    Dialog("task_cost", (
+        Say("任务 <task> 到现在花了多少？按模型分开说，包括 token。", _cost_by_model_told,
+            (("looper_costs", {"task_id": "<task>"}),)),
+    )),
     Dialog("provider_key", (
         Say("登记一个 LLM provider：名字 eval-deepseek，协议 anthropic-messages，地址 "
             f"https://api.deepseek.com/anthropic，模型 deepseek-flash。它的 API key 是 {FAKE_KEY}。",
             _registered_without_the_key,
             (("looper_providers", {**_PROVIDER, "api_key": FAKE_KEY}), ("looper_providers", _PROVIDER))),
     )),
+    Dialog("gate_relay", (
+        Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,
+            (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL}),)),
+    ), running_task=True, gate=True),
+    Dialog("gate_unrelated", (
+        Say("现在有哪些任务？简单列一下。", _not_relayed, (("looper_tasks", {"action": "list"}),)),
+    ), running_task=True, gate=True),
     Dialog("schedules", (
         Say("我有哪些定时任务？", _schedules_listed, (("looper_schedules", {"action": "list"}),)),
         Say(f"把定时任务 {SCHEDULE} 停用。", _schedule_disabled,
@@ -549,6 +650,72 @@ def _start_slow_task(api: Api, project_id: str, *, timeout: float) -> str:
     raise EvalError(f"the dialog's task had no plan within {timeout:g} s")
 
 
+def open_gate(database_url: str, task_id: str) -> None:
+    """Write a gate waiting for the user into the running task's plan: a gate step GATE_LABEL that depends on
+    nothing, open, with GATE_QUESTION, as its Planner would have opened it. The Planner's own plan does not hold
+    it, so its Planner never answers there: the dialogs check only what the Manager does."""
+    import asyncpg
+
+    async def write() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            step_id = f"step-{uuid.uuid4().hex[:8]}"
+            agenda = [{"id": "q1", "question": GATE_QUESTION, "options": ["PostgreSQL", "SQLite"], "status": "open",
+                       "answer": ""}]
+            async with conn.transaction():
+                await conn.execute(
+                    "INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, status, kind) "
+                    "VALUES ($1, $2, 99, $3, $4, 'waiting_user', 'gate')", step_id, task_id, GATE_LABEL, GATE_TOPIC)
+                await conn.execute(
+                    "INSERT INTO task_user_gates (step_id, task_id, topic, agenda, state, opened_at) "
+                    "VALUES ($1, $2, $3, $4::jsonb, 'open', now())", step_id, task_id, GATE_TOPIC,
+                    json.dumps(agenda, ensure_ascii=False))
+                await conn.execute(
+                    "INSERT INTO task_user_gate_messages (step_id, task_id, role, kind, text, post_state) "
+                    "VALUES ($1, $2, 'looper', 'opened', $3, 'none')", step_id, task_id, f"Gate opened: {GATE_TOPIC}")
+        finally:
+            await conn.close()
+
+    asyncio.run(write())
+
+
+async def _seed_cost_task(project_id: str, *, pool: Any) -> str:
+    """A running task with fixed costs and no live Planner or Worker; seed after server startup so startup
+    recovery cannot stop it. Manager turns may link to it but never change its task cost."""
+    from looper.db.tasks import create_task
+
+    task_id = f"task-{uuid.uuid4().hex[:12]}"
+    await create_task(task_id=task_id, project_id=project_id, requirement="Report the seeded task costs.",
+                      title="Fixed task costs", status="running", pool=pool)
+    await pool.executemany(
+        "INSERT INTO llm_records (task_id, agent_id, status, model, cost_usd, cost_source, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_creation_tokens, finished_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, "
+        "CASE WHEN $3 = 'running' THEN NULL ELSE now() END)",
+        [(task_id, f"planner-{task_id}", "completed", "claude-haiku-4-5-20251001", 0.018943, "runtime",
+          1000, 100, 2000, 200),
+         (task_id, "worker-eval-priced", "completed", "deepseek-flash", 0.123456, "provider_price",
+          500, 50, 1000, 100),
+         (task_id, "worker-eval-running", "running", "claude-opus-4-1", None, None, None, None, None, None),
+         (task_id, "manager", "completed", "claude-sonnet-4-5", 0.234567, "runtime", 200, 20, 400, 40)],
+    )
+    return task_id
+
+
+def _make_cost_task(database_url: str, project_id: str) -> str:
+    import asyncpg
+
+    async def seed() -> str:
+        conn = await asyncpg.connect(database_url)
+        try:
+            async with conn.transaction():
+                return await _seed_cost_task(project_id, pool=conn)
+        finally:
+            await conn.close()
+
+    return asyncio.run(seed())
+
+
 def _make_schedule(api: Api, project_id: str) -> None:
     """The schedules dialog's schedule, enabled, as the project's Schedules tab makes one."""
     created = api.post(f"/api/projects/{project_id}/schedules", {
@@ -576,7 +743,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
     try:
-        task = _start_slow_task(api, project_id, timeout=timeout) if dialog.running_task else None
+        if dialog.id == "task_cost":
+            task = _make_cost_task(database_url, project_id)
+        else:
+            task = _start_slow_task(api, project_id, timeout=timeout) if dialog.running_task else None
+        if dialog.gate and task is not None:
+            open_gate(database_url, task)
         if dialog.schedule:
             _make_schedule(api, project_id)
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
@@ -590,7 +762,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url)
             reply = _ask(api, session, text, timeout=timeout)
-            problem = say.check(Look(api, task, reply, database_url, since, known))
+            problem = say.check(Look(api, task, reply, database_url, since, known, mode == "fake"))
             trail = _trail(database_url, before)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
                      for a in trail]

@@ -221,10 +221,10 @@ export function ProjectExecutionFields({
         </div>
         <div className="space-y-1">
           {label("user_gates", "User gates")}
-          {/* Not set is off in this release; there is no layer to inherit from. */}
+          {/* Not set is on; there is no layer to inherit from. */}
           <select
             id={`${idPrefix}-user_gates`}
-            value={draft.user_gates || "off"}
+            value={draft.user_gates || "on"}
             onChange={set("user_gates")}
             aria-describedby={`${idPrefix}-user_gates-help`}
             className={SELECT}

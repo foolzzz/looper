@@ -19,6 +19,11 @@ a task's progress goes to the group, and its end notice too, @-mentioning
 the requester. So the bot posts in a group only to answer an allowlisted
 @-mention and for that task.
 
+A user gate's messages are posted directly (``post``: to the user or the
+group, or as a reply to a message, returning the id of the message sent), and
+a reply's references (``reply_to``, ``root_id``) reach the Manager in
+``channel_context``, so a reply to a gate's message can be routed to its gate.
+
 Only the senders on its allowlist (their ``open_id`` for this app) reach the
 Manager: anyone else is dropped with one log line, recorded as a rejected
 sender (``on_rejected``: who, and in which group chat) and gets no reply, and
@@ -47,9 +52,10 @@ from ..message import (
 from ..task_notice import Notice, NotifyTarget, TargetKind
 from . import lark_cli
 from .allowlist import SenderAllowlist
-from .base import ChannelAdapter, DeliveryReceipt
+from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
+from .chat_history import record_reply
 from .lark_cli import (
-    RECEIVE_EVENT, LarkCliError, consume_command, edit_command, mention, reaction_command, reply_command, run,
+    MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, consume_command, edit_command, mention, reaction_command, reply_command, run,
     run_json, send_command, sent_message_id,
 )
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -192,6 +198,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 channel="lark",
                 success=False,
                 error=f"no chat_id for correlation {corr_id}",
+                failure=DeliveryFailure.NO_CHAT,
             )
 
         if envelope.message_type is MessageType.STATUS_UPDATE:
@@ -234,16 +241,20 @@ class LarkChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="lark", success=False, error=str(exc))
         return DeliveryReceipt(channel="lark", success=True)
 
+    def _target_command(self, target: NotifyTarget, text: str, *, idempotency_key: str | None = None) -> list[str]:
+        """The argv that sends ``text`` as Markdown to ``target``: to a user in a direct message, or to a group chat
+        @-mentioning the requester."""
+        if target.kind is TargetKind.USER:
+            return send_command(user_id=target.id, markdown=text, profile=self._profile,
+                                idempotency_key=idempotency_key)
+        body = f"{mention(target.mention)} {text}" if target.mention else text
+        return send_command(chat_id=target.id, markdown=body, profile=self._profile, idempotency_key=idempotency_key)
+
     async def _send_notice(self, target: NotifyTarget, text: str) -> DeliveryReceipt:
         """Send a task's end notice as Markdown, like an answer: to a user in a direct message, or to a group chat
         @-mentioning the requester."""
-        if target.kind is TargetKind.USER:
-            argv = send_command(user_id=target.id, markdown=text, profile=self._profile)
-        else:
-            body = f"{mention(target.mention)} {text}" if target.mention else text
-            argv = send_command(chat_id=target.id, markdown=body, profile=self._profile)
         try:
-            await run(argv)
+            await run(self._target_command(target, text))
         except LarkCliError as exc:
             logger.warning("lark: a task's end notice to %s failed: %s", target.id, exc)
             return DeliveryReceipt(channel="lark", success=False, error=str(exc))
@@ -274,6 +285,26 @@ class LarkChannelAdapter(ChannelAdapter):
             logger.warning("lark notification to %s failed: %s", chat, exc)
             return DeliveryReceipt(channel="lark", success=False, error=str(exc))
         return DeliveryReceipt(channel="lark", success=True)
+
+    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                   idempotency_key: str | None = None) -> PostReceipt:
+        """Send ``text`` as Markdown: a reply to the message ``reply_to`` (``om_...``) when given, which @-mentions
+        nobody; else to ``target`` like an end notice (a user, or a group @-mentioning the requester). Lark sends one
+        message per ``idempotency_key`` within an hour, so a post retried after a lost answer is not sent twice."""
+        if reply_to:
+            argv = reply_command(reply_to, markdown=text, profile=self._profile, idempotency_key=idempotency_key)
+        else:
+            argv = self._target_command(target, text, idempotency_key=idempotency_key)
+        try:
+            message_id = sent_message_id(await run_json(argv))
+        except LarkCliError as exc:
+            logger.warning("lark: a post to %s failed: %s", target.id, exc)
+            return PostReceipt(False, error=str(exc),
+                               parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES)
+        if message_id is None:
+            logger.warning("lark: a post to %s: lark-cli did not say which message it sent", target.id)
+            return PostReceipt(False, error="lark-cli did not say which message it sent")
+        return PostReceipt(True, external_ids=(message_id,))
 
     def healthcheck(self) -> dict[str, Any]:
         return {
@@ -351,8 +382,8 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _handle_lark_event(self, event: dict[str, Any]) -> None:
         """Publish a received text message to the Bus. The event is lark-cli's flat one: ``chat_id``,
         ``chat_type`` (``p2p`` or ``group``), ``message_id``, ``message_type``, ``sender_id`` (the open_id),
-        ``sender_type``, ``mentions`` (each ``id``, an open_id, ``key`` and ``name``) and ``content``, a text
-        message's text with each mention shown as ``@name``."""
+        ``sender_type``, ``mentions`` (each ``id``, an open_id, ``key`` and ``name``), ``content``, a text
+        message's text with each mention shown as ``@name``, and for a reply ``reply_to`` and ``root_id``."""
         assert self._bus is not None
         import uuid as _uuid
 
@@ -389,7 +420,7 @@ class LarkChannelAdapter(ChannelAdapter):
             return
 
         text = self._without_mentions(text, bot_mentions)
-        if not text.strip():
+        if not text.strip() and not (event.get("reply_to") or event.get("root_id")):
             return
 
         message_id = event.get("message_id") or ""
@@ -398,6 +429,10 @@ class LarkChannelAdapter(ChannelAdapter):
         self._correlation_chat[correlation_id] = chat_id
         context = {"chat_id": chat_id, "chat_type": "group" if group else "p2p", "sender_id": sender_open_id or "",
                    "message_id": message_id}
+        # What the message replies to: the message it answers and the first of its thread (a gate's messages).
+        for key in ("reply_to", "root_id"):
+            if isinstance(ref := event.get(key), str) and ref:
+                context[key] = ref
         if group:
             if message_id:
                 self._group_message[correlation_id] = message_id
@@ -425,7 +460,8 @@ class LarkChannelAdapter(ChannelAdapter):
             async for envelope in self._bus.subscribe(self.channel_id):
                 if not self._running:
                     break
-                await self.deliver(envelope)
+                # An answer is stored once it was sent, or as not delivered (the Manager names its record).
+                await record_reply(self.channel_type, envelope, await self.deliver(envelope))
         except asyncio.CancelledError:
             pass
 

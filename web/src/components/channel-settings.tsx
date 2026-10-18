@@ -1,19 +1,39 @@
 import { useEffect, useId, useState } from "react";
-import { AlertTriangle, Bot, Save, Loader2, MessageCircle, Search, Send, CheckCircle2, XCircle, Plus, Trash2, UserPlus } from "lucide-react";
+import {
+  AlertTriangle,
+  Bot,
+  Save,
+  Loader2,
+  MessageCircle,
+  MessageCircleQuestionMark,
+  Search,
+  Send,
+  CheckCircle2,
+  XCircle,
+  Plus,
+  Trash2,
+  UserPlus,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { LABEL, SELECT } from "@/components/registry-ui";
 import {
   fetchChannelConfigs,
+  fetchGateSettings,
   fetchLarkStatus,
   searchLarkPeople,
   updateChannelConfig,
+  updateGateSettings,
   type ChannelConfig,
+  type GateSettings,
+  type GateTarget,
   type LarkPerson,
   type LarkStatus,
 } from "@/lib/api";
 import { useSettingsTarget } from "@/lib/settings-target";
+import { errorText, useAction } from "@/lib/use-action";
 import { cn } from "@/lib/utils";
 
 function channelIcon(type: string) {
@@ -454,6 +474,141 @@ function LarkPeople({
   );
 }
 
+/** A gate target as the select holds it; "" = only the task page. */
+const gateTargetKey = (target: GateTarget | null) => (target ? `${target.channel}\n${target.chat}` : "");
+
+/** The chat the gate messages of tasks started on the dashboard also go to, from the channels' sender allowlists.
+ * Read again when `reloadKey` changes (a channel was saved). */
+function DashboardGatesCard({ reloadKey }: { reloadKey: string }) {
+  const id = useId();
+  const [settings, setSettings] = useState<GateSettings | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [choice, setChoice] = useState("");
+  const [justSaved, setJustSaved] = useState(false);
+  const { busy, error, run } = useAction();
+
+  useEffect(() => {
+    let alive = true;
+    fetchGateSettings().then(
+      (next) => {
+        if (!alive) return;
+        setSettings(next);
+        setChoice(gateTargetKey(next.dashboard_target));
+        setLoadError("");
+      },
+      (err) => alive && setLoadError(errorText(err)),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [reloadKey]);
+
+  const saved = gateTargetKey(settings?.dashboard_target ?? null);
+  const targets = settings?.targets ?? [];
+  const chosen = targets.find((target) => gateTargetKey(target) === choice);
+  // A saved chat the allowlist no longer has stays selectable, so the select shows what is saved.
+  const gone = settings?.dashboard_target && !targets.some((t) => gateTargetKey(t) === saved) ? settings.dashboard_target : null;
+
+  const save = async () => {
+    setJustSaved(false);
+    const ok = await run(async () => {
+      // Save is off while the choice is the saved one, so anything but a listed chat is "only the task page".
+      const next = await updateGateSettings(chosen ? { channel: chosen.channel, chat: chosen.chat } : null);
+      setSettings(next);
+      setChoice(gateTargetKey(next.dashboard_target));
+    });
+    if (ok) setJustSaved(true);
+  };
+
+  return (
+    <section aria-labelledby={`${id}-title`} className="rounded-lg border border-border bg-card overflow-hidden">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-border">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+          <MessageCircleQuestionMark className="h-5 w-5" aria-hidden="true" />
+        </div>
+        <div>
+          <h3 id={`${id}-title`} className="text-sm font-semibold">Gates of dashboard tasks</h3>
+          <p className="text-xs text-muted-foreground">
+            Questions a task started on the dashboard asks you at a gate go to its task page, and also to the chat
+            chosen here.
+          </p>
+        </div>
+      </div>
+
+      <div className="px-5 py-4 space-y-3">
+        {!settings ? (
+          loadError ? (
+            <p role="alert" className="text-xs text-destructive">{loadError}</p>
+          ) : (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-label="Loading" />
+          )
+        ) : targets.length === 0 && !gone ? (
+          <p className="text-xs text-muted-foreground">
+            Gate questions stay on the task page. To have them sent to a chat as well, add a person to the Lark or
+            Telegram channel&apos;s sender allowlist above first.
+          </p>
+        ) : (
+          <>
+            <div className="space-y-1">
+              <label htmlFor={`${id}-target`} className={LABEL}>Also send to</label>
+              <select
+                id={`${id}-target`}
+                value={choice}
+                onChange={(e) => {
+                  setChoice(e.target.value);
+                  setJustSaved(false);
+                }}
+                aria-describedby={`${id}-hint`}
+                className={cn(SELECT, "h-11")}
+              >
+                <option value="">Only the task page</option>
+                {targets.map((target) => (
+                  // A chat on a channel that is off cannot be chosen (the API refuses it); a saved one stays shown.
+                  <option
+                    key={gateTargetKey(target)}
+                    value={gateTargetKey(target)}
+                    disabled={!target.channel_enabled && gateTargetKey(target) !== saved}
+                  >
+                    {`${target.label}${target.channel_enabled ? "" : " (channel off)"}`}
+                  </option>
+                ))}
+                {gone && <option value={saved}>{`${gone.channel} · ${gone.chat} (not in the allowlist)`}</option>}
+              </select>
+              <p id={`${id}-hint`} className="text-xs text-muted-foreground">
+                {chosen && !chosen.channel_enabled ? (
+                  <span className="text-warning">This channel is turned off: nothing reaches the chat until it is on. </span>
+                ) : gone && choice === saved ? (
+                  <span className="text-warning">
+                    {settings.dashboard_target_problem ?? "This chat is no longer in its channel's sender allowlist"}.{" "}
+                  </span>
+                ) : null}
+                Chats a channel&apos;s sender allowlist lets in.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+              {justSaved && (
+                <span role="status" className="flex items-center gap-1 text-xs text-success">
+                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  Saved
+                </span>
+              )}
+              <Button type="button" onClick={save} disabled={busy || choice === saved} className="min-h-11">
+                {busy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+                Save
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /** Settings → Channels: the Telegram and Lark (lark-cli) channels, each with its sender allowlist. */
 export function ChannelsSection() {
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
@@ -495,6 +650,8 @@ export function ChannelsSection() {
       ) : (
         channels.map((ch) => <ChannelCard key={ch.channel_id} channel={ch} onSaved={load} />)
       )}
+
+      {!loading && <DashboardGatesCard reloadKey={channels.map((ch) => ch.updated_at).join()} />}
     </div>
   );
 }
