@@ -137,11 +137,11 @@ def _listed(task: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _tasks(call: Call) -> dict[str, Any]:
     arguments = call.arguments
-    if arguments["action"] == "get":
+    if arguments["action"] in ("get", "room"):
         task_id = arguments.get("task_id")
         if not task_id:
-            raise OpError(ErrorCode.INVALID, "task_id is required for action get")
-        return await _task_view(task_id)
+            raise OpError(ErrorCode.INVALID, f"task_id is required for action {arguments['action']}")
+        return await _task_view(task_id) if arguments["action"] == "get" else await _room_view(call, task_id)
     project_id = None
     if arguments.get("project"):
         project = await db_projects.find_project_by_name(project_name(arguments["project"]))
@@ -156,6 +156,25 @@ async def _tasks(call: Call) -> dict[str, Any]:
         tasks = [t for t in tasks if query in " ".join(
             str(t.get(key) or "") for key in ("id", "name", "requirement", "project_name", "goal_id")).casefold()]
     return {"tasks": [_listed(task) for task in tasks[:limit]], "more": len(tasks) > limit}
+
+
+# The newest room messages ``looper_tasks`` room shows, each clipped.
+ROOM_MESSAGES_SHOWN = 40
+
+
+async def _room_view(call: Call, task_id: str) -> dict[str, Any]:
+    """A task's agent room, read only: its seats and their presence, its numbers, its newest messages."""
+    from ..room import task_view
+
+    pool = call.platform.worker_pool
+    view = await task_view(task_id, runs=pool.room_runs(task_id) if pool is not None else None,
+                           limit=ROOM_MESSAGES_SHOWN)
+    if view is None:
+        raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}: find its id with looper_tasks")
+    return {"task_id": task_id, "enabled": view["enabled"], "counts": view["counts"],
+            "seats": [{"seat": s["seat"], "step": s["step"], "presence": s["presence"]} for s in view["seats"]],
+            "messages": [{**m, "body": clip(m["body"], 500)} for m in view["messages"]],
+            "more": view["more"]}
 
 
 async def _task_view(task_id: str) -> dict[str, Any]:
@@ -576,12 +595,13 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_tasks",
         description="List or search tasks (newest first), or get one task with its steps, supplements, latest "
-                    "progress note, result, cost and concurrency limits.",
+                    "progress note, result, cost and concurrency limits; room: what the task's agents said to each "
+                    "other in its room (read only).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["list", "get"]},
-                "task_id": {**_TASK_ID, "description": "The task to get (action get)."},
+                "action": {"type": "string", "enum": ["list", "get", "room"]},
+                "task_id": {**_TASK_ID, "description": "The task to get (action get, room)."},
                 "query": {"type": "string", "description": "Words to find in a task's id, name, requirement or "
                                                           "project (action list)."},
                 "group": {"type": "string", "enum": [g.value for g in db_tasks.TaskGroup],

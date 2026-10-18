@@ -710,6 +710,13 @@ async def _run_agent_system(
     # deleted content that no running process mounts.
     from .read_only_copies import reclaim_unused
     await reclaim_unused(runtime_root)
+    # The sessions the agent room's runs kept (Codex, OMP) of tasks gone or ended over a week ago.
+    from .room import RUN_SESSIONS_KEPT_DAYS, sweep_run_sessions
+    try:
+        from ..db import room as db_room
+        sweep_run_sessions(runtime_root, await db_room.tasks_keeping_sessions(days=RUN_SESSIONS_KEPT_DAYS))
+    except Exception:
+        logger.warning("could not remove the kept sessions of ended tasks", exc_info=True)
 
     logger.info("database initialised")
 
@@ -788,11 +795,18 @@ async def _run_agent_system(
     from .ops.planner import PlannerOps
     from .ops.service import ManagerOps, Platform
     platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=manager,
-                        supervisor=supervisor)
+                        supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     manager_ops = ManagerOps(platform, url=_local_url(host, port))
     manager.ops = manager_ops
     planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
     task_router.planner_ops = planner_ops
+    # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
+    from .ops.room import RoomOps
+    from .room import RoomService
+    room = RoomService(bus=bus, worker_pool=worker_pool)
+    planner_ops.room = room
+    room_ops = RoomOps(room, url=_local_url(host, port))
+    worker_pool.room_ops = room_ops
 
     # --- Start ---
 
@@ -816,6 +830,7 @@ async def _run_agent_system(
         scheduler=scheduler,
         manager_ops=manager_ops,
         planner_ops=planner_ops,
+        room_ops=room_ops,
     )
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.

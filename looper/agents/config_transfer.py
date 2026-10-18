@@ -24,7 +24,8 @@ sections:
 - ``channels``: each chat channel's configuration;
 - ``installs``: the global installs, naming their item by kind and name;
 - ``projects`` (``--include-projects``): each project's fields, execution
-  settings, layers, knowledge, the items it wrote and its installs;
+  settings, layers, knowledge, the items it wrote, its installs and its
+  ``schedules`` (Manager tools RFC, section 7.1; see **Schedules**);
 - ``catalog``: every item outside projects with its files, or an MCP
   server's configuration.
 
@@ -55,6 +56,15 @@ role then runs the profile and effort it would have run with the file's
 layers, through the profiles they select, added as needed (``<profile> ·
 <effort>``). A layer this changes that the file does not give, such as a
 role's in a project, is changed too; a note says each.
+
+**Schedules** carry their settings, their Agent Profiles by name and their
+task limits, not whether they are enabled, their runs or counters, nor their
+own directory (a machine path: ``repoint`` marks one that had it). An import
+creates a schedule it adds, and rewrites one whose settings differ, disabled
+(enabling is the approval, scheduled-tasks RFC D6), with a note; one whose
+settings match is left as it is. A ``notify_target`` this machine's sender
+allowlists (as the import leaves the channels) do not allow is dropped, with a
+note.
 
 **Runtimes** are built in, so a file's runtime only says what its profiles run
 on here: the runtime of its name when one of its type is here, else the
@@ -125,7 +135,12 @@ class Action(str, Enum):
 
 SECTIONS = ("runtimes", "providers", "profiles", "settings.layers", "settings.roles", "channels", "catalog", "installs",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
-            "project.installs")
+            "project.schedules", "project.installs")
+# A schedule's settings the file carries as they are; its notify target, Agent Profiles and task limits are
+# ``notify_target``, ``profiles`` (by name) and ``task_limits``.
+_SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
+                    "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd",
+                    "notify")
 
 
 @dataclass(frozen=True)
@@ -319,6 +334,19 @@ def document_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     return {**entry, "content": row["content"]}
 
 
+def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> dict[str, Any]:
+    """A schedule as the file holds it: no enabled flag, runs or counters, and no directory (``repoint`` when it had
+    one of its own)."""
+    entry = {name: row[name] for name in _SCHEDULE_FIELDS}
+    entry["notify_target"] = ({"channel": row["notify_channel"], "chat": row["notify_chat"]}
+                              if row["notify_channel"] else None)
+    entry["profiles"] = {role: profile_names.get(pid, pid) for role, pid in sorted(row["profile_overrides"].items())}
+    entry["task_limits"] = dict(sorted(row["task_limits"].items()))
+    if row["work_dir"]:
+        entry["repoint"] = True
+    return entry
+
+
 @dataclass
 class ExportSummary:
     counts: dict[str, int] = field(default_factory=dict)
@@ -380,13 +408,20 @@ async def export_chunks(
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
 
     if include_projects:
+        from ..db.schedules import list_schedules
+
         documents, templates = defaultdict(list), defaultdict(list)
         for row in await db.read_documents(conn, content=True):
             documents[row["project_id"]].append(row)
         for row in await db.read_role_templates(conn):
             templates[row["project_id"]].append(row)
+        schedules = defaultdict(list)
+        for row in await list_schedules(pool=conn):
+            schedules[row["project_id"]].append(row)
+        profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
         projects = await db.read_projects(conn)
         summary.counts["projects"] = len(projects)
+        summary.counts["schedules"] = sum(len(rows) for rows in schedules.values())
         yield ',\n"projects":['
         for index, project in enumerate(projects):
             owned = []
@@ -405,6 +440,8 @@ async def export_chunks(
                 # Only a project that has templates names them, so a file of a project without is as before.
                 by_id = {row["id"]: row for row in items}
                 entry["role_templates"] = [role_template_entry(r, by_id) for r in templates[project["id"]]]
+            if schedules[project["id"]]:  # likewise its schedules
+                entry["schedules"] = [schedule_entry(r, profile_names) for r in schedules[project["id"]]]
             summary.repoint += sum(1 for d in entry["knowledge"] if d.get("repoint"))
             yield ("\n" if index == 0 else ",\n") + _dump(entry)
         yield "]"
@@ -429,26 +466,33 @@ async def _read_only(dsn: str) -> Any:
 
 async def export_to_file(dsn: str, path: Path, *, include_projects: bool, include_secrets: bool) -> ExportSummary:
     """Write the configuration file from a read-only connection; the file appears whole or not at all."""
-    summary = ExportSummary()
     conn = await _read_only(dsn)
+    try:
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            return await write_export(conn, path, include_projects=include_projects, include_secrets=include_secrets)
+    finally:
+        await conn.close()
+
+
+async def write_export(conn: Any, path: Path, *, include_projects: bool, include_secrets: bool) -> ExportSummary:
+    """Write the configuration file from ``conn`` (in a read-only, repeatable-read transaction) to ``path``, whole or
+    not at all; a file without secrets is readable as the umask allows, one with them by its owner only."""
+    summary = ExportSummary()
     path = path.expanduser()
     handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent.resolve(), prefix=f".{path.name}.",
                                          delete=False)
     try:
         if not include_secrets:
             os.chmod(handle.name, 0o644 & ~_umask())
-        async with conn.transaction(isolation="repeatable_read", readonly=True):
-            async for chunk in export_chunks(conn, include_projects=include_projects,
-                                             include_secrets=include_secrets, summary=summary):
-                handle.write(chunk)
+        async for chunk in export_chunks(conn, include_projects=include_projects, include_secrets=include_secrets,
+                                         summary=summary):
+            handle.write(chunk)
         handle.close()
         os.replace(handle.name, path)
     except BaseException:
         handle.close()
         Path(handle.name).unlink(missing_ok=True)
         raise
-    finally:
-        await conn.close()
     summary.bytes = path.stat().st_size
     return summary
 
@@ -759,6 +803,7 @@ class _Target:
     runtimes: dict[str, dict[str, Any]] = field(default_factory=dict)  # by name
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    schedules: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))  # by project id
 
     @classmethod
     async def read(cls, conn: Any) -> _Target:
@@ -782,6 +827,10 @@ class _Target:
         target.runtimes = {row["name"]: row for row in await db.read_runtimes(conn)}
         target.providers = {row["name"]: row for row in await db.read_providers(conn)}
         target.profiles = {row["name"]: row for row in await db.read_profiles(conn)}
+        from ..db.schedules import list_schedules
+
+        for row in await list_schedules(pool=conn):
+            target.schedules[row["project_id"]].append(row)
         return target
 
 
@@ -819,6 +868,12 @@ class _Importer:
         self.file_layers: list[_FileLayer] = []
         self.seen_items: set[tuple[str, str, str | None]] = set()
         self.seen_projects: set[str] = set()
+        # Each channel's configuration as the import leaves it (the file's over this machine's): its sender allowlist
+        # says which chats a schedule may tell.
+        self.channel_configs = {kind: dict(row["config"] or {}) for kind, row in target.channels.items()}
+        # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
+        self.disabled_schedules: list[str] = []
+        self.repointed_schedules: list[str] = []
         self.role_text_limits: dict[str, int] = {}  # by project id: how long its roles' texts may be
         # Runtimes, providers and Agent Profiles by name, stored and from the file: their ids ("new:..." in a
         # preview) and what a profile is checked with.
@@ -1222,6 +1277,7 @@ class _Importer:
         except _Skip as exc:
             self.record("channels", str(kind), Action.SKIPPED, reason=str(exc))
             return
+        self.channel_configs[kind] = config
         current = {"display_name": row["display_name"], "enabled": row["enabled"],
                    "config": dict(row["config"] or {})} if row else None
         action = self.outcome("channels", kind, current, _differs(values, current, ("display_name", "enabled",
@@ -1472,6 +1528,128 @@ class _Importer:
 
                 await db_templates.put_template(project_id, key, values, pool=self.conn)
 
+    # --- schedules ---
+
+    def _notify_allowed(self, channel: Any, chat: Any) -> bool:
+        from .channels.allowlist import SENDER_ID_FORMATS, AllowlistError, sender_ids
+
+        if channel not in SENDER_ID_FORMATS or not isinstance(chat, str):
+            return False
+        config = self.channel_configs.get(channel) or {}
+        try:
+            return chat in sender_ids(channel, config.get(SENDER_ID_FORMATS[channel].field))
+        except AllowlistError:
+            return False
+
+    def _schedule_values(self, entry: Any, label: str,
+                         ) -> tuple[dict[str, Any], dict[str, tuple[str, str]], dict[str, int]]:
+        """A schedule of the file, checked as the API checks one: its settings (``schedules.FIELDS`` but its
+        directory), its Agent Profiles as role -> (name, id; ``new:...`` in a preview) and its task limits.
+        ``_Skip`` otherwise; a notify target this machine's allowlists do not allow is dropped, with a note."""
+        from . import cron, schedules
+        from .profile_registry import RegistryError, check_roles
+        from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
+
+        entry = _mapping(entry, "a schedule")
+        unknown = sorted(set(entry) - {*_SCHEDULE_FIELDS, "notify_target", "profiles", "task_limits", "repoint"})
+        if unknown:
+            raise _Skip(f"unknown field {unknown[0]!r}")
+        defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures"}
+        values: dict[str, Any] = {}
+        try:
+            for name in _SCHEDULE_FIELDS:
+                if name not in ("cron", "timezone"):
+                    values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
+            zone = entry.get("timezone") or cron.local_zone_name()
+            rule, _ = schedules.checked_rule(entry.get("cron"), zone, now=datetime.now(UTC),
+                                             gated=bool(values["gate_command"]))
+            values.update(cron=rule.text, timezone=zone)
+            limits = _concurrency_limits(entry.get("task_limits") or {}, field="task_limits")
+        except ValueError as exc:
+            raise _Skip(str(exc)) from None
+        except RequestError as exc:
+            raise _Skip(str(exc)) from None
+        target = entry.get("notify_target")
+        values["notify_channel"] = values["notify_chat"] = None
+        if target is not None:
+            target = _mapping(target, "notify_target")
+            if self._notify_allowed(target.get("channel"), target.get("chat")):
+                values["notify_channel"], values["notify_chat"] = target["channel"], target["chat"]
+            else:
+                self.plan.notes.append(f"schedule {label}{values['name']}: {target.get('channel')} chat "
+                                       f"{target.get('chat')!r} is not in this machine's sender allowlist, so it "
+                                       "tells the dashboard only; add the sender in Settings → Channels, then pick it")
+        profiles: dict[str, tuple[str, str]] = {}
+        for role, name in _mapping(entry.get("profiles") or {}, "profiles").items():
+            if role not in TASK_PROFILE_ROLES:
+                raise _Skip(f"profiles: a schedule chooses the Agent Profile of its {', '.join(TASK_PROFILE_ROLES)} "
+                            f"only, not {role!r}")
+            if not isinstance(name, str) or name not in self.profiles:
+                raise _Skip(f"profiles.{role}: no Agent Profile {name!r} here or in the file")
+            profile_id, spec = self.profiles[name]
+            try:
+                check_roles(spec, (role,))
+            except RegistryError as exc:
+                raise _Skip(f"profiles.{role}: {exc}") from None
+            profiles[role] = (name, profile_id)
+        return values, profiles, {role: limit for role, limit in limits.items() if limit is not None}
+
+    async def schedules(self, entries: Any, project_id: str, label: str) -> None:
+        """Add or rewrite the project's schedules of the file, disabled; leave those whose settings match."""
+        if not isinstance(entries, list):
+            self.record("project.schedules", f"{label}schedules", Action.SKIPPED, reason="schedules is not a list")
+            return
+        stored = {row["name"].lower(): row for row in self.target.schedules.get(project_id, [])}
+        names = {row["id"]: name for name, row in self.target.profiles.items()}
+        seen: set[str] = set()
+        for entry in entries:
+            raw_name = entry.get("name") if isinstance(entry, Mapping) else None
+            try:
+                values, profiles, limits = self._schedule_values(entry, label)
+                if values["name"].lower() in seen:
+                    raise _Skip("the file gives this schedule twice")
+                seen.add(values["name"].lower())
+            except _Skip as exc:
+                self.record("project.schedules", f"{label}{raw_name}", Action.SKIPPED, reason=str(exc))
+                continue
+            key = f"{label}{values['name']}"
+            row = stored.get(values["name"].lower())
+            new = {**values, "profiles": {role: name for role, (name, _) in profiles.items()}, "task_limits": limits}
+            profile_ids = {role: profile_id for role, (_, profile_id) in profiles.items()}
+            current = None
+            if row is not None:
+                current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "notify_channel", "notify_chat")}
+                current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
+                current["task_limits"] = dict(row["task_limits"])
+            action = self.outcome("project.schedules", key, current, _differs(new, current, new))
+            if action in (Action.ADDED, Action.CHANGED):
+                self.disabled_schedules.append(key)
+                if isinstance(entry, Mapping) and entry.get("repoint") and row is None:
+                    self.repointed_schedules.append(key)
+            if not self.apply or action not in (Action.ADDED, Action.CHANGED):
+                continue
+            from ..db import schedules as db_schedules
+
+            if row is None:
+                await db_schedules.create_schedule(self.conn, project_id=project_id, fields=values,
+                                                   profiles=profile_ids, task_limits=limits, created_via="import")
+            else:
+                fields = {**values, "enabled": False, "next_fire_at": None}
+                if (values["cron"], values["timezone"]) != (row["cron"], row["timezone"]):
+                    fields["rule_changed_at"] = datetime.now(UTC)
+                await db_schedules.update_schedule(self.conn, row["id"], fields, profiles=profile_ids,
+                                                   task_limits=limits)
+
+    def schedule_notes(self) -> None:
+        if self.disabled_schedules:
+            self.plan.notes.append(
+                f"{len(self.disabled_schedules)} schedule(s) come in disabled ({', '.join(self.disabled_schedules)}): "
+                "check each one's directory and gate command on this machine, then enable it")
+        if self.repointed_schedules:
+            self.plan.notes.append(
+                f"{', '.join(self.repointed_schedules)}: had a directory of its own, which is not carried; it runs in "
+                "its project's directory until you set one")
+
 
 async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
     """The import's plan for ``data`` (from ``read_file``); with ``apply`` also written, in the caller's
@@ -1518,6 +1696,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
             await importer.item(item, project_id, label)
         await importer.documents(entry.get("knowledge") or [], project_id, label)
         await importer.role_templates(entry.get("role_templates") or [], project_id, label)
+        await importer.schedules(entry.get("schedules") or [], project_id, label)
+    importer.schedule_notes()
     await importer.settle_layers()
     importer.check_caps()
 

@@ -38,6 +38,9 @@ logged.
   the project's list (``task_roles``). Each change is a new version, with a
   ``role_defined`` journal entry; a step's attempt runs the version current
   when it starts.
+- **The room.** With its project's agent room on (the default), the room's
+  tools are listed too (``ops.room``: the roster, posting, the inbox and the
+  history), acting as the seat ``planner``; elsewhere they are refused.
 """
 
 from __future__ import annotations
@@ -69,7 +72,10 @@ from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from ..tiers.worker import recheck_limits
 from . import ErrorCode, OpError, Risk, Tool, check_arguments
 from .concurrency import COUNTS, NOTE, limits_argument, set_task_limits, shown
+from .room import TOOL_NAMES as ROOM_TOOL_NAMES, normalize_room_arguments, run_tool as run_room_tool
+from .room import tools_for as room_tools_for
 from .service import MANAGER_TOOLS, library_with_server, server_config
+from ..room import PLANNER_ROOM_GUIDE, MemberKind, Seat
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +189,8 @@ class PlannerOps:
         self._dashboard_url = dashboard_url
         self._tools = {tool.name: tool for tool in ((*TOOLS, *ROLE_TOOLS) if tools is None else tools)}
         self._grants: dict[str, _Grant] = {}  # a token's hash -> what it is good for
+        # The tasks' agent rooms (``room.RoomService``); without them the Planner has no room tools.
+        self.room: Any = None
 
     # --- Tokens ---
 
@@ -232,7 +240,10 @@ class PlannerOps:
         define roles."""
         grant = self._grant(header)
         roles_on = grant is not None and await _roles_on(grant.task_id)
-        return [tool.listing() for tool in self._tools.values() if roles_on or tool.name not in _ROLE_TOOL_NAMES]
+        tools = [tool.listing() for tool in self._tools.values() if roles_on or tool.name not in _ROLE_TOOL_NAMES]
+        if grant is not None and self.room is not None and await self.room.enabled(grant.task_id):
+            tools += [tool.listing() for tool in room_tools_for(MemberKind.PLANNER)]
+        return tools
 
     async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
         """Run one tool call of the Planner whose token ``header`` carries; the protocol's answer."""
@@ -241,6 +252,8 @@ class PlannerOps:
             return _error(ErrorCode.FORBIDDEN, "this Planner's token no longer works: its task ended or a new "
                                                "Planner took over")
         task_id = grant.task_id
+        if name in ROOM_TOOL_NAMES and self.room is not None:
+            return await self._room_call(grant, name, raw)
         tool = self._tools.get(name)
         if tool is None:
             manager = name in {t.name for t in MANAGER_TOOLS}
@@ -274,6 +287,30 @@ class PlannerOps:
                                                  "again later")
         return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}
 
+    async def _room_call(self, grant: _Grant, name: str, raw: Any) -> dict[str, Any]:
+        """A call of a room tool, as the seat ``planner`` of its token's task."""
+        task_id = grant.task_id
+        tool = next((t for t in room_tools_for(MemberKind.PLANNER) if t.name == name), None)
+        if tool is None:
+            return _error(ErrorCode.INVALID, f"{name} is not one of your room tools")
+        try:
+            arguments = check_arguments(tool.schema, normalize_room_arguments(raw))
+            if not await self.room.enabled(task_id):
+                raise OpError(ErrorCode.FORBIDDEN, "this task's project has turned its agent room off")
+            if tool.risk is not Risk.READ and not grant.in_turn:
+                raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn it sent you, not in a "
+                                                         "turn you run on your own; do it in your next turn")
+            result = await run_room_tool(self.room, task_id, Seat.planner(), name, arguments)
+        except OpError as exc:
+            if tool.risk is not Risk.READ:
+                await _activity(task_id, f"Planner's {name} refused ({exc.code.value}): {exc}")
+            return _error(exc.code, str(exc))
+        except Exception as exc:
+            logger.exception("task %s: the Planner's call of %s failed", task_id, name)
+            return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); try "
+                                                 "again later")
+        return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}
+
     # --- The Planner's MCP entry ---
 
     @property
@@ -281,9 +318,11 @@ class PlannerOps:
         """How the Planner uses its tools, for its system prompt."""
         return TOOLS_GUIDE
 
-    def guide_for(self, *, roles: bool) -> str:
-        """How the Planner uses its tools, with the role tools where its project lets it define roles."""
-        return f"{TOOLS_GUIDE}\n{ROLES_GUIDE}" if roles else TOOLS_GUIDE
+    def guide_for(self, *, roles: bool, room: bool = False) -> str:
+        """How the Planner uses its tools, with the role tools where its project lets it define roles, and the room's
+        where its project has the agent room on."""
+        guide = f"{TOOLS_GUIDE}\n{ROLES_GUIDE}" if roles else TOOLS_GUIDE
+        return f"{guide}\n{PLANNER_ROOM_GUIDE}" if room and self.room is not None else guide
 
     async def library_with_server(self, library: Any, runtime_root: Path, token: str) -> Any:
         """``library`` with Looper's MCP server for the Planner holding ``token``."""

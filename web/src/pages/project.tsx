@@ -22,6 +22,7 @@ import {
   type ProjectRole,
   type ProjectKnowledge,
 } from "@/lib/api";
+import { ROOM_LIMITS } from "@/lib/room";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
 import { profileName } from "@/lib/use-registry";
@@ -278,6 +279,10 @@ function executionRows(project: Project): [string, string][] {
       "Gate reminders",
       project.gate_reminder_hours === 0 ? "None" : `Every ${project.gate_reminder_hours} h`,
     ]);
+  if (project.agent_room === "off") rows.push(["Agent room", "Off"]);
+  const roomLimits = ROOM_LIMITS.filter(({ field }) => project[field] != null)
+    .map(({ field, label }) => `${label} ${project[field]!.toLocaleString()}`);
+  if (roomLimits.length) rows.push(["Agent room limits", roomLimits.join(" · ")]);
   if (project.distill_lessons !== "off")
     rows.push([
       "Lessons",

@@ -105,6 +105,14 @@ class Capability(str, Enum):
     COST_REPORT = "cost_report"  # it reports what a run cost
 
 
+class ReadOnly(str, Enum):
+    """How a run that must not change files (``Launch.read_only``, a Planner's) is kept from changing them."""
+
+    PERMISSIONS = "permissions"  # the runtime refuses the tools and commands that would, and reports each refusal
+    TOOLS = "tools"  # it runs with reading tools only (no shell, no write tool); nothing is refused, so nothing is reported
+    CHECK = "check"  # it cannot: the Planner compares the task directory before and after each turn
+
+
 class CostSource(str, Enum):
     """Where a run's cost comes from: what the runtime reported, or its tokens at the provider's prices."""
 
@@ -193,6 +201,11 @@ class RuntimeAdapter(ABC):
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset()
+    # Whether a run reads more user turns while it runs (``write_turn`` after the prompt): a forwarded message, a
+    # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
+    run_input: ClassVar[bool] = False
+    # How it keeps a run that must not change files from changing them (``Launch.read_only``).
+    read_only: ClassVar[ReadOnly] = ReadOnly.CHECK
     # Whether a run priced by the runtime's own figure (``CostSource.RUNTIME``) stops at its per-run spend cap:
     # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
     runtime_cost_capped: ClassVar[bool] = True
@@ -238,8 +251,10 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """A one-off run's command; its prompt and later user turns come on stdin."""
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """A one-off run's command; its prompt and later user turns come on stdin. With ``session_dir`` a runtime
+        that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
+        later (the agent room's consults); Claude Code keeps every run's session in its own place."""
 
     # --- Sessions and the stream ---
 
@@ -274,6 +289,11 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         """Why a run stopped at its spend cap; None when it did not."""
+
+    def permission_denials(self, result_event: dict[str, Any] | None) -> list[dict[str, str]]:
+        """The tool calls the runtime refused in a run, as its result reports them (``{tool, input}``); none unless
+        the adapter says otherwise."""
+        return []
 
     # --- Its own login ---
 

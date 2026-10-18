@@ -584,3 +584,29 @@ def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_once_it_ends(tmp_pa
     assert second.usage.cost_usd == pytest.approx(turn_cost) and CODEX.budget_error(first.result_event) is None
     # The session's totals carry the capped turn too, so the next one counts only its own.
     assert (totals.output_tokens, totals.cost_usd) == (20, pytest.approx(2 * turn_cost))
+
+
+def test_loopers_own_mcp_entry_waits_longer_than_codexs_default(tmp_path: Path) -> None:
+    from looper.agents.library import AgentLibrary
+    from looper.agents.runtimes.codex import LOOPER_TOOL_TIMEOUT_SEC, mcp_servers
+
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"looper": {"command": "python", "args": ["-m", "looper.cli"]},
+                                                 "other": {"command": "other"}}}))
+    tables = dict(mcp_servers(AgentLibrary(mcp_config=str(config)))[0])
+    assert tables["looper"]["tool_timeout_sec"] == LOOPER_TOOL_TIMEOUT_SEC
+    assert "tool_timeout_sec" not in tables["other"]
+
+
+def test_a_run_that_keeps_its_session_has_a_home_of_its_own_and_is_not_ephemeral(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    keep = root / ".local" / "codex" / "run-sessions" / "task-1" / "worker-1"
+    plain = CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=_launch())
+    kept = CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=_launch(),
+                             session_dir=keep)
+    assert kept[:4] == ["env", f"CODEX_HOME={keep}", "codex", "exec"] and kept[-1] == "-"
+    assert "--ephemeral" not in kept and plain[-2:] == ["--ephemeral", "-"]
+    run_home = Path(plain[1].removeprefix("CODEX_HOME="))
+    for name in ("config.toml", "AGENTS.md"):  # the run home's, as a resident session gets them
+        assert (keep / name).read_text() == (run_home / name).read_text()
+    assert kept[4:-1] == plain[4:-2]

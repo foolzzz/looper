@@ -621,3 +621,13 @@ def test_the_probe_reads_only_the_version_with_an_empty_home(tmp_path: Path, mon
 def test_its_capabilities_cover_every_role() -> None:
     assert all(needs <= OMP.capabilities for needs in ROLE_CAPABILITIES.values())
     assert OMP.protocols == {ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT, ApiProtocol.ANTHROPIC_MESSAGES}
+
+
+def test_a_run_that_keeps_its_session_names_its_directory_instead_of_no_session(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    (work / ".git").mkdir(parents=True)
+    keep = tmp_path / "runtime" / ".local" / "omp" / "run-sessions" / "task-1" / "worker-1"
+    plain = OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path), launch=_launch())
+    kept = OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path), launch=_launch(), session_dir=keep)
+    assert plain[-1] == "--no-session" and "--no-session" not in kept
+    assert kept[-2:] == ["--session-dir", str(keep)] and keep.is_dir() and kept[:-2] == plain[:-1]

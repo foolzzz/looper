@@ -584,7 +584,11 @@ answer to an edit on the task page goes.
     step's label, instruction, working directory, target files, acceptance
     criteria, validation commands and, on a retry, the attempt number and the
     feedback on the previous attempts. A Reviewer's has the requirement, then
-    the reviewed step's instruction and acceptance criteria. Both list the
+    the reviewed step's instruction and acceptance criteria and, on a retry,
+    the notes the Planner retried it with (the same feedback, oldest first),
+    marked as the Planner's changes to the step: where one changes the
+    instruction or a criterion the Reviewer reviews against it, and every
+    criterion no note changes still holds. Both list the
     task's supplements after the requirement (`WORK_ITEM` and
     `VERIFY_REQUEST` `supplements`: whole, oldest first, in their own 8,000
     characters), as they were when the step was dispatched;
@@ -599,7 +603,7 @@ answer to an edit on the task page goes.
 - `WORK_ITEM` carries the step's fields apart: `requirement`, `step_key`,
   `instruction` (the step's own, without feedback), `feedback` (a list) and
   `attempt`, `dependencies`, `findings`; `VERIFY_REQUEST` adds `requirement` and
-  `step_key`.
+  `step_key`, and `feedback` once the step was retried.
 - Each run is one `llm_records` row with `metadata.command` (the exact
   argv), the system prompt's record (`system_prompt`, `system_prompt_sha256`,
   `prompt_layers`), `metadata.step_id`, and the process's cost, tokens, final
@@ -698,25 +702,68 @@ where they are installed (below), never from `~/.claude` itself.
 
 ### What an agent may do
 
-Every agent (Manager, Planner, Worker, Reviewer) has every tool and runs
-without permission prompts (RFC decision 8). `permission_args()` in
+The Manager, the Workers and the Reviewers have every tool and run without
+permission prompts (RFC decision 8): `permission_args()` in
 `looper/agents/claude_cli.py` is `--dangerously-skip-permissions`, and
-`agent_settings.Launch.args` puts it in front of every agent's launch flags,
-beside the installed plugins', so the four commands cannot diverge. No command
-carries `--tools`, `--allowedTools` or `--permission-mode`. What an agent is
-for is the job of its role prompt and its code-owned contract: the
-Planner's recommended role prompt says it plans and decides, does not modify
-files and gives every change to a Worker.
+`agent_settings.Launch.args` puts it in front of their launch flags, beside
+the installed plugins'. Verified with Claude Code 2.1.285 in `--print` mode
+with the isolation flags and a `--plugin-dir`: the init event reports
+`permissionMode: bypassPermissions`, and Bash, Write and a plugin skill that
+declares `allowed-tools: Bash` all ran without a permission denial. The
+isolation `--settings` (`claudeMdExcludes`, `autoMemoryEnabled`) leave
+permissions alone. Not checked: managed (admin policy) settings that deny
+tools or turn bypass mode off.
 
-Verified with Claude Code 2.1.285 in `--print` mode with the isolation flags
-and a `--plugin-dir`: the init event reports `permissionMode:
-bypassPermissions`, and Bash, Write and a plugin skill that declares
-`allowed-tools: Bash` all ran without a permission denial. Without the flag
-the same run had the Write and the skill denied (`date` alone is allowed
-either way, as a read-only command). The isolation `--settings`
-(`claudeMdExcludes`, `autoMemoryEnabled`) leave permissions alone. Not
-checked: a project's own `.claude/settings.json` (which still loads) or
-managed settings that deny tools or turn bypass mode off.
+A Planner runs read-only (`Launch.read_only`; [Planner read-only
+RFC](rfcs/planner-read-only-v0.zh-CN.md)): it plans and decides, and every
+change goes to a Worker. How its runtime keeps it from changing files is the
+adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
+
+- **`permissions`** (Claude Code): `read_only_args` in place of
+  `permission_args`. `--permission-mode manual` (2.1.285's name for its
+  default mode) is pinned, so a project's own `permissions.defaultMode`
+  cannot loosen it, and `--permission-prompts none` leaves no one to answer
+  a prompt: in `--print` mode every tool call Claude Code would ask about is
+  refused. `--disallowedTools Edit,Write,NotebookEdit` leaves out the
+  file-editing tools, and `--allowedTools` lets through what the Planner may
+  use without asking: its skills (`Skill`), web reads (`WebFetch`,
+  `WebSearch`) and each of its MCP servers (`mcp_rule`: `mcp__<server>`,
+  with each character of the name that is not a letter, a digit, `_` or `-`
+  replaced by `_`, as Claude Code names the tools; `mcp__looper` is its own).
+  A plugin's own MCP servers never load (`--strict-mcp-config`). Bash
+  runs `ls`, `cat`, `grep` and `git status`, `log`, `diff` and `show`, and
+  refuses a redirect, `touch`, a script that writes or `git commit`
+  (verified with Claude Code 2.1.285 and haiku). Each refused call is in the
+  turn's `result.permission_denials`: the run record keeps it as
+  `metadata.permission_denials` (`[{tool, input, id}]`, the input cut to
+  200 characters, the `tool_use` id) and the task's activity says "The
+  Planner runs read-only: Looper refused N of its tool calls (...)", each
+  input masked (`log_redaction.redact`) and cut to 80 characters. Not
+  covered: a project's own `.claude/settings.json` still loads and its allow
+  rules may let through Bash commands that write, an MCP server installed for
+  the Planner may write files, and a skill's `allowed-tools` grants its tools
+  while it runs.
+- **`check`** (Codex and OMP, whose read-only modes are not verified yet):
+  the command is unchanged, and the Planner compares its task directory's git
+  checkout before and after each turn (`step_workspaces.tree_state`: `HEAD`
+  and each path `git status` lists with its status, size and modification
+  time, read with `--no-optional-locks`). A change is recorded as the turn's
+  `metadata.planner_changed_files` and an activity warning ("files changed in
+  the task directory during a Planner turn, while no Worker, Reviewer or
+  other task ran there ..."); the files are left as they are. It compares
+  only when, at the start and the end of the turn, no Worker or Reviewer of
+  the task runs in the task directory (a step in a worktree of its own runs
+  elsewhere) and no other task in progress shares the directory
+  (`tasks.others_active_in`), and only in a git checkout. Each such turn
+  records how it was checked as `metadata.read_only_check`: `compared`,
+  `shared` (another writer may have run) or `no_checkout`.
+
+A step that runs in a worktree of its own is outside the directories the
+Planner reads; the decision on it names the worktree, its branch and the
+commit it started from, and git shows its committed changes.
+
+The Planner's recommended role prompt says it runs read-only and which
+commands it may run.
 
 Because the Manager can now run any command on this machine, Telegram and
 Lark pass on only the senders they list, and a channel without such a list
@@ -887,7 +934,9 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `codex/instructions/<sha256>.md`, referenced by the top-level
   `model_instructions_file` key; the home's `AGENTS.md` is empty. The operator's `~/.codex` is
   never read. A Worker or Reviewer is one `--ephemeral` process with its
-  prompt on stdin, which then closes: it cannot be steered while it runs.
+  prompt on stdin, which then closes: it cannot be steered while it runs (in
+  a task with an agent room, one that keeps its session in a home of its own:
+  [A task's agent room](#a-tasks-agent-room)).
   The Manager and a Planner run one process per turn that resumes the
   session (`exec ... resume <thread> -`, `ResidentCodex`), in a home of their
   own (`codex/sessions/manager`, `codex/sessions/planner-<task_id>`) whose
@@ -957,10 +1006,12 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   past the operator's home, so there the sources that climb (`native`,
   `claude`, `agents`, `agents-md`, `claude-md`) are off, and the work
   directory's own `AGENTS.md` (else `CLAUDE.md`) goes into the system prompt
-  instead. The system prompt uses `--append-system-prompt` by default or
-  `--system-prompt` in replace mode (that file when there is one, OMP runtime
-  notes, then the prompt), which a resumed session takes up. A Worker or Reviewer is one `--no-session`
-  process with its prompt on stdin, which then closes. The Manager and a
+  instead. The system prompt is `--append-system-prompt` by default or
+  `--system-prompt` in replace mode (that file when there is one, OMP runtime notes, then the prompt), which a resumed session
+  takes up. A Worker or Reviewer is one `--no-session`
+  process with its prompt on stdin, which then closes (in a task with an agent
+  room, one with a `--session-dir` of its own: [A task's agent
+  room](#a-tasks-agent-room)). The Manager and a
   Planner run one process per turn with `--session-dir omp/sessions/<agent>`
   and `--resume <id>` (`ResidentOmp`); the turn that starts a new session
   removes the agent's earlier ones. The installed plugins load natively
@@ -1669,7 +1720,14 @@ and its harness may each be ([Roles a task's Planner
 defines](#roles-a-tasks-planner-defines)); and `user_gates` (`on`, also when
 null, or `off`) with `gate_reminder_hours` (0 to 168, null for 24, 0 for none),
 whether the project's Planners may open user gates and how often a gate that
-waits for the user is noted as still waiting ([User gates](#user-gates)).
+waits for the user is noted as still waiting ([User gates](#user-gates)); and
+`agent_room` (`on`, also when null: on by default, unlike the switches above;
+or `off`) with its limits `room_post_per_minute` (1 to 60, null for 6),
+`room_broadcasts_per_run` (0 to 50, null for 5), `room_message_max_chars`
+(500 to 20,000, null for 4,000), `room_messages_per_task` (20 to 5,000, null
+for 300), `room_ping_pong_rounds` (2 to 50, null for 6) and
+`room_wait_max_seconds` (0 to 120, null for 60) ([A task's agent
+room](#a-tasks-agent-room)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -1786,9 +1844,9 @@ the setting.
 
 A project's schedules fire a full task of the project on a time rule
 ([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md), S1 and S2; the
-Manager lists, reads, enables, disables and deletes them with
-`looper_schedules`, and creating and editing them through it, and export, come
-with the rest of the Manager platform tools' T3). A schedule has a `name` (unique in the project ignoring case),
+Manager lists, reads, creates, changes, enables, disables, runs and deletes
+them with `looper_schedules`, and they move with their projects in the
+configuration file, [Moving the configuration](#moving-the-configuration-export-and-import)). A schedule has a `name` (unique in the project ignoring case),
 a `cron` rule and an IANA `timezone` (default: the server's own zone), the
 `requirement` each run's task gets (at most 27,000 characters), a `work_dir` (`''`: the project's default
 when it fires), `overlap` (`skip`, `queue` or `parallel`, with
@@ -1953,8 +2011,7 @@ dashboard only). A new schedule is disabled.
   Writing a run's end locks the schedule's row before the run's
   (`finish_run`), as every other writer does, so a delete waits for it
   instead of deadlocking with it; a message whose schedule was deleted after
-  it was written is not recorded (its outbox went with it). Schedules are not
-  in the configuration export yet, and an import leaves them alone.
+  it was written is not recorded (its outbox went with it).
 
 ### The capability catalog: items and where they are installed
 
@@ -2084,7 +2141,7 @@ and enabled flag; a role's `max_concurrency` in an older file is ignored, with
 one note, and so is a layer's other than the Workers' or the Reviewers' role
 layer, with a note each: a layer that set nothing else is skipped), `channels`, `installs` (global),
 `projects` (with `--include-projects`: fields, execution settings, layers,
-knowledge, own skills and installs) and `catalog` (each item with its files,
+knowledge, own skills, installs, and `schedules` for a project that has some) and `catalog` (each item with its files,
 or an MCP server's configuration). Catalog files are UTF-8 text, so JSON holds
 them as they are; the file is written piece by piece from one read-only,
 repeatable-read snapshot, by the CLI straight from the database (a catalog is
@@ -2108,6 +2165,22 @@ with the file's in their place: the profiles that takes are added, each layer
 it changes selects its profile (a layer the file does not give included), and
 a note says each. Tasks are not exported, so neither are their profile
 overrides.
+
+A project's schedules carry their settings (`name`, `cron`, `timezone`,
+`requirement`, `overlap`, `max_parallel_runs`, `catch_up`, the timeouts, the
+caps, the gate, `notify` and `notify_target`), their Agent Profiles by name
+(`profiles`) and their `task_limits`; not whether they are enabled, their runs,
+messages, counters or alerts, nor their own directory: a schedule that had one
+is flagged `repoint`. The import matches a schedule by project and name,
+ignoring case (`project.schedules`): one it adds is created disabled
+(`created_via` `import`), one whose settings differ is rewritten disabled (its
+directory here stays), one that matches is left as it is, enabled or not.
+Enabling is the approval (scheduled-tasks RFC D6), so a schedule nobody here
+approved never runs on its own; a note lists them, to check their directory and
+gate here first. A schedule the API would refuse (a bad or too frequent rule,
+an unknown profile or field) is skipped with the reason, and a `notify_target`
+the sender allowlists here (as the import leaves the channels) do not allow is
+dropped, with a note.
 
 An import matches entries by natural key: an item by kind and name (a
 project's own skill within its project), a project, runtime, provider or
@@ -2229,15 +2302,15 @@ So:
 
 The Manager acts on Looper through MCP tools, one catalog in
 `looper/agents/ops/` ([Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md),
-T1, T2 and the schedules part of T3). Each tool has a name, a description, a
+T1, T2 and T3). Each tool has a name, a description, a
 JSON Schema for its arguments, a risk tier and the code that runs it; the
 code is what the dashboard's API calls (`projects`, the TaskRouter's
 messages, `db.task_changes`, `agent_settings`, `profile_registry`, `catalog`,
 `db.llm_records`, `schedules`), so both check alike and a refusal carries the
 dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
-409 `conflict`, its 400 `invalid`). The definitions of the 15 tools take
-13.4 KB of the Manager's context (the JSON of `tools/list`), the contract
-2.8 KB.
+409 `conflict`, its 400 `invalid`). The definitions of the 16 tools take
+15.0 KB of the Manager's context (the JSON of `tools/list`, 14,988 bytes), the
+contract 3.3 KB.
 
 - **Reaching Looper.** `looper serve` makes one `ManagerOps`
   (`ops/service.py`) with a random token at start. Every launch of the
@@ -2310,21 +2383,23 @@ dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
 | `looper_catalog` | `list` the items (kind, qualified name, description) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
-| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `enable` or `disable` one (`schedules.update_schedule`, as its switch does; the answer says when it was so already); `delete` one (`schedules.delete_schedule`). A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; delete is high |
+| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the settings `POST /api/projects/:id/schedules` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, gate, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`). A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
+| `looper_config_export` | Write `looper config export`'s file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`looper config import`, or Settings → Import / Export) | read |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
 not one of these tools yet; nor are a project's execution settings, a role's
-prompt, name, turns and switch, changing or removing a provider, adding
-items to the catalog, or creating, editing, running now or exporting a
-schedule (the project's Schedules tab does those).
+prompt, name, turns and switch, changing or removing a provider, or adding
+items to the catalog.
 
 ### A task's Planner's tools
 
 Each task's Planner has four MCP tools of its own, which act on its task
 only (`looper/agents/ops/planner.py`, [Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md)
-section 8.3, decisions 9 and 10), and two more for its roles where its project
-lets it define them ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)).
+section 8.3, decisions 9 and 10), two more for its roles where its project
+lets it define them ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)),
+and four of its task's agent room where its project has the room on ([A task's
+agent room](#a-tasks-agent-room)).
 
 - **Reaching Looper.** `looper serve` makes one `PlannerOps`. A Planner gets a
   token for its task when it starts (`planner.` and 43 random characters,
@@ -2694,6 +2769,106 @@ refused with the reason and what to do instead.
   group; a Planner's thread on the Chat page says when its task waits at a
   gate.
 
+### A task's agent room
+
+In a project with `agent_room` on (the default), a task's Planner and the
+agents of its steps message each other in the task's room ([Agent room
+RFC](rfcs/agent-room-v0.zh-CN.md), R1a; `looper/agents/room.py`, the tools in
+`looper/agents/ops/room.py`, the rows in `room_messages`, `room_reads` and
+`room_watches`). With it off, every prompt, tool list and command line is as
+before.
+
+- **Seats.** A member is the Planner (`planner`) or a seat, `<role>@<step
+  key>`: the task role a step runs as (`backend_rd@s2`), else `worker@s2`;
+  its Reviewer `reviewer@s2`, its review role `security@s2`. A retry is a
+  new run in the same seat. Presence is derived, never stored: a seat whose
+  run the WorkerPool has is `online` (or `waiting` for room in its task),
+  else `offline` once a run was in it, else `planned`, or `dropped` with its
+  step. Gates have no seat. Looper writes as `looper`.
+- **Tokens and tools.** Each Worker and Reviewer run in such a project gets
+  a token of its own (`run.` and 43 random characters, a hash in memory, never
+  logged) naming its task and seat, and Looper's MCP entry through the agent
+  library on all three runtimes (`library_with_server`); both go when the run
+  ends (`RoomOps.revoke_run`, which deletes the MCP files that carry the token).
+  `/api/agent/v1/` tells a run's token by its prefix. A work seat has
+  `looper_room_roster`, `looper_room_post`, `looper_room_inbox`,
+  `looper_room_read` and `looper_room_watch`; a review seat all but the watch;
+  the Planner the review seat's four on its own token where its project has the
+  room on (its writes, as its other tools', only in a turn Looper sent it).
+- **Scope** (`room.check_scope`). The sender is the token's seat, never an
+  argument. A work seat posts to work seats, roles, the Planner and everyone,
+  and to a review seat only an answer to that seat's own question to it
+  (Workers do not lobby Reviewers). A review seat only asks (`question`) work
+  seats or the Planner, never everyone, and answers the Planner; its messages
+  and those to it are marked `cc_planner`. The Planner posts anything to
+  anyone. A seat sees what is for everyone, what it sent and what names it or
+  its role; the Planner sees everything. Kinds: `info`, `question`, `answer`
+  (with `reply_to` a question), `interface`, `announce`; Looper's `notice` and
+  `escalation`. Messages are only added; they go with their task and with a
+  start-over (`reset_task_for_restart`). Refused posts are a task activity line.
+- **Delivery is pulled.** A run's first user turn says its seat, who is
+  online, the messages for it in full and the interface posts it has not read
+  (within 2,000 characters), after the Findings; the system prompt has the
+  room's section after the task (and before a role's boundaries;
+  `prompt_layers.room`). `looper_room_inbox` gives the unread messages oldest
+  first (`for_you` on those that name the seat; at most 20 and 8,000
+  characters) and marks them read per seat (a retry reads on); `peek` reads
+  without marking; `wait_seconds` waits, up to the project's
+  `room_wait_max_seconds`, for a message for the seat or an interface post.
+  Every tool's answer carries the seat's unread counts.
+- **Reminders.** A run on a runtime that reads user turns while it runs
+  (`RuntimeAdapter.run_input`: Claude Code; not a stored capability) that a
+  message names, or that an interface post or a watch reaches, gets one line,
+  never the message (`WorkerPool.remind`), at most every 60 s. It is written
+  only while one of its tool calls runs (the stream's `tool_use` and
+  `tool_result`): Claude Code 2.1.285 folds a user turn written then into the
+  turn it is in at the next tool result, but runs one written while it writes
+  its final reply as a turn of its own after the report. Reminders carry a
+  uuid (`looper-reminder-…`), and a result whose `user_message_uuids` are all
+  the run's reminders never replaces the run's outcome; the cost is still the
+  last result's (the session's totals).
+- **The Planner.** A message for `planner`, and every escalation, is stored
+  `planner_pending` and wakes the Planner (`ROOM_MESSAGE`) after a 30 s batch
+  (`ROOM_BATCH_SECONDS`); after the event it is in, the Planner gives all that
+  wait in one `[ROOM]` turn, answered in the `[CHAT]` shape (gate changes,
+  actions and `final` as there). A non-empty `reply` is posted for those who
+  wrote, as the answer to their questions (`via` `planner_reply`); they are
+  delivered once the reply is taken. A failed turn gives them again with a
+  newer message, or 10 minutes later at the next event. A `[DECISION]` on a
+  step, and each running step in a `[SUPERVISE]`, carry what the step's seats
+  did in the room (sent, received, interface posts, unanswered questions).
+  The reply contract and the tools' guide name `[ROOM]` and the room only
+  where it is on (`reply_contract(..., room=True)`).
+- **Escalations** (`reason`): a question for a seat no run is in
+  (`consult_fallback`: `not_started`, or `runtime_cannot` until the consults
+  of R1b), with a notice to the asker; two seats trading
+  `room_ping_pong_rounds` messages to each other only, with no answer between
+  (`ping_pong`, once at that count); an interface post that replies to an
+  earlier one that a seat whose step ended had read (`interface_changed`); the
+  room at `room_messages_per_task` (`room_full`, once).
+- **Limits.** A run posts at most `room_post_per_minute` messages a minute and
+  `room_broadcasts_per_run` to everyone; a message has at most
+  `room_message_max_chars`; a task holds `room_messages_per_task`. Past one,
+  `rate_limited` (a new error code) or `invalid`. A run keeps at most 5 watches;
+  they end with it. The Planner is held to the length and the task's total
+  only.
+- **Kept sessions.** A Codex or OMP run in a room keeps its session, for the
+  consults to come: Codex in a home of its own
+  (`.local/codex/run-sessions/<task>/<run>`, given the run home's
+  configuration as a resident session's is, without `--ephemeral`; the
+  Codex login check looks at these homes too), OMP with `--session-dir
+  .local/omp/run-sessions/<task>/<run>` in place of `--no-session`. They go
+  when the task is planned anew or deleted, and when the server starts after
+  it ended a week ago (`RUN_SESSIONS_KEPT_DAYS`). Claude Code keeps every
+  run's session itself.
+- **Reading it.** `GET /api/tasks/:id/room` (`kind`, `from`, `unanswered`,
+  `after`, `limit`) gives the seats with their presence, the messages oldest
+  first (with `answered` and `cc_planner`), the counts and each step's (sent,
+  received, unanswered, each message once per step); `GET /api/tasks/:id` has
+  the counts as `room`. The task page's Room tab shows them; a Pipeline step
+  its counts. The Manager reads a room with `looper_tasks` action `room`; it
+  never posts in this phase, nor does the user.
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
@@ -2798,8 +2973,8 @@ Key message types:
      (in a worktree of its own, once it is merged), and its `summary` becomes
      the task's result unless a later accept replaces it.
    - `review` only after a successful Worker result. A new Reviewer gets
-     `VERIFY_REQUEST` with the step's instruction, the Worker's result and the
-     acceptance criteria. A step with `review` set in the plan, or sent to
+     `VERIFY_REQUEST` with the step's instruction, the Worker's result, the
+     acceptance criteria and the retry notes, if any. A step with `review` set in the plan, or sent to
      review once, needs a passing review before it can be accepted, also after
      a retry.
    - `retry` sends the same step to a new Worker with the feedback appended to
@@ -2893,7 +3068,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
 | `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; a profile on a list is not deleted |
-| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
+| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |

@@ -48,6 +48,9 @@ class MessageType(str, Enum):
     # Dashboard → a task's Planner: the user wrote in a user gate's discussion, or ended it; stored first, so this
     # only wakes the Planner, which takes every message waiting.
     GATE_MESSAGE = "gate_message"
+    # The agent room → a task's Planner: messages for it (or Looper's escalations) wait in the task's room; stored
+    # first, so this only wakes the Planner, which takes every one waiting in a [ROOM] turn.
+    ROOM_MESSAGE = "room_message"
     TASK_CANCEL = "task_cancel"
     TASK_STOP = "task_stop"
     # Dashboard or Manager → TaskRouter: run a stopped, failed or cancelled task again, as its ``RestartMode`` says.
