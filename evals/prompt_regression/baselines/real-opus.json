@@ -4,9 +4,9 @@
   "model": "opus",
   "agent": "claude-code/opus",
   "provider_preset": null,
-  "started_at": "20261017T120839Z",
+  "started_at": "20261018T162925Z",
   "git": {
-    "commit": "68d7b953cc0fc8c00c72e3b4138e7c03629a3557",
+    "commit": "3ca041201d15ebbe54814a39e2d6aa784e4b6686",
     "dirty": false
   },
   "caps": {
@@ -18,7 +18,7 @@
   "reps": 3,
   "stopped_by_cap": false,
   "aborted": null,
-  "total_cost_usd": 18.735112,
+  "total_cost_usd": 27.727277,
   "tasks": [
     {
       "id": "dependent_steps",
@@ -41,8 +41,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -58,14 +60,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.309063,
+      "cost_usd": 0.325797,
       "cost_by_role": {
-        "planner": 0.166546,
-        "worker": 0.142517,
+        "planner": 0.176907,
+        "worker": 0.14889,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -80,9 +93,9 @@
       },
       "tokens": {
         "input": 18,
-        "output": 2476,
-        "cache_read": 142917,
-        "cache_creation": 28861
+        "output": 2449,
+        "cache_read": 146764,
+        "cache_creation": 30924
       },
       "cost_basis": {
         "equivalent": 5,
@@ -95,13 +108,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 41.0,
+      "duration_s": 53.6,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/dependent_steps/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "parallel_parts",
@@ -124,8 +140,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -141,14 +159,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.412393,
+      "cost_usd": 0.436134,
       "cost_by_role": {
-        "planner": 0.200141,
-        "worker": 0.212252,
+        "planner": 0.211703,
+        "worker": 0.224431,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -163,9 +192,9 @@
       },
       "tokens": {
         "input": 26,
-        "output": 3516,
-        "cache_read": 215806,
-        "cache_creation": 37351
+        "output": 3476,
+        "cache_read": 222353,
+        "cache_creation": 40255
       },
       "cost_basis": {
         "equivalent": 7,
@@ -178,13 +207,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.1,
+      "duration_s": 65.9,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/parallel_parts/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "interface_first",
@@ -207,8 +239,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -224,14 +258,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 1,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 1,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 1,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 4
       },
-      "cost_usd": 0.80294,
+      "cost_usd": 0.918023,
       "cost_by_role": {
-        "planner": 0.270435,
-        "worker": 0.532505,
+        "planner": 0.332858,
+        "worker": 0.585165,
         "reviewer": 0.0
       },
       "runs": 9,
@@ -245,10 +290,10 @@
         ]
       },
       "tokens": {
-        "input": 48,
-        "output": 12711,
-        "cache_read": 452719,
-        "cache_creation": 57248
+        "input": 50,
+        "output": 14244,
+        "cache_read": 495795,
+        "cache_creation": 66723
       },
       "cost_basis": {
         "equivalent": 9,
@@ -261,13 +306,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 114.6,
+      "duration_s": 144.2,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/interface_first/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "supplement_replan",
@@ -290,8 +338,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -307,15 +357,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.3221,
+      "cost_usd": 0.33776,
       "cost_by_role": {
-        "planner": 0.182586,
-        "worker": 0.139514,
+        "planner": 0.190575,
+        "worker": 0.147185,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -330,9 +391,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2585,
-        "cache_read": 165242,
-        "cache_creation": 29659
+        "output": 2483,
+        "cache_read": 169459,
+        "cache_creation": 31766
       },
       "cost_basis": {
         "equivalent": 6,
@@ -345,13 +406,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.3,
+      "duration_s": 65.9,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/supplement_replan/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "requirement_edit",
@@ -374,8 +438,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -391,15 +457,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.363885,
+      "cost_usd": 0.394598,
       "cost_by_role": {
-        "planner": 0.226803,
-        "worker": 0.137081,
+        "planner": 0.248273,
+        "worker": 0.146325,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -415,8 +492,8 @@
       "tokens": {
         "input": 20,
         "output": 2594,
-        "cache_read": 159863,
-        "cache_creation": 34994
+        "cache_read": 163509,
+        "cache_creation": 38742
       },
       "cost_basis": {
         "equivalent": 6,
@@ -429,13 +506,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 59.3,
+      "duration_s": 57.5,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/requirement_edit/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "supplement_no_change",
@@ -458,8 +538,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -475,15 +557,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.307117,
+      "cost_usd": 0.326465,
       "cost_by_role": {
-        "planner": 0.170747,
-        "worker": 0.13637,
+        "planner": 0.1825,
+        "worker": 0.143965,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -498,9 +591,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2154,
-        "cache_read": 163666,
-        "cache_creation": 28903
+        "output": 2239,
+        "cache_read": 168263,
+        "cache_creation": 30994
       },
       "cost_basis": {
         "equivalent": 6,
@@ -513,13 +606,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 59.2,
+      "duration_s": 61.7,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/supplement_no_change/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_tester_docs",
@@ -542,8 +638,10 @@
       "role_runs": 2,
       "role_profile_runs": 1,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -559,14 +657,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 1,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.531308,
+      "cost_usd": 0.642538,
       "cost_by_role": {
-        "planner": 0.247863,
-        "worker": 0.283445,
+        "planner": 0.294611,
+        "worker": 0.347927,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -580,10 +689,10 @@
         ]
       },
       "tokens": {
-        "input": 38,
-        "output": 6609,
-        "cache_read": 358001,
-        "cache_creation": 40922
+        "input": 48,
+        "output": 8287,
+        "cache_read": 482587,
+        "cache_creation": 47511
       },
       "cost_basis": {
         "equivalent": 7,
@@ -596,13 +705,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 59.4,
+      "duration_s": 94.7,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_tester_docs/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_multi_platform",
@@ -625,8 +737,10 @@
       "role_runs": 5,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -642,15 +756,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 2,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 2,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 8,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 7
       },
-      "cost_usd": 1.89379,
+      "cost_usd": 1.97687,
       "cost_by_role": {
-        "planner": 0.584821,
-        "worker": 1.140766,
-        "reviewer": 0.168203
+        "planner": 0.619107,
+        "worker": 1.189643,
+        "reviewer": 0.16812
       },
       "runs": 15,
       "run_errors": 0,
@@ -666,10 +791,10 @@
         ]
       },
       "tokens": {
-        "input": 98,
-        "output": 35100,
-        "cache_read": 1093232,
-        "cache_creation": 121594
+        "input": 108,
+        "output": 32404,
+        "cache_read": 1268392,
+        "cache_creation": 134335
       },
       "cost_basis": {
         "equivalent": 15,
@@ -682,13 +807,217 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 255.9,
+      "duration_s": 236.4,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_multi_platform/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "roles_template_fits",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "template_roles": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 1,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.421207,
+      "cost_by_role": {
+        "planner": 0.16383,
+        "worker": 0.087445,
+        "reviewer": 0.169932
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "reviewer": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 22,
+        "output": 4155,
+        "cache_read": 182374,
+        "cache_creation": 37693
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 72.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/roles_template_fits/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "roles_template_unfit",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.226299,
+      "cost_by_role": {
+        "planner": 0.153388,
+        "worker": 0.072911,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1320,
+        "cache_read": 77056,
+        "cache_creation": 23056
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 34.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/roles_template_unfit/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_not_needed",
@@ -711,8 +1040,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -728,14 +1059,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.203936,
+      "cost_usd": 0.220804,
       "cost_by_role": {
-        "planner": 0.135618,
-        "worker": 0.068319,
+        "planner": 0.148318,
+        "worker": 0.072486,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -750,9 +1092,9 @@
       },
       "tokens": {
         "input": 10,
-        "output": 1083,
-        "cache_read": 74422,
-        "cache_creation": 20919
+        "output": 1125,
+        "cache_read": 76640,
+        "cache_creation": 22867
       },
       "cost_basis": {
         "equivalent": 3,
@@ -765,13 +1107,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 24.6,
+      "duration_s": 28.8,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_not_needed/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_ambiguous",
@@ -794,8 +1139,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -806,20 +1153,31 @@
       "gates_passed": 1,
       "gates_ended_by_user": 0,
       "gates_cancelled": 0,
-      "assumptions_stated": 2,
+      "assumptions_stated": 1,
       "gate_plan_changes": 1,
       "gate_parallel_runs": 0,
       "conclusion_reads": 1,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "gate": 1,
         "decision": 1
       },
-      "cost_usd": 0.236404,
+      "cost_usd": 0.243215,
       "cost_by_role": {
-        "planner": 0.161356,
-        "worker": 0.075048,
+        "planner": 0.167455,
+        "worker": 0.07576,
         "reviewer": 0.0
       },
       "runs": 4,
@@ -833,10 +1191,10 @@
         ]
       },
       "tokens": {
-        "input": 14,
-        "output": 2506,
-        "cache_read": 122979,
-        "cache_creation": 20204
+        "input": 16,
+        "output": 2298,
+        "cache_read": 144636,
+        "cache_creation": 21033
       },
       "cost_basis": {
         "equivalent": 4,
@@ -849,13 +1207,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 53.2,
+      "duration_s": 55.5,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_ambiguous/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_not_needed",
@@ -878,8 +1239,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -895,14 +1258,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.208375,
+      "cost_usd": 0.224816,
       "cost_by_role": {
-        "planner": 0.139237,
-        "worker": 0.069138,
+        "planner": 0.141503,
+        "worker": 0.083313,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -916,10 +1290,10 @@
         ]
       },
       "tokens": {
-        "input": 10,
-        "output": 1183,
-        "cache_read": 75175,
-        "cache_creation": 21205
+        "input": 12,
+        "output": 1427,
+        "cache_read": 92661,
+        "cache_creation": 22212
       },
       "cost_basis": {
         "equivalent": 3,
@@ -932,13 +1306,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 28.6,
+      "duration_s": 22.6,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_not_needed/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_parallel_branch",
@@ -961,8 +1338,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -978,15 +1357,26 @@
       "gate_parallel_runs": 1,
       "conclusion_reads": 1,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "gate": 1,
         "decision": 2
       },
-      "cost_usd": 0.338585,
+      "cost_usd": 0.360405,
       "cost_by_role": {
-        "planner": 0.195018,
-        "worker": 0.143567,
+        "planner": 0.209644,
+        "worker": 0.150761,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -1000,10 +1390,10 @@
         ]
       },
       "tokens": {
-        "input": 22,
-        "output": 3346,
-        "cache_read": 199084,
-        "cache_creation": 28970
+        "input": 24,
+        "output": 3563,
+        "cache_read": 222485,
+        "cache_creation": 30569
       },
       "cost_basis": {
         "equivalent": 6,
@@ -1016,13 +1406,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 51.0,
+      "duration_s": 51.4,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_parallel_branch/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_discoverable",
@@ -1045,8 +1438,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1062,14 +1457,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.220357,
+      "cost_usd": 0.226057,
       "cost_by_role": {
-        "planner": 0.143679,
-        "worker": 0.076678,
+        "planner": 0.143807,
+        "worker": 0.08225,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -1084,9 +1490,9 @@
       },
       "tokens": {
         "input": 12,
-        "output": 1512,
-        "cache_read": 92586,
-        "cache_creation": 21444
+        "output": 1536,
+        "cache_read": 92881,
+        "cache_creation": 22089
       },
       "cost_basis": {
         "equivalent": 3,
@@ -1099,13 +1505,518 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 43.1,
+      "duration_s": 30.7,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_discoverable/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "operator_notes",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.20649,
+      "cost_by_role": {
+        "planner": 0.130658,
+        "worker": 0.075832,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 12,
+        "output": 1638,
+        "cache_read": 99609,
+        "cache_creation": 19220
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 31.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/operator_notes/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "operator_notes_stale",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.226827,
+      "cost_by_role": {
+        "planner": 0.140662,
+        "worker": 0.086165,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 16,
+        "output": 2043,
+        "cache_read": 138517,
+        "cache_creation": 19775
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 39.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/operator_notes_stale/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "room_interface",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 1,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 1,
+      "room_escalations": 0,
+      "room_reminders": 1,
+      "room_refused": 0,
+      "room_tool_calls": 4,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.601041,
+      "cost_by_role": {
+        "planner": 0.227348,
+        "worker": 0.373693,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 42,
+        "output": 7191,
+        "cache_read": 392783,
+        "cache_creation": 47312
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "looper_commits": {
+        "merges": 2,
+        "checkpoints": 0
+      },
+      "duration_s": 82.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/room_interface/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "room_consult",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 2,
+      "room_questions": 1,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 1,
+      "room_refused": 0,
+      "room_tool_calls": 3,
+      "room_consults": 1,
+      "room_consults_answered": 1,
+      "planner_denials": 3,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.443763,
+      "cost_by_role": {
+        "planner": 0.203908,
+        "worker": 0.239855,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "other": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 42,
+        "output": 7057,
+        "cache_read": 365706,
+        "cache_creation": 52596
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 112.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/room_consult/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "planner_plan_file",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.4088,
+      "cost_by_role": {
+        "planner": 0.187378,
+        "worker": 0.221422,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 26,
+        "output": 3371,
+        "cache_read": 226381,
+        "cache_creation": 37000
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 59.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/planner_plan_file/1",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "dependent_steps",
@@ -1128,8 +2039,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1145,14 +2058,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.306203,
+      "cost_usd": 0.323499,
       "cost_by_role": {
-        "planner": 0.166782,
-        "worker": 0.139421,
+        "planner": 0.17354,
+        "worker": 0.149959,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -1167,9 +2091,9 @@
       },
       "tokens": {
         "input": 18,
-        "output": 2399,
-        "cache_read": 142673,
-        "cache_creation": 28702
+        "output": 2358,
+        "cache_read": 146533,
+        "cache_creation": 30870
       },
       "cost_basis": {
         "equivalent": 5,
@@ -1182,13 +2106,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
       "duration_s": 49.1,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/dependent_steps/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "parallel_parts",
@@ -1211,8 +2138,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1228,14 +2157,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.417414,
+      "cost_usd": 0.443283,
       "cost_by_role": {
-        "planner": 0.20535,
-        "worker": 0.212064,
+        "planner": 0.215622,
+        "worker": 0.227661,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -1250,9 +2190,9 @@
       },
       "tokens": {
         "input": 26,
-        "output": 3686,
-        "cache_read": 216228,
-        "cache_creation": 37543
+        "output": 3697,
+        "cache_read": 222834,
+        "cache_creation": 40584
       },
       "cost_basis": {
         "equivalent": 7,
@@ -1265,13 +2205,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.3,
+      "duration_s": 55.4,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/parallel_parts/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "interface_first",
@@ -1294,8 +2237,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1311,14 +2256,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 1,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 1,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 3,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 4
       },
-      "cost_usd": 0.895623,
+      "cost_usd": 0.974576,
       "cost_by_role": {
-        "planner": 0.273353,
-        "worker": 0.62227,
+        "planner": 0.32103,
+        "worker": 0.653546,
         "reviewer": 0.0
       },
       "runs": 9,
@@ -1332,10 +2288,10 @@
         ]
       },
       "tokens": {
-        "input": 56,
-        "output": 14037,
-        "cache_read": 537336,
-        "cache_creation": 63399
+        "input": 58,
+        "output": 14836,
+        "cache_read": 581441,
+        "cache_creation": 70167
       },
       "cost_basis": {
         "equivalent": 9,
@@ -1348,13 +2304,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 122.7,
+      "duration_s": 139.9,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/interface_first/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "supplement_replan",
@@ -1377,8 +2336,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1394,15 +2355,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.319468,
+      "cost_usd": 0.340153,
       "cost_by_role": {
-        "planner": 0.183004,
-        "worker": 0.136464,
+        "planner": 0.195482,
+        "worker": 0.144671,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -1417,9 +2389,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2462,
-        "cache_read": 165341,
-        "cache_creation": 29635
+        "output": 2507,
+        "cache_read": 170228,
+        "cache_creation": 31986
       },
       "cost_basis": {
         "equivalent": 6,
@@ -1432,13 +2404,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.3,
+      "duration_s": 57.6,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/supplement_replan/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "requirement_edit",
@@ -1461,8 +2436,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1478,15 +2455,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.359767,
+      "cost_usd": 0.399511,
       "cost_by_role": {
-        "planner": 0.224128,
-        "worker": 0.135639,
+        "planner": 0.252609,
+        "worker": 0.146902,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -1501,9 +2489,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2379,
-        "cache_read": 159775,
-        "cache_creation": 35019
+        "output": 2743,
+        "cache_read": 163615,
+        "cache_creation": 38981
       },
       "cost_basis": {
         "equivalent": 6,
@@ -1516,13 +2504,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 65.7,
+      "duration_s": 59.5,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/requirement_edit/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "supplement_no_change",
@@ -1545,8 +2536,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1562,15 +2555,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.309323,
+      "cost_usd": 0.329567,
       "cost_by_role": {
-        "planner": 0.172939,
-        "worker": 0.136385,
+        "planner": 0.183947,
+        "worker": 0.14562,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -1585,9 +2589,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2246,
-        "cache_read": 163697,
-        "cache_creation": 28948
+        "output": 2293,
+        "cache_read": 168658,
+        "cache_creation": 31237
       },
       "cost_basis": {
         "equivalent": 6,
@@ -1600,13 +2604,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 55.3,
+      "duration_s": 61.6,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/supplement_no_change/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_tester_docs",
@@ -1629,8 +2636,10 @@
       "role_runs": 2,
       "role_profile_runs": 1,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1646,14 +2655,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.531235,
+      "cost_usd": 0.606647,
       "cost_by_role": {
-        "planner": 0.250639,
-        "worker": 0.280595,
+        "planner": 0.283385,
+        "worker": 0.323262,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -1667,10 +2687,10 @@
         ]
       },
       "tokens": {
-        "input": 38,
-        "output": 6674,
-        "cache_read": 357614,
-        "cache_creation": 40760
+        "input": 42,
+        "output": 7614,
+        "cache_read": 419756,
+        "cache_creation": 46281
       },
       "cost_basis": {
         "equivalent": 7,
@@ -1683,13 +2703,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 100.4,
+      "duration_s": 92.5,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_tester_docs/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_multi_platform",
@@ -1712,8 +2735,10 @@
       "role_runs": 5,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1729,15 +2754,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 1,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 1,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 5,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 7
       },
-      "cost_usd": 2.032284,
+      "cost_usd": 2.133805,
       "cost_by_role": {
-        "planner": 0.575281,
-        "worker": 1.270906,
-        "reviewer": 0.186097
+        "planner": 0.666527,
+        "worker": 1.265718,
+        "reviewer": 0.20156
       },
       "runs": 15,
       "run_errors": 0,
@@ -1753,10 +2789,10 @@
         ]
       },
       "tokens": {
-        "input": 98,
-        "output": 37774,
-        "cache_read": 1108900,
-        "cache_creation": 131829
+        "input": 118,
+        "output": 37583,
+        "cache_read": 1376327,
+        "cache_creation": 138301
       },
       "cost_basis": {
         "equivalent": 15,
@@ -1769,13 +2805,217 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 294.5,
+      "duration_s": 436.6,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_multi_platform/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "roles_template_fits",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "template_roles": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 1,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.473901,
+      "cost_by_role": {
+        "planner": 0.184995,
+        "worker": 0.091461,
+        "reviewer": 0.197445
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "reviewer": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 28,
+        "output": 5397,
+        "cache_read": 242964,
+        "cache_creation": 39657
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 92.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/roles_template_fits/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "roles_template_unfit",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.226139,
+      "cost_by_role": {
+        "planner": 0.15238,
+        "worker": 0.073759,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1356,
+        "cache_read": 77133,
+        "cache_creation": 22944
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 30.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/roles_template_unfit/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_not_needed",
@@ -1798,8 +3038,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1815,14 +3057,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.200482,
+      "cost_usd": 0.215947,
       "cost_by_role": {
-        "planner": 0.134111,
-        "worker": 0.066371,
+        "planner": 0.14336,
+        "worker": 0.072587,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -1837,9 +3090,9 @@
       },
       "tokens": {
         "input": 10,
-        "output": 1022,
-        "cache_read": 74449,
-        "cache_creation": 20639
+        "output": 974,
+        "cache_read": 76654,
+        "cache_creation": 22637
       },
       "cost_basis": {
         "equivalent": 3,
@@ -1852,13 +3105,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 32.7,
+      "duration_s": 26.6,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_not_needed/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_ambiguous",
@@ -1871,7 +3127,7 @@
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
-      "independent_pairs": 1,
+      "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
       "progress_notes": 1,
@@ -1881,8 +3137,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1893,20 +3151,31 @@
       "gates_passed": 1,
       "gates_ended_by_user": 0,
       "gates_cancelled": 0,
-      "assumptions_stated": 2,
-      "gate_plan_changes": 1,
+      "assumptions_stated": 1,
+      "gate_plan_changes": 0,
       "gate_parallel_runs": 0,
       "conclusion_reads": 1,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "gate": 1,
         "decision": 1
       },
-      "cost_usd": 0.23702,
+      "cost_usd": 0.247368,
       "cost_by_role": {
-        "planner": 0.163634,
-        "worker": 0.073385,
+        "planner": 0.1662,
+        "worker": 0.081168,
         "reviewer": 0.0
       },
       "runs": 4,
@@ -1920,10 +3189,10 @@
         ]
       },
       "tokens": {
-        "input": 14,
-        "output": 2461,
-        "cache_read": 123158,
-        "cache_creation": 20389
+        "input": 16,
+        "output": 2445,
+        "cache_read": 144857,
+        "cache_creation": 21179
       },
       "cost_basis": {
         "equivalent": 4,
@@ -1936,13 +3205,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 38.8,
+      "duration_s": 53.2,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_ambiguous/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_not_needed",
@@ -1965,8 +3237,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -1982,14 +3256,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.203993,
+      "cost_usd": 0.21289,
       "cost_by_role": {
-        "planner": 0.136787,
-        "worker": 0.067205,
+        "planner": 0.13967,
+        "worker": 0.07322,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2004,9 +3289,9 @@
       },
       "tokens": {
         "input": 10,
-        "output": 1067,
-        "cache_read": 75023,
-        "cache_creation": 20951
+        "output": 1161,
+        "cache_read": 74834,
+        "cache_creation": 21833
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2019,13 +3304,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 20.4,
+      "duration_s": 24.7,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_not_needed/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_parallel_branch",
@@ -2048,8 +3336,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2065,15 +3355,26 @@
       "gate_parallel_runs": 1,
       "conclusion_reads": 1,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "gate": 1,
         "decision": 2
       },
-      "cost_usd": 0.34608,
+      "cost_usd": 0.362024,
       "cost_by_role": {
-        "planner": 0.203408,
-        "worker": 0.142672,
+        "planner": 0.211839,
+        "worker": 0.150185,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -2087,10 +3388,10 @@
         ]
       },
       "tokens": {
-        "input": 22,
-        "output": 3623,
-        "cache_read": 200020,
-        "cache_creation": 29191
+        "input": 24,
+        "output": 3619,
+        "cache_read": 222980,
+        "cache_creation": 30619
       },
       "cost_basis": {
         "equivalent": 6,
@@ -2103,13 +3404,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.2,
+      "duration_s": 56.8,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_parallel_branch/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_discoverable",
@@ -2132,8 +3436,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2149,14 +3455,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.21489,
+      "cost_usd": 0.224607,
       "cost_by_role": {
-        "planner": 0.140548,
-        "worker": 0.074342,
+        "planner": 0.142131,
+        "worker": 0.082476,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2171,9 +3488,9 @@
       },
       "tokens": {
         "input": 12,
-        "output": 1320,
-        "cache_read": 92529,
-        "cache_creation": 21242
+        "output": 1491,
+        "cache_read": 92816,
+        "cache_creation": 22022
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2186,13 +3503,518 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 30.6,
+      "duration_s": 32.1,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_discoverable/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "operator_notes",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.215071,
+      "cost_by_role": {
+        "planner": 0.130527,
+        "worker": 0.084544,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 14,
+        "output": 1760,
+        "cache_read": 117717,
+        "cache_creation": 19534
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 49.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/operator_notes/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "operator_notes_stale",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.235061,
+      "cost_by_role": {
+        "planner": 0.150559,
+        "worker": 0.084502,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 18,
+        "output": 2092,
+        "cache_read": 160544,
+        "cache_creation": 20130
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 46.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/operator_notes_stale/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "room_interface",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 2,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 2,
+      "room_escalations": 0,
+      "room_reminders": 1,
+      "room_refused": 0,
+      "room_tool_calls": 5,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.54209,
+      "cost_by_role": {
+        "planner": 0.18429,
+        "worker": 0.3578,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 34,
+        "output": 6178,
+        "cache_read": 300772,
+        "cache_creation": 44780
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "looper_commits": {
+        "merges": 2,
+        "checkpoints": 0
+      },
+      "duration_s": 96.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/room_interface/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "room_consult",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 2,
+      "room_questions": 1,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 1,
+      "room_refused": 0,
+      "room_tool_calls": 3,
+      "room_consults": 1,
+      "room_consults_answered": 1,
+      "planner_denials": 2,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.433439,
+      "cost_by_role": {
+        "planner": 0.204669,
+        "worker": 0.22877,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "other": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 40,
+        "output": 6494,
+        "cache_read": 344327,
+        "cache_creation": 51783
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 124.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/room_consult/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "planner_plan_file",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.410508,
+      "cost_by_role": {
+        "planner": 0.18976,
+        "worker": 0.220748,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 26,
+        "output": 3423,
+        "cache_read": 226281,
+        "cache_creation": 37086
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 63.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/planner_plan_file/2",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "dependent_steps",
@@ -2215,8 +4037,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2232,14 +4056,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.302576,
+      "cost_usd": 0.322633,
       "cost_by_role": {
-        "planner": 0.163632,
-        "worker": 0.138944,
+        "planner": 0.173957,
+        "worker": 0.148676,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -2254,9 +4089,9 @@
       },
       "tokens": {
         "input": 18,
-        "output": 2273,
-        "cache_read": 142502,
-        "cache_creation": 28568
+        "output": 2360,
+        "cache_read": 146401,
+        "cache_creation": 30760
       },
       "cost_basis": {
         "equivalent": 5,
@@ -2269,13 +4104,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 46.9,
+      "duration_s": 48.8,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/dependent_steps/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "parallel_parts",
@@ -2298,8 +4136,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2315,14 +4155,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.413963,
+      "cost_usd": 0.437413,
       "cost_by_role": {
-        "planner": 0.20237,
-        "worker": 0.211593,
+        "planner": 0.212809,
+        "worker": 0.224604,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -2337,9 +4188,9 @@
       },
       "tokens": {
         "input": 26,
-        "output": 3586,
-        "cache_read": 215735,
-        "cache_creation": 37374
+        "output": 3559,
+        "cache_read": 222047,
+        "cache_creation": 40215
       },
       "cost_basis": {
         "equivalent": 7,
@@ -2352,13 +4203,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 59.3,
+      "duration_s": 50.2,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/parallel_parts/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "interface_first",
@@ -2381,8 +4235,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2398,14 +4254,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 1,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 1,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 2,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 4
       },
-      "cost_usd": 0.880295,
+      "cost_usd": 0.858861,
       "cost_by_role": {
-        "planner": 0.278336,
-        "worker": 0.60196,
+        "planner": 0.284988,
+        "worker": 0.573873,
         "reviewer": 0.0
       },
       "runs": 9,
@@ -2419,10 +4286,10 @@
         ]
       },
       "tokens": {
-        "input": 54,
-        "output": 13651,
-        "cache_read": 518256,
-        "cache_creation": 62926
+        "input": 52,
+        "output": 12260,
+        "cache_read": 505623,
+        "cache_creation": 64041
       },
       "cost_basis": {
         "equivalent": 9,
@@ -2435,13 +4302,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 155.2,
+      "duration_s": 129.7,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/interface_first/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "supplement_replan",
@@ -2464,8 +4334,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2481,15 +4353,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.316131,
+      "cost_usd": 0.344638,
       "cost_by_role": {
-        "planner": 0.178414,
-        "worker": 0.137717,
+        "planner": 0.197334,
+        "worker": 0.147304,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -2504,9 +4387,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2362,
-        "cache_read": 164656,
-        "cache_creation": 29485
+        "output": 2679,
+        "cache_read": 170567,
+        "cache_creation": 32108
       },
       "cost_basis": {
         "equivalent": 6,
@@ -2519,13 +4402,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 67.5,
+      "duration_s": 59.7,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/supplement_replan/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "requirement_edit",
@@ -2548,8 +4434,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2565,15 +4453,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.374699,
+      "cost_usd": 0.38954,
       "cost_by_role": {
-        "planner": 0.238291,
-        "worker": 0.136407,
+        "planner": 0.244093,
+        "worker": 0.145447,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -2588,9 +4487,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2946,
-        "cache_read": 161093,
-        "cache_creation": 35435
+        "output": 2458,
+        "cache_read": 162700,
+        "cache_creation": 38470
       },
       "cost_basis": {
         "equivalent": 6,
@@ -2603,13 +4502,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 65.7,
+      "duration_s": 65.9,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/requirement_edit/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "supplement_no_change",
@@ -2632,8 +4534,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2649,15 +4553,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.307441,
+      "cost_usd": 0.334594,
       "cost_by_role": {
-        "planner": 0.172676,
-        "worker": 0.134765,
+        "planner": 0.18749,
+        "worker": 0.147104,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -2672,9 +4587,9 @@
       },
       "tokens": {
         "input": 20,
-        "output": 2177,
-        "cache_read": 163864,
-        "cache_creation": 28881
+        "output": 2368,
+        "cache_read": 168850,
+        "cache_creation": 31673
       },
       "cost_basis": {
         "equivalent": 6,
@@ -2687,13 +4602,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.3,
+      "duration_s": 59.6,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/supplement_no_change/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_tester_docs",
@@ -2716,8 +4634,10 @@
       "role_runs": 2,
       "role_profile_runs": 1,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2733,14 +4653,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 2,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.572997,
+      "cost_usd": 0.617981,
       "cost_by_role": {
-        "planner": 0.259362,
-        "worker": 0.313635,
+        "planner": 0.28746,
+        "worker": 0.330521,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -2754,10 +4685,10 @@
         ]
       },
       "tokens": {
-        "input": 42,
-        "output": 7767,
-        "cache_read": 395965,
-        "cache_creation": 42287
+        "input": 48,
+        "output": 7744,
+        "cache_read": 476625,
+        "cache_creation": 45948
       },
       "cost_basis": {
         "equivalent": 7,
@@ -2770,13 +4701,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 67.6,
+      "duration_s": 76.2,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_tester_docs/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_multi_platform",
@@ -2799,8 +4733,10 @@
       "role_runs": 5,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2816,15 +4752,26 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 1,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 1,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 7,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 7
       },
-      "cost_usd": 1.846074,
+      "cost_usd": 2.055867,
       "cost_by_role": {
-        "planner": 0.606752,
-        "worker": 1.085408,
-        "reviewer": 0.153914
+        "planner": 0.566633,
+        "worker": 1.318078,
+        "reviewer": 0.171156
       },
       "runs": 15,
       "run_errors": 0,
@@ -2840,10 +4787,10 @@
         ]
       },
       "tokens": {
-        "input": 98,
-        "output": 32463,
-        "cache_read": 1122109,
-        "cache_creation": 121500
+        "input": 112,
+        "output": 36048,
+        "cache_read": 1261253,
+        "cache_creation": 135276
       },
       "cost_basis": {
         "equivalent": 15,
@@ -2856,13 +4803,217 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 263.8,
+      "duration_s": 286.0,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_multi_platform/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "roles_template_fits",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "template_roles": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 1,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.429581,
+      "cost_by_role": {
+        "planner": 0.167158,
+        "worker": 0.08894,
+        "reviewer": 0.173483
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "reviewer": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 22,
+        "output": 4331,
+        "cache_read": 182684,
+        "cache_creation": 38292
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 76.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/roles_template_fits/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "roles_template_unfit",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.224177,
+      "cost_by_role": {
+        "planner": 0.151062,
+        "worker": 0.073115,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1270,
+        "cache_read": 77088,
+        "cache_creation": 22915
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 26.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/roles_template_unfit/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "roles_not_needed",
@@ -2885,8 +5036,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2902,14 +5055,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.203727,
+      "cost_usd": 0.220669,
       "cost_by_role": {
-        "planner": 0.135232,
-        "worker": 0.068495,
+        "planner": 0.146434,
+        "worker": 0.074235,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2924,9 +5088,9 @@
       },
       "tokens": {
         "input": 10,
-        "output": 1103,
-        "cache_read": 74454,
-        "cache_creation": 20842
+        "output": 1128,
+        "cache_read": 76746,
+        "cache_creation": 22840
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2939,13 +5103,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 28.5,
+      "duration_s": 30.9,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/roles_not_needed/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_ambiguous",
@@ -2968,8 +5135,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -2980,20 +5149,31 @@
       "gates_passed": 1,
       "gates_ended_by_user": 0,
       "gates_cancelled": 0,
-      "assumptions_stated": 2,
+      "assumptions_stated": 1,
       "gate_plan_changes": 1,
       "gate_parallel_runs": 0,
       "conclusion_reads": 1,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "gate": 1,
         "decision": 1
       },
-      "cost_usd": 0.236579,
+      "cost_usd": 0.255623,
       "cost_by_role": {
-        "planner": 0.161073,
-        "worker": 0.075506,
+        "planner": 0.176213,
+        "worker": 0.07941,
         "reviewer": 0.0
       },
       "runs": 4,
@@ -3007,10 +5187,10 @@
         ]
       },
       "tokens": {
-        "input": 14,
-        "output": 2449,
-        "cache_read": 123155,
-        "cache_creation": 20364
+        "input": 16,
+        "output": 2693,
+        "cache_read": 145494,
+        "cache_creation": 21575
       },
       "cost_basis": {
         "equivalent": 4,
@@ -3023,13 +5203,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 43.0,
+      "duration_s": 51.4,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_ambiguous/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_not_needed",
@@ -3052,8 +5235,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -3069,14 +5254,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.204869,
+      "cost_usd": 0.210901,
       "cost_by_role": {
-        "planner": 0.137353,
-        "worker": 0.067516,
+        "planner": 0.137713,
+        "worker": 0.073188,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -3091,9 +5287,9 @@
       },
       "tokens": {
         "input": 10,
-        "output": 1094,
-        "cache_read": 75063,
-        "cache_creation": 20992
+        "output": 1097,
+        "cache_read": 74767,
+        "cache_creation": 21746
       },
       "cost_basis": {
         "equivalent": 3,
@@ -3106,13 +5302,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 22.5,
+      "duration_s": 30.9,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_not_needed/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_parallel_branch",
@@ -3125,7 +5324,7 @@
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
-      "independent_pairs": 3,
+      "independent_pairs": 2,
       "bracketed_pairs": 0,
       "parallel_workers": 2,
       "progress_notes": 2,
@@ -3135,8 +5334,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -3147,20 +5348,31 @@
       "gates_passed": 1,
       "gates_ended_by_user": 0,
       "gates_cancelled": 0,
-      "assumptions_stated": 2,
+      "assumptions_stated": 1,
       "gate_plan_changes": 1,
       "gate_parallel_runs": 1,
       "conclusion_reads": 1,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
         "gate": 1,
         "decision": 2
       },
-      "cost_usd": 0.337008,
+      "cost_usd": 0.361162,
       "cost_by_role": {
-        "planner": 0.193751,
-        "worker": 0.143257,
+        "planner": 0.210033,
+        "worker": 0.151129,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -3174,10 +5386,10 @@
         ]
       },
       "tokens": {
-        "input": 22,
-        "output": 3348,
-        "cache_read": 199002,
-        "cache_creation": 28770
+        "input": 24,
+        "output": 3589,
+        "cache_read": 222590,
+        "cache_creation": 30596
       },
       "cost_basis": {
         "equivalent": 6,
@@ -3190,13 +5402,16 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 53.1,
+      "duration_s": 77.9,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_parallel_branch/3",
+      "outcome": "pass",
+      "user_gates": "on"
     },
     {
       "id": "gate_discoverable",
@@ -3219,8 +5434,10 @@
       "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
+      "template_roles": 0,
       "role_prompt_mismatches": 0,
       "role_boundary_misses": 0,
+      "most_review_roles": 0,
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
@@ -3236,14 +5453,25 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.214718,
+      "cost_usd": 0.226093,
       "cost_by_role": {
-        "planner": 0.142036,
-        "worker": 0.072682,
+        "planner": 0.143853,
+        "worker": 0.08224,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -3258,9 +5486,9 @@
       },
       "tokens": {
         "input": 12,
-        "output": 1282,
-        "cache_read": 92592,
-        "cache_creation": 21314
+        "output": 1512,
+        "cache_read": 92905,
+        "cache_creation": 22153
       },
       "cost_basis": {
         "equivalent": 3,
@@ -3273,13 +5501,518 @@
         "reviewer": 0,
         "total": 0
       },
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 30.6,
+      "duration_s": 28.7,
       "stopped_by_cap": false,
       "timed_out": false,
-      "outcome": "pass"
+      "work_dir": "<eval-root>/work/gate_discoverable/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "operator_notes",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.216721,
+      "cost_by_role": {
+        "planner": 0.131496,
+        "worker": 0.085225,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 14,
+        "output": 1839,
+        "cache_read": 117706,
+        "cache_creation": 19543
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 34.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/operator_notes/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "operator_notes_stale",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.223491,
+      "cost_by_role": {
+        "planner": 0.140045,
+        "worker": 0.083446,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 16,
+        "output": 1794,
+        "cache_read": 138696,
+        "cache_creation": 19976
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 41.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/operator_notes_stale/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "room_interface",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 1,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 1,
+      "room_escalations": 0,
+      "room_reminders": 1,
+      "room_refused": 0,
+      "room_tool_calls": 4,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 2,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.629139,
+      "cost_by_role": {
+        "planner": 0.262811,
+        "worker": 0.366328,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 46,
+        "output": 7756,
+        "cache_read": 450734,
+        "cache_creation": 47961
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "looper_commits": {
+        "merges": 2,
+        "checkpoints": 0
+      },
+      "duration_s": 90.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/room_interface/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "room_consult",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 2,
+      "room_questions": 1,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 1,
+      "room_refused": 0,
+      "room_tool_calls": 4,
+      "room_consults": 1,
+      "room_consults_answered": 1,
+      "planner_denials": 1,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.448448,
+      "cost_by_role": {
+        "planner": 0.199195,
+        "worker": 0.249253,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "other": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 40,
+        "output": 7607,
+        "cache_read": 342853,
+        "cache_creation": 52980
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 96.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/room_consult/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "planner_plan_file",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.40175,
+      "cost_by_role": {
+        "planner": 0.182827,
+        "worker": 0.218923,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 26,
+        "output": 3250,
+        "cache_read": 225110,
+        "cache_creation": 36453
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 45.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/planner_plan_file/3",
+      "outcome": "pass",
+      "user_gates": "on"
     }
   ]
 }
