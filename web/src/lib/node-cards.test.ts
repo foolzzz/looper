@@ -118,6 +118,21 @@ describe("stepCard", () => {
     expect(titles(card.sections)).toEqual(["Instruction", "Timing"]);
   });
 
+  it("counts the step's room messages after its runs, and its unanswered questions when it has any", () => {
+    const s1 = step("s1", { worker_id: "worker-a" });
+    const card = (room: { sent: number; received: number; unanswered: number }) =>
+      stepCard(s1, { taskId: "t1", active: true, look: LOOKS.pending, lookOf: (d) => LOOKS[d.status], stepsById: new Map(),
+                     room });
+    expect(titles(card({ sent: 2, received: 1, unanswered: 0 }).sections)).toEqual(["Runs", "Room", "Timing"]);
+    expect(section(card({ sent: 2, received: 1, unanswered: 0 }).sections, "Room")).toEqual({ kind: "facts", title: "Room", facts: [
+      { label: "Messages", value: "2 sent, 1 received" },
+    ] });
+    expect(section(card({ sent: 0, received: 1, unanswered: 1 }).sections, "Room")).toMatchObject({ facts: [
+      { label: "Messages", value: "0 sent, 1 received" },
+      { label: "Unanswered", value: "1 question" },
+    ] });
+  });
+
   it("clips a long result to a preview and keeps the whole text", () => {
     const card = cardOf(step("s1", { status: "verified", result: { status: "completed", summary: LONG } }));
     const result = section(card.sections, "Result");
@@ -255,7 +270,8 @@ function gate(extra: Partial<UserGate> = {}): UserGate {
   return {
     step: "g1", step_id: "g1", state: "discussing", topic: "Pick the database", agenda: [], findings: "", summary: null,
     resolution: "", ended_by_user: false, plan_change: null, depends_on: ["s1"], waiting_on: null, not_delivered: 0,
-    retry_at: null, turns: 0, reminders: 0, opened_at: null, first_reply_at: null, closed_at: null, ...extra,
+    retry_at: null, turns: 0, reminders: 0, opened_at: null, first_reply_at: null, closed_at: null,
+    channel_posts: null, ...extra,
   };
 }
 

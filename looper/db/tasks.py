@@ -60,6 +60,15 @@ PLANNER_END_STATUSES = frozenset({"completed", "failed"})
 ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
                         if group in (TaskGroup.NEEDS_YOU, TaskGroup.IN_PROGRESS))
 
+async def others_active_in(work_dir: str, task_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Whether a task other than ``task_id`` is running or starting (``ACTIVE_STATUSES``) in the directory
+    ``work_dir``: its agents may change files there."""
+    pool = pool or get_pool()
+    return bool(await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM tasks WHERE work_dir = $1 AND id <> $2 AND status = ANY($3::text[]))",
+        work_dir, task_id, list(ACTIVE_STATUSES)))
+
+
 # A task in one of these ended without completing (failed, stopped or cancelled): a restart runs it again, from its
 # saved plan or planned anew.
 RESTARTABLE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
@@ -315,6 +324,9 @@ async def reset_task_for_restart(
     if not keep_steps:
         await pool.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
+        # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
+        for table in ("room_watches", "room_reads", "room_messages"):
+            await pool.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))

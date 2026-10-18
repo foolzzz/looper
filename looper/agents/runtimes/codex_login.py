@@ -20,6 +20,8 @@ Verified against the Codex CLI 0.162.0 source (tag ``rust-v0.162.0``):
   link put back, and the problem is recorded (``FORK_KEY``), which makes the
   login unavailable to runs until the operator has checked
   ``codex login status`` on the machine and cleared it (``clear_problem``).
+  The link, its inspection and the recorded problem are ``linked_login``'s,
+  which Grok's login shares.
 - **The agent's shell** is given a ``CODEX_HOME`` without the login
   (``SHELL_HOME``, set by ``shell_environment_policy``), so a ``codex``
   command the agent runs, ``codex logout`` included, does not reach it.
@@ -31,18 +33,17 @@ Verified against the Codex CLI 0.162.0 source (tag ``rust-v0.162.0``):
 from __future__ import annotations
 
 import enum
-import json
 import os
 import shutil
-import stat
 import subprocess
 import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from . import linked_login
 
 LOGIN_FILE = "auth.json"
 # What would make Codex use an API key or a token of its own instead of the login.
@@ -71,65 +72,30 @@ def login_file(environ: Mapping[str, str] | None = None) -> Path:
     return base / LOGIN_FILE
 
 
-# --- The link in a home ---
+# --- The link in a home (``linked_login``) ---
 
-
-class LinkState(str, enum.Enum):
-    """What a home's ``auth.json`` is."""
-
-    INTACT = "intact"  # a symbolic link to the operator's login file
-    MISSING = "missing"
-    COPY = "copy"  # a file of its own: a copy of the tokens, the login forked
-    OTHER = "other"  # a link to something else, or not a file
-
-
-class LoginLinkError(RuntimeError):
-    """A home's ``auth.json`` is not the link to the operator's login file."""
+LinkState = linked_login.LinkState
+LoginLinkError = linked_login.LoginLinkError
+LinkProblem = linked_login.LinkProblem
+LOGIN = "Codex login"
+# What removes a home's link, as a problem says it.
+REMOVED = "as `codex logout` there would, which also revokes the login"
 
 
 def link_state(home: Path, target: Path) -> LinkState:
     """What ``home``'s ``auth.json`` is, read with ``lstat`` (a link is never followed)."""
-    path = Path(home) / LOGIN_FILE
-    try:
-        mode = os.lstat(path).st_mode
-    except FileNotFoundError:
-        return LinkState.MISSING
-    if stat.S_ISLNK(mode):
-        return LinkState.INTACT if os.readlink(path) == str(target) else LinkState.OTHER
-    return LinkState.COPY if stat.S_ISREG(mode) else LinkState.OTHER
+    return linked_login.link_state(home, LOGIN_FILE, target)
 
 
 def link_login(home: Path, target: Path) -> None:
     """Give ``home`` an ``auth.json`` that is a symbolic link to ``target``; raises ``LoginLinkError`` when
     something else is there, which the next inspection removes (``inspect_homes``)."""
-    for _ in range(2):
-        state = link_state(home, target)
-        if state is LinkState.INTACT:
-            return
-        if state is not LinkState.MISSING:
-            raise LoginLinkError(f"{Path(home) / LOGIN_FILE} is not the link to the Codex login ({state.value}): "
-                                 f"{PROBLEM_FIX}")
-        try:
-            os.symlink(target, Path(home) / LOGIN_FILE)
-            return
-        except FileExistsError:
-            continue  # another run linked it meanwhile
-    raise LoginLinkError(f"cannot link the Codex login into {home}")
+    linked_login.link(home, LOGIN_FILE, target, login=f"the {LOGIN}", fix=PROBLEM_FIX)
 
 
 def unlink_login(home: Path) -> None:
     """Remove ``home``'s login link, if it has one (a session home whose agent moved to an API key provider)."""
-    path = Path(home) / LOGIN_FILE
-    if path.is_symlink():
-        path.unlink()
-
-
-def _remove_entry(path: Path) -> None:
-    """Remove ``path`` itself: a link or a file is unlinked, a directory removed; no link is followed."""
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    else:
-        path.unlink(missing_ok=True)
+    linked_login.unlink(home, LOGIN_FILE)
 
 
 def _is_login_home(home: Path) -> bool:
@@ -139,44 +105,22 @@ def _is_login_home(home: Path) -> bool:
         return False
 
 
-@dataclass(frozen=True)
-class LinkProblem:
-    """A home whose ``auth.json`` was not the link to the login when it was inspected."""
-
-    home: Path
-    state: LinkState
-
-    def text(self) -> str:
-        if self.state is LinkState.COPY:
-            return (f"auth.json in {self.home} had become a copy of the Codex login (the link was replaced), so the "
-                    "login on this machine may hold a refresh token that no longer works; the copy was deleted")
-        if self.state is LinkState.MISSING:
-            return (f"the Codex login link in {self.home} was removed (as `codex logout` there would, which also "
-                    "revokes the login)")
-        return f"auth.json in {self.home} was not the link to the Codex login; it was replaced by the link"
+# Where the runs that keep their sessions (the agent room's, ``codex.run_command``'s ``session_dir``) have their
+# homes: one directory per task, one home per run.
+RUN_SESSIONS = "run-sessions"
 
 
 def inspect_homes(codex_dir: Path, target: Path) -> list[LinkProblem]:
-    """Every home under ``codex_dir`` (``runs/<sha256>``, ``sessions/<agent>``) whose ``auth.json`` is not the
-    link to ``target``: a copy or another entry in its place, or a login home whose link is gone. Each is put
-    right (the entry removed, the link put back), so it is reported once. An API key home without a link is
-    fine."""
-    problems: list[LinkProblem] = []
-    for parent in (Path(codex_dir) / "runs", Path(codex_dir) / "sessions"):
-        for home in sorted(parent.iterdir()) if parent.is_dir() else []:
-            if home.name.startswith(".") or home.is_symlink() or not home.is_dir():
-                continue  # a home being built, or not one of Looper's
-            try:
-                state = link_state(home, target)
-                if state is LinkState.INTACT or (state is LinkState.MISSING and not _is_login_home(home)):
-                    continue
-                if state is not LinkState.MISSING:
-                    _remove_entry(home / LOGIN_FILE)
-                link_login(home, target)
-            except FileNotFoundError:
-                continue  # an idle home removed meanwhile (``codex._remove_idle_homes``)
-            problems.append(LinkProblem(home, state))
-    return problems
+    """Every home under ``codex_dir`` (``runs/<sha256>``, ``sessions/<agent>``, ``run-sessions/<task>/<run>``)
+    whose ``auth.json`` is not the link to ``target``: a copy or another entry in its place, or a login home whose
+    link is gone. Each is put right (the entry removed, the link put back), so it is reported once. An API key home
+    without a link is fine."""
+    run_sessions = Path(codex_dir) / RUN_SESSIONS
+    tasks = (sorted(p for p in run_sessions.iterdir() if p.is_dir() and not p.is_symlink())
+             if run_sessions.is_dir() else [])
+    return linked_login.inspect_homes((Path(codex_dir) / "runs", Path(codex_dir) / "sessions", *tasks),
+                                      {LOGIN_FILE: target}, is_login_home=_is_login_home, login=LOGIN,
+                                      removed=REMOVED)
 
 
 # --- The recorded problem ---
@@ -184,33 +128,18 @@ def inspect_homes(codex_dir: Path, target: Path) -> list[LinkProblem]:
 
 async def recorded_problem(*, pool: Any = None) -> dict[str, str] | None:
     """The recorded problem, ``{"detail", "at"}``; None when there is none."""
-    from ...db import system_settings
-
-    raw = (await system_settings.get_settings([FORK_KEY], pool=pool)).get(FORK_KEY)
-    if raw is None:
-        return None
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        value = None
-    return value if isinstance(value, dict) else {"detail": "the recorded problem cannot be read", "at": ""}
+    return await linked_login.recorded_problem(FORK_KEY, pool=pool)
 
 
 async def record_problems(problems: list[LinkProblem]) -> str:
     """Record ``problems`` (the login is unavailable to runs from now on) and return what to tell the operator."""
-    from ...db import system_settings
-
-    detail = "; ".join(problem.text() for problem in problems)
-    at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    await system_settings.put_settings({FORK_KEY: json.dumps({"detail": detail, "at": at}, ensure_ascii=False)})
+    detail = await linked_login.record_problems(FORK_KEY, problems)
     forget_probe()
     return f"Codex login unavailable: {detail}. To fix: {PROBLEM_FIX}"
 
 
 async def clear_problem() -> None:
-    from ...db import system_settings
-
-    await system_settings.put_settings({FORK_KEY: None})
+    await linked_login.clear_problem(FORK_KEY)
     forget_probe()
 
 

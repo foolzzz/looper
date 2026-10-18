@@ -232,7 +232,7 @@ class _AgentAPI(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.posts.append({"path": self.path, "content_type": self.headers.get("Content-Type"), "body": body})
         name = self.path.removeprefix("/api/agent/v1/ops/")
-        if name == "slow":
+        if name in ("slow", "looper_room_inbox"):
             time.sleep(1.0)
         status, answer = {
             "create_task": (200, ANSWER),
@@ -241,6 +241,7 @@ class _AgentAPI(BaseHTTPRequestHandler):
             "created": (201, ANSWER),
             "broken": (500, b"Internal Server Error"),
             "slow": (200, ANSWER),
+            "looper_room_inbox": (200, ANSWER),
         }.get(name, (404, {"error": f"unknown tool {name}"}))
         self._send(status, answer)
 
@@ -293,6 +294,18 @@ def test_agent_client_raises_when_the_answer_is_unusable(
     assert str(raised.value) == reason.format(port=agent_api.server_address[1])
     assert type(raised.value) is failure
     assert agent_api.posts[-1]["path"] == "/api/agent/v1/ops/" + urllib.parse.quote(name, safe="")
+
+
+def test_a_room_inbox_that_waits_gets_its_wait_on_top_of_the_timeout(
+    agent_api: _AgentAPIServer, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import mcp_server
+
+    monkeypatch.setattr(mcp_server, "WAIT_MARGIN_SECONDS", 0.5)
+    client = AgentClient(_url(agent_api), TOKEN, timeout=0.3)
+    assert client.call_tool("looper_room_inbox", {"wait_seconds": 1}) == ANSWER  # 1 s + 0.5 s, not 0.3 s
+    with pytest.raises(LooperTimedOut):
+        client.call_tool("looper_room_inbox", {})  # no wait: the timeout as for any call
 
 
 def test_agent_client_raises_when_nothing_listens() -> None:

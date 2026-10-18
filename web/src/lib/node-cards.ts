@@ -6,6 +6,7 @@ import { MERGE_ERRORS, shortCommit, workspaceState } from "@/lib/workspaces";
 import {
   reviewingRole,
   type GateAgendaItem,
+  type RoomStepCounts,
   type StepWorkspace,
   type TaskDetail,
   type TaskStep,
@@ -172,13 +173,15 @@ export interface StepCardContext {
   stepsById: Map<string, TaskStep>;
   /** Why a dropped step was dropped. */
   skippedBecause?: string;
+  /** Its seats' messages in the task's room, when they have any. */
+  room?: RoomStepCounts;
   /** The step's worktrees, oldest first, when it had any. */
   workspaces?: StepWorkspace[];
 }
 
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
 export function stepCard(
-  step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces }: StepCardContext,
+  step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces, room }: StepCardContext,
 ): NodeCard {
   const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   const span = stepSpan(step, active);
@@ -207,6 +210,13 @@ export function stepCard(
         },
       ]),
       ...stepWorktree(workspaces),
+      ...facts("Room", [
+        room && { label: "Messages", value: `${room.sent} sent, ${room.received} received` },
+        room && room.unanswered > 0 && {
+          label: "Unanswered",
+          value: `${room.unanswered} question${room.unanswered === 1 ? "" : "s"}`,
+        },
+      ]),
       ...stepResult(step),
       ...(step.status === "skipped" ? text("Skipped", skippedBecause || "Dropped from the plan by a replan") : []),
       ...facts("Timing", [

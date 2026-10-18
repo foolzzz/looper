@@ -34,7 +34,7 @@ command themselves. An adapter says:
 - **its own login** (``login_problem``, ``after_run``, ``login_models``):
   why a run with the runtime's login cannot start now, what a run left wrong
   with the login, and the models the form suggests for it (Codex:
-  ``codex_login``);
+  ``codex_login``; Grok: ``grok_login``; both share ``linked_login``);
 - **the project's instruction files** (``instruction_files``): which of the
   repository's ``CLAUDE.md`` and ``AGENTS.md`` a run is given, read by the
   runtime itself or put in its system prompt by Looper (``instructions``).
@@ -44,14 +44,15 @@ the MCP configuration, knowledge directories) is materialized by
 ``library.load_installed`` and ``knowledge.load_knowledge`` in Claude Code's
 plugin format; ``launch_args`` turns it into flags. A runtime of another
 format translates it at launch (Codex: ``codex.materialize``,
-``codex.config_toml``; OMP: ``omp.overlay``, ``omp.mcp_config``) and says in
-the run's record what it left out (``launch_record``).
+``codex.config_toml``; OMP: ``omp.overlay``, ``omp.mcp_config``; Grok:
+``grok.config_toml``) and says in the run's record what it left out
+(``launch_record``).
 
 A runtime whose CLI runs one turn per process keeps the Manager's and a
 Planner's session by resuming it on every turn (``per_turn.PerTurnSession``).
 
-The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``) and ``omp``
-(``omp``).
+The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
+(``omp``) and ``grok`` (``grok``).
 """
 
 from __future__ import annotations
@@ -102,6 +103,14 @@ class Capability(str, Enum):
     COST_REPORT = "cost_report"  # it reports what a run cost
 
 
+class ReadOnly(str, Enum):
+    """How a run that must not change files (``Launch.read_only``, a Planner's) is kept from changing them."""
+
+    PERMISSIONS = "permissions"  # the runtime refuses the tools and commands that would, and reports each refusal
+    TOOLS = "tools"  # it runs with reading tools only (no shell, no write tool); nothing is refused, so nothing is reported
+    CHECK = "check"  # it cannot: the Planner compares the task directory before and after each turn
+
+
 class CostSource(str, Enum):
     """Where a run's cost comes from: what the runtime reported, or its tokens at the provider's prices."""
 
@@ -150,8 +159,8 @@ class Probe:
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
-    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex and OMP one process per turn
-    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``)."""
+    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex, OMP and Grok one process per turn
+    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``, ``grok.ResidentGrok``)."""
 
     @property
     def label(self) -> str: ...
@@ -190,6 +199,14 @@ class RuntimeAdapter(ABC):
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset()
+    # Whether a run reads more user turns while it runs (``write_turn`` after the prompt): a forwarded message, a
+    # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
+    run_input: ClassVar[bool] = False
+    # How it keeps a run that must not change files from changing them (``Launch.read_only``).
+    read_only: ClassVar[ReadOnly] = ReadOnly.CHECK
+    # Whether a run priced by the runtime's own figure (``CostSource.RUNTIME``) stops at its per-run spend cap:
+    # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
+    runtime_cost_capped: ClassVar[bool] = True
 
     # --- Registration ---
 
@@ -231,8 +248,10 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """A one-off run's command; its prompt and later user turns come on stdin."""
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """A one-off run's command; its prompt and later user turns come on stdin. With ``session_dir`` a runtime
+        that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
+        later (the agent room's consults); Claude Code keeps every run's session in its own place."""
 
     # --- Sessions and the stream ---
 
@@ -268,6 +287,11 @@ class RuntimeAdapter(ABC):
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         """Why a run stopped at its spend cap; None when it did not."""
 
+    def permission_denials(self, result_event: dict[str, Any] | None) -> list[dict[str, str]]:
+        """The tool calls the runtime refused in a run, as its result reports them (``{tool, input}``); none unless
+        the adapter says otherwise."""
+        return []
+
     # --- Its own login ---
 
     # The models the Agent Profile form suggests with the runtime's own login (any model is taken).
@@ -302,9 +326,10 @@ class RuntimeAdapter(ABC):
 def _adapters() -> dict[str, RuntimeAdapter]:
     from .claude_code import ClaudeCodeRuntime
     from .codex import CodexRuntime
+    from .grok import GrokRuntime
     from .omp import OmpRuntime
 
-    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime())}
+    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

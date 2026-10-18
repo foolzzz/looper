@@ -82,4 +82,50 @@ describe("TaskDetailRoute", () => {
     expect(container.textContent).not.toContain("Build the A parser.");
     release();
   });
+
+  it("clears the mounted room and reads from zero after Start over", async () => {
+    let restarted = false;
+    let releaseRoom = () => {};
+    const reads: string[] = [];
+    const room = (id: number, body: string) => ({
+      enabled: true, seats: [], by_step: {}, more: false,
+      counts: { messages: 1, by_kind: { info: 1 }, questions: 0, unanswered: 0 },
+      messages: [{ id, from: "worker@s1", to: "all", kind: "info", body, at: "2026-10-17T08:00:00Z",
+                   cc_planner: false, answered: false }],
+    });
+    const response = (data: unknown) => new Response(JSON.stringify(data), { status: 200 });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/start")) {
+        restarted = true;
+        return response({});
+      }
+      if (url.includes("/room")) {
+        reads.push(url);
+        if (!restarted) return response(room(7, "Previous run's message"));
+        return new Promise<Response>((resolve) => {
+          releaseRoom = () => resolve(response(room(1, "Restarted run's message")));
+        });
+      }
+      if (url.endsWith("/tasks/task-a") && restarted) {
+        return response({ ...detail("task-a"), status: "running", group: "in_progress" });
+      }
+      return response(answer(url));
+    }));
+    await show("task-a");
+    await openTab("Room");
+    expect(container.textContent).toContain("Previous run's message");
+
+    await openTab("Start over"); // open the confirmation
+    await openTab("Start over"); // restart while Room stays selected
+    expect(container.textContent).not.toContain("Previous run's message");
+    expect(reads.length).toBeGreaterThan(1);
+    for (const url of reads.slice(1)) {
+      expect(new URL(url, "http://localhost").searchParams.get("after") ?? "0").toBe("0");
+    }
+    await act(async () => releaseRoom());
+    await settle();
+    expect(container.textContent).toContain("Restarted run's message");
+    expect(container.textContent).not.toContain("Previous run's message");
+  });
 });

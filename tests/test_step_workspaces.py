@@ -798,3 +798,37 @@ def test_looper_forgets_only_its_own_worktrees(repo: Path, tmp_path: Path) -> No
     listed = git(repo, "worktree", "list", "--porcelain")
     assert f"worktree {users.resolve()}" in listed or f"worktree {users}" in listed
     assert "looper/" not in listed and str(root) not in listed
+
+
+# --- Whether a turn changed the task directory ---
+
+
+@pytest.mark.parametrize(("change", "changed"), [
+    (lambda path: None, []),
+    (lambda path: (path / "notes.md").write_text("plan\n"), ["notes.md"]),  # a new file
+    (lambda path: (path / "base.txt").write_text("changed\n"), ["base.txt"]),  # a committed file edited
+    (lambda path: (path / "shared.txt").unlink(), ["shared.txt"]),
+    (lambda path: (path / ".env").write_text("SECRET=1\n"), []),  # ignored: not the project's content
+    (lambda path: git(path, "commit", "-q", "--allow-empty", "-m", "x"), ["HEAD"]),
+], ids=["nothing", "new file", "edited", "deleted", "ignored", "commit"])
+def test_a_change_to_the_checkout_between_two_states_is_named(repo: Path, change: Any, changed: list[str]) -> None:
+    (repo / "draft.txt").write_text("before\n")  # already pending before: only a change to it counts
+    before = run(ws.tree_state(repo))
+    index = (repo / ".git" / "index").stat().st_mtime_ns
+    change(repo)
+    after = run(ws.tree_state(repo))
+    assert ws.changed_between(before, after) == changed
+    assert (repo / ".git" / "index").stat().st_mtime_ns == index or changed == ["HEAD"]  # reading wrote no index
+
+
+def test_a_pending_file_written_again_is_a_change_and_no_checkout_has_no_state(repo: Path, tmp_path: Path) -> None:
+    import time
+
+    (repo / "draft.txt").write_text("one\n")
+    before = run(ws.tree_state(repo))
+    time.sleep(0.01)
+    (repo / "draft.txt").write_text("two, longer\n")
+    assert ws.changed_between(before, run(ws.tree_state(repo))) == ["draft.txt"]
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert run(ws.tree_state(plain)) is None and run(ws.tree_state(tmp_path / "missing")) is None

@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
     EXPIRED = "expired"  # a confirmation past its time or its turn
     UNAVAILABLE = "unavailable"  # Looper could not do it now (its database); the call may be tried again
+    RATE_LIMITED = "rate_limited"  # over a limit of how often or how much (a room's); the message says when
 
 
 class OpError(Exception):
@@ -67,6 +68,7 @@ class Turn:
     group: bool = False  # the chat is a group chat
     envelope: MessageEnvelope | None = None
     blocks: list[str] = field(default_factory=list)
+    task_ids: set[str | None] = field(default_factory=set)  # each call's named task; None for global calls or creates
     # Looper refused a call of this turn for its token: the tools did not work, whatever Claude says.
     refused: bool = False
 

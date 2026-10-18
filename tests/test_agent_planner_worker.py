@@ -9,8 +9,9 @@ import signal
 import subprocess
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -71,6 +72,44 @@ class TestTaskPlan:
 
 
 class TestWorkerPool:
+    @pytest.mark.parametrize("offline_fails", [False, True])
+    def test_cancelled_run_announces_offline(self, agent_db: Any, tmp_path: Path, offline_fails: bool) -> None:
+        async def _run() -> None:
+            bus = MessageBus(runtime_root=tmp_path)
+            pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+            pool._bus = bus
+            pool._take_slot = AsyncMock()  # type: ignore[method-assign]
+            started = asyncio.Event()
+            changes = []
+            revoke = Mock()
+
+            async def presence_changed(task_id: str, seat: Any, *, online: bool) -> None:
+                changes.append((task_id, seat.key, online))
+                if not online:
+                    revoke.assert_called_once_with("w1")
+                    if offline_fails:
+                        raise RuntimeError("room storage unavailable")
+
+            pool.room_ops = SimpleNamespace(revoke_run=revoke, room=SimpleNamespace(presence_changed=presence_changed))
+
+            async def execute(*_args: Any, **_kwargs: Any) -> None:
+                started.set()
+                await asyncio.Future()
+
+            pool._execute = execute  # type: ignore[method-assign]
+            envelope = _work_item(tmp_path)
+            envelope.payload["parent_task_id"] = "t1"
+            run = asyncio.create_task(pool._run_worker(envelope))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            run.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run
+            assert changes == [("t1", "worker@s1", True), ("t1", "worker@s1", False)]
+            assert bus.get_queue("planner-t1").empty()
+            await bus.shutdown()
+
+        asyncio.run(_run())
+
     def test_pool_start_stop(self, stub_claude_on_path: Path) -> None:
         # is_healthy() needs a `claude` on PATH; the stub keeps this off the machine's own install.
         async def _run() -> None:

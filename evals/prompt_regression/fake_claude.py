@@ -23,10 +23,14 @@ agent system started it in:
 - a Worker (its task section says "Your step:") writes the files its step's
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
-  waits for a forwarded user turn and then writes the files given there;
+  waits for a forwarded user turn and then writes the files given there; with
+  ``room_calls`` (``{label: [[tool, arguments], ...]}``) it first makes those
+  calls of the room's tools over its ``looper`` MCP server (and answers a
+  [ROOM] turn of the Planner's with ``room_reply``, or "Noted.");
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
-  marker): then it fails it;
+  marker), or the attempt under review is one the script's
+  ``failing_review_attempts`` lists for its step: then it fails it;
 - the Manager (its system prompt has Looper's tools contract) starts the
   ``looper`` MCP server of its ``--mcp-config`` and, for each user message,
   makes the calls ``scenarios.json``'s ``manager`` lists for that message's
@@ -41,8 +45,15 @@ Planner write files with the Write tool during [PLAN] (``planner_writes``),
 break its first [PLAN] reply (``break_first_plan``), or give a Worker attempt
 a final message without the report (``raw`` in the attempt).
 
+The Planner's retries carry the script's ``retry_feedback`` for the step (the
+Nth retry its Nth note), else a note of its own.
+
 The task is found by the process's working directory in ``scenarios.json``
 (``{work_dir: script}``). Every result reports the session's running cost.
+
+In real mode (``REAL_CLAUDE_ENV`` names Claude Code) every run goes to Claude
+Code, but for a task whose script sets ``real_reviewer``: its Planner and
+Workers play the script, and only its Reviewers are Claude Code's.
 """
 
 from __future__ import annotations
@@ -56,6 +67,8 @@ import sys
 import time
 from typing import Any
 
+# Names the real Claude Code in real mode (``main``).
+REAL_CLAUDE_ENV = "LOOPER_EVAL_REAL_CLAUDE"
 PLANNER_TURN_COST = 0.001
 MANAGER_TURN_COST = 0.001
 WORKER_RUN_COST = 0.002
@@ -124,7 +137,9 @@ FINAL = {"delivered": "the task's files", "how_to_use": "read them", "verificati
          "open_issues": "none"}
 
 
-def _decide(script: dict[str, Any], message: str) -> dict[str, Any]:
+def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> dict[str, Any]:
+    """The decision on a step: accept, else review, else retry (``retried`` counts the retries of each step, for
+    ``retry_feedback``), else fail."""
     allowed_line = re.search(r"^Allowed decisions now: (.*)\.$", message, re.MULTILINE)
     allowed = {item.split(" ")[0] for item in (allowed_line.group(1).split(", ") if allowed_line else [])}
     step = re.match(r"\[DECISION\] Step (\S+)", message)
@@ -135,7 +150,11 @@ def _decide(script: dict[str, Any], message: str) -> dict[str, Any]:
     if "review" in allowed and "needs a passing review" in message:
         return {"decision": "review", "reason": "the step asks for an independent review"}
     if "retry" in allowed:
-        return {"decision": "retry", "reason": "the step failed", "feedback": "Run the step again."}
+        label = step.group(1) if step else ""
+        notes = (script.get("retry_feedback") or {}).get(label) or []
+        retried[label] = retried.get(label, 0) + 1
+        note = notes[retried[label] - 1] if retried[label] <= len(notes) else "Run the step again."
+        return {"decision": "retry", "reason": "the step failed", "feedback": note}
     return {"decision": "fail", "reason": "the step cannot be done"}
 
 
@@ -194,6 +213,7 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
     broken = 0
     calls = script.get("planner_calls") or {}
     rpc = _mcp(args) if calls else None
+    retried: dict[str, int] = {}
     while (line := stdin.readline()) is not None:
         if not line.strip():
             continue
@@ -211,9 +231,11 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {"steps": script["plan"]}
             writes = script.get("planner_writes")
         elif message.startswith("[DECISION]"):
-            reply = {**_decide(script, message), "progress": PROGRESS}
+            reply = {**_decide(script, message, retried), "progress": PROGRESS}
         elif message.startswith("[GATE]"):
             reply = _gate(script, message)
+        elif message.startswith("[ROOM]"):
+            reply = {"reply": script.get("room_reply", "Noted."), "action": "none"}
         elif message.startswith("[CHAT]"):
             reply = _chat(script, message)
         else:
@@ -230,10 +252,20 @@ def _write(work_dir: str, files: dict[str, str]) -> None:
             handle.write(content)
 
 
-def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
+def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: list[str]) -> None:
     stdin.readline()  # the start cue
     step = re.search(r"^Your step: (\S+)$", system_prompt, re.MULTILINE)
     label = step.group(1) if step else ""
+    calls = (script.get("room_calls") or {}).get(label) or []
+    rpc = _mcp(args) if calls else None
+    inbox: list[dict[str, Any]] | None = None
+    for name, arguments in calls:
+        _emit({"type": "assistant", "session_id": "fake-worker", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"toolu_{name}", "name": f"mcp__looper__{name}", "input": arguments}]}})
+        result = rpc("tools/call", {"name": name, "arguments": arguments})
+        if name == "looper_room_inbox":
+            answer = json.loads(result["result"]["content"][0]["text"])
+            inbox = (inbox or []) + (answer.get("result") or {}).get("messages", [])
     retried = re.search(r"being retried \(attempt (\d+)\)", system_prompt)
     attempt_no = int(retried.group(1)) if retried else 1
     attempts = script.get("attempts", {}).get(label) or [{"status": "completed", "files": {}}]
@@ -242,6 +274,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
         files = dict(wait.get("files") or {})
+    if inbox is not None and "cli.py" in files:
+        # The inventory client learns its fields only from the delivered interface; no interface means {}.
+        interface = next((m["body"] for m in reversed(inbox) if m.get("kind") == "interface"), "")
+        fields = re.findall(r'"([^"\n]+)"\s*:\s*(str|int)\b', interface)
+        record = ", ".join(f"{json.dumps(field)}: {'name' if kind == 'str' else 'int(count)'}"
+                           for field, kind in fields)
+        files["cli.py"] = re.sub(r"store\.add_item\(\{[^}]*\}\)", lambda _: f"store.add_item({{{record}}})",
+                                 files["cli.py"])
     time.sleep(float(attempt.get("seconds", 0)))
     work_dir = os.getcwd()
     _write(work_dir, files)
@@ -252,8 +292,12 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
 
 
 def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
-    stdin.readline()  # the Worker's report
-    if any(marker in system_prompt for marker in script.get("failing_reviews") or []):
+    report = _user_text(stdin.readline() or "{}")  # the Worker's report
+    step = re.search(r"^The step under review: (\S+)$", system_prompt, re.MULTILINE)
+    attempt = re.search(r"\battempt (\d+)\b", report)
+    failing = (script.get("failing_review_attempts") or {}).get(step.group(1) if step else "") or []
+    if any(marker in system_prompt for marker in script.get("failing_reviews") or []) or (
+            attempt is not None and int(attempt.group(1)) in failing):
         verdict = {"passed": False, "findings": ["the greeting is not what this role asks for"],
                    "summary": "Not to this role's liking."}
     else:
@@ -305,15 +349,20 @@ def main(argv: list[str]) -> int:
     if "--append-system-prompt-file" in args:
         with open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8") as handle:
             system_prompt = handle.read()
+    review = re.search(r"^The step under review:", system_prompt, re.MULTILINE)
+    real = os.environ.get(REAL_CLAUDE_ENV)
+    if real and (review or not script.get("real_reviewer")):
+        # Real mode: Claude Code runs it, with every argument it came with (the budget flags included).
+        os.execv(real, [real, *args])
     stdin = _Stdin()
     # The role is in the task section: a Reviewer's names the step under review, a Worker's its step; the
     # Manager's prompt ends with Looper's tools contract.
     if "## Looper's tools (required)" in system_prompt:
         _manager(scenarios_path, args, stdin)
-    elif re.search(r"^The step under review:", system_prompt, re.MULTILINE):
+    elif review:
         _reviewer(script, system_prompt, stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
-        _worker(script, system_prompt, stdin)
+        _worker(script, system_prompt, stdin, args)
     else:
         _planner(script, args, stdin)
     return 0
