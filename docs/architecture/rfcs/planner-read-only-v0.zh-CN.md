@@ -56,11 +56,11 @@ agent-room 那一路已在 Claude Code 2.1.285 的 `--print` 模式（隔离参�
 
 ### 4.1 各运行时
 
-| | Claude Code | Codex | OMP |
-|---|---|---|---|
-| 只读方式（`RuntimeAdapter.read_only`） | `permissions`：去掉 `--dangerously-skip-permissions`，钉住 `--permission-mode manual`（2.1.285 里默认模式的名字）和 `--permission-prompts none`（没有人回答确认，凡要确认的一律拒绝），加 `--disallowedTools Edit,Write,NotebookEdit` 和 `--allowedTools`（见 4.2） | 候选：`exec` 的 `--sandbox read-only` 加 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`。沙箱只管模型生成的 shell 命令，MCP 调用不受影响。**需要验证**：`exec resume` 是否沿用这些参数，MCP 工具调用是否仍能执行，被拒的命令在 `--json` 事件里怎样表示。验证通过前保持现状，用回退检查（`check`） | 候选：`--approval-mode write`（print 模式下没有界面可批，行为未知）或 `--tools` 白名单（去掉 bash 就没有 git log/diff）。**需要验证**；验证前用回退检查（`check`） |
-| 拒绝的记录 | `result.permission_denials`，每次拒绝一条 | 没有类型化的拒绝信号（被拒的命令只是失败） | 没有 |
-| 已核实 | Bash 的读命令放行、写命令拒绝并记录（第 2 节）；MCP 工具和技能在放行后可用、规划者照常完成任务：**需要验证**，由真实评测覆盖 | 一次探测（新会话加 `exec resume`，只读沙箱加 `approval_policy="never"`）：读命令照常，写文件、`touch`、`git commit` 被沙箱拒绝（命令失败，没有类型化的拒绝信号）；MCP 工具在默认的审批下被拒（「requires approval, but approval policy is never」），给该服务器加 `mcp_servers.<名字>.default_tools_approval_mode="approve"` 后在两轮里都能调用。命令行还没改，每个 MCP 服务器都要加这条配置，还要在真实规划任务里评测 | 未验证（`--approval-mode write` 和 `--tools` 白名单的探测没有得出结论） |
+| | Claude Code | Codex | OMP | Grok |
+|---|---|---|---|---|
+| 只读方式（`RuntimeAdapter.read_only`） | `permissions`：去掉 `--dangerously-skip-permissions`，钉住 `--permission-mode manual`（2.1.285 里默认模式的名字）和 `--permission-prompts none`（没有人回答确认，凡要确认的一律拒绝），加 `--disallowedTools Edit,Write,NotebookEdit` 和 `--allowedTools`（见 4.2） | 候选：`exec` 的 `--sandbox read-only` 加 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`。沙箱只管模型生成的 shell 命令，MCP 调用不受影响。**需要验证**：`exec resume` 是否沿用这些参数，MCP 工具调用是否仍能执行，被拒的命令在 `--json` 事件里怎样表示。验证通过前保持现状，用回退检查（`check`） | 候选：`--approval-mode write`（print 模式下没有界面可批，行为未知）或 `--tools` 白名单（去掉 bash 就没有 git log/diff）。**需要验证**；验证前用回退检查（`check`） | `tools`：命令行加 `--tools read_file,grep,list_dir`，内置工具只剩读文件、搜索、列目录，没有写工具也没有 shell；`--always-approve` 照旧（工具被去掉，不是被拒绝）。MCP 工具仍可用，经 `use_tool` 调用。`--resume` 的后续轮同样带这条 |
+| 拒绝的记录 | `result.permission_denials`，每次拒绝一条 | 没有类型化的拒绝信号（被拒的命令只是失败） | 没有 | 没有（工具不在，模型无从调用，也就没有拒绝记录） |
+| 已核实 | Bash 的读命令放行、写命令拒绝并记录（第 2 节）；MCP 工具和技能在放行后可用、规划者照常完成任务：**需要验证**，由真实评测覆盖 | 一次探测（新会话加 `exec resume`，只读沙箱加 `approval_policy="never"`）：读命令照常，写文件、`touch`、`git commit` 被沙箱拒绝（命令失败，没有类型化的拒绝信号）；MCP 工具在默认的审批下被拒（「requires approval, but approval policy is never」），给该服务器加 `mcp_servers.<名字>.default_tools_approval_mode="approve"` 后在两轮里都能调用。命令行还没改，每个 MCP 服务器都要加这条配置，还要在真实规划任务里评测 | 未验证（`--approval-mode write` 和 `--tools` 白名单的探测没有得出结论） | 一次探测（grok 1.0.62，Looper 生成的家目录，`--disable-web-search`）：带 `--tools` 时 `init` 里的工具是 `read_file`、`list_dir`、`grep`、`search_tool`、`use_tool`；MCP 工具经 `use_tool` 被调用，`--resume` 的下一轮同样可调；模型找不到写工具，两轮都没有创建文件。对照（不带 `--tools`、同样的规则）：同一个提示用 `write` 创建了文件。**代价**：规划者没有 shell，不能 `git diff`、跑测试；装给规划者的 MCP 服务器如果自己会写文件，照样能写（与 Claude Code 相同） |
 
 运行记录写明怎样保证只读：`metadata.read_only` 为 `permissions` 或 `check`（只有规划者的运行有这个字段）。
 
@@ -152,6 +152,7 @@ criterion that no note changes still holds.
 | D6 | 拒绝记在运行记录的 `metadata.permission_denials`，不加新表 | 一轮一条记录，和这一轮的花费、事件放在一起；按任务、按角色统计时从记录里读 |
 | D7 | 评审者拿到全部重试说明（按先后），不只最后一条 | 第 N 次尝试的 Worker 按全部说明做；前面的说明（例如放宽的边界）仍然有效 |
 | D8 | 说明里写明「没被说明改到的标准照旧成立」 | 和问题相反的方向：一条无关的说明不能让评审放水 |
+| D9 | Grok 的规划者用 `--tools read_file,grep,list_dir` 只留读取工具（`ReadOnly.TOOLS`），不用回退检查 | 探测证实写工具确实去掉、MCP 工具经 `use_tool` 仍可用；代价是规划者没有 shell（看不了 `git diff`），装给它的会写文件的 MCP 服务器仍能写 |
 
 ## 7. 评测
 
