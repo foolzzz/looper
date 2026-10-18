@@ -139,6 +139,7 @@ def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider_name"], "model": view["model"], "effort": view["effort"],
             "agent_teams": view["agent_teams"], "system_prompt_mode": view["system_prompt_mode"],
+            "custom_prompt": view.get("custom_prompt", ""),
             "roles": view["roles"], "builtin": view["builtin"],
             "used_by": used or None}
 
@@ -188,7 +189,8 @@ async def _profiles(call: Call) -> dict[str, Any]:
                 "providers": [{"provider_id": p["provider_id"], "name": p["name"],
                                "models": [m["name"] for m in p["models"]] or p["suggested_models"]}
                               for p in registry["providers"]]}
-    fields = {**_given(arguments, ("name", "model", "effort", "agent_teams", "system_prompt_mode"), clears=("effort",)),
+    fields = {**_given(arguments, ("name", "model", "effort", "agent_teams", "system_prompt_mode", "custom_prompt"),
+                      clears=("effort",)),
               **_profile_parts(registry, arguments)}
     if action == "create":
         _required(arguments, action, "name", "runtime", "provider", "model")
@@ -415,6 +417,8 @@ TOOLS: tuple[Tool, ...] = (
                 "system_prompt_mode": {"type": "string", "enum": ["append", "replace"],
                                        "description": "append adds to the runtime's default system prompt; replace "
                                                       "replaces it and is refused on unsupported runtimes."},
+                "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
+                                  "prompt, before the harness; empty adds nothing."},
             },
         },
         risk=Risk.WRITE, run=_profiles, escalate=_deleting_profile, read_actions=frozenset({"list"}),

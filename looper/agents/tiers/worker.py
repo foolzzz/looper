@@ -815,6 +815,7 @@ class WorkerPool:
         if task_role is None:
             system_prompt = build_system_prompt(
                 harness=agent_settings.harness,
+                custom_prompt=agent_settings.profile.custom_prompt,
                 role_id=agent.value,
                 role=settings.system_prompt,
                 recommended=settings.recommended,
@@ -831,6 +832,7 @@ class WorkerPool:
         else:
             system_prompt = build_role_prompt(
                 harness=agent_settings.harness,
+                custom_prompt=agent_settings.profile.custom_prompt,
                 boundaries=agent_settings.boundaries,
                 task_role=task_role,
                 project=project,

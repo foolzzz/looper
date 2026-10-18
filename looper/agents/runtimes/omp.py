@@ -78,8 +78,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    instructions,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+    instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -216,8 +216,8 @@ class OmpRuntime(RuntimeAdapter):
         mcp = mcp_config(launch.library, visible)
         home = write_home(local, models_yml(launch), overlay(launch, outside_repository=outside_repository(cwd)), mcp)
         project = instructions.injected_section(self.instruction_files(cwd), self.label)
-        prompt = write_prompt(home, "\n\n---\n\n".join(
-            part for part in (project, runtime_notes(), Path(prompt_file).read_text(encoding="utf-8")) if part))
+        prompt = write_prompt(home, _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch,
+                                                project=project))
         prompt_flag = ("--system-prompt" if launch.system_prompt_mode is SystemPromptMode.REPLACE
                        else "--append-system-prompt")
         return [
@@ -225,6 +225,12 @@ class OmpRuntime(RuntimeAdapter):
             "--config", str(home / OVERLAY), prompt_flag, str(prompt),
             *(["--plugin-dir", str(home / "plugins" / MCP_PLUGIN)] if mcp else []),
         ]
+
+    def prompt_blocks(self, launch: Launch, looper_prompt: str) -> list[PromptBlock]:
+        looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
+                             "system prompt file")
+        return ([looper] if launch.system_prompt_mode is SystemPromptMode.REPLACE else
+                [PromptBlock("Default prompt", "runtime", None, "OMP's default prompt (not shown)"), looper])
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -474,6 +480,10 @@ def runtime_notes() -> str:
         "- Looper reads only your final message. When the instructions ask for a reply or a report in a given shape "
         "(such as a JSON block), put all of it in that final message.",
     ])
+
+
+def _prompt_text(looper_prompt: str, launch: Launch, *, project: str = "") -> str:
+    return runtime_prompt_text(launch, looper_prompt, project, runtime_notes(), keep_empty=False)
 
 
 # --- What a run's home holds ---

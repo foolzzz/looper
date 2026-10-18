@@ -2,6 +2,8 @@
 
 The Planner, the Workers and the Reviewers get the same layout::
 
+    <custom prompt>          L0: profile text, when non-empty
+
     <harness prompt>         L1: character and stability, resolved by
                                  agent_settings.resolve_harness (Settings
                                  default, or the project's override)
@@ -30,7 +32,7 @@ Everything here is fixed for the session; what changes from turn to turn
 (progress, results, other agents' output, chat) is the user turn. The
 contract comes last, so nothing a user or the Planner wrote can follow it.
 The Manager, which spans every project and has no single task, gets its
-harness, its role and its contract.
+custom prompt, harness, role and contract.
 
 A run of a role a task's Planner defined (``task_roles``) gets that role's
 working style in L1 (its own harness, else the working-style part of the
@@ -268,16 +270,16 @@ def compose_system_prompt(
     role: str,
     *,
     harness: str = "",
+    custom_prompt: str = "",
     project_name: str = "",
     background: str = "",
     knowledge: str = "",
     task: str = "",
     contract: str = "",
 ) -> str:
-    """The harness, the role prompt, the project section (its background, then its knowledge index, each when
-    there is one), the task, then the contract."""
-    parts = (harness.rstrip(), role.rstrip(), project_section(project_name, background), knowledge.strip(),
-             task.strip(), contract)
+    """The optional custom prompt, harness, role, project background and knowledge index, task, then contract."""
+    parts = (custom_prompt.strip(), harness.rstrip(), role.rstrip(), project_section(project_name, background),
+             knowledge.strip(), task.strip(), contract)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -306,6 +308,7 @@ def prompt_layers(
     task: str = "",
     harness: Harness | None = None,
     knowledge: AgentKnowledge | None = None,
+    custom_prompt: str = "",
 ) -> dict[str, Any]:
     """Where each layer of a system prompt came from, for the run's record.
 
@@ -318,6 +321,7 @@ def prompt_layers(
     background = str((project or {}).get("background") or "")
     knowledge = knowledge or AgentKnowledge()
     return {
+        **({"custom_prompt": {"sha256": sha256_text(custom_prompt.strip())}} if custom_prompt.strip() else {}),
         "harness": None if harness is None else harness.record(),
         "role": {"config_id": role_id, "sha256": sha256_text(role.strip()), "recommended": recommended},
         "project": None if project is None else {
@@ -394,6 +398,7 @@ def build_system_prompt(
     step_id: str | None = None,
     task: str = "",
     knowledge: AgentKnowledge | None = None,
+    custom_prompt: str = "",
     room: str = "",
 ) -> SystemPrompt:
     """An agent's system prompt (harness, role, project and its knowledge index, task, contract) with its layers;
@@ -405,6 +410,7 @@ def build_system_prompt(
     text = compose_system_prompt(
         role,
         harness=harness.text,
+        custom_prompt=custom_prompt,
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.prompt_section,
@@ -414,7 +420,7 @@ def build_system_prompt(
     layers = prompt_layers(
         role_id=role_id, role=role, recommended=recommended, contract_name=contract_name, contract=contract,
         project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task, harness=harness,
-        knowledge=knowledge,
+        knowledge=knowledge, custom_prompt=custom_prompt,
     )
     return SystemPrompt(text, _room_layer(layers, room))
 
@@ -453,6 +459,7 @@ def build_role_prompt(
     step_id: str | None = None,
     task: str = "",
     knowledge: AgentKnowledge | None = None,
+    custom_prompt: str = "",
     room: str = "",
 ) -> SystemPrompt:
     """The system prompt of a run of ``task_role``: its working style (its own harness; else the built-in harness's
@@ -471,6 +478,7 @@ def build_role_prompt(
     text = compose_system_prompt(
         task_role.role_prompt,
         harness=working,
+        custom_prompt=custom_prompt,
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.prompt_section,
@@ -481,7 +489,7 @@ def build_role_prompt(
     layers = prompt_layers(
         role_id=task_role.kind.agent.value, role=task_role.role_prompt, recommended=False,
         contract_name=contract_name, contract=contract, project=project, task_kind=task_kind, task_id=task_id,
-        step_id=step_id, task=task, harness=harness, knowledge=knowledge,
+        step_id=step_id, task=task, harness=harness, knowledge=knowledge, custom_prompt=custom_prompt,
     )
     layers["harness"] = harness_record
     layers["role"]["task_role"] = task_role.key

@@ -431,7 +431,8 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 -- registry sets a new profile's (profile_registry.default_agent_teams) and a migration below turned them on once
 -- for the profiles before; the column's default is for the other runtimes, which have none.
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
--- Existing profiles append the Looper prompt; replacement must be selected explicitly.
+-- Existing profiles add no custom text and append the Looper prompt by default.
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS custom_prompt TEXT NOT NULL DEFAULT '';
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS system_prompt_mode TEXT NOT NULL DEFAULT 'append'
     CHECK (system_prompt_mode IN ('append', 'replace'));
 -- A task's profile overrides: its own choice of Agent Profile for some of its

@@ -240,8 +240,8 @@ def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, A
 
 
 def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {name: row[name] for name in ("name", "runtime", "provider", "model", "effort", "agent_teams",
-                                       "system_prompt_mode")}
+    return {**{name: row[name] for name in ("name", "runtime", "provider", "model", "effort", "agent_teams",
+                                          "system_prompt_mode")}, "custom_prompt": row.get("custom_prompt", "")}
 
 
 def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -898,15 +898,16 @@ class _Importer:
             if row["runtime"] in self.runtimes and row["provider"] in self.providers:
                 self.profiles[name] = (row["id"], self._profile_spec(row["id"], name, row["runtime"],
                                                                      row["provider"], row["model"], row["effort"],
-                                                                     row["agent_teams"], row["system_prompt_mode"]))
+                                                                     row["agent_teams"], row["system_prompt_mode"],
+                                                                     row.get("custom_prompt", "")))
 
     def _profile_spec(self, profile_id: str, name: str, runtime: str, provider: str, model: str,
-                      effort: str | None, agent_teams: bool, system_prompt_mode: Any) -> Any:
+                      effort: str | None, agent_teams: bool, system_prompt_mode: Any, custom_prompt: str = "") -> Any:
         from .profile_registry import AgentProfile
         from .system_prompt_mode import SystemPromptMode
 
         return AgentProfile(profile_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort,
-                            agent_teams, SystemPromptMode(system_prompt_mode))
+                            agent_teams, SystemPromptMode(system_prompt_mode), custom_prompt)
 
     def record(self, section: str, key: str, action: Action, fields: Sequence[str] = (), reason: str = "") -> None:
         self.plan.changes.append(Change(section, key, action, tuple(fields), reason))
@@ -999,7 +1000,7 @@ class _Importer:
         self.providers[name] = (provider_id, provider_spec({**fields, "id": provider_id}))
 
     async def profile(self, entry: Any) -> None:
-        from .profile_registry import RegistryError, _agent_teams, _effort, _model, _system_prompt_mode, \
+        from .profile_registry import RegistryError, _agent_teams, _custom_prompt, _effort, _model, _system_prompt_mode, \
             check_agent_teams, check_pairing, check_system_prompt_mode, default_agent_teams, entry_name
 
         raw = entry if isinstance(entry, Mapping) else {}
@@ -1007,7 +1008,7 @@ class _Importer:
         try:
             entry = _mapping(entry, "an Agent Profile")
             unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort", "agent_teams",
-                                           "system_prompt_mode"})
+                                           "system_prompt_mode", "custom_prompt"})
             if unknown:
                 raise _Skip(f"unknown field {unknown[0]!r}")
             try:
@@ -1015,7 +1016,8 @@ class _Importer:
                 values = {"runtime": entry.get("runtime"), "provider": entry.get("provider"),
                           "model": _model(entry.get("model")), "effort": _effort(entry.get("effort")),
                           "agent_teams": _agent_teams(entry["agent_teams"]) if "agent_teams" in entry else None,
-                          "system_prompt_mode": _system_prompt_mode(entry.get("system_prompt_mode", "append"))}
+                          "system_prompt_mode": _system_prompt_mode(entry.get("system_prompt_mode", "append")),
+                          "custom_prompt": _custom_prompt(entry.get("custom_prompt", ""))}
             except RegistryError as exc:
                 raise _Skip(str(exc)) from None
             if values["runtime"] not in self.runtimes:
@@ -1030,7 +1032,7 @@ class _Importer:
                 raise _Skip("a built-in Agent Profile has this name here")
             spec = self._profile_spec(row["id"] if row else f"new:{name}", name, values["runtime"],
                                       values["provider"], values["model"], values["effort"], values["agent_teams"],
-                                      values["system_prompt_mode"])
+                                      values["system_prompt_mode"], values["custom_prompt"])
             try:
                 check_system_prompt_mode(spec.runtime, spec.system_prompt_mode)
                 check_pairing(spec.runtime, spec.provider, spec.model)
@@ -1052,7 +1054,8 @@ class _Importer:
 
         return await db.write_profile(self.conn, profile_id, {
             "name": name, "runtime_id": spec.runtime.id, "provider_id": spec.provider.id, "model": spec.model,
-            "effort": spec.effort, "agent_teams": spec.agent_teams, "system_prompt_mode": spec.system_prompt_mode})
+            "effort": spec.effort, "agent_teams": spec.agent_teams, "system_prompt_mode": spec.system_prompt_mode,
+            "custom_prompt": spec.custom_prompt})
 
     async def _layer_profile(self, name: str | None, scope: str, role: str | None) -> str | None:
         """The id of the layer's Agent Profile (``new:...`` in a preview); a model's profile from a file before
@@ -1177,7 +1180,7 @@ class _Importer:
 
         base = derived.base
         spec = AgentProfile(f"new:{derived.name}", derived.name, base.runtime, base.provider, base.model,
-                            derived.effort, base.agent_teams, base.system_prompt_mode)
+                            derived.effort, base.agent_teams, base.system_prompt_mode, base.custom_prompt)
         self.record("profiles", derived.name, Action.ADDED)
         profile_id = await self._write_profile(None, derived.name, spec) if self.apply else spec.id
         self.profiles[derived.name] = (profile_id, replace(spec, id=profile_id))

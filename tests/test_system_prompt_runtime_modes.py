@@ -19,7 +19,7 @@ from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, SystemPromptMode, adapter, replace_refusal
 from looper.agents.runtimes import codex, grok, omp
-from looper.agents.system_prompt import SystemPrompt
+from looper.agents.system_prompt import SystemPrompt, compose_system_prompt
 
 
 @pytest.fixture
@@ -61,6 +61,107 @@ def _launch(runtime_type: str, mode: SystemPromptMode | None = None, *, oauth: b
 def _files(root: Path) -> dict[str, bytes | str]:
     return {str(p.relative_to(root)): os.readlink(p) if p.is_symlink() else p.read_bytes()
             for p in root.rglob("*") if p.is_symlink() or p.is_file()}
+
+
+def _sent_looper_text(runtime_type: str, mode: SystemPromptMode, command: list[str]) -> str:
+    """Read the actual input named by the command, excluding Grok's agent metadata."""
+    if runtime_type == "claude-code":
+        flag = "--system-prompt-file" if mode is SystemPromptMode.REPLACE else "--append-system-prompt-file"
+        return Path(command[command.index(flag) + 1]).read_text()
+    if runtime_type == "codex":
+        home = Path(command[1].partition("=")[2])
+        config = tomllib.loads((home / "config.toml").read_text())
+        return (Path(config["model_instructions_file"]) if mode is SystemPromptMode.REPLACE
+                else home / "AGENTS.md").read_text()
+    if runtime_type == "grok":
+        home = Path(command[1].partition("=")[2])
+        if mode is SystemPromptMode.REPLACE:
+            return (home / "agent.md").read_text().split("---\n\n", 1)[1]
+        return (home / grok.RULES_FILE).read_text()
+    flag = "--system-prompt" if mode is SystemPromptMode.REPLACE else "--append-system-prompt"
+    return Path(command[command.index(flag) + 1]).read_text()
+
+
+@pytest.mark.parametrize("runtime_type", ["claude-code", "codex", "grok", "omp"])
+@pytest.mark.parametrize("mode", list(SystemPromptMode))
+@pytest.mark.parametrize("command_kind", ["run_command", "resident_command"])
+@pytest.mark.parametrize("custom_prompt", ["", "  Profile's identity: 自定义\n  "])
+def test_prompt_blocks_match_real_launch_files(
+    runtime_type: str, mode: SystemPromptMode, command_kind: str, custom_prompt: str,
+    tmp_path: Path, isolated_operator: Path,
+) -> None:
+    # In a repository OMP lets the runtime load project instruction files itself.
+    (tmp_path / ".git").mkdir()
+    runtime, launch = adapter(runtime_type), _launch(runtime_type, mode)
+    launch = replace(launch, settings=replace(launch.settings,
+                     profile=replace(launch.profile, custom_prompt=custom_prompt.strip())))
+    baseline = compose_system_prompt("Role", harness="Harness", contract="Contract")
+    text = compose_system_prompt("Role", harness="Harness", contract="Contract", custom_prompt=custom_prompt)
+    prompt = SystemPrompt(text).write_file(tmp_path / "runtime")
+    command = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path, prompt_file=prompt,
+                                             launch=launch)
+    sent = _sent_looper_text(runtime_type, mode, command)
+    blocks = runtime.prompt_blocks(launch, text)
+    assert "".join(block.text or "" for block in blocks if block.owner == "looper") == sent
+    assert all(block.text is None and block.note for block in blocks if block.owner == "runtime")
+    assert all(block.text is not None for block in blocks if block.owner == "looper")
+    if custom_prompt:
+        assert text.startswith(custom_prompt.strip() + "\n\nHarness")
+        assert sent.startswith(custom_prompt.strip() + "\n\n")
+        assert sent.endswith("Harness\n\nRole\n\nContract")
+    else:
+        assert text == baseline
+        baseline_file = SystemPrompt(baseline).write_file(tmp_path / "runtime")
+        baseline_command = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path,
+                                                         prompt_file=baseline_file, launch=launch)
+        assert command == baseline_command
+        assert sent == _sent_looper_text(runtime_type, mode, baseline_command)
+
+
+@pytest.mark.parametrize("runtime_type,mode,owners,notes", [
+    ("claude-code", SystemPromptMode.APPEND, ["runtime", "runtime", "runtime", "looper"],
+     ["billing header (fixed)", "identity line (fixed; changes with append vs replace)",
+      "Claude Code's default prompt (not shown)"]),
+    ("claude-code", SystemPromptMode.REPLACE, ["runtime", "runtime", "looper"],
+     ["billing header (fixed)", "identity line (fixed; changes with append vs replace)"]),
+    ("codex", SystemPromptMode.APPEND, ["runtime", "runtime", "looper", "runtime"],
+     ["base instructions (not shown)", "skills/permissions notes (not shown)", "environment (not shown)"]),
+    ("codex", SystemPromptMode.REPLACE, ["looper", "runtime", "runtime"],
+     ["skills/permissions notes (not shown)", "environment (not shown)"]),
+    ("grok", SystemPromptMode.APPEND, ["runtime", "looper"], ["Grok's default prompt (not shown)"]),
+    ("grok", SystemPromptMode.REPLACE, ["looper"], []),
+    ("omp", SystemPromptMode.APPEND, ["runtime", "looper"], ["OMP's default prompt (not shown)"]),
+    ("omp", SystemPromptMode.REPLACE, ["looper"], []),
+])
+def test_prompt_blocks_preserve_runtime_order(
+    runtime_type: str, mode: SystemPromptMode, owners: list[str], notes: list[str],
+) -> None:
+    blocks = adapter(runtime_type).prompt_blocks(_launch(runtime_type, mode), "Looper prompt")
+    assert [block.owner for block in blocks] == owners
+    assert [block.note for block in blocks if block.owner == "runtime"] == notes
+
+
+@pytest.mark.parametrize("runtime_type", ["codex", "grok", "omp"])
+def test_empty_prompt_preserves_adapter_note_separator(runtime_type: str) -> None:
+    launch = _launch(runtime_type)
+    text = "".join(block.text or "" for block in launch.runtime.prompt_blocks(launch, ""))
+    if runtime_type == "codex":
+        expected = codex.runtime_notes(codex.materialize(launch.library)) + "\n\n---\n\n"
+    elif runtime_type == "grok":
+        expected = grok.runtime_notes([]) + "\n\n---\n\n"
+    else:
+        expected = omp.runtime_notes()
+    assert text == expected
+
+
+@pytest.mark.parametrize("command_kind", ["run_command", "resident_command"])
+def test_claude_command_construction_does_not_read_prompt_file(
+    command_kind: str, tmp_path: Path, isolated_operator: Path,
+) -> None:
+    launch = _launch("claude-code")
+    path = tmp_path / "not-written.md"
+    command = getattr(launch.runtime, command_kind)("claude", cwd=tmp_path, prompt_file=path, launch=launch)
+    assert command[command.index("--append-system-prompt-file") + 1] == str(path)
 
 
 @pytest.mark.parametrize("runtime_type", ["claude-code", "codex", "grok", "omp"])
