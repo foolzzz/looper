@@ -45,6 +45,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -330,10 +331,18 @@ def _model_named(reply: str, model: str) -> bool:
                                  if len(part) >= 4 and part != "claude")
 
 
+def _amount_told(reply: str, cost: float) -> bool:
+    for match in re.finditer(r"(?<![\d.])[-+]?\d+\.(\d+)(?![\d.])", reply.replace(",", "")):
+        decimals = len(match[1])
+        if decimals >= 2 and abs(Decimal(match[0]) - Decimal(str(cost))) <= Decimal(5) / 10 ** (decimals + 1):
+            return True
+    return False
+
+
 def _cost_by_model_told(look: Look) -> str | None:
     """A task's cost by model: read for that task (looper_costs with its task_id), nothing changed, and the
-    reply names each model of the task's cost (the trail keeps no read's answer: the models are the task page's
-    whose runs had ended, which the Manager's read had too)."""
+    reply names each model of the task's cost and gives its cost as rounded (the trail keeps no read's answer:
+    the models are the task page's whose runs had ended, which the Manager's read had too)."""
     read = [a for a in look.actions() if a["tool"] == "looper_costs" and a["status"] == "ok"
             and a["arguments"].get("task_id") == look.task]
     if not read:
@@ -341,12 +350,18 @@ def _cost_by_model_told(look: Look) -> str | None:
     changed = _writes(look, status="ok") + _writes(look, status="needs_confirmation")
     if changed:
         return f"something changed: {', '.join(a['tool'] for a in changed)}"
-    models = [row["model"] for row in look.detail()["cost"]["by_model"]
+    models = [row for row in look.detail()["cost"]["by_model"]
               if row["model"] is not None and row["runs"] > row["running"]]
     if not models:
         return "the task's cost has no model to name"
-    missing = [model for model in models if not _model_named(look.reply, model)] if not look.fake else []
-    return f"the reply does not name {', '.join(missing)}" if missing else None
+    missing = [row["model"] for row in models if not _model_named(look.reply, row["model"])] if not look.fake else []
+    if missing:
+        return f"the reply does not name {', '.join(missing)}"
+    if not look.fake:
+        for row in models:
+            if row["cost_usd"] is not None and not _amount_told(look.reply, row["cost_usd"]):
+                return f"the reply does not give the cost of {row['model']} ({row['cost_usd']:.4f})"
+    return None
 
 
 def _delete_asked(look: Look) -> str | None:

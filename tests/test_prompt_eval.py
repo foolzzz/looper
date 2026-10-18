@@ -853,7 +853,27 @@ def test_a_models_id_or_family_is_named_in_the_reply(reply: str, model: str, nam
     assert _model_named(reply, model) is named
 
 
-_HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1}
+@pytest.mark.parametrize(("reply", "cost", "told"), [
+    ("$0.04", 0.0409, True),
+    ("0.041", 0.0409, True),
+    ("$0.0409", 0.0409, True),
+    ("0.04 美元", 0.0409, True),
+    ("$999999", 0.0409, False),
+    ("$0.05", 0.0409, False),
+    ("0.1", 0.0409, False),
+    ("0.0", 0.0409, False),
+    ("$1,234.56", 1234.56, True),
+    ("$1,000.0409", 0.0409, False),
+    ("$0.04", 0.045, True),
+    ("$0.04", 0.045001, False),
+])
+def test_an_amount_is_told_at_the_written_precision(reply: str, cost: float, told: bool) -> None:
+    from evals.prompt_regression.dialogs import _amount_told
+
+    assert _amount_told(reply, cost) is told
+
+
+_HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1, "cost_usd": 0.0409}
 
 
 @pytest.mark.parametrize(("task_id", "status", "by_model", "write_status", "fake", "reply", "problem"), [
@@ -861,14 +881,18 @@ _HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1}
     ("task-a", "error", [_HAIKU_RUNS], None, False, "Haiku", "looper_costs did not read the task's cost"),
     ("task-a", "ok", [_HAIKU_RUNS], "ok", False, "Haiku", "something changed: looper_settings"),
     ("task-a", "ok", [_HAIKU_RUNS], "needs_confirmation", False, "Haiku", "something changed: looper_settings"),
-    ("task-a", "ok", [{"model": None, "runs": 1, "running": 0}], None, False, "Haiku",
+    ("task-a", "ok", [{"model": None, "runs": 1, "running": 0, "cost_usd": 0.01}], None, False, "Haiku",
      "the task's cost has no model to name"),
     ("task-a", "ok", [_HAIKU_RUNS], None, False, "Sonnet", "the reply does not name claude-haiku-4-5"),
+    ("task-a", "ok", [_HAIKU_RUNS], None, False, "Haiku $999999",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0409)"),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": None}], None, False, "Haiku", None),
     ("task-a", "ok", [_HAIKU_RUNS], None, True, "ok", None),
-    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0}], None, False,
-     "Haiku and DeepSeek", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
+     None, False, "Haiku $0.04 and DeepSeek $0.02", None),
     # A model whose runs are all still running came after the Manager's read: the reply need not name it.
-    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1}], None, False, "Haiku", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
+     None, False, "Haiku $0.0409", None),
 ])
 def test_a_tasks_cost_is_read_and_told_without_changes(
     monkeypatch: pytest.MonkeyPatch, task_id: str, status: str, by_model: list[dict[str, Any]],
