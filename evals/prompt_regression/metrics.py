@@ -272,6 +272,13 @@ def interface_dependents(steps: Iterable[Mapping[str, Any]]) -> int:
     return max((sum(1 for step_id in role_steps if shared in before[step_id]) for shared in before), default=0)
 
 
+def planner_denials(records: Iterable[Mapping[str, Any]]) -> int:
+    """The tool calls the Planner's runtime refused it, all turns together (its runs' ``permission_denials``): what
+    it tried that would have changed files, or that the runtime could not tell would not."""
+    return sum(len((record.get("metadata") or {}).get("permission_denials") or []) for record in records
+               if role(record) == "planner")
+
+
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``gate``, ``room``, ``repair``)."""
     kinds: dict[str, int] = {}
@@ -304,15 +311,26 @@ def _relative(path: str, work_dir: Path) -> str:
         return f"<outside the working directory>/{candidate.name}"
 
 
-def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path) -> list[str]:
-    """The files a run's file-editing tool calls named, relative to ``work_dir`` (only a name outside it)."""
+def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path, refused: Iterable[str] = ()) -> list[str]:
+    """The files a run's file-editing tool calls named, relative to ``work_dir`` (only a name outside it), but for
+    the calls its runtime refused (``refused``, their ``tool_use`` ids) or answered with an error (a tool the run
+    does not have: "Write is disabled for this session"): those changed nothing."""
+    events = list(events)
+    refused = {tool_use_id for tool_use_id in refused if tool_use_id}
+    for row in events:
+        event = row.get("event", row)
+        content = (event.get("message") or {}).get("content") if isinstance(event, Mapping) else None
+        if isinstance(event, Mapping) and event.get("type") == "user" and isinstance(content, list):
+            refused |= {block.get("tool_use_id") for block in content if isinstance(block, Mapping)
+                        and block.get("type") == "tool_result" and block.get("is_error")}
     paths = []
     for row in events:
         event = row.get("event", row)
         if not isinstance(event, Mapping) or event.get("type") != "assistant":
             continue
         for block in (event.get("message") or {}).get("content") or []:
-            if isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS:
+            if (isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS
+                    and block.get("id") not in refused):
                 tool_input = block.get("input") or {}
                 named = [tool_input.get("file_path") or tool_input.get("notebook_path"),
                          *(c.get("path") for c in tool_input.get("changes") or [] if isinstance(c, Mapping)),
@@ -452,8 +470,9 @@ def task_metrics(
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
-    file changes. ``expect`` may bound ``contract_violations`` (their total) too, and the gates the scripted user
-    ended because the Planner asked after its script ran out (``gate_asks_beyond_script``, the runner's count)."""
+    file changes. ``expect`` may bound ``contract_violations`` (their total) and ``planner_modified_files`` too, and
+    the gates the scripted user ended because the Planner asked after its script ran out
+    (``gate_asks_beyond_script``, the runner's count)."""
     by_role: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         by_role.setdefault(role(record), []).append(record)
@@ -468,8 +487,9 @@ def task_metrics(
                 else:
                     reviewer_violations += 1
     planner_edits = sorted({
-        path for record in by_role.get("planner", []) for path in edit_tool_paths(events.get(int(record["id"]), []),
-                                                                                  work_dir)
+        path for record in by_role.get("planner", []) for path in edit_tool_paths(
+            events.get(int(record["id"]), []), work_dir,
+            refused=(d.get("id") for d in (record.get("metadata") or {}).get("permission_denials") or []))
     })
     windows = run_windows(records, now=now)
     changed_by_planner = planner_changed_files(changes, windows, clock_offset=clock_offset)
@@ -501,6 +521,8 @@ def task_metrics(
         "gate_asks_beyond_script": gate_asks_beyond_script,
         # What the task's agents did in its room.
         **room_metrics(detail, activity, events),
+        # What its runtime refused the read-only Planner.
+        "planner_denials": planner_denials(records),
     }
     violations = {"planner": planner_violations(activity), "worker": worker_violations,
                   "reviewer": reviewer_violations}
@@ -511,7 +533,8 @@ def task_metrics(
         problems.append(f"task {status or 'unknown'}" + (f": {error}" if error else ""))
     if check_problem:
         problems.append(check_problem)
-    problems += flow_problems(expect, {**observed, "contract_violations": sum(violations.values())})
+    problems += flow_problems(expect, {**observed, "contract_violations": sum(violations.values()),
+                                       "planner_modified_files": len(set(planner_edits) | set(changed_by_planner))})
 
     cost = detail.get("cost") or {}
     # Tokens are what every runtime reports, priced or not (a subscription, a provider without prices).

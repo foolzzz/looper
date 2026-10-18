@@ -188,8 +188,10 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
     captured["manager"]["stdin"] = captured["manager"]["stdin"].replace(f"(agent {glm_high})",
                                                                         "(agent agent-glm000000001)")
     assert sorted(captured) == sorted(MAIN)
+    # The fixture predates the Planner's read-only run (its role prompt is the scenario's own, not the recommended one).
+    expected = agent_launch_parity.read_only_planner(MAIN, recommended=False)
     for case in parity.CASES:
-        assert captured[case] == MAIN[case], case
+        assert captured[case] == expected[case], case
 
 
 def test_a_migrated_v2_6_0_database_is_shaped_like_a_new_one() -> None:

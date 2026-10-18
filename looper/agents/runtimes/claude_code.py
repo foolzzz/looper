@@ -72,8 +72,8 @@ from urllib.parse import urlsplit
 
 from .. import claude_cli
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    instructions,
+    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
 
@@ -117,6 +117,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     isolation_id = claude_cli.ISOLATION_ID
     provider_env_owned = frozenset({BASE_URL, API_KEY, AUTH_TOKEN, "ANTHROPIC_MODEL", *MAIN_MODEL_VARS,
                                     *BACKGROUND_MODEL_VARS})
+    # A read-only run refuses what would change files and reports each refusal (claude_cli.read_only_args).
+    read_only = ReadOnly.PERMISSIONS
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``: Claude Code prints its version and exits without calling a model."""
@@ -168,15 +170,15 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             unset=(API_KEY,))
 
     def launch_args(self, launch: Launch) -> list[str]:
-        """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
-        plugin directories of the installed items, the directories of the project knowledge, the
-        per-run spend cap (when Claude Code's own figure is the run's cost), the provider's binding and, with
-        agent teams (``Launch.agent_teams``), where teammates run."""
-        from ..claude_cli import budget_args, knowledge_args, library_args, permission_args
+        """The Claude Code flags every agent starts with: the permissions (read-only for a run that must not
+        change files, ``Launch.read_only``), the model, the effort, the plugin directories of the installed items,
+        the directories of the project knowledge, the per-run spend cap (when Claude Code's own figure is the run's
+        cost), the provider's binding and, with agent teams (``Launch.agent_teams``), where teammates run."""
+        from ..claude_cli import budget_args, knowledge_args, library_args, permission_args, read_only_args
 
         provider = launch.profile.provider
         return [
-            *permission_args(),
+            *(read_only_args(launch.library) if launch.read_only else permission_args()),
             "--model", launch.model,
             *(["--effort", launch.effort] if launch.effort else []),
             *library_args(launch.library),
@@ -293,3 +295,6 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         return claude_cli.budget_error(result_event)
+
+    def permission_denials(self, result_event: dict[str, Any] | None) -> list[dict[str, str]]:
+        return claude_cli.permission_denials(result_event)

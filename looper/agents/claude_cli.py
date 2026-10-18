@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -161,19 +162,19 @@ def knowledge_args(knowledge: AgentKnowledge) -> list[str]:
 
 # --- What an agent may do ---
 #
-# Every agent (Manager, Planner, Worker, Reviewer) has every tool and runs
-# without permission prompts (RFC decision 8). What an agent is for is the
-# job of its role prompt and its code-owned contract, not of a tool list. The
-# flags reach every command through agent_settings.Launch.args, beside the
-# library's, so the four agents cannot diverge. Verified against Claude Code
-# 2.1.285 in --print mode with the isolation flags above and a --plugin-dir:
-# the init event reports permissionMode "bypassPermissions", and Bash, Write
-# and a plugin skill that declares allowed-tools all run without a denial,
-# where the default mode denies the Write and the skill. The isolation
-# --settings (claudeMdExcludes, autoMemoryEnabled) leave permissions alone.
-# Since the Manager can now run any command on this machine, the chat
-# channels that reach it pass on only the senders they list
-# (channels/allowlist.py).
+# The Manager, the Workers and the Reviewers have every tool and run without
+# permission prompts (RFC decision 8): ``permission_args``. A Planner runs
+# read-only (decision 8 as revised for the Planner, the Planner read-only RFC):
+# ``read_only_args`` in their place. The flags reach every command through
+# agent_settings.Launch.args, beside the library's. Verified against Claude
+# Code 2.1.285 in --print mode with the isolation flags above and a
+# --plugin-dir: with permission_args the init event reports permissionMode
+# "bypassPermissions", and Bash, Write and a plugin skill that declares
+# allowed-tools all run without a denial, where the default mode denies the
+# Write and the skill. The isolation --settings (claudeMdExcludes,
+# autoMemoryEnabled) leave permissions alone. Since the Manager can run any
+# command on this machine, the chat channels that reach it pass on only the
+# senders they list (channels/allowlist.py).
 
 
 def budget_args(max_budget_usd: float | None) -> list[str]:
@@ -263,8 +264,62 @@ def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]]) -
 
 
 def permission_args() -> list[str]:
-    """The flags that let an agent use every tool without asking; every agent's launch carries them."""
+    """The flags that let an agent use every tool without asking; every launch but a Planner's carries them."""
     return ["--dangerously-skip-permissions"]
+
+
+# The permission mode of a run that must not change files (``read_only_args``): Claude Code 2.1.285's name for its
+# default mode, pinned so that a project's settings (``permissions.defaultMode``) cannot loosen it, and with no one to
+# answer its permission prompts, so that whatever would prompt is refused.
+READ_ONLY_MODE = ("--permission-mode", "manual", "--permission-prompts", "none")
+# The tools such a run does not have.
+WRITE_TOOLS = ("Edit", "Write", "NotebookEdit")
+# The tools it may use although Claude Code's default permission mode would ask first; none of them changes a file.
+READ_ONLY_ALLOWED = ("Skill", "WebFetch", "WebSearch")
+# How much of a refused call's input its record keeps.
+DENIAL_INPUT_CHARS = 200
+
+
+def mcp_rule(server: str) -> str:
+    """The permission rule that allows every tool of the MCP server ``server``: Claude Code names its tools
+    ``mcp__<server>__<tool>``, with each character of the server's name that is not a letter, a digit, ``_`` or
+    ``-`` replaced by ``_``."""
+    return "mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", server)
+
+
+def read_only_args(library: AgentLibrary) -> list[str]:
+    """The flags of a run that must not change files (a Planner's, ``Launch.read_only``), in place of
+    ``permission_args``: Claude Code's default permission mode, pinned and with no one to answer its prompts
+    (``READ_ONLY_MODE``), so that in ``--print`` mode it refuses every tool call it would ask about; without the
+    file-editing tools (``WRITE_TOOLS``); and with what the run may use without asking: its skills, web reads and the
+    MCP servers installed for it, Looper's own among them (``mcp_rule``). A plugin's own MCP servers never load
+    (``--strict-mcp-config``), so none needs a rule.
+
+    Verified against Claude Code 2.1.285 in ``--print`` stream-json mode with the isolation flags: Bash runs
+    ``ls``, ``cat``, ``git status``, ``git log`` and ``git show`` and refuses a redirect, ``touch``, a ``python3``
+    that writes a file and ``git commit`` ("This command requires approval"), each refusal in the result's
+    ``permission_denials`` (``permission_denials``); the working directory is unchanged.
+    """
+    from .library import ItemKind
+
+    servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
+    return [*READ_ONLY_MODE, "--disallowedTools", ",".join(WRITE_TOOLS),
+            "--allowedTools", ",".join((*READ_ONLY_ALLOWED, *servers))]
+
+
+def permission_denials(result_event: dict[str, Any] | None) -> list[dict[str, str]]:
+    """The tool calls Claude Code refused in a run, from its result's ``permission_denials``: each one's tool, its
+    input (a Bash call's command), shortened to ``DENIAL_INPUT_CHARS``, and the id of its ``tool_use``."""
+    denials = []
+    for raw in (result_event or {}).get("permission_denials") or []:
+        if not isinstance(raw, dict):
+            continue
+        tool_input = raw.get("tool_input") if isinstance(raw.get("tool_input"), dict) else {}
+        shown = tool_input.get("command") if isinstance(tool_input.get("command"), str) else json.dumps(
+            tool_input, ensure_ascii=False)
+        denials.append({"tool": str(raw.get("tool_name") or "?"), "input": shown[:DENIAL_INPUT_CHARS],
+                        "id": str(raw.get("tool_use_id") or "")})
+    return denials
 
 
 def system_prompt_args(prompt_file: Path) -> list[str]:
@@ -1086,7 +1141,8 @@ class ClaudeRunRecorder:
     ) -> None:
         """Close the record with the run's own ``usage``; without one, all the result reports is the run's.
         ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``); ``status``,
-        when given, replaces the one its result gives (``ended_by``, for a run that was stopped).
+        when given, replaces the one its result gives (``ended_by``, for a run that was stopped). The tool calls
+        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``.
 
         Claude reports the running totals of its session, so a run that is
         one turn of a longer-lived session passes its own share
@@ -1104,12 +1160,27 @@ class ClaudeRunRecorder:
         if result_event is None or result.get(SOFT_CAP):
             # No result reported the run's spend: what its usage events add up to is what is known.
             usage = usage.filled_from(self._usage_so_far)
+        notes: dict[str, Any] = {}
+        if denials := self._runtime().permission_denials(result_event):
+            notes["permission_denials"] = denials
         await self._close(
             status or (RecordStatus.COMPLETED if succeeded else RecordStatus.FAILED),
             output_text=output_text, session_id=result.get("session_id"), usage=usage,
             error=error or (None if succeeded else f"Claude run ended: {result.get('subtype') or 'no result'}"),
-            outcome=outcome,
+            outcome=outcome, metadata=notes,
         )
+
+    async def annotate(self, metadata: dict[str, Any]) -> None:
+        """Add ``metadata``'s keys to the run's record once it ended; a database error is logged and never fails
+        the run."""
+        if self._record_id is None or not metadata:
+            return
+        from ..db import llm_records
+
+        try:
+            await llm_records.add_metadata(self._record_id, metadata)
+        except Exception:
+            logger.warning("could not annotate llm record for %s", self._agent_id, exc_info=True)
 
     async def end_left_open(self, exc: BaseException | None = None) -> None:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
@@ -1132,8 +1203,9 @@ class ClaudeRunRecorder:
                           usage=usage, error=why)
 
     async def _close(self, status: RecordStatus, *, output_text: str | None, session_id: str | None, usage: Usage,
-                     error: str | None, outcome: str | None = None) -> None:
-        """Write the record's end once, with ``usage`` priced as the run's runtime prices it.
+                     error: str | None, outcome: str | None = None, metadata: dict[str, Any] | None = None) -> None:
+        """Write the record's end once, with ``usage`` priced as the run's runtime prices it, and ``metadata``'s keys
+        added to the record's when there are any.
 
         The write goes on when the caller is cancelled meanwhile (its run being
         stopped), for at most ``CLOSE_TIMEOUT_SEC``; a failed write is logged.
@@ -1160,6 +1232,7 @@ class ClaudeRunRecorder:
                 "model": self._model,
                 "error": error,
                 "outcome": outcome,
+                **({"metadata": metadata} if metadata else {}),
             }
             write = asyncio.ensure_future(asyncio.wait_for(self._write_end(fields), CLOSE_TIMEOUT_SEC))
         except Exception:  # recording never fails the run; the next start ends the record

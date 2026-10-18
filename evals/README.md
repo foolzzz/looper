@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs twenty-four small tasks through a disposable `looper serve` (a new
+It runs thirty small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -39,6 +39,9 @@ directories), one at a time over the HTTP API:
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
 | `room_interface` | two parts built at the same time, each in a worktree of its own (`step_workspaces` `worktree` for this task), where the store's author picks the record's field names while writing it and the client must use them: the agents must coordinate in the task's agent room (`room_messages` at least 1), and `python cli.py widget 3` works against the store |
 | `room_quiet` | a one-file task with the agent room on, as every task now has it: no room message at all (`room_messages` 0), one step |
+| `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
+| `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work in its one review (the requirement leaves the regions to the step, so only the note can correct it) |
+| `reviewer_unrelated_note` | the same, the other way: the retry note is about the file's separator, and the work it leads to still lacks a region, so the Reviewer must not pass it; the next attempt has it and passes (exactly two reviews and two retries) |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -67,7 +70,8 @@ and cached, and output; what a runtime without prices still reports), contract v
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
 `planner_violation_reasons`), whether the Planner modified files itself (its file-editing tool
-calls, and files changed while only a Planner turn ran), the runs that ended in an error (`run_errors`,
+calls, and files changed while only a Planner turn ran), the tool calls its runtime refused the read-only Planner
+(`planner_denials`, from its runs' `permission_denials`), the runs that ended in an error (`run_errors`,
 by their records' status) and the models each role's runs reported (`models`).
 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by
@@ -135,6 +139,13 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 `tests/test_prompt_eval.py` runs it as part of the test suite when
 `LOOPER_TEST_DATABASE_URL` is set.
 
+A script may also give the Planner's retry notes (`retry_feedback`: a step's
+Nth retry gets its Nth note) and fail the review of some attempts
+(`failing_review_attempts`, read from the Worker's report). A script with
+`real_reviewer` plays its Planner and Workers in real mode too, and only its
+Reviewers are Claude Code: the stand-in hands Claude Code every other run of
+every task, with its arguments, so the other tasks run as before.
+
 ### Real mode: the effect, on demand
 
 Runs real Claude Code (`haiku` by default) and costs money. Every Claude Code
@@ -192,7 +203,8 @@ whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
 `roles_not_needed`, `roles_multi_platform`, `roles_template_fits`,
 `roles_template_unfit`, `gate_ambiguous`,
-`gate_not_needed`, `gate_parallel_branch`, `gate_discoverable` and `room_interface`; a set is
+`gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface` and
+`planner_plan_file`; a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,

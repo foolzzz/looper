@@ -301,6 +301,34 @@ def _result(text: str) -> list[dict[str, Any]]:
     return [{"seq": 1, "event": {"type": "result", "subtype": "success", "result": text}}]
 
 
+def test_the_planners_refused_calls_are_counted_and_its_file_changes_can_be_bounded(tmp_path: Path) -> None:
+    refused = {"permission_denials": [{"tool": "Bash", "input": "echo x > PLAN.md"}, {"tool": "Bash", "input": "touch a"}]}
+    records = [{**_record(1, "planner-task-1", input_text="[PLAN] Plan the task"), "metadata": refused},
+               {**_record(2, "worker-a", step_id="step-1"), "metadata": {"permission_denials": [{"tool": "x"}]}}]
+    write = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": str(tmp_path / "PLAN.md")}}]}}
+    result = metrics.task_metrics(
+        detail={"status": "completed", "steps": [{"id": "step-1"}]}, activity=[], records=records,
+        events={1: [{"seq": 1, "event": write}]}, changes={}, work_dir=tmp_path, check_problem=None,
+        expect={"max_planner_modified_files": 0}, now=0.0)
+    assert result["planner_denials"] == 2  # the Planner's only
+    assert result["problems"] == ["planner_modified_files 1 > 0"]
+    # A Write its runtime refused changed nothing.
+    records[0]["metadata"] = {"permission_denials": [{"tool": "Write", "input": "{}", "id": "toolu_w"}]}
+    write["message"]["content"][0]["id"] = "toolu_w"
+    refused = metrics.task_metrics(
+        detail={"status": "completed", "steps": [{"id": "step-1"}]}, activity=[], records=records,
+        events={1: [{"seq": 1, "event": write}]}, changes={}, work_dir=tmp_path, check_problem=None,
+        expect={"max_planner_modified_files": 0}, now=0.0)
+    assert (refused["planner_modified_files"], refused["problems"]) == (0, [])
+    # A Write the run does not have, answered with an error, changed nothing either.
+    records[0]["metadata"] = {}
+    disabled = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_w",
+                                                         "is_error": True, "content": "Write is disabled"}]}}
+    assert metrics.edit_tool_paths([{"event": write}, {"event": disabled}], tmp_path) == []
+    assert metrics.edit_tool_paths([{"event": write}], tmp_path) == ["PLAN.md"]
+
+
 def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
     good = '{"status": "completed", "changed_files": {}, "deleted_files": [], "summary": "ok"}'
     records = [
@@ -739,6 +767,44 @@ def test_real_claude_gets_the_per_run_budget(tmp_path: Path) -> None:
         runner.install_claude(tmp_path, mode="real", max_budget_usd=0.25, real_claude=None)
 
 
+def test_with_a_real_reviewer_task_the_stand_in_hands_claude_code_every_run_but_that_tasks_others(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+    import sys
+
+    real = tmp_path / "real-claude"  # records what it was started with
+    real.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(tmp_path / 'real.jsonl')!r}, 'a')"
+                    ".write(json.dumps(sys.argv[1:]) + '\\n')\n")
+    real.chmod(0o755)
+    scripted, other = tmp_path / "scripted", tmp_path / "other"
+    for directory in (scripted, other):
+        directory.mkdir()
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text(json.dumps({str(scripted.resolve()): {"real_reviewer": True, "plan": []},
+                                     str(other.resolve()): {"plan": []}}))
+    script = runner.install_claude(tmp_path / "bin", mode="real", scenarios=scenarios, max_budget_usd=0.25,
+                                   real_claude=str(real), real_reviewer=True)
+    assert script.read_text().splitlines()[-1].startswith(f"LOOPER_EVAL_REAL_CLAUDE={real} exec ")
+
+    def started(cwd: Path, task_section: str) -> list[list[str]]:
+        prompt = tmp_path / "prompt.md"
+        prompt.write_text(task_section)
+        (tmp_path / "real.jsonl").unlink(missing_ok=True)
+        subprocess.run([str(script), "--append-system-prompt-file", str(prompt)], cwd=cwd, input="", text=True,
+                       capture_output=True, timeout=30, check=True)
+        log = tmp_path / "real.jsonl"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    review, work = "## Task\nThe step under review: s1\n", "## Task\nYour step: s1\n"
+    budget = ["--max-budget-usd", "0.25"]
+    # That task's Reviewer is Claude Code, with every argument; its Worker plays the script.
+    assert started(scripted, review) == [["--append-system-prompt-file", str(tmp_path / "prompt.md"), *budget]]
+    assert started(scripted, work) == []
+    # Every run of every other task is Claude Code's.
+    assert started(other, work) == [["--append-system-prompt-file", str(tmp_path / "prompt.md"), *budget]]
+
+
 # --- Fake mode: the task set through a real server -----------------------------------------------------
 
 
@@ -787,7 +853,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
                     "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
-                    "room_interface": (3, 0, 0, 0), "room_quiet": (1, 0, 0, 0)}
+                    "room_interface": (3, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
+                    # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
+                    "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
+                    "reviewer_unrelated_note": (1, 2, 2, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -807,7 +876,9 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
                      "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
-                     "room_interface": (1, 0, 2), "room_quiet": (0, 0, 1)}
+                     "room_interface": (1, 0, 2), "room_quiet": (0, 0, 1),
+                     "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
+                     "reviewer_unrelated_note": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
@@ -846,6 +917,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
     assert by_id["gate_discoverable"]["gates_opened"] == 0
     assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
+    # The stand-in is refused nothing: the denials are Claude Code's.
+    assert all(by_id[t]["planner_denials"] == 0 for t in by_id)
     assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
     # Only room_interface's agents use the room: the store's interface, the client's question to the Planner, and the
     # Planner's answer in a [ROOM] turn, so nothing is left unanswered; every other task's room stays quiet.
