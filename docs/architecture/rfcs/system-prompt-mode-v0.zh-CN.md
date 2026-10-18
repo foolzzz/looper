@@ -25,13 +25,13 @@ Looper 给每个 agent 一份自己的系统提示词（`SystemPrompt`），四�
 | Claude Code 2.1.285 | `--system-prompt-file <文件>` | `--append-system-prompt-file <文件>` | 两种都保留 `--system-prompt-snapshot off` |
 | Codex 0.162.0 | 家目录 `config.toml` 的 `model_instructions_file`，指向存放提示词的文件；家目录的 `AGENTS.md` 不再放提示词 | 家目录 `AGENTS.md` | 替换后模型自称不再是 Codex，只回答替换提示词里的名字和标记；追加时两者并存 |
 | Grok 1.0.62 | `--agent <定义文件>`，文件前置元数据 `prompt_mode: full`，正文是提示词；家目录不再写 `rules/looper.md` | 家目录 `rules/looper.md` | `--system-prompt-override` 在 `-p` 下不可靠：输入 token 不变，默认提示词还在（仍拒绝引用自己的提示词），因此不用它 |
-| OMP 18.4.3 | `--system-prompt <文件>` | `--append-system-prompt <文件>` | 探针结果见 PR |
+| OMP 18.4.3 | `--system-prompt <文件>` | `--append-system-prompt <文件>` | 替换后自称只回答替换提示词里的名字，追加时自称 omp 的助手 |
 
 替换后保留什么：
 
 - 运行时的工具定义不变（它们不属于系统提示词）。
 - Claude Code：项目的 `CLAUDE.md` 仍然加载；自动记忆的 `MEMORY.md` 索引仍作为上下文注入（`autoMemoryEnabled` 打开时），但默认提示词里「怎么写记忆」的说明没有了。Looper 的 Claude Code 运行带 `--setting-sources project` 和 `autoMemoryEnabled: false`，所以运行里本来就没有自动记忆。
-- Looper 自己的提示词里写给 Claude Code 的运行时说明（Codex 的 `runtime_notes` 等）仍随提示词一起放进替换文件。
+- Codex、Grok、OMP 的运行时说明（`runtime_notes`，如 MCP 工具怎么调用）仍随 Looper 的提示词一起放进替换用的文件。
 
 ## 4. 数据与接口
 
