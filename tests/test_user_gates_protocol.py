@@ -301,10 +301,12 @@ def test_a_chat_reply_may_cancel_a_gate_and_depend_on_it_in_a_replan() -> None:
 
 
 # What the contract was before gates, for each combination (sha256): with gates off it is byte for byte the same.
+# The roles-on ones are the contract since a step lists its review roles (review_roles), whose role paragraph
+# replaced the single review_role's; with roles off it is as before.
 _BEFORE = {(False, 2): "eaf7d704210243ea908d0dac3b50ab65a5597f1bb35e609ef6eff5ebd4e3bed8",
            (False, 0): "e8092df608ce4226b94bb019020297fccaed774a35b5b331c4adb0616669e77b",
-           (True, 2): "ac7a9b12adb623a4bcce0d64c42e0d78f9add0a238a8b1bab585f4092852cd99",
-           (True, 5): "d989a3235b9cabcb7b8d4c2d6a8813ebdb1ac8147e7820c8041afc3cc48ce795"}
+           (True, 2): "df7c5af5919c4f2c13ad13df608ac9693917f17ff1d632aab272222232bc642d",
+           (True, 5): "f3b94368da4eb0384c0c43f9a27dca77b88225f359f1e757555dea14449529de"}
 
 
 @pytest.mark.parametrize(("roles", "retries"), sorted(_BEFORE))
