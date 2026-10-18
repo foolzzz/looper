@@ -529,13 +529,21 @@ async def _at(pool: Any, record_id: int, when: datetime) -> None:
 
 
 def test_a_tasks_cost_is_the_task_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.db import llm_records
+
     async def test(pool: Any) -> None:
         await _task(pool, "task-a", "completed", await _project(pool))
         for agent_id, cost in (("planner-task-a", 0.12), ("worker-1", 0.4), ("reviewer-2", 0.05)):
             await _run_record(pool, agent_id, task_id="task-a", cost=cost)
-        await _run_record(pool, "manager", task_id="task-a", cost=7.0)
+        before = (await _ok("GET", "/api/tasks/task-a"))["cost"]["cost_usd"]
+        record_id = await _run_record(pool, "manager", cost=7.0)
+        await llm_records.link_task(record_id, "task-a", pool=pool)
         (answer,) = await _Chat(tmp_path).say("task-a 花了多少", ("looper_costs", {"task_id": "task-a"}))
-        assert answer["result"]["cost"] == (await _ok("GET", "/api/tasks/task-a"))["cost"]
+        page = await _ok("GET", "/api/tasks/task-a")
+        assert page["cost"]["cost_usd"] == before
+        assert answer["result"]["cost"] == page["cost"]
+        assert answer["result"]["cost"]["by_model"] == page["cost"]["by_model"]
+        assert "manager_by_model" in answer["result"]["note"]
         assert answer["result"]["cost"]["cost_usd"] == pytest.approx(0.57)
         (mixed,) = await _Chat(tmp_path).say("task-a 今天花了多少", ("looper_costs", {"task_id": "task-a",
                                                                                      "period": "today"}))

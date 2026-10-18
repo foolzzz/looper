@@ -123,6 +123,11 @@ class ManagerOps:
         self._pending: dict[tuple[str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
 
+    @property
+    def platform(self) -> Platform:
+        """What the tools act on (the Manager routes a reply to a user gate through it before its model)."""
+        return self._platform
+
     # --- The endpoint ---
 
     def authorized(self, header: str | None) -> bool:
@@ -268,11 +273,14 @@ class ManagerOps:
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
                       error_code: str | None = None, result: Any = None, confirmation_id: str | None = None) -> None:
+        task_id = tool.task_id(arguments)
+        turn.task_ids.add(task_id)
+        task_id = task_id or _created_task(result)
         try:
             await db_actions.record(
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
-                confirmation_id=confirmation_id, task_id=tool.task_id(arguments) or _created_task(result),
+                confirmation_id=confirmation_id, task_id=task_id,
             )
         except Exception:
             logger.warning("could not record the Manager's call of %s", tool.name, exc_info=True)

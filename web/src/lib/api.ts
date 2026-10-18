@@ -50,6 +50,22 @@ export interface TaskInfo {
 /** The agents that work on one task; their runs make up its cost. */
 export type TaskRole = "planner" | "worker" | "reviewer";
 
+/** A task's runs, tokens and cost on one model. */
+export interface TaskModelCost {
+  /** The recorded model, or null when none was recorded. */
+  model: string | null;
+  runs: number;
+  running: number;
+  unpriced_runs: number;
+  interrupted_runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  /** Null when none of the model's runs has a cost. */
+  cost_usd: number | null;
+}
+
 /** A task's cost: the sum of its runs' own costs, in total and by the role of the agent that ran. */
 export interface TaskCost {
   cost_usd: number;
@@ -64,6 +80,9 @@ export interface TaskCost {
   /** Runs Looper priced at their provider's prices. */
   provider_price_runs?: number;
   by_role: Record<TaskRole, { cost_usd: number; runs: number }>;
+  by_model: TaskModelCost[];
+  /** The Manager's turns about the task, by model; not in cost_usd or the spend cap. */
+  manager_by_model: TaskModelCost[];
 }
 
 /** The most characters a project background may have. */
@@ -367,6 +386,10 @@ export async function sendChat(
   return res.json();
 }
 
+/** Why a Lark or Telegram answer did not reach its chat: the channel no longer knew the chat (it restarted), or it
+ * could not send the answer. */
+export type DeliveryFailure = "no_chat" | "send_failed";
+
 export interface DbChatMessage {
   message_id: string;
   role: string;
@@ -374,6 +397,9 @@ export interface DbChatMessage {
   /** The channel the turn came in on: "web", "telegram" or "lark". */
   channel?: string;
   created_at: string;
+  /** Set for a Lark or Telegram answer its channel did not deliver, with the channel's error. */
+  delivery_failure?: DeliveryFailure | null;
+  delivery_error?: string | null;
 }
 
 /** A session's newest messages (up to 200), oldest first. */
@@ -1505,6 +1531,23 @@ export interface UserGate {
   opened_at: string | null;
   first_reply_at: string | null;
   closed_at: string | null;
+  /** The chat the gate's messages go to besides its task page; null when they go to no chat (a dashboard task with
+   * no gate target in Settings → Channels). */
+  channel_posts: GateChannelPosts | null;
+}
+
+/** A channel gate messages can go to. */
+export type GateChannel = "lark" | "telegram";
+
+/** How the gate's own messages fared in its chat. */
+export interface GateChannelPosts {
+  channel: GateChannel;
+  /** The chat in words, e.g. "Lark group oc_123". */
+  target: string;
+  sent: number;
+  failed: number;
+  /** Why the latest message that failed could not be sent; null when none failed. */
+  last_error: string | null;
 }
 
 /** One message of a gate's discussion: the user's, the Planner's, or Looper's own note. */
@@ -3082,6 +3125,43 @@ export async function updateChannelConfig(
     body: JSON.stringify(fields),
   });
   if (!res.ok) await failed(res, "update channel-config");
+  return res.json();
+}
+
+/** A chat of a channel: where a dashboard task's gate messages also go. */
+export interface GateTarget {
+  channel: GateChannel;
+  chat: string;
+}
+
+/** A chat a channel's sender allowlist lets in (the same list as a schedule's notify targets). */
+export interface GateTargetOption extends GateTarget {
+  label: string;
+  channel_enabled: boolean;
+}
+
+/** Where the gate messages of tasks started on the dashboard go besides the task page; null: only the task page. */
+export interface GateSettings {
+  dashboard_target: GateTarget | null;
+  /** Set when the saved chat is no longer on its channel's sender allowlist: gates then go to the task page only. */
+  dashboard_target_problem?: string | null;
+  targets: GateTargetOption[];
+}
+
+export async function fetchGateSettings(): Promise<GateSettings> {
+  const res = await fetch(`${API_BASE}/gate-settings`);
+  if (!res.ok) await failed(res, "gate settings");
+  return res.json();
+}
+
+/** Store the dashboard tasks' gate target; 400 for a chat that is not one of `targets`. */
+export async function updateGateSettings(dashboardTarget: GateTarget | null): Promise<GateSettings> {
+  const res = await fetch(`${API_BASE}/gate-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dashboard_target: dashboardTarget }),
+  });
+  if (!res.ok) await failed(res, "save gate settings");
   return res.json();
 }
 

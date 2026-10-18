@@ -43,6 +43,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from looper.agents.project_execution import ProjectExecution
+
 from . import metrics
 from . import tasks as task_list
 from .fake_claude import REAL_CLAUDE_ENV
@@ -373,7 +375,7 @@ def run_task(
         for template in task.role_templates:
             fields = {k: v for k, v in template.items() if k != "key"}
             api.put(f"/api/projects/{created['project_id']}/role-templates/{template['key']}", fields)
-        gates = "on" if task.user_gates else user_gates
+        gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
         api.post("/api/tasks/start", {"task_id": task_id})
@@ -502,6 +504,18 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
 
 
 # Named sets of tasks for ``--tasks``, resolved against the task set: an id it does not have (yet) is left out.
+def _project_user_gates(task: EvalTask, user_gates: str | None) -> str | None:
+    """The ``user_gates`` the runner sets on ``task``'s project: on for a gate task, else the run's (None: unset)."""
+    return "on" if task.user_gates else user_gates
+
+
+def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
+    """Whether ``task``'s Planner may open user gates, ``on`` or ``off``, as its project's setting makes it
+    (``ProjectExecution.gates_on``: unset is on). Each row records it, so a comparison says when it differs."""
+    gates = _project_user_gates(task, user_gates)
+    return "on" if ProjectExecution.from_row({"user_gates": gates}).gates_on else "off"
+
+
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
@@ -700,6 +714,9 @@ def run(
     finally:
         if not keep_work_dirs:
             shutil.rmtree(root, ignore_errors=True)
+        by_id = {task.id: task for task in tasks}
+        for row in results:
+            row["user_gates"] = effective_user_gates(by_id[row["id"]], user_gates)
         path = out_dir / f"{stamp}-{mode}.json"
         run_result = write_result({
             "schema": SCHEMA,

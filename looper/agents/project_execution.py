@@ -1,6 +1,6 @@
 """A project's execution settings: how the agents of its tasks run.
 
-Every field is optional, and ``None`` inherits today's behavior:
+Every field is optional, and ``None`` inherits today's behavior, but for ``user_gates`` (unset is on):
 
 - ``task_budget_usd``: the most a task may spend over all its runs, counted
   like the task's cost (``llm_records.task_costs``);
@@ -31,8 +31,8 @@ Every field is optional, and ``None`` inherits today's behavior:
   each be, ``ROLE_TEXT_MIN_CHARS`` to ``ROLE_TEXT_MAX_CHARS``
   (``DEFAULT_ROLE_TEXT_CHARS`` when unset);
 - ``user_gates``: whether the project's Planners may open user gates, where
-  they discuss with the user what only the user can decide (``on``), or not
-  (``off``, also when unset; ``user_gates``);
+  they discuss with the user what only the user can decide (``on``, also when
+  unset), or not (``off``; ``user_gates``);
 - ``gate_reminder_hours``: how many hours a gate waits for the user between
   reminders, 0 (none) to ``GATE_REMINDER_MAX_HOURS``
   (``DEFAULT_GATE_REMINDER_HOURS`` when unset).
@@ -152,8 +152,8 @@ class ProjectExecution:
 
     @property
     def gates_on(self) -> bool:
-        """Whether the project's Planners may open user gates."""
-        return self.user_gates is UserGates.ON
+        """Whether the project's Planners may open user gates: unless the project turned them off."""
+        return self.user_gates is not UserGates.OFF
 
     @property
     def gate_reminder_interval_hours(self) -> int:
