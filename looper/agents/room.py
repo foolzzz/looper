@@ -117,7 +117,7 @@ class Reason(str, Enum):
 
 
 class FallbackReason(str, Enum):
-    """Why a question went to the Planner instead of its seat."""
+    """Why a question could not be answered by its seat."""
 
     NOT_STARTED = "not_started"  # the seat's step has not started
     RUNTIME_CANNOT = "runtime_cannot"  # its runtime cannot resume the session, or its profile moved to another
@@ -126,9 +126,10 @@ class FallbackReason(str, Enum):
     NO_SNAPSHOT = "no_snapshot"  # it would need a throwaway checkout, and its task directory is not a git checkout
     LIMIT = "limit"  # the task had its room_consults_per_task
     MANY_SEATS = "many_seats"  # a role with several seats that ran: which one to ask is the asker's to say
-    BUDGET = "budget"  # the consult reached room_consult_budget_usd
+    BUDGET = "budget"  # its cost reached room_consult_budget_usd or could not be checked
     TIMEOUT = "timeout"  # the consult ran over room_consult_timeout_seconds
     STOPPED = "stopped"  # its run was stopped
+    ROOM_OFF = "room_off"  # its task's agent room was turned off before it ended
     CONTRACT = "contract"  # its reply had no answers object
     WROTE_FILES = "wrote_files"  # it changed its throwaway checkout: its answers are dropped
     UNSURE = "unsure"  # it answered the others, not this one
@@ -719,12 +720,23 @@ class RoomService:
                              answers: Sequence[tuple[Mapping[str, Any], str]],
                              to_planner: Sequence[Mapping[str, Any]], reason: FallbackReason, why: str,
                              columns: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Store a consult's outcome, answers and unanswered questions together, then notify their readers."""
-        context = await self._context(task_id, live=False)
-        member = context.member(seat)
-        kind = MemberKind.REVIEW if member and member.kind is MemberKind.REVIEW else MemberKind.WORK
+        """Store a consult's outcome and messages together, then notify readers; a room turned off gets no messages
+        or notifications."""
+        task = await db_tasks.get_task(task_id)
+        if task is None:
+            raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}")
+        project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
+        execution = ProjectExecution.from_row(project)
         async with db_room.task_transaction(task_id) as conn:
             await db_room.consult_lock(conn, task_id)
+            if not execution.room_on:
+                return await db_room.move_consult(consult_id, "failed", expect=expect, pool=conn,
+                                                  fallback_reason=FallbackReason.ROOM_OFF.value,
+                                                  detail="its task's agent room was turned off")
+            context = _Context(task, execution, members(await db_steps.list_steps(task_id, pool=conn),
+                                                        self._runs(task_id)))
+            member = context.member(seat)
+            kind = MemberKind.REVIEW if member and member.kind is MemberKind.REVIEW else MemberKind.WORK
             row = await db_room.move_consult(consult_id, state, expect=expect, pool=conn, **columns)
             if row is None:
                 return None

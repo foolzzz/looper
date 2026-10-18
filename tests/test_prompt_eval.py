@@ -384,6 +384,9 @@ def test_the_planners_refused_calls_are_counted_and_its_file_changes_can_be_boun
                                                          "is_error": True, "content": "Write is disabled"}]}}
     assert metrics.edit_tool_paths([{"event": write}, {"event": disabled}], tmp_path) == []
     assert metrics.edit_tool_paths([{"event": write}], tmp_path) == ["PLAN.md"]
+    # An event whose message is a string (not a turn's) is skipped, not an error.
+    texts = [{"event": {"type": "user", "message": "a note"}}, {"event": {"type": "assistant", "message": "a note"}}]
+    assert metrics.edit_tool_paths([*texts, {"event": write}], tmp_path) == ["PLAN.md"]
 
 
 def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:

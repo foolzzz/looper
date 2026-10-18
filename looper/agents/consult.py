@@ -26,12 +26,16 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   ``room_consult_timeout_seconds`` each, 20 turns (Claude Code and Grok); a seat has one consult at a time, and
   questions that come while one is queued join it. One lock per task covers both its limit and its seats. A consult takes a place
   under its task's limit of the seat's kind (Worker or Reviewer), as any run does. Its spend is a run of its own
-  (``consult-<12 hex>``), in the task's cost. A recorded cost over its cap drops the answers on every runtime.
+  (``consult-<12 hex>``), in the task's cost. After each run its recorded cost is checked, falling back to the
+  result's own figure. A cost over its cap or still unknown drops the answers on every runtime.
+  A provider-priced model without a full price cannot run a consult (``runtime_cannot``).
   One deadline covers writing the prompt, reading the reply and waiting for exit; stderr is drained with a short
   tail kept for errors, and the process tree is ended on success too.
-- **Delivery.** Its end state, answers and unanswered questions for the Planner commit together, once.
+- **Delivery.** Its end state, answers and unanswered questions for the Planner commit together, once. If its
+  task's room was turned off, it ends ``failed`` (``room_off``), without messages or notifications.
 - **Restarts.** Shutdown leaves consults queued or running; killing a run gives its questions to the Planner.
-  The server's start sweeps leftover checkouts and forks, then runs one consult per seat, oldest first (``resume_all``).
+  Before agents, tasks or HTTP start, the server sweeps leftover checkouts and forks and requeues interrupted
+  consults, then runs one per seat, oldest first (``resume_all``); until then, new consults stay queued.
 """
 
 from __future__ import annotations
@@ -125,6 +129,7 @@ class ConsultService:
         self.claude_bin = claude_bin
         self._running: set[asyncio.Task[Any]] = set()
         self._stopping = False
+        self._recovered = False
 
     # --- Asking ---
 
@@ -179,14 +184,15 @@ class ConsultService:
         return step.get("reviewer_id")
 
     def _start(self, consult_id: int) -> None:
-        if self._stopping:
+        """Start a queued consult only after recovery has swept and requeued the previous server's consults."""
+        if self._stopping or not self._recovered:
             return
         task = asyncio.get_running_loop().create_task(self._run(consult_id))
         self._running.add(task)
         task.add_done_callback(self._running.discard)
 
     async def resume_all(self) -> None:
-        """At the server's start: run again the consults of running tasks left queued or running."""
+        """At the server's start: sweep and requeue unfinished consults before any queued consult can start."""
         await asyncio.to_thread(_sweep, self.runtime_root)
         try:
             rows = await db_room.unfinished_consults()
@@ -196,6 +202,7 @@ class ConsultService:
         for row in rows:
             if row["state"] == "running":
                 await db_room.move_consult(row["id"], "queued", expect=("running",))
+        self._recovered = True
         seats: set[tuple[str, str]] = set()
         for row in rows:
             seat = (row["task_id"], row["seat"])
@@ -295,6 +302,12 @@ class ConsultService:
                                                          "provider than its session")
         budget = min(limits.consult_budget_usd, settings.max_budget_usd or limits.consult_budget_usd)
         launch = Launch(replace(settings, max_budget_usd=budget), role=agent, consult=True)
+        from .profile_registry import cost_basis
+
+        basis = cost_basis(launch.profile)
+        if basis["source"] == "provider_price" and launch.model in basis["unpriced"]:
+            raise _Failed(FallbackReason.RUNTIME_CANNOT, "its model has no full price with its provider, so "
+                                                         "room_consult_budget_usd cannot hold")
         runtime = launch.runtime
         # Where it runs: where the step ran, its runtime keeping it from writing; else a throwaway checkout.
         cwd, snapshot = str(metadata.get("cwd") or task.get("work_dir") or ""), None
@@ -349,7 +362,12 @@ class ConsultService:
                 raise _Failed(FallbackReason.CONTRACT, "its run ended without a result")
             if runtime.budget_error(result) is not None:
                 raise _Failed(FallbackReason.BUDGET, f"it reached its spend cap of {budget:g} USD (room_consult_budget_usd)")
-            if cost is not None and cost > budget:
+            if cost is None and isinstance(result.get("total_cost_usd"), (int, float)):
+                cost = float(result["total_cost_usd"])
+            if cost is None:
+                raise _Failed(FallbackReason.BUDGET, f"its cost is unknown, so its cap of {budget:g} USD "
+                                                    "(room_consult_budget_usd) cannot be checked: its answers are dropped")
+            if cost > budget:
                 raise _Failed(FallbackReason.BUDGET, f"it cost {cost:.4f} USD, over its cap of {budget:g} USD "
                                                     "(room_consult_budget_usd): its answers are dropped")
             if wrote:
@@ -512,6 +530,7 @@ async def _run_cost(task_id: str, run_id: str) -> float | None:
         value = (row or {}).get("cost_usd")
         return float(value) if value is not None else None
     except Exception:
+        logger.warning("task %s: cannot read the cost of consult %s", task_id, run_id, exc_info=True)
         return None
 
 

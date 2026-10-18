@@ -83,8 +83,10 @@ if "Write" not in tools or "Write" in disallowed:
     denials.append({"tool_name": "Write", "tool_input": {"file_path": str(write)}})
 else:
     write.write_text("written")
-print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
-                  "permission_denials": denials, "total_cost_usd": float(os.environ.get("CONSULT_COST", "0.01"))}), flush=True)
+result = {"type": "result", "subtype": "success", "is_error": False, "result": text, "permission_denials": denials}
+if mode != "no_cost":
+    result["total_cost_usd"] = float(os.environ.get("CONSULT_COST", "0.01"))
+print(json.dumps(result), flush=True)
 if mode == "wait_exit":
     os.close(1)
     os.close(2)
@@ -119,6 +121,7 @@ def _service(tmp_path: Path, room: RoomService, pool_runs: _Pool) -> Any:
     room.worker_pool = workers
     service = ConsultService(room=room, worker_pool=workers, runtime_root=tmp_path / "runtime",
                              claude_bin=str(tmp_path / "claude"))
+    service._recovered = True  # as after the server's start
     room.consults = service
     return service
 
@@ -134,6 +137,161 @@ async def _settled(pool: Any, *, noted: bool = True) -> dict[str, Any]:
             return dict(row)
         await asyncio.sleep(0.02)
     raise AssertionError("the consult did not end")
+
+
+def test_a_consult_waits_for_recovery_then_answers_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen = tmp_path / "seen.jsonl"
+    monkeypatch.setenv("SEEN", str(seen))
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        service._recovered = False
+        try:
+            member = (await room._context("task-r")).member("backend_rd@s1")
+            question = await _question(pool, "qty?")
+            assert await service.ask("task-r", member, question) is None
+            assert not service._running
+            assert await pool.fetchval("SELECT state FROM room_consults") == "queued"
+            assert not seen.exists()
+            await service.resume_all()
+            assert (await _settled(pool))["state"] == "answered"
+            await _until(lambda: not service._running, "the consult's end")
+            assert len(seen.read_text().splitlines()) == 1
+            assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 1
+        finally:
+            await service.stop()
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("mode", ["no_cost", "answer"])
+def test_a_consult_checks_its_result_cost_when_the_recorded_cost_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: str,
+) -> None:
+    from looper.agents.consult import db_llm_records
+
+    monkeypatch.setenv("SEEN", str(tmp_path / "seen.jsonl"))
+    monkeypatch.setenv("CONSULT_MODE", mode)
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("cost lookup failed")
+
+    monkeypatch.setattr(db_llm_records, "get_record", unavailable)
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        try:
+            question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            row = await _settled(pool)
+            if mode == "no_cost":
+                assert (row["state"], row["fallback_reason"]) == ("failed", "budget")
+                assert "cost is unknown" in row["detail"]
+                assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
+                escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
+                assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
+            else:
+                assert row["state"] == "answered" and row["cost_usd"] == pytest.approx(0.01)
+                answer = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'answer'")
+                assert answer["sender_seat"] == "backend_rd@s1" and answer["reply_to"] == question["id"]
+            assert any(record.exc_info and "cost lookup failed" in str(record.exc_info[1])
+                       for record in caplog.records if record.name == "looper.agents.consult")
+        finally:
+            await service.stop()
+
+    _run(test, monkeypatch)
+
+
+def test_a_consult_with_no_full_provider_price_does_not_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from looper.agents import consult
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.profile_registry import BUILTIN_PROFILE, cost_basis
+    from looper.agents.runtimes import AuthKind
+
+    seen = tmp_path / "seen.jsonl"
+    monkeypatch.setenv("SEEN", str(seen))
+    provider = replace(BUILTIN_PROFILE.provider, id="provider-test", auth=AuthKind.API_KEY,
+                       base_url="https://provider.invalid", api_key="test-key")
+    profile = replace(BUILTIN_PROFILE, provider=provider, model="unpriced-model")
+    assert cost_basis(profile)["source"] == "provider_price"
+    assert profile.model in cost_basis(profile)["unpriced"]
+
+    async def settings(*args: Any, **kwargs: Any) -> AgentSettings:
+        return AgentSettings(profile=profile)
+
+    monkeypatch.setattr(consult, "load_agent_settings", settings)
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work", provider=provider.id)
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        try:
+            question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            row = await _settled(pool)
+            assert (row["state"], row["fallback_reason"]) == ("fallback", "runtime_cannot")
+            assert "model has no full price" in row["detail"]
+            assert not seen.exists()
+            assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE agent_id LIKE 'consult-%'") == 0
+            escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
+            assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
+        finally:
+            await service.stop()
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("mode", ["answer", "prose"])
+def test_a_consult_finishes_without_messages_when_its_room_was_turned_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
+) -> None:
+    monkeypatch.setenv("SEEN", str(tmp_path / "seen.jsonl"))
+    monkeypatch.setenv("CONSULT_MODE", mode)
+
+    async def test(pool: Any) -> None:
+        project = await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        workers = _Pool({"worker-2": "running"})
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, workers)
+        entered, release = asyncio.Event(), asyncio.Event()
+        execute = service._execute
+
+        async def held(*args: Any) -> Any:
+            entered.set()
+            await release.wait()
+            return await execute(*args)
+
+        monkeypatch.setattr(service, "_execute", held)
+        try:
+            await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            assert await pool.fetchval("SELECT state FROM room_consults") == "running"
+            await pool.execute("UPDATE projects SET agent_room = 'off' WHERE id = $1", project["id"])
+            messages = await pool.fetchval("SELECT count(*) FROM room_messages")
+            workers.reminded.clear()
+            wakes: list[str] = []
+            monkeypatch.setattr(room, "_wake_planner", wakes.append)
+            monkeypatch.setattr(room, "_wake_inboxes", wakes.append)
+            release.set()
+            await _until(lambda: not service._running, "the consult's end")
+            row = await pool.fetchrow("SELECT * FROM room_consults")
+            assert (row["state"], row["fallback_reason"]) == ("failed", "room_off")
+            assert row["detail"] == "its task's agent room was turned off" and row["finished_at"] is not None
+            assert await pool.fetchval("SELECT count(*) FROM room_messages") == messages
+            assert not wakes and not workers.reminded
+        finally:
+            release.set()
+            await service.stop()
+
+    _run(test, monkeypatch)
 
 
 def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_session(

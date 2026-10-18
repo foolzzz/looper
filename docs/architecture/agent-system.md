@@ -2944,7 +2944,9 @@ before.
   are posted as the seat (`via` `consult`, `cc_planner`); its final state,
   answers and unanswered questions' escalations and notices are stored in
   one transaction, with notifications after commit. A refused state change
-  stores nothing, so finishing again cannot post the answers twice. A task's
+  stores nothing, so finishing again cannot post the answers twice. If the
+  task's room was turned off before it ended, the consult fails with
+  `room_off`, without messages or notifications. A task's
   own consult lock guards both admission under its count limit and the
   seat's queue; it is separate from the room's message lock. Questions that
   come while one is queued join it. After taking capacity, starting under
@@ -2954,17 +2956,21 @@ before.
   under its task's limit of the seat's kind, and has at most
   `room_consult_budget_usd`, `room_consult_timeout_seconds` and 20 turns
   (Claude Code and Grok). Every runtime's recorded cost is checked after the
-  run; over-cap answers are dropped and the questions go to the Planner as
-  `budget`. One deadline covers writing stdin, reading stdout and waiting for
-  exit. Stderr is drained, with its last 2,000 characters kept for errors, and
+  run, falling back to the result's own `total_cost_usd` when it is unknown;
+  over-cap or still-unknown costs drop the answers and send the questions to
+  the Planner as `budget`. A provider-priced model without a full price
+  cannot start a consult (`runtime_cannot`). One deadline covers writing stdin,
+  reading stdout and waiting for exit. Stderr is drained, with its last 2,000
+  characters kept for errors, and
   the process tree is ended on success too. A
   task has at most `room_consults_per_task`. The seat's Agent Profile must
   still run on the session's runtime and provider. Stopping the service
   starts nothing and keeps queued and running states for recovery; killing
   a consult, including one waiting for capacity, fails it with `stopped`
-  and sends its questions to the Planner. Before recovery starts anything,
-  it removes leftover checkouts in `.local/consults` and every runtime's
-  `consult-sessions` contents. It requeues interrupted runs, starts only the
+  and sends its questions to the Planner. Before agents, tasks or HTTP start,
+  recovery removes leftover checkouts in `.local/consults` and every runtime's
+  `consult-sessions` contents and requeues interrupted runs; until then,
+  new consults stay queued. It starts only the
   oldest consult of each seat, and runs the others in order when it ends.
 - **Escalations** (`reason`): a question no seat can take (`consult_fallback`,
   with the typed reason: `not_started`, `no_session`, `session_gone`,

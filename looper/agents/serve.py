@@ -819,6 +819,9 @@ async def _run_agent_system(
     room_ops = RoomOps(room, url=_local_url(host, port))
     worker_pool.room_ops = room_ops
 
+    # The consults the last server left queued or running run again.
+    await consults.resume_all()
+
     # --- Start ---
 
     await supervisor.start_all()
@@ -848,8 +851,6 @@ async def _run_agent_system(
     await scheduler.start()
     await gate_reminders.start()
     await gate_courier.start()
-    # The consults the last server left queued or running run again.
-    await consults.resume_all()
 
     logger.info(
         "agent system running on http://%s:%d (channels=%s)",

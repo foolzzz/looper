@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import os
 import subprocess
 from pathlib import Path
@@ -19,6 +20,20 @@ def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+def test_the_server_recovers_consults_before_starting_agents_tasks_or_http() -> None:
+    import looper.agents.serve as serve
+
+    tree = ast.parse(Path(serve.__file__).read_text())
+    run = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+               and node.name == "_run_agent_system")
+    calls = [node.value.value.func for node in run.body if isinstance(node, ast.Expr)
+             and isinstance(node.value, ast.Await) and isinstance(node.value.value, ast.Call)]
+    names = [ast.unparse(call) for call in calls]
+    assert names.count("consults.resume_all") == 1
+    assert all(names.index("consults.resume_all") < names.index(name)
+               for name in ("supervisor.start_all", "carry_on_tasks", "http_server.start"))
 
 
 def test_the_consult_contract_replaces_the_runs_and_its_answers_are_read_by_question() -> None:
