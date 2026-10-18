@@ -240,20 +240,52 @@ uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/ru
 
 ### Which tier to run
 
-A pull request runs real mode on its change and pastes the tables into its
-description; `--total-cap-usd` covers all the reps, so raise it with them:
+A pull request runs real mode only on what its change touches, and pastes the
+tables into its description. Before a release, one run of the full tiers
+refreshes the baselines. `--total-cap-usd` covers all the reps, so raise it
+with them. Every `--jobs` command below also takes `--case-budget-usd` (1 for
+haiku, 3 for opus; see Running cases in parallel).
 
-- any change to model-visible content (a recommended prompt, a contract, the
-  injection order, the injected context) runs the haiku tier on all tasks:
-  `run --mode real --reps 3` (about $8 and 70 minutes);
+Per pull request, on the tasks and dialogs the change touches plus any new
+ones, with `--reps 2` and haiku (`--tasks a,b` or a task set, `--dialogs a,b`):
+
+- a change to model-visible content (a recommended prompt, a contract, the
+  injection order, the injected context) runs those tasks:
+  `run --mode real --reps 2 --tasks <ids> --jobs 4 --case-budget-usd 1`;
 - a change to the Planner's prompt, its contracts, the plan contract or the
-  context the Planner receives also runs the opus tier, `run --mode real
-  --model opus --reps 3 --tasks planner`, compared with
-  `baselines/real-opus.json` (about $19 and 48 minutes);
+  context the Planner receives also runs them on opus, `run --mode real
+  --model opus --reps 2 --tasks <ids> --jobs 4`, compared with
+  `baselines/real-opus.json`;
 - a change to the Manager's prompt or its tools runs `dialogs --mode real
-  --reps 3` (about $2.30 and 21 minutes), and also `dialogs --mode real
-  --manager-model opus --manager-effort xhigh --reps 3` (about $5.10 and 24
-  minutes).
+  --reps 2 --dialogs <ids> --jobs 4`, and also, with `--manager-model opus
+  --manager-effort xhigh`, the same dialogs on the opus Manager.
+
+Do not rerun after a change the model cannot see.
+
+Once before a release, on the release candidate (`main` after every merge):
+haiku on all tasks, `run --mode real --reps 3 --jobs 4` (about $8); opus,
+`run --mode real --model opus --reps 3 --tasks planner --jobs 4` (about $19);
+and the dialogs on haiku and on the opus xhigh Manager, `dialogs --mode real
+--reps 3 --jobs 4` (about $2.30) and the same with `--manager-model opus
+--manager-effort xhigh` (about $5.10). The baselines are refreshed from these
+runs.
+
+#### Running cases in parallel
+
+`--jobs N` (default 1, one case after another) runs N cases (task or dialog,
+times reps) at once; the tokens and cost are the same, only the wall time
+shrinks (a haiku run of all tasks with `--reps 3` takes about 83 minutes at
+`--jobs 1`). Use `--jobs 4`. `run` puts its cases on one server, each in a
+project, a working directory and a task of its own; `dialogs` gives each case
+its own database, server, port and directories. The rows keep the task/rep
+order whatever finishes first. `--total-cap-usd` still holds with cases in
+flight: while others run, a case starts only when what is spent plus the
+`--case-budget-usd` (the most one case may spend; required with `--jobs` above
+1 in real mode, since `--max-budget-usd` caps each Claude call and a case makes
+several) of every case in flight and of this one is within the cap (a case
+alone is cut at the cap, as before). On Ctrl-C the cases in flight cancel their
+tasks and end before the run writes its file. More jobs load the machine and the
+model's rate limit, so keep `--task-timeout` generous on a busy host.
 
 Each compares with the committed baseline of its model, or with a run of the
 base branch via `--baseline`. Update the model's committed baseline

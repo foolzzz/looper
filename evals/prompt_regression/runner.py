@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -29,6 +30,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -36,6 +38,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -157,13 +160,23 @@ def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
 # --- Server --------------------------------------------------------------------------------------------
 
 
+# Set when a run is interrupted: cases in flight cancel their task and end, so no thread outlives the run.
+INTERRUPTED = threading.Event()
+
+_ISSUED_PORTS: set[int] = set()
+_PORT_LOCK = threading.Lock()
+
+
 def free_port() -> int:
+    """A free port, never one this process handed out before: parallel runs pick theirs before their servers bind."""
     while True:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        if port != RESERVED_PORT:
-            return port
+        with _PORT_LOCK:
+            if port != RESERVED_PORT and port not in _ISSUED_PORTS:
+                _ISSUED_PORTS.add(port)
+                return port
 
 
 class Api:
@@ -426,6 +439,8 @@ def run_task(
         edit_pending = task.edit_requirement is not None
         stopped_by_cap = timed_out = False
         while True:
+            if INTERRUPTED.is_set():
+                raise EvalError("the run was interrupted")
             detail = api.get(f"/api/tasks/{task_id}")
             status = detail.get("status")
             if status in metrics.TERMINAL_STATUSES:
@@ -587,42 +602,119 @@ def select_tasks(names: list[str] | None) -> tuple[EvalTask, ...]:
     return task_list.select(ids)
 
 
+def check_case_budget(value: float | None) -> None:
+    if value is not None and (not math.isfinite(value) or value <= 0):
+        raise EvalError("--case-budget-usd must be a finite positive number")
+
+
 def run_suite(
-    tasks: tuple[EvalTask, ...],
-    run_one: Callable[[EvalTask, int, float | None], dict[str, Any]],
+    tasks: tuple[Any, ...],
+    run_one: Callable[[Any, int, float | None], dict[str, Any]],
     *,
     total_cap_usd: float | None,
     reps: int = 1,
     results: list[dict[str, Any]] | None = None,
+    jobs: int = 1,
+    run_budget_usd: float | None = None,
+    catch: bool = True,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Run every task ``reps`` times, rep-major (rep 1 of every task, then rep 2, ...), so drift over time does not
-    land on one task, until their summed cost reaches ``total_cap_usd``; the rest are skipped.
+    """Run every task (anything with an ``id``) ``reps`` times, rep-major (rep 1 of every task, then rep 2, ...),
+    so drift over time does not land on one task, until their summed cost reaches ``total_cap_usd``; the rest are
+    skipped.
 
     ``run_one(task, rep, cap_left)`` runs one case with the budget left. A case that raises is an error row of
-    class ``harness`` and the run goes on with the next. The rows go into ``results`` as they are made (a new list
-    without), so a caller keeps what is done when the run stops midway. Returns the rows and whether the cap
-    stopped the run.
+    class ``harness`` and the run goes on with the next (with ``catch`` off, it stops the run: nothing new
+    starts, the cases in flight end, and the exception is raised). The rows go into ``results`` as they are
+    made, always in task/rep order (a new list without), so a caller keeps what is done when the run stops
+    midway. Returns the rows and whether the cap stopped the run.
+
+    Up to ``jobs`` cases run at once; under a total cap that needs ``run_budget_usd``, the most one case may spend
+    (not the per-call ``--max-budget-usd``). While others are in flight, a case starts only when what is spent,
+    plus ``run_budget_usd`` for each in-flight case and for this one, stays within the cap, and its ``cap_left`` is the
+    smaller of its reserved budget and the cap less what is spent and reserved. With one job, a case is cut
+    at the cap alone.
     """
+    check_case_budget(run_budget_usd)
+    if jobs > 1 and total_cap_usd is not None and run_budget_usd is None:
+        raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd: what one case may spend "
+                        "(--max-budget-usd caps each Claude call, and a case makes several)")
     results = [] if results is None else results
+    cases = [(task, rep) for rep in range(1, reps + 1) for task in tasks]
+    budget = run_budget_usd or 0.0
+    INTERRUPTED.clear()
+    rows: dict[int, dict[str, Any]] = {}
+    flushed = 0
     spent = 0.0
     stopped = False
-    for rep in range(1, reps + 1):
-        for task in tasks:
-            if stopped or (total_cap_usd is not None and spent >= total_cap_usd):
-                stopped = True
-                results.append({"id": task.id, "rep": rep, "skipped": "the spending cap was reached",
-                                "cost_usd": 0.0})
-                continue
-            try:
-                row = run_one(task, rep, None if total_cap_usd is None else total_cap_usd - spent)
-            except Exception as exc:
-                traceback.print_exc(file=sys.stderr)
-                cost = exc.cost_usd if isinstance(exc, TaskError) else 0.0
-                message = str(exc) if isinstance(exc, TaskError) else f"{type(exc).__name__}: {exc}"
-                row = error_row(ErrorClass.HARNESS, message, cost_usd=cost)
-            spent += float(row.get("cost_usd") or 0.0)
-            stopped = stopped or bool(row.get("stopped_by_cap"))
-            results.append({"id": task.id, "rep": rep, **row})
+    failure: BaseException | None = None
+    in_flight: dict[Future[dict[str, Any]], int] = {}
+
+    def flush() -> None:
+        nonlocal flushed
+        while flushed in rows:
+            results.append(rows.pop(flushed))
+            flushed += 1
+
+    def execute(task: Any, rep: int, cap_left: float | None) -> dict[str, Any]:
+        try:
+            row = run_one(task, rep, cap_left)
+        except Exception as exc:
+            if not catch:
+                raise
+            traceback.print_exc(file=sys.stderr)
+            cost = exc.cost_usd if isinstance(exc, TaskError) else 0.0
+            message = str(exc) if isinstance(exc, TaskError) else f"{type(exc).__name__}: {exc}"
+            row = error_row(ErrorClass.HARNESS, message, cost_usd=cost)
+        return {"id": task.id, "rep": rep, **row}
+
+    pool = ThreadPoolExecutor(max_workers=max(1, jobs), thread_name_prefix="eval-case")
+    try:
+        index = 0
+        while index < len(cases) or in_flight:
+            if index < len(cases) and failure is None and len(in_flight) < max(1, jobs):
+                task, rep = cases[index]
+                if stopped or (total_cap_usd is not None and spent >= total_cap_usd):
+                    stopped = True
+                    rows[index] = {"id": task.id, "rep": rep, "skipped": "the spending cap was reached",
+                                   "cost_usd": 0.0}
+                    index += 1
+                    flush()
+                    continue
+                reserved = budget * len(in_flight)
+                if total_cap_usd is None or not in_flight or spent + reserved + budget <= total_cap_usd:
+                    cap_left = None if total_cap_usd is None else total_cap_usd - spent - reserved
+                    if jobs > 1 and cap_left is not None:
+                        cap_left = min(budget, cap_left)
+                    in_flight[pool.submit(execute, task, rep, cap_left)] = index
+                    index += 1
+                    continue
+            if not in_flight:
+                break  # a case failed and nothing else runs
+            done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in sorted(done, key=in_flight.__getitem__):
+                position = in_flight.pop(future)
+                if future.exception() is not None:
+                    failure = failure or future.exception()
+                    continue
+                row = future.result()
+                spent += float(row.get("cost_usd") or 0.0)
+                stopped = stopped or bool(row.get("stopped_by_cap"))
+                rows[position] = row
+            flush()
+    except BaseException:
+        INTERRUPTED.set()
+        pool.shutdown(wait=True, cancel_futures=True)  # the cases in flight cancel their tasks and end
+        INTERRUPTED.clear()
+        for future, position in in_flight.items():
+            if future.done() and not future.cancelled() and future.exception() is None:
+                rows[position] = future.result()
+        for position in sorted(rows):
+            results.append(rows[position])
+        raise
+    pool.shutdown()
+    if failure is not None:
+        results.extend(rows[position] for position in sorted(rows))  # the cases that ended, past the failed one
+        raise failure
     return results, stopped
 
 
@@ -681,8 +773,11 @@ def run(
     step_workspaces: str | None = None,
     reps: int = 1,
     user_gates: str | None = None,
+    jobs: int = 1,
+    case_budget_usd: float | None = None,
 ) -> tuple[dict[str, Any], Path]:
-    """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``); returns the run and the JSON file
+    """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``), ``jobs`` at a time on the one server
+    (each in a project, a working directory and a task of its own); returns the run and the JSON file
     written to ``out_dir``. Each (task, rep) runs in a working directory of its own, ``<root>/work/<task>/<rep>``.
     The JSON is written however the run ends: when it stops midway, with what is done and ``aborted`` saying why
     (an interrupt is raised again once it is written).
@@ -700,6 +795,11 @@ def run(
         raise EvalError(f"a provider needs its API key in ${API_KEY_ENV}")
     if reps < 1:
         raise EvalError(f"reps must be at least 1, not {reps}")
+    if jobs < 1:
+        raise EvalError(f"jobs must be at least 1, not {jobs}")
+    check_case_budget(case_budget_usd)
+    if jobs > 1 and total_cap_usd is not None and case_budget_usd is None:
+        raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -752,6 +852,8 @@ def run(
                 total_cap_usd=total_cap_usd,
                 reps=reps,
                 results=results,
+                jobs=jobs,
+                run_budget_usd=case_budget_usd,
             )
     except BaseException as exc:
         aborted = aborted_reason(exc)
