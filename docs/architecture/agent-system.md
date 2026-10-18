@@ -1809,9 +1809,9 @@ the setting.
 
 A project's schedules fire a full task of the project on a time rule
 ([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md), S1 and S2; the
-Manager lists, reads, enables, disables and deletes them with
-`looper_schedules`, and creating and editing them through it, and export, come
-with the rest of the Manager platform tools' T3). A schedule has a `name` (unique in the project ignoring case),
+Manager lists, reads, creates, changes, enables, disables, runs and deletes
+them with `looper_schedules`, and they move with their projects in the
+configuration file, [Moving the configuration](#moving-the-configuration-export-and-import)). A schedule has a `name` (unique in the project ignoring case),
 a `cron` rule and an IANA `timezone` (default: the server's own zone), the
 `requirement` each run's task gets (at most 27,000 characters), a `work_dir` (`''`: the project's default
 when it fires), `overlap` (`skip`, `queue` or `parallel`, with
@@ -1976,8 +1976,7 @@ dashboard only). A new schedule is disabled.
   Writing a run's end locks the schedule's row before the run's
   (`finish_run`), as every other writer does, so a delete waits for it
   instead of deadlocking with it; a message whose schedule was deleted after
-  it was written is not recorded (its outbox went with it). Schedules are not
-  in the configuration export yet, and an import leaves them alone.
+  it was written is not recorded (its outbox went with it).
 
 ### The capability catalog: items and where they are installed
 
@@ -2107,7 +2106,7 @@ and enabled flag; a role's `max_concurrency` in an older file is ignored, with
 one note, and so is a layer's other than the Workers' or the Reviewers' role
 layer, with a note each: a layer that set nothing else is skipped), `channels`, `installs` (global),
 `projects` (with `--include-projects`: fields, execution settings, layers,
-knowledge, own skills and installs) and `catalog` (each item with its files,
+knowledge, own skills, installs, and `schedules` for a project that has some) and `catalog` (each item with its files,
 or an MCP server's configuration). Catalog files are UTF-8 text, so JSON holds
 them as they are; the file is written piece by piece from one read-only,
 repeatable-read snapshot, by the CLI straight from the database (a catalog is
@@ -2131,6 +2130,22 @@ with the file's in their place: the profiles that takes are added, each layer
 it changes selects its profile (a layer the file does not give included), and
 a note says each. Tasks are not exported, so neither are their profile
 overrides.
+
+A project's schedules carry their settings (`name`, `cron`, `timezone`,
+`requirement`, `overlap`, `max_parallel_runs`, `catch_up`, the timeouts, the
+caps, the gate, `notify` and `notify_target`), their Agent Profiles by name
+(`profiles`) and their `task_limits`; not whether they are enabled, their runs,
+messages, counters or alerts, nor their own directory: a schedule that had one
+is flagged `repoint`. The import matches a schedule by project and name,
+ignoring case (`project.schedules`): one it adds is created disabled
+(`created_via` `import`), one whose settings differ is rewritten disabled (its
+directory here stays), one that matches is left as it is, enabled or not.
+Enabling is the approval (scheduled-tasks RFC D6), so a schedule nobody here
+approved never runs on its own; a note lists them, to check their directory and
+gate here first. A schedule the API would refuse (a bad or too frequent rule,
+an unknown profile or field) is skipped with the reason, and a `notify_target`
+the sender allowlists here (as the import leaves the channels) do not allow is
+dropped, with a note.
 
 An import matches entries by natural key: an item by kind and name (a
 project's own skill within its project), a project, runtime, provider or
@@ -2252,15 +2267,15 @@ So:
 
 The Manager acts on Looper through MCP tools, one catalog in
 `looper/agents/ops/` ([Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md),
-T1, T2 and the schedules part of T3). Each tool has a name, a description, a
+T1, T2 and T3). Each tool has a name, a description, a
 JSON Schema for its arguments, a risk tier and the code that runs it; the
 code is what the dashboard's API calls (`projects`, the TaskRouter's
 messages, `db.task_changes`, `agent_settings`, `profile_registry`, `catalog`,
 `db.llm_records`, `schedules`), so both check alike and a refusal carries the
 dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
-409 `conflict`, its 400 `invalid`). The definitions of the 15 tools take
-13.4 KB of the Manager's context (the JSON of `tools/list`), the contract
-2.8 KB.
+409 `conflict`, its 400 `invalid`). The definitions of the 16 tools take
+15.0 KB of the Manager's context (the JSON of `tools/list`, 14,988 bytes), the
+contract 3.3 KB.
 
 - **Reaching Looper.** `looper serve` makes one `ManagerOps`
   (`ops/service.py`) with a random token at start. Every launch of the
@@ -2333,14 +2348,14 @@ dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
 | `looper_catalog` | `list` the items (kind, qualified name, description) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
-| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `enable` or `disable` one (`schedules.update_schedule`, as its switch does; the answer says when it was so already); `delete` one (`schedules.delete_schedule`). A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; delete is high |
+| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the settings `POST /api/projects/:id/schedules` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, gate, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`). A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
+| `looper_config_export` | Write `looper config export`'s file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`looper config import`, or Settings → Import / Export) | read |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
 not one of these tools yet; nor are a project's execution settings, a role's
-prompt, name, turns and switch, changing or removing a provider, adding
-items to the catalog, or creating, editing, running now or exporting a
-schedule (the project's Schedules tab does those).
+prompt, name, turns and switch, changing or removing a provider, or adding
+items to the catalog.
 
 ### A task's Planner's tools
 
@@ -3018,7 +3033,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
 | `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; a profile on a list is not deleted |
-| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
+| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |

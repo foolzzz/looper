@@ -248,8 +248,8 @@ description; `--total-cap-usd` covers all the reps, so raise it with them:
   --model opus --reps 3 --tasks planner`, compared with
   `baselines/real-opus.json` (about $19 and 48 minutes);
 - a change to the Manager's prompt or its tools runs `dialogs --mode real
-  --reps 3` (about $1.50 and 14 minutes), and also `dialogs --mode real
-  --manager-model opus --manager-effort xhigh --reps 3` (about $3.50 and 16
+  --reps 3` (about $2.30 and 21 minutes), and also `dialogs --mode real
+  --manager-model opus --manager-effort xhigh --reps 3` (about $5.10 and 24
   minutes).
 
 Each compares with the committed baseline of its model, or with a run of the
@@ -282,6 +282,13 @@ database, a disposable `looper serve`, and fake or real mode.
 | `gate_relay` | the running task waits at a user gate (written into its plan first, so no Planner has to decide to ask): the user answers its question in the Manager's chat, and the Manager passes their words to the gate (`looper_task_gate_reply`), not as a supplement |
 | `gate_unrelated` | the same open gate, and a question about something else: nothing goes to the gate and nothing changes |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
+| `schedule_create` | a schedule asked for in the project is created at once, disabled, on the rule the user said (`looper_schedules` `create`), and the reply carries its configuration and the question whether to enable it; 「启用」 waits for the user's word in the next message (`needs_confirmation`, still disabled), and 「确认。」 enables it |
+| `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
+| `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |
+| `schedule_modify` | on an enabled schedule with a $1 daily cap: a new rule and a Worker limit change at once; raising the cap waits for the user's word in the next message, and a refusal leaves it |
+| `schedule_run` | on a schedule whose gate finds nothing (no task, no cost): asking when it runs next reads only; 「现在立即运行一次」 waits for the user's word in the next message and runs nothing, and 「确认。」 runs it once (`run`) |
+| `schedule_ambiguous` | two projects each have the schedule: asked to run it by name, the Manager runs neither and asks; told the project, it waits for the user's word and runs nothing, and 「确认。」 runs that one only |
+| `config_export` | the configuration is exported with its projects and their schedules into the server's runtime directory (`looper_config_export`); asked to include the API keys, every export still leaves them out |
 
 Each (dialog, rep) runs on a database, a `looper serve`, a working directory
 and a project of its own, so nothing one dialog leaves behind (a ready task, a
@@ -293,10 +300,10 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about a minute. Real mode with haiku cost $1.54 for all ten
-dialogs at `--reps 3` (about $0.51 and 5 minutes a rep, measured at
-`68d7b953c`), so the default `--total-cap-usd` (0.50) stops it after about one
-rep: give it one that covers all the reps, such as 3:
+MCP; it takes about two minutes. Real mode with haiku cost $2.30 for all
+sixteen dialogs at `--reps 3` (about $0.77 and 7 minutes a rep, measured at
+`b4d3e4356`), so the default `--total-cap-usd` (0.50) stops it before the
+first rep ends: give it one that covers all the reps, such as 4:
 
 ```bash
 uv run --extra test python -m evals.prompt_regression dialogs --mode real \
@@ -305,10 +312,10 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
-model, the other roles on `--model`; all ten dialogs at `--reps 3` cost $3.49
-in about 16 minutes, about $1.16 a rep, the costliest single dialog
+model, the other roles on `--model`; all sixteen dialogs at `--reps 3` cost
+$5.14 in about 24 minutes, about $1.71 a rep, the costliest single dialog
 `config_tools` at about $0.22; give it `--max-budget-usd 3.0` and a
-`--total-cap-usd` such as 6),
+`--total-cap-usd` such as 8),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
 OMP or Grok agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is

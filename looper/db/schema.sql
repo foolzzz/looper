@@ -1352,6 +1352,17 @@ BEGIN
         INSERT INTO schema_migrations (name) VALUES ('schedules_notify_alerts');
     END IF;
 END $$;
+-- Once: a schedule a configuration import created says so (created_via 'import'), beside the dashboard's and the
+-- Manager's.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_created_via_import') THEN
+        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_created_via_check;
+        ALTER TABLE schedules ADD CONSTRAINT schedules_created_via_check
+            CHECK (created_via IN ('dashboard', 'manager', 'import'));
+        INSERT INTO schema_migrations (name) VALUES ('schedules_created_via_import');
+    END IF;
+END $$;
 -- When the schedule was created or last enabled (set when enabled turns true): the no-success alert counts from it
 -- or from last_ok_at, whichever is later, so a schedule enabled again after a pause is not stale at once. A schedule
 -- from before takes its updated_at, which is at or after its last enabling.
