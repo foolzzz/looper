@@ -1983,7 +1983,7 @@ and enabled flag; a role's `max_concurrency` in an older file is ignored, with
 one note, and so is a layer's other than the Workers' or the Reviewers' role
 layer, with a note each: a layer that set nothing else is skipped), `channels`, `installs` (global),
 `projects` (with `--include-projects`: fields, execution settings, layers,
-knowledge, own skills, installs and `schedules`) and `catalog` (each item with its files,
+knowledge, own skills, installs, and `schedules` for a project that has some) and `catalog` (each item with its files,
 or an MCP server's configuration). Catalog files are UTF-8 text, so JSON holds
 them as they are; the file is written piece by piece from one read-only,
 repeatable-read snapshot, by the CLI straight from the database (a catalog is
