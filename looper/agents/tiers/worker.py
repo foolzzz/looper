@@ -563,6 +563,9 @@ class WorkerPool:
         """A place under ``wp``'s task's limit of its role for a run of Looper's own (an agent room consult): it
         waits like any run, shows among the runs, and frees its place when it ends."""
         self._active[wp.worker_id] = wp
+        task = asyncio.current_task()
+        assert task is not None
+        self._tasks[wp.worker_id] = task
         try:
             await self._take_slot(wp)
             wp.status, wp.since = "running", datetime.now(timezone.utc)

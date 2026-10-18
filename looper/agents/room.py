@@ -128,6 +128,7 @@ class FallbackReason(str, Enum):
     MANY_SEATS = "many_seats"  # a role with several seats that ran: which one to ask is the asker's to say
     BUDGET = "budget"  # the consult reached room_consult_budget_usd
     TIMEOUT = "timeout"  # the consult ran over room_consult_timeout_seconds
+    STOPPED = "stopped"  # its run was stopped
     CONTRACT = "contract"  # its reply had no answers object
     WROTE_FILES = "wrote_files"  # it changed its throwaway checkout: its answers are dropped
     UNSURE = "unsure"  # it answered the others, not this one
@@ -694,34 +695,60 @@ class RoomService:
     async def give_to_planner(self, task_id: str, message: Mapping[str, Any], target: str, reason: FallbackReason,
                               why: str) -> None:
         """A question ``target`` cannot answer goes to the Planner (an escalation), and its asker is told."""
-        asker = str(message["sender_seat"])
-        await self._looper(task_id, MessageKind.ESCALATION, Reason.CONSULT_FALLBACK,
-                           f"{asker} asked {target} (message {message['id']}), but {why} ({reason.value}). Answer "
-                           f"it, or say who will and when. The question: {_line(message['body'], 600)}",
-                           audience=[PLANNER], reply_to=message["id"], pending=True)
-        if asker != PLANNER:
-            await self._looper(task_id, MessageKind.NOTICE, Reason.CONSULT_FALLBACK,
-                               f"{target} cannot take your question {message['id']} now ({reason.value}): the "
-                               "Planner has it and will answer in the room.",
-                               audience=[asker], reply_to=message["id"])
+        await self._planner_fallback(task_id, message, target, reason, why)
         self._wake_planner(task_id)
-
-    async def consult_answer(self, task_id: str, seat: str, question: Mapping[str, Any], body: str) -> dict[str, Any]:
-        """Post a consult's answer to ``question`` as ``seat`` (``via`` ``consult``), for its asker, the Planner seeing
-        it; an asker online is reminded, the Planner woken."""
-        context = await self._context(task_id, live=False)
-        asker = str(question["sender_seat"])
-        stored = await db_room.add(
-            task_id, sender_seat=seat, sender_kind=MemberKind.REVIEW.value if (context.member(seat) and context.member(
-                seat).kind is MemberKind.REVIEW) else MemberKind.WORK.value, kind=MessageKind.ANSWER.value,
-            body=body[: context.limits.message_max_chars], audience=[asker], via="consult", cc_planner=True,
-            reply_to=question["id"], planner_pending=asker == PLANNER)
-        if asker == PLANNER:
-            self._wake_planner(task_id)
-        elif (member := context.member(asker)) is not None:
-            await self._remind(task_id, member)
         self._wake_inboxes(task_id)
-        return stored
+
+    async def _planner_fallback(self, task_id: str, message: Mapping[str, Any], target: str, reason: FallbackReason,
+                                why: str, *, pool: Any = None) -> None:
+        """Store the escalation and the asker's notice for a question the seat cannot answer."""
+        asker = str(message["sender_seat"])
+        await db_room.add(task_id, sender_seat=LOOPER, sender_kind=MemberKind.LOOPER.value,
+                          kind=MessageKind.ESCALATION.value, via="looper", reason=Reason.CONSULT_FALLBACK.value,
+                          body=f"{asker} asked {target} (message {message['id']}), but {why} ({reason.value}). Answer "
+                               f"it, or say who will and when. The question: {_line(message['body'], 600)}",
+                          audience=[PLANNER], reply_to=message["id"], planner_pending=True, pool=pool)
+        if asker != PLANNER:
+            await db_room.add(task_id, sender_seat=LOOPER, sender_kind=MemberKind.LOOPER.value,
+                              kind=MessageKind.NOTICE.value, via="looper", reason=Reason.CONSULT_FALLBACK.value,
+                              body=f"{target} cannot take your question {message['id']} now ({reason.value}): the "
+                                   "Planner has it and will answer in the room.",
+                              audience=[asker], reply_to=message["id"], pool=pool)
+
+    async def finish_consult(self, task_id: str, consult_id: int, seat: str, *, state: str, expect: Sequence[str],
+                             answers: Sequence[tuple[Mapping[str, Any], str]],
+                             to_planner: Sequence[Mapping[str, Any]], reason: FallbackReason, why: str,
+                             columns: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Store a consult's outcome, answers and unanswered questions together, then notify their readers."""
+        context = await self._context(task_id, live=False)
+        member = context.member(seat)
+        kind = MemberKind.REVIEW if member and member.kind is MemberKind.REVIEW else MemberKind.WORK
+        async with db_room.task_transaction(task_id) as conn:
+            await db_room.consult_lock(conn, task_id)
+            row = await db_room.move_consult(consult_id, state, expect=expect, pool=conn, **columns)
+            if row is None:
+                return None
+            covered = {q["id"] for q, _ in answers} | {q["id"] for q in to_planner}
+            to_planner = list(to_planner)
+            for question_id in row["questions"]:
+                if question_id not in covered:
+                    question = await db_room.get(task_id, int(question_id), pool=conn)
+                    if question is not None:
+                        to_planner.append(question)
+            for question, body in answers:
+                asker = str(question["sender_seat"])
+                await db_room.add(task_id, sender_seat=seat, sender_kind=kind.value, kind=MessageKind.ANSWER.value,
+                                  body=body[: context.limits.message_max_chars], audience=[asker], via="consult",
+                                  cc_planner=True, reply_to=question["id"], planner_pending=asker == PLANNER, pool=conn)
+            for question in to_planner:
+                await self._planner_fallback(task_id, question, seat, reason, why, pool=conn)
+        if to_planner or any(question["sender_seat"] == PLANNER for question, _ in answers):
+            self._wake_planner(task_id)
+        for question, _ in answers:
+            if (asker := context.member(str(question["sender_seat"]))) is not None:
+                await self._remind(task_id, asker)
+        self._wake_inboxes(task_id)
+        return row
 
     async def _after_post(self, task_id: str, context: _Context, sender: Seat, message: Mapping[str, Any],
                           reply: Mapping[str, Any] | None, targets: Sequence[Target]) -> None:

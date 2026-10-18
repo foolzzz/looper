@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from enum import Enum
 from typing import Any
 
 import asyncpg
@@ -77,7 +78,7 @@ async def messages(task_id: str, *, after: int = 0, before: int | None = None, l
     return [_message(row) for row in rows]
 
 
-async def get(task_id: str, message_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+async def get(task_id: str, message_id: int, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     row = await pool.fetchrow(f"SELECT {_COLUMNS} FROM room_messages WHERE task_id = $1 AND id = $2",
                               task_id, message_id)
@@ -189,21 +190,67 @@ async def tasks_keeping_sessions(*, days: int, pool: asyncpg.Pool | None = None)
 # --- Consults ---
 
 
-async def add_consult(task_id: str, *, seat: str, question: int, source_run: str | None, runtime: str | None,
-                      pool: asyncpg.Pool | None = None) -> tuple[dict[str, Any], bool]:
-    """``question`` for ``seat``'s consult: added to its queued one, else a new one; the row, and whether it is new."""
+async def consult_lock(conn: asyncpg.Connection, task_id: str) -> None:
+    """One lock per task covers both the consult limit and its seats, separate from the message lock."""
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('room_consults:' || $1, 0))", task_id)
+
+
+async def admit_consult(task_id: str, *, seat: str, question: int, source_run: str | None,
+                        source_record: int | None, runtime: str | None, limit: int,
+                        pool: asyncpg.Pool | None = None) -> tuple[dict[str, Any] | None, bool]:
+    """Add a question to the seat's newest queued consult, else admit one under the task's limit; row and start."""
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
+        await consult_lock(conn, task_id)
         queued = await conn.fetchrow("SELECT * FROM room_consults WHERE task_id = $1 AND seat = $2 AND state = 'queued' "
-                                     "ORDER BY id DESC LIMIT 1 FOR UPDATE", task_id, seat)
+                                     "ORDER BY id DESC LIMIT 1", task_id, seat)
         if queued is not None:
-            row = await conn.fetchrow("UPDATE room_consults SET questions = array_append(questions, $2) WHERE id = $1 "
-                                      "RETURNING *", queued["id"], question)
+            row = await conn.fetchrow("UPDATE room_consults SET questions = CASE WHEN $2 = ANY(questions) THEN "
+                                      "questions ELSE array_append(questions, $2) END WHERE id = $1 RETURNING *",
+                                      queued["id"], question)
             return dict(row), False
-        row = await conn.fetchrow("INSERT INTO room_consults (task_id, seat, questions, source_run, runtime) "
-                                  "VALUES ($1, $2, ARRAY[$3::bigint], $4, $5) RETURNING *",
-                                  task_id, seat, question, source_run, runtime)
-        return dict(row), True
+        if await conn.fetchval("SELECT count(*) FROM room_consults WHERE task_id = $1", task_id) >= limit:
+            return None, False
+        running = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM room_consults WHERE task_id = $1 "
+                                      "AND seat = $2 AND state = 'running')", task_id, seat)
+        row = await conn.fetchrow("INSERT INTO room_consults (task_id, seat, questions, source_run, source_record, runtime) "
+                                  "VALUES ($1, $2, ARRAY[$3::bigint], $4, $5, $6) RETURNING *",
+                                  task_id, seat, question, source_run, source_record, runtime)
+        return dict(row), not running
+
+
+class ConsultStart(str, Enum):
+    """Whether a queued consult can start now."""
+
+    STARTED = "started"
+    GONE = "gone"
+    BUSY = "busy"
+    TASK_ENDED = "task_ended"
+
+
+async def start_consult(consult_id: int, *, consult_run: str, pool: asyncpg.Pool | None = None
+                        ) -> tuple[dict[str, Any] | None, ConsultStart]:
+    """Start a queued consult when its task is active and its seat has none running."""
+    from .tasks import ACTIVE_STATUSES
+
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        task_id = await conn.fetchval("SELECT task_id FROM room_consults WHERE id = $1", consult_id)
+        if task_id is None:
+            return None, ConsultStart.GONE
+        await consult_lock(conn, task_id)
+        row = await conn.fetchrow("SELECT * FROM room_consults WHERE id = $1", consult_id)
+        if row is None or row["state"] != "queued":
+            return None, ConsultStart.GONE
+        status = await conn.fetchval("SELECT status FROM tasks WHERE id = $1", task_id)
+        if status not in ACTIVE_STATUSES:
+            row = await move_consult(consult_id, "failed", expect=("queued",), pool=conn, detail="its task ended first")
+            return row, ConsultStart.TASK_ENDED
+        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM room_consults WHERE task_id = $1 AND seat = $2 "
+                               "AND state = 'running')", task_id, row["seat"]):
+            return dict(row), ConsultStart.BUSY
+        row = await move_consult(consult_id, "running", expect=("queued",), consult_run=consult_run, pool=conn)
+        return row, ConsultStart.STARTED
 
 
 async def consults(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
@@ -216,8 +263,8 @@ async def consult_count(task_id: str, *, pool: asyncpg.Pool | None = None) -> in
     return int(await pool.fetchval("SELECT count(*) FROM room_consults WHERE task_id = $1", task_id))
 
 
-async def move_consult(consult_id: int, state: str, *, expect: Sequence[str], pool: asyncpg.Pool | None = None,
-                       **columns: Any) -> dict[str, Any] | None:
+async def move_consult(consult_id: int, state: str, *, expect: Sequence[str],
+                       pool: asyncpg.Pool | asyncpg.Connection | None = None, **columns: Any) -> dict[str, Any] | None:
     """Move consult ``consult_id`` to ``state`` (and set ``columns``) when it is in one of ``expect``; the row, or None
     when it was not (another moved it first)."""
     pool = pool or get_pool()
@@ -236,6 +283,18 @@ async def latest_run(task_id: str, agent_id: str, *, pool: asyncpg.Pool | None =
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT id, agent_id, session_id, status, metadata, output_text FROM llm_records "
                               "WHERE task_id = $1 AND agent_id = $2 ORDER BY id DESC LIMIT 1", task_id, agent_id)
+    return _run_record(row)
+
+
+async def run_record(record_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """A pinned run record: its session, status, metadata and output."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT id, agent_id, session_id, status, metadata, output_text FROM llm_records "
+                              "WHERE id = $1", record_id)
+    return _run_record(row)
+
+
+def _run_record(row: asyncpg.Record | None) -> dict[str, Any] | None:
     if row is None:
         return None
     record = dict(row)

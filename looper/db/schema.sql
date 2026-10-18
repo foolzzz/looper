@@ -1231,7 +1231,8 @@ CREATE TABLE IF NOT EXISTS room_watches (
 );
 CREATE INDEX IF NOT EXISTS idx_room_watches_open ON room_watches (task_id) WHERE ended_at IS NULL;
 -- A consult: the questions for a seat no run is in that its last run's session answers, read only, in a fork of
--- that session (looper/agents/consult.py). source_run: the run whose session it resumes; consult_run: its own run.
+-- that session (looper/agents/consult.py). source_run: the run whose session it resumes; source_record: its pinned
+-- finished llm_records row; consult_run: its own run.
 -- state: 'queued' (waiting to start, or for room in its task), 'running', then 'answered', or 'fallback' (the
 -- Planner was given the questions, fallback_reason says why) or 'failed' (it ran and gave no usable answer; the
 -- Planner has them too). read_only: how the run was kept from writing ('runtime': its runtime refuses writes;
@@ -1242,6 +1243,7 @@ CREATE TABLE IF NOT EXISTS room_consults (
     seat             TEXT NOT NULL,
     questions        BIGINT[] NOT NULL DEFAULT '{}',
     source_run       TEXT,
+    source_record    BIGINT,
     consult_run      TEXT,
     runtime          TEXT,
     state            TEXT NOT NULL DEFAULT 'queued'

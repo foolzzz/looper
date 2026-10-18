@@ -5,10 +5,11 @@ may never come: Looper resumes a fork of the seat's last run's session, read onl
 its answers in the room as the seat (``via`` ``consult``, the Planner seeing them). When it cannot, the question goes
 to the Planner with the reason (``room.FallbackReason``), as in R1a.
 
-- **What it resumes.** The newest record of the seat's last run (its step's Worker, or Reviewer): its session id,
-  its runtime and provider, its system prompt. Claude Code keeps every session itself; Codex and OMP only the
+- **What it resumes.** The pinned, finished record of the seat's last run (its step's Worker, or Reviewer): its
+  session id, its runtime and provider, its system prompt. Claude Code keeps every session itself; Codex and OMP only the
   sessions of runs in a room (``room.run_session_dir``); Grok in the home its recorded command names. The seat's Agent Profile must still run on that runtime and
-  provider (a session belongs to both, as the Planner's does), else ``runtime_cannot``.
+  provider (a session belongs to both, as the Planner's does), else ``runtime_cannot``. A newer record of that run
+  makes the pin unusable (``no_session``), so an active session is never copied.
 - **A fork.** Claude Code ``--resume <id> --fork-session``; Codex and OMP a copy of the run's session directory;
   Grok a home of its own with a copy of that one session, resumed with ``--fork-session``. The run's own session
   stays as it was, and consults never pile up in it.
@@ -20,9 +21,12 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   ``wrote_files``.
 - **Bounds.** At most ``room_consults_per_task`` a task, ``room_consult_budget_usd`` and
   ``room_consult_timeout_seconds`` each, 20 turns (Claude Code); a seat has one consult at a time, and questions that
-  come while one is queued join it. A consult takes a place under its task's limit of the seat's kind (Worker or
-  Reviewer), as any run does. Its spend is a run of its own (``consult-<12 hex>``), in the task's cost.
-- **Restarts.** The server's start runs the consults left queued or running again (``resume_all``).
+  come while one is queued join it. One lock per task covers both its limit and its seats. A consult takes a place
+  under its task's limit of the seat's kind (Worker or Reviewer), as any run does. Its spend is a run of its own
+  (``consult-<12 hex>``), in the task's cost.
+- **Delivery.** Its end state, answers and unanswered questions for the Planner commit together, once.
+- **Restarts.** Shutdown leaves consults queued or running; killing a run gives its questions to the Planner.
+  The server's start sweeps leftover checkouts and forks, then runs one consult per seat, oldest first (``resume_all``).
 """
 
 from __future__ import annotations
@@ -113,6 +117,7 @@ class ConsultService:
         self.runtime_root = runtime_root
         self.claude_bin = claude_bin
         self._running: set[asyncio.Task[Any]] = set()
+        self._stopping = False
 
     # --- Asking ---
 
@@ -129,18 +134,17 @@ class ConsultService:
             return FallbackReason.NO_SESSION
         record = await db_room.latest_run(task_id, run)
         runtime = ((((record or {}).get("metadata") or {}).get("profile") or {}).get("runtime") or {}).get("type")
-        if record is None or not record.get("session_id") or not runtime:
+        if record is None or record["status"] == "running" or not record.get("session_id") or not runtime:
             return FallbackReason.NO_SESSION
         session_dir = self._session_dir(runtime, task_id, run, record)
         if session_dir is not None and not session_dir.is_dir():
             return FallbackReason.NO_SESSION
-        queued = [c for c in await db_room.consults(task_id) if c["seat"] == member.seat and c["state"] == "queued"]
-        if not queued and await db_room.consult_count(task_id) >= limits.consults_per_task:
+        row, start = await db_room.admit_consult(task_id, seat=member.seat, question=int(question["id"]),
+                                                 source_run=run, source_record=record["id"], runtime=runtime,
+                                                 limit=limits.consults_per_task)
+        if row is None:
             return FallbackReason.LIMIT
-        running = any(c["seat"] == member.seat and c["state"] == "running" for c in await db_room.consults(task_id))
-        row, new = await db_room.add_consult(task_id, seat=member.seat, question=int(question["id"]),
-                                             source_run=run, runtime=runtime)
-        if new and not running:  # a seat has one consult at a time: the next starts when it ends (``_next``)
+        if start:
             self._start(row["id"])
         return None
 
@@ -168,12 +172,15 @@ class ConsultService:
         return step.get("reviewer_id")
 
     def _start(self, consult_id: int) -> None:
+        if self._stopping:
+            return
         task = asyncio.get_running_loop().create_task(self._run(consult_id))
         self._running.add(task)
         task.add_done_callback(self._running.discard)
 
     async def resume_all(self) -> None:
         """At the server's start: run again the consults of running tasks left queued or running."""
+        await asyncio.to_thread(_sweep, self.runtime_root)
         try:
             rows = await db_room.unfinished_consults()
         except Exception:
@@ -182,7 +189,12 @@ class ConsultService:
         for row in rows:
             if row["state"] == "running":
                 await db_room.move_consult(row["id"], "queued", expect=("running",))
-            self._start(row["id"])
+        seats: set[tuple[str, str]] = set()
+        for row in rows:
+            seat = (row["task_id"], row["seat"])
+            if seat not in seats:
+                seats.add(seat)
+                self._start(row["id"])
 
     # --- Running ---
 
@@ -193,10 +205,13 @@ class ConsultService:
         try:
             await self._run_queued(row)
         finally:
-            await self._next(row["task_id"], row["seat"])
+            if not self._stopping:
+                await self._next(row["task_id"], row["seat"])
 
     async def _next(self, task_id: str, seat: str) -> None:
         """Start the seat's next queued consult, once none of its consults runs."""
+        if self._stopping:
+            return
         try:
             rows = [c for c in await db_room.consults(task_id) if c["seat"] == seat]
         except Exception:
@@ -224,10 +239,14 @@ class ConsultService:
                            role=agent, parent_task_id=task_id, step=step_key, instruction="consult")
         try:
             async with self.worker_pool.slot_for(wp):
-                if await db_room.move_consult(consult_id, "running", expect=("queued",), consult_run=run_id) is None:
+                _, started = await db_room.start_consult(consult_id, consult_run=run_id)
+                if started is not db_room.ConsultStart.STARTED:
                     return
                 await self._consult(consult_id, task_id, seat_name, kind, agent, step, run_id)
         except asyncio.CancelledError:
+            if not self._stopping:
+                await asyncio.shield(self._give_up(consult_id, task_id, seat_name, FallbackReason.STOPPED,
+                                                   "its run was stopped"))
             raise
         except _Failed as failed:
             await self._give_up(consult_id, task_id, seat_name, failed.reason, str(failed))
@@ -247,10 +266,13 @@ class ConsultService:
             raise _Failed(FallbackReason.NO_SESSION, "its task or its step is gone")
         project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
         limits = ProjectExecution.from_row(project).room_limits
-        record = await db_room.latest_run(task_id, row["source_run"])
+        record = await db_room.run_record(row["source_record"])
         metadata = (record or {}).get("metadata") or {}
-        if record is None or not record.get("session_id"):
-            raise _Failed(FallbackReason.NO_SESSION, "its last run kept no session")
+        if record is None or not record.get("session_id") or record["status"] == "running":
+            raise _Failed(FallbackReason.NO_SESSION, "its last run kept no finished session")
+        latest = await db_room.latest_run(task_id, row["source_run"])
+        if latest is not None and latest["id"] > record["id"]:
+            raise _Failed(FallbackReason.NO_SESSION, "its seat started another run meanwhile")
         # The seat's profile now, which must still run where the session is: its runtime and its provider.
         role_key = step.get("role_key") if kind is MemberKind.WORK else (
             step.get("review_role_key") if seat_name.split("@", 1)[0] != "reviewer" else None)
@@ -273,68 +295,69 @@ class ConsultService:
             cwd = str(task.get("work_dir") or "")
         if not cwd or not Path(cwd).is_dir():
             raise _Failed(FallbackReason.NO_SNAPSHOT, "the directory its step ran in, and its task's, are gone")
-        read_only = "runtime"
-        if runtime.type not in RUNTIME_READ_ONLY:
-            snapshot = await asyncio.to_thread(_snapshot, Path(task.get("work_dir") or ""),
-                                               self.runtime_root / ".local" / "consults" / run_id)
-            if snapshot is None:
-                raise _Failed(FallbackReason.NO_SNAPSHOT, "its task directory is not a git checkout, and its runtime "
-                                                          "cannot be kept from writing there")
-            cwd, read_only = str(snapshot[2]), "snapshot"
-        questions = [m for m in [await db_room.get(task_id, int(q)) for q in row["questions"]] if m is not None]
-        system_prompt = SystemPrompt(consult_prompt(str(metadata.get("system_prompt") or "")), {
-            "consult": {"seat": seat_name, "source_record": record["id"], "questions": [m["id"] for m in questions],
-                        "read_only": read_only}})
-        prompt = await self._prompt(task_id, seat_name, step, questions)
         fork_dir = self.runtime_root.absolute() / ".local" / runtime.type / "consult-sessions" / task_id / run_id
-        session_dir = self._session_dir(runtime.type, task_id, str(row["source_run"]), record)
-        from .runtimes import RuntimeUnsupported
+        try:
+            read_only = "runtime"
+            if runtime.type not in RUNTIME_READ_ONLY:
+                creating = asyncio.create_task(asyncio.to_thread(
+                    _snapshot, Path(task.get("work_dir") or ""), self.runtime_root / ".local" / "consults" / run_id))
+                try:
+                    snapshot = await asyncio.shield(creating)
+                except asyncio.CancelledError:
+                    snapshot = await creating
+                    raise
+                if snapshot is None:
+                    raise _Failed(FallbackReason.NO_SNAPSHOT, "its task directory is not a git checkout, and its runtime "
+                                                              "cannot be kept from writing there")
+                cwd, read_only = str(snapshot[2]), "snapshot"
+            questions = [m for m in [await db_room.get(task_id, int(q)) for q in row["questions"]] if m is not None]
+            system_prompt = SystemPrompt(consult_prompt(str(metadata.get("system_prompt") or "")), {
+                "consult": {"seat": seat_name, "source_record": record["id"], "questions": [m["id"] for m in questions],
+                            "read_only": read_only}})
+            prompt = await self._prompt(task_id, seat_name, step, questions)
+            session_dir = self._session_dir(runtime.type, task_id, str(row["source_run"]), record)
+            from .runtimes import RuntimeUnsupported
 
-        try:
-            prompt_file = system_prompt.write_file(self.runtime_root)
-            command = runtime.consult_command(launch.executable(self.claude_bin), cwd=cwd, prompt_file=prompt_file,
-                                              launch=launch, session_id=str(record["session_id"]),
-                                              session_dir=session_dir, fork_dir=fork_dir,
-                                              max_turns=CONSULT_MAX_TURNS)
-        except RuntimeUnsupported as exc:
-            _cleanup(snapshot, fork_dir)
-            raise _Failed(FallbackReason.RUNTIME_CANNOT, str(exc)) from None
-        asked = ", ".join(f"#{m['id']}" for m in questions)
-        await self._note(task_id, run_id, f"Consulting {seat_name} for question(s) {asked} (read only: {read_only})")
-        try:
+            try:
+                prompt_file = system_prompt.write_file(self.runtime_root)
+                command = runtime.consult_command(launch.executable(self.claude_bin), cwd=cwd, prompt_file=prompt_file,
+                                                  launch=launch, session_id=str(record["session_id"]),
+                                                  session_dir=session_dir, fork_dir=fork_dir,
+                                                  max_turns=CONSULT_MAX_TURNS)
+            except RuntimeUnsupported as exc:
+                raise _Failed(FallbackReason.RUNTIME_CANNOT, str(exc)) from None
+            asked = ", ".join(f"#{m['id']}" for m in questions)
+            await self._note(task_id, run_id, f"Consulting {seat_name} for question(s) {asked} (read only: {read_only})")
             result, started = await self._execute(task_id, step, run_id, command, cwd, prompt, system_prompt, launch,
                                                   limits.consult_timeout_seconds)
             wrote = await asyncio.to_thread(_changed, snapshot[2]) if snapshot is not None else []
+            denied = len(result.get("permission_denials") or []) if result else 0
+            cost = await _run_cost(task_id, run_id)
+            if not started:
+                raise _Failed(FallbackReason.SESSION_GONE, "its last run's session could not be resumed")
+            if result is None:
+                raise _Failed(FallbackReason.TIMEOUT, f"no answer within {limits.consult_timeout_seconds} s "
+                                                      "(room_consult_timeout_seconds)")
+            if runtime.budget_error(result) is not None:
+                raise _Failed(FallbackReason.BUDGET, f"it reached its spend cap of {budget:g} USD (room_consult_budget_usd)")
+            if wrote:
+                raise _Failed(FallbackReason.WROTE_FILES, f"it changed {', '.join(wrote[:10])}: its answers are dropped")
+            try:
+                answers, unsure = consult_answers(str(result.get("result") or ""), [m["id"] for m in questions])
+            except ValueError as exc:
+                raise _Failed(FallbackReason.CONTRACT, str(exc)) from None
+            left = [m for m in questions if m["id"] not in answers]
+            state = "answered" if not left else "failed"
+            await self.room.finish_consult(
+                task_id, consult_id, seat_name, state=state, expect=("running",),
+                answers=[(m, answers[m["id"]]) for m in questions if m["id"] in answers], to_planner=left,
+                reason=FallbackReason.UNSURE, why=unsure or "the consult gave no answer to it",
+                columns={"read_only": read_only, "denied_writes": denied, "cost_usd": cost, "detail": unsure[:1000]})
+            await self._note(task_id, run_id, f"Consulted {seat_name}: {len(answers)} of {len(questions)} answered"
+                                              + (f", {denied} write(s) refused" if denied else "")
+                                              + (f" (${cost:.4f})" if cost is not None else ""))
         finally:
             await asyncio.to_thread(_cleanup, snapshot, fork_dir)
-        denied = len(result.get("permission_denials") or []) if result else 0
-        cost = await _run_cost(task_id, run_id)
-        if not started:
-            raise _Failed(FallbackReason.SESSION_GONE, "its last run's session could not be resumed")
-        if result is None:
-            raise _Failed(FallbackReason.TIMEOUT, f"no answer within {limits.consult_timeout_seconds} s "
-                                                  "(room_consult_timeout_seconds)")
-        if runtime.budget_error(result) is not None:
-            raise _Failed(FallbackReason.BUDGET, f"it reached its spend cap of {budget:g} USD (room_consult_budget_usd)")
-        if wrote:
-            raise _Failed(FallbackReason.WROTE_FILES, f"it changed {', '.join(wrote[:10])}: its answers are dropped")
-        try:
-            answers, unsure = consult_answers(str(result.get("result") or ""), [m["id"] for m in questions])
-        except ValueError as exc:
-            raise _Failed(FallbackReason.CONTRACT, str(exc)) from None
-        for question in questions:
-            if question["id"] in answers:
-                await self.room.consult_answer(task_id, seat_name, question, answers[question["id"]])
-        left = [m for m in questions if m["id"] not in answers]
-        state = "answered" if not left else "failed"
-        await db_room.move_consult(consult_id, state, expect=("running",), read_only=read_only, denied_writes=denied,
-                                   cost_usd=cost, detail=unsure[:1000])
-        for question in left:
-            await self.room.give_to_planner(task_id, question, seat_name, FallbackReason.UNSURE,
-                                            unsure or "the consult gave no answer to it")
-        await self._note(task_id, run_id, f"Consulted {seat_name}: {len(answers)} of {len(questions)} answered"
-                                          + (f", {denied} write(s) refused" if denied else "")
-                                          + (f" (${cost:.4f})" if cost is not None else ""))
 
     async def _prompt(self, task_id: str, seat_name: str, step: Mapping[str, Any],
                       questions: Sequence[Mapping[str, Any]]) -> str:
@@ -411,15 +434,16 @@ class ConsultService:
     async def _give_up(self, consult_id: int, task_id: str, seat_name: str, reason: FallbackReason,
                        detail: str) -> None:
         """A consult that could not answer: its questions go to the Planner, the askers are told."""
-        row = await db_room.move_consult(consult_id, "fallback" if reason in _BEFORE_RUNNING else "failed",
-                                         expect=("queued", "running"), fallback_reason=reason.value,
-                                         detail=detail[:1000])
+        row = await db_room.get_consult(consult_id)
         if row is None:
             return
-        for question_id in row["questions"]:
-            question = await db_room.get(task_id, int(question_id))
-            if question is not None:
-                await self.room.give_to_planner(task_id, question, seat_name, reason, detail)
+        questions = [m for q in row["questions"] if (m := await db_room.get(task_id, int(q))) is not None]
+        row = await self.room.finish_consult(
+            task_id, consult_id, seat_name, state="fallback" if reason in _BEFORE_RUNNING else "failed",
+            expect=("queued", "running"), answers=[], to_planner=questions, reason=reason, why=detail,
+            columns={"fallback_reason": reason.value, "detail": detail[:1000]})
+        if row is None:
+            return
         await self._note(task_id, row.get("consult_run") or seat_name,
                          f"Could not consult {seat_name} ({reason.value}): {detail}"[:500])
 
@@ -433,6 +457,7 @@ class ConsultService:
             logger.debug("could not note a consult", exc_info=True)
 
     async def stop(self) -> None:
+        self._stopping = True
         for task in list(self._running):
             task.cancel()
         if self._running:
@@ -490,9 +515,29 @@ def _cleanup(snapshot: tuple[Path, Path, Path] | None, fork_dir: Path) -> None:
     """Remove a consult's checkout and its forked session."""
     if snapshot is not None:
         repo, target, _ = snapshot
-        _git(repo, "worktree", "remove", "--force", str(target))
+        try:
+            _git(repo, "worktree", "remove", "--force", str(target))
+        except (OSError, subprocess.SubprocessError):
+            pass
         shutil.rmtree(target, ignore_errors=True)
     shutil.rmtree(fork_dir, ignore_errors=True)
+
+
+def _sweep(runtime_root: Path) -> None:
+    """Remove leftover consult checkouts and forks; no consult runs yet when startup calls this."""
+    for target in (runtime_root / ".local" / "consults").glob("*"):
+        if target.is_dir():
+            try:
+                _git(target, "worktree", "remove", "--force", str(target.absolute()))
+            except (OSError, subprocess.SubprocessError):
+                pass
+            shutil.rmtree(target, ignore_errors=True)
+    for sessions in (runtime_root / ".local").glob("*/consult-sessions"):
+        for child in sessions.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
 
 
 def consulting(rows: Sequence[Mapping[str, Any]]) -> set[str]:
