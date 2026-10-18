@@ -973,22 +973,27 @@ if __name__ == "__main__":
     main(sys.argv[1:])
 """
 
-_FAKE_CODE = "482913"
+# room_consult's code: 20 lowercase letters and digits, which no step can find from its SHA-256 by trying them all (a
+# 6-digit number's took a second, and the second step did that instead of asking).
+CODE_LENGTH = 20
+CODE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+_FAKE_CODE = "k3v9q2x7m4p8w1z6r5t0"
 _FAKE_CODE_SHA = __import__("hashlib").sha256(_FAKE_CODE.encode()).hexdigest()
 
 
 def _code_matches(work_dir: Path) -> str | None:
-    """code.txt holds six digits whose SHA-256 is what code.sha256 holds."""
+    """code.txt holds a code of ``CODE_LENGTH`` characters of ``CODE_ALPHABET`` whose SHA-256 is what code.sha256
+    holds."""
     import hashlib
 
     digest, code = _read(work_dir, "code.sha256"), _read(work_dir, "code.txt")
     if digest is None or code is None:
         return f"missing {'code.sha256' if digest is None else 'code.txt'}"
     code = code.strip()
-    if len(code) != 6 or not code.isdigit():
-        return f"code.txt holds {code[:20]!r}, not six digits"
+    if len(code) != CODE_LENGTH or set(code) - set(CODE_ALPHABET):
+        return f"code.txt holds {code[:40]!r}, not {CODE_LENGTH} lowercase letters and digits"
     if hashlib.sha256(code.encode()).hexdigest() != digest.strip().lower():
-        return "code.txt's number is not the one whose SHA-256 is in code.sha256"
+        return "code.txt's code is not the one whose SHA-256 is in code.sha256"
     return None
 
 
@@ -1038,16 +1043,19 @@ ROOM_TASKS: tuple[EvalTask, ...] = (
         # A second step needs what only the first step's session knows, and the first has ended: the second asks it
         # in the room, and a consult of its session answers.
         id="room_consult",
-        requirement="Do this as two steps, the second after the first. The first step picks a random 6-digit "
-                    "number (pick it yourself; do not derive it from anything), writes only its SHA-256 hex "
-                    "digest (of the six digits, no newline) to code.sha256, and keeps the number itself out of "
-                    "every file, commit and its report. The second step writes that number, the six digits only, "
-                    "to code.txt.",
+        # The first step makes the code up as it runs, so the plan cannot carry it, and tells it only when asked, so
+        # it cannot post it ahead.
+        requirement="Do this as two steps, the second after the first. The first step makes up a random code of "
+                    f"{CODE_LENGTH} lowercase letters and digits while it runs (the plan does not choose it, and it "
+                    "is not derived from anything), writes only its SHA-256 hex digest (of the code, no newline) to "
+                    "code.sha256, and keeps the code itself out of every file, commit and its report, telling it "
+                    "only to whoever asks for it. The second step writes that code, its "
+                    f"{CODE_LENGTH} characters only, to code.txt.",
         check=_code_matches,
         expect={"min_room_consults": 1},
         fake={
-            "plan": [_step("s1", "Pick a 6-digit number; write its SHA-256 to code.sha256.", ["code.sha256 exists"]),
-                     _step("s2", "Write the number s1 picked to code.txt.", ["code.txt holds it"],
+            "plan": [_step("s1", "Make up a code; write its SHA-256 to code.sha256.", ["code.sha256 exists"]),
+                     _step("s2", "Write the code s1 made up to code.txt.", ["code.txt holds it"],
                            depends_on=["s1"])],
             "attempts": {
                 "s1": [{"status": "completed", "files": {"code.sha256": _FAKE_CODE_SHA}}],
@@ -1055,7 +1063,7 @@ ROOM_TASKS: tuple[EvalTask, ...] = (
             },
             # The second step's Worker asks the first's seat, which has ended: a consult answers in its inbox.
             "room_calls": {"s2": [["looper_room_post", {"to": ["worker@s1"], "kind": "question",
-                                                        "body": "Which number did you pick?"}],
+                                                        "body": "Which code did you make up?"}],
                                   ["looper_room_inbox", {"wait_seconds": 60}]]},
             "consult_answer": _FAKE_CODE,
         },

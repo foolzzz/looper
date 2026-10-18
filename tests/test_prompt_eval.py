@@ -209,6 +209,28 @@ def test_a_discipline_counts_once_it_has_a_role_of_its_own_that_names_its_conven
     assert metrics.discipline_roles(strong, ()) == 0
 
 
+@pytest.mark.parametrize(("code", "problem"), [
+    ("k3v9q2x7m4p8w1z6r5t0", None),
+    ("k3v9q2x7m4p8w1z6r5t1", "code.txt's code is not the one whose SHA-256 is in code.sha256"),
+    ("482913", "code.txt holds '482913', not 20 lowercase letters and digits"),
+    ("K3V9Q2X7M4P8W1Z6R5T0", "code.txt holds 'K3V9Q2X7M4P8W1Z6R5T0', not 20 lowercase letters and digits"),
+    (None, "missing code.txt"),
+])
+def test_the_consult_check_takes_only_the_code_whose_digest_the_first_step_wrote(
+        tmp_path: Path, code: str | None, problem: str | None) -> None:
+    import hashlib
+
+    task = next(t for t in TASKS if t.id == "room_consult")
+    (tmp_path / "code.sha256").write_text(hashlib.sha256(b"k3v9q2x7m4p8w1z6r5t0").hexdigest() + "\n")
+    if code is not None:
+        (tmp_path / "code.txt").write_text(code + "\n")
+    assert task.check(tmp_path) == problem
+    # The code is out of reach of trying every one against its digest (a 6-digit number's took a second), so only
+    # the first step's session can give it; the requirement asks for that code.
+    assert len(task_list.CODE_ALPHABET) ** task_list.CODE_LENGTH >= 2 ** 100
+    assert f"{task_list.CODE_LENGTH} lowercase letters and digits" in task.requirement
+
+
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
     from evals.prompt_regression.tasks import TASKS
 
