@@ -62,6 +62,8 @@ _AGENT_DB_READS = (
     ("project_documents", "list_documents", []),
     ("project_documents", "get_content", None),
     ("chat", "recent_conversations", []),
+    ("user_gates", "open_gates", []),
+    ("user_gates", "find_reference", None),
     ("role_templates", "list_templates", []),
 )
 
@@ -278,6 +280,19 @@ def _no_operator_codex_login(tmp_path_factory: pytest.TempPathFactory) -> Any:
         os.environ.pop("CODEX_HOME", None)
     else:
         os.environ["CODEX_HOME"] = previous
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_operator_grok_login(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """No test reaches the operator's Grok login: the login file a Grok run links to is ``auth.json`` in the
+    server's ``GROK_HOME`` (``runtimes.grok_login.login_file``), here an empty directory of the session's."""
+    previous = os.environ.get("GROK_HOME")
+    os.environ["GROK_HOME"] = str(tmp_path_factory.mktemp("grok-home"))
+    yield
+    if previous is None:
+        os.environ.pop("GROK_HOME", None)
+    else:
+        os.environ["GROK_HOME"] = previous
 
 
 @pytest.fixture(scope="session", autouse=True)

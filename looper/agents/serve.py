@@ -41,6 +41,7 @@ from .channels.registry import ChannelRegistry
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
 from . import self_check
+from .gate_courier import GateCourier
 from .gate_service import GateReminders
 from .http_server import AgentHTTPServer
 from .log_redaction import log_to_stderr
@@ -695,14 +696,15 @@ async def _run_agent_system(
     except Exception:
         logger.exception("could not sweep the step worktrees")
 
-    # A Codex login that forked in a run the previous server did not see end (before the session directories
-    # it may be in are reclaimed).
-    from .runtimes import codex_login
-    try:
-        if problem := await codex_login.inspect_at_start(runtime_root):
-            logger.warning("%s", problem)
-    except Exception:
-        logger.warning("could not inspect the Codex homes for a forked login", exc_info=True)
+    # A Codex or Grok login that forked in a run the previous server did not see end (before the session
+    # directories it may be in are reclaimed).
+    from .runtimes import codex_login, grok_login
+    for login, label in ((codex_login, "Codex"), (grok_login, "Grok")):
+        try:
+            if problem := await login.inspect_at_start(runtime_root):
+                logger.warning("%s", problem)
+        except Exception:
+            logger.warning("could not inspect the %s homes for a forked login", label, exc_info=True)
 
     # Before any agent launches: remove the read-only copies of replaced or
     # deleted content that no running process mounts.
@@ -751,6 +753,7 @@ async def _run_agent_system(
         database_check,
         *await asyncio.to_thread(self_check.check_claude, claude_bin),
         await self_check.codex_login_check(),
+        await self_check.grok_login_check(),
         self_check.check_lark_cli(lark_enabled),
         await asyncio.to_thread(self_check.check_git),
     ]
@@ -775,8 +778,10 @@ async def _run_agent_system(
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
     scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url)
-    # It notes the user gates that have waited for the user for their project's reminder interval.
+    # It notes the user gates that have waited for the user for their project's reminder interval; the courier
+    # posts what the gates' discussions say to the chats their tasks came from.
     gate_reminders = GateReminders()
+    gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url)
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                              on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
     supervisor.register(task_router)
@@ -834,6 +839,7 @@ async def _run_agent_system(
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()
+    await gate_courier.start()
     # The consults the last server left queued or running run again.
     await consults.resume_all()
 
@@ -857,6 +863,7 @@ async def _run_agent_system(
         logger.info("shutting down agent system...")
         await consults.stop()
         await gate_reminders.stop()
+        await gate_courier.stop()
         await scheduler.stop()
         await http_server.stop()
         await supervisor.stop_all()

@@ -1,7 +1,7 @@
 """Resident sessions that run one process per turn and resume the session (multi-runtime RFC P2).
 
 A runtime whose CLI runs one turn and exits (Codex's ``exec``, OMP's print
-mode) still serves the Manager and a Planner: each turn is a new process that
+mode, Grok's headless mode) still serves the Manager and a Planner: each turn is a new process that
 resumes the session the previous turn left. ``PerTurnSession`` is what the
 tiers drive for them (``runtimes.ResidentSession``), in place of the one
 long-lived process Claude Code keeps (``claude_cli.ResidentClaude``):

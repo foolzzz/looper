@@ -490,6 +490,21 @@ async def delete_install(install_id: str, *, pool: Executor | None = None) -> bo
     return await pool.execute("DELETE FROM library_installs WHERE id = $1", install_id) == "DELETE 1"
 
 
+async def list_role_items(project_id: str | None, item_ids: Sequence[str] = (), *, pool: Executor | None = None,
+                          ) -> list[dict[str, Any]]:
+    """The enabled installs for the roles a task's Planner defines (``task_role``), global or in ``project_id``,
+    shaped as ``list_installed`` rows; only those of ``item_ids`` when given."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, i.description, s.scope "
+        "FROM library_installs s JOIN library_items i ON i.id = s.item_id "
+        "WHERE s.enabled AND 'task_role' = ANY(s.roles) AND (s.scope = 'global' OR s.project_id = $1) "
+        f"AND (cardinality($2::text[]) = 0 OR i.id = ANY($2::text[])) ORDER BY {_BY_NAME}, s.scope",
+        project_id, list(item_ids),
+    )
+    return [dict(row) for row in rows]
+
+
 async def list_installed(role: str, project_id: str | None, *, pool: Executor | None = None) -> list[dict[str, Any]]:
     """The installs one run of ``role`` in ``project_id`` loads: the enabled ones naming the role, global or in
     the project.

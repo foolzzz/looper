@@ -942,6 +942,14 @@ class ClaudeRunRecorder:
 
             self._spend = RunSpend(launch.profile.provider, launch.model, launch.max_budget_usd)
 
+    @property
+    def record_id(self) -> int | None:
+        return self._record_id
+
+    @property
+    def task_id(self) -> str | None:
+        return self._task_id
+
     async def start(self) -> None:
         from ..db import llm_records
         from .runtimes.instructions import record as instructions_record

@@ -257,10 +257,12 @@ async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[st
 
 
 def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    """A ``task_steps`` row as the plan and the task page read it: ``result`` decoded, the array columns as lists."""
+    """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
+    columns as lists."""
     step = dict(row)
-    if isinstance(step.get("result"), str):
-        step["result"] = json.loads(step["result"])
+    for name in ("result", "review_roles"):
+        if isinstance(step.get(name), str):
+            step[name] = json.loads(step[name])
     for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
                  "missed_messages"):
         step[name] = list(step.get(name) or [])

@@ -1,6 +1,6 @@
 /** Dollars and token counts, as the dashboard shows them. */
 
-import { runProfile, type Compaction, type LlmRecord, type TaskCost } from "@/lib/api";
+import { runProfile, type Compaction, type LlmRecord, type TaskCost, type TaskModelCost } from "@/lib/api";
 
 export function formatUsd(value: number | null | undefined): string {
   if (value == null) return "–";
@@ -26,6 +26,15 @@ export function costCaveats(cost: TaskCost): string[] {
     cost.running ? `${cost.running} still running` : "",
     cost.unpriced_runs ? `${cost.unpriced_runs} without a cost (no result, or no price: tokens only)` : "",
   ].filter(Boolean);
+}
+
+/** Runs still going, without a cost or interrupted, for one model. */
+export function modelRunCaveats(row: TaskModelCost): string {
+  return [
+    row.running ? `${row.running} running` : "",
+    row.unpriced_runs ? `${row.unpriced_runs} without a cost` : "",
+    row.interrupted_runs ? `${row.interrupted_runs} interrupted` : "",
+  ].filter(Boolean).join(", ");
 }
 
 /** How a task's cost was priced: a subscription's usage at API prices ("equivalent"), the providers' prices, or both. */
