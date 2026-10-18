@@ -1,6 +1,6 @@
 name: Go Tests
 
-# The Go port (go/): vet and unit tests. PostgreSQL is not required for G0.
+# The Go port (go/): vet, unit tests, and the disposable-database parity suite.
 on:
   pull_request:
     branches:
@@ -21,6 +21,20 @@ jobs:
     defaults:
       run:
         working-directory: go
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: loopgo_ci
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d loopgo_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
 
@@ -33,4 +47,6 @@ jobs:
         run: go vet ./...
 
       - name: Test
+        env:
+          LOOPGO_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/loopgo_ci
         run: go test ./...

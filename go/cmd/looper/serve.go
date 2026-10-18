@@ -20,6 +20,10 @@ import (
 
 const shutdownTimeout = 10 * time.Second
 
+// schemaTimeout bounds EnsureSchema. The signal context has no deadline, and a
+// stuck connection or advisory lock must not stall startup forever.
+const schemaTimeout = 60 * time.Second
+
 func serve(args []string, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -46,8 +50,18 @@ func serveContext(ctx context.Context, args []string, logger *slog.Logger) error
 		return fmt.Errorf("listen on 127.0.0.1:%d: %w", cfg.Port, err)
 	}
 	logger.Info("listening", "addr", ln.Addr().String(), "version", version)
-	handler := httpapi.New(version, db.Probe{DB: sqlDB}, cfg.WebDir).Handler()
-	return serveListener(ctx, ln, handler, logger, shutdownTimeout)
+	// After listen: a refused database must not stop the port from opening.
+	// Schema SQL errors are logged without the connection string. Python's
+	// data migrations are not run.
+	schemaCtx, schemaCancel := context.WithTimeout(ctx, schemaTimeout)
+	err = db.EnsureSchema(schemaCtx, cfg.DBURL)
+	schemaCancel()
+	if err != nil {
+		logger.Error("ensure schema", "err", db.ErrorText(err))
+	}
+	api := httpapi.New(version, db.Probe{DB: sqlDB}, cfg.WebDir)
+	api.Reads = db.NewStore(sqlDB)
+	return serveListener(ctx, ln, api.Handler(), logger, shutdownTimeout)
 }
 
 func checkWebDir(dir string) error {
@@ -90,6 +104,8 @@ func serveListener(ctx context.Context, ln net.Listener, handler http.Handler, l
 		shutCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		if err := srv.Shutdown(shutCtx); err != nil {
+			// Shutdown left connections open. Close cancels their request contexts.
+			_ = srv.Close()
 			return fmt.Errorf("shutdown http server: %w", err)
 		}
 		return nil

@@ -77,6 +77,14 @@ Golden JSON compares the Go server with the Python server on one seeded
 disposable database (`127.0.0.1:54329`, name `loopgo_*`, dropped after the
 run).
 
+G1a is the slice in the tree now. It applies the schema on startup, refuses
+a non-loopback Host and a cross-origin Origin, and serves `GET /api/status`,
+`GET /api/projects`, and `GET /api/overview`. Golden JSON for those three
+routes is `go/testdata/parity/`. `GET /api/tasks`, `GET /api/tasks/:id`, and
+the cost routes (`/api/agents/<id>/usage`, `/api/llm-records`) return
+`501 {"error":"not implemented in the Go server yet"}` and do not read task
+data. Those endpoints stay for a later card.
+
 ### G2 — write API, no agents
 
 Create a project and a task. Task control: start, stop, cancel, delete.
