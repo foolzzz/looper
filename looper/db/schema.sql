@@ -1200,6 +1200,8 @@ CREATE TABLE IF NOT EXISTS room_messages (
     CONSTRAINT room_messages_answer_replies CHECK (kind <> 'answer' OR reply_to IS NOT NULL),
     CONSTRAINT room_messages_audience CHECK (audience_all OR cardinality(audience) > 0)
 );
+-- All questions covered by one Planner answer; reply_to keeps its primary thread link.
+ALTER TABLE room_messages ADD COLUMN IF NOT EXISTS answers_ids BIGINT[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_room_messages_task ON room_messages (task_id, id);
 CREATE INDEX IF NOT EXISTS idx_room_messages_planner ON room_messages (task_id, id) WHERE planner_pending;
 -- How far each seat of a task has read its room (the ids up to last_read_id); a retry of a step reads on.

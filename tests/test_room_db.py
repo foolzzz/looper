@@ -367,6 +367,21 @@ def test_the_planners_reply_answers_those_who_asked_it(monkeypatch: pytest.Monke
         assert posted is not None and posted["kind"] == "answer" and posted["via"] == "planner_reply"
         assert sorted(posted["audience"]) == ["backend_rd@s1", "fe_rd@s2"]
         assert {run for run, _ in workers.reminded} >= {"worker-1", "worker-2"}
+        questions = [r for r in await db_room.messages("task-r") if r["kind"] == "question"]
+        assert len(questions) == 2
+        assert sorted(posted["answers_ids"]) == [q["id"] for q in questions]
+        assert not (await room.read("task-r", PLANNER, unanswered=True))["messages"]
+        assert (await room.counts("task-r"))["unanswered"] == 0
+        for question in questions:
+            thread = await room.read("task-r", PLANNER, about=question["id"])
+            assert posted["id"] in [m["id"] for m in thread["messages"]]
+        answer_thread = await room.read("task-r", PLANNER, about=posted["id"])
+        assert {q["id"] for q in questions} <= {m["id"] for m in answer_thread["messages"]}
+        assert not any("nobody answered" in line for line in await room.step_summary("task-r", [FE.key, BACKEND.key]))
+        from looper.agents.room import task_view
+        view = await task_view("task-r", unanswered=True)
+        assert view is not None and view["counts"]["unanswered"] == 0 and view["messages"] == []
+        assert view["by_step"]["s1"]["unanswered"] == view["by_step"]["s2"]["unanswered"] == 0
         assert await room.planner_reply("task-r", "", pending) is None
 
     _run(test, monkeypatch)
@@ -599,5 +614,107 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
         record = json.loads(seen.read_text())
         assert "--mcp-config" not in record["argv"]
         assert "task room" not in record["prompt"] and "room" not in record["first_turn"]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("explicit_transaction", [False, True])
+def test_message_ids_follow_task_commit_order(monkeypatch: pytest.MonkeyPatch, explicit_transaction: bool) -> None:
+    from looper.db import room as db_room
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        async with pool.acquire() as first_conn:
+            later = None
+            try:
+                async with first_conn.transaction():
+                    first = await db_room.add("task-r", sender_seat=BACKEND.key, sender_kind="work", kind="info",
+                                              body="first", audience=[FE.key], pool=first_conn)
+
+                    async def add_later() -> Any:
+                        if explicit_transaction:
+                            async with pool.acquire() as conn, conn.transaction():
+                                return await db_room.add("task-r", sender_seat=BACKEND.key, sender_kind="work",
+                                                         kind="info", body="later", audience=[FE.key], pool=conn)
+                        return await db_room.add("task-r", sender_seat=BACKEND.key, sender_kind="work", kind="info",
+                                                 body="later", audience=[FE.key], pool=pool)
+
+                    later = asyncio.create_task(add_later())
+                    await asyncio.sleep(0.05)
+                    assert await db_room.messages("task-r", after=0, pool=pool) == []
+                    assert not later.done(), "a later insert must wait for the first transaction to commit"
+            finally:
+                if later is not None:
+                    second = await asyncio.wait_for(later, timeout=2)
+            rows = await db_room.messages("task-r", after=0, pool=pool)
+            assert [r["id"] for r in rows] == [first["id"], second["id"]]
+            assert [r["id"] for r in await db_room.messages("task-r", after=first["id"], pool=pool)] == [second["id"]]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize(("setting", "cap", "posts"), [
+    ("room_messages_per_task", 20, 24),
+    ("room_post_per_minute", 2, 8),
+    ("room_broadcasts_per_run", 2, 8),
+])
+def test_parallel_posts_respect_limits(monkeypatch: pytest.MonkeyPatch, setting: str, cap: int, posts: int) -> None:
+    from looper.db import room as db_room
+
+    async def test(pool: Any) -> None:
+        settings = {"room_post_per_minute": 60, "room_broadcasts_per_run": 50, setting: cap}
+        await _room_task(pool, **settings)
+        room, _ = _room()
+        original = db_room.count
+
+        async def count(*args: Any, **kwargs: Any) -> int:
+            result = await original(*args, **kwargs)
+            await asyncio.sleep(0.01)  # force overlapping checks when they are not serialized
+            return result
+
+        monkeypatch.setattr(db_room, "count", count)
+        results = await asyncio.gather(*(room.post("task-r", BACKEND, kind="info", body="x", to=["all"])
+                                         for _ in range(posts)), return_exceptions=True)
+        assert sum(isinstance(r, dict) for r in results) == cap
+        assert all(isinstance(r, dict) or isinstance(r, OpError) and r.code is ErrorCode.RATE_LIMITED for r in results)
+        assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE sender_kind = 'work'") == cap
+        if setting == "room_messages_per_task":
+            assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE reason = 'room_full'") == 1
+
+    _run(test, monkeypatch)
+
+
+def test_parallel_watches_respect_run_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import room as db_room
+    from looper.agents.room import WATCHES_PER_RUN
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        room, _ = _room()
+        original = db_room.open_watches
+
+        async def watches(*args: Any, **kwargs: Any) -> Any:
+            result = await original(*args, **kwargs)
+            await asyncio.sleep(0.01)
+            return result
+
+        monkeypatch.setattr(db_room, "open_watches", watches)
+        results = await asyncio.gather(*(room.watch("task-r", FE, kind="announce")
+                                         for _ in range(WATCHES_PER_RUN + 5)), return_exceptions=True)
+        assert sum(isinstance(r, dict) for r in results) == WATCHES_PER_RUN
+        assert all(isinstance(r, dict) or isinstance(r, OpError) and r.code is ErrorCode.RATE_LIMITED for r in results)
+        assert len(await original("task-r", run=FE.run)) == WATCHES_PER_RUN
+
+    _run(test, monkeypatch)
+
+
+def test_post_budget_includes_references(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _room_task(pool, room_message_max_chars=500)
+        room, _ = _room()
+        await room.post("task-r", BACKEND, kind="info", body="x" * 490, files=["f" * 10], to=[FE.key])
+        assert await _refused(room.post("task-r", BACKEND, kind="info", body="x" * 491,
+                                        files=["f" * 10], to=[FE.key])) is ErrorCode.INVALID
+        assert await pool.fetchval("SELECT count(*) FROM room_messages") == 1
 
     _run(test, monkeypatch)

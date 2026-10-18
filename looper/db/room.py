@@ -9,15 +9,16 @@ that plans the task anew (``db.tasks.reset_task_for_restart``).
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 import asyncpg
 
-from .connection import get_pool
+from .connection import _connection, get_pool
 
 _COLUMNS = ("id, task_id, sender_seat, sender_kind, sender_step, sender_run, via, audience_all, audience, cc_planner, "
-            "kind, reason, reply_to, refs, body, planner_pending, created_at")
+            "kind, reason, reply_to, answers_ids, refs, body, planner_pending, created_at")
 
 
 def _message(row: asyncpg.Record) -> dict[str, Any]:
@@ -28,20 +29,37 @@ def _message(row: asyncpg.Record) -> dict[str, Any]:
     return message
 
 
+@asynccontextmanager
+async def task_transaction(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None
+                           ) -> AsyncIterator[asyncpg.Connection]:
+    """Serialize a task's inserts and limit checks through commit, before allocating message ids."""
+    async with _connection(pool or get_pool()) as conn:
+        if conn.is_in_transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", task_id)
+            yield conn
+        else:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", task_id)
+                yield conn
+
+
 async def add(task_id: str, *, sender_seat: str, sender_kind: str, kind: str, body: str,
               audience: Sequence[str] = (), audience_all: bool = False, sender_step: str | None = None,
               sender_run: str | None = None, via: str = "agent", cc_planner: bool = False, reason: str | None = None,
-              reply_to: int | None = None, refs: Sequence[dict[str, Any]] = (), planner_pending: bool = False,
+              reply_to: int | None = None, answers_ids: Sequence[int] = (), refs: Sequence[dict[str, Any]] = (),
+              planner_pending: bool = False,
               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, Any]:
     """Add one message to ``task_id``'s room; the stored row."""
     pool = pool or get_pool()
-    row = await pool.fetchrow(
-        f"INSERT INTO room_messages (task_id, sender_seat, sender_kind, sender_step, sender_run, via, audience_all, "
-        f"audience, cc_planner, kind, reason, reply_to, refs, body, planner_pending) "
-        f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15) RETURNING {_COLUMNS}",
-        task_id, sender_seat, sender_kind, sender_step, sender_run, via, audience_all, list(audience), cc_planner,
-        kind, reason, reply_to, json.dumps(list(refs), ensure_ascii=False), body, planner_pending,
-    )
+    async with task_transaction(task_id, pool=pool) as conn:
+        row = await conn.fetchrow(
+            f"INSERT INTO room_messages (task_id, sender_seat, sender_kind, sender_step, sender_run, via, audience_all, "
+            f"audience, cc_planner, kind, reason, reply_to, answers_ids, refs, body, planner_pending) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::bigint[], $14::jsonb, $15, $16) "
+            f"RETURNING {_COLUMNS}",
+            task_id, sender_seat, sender_kind, sender_step, sender_run, via, audience_all, list(audience), cc_planner,
+            kind, reason, reply_to, list(answers_ids), json.dumps(list(refs), ensure_ascii=False), body, planner_pending,
+        )
     return _message(row)
 
 
@@ -67,7 +85,7 @@ async def get(task_id: str, message_id: int, *, pool: asyncpg.Pool | None = None
 
 
 async def count(task_id: str, *, sender_run: str | None = None, since_seconds: float | None = None,
-                audience_all: bool | None = None, pool: asyncpg.Pool | None = None) -> int:
+                audience_all: bool | None = None, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int:
     """How many of ``task_id``'s messages there are: those ``sender_run`` posted (in the last ``since_seconds``),
     those to everyone or not (``audience_all``)."""
     pool = pool or get_pool()
@@ -117,7 +135,7 @@ async def planner_delivered(task_id: str, ids: Sequence[int], *, pool: asyncpg.P
                        task_id, list(ids))
 
 
-async def has_escalation(task_id: str, reason: str, *, pool: asyncpg.Pool | None = None) -> bool:
+async def has_escalation(task_id: str, reason: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
     pool = pool or get_pool()
     return bool(await pool.fetchval(
         "SELECT EXISTS (SELECT 1 FROM room_messages WHERE task_id = $1 AND kind = 'escalation' AND reason = $2)",
@@ -129,7 +147,7 @@ async def has_escalation(task_id: str, reason: str, *, pool: asyncpg.Pool | None
 
 async def add_watch(task_id: str, *, seat: str, run: str, presence: str | None = None, state: str | None = None,
                     kind: str | None = None, from_seat: str | None = None, until: str = "first",
-                    pool: asyncpg.Pool | None = None) -> int:
+                    pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int:
     pool = pool or get_pool()
     return int(await pool.fetchval(
         "INSERT INTO room_watches (task_id, seat, run, presence, state, kind, from_seat, until) "
@@ -137,7 +155,7 @@ async def add_watch(task_id: str, *, seat: str, run: str, presence: str | None =
         task_id, seat, run, presence, state, kind, from_seat, until))
 
 
-async def open_watches(task_id: str, *, run: str | None = None, pool: asyncpg.Pool | None = None,
+async def open_watches(task_id: str, *, run: str | None = None, pool: asyncpg.Pool | asyncpg.Connection | None = None,
                        ) -> list[dict[str, Any]]:
     """``task_id``'s watches that have not ended (``run``'s only, with it)."""
     pool = pool or get_pool()

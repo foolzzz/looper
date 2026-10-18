@@ -700,8 +700,10 @@ class WorkerPool:
             if seat is not None:
                 # Its token stops working, with the files that carry it, before anything else waits.
                 self.room_ops.revoke_run(worker_id)
-        if seat is not None:
-            await self.room_ops.room.presence_changed(parent_task_id, seat, online=False)
+                try:
+                    await self.room_ops.room.presence_changed(parent_task_id, seat, online=False)
+                except Exception:
+                    logger.exception("worker %s could not announce it left task %s's room", worker_id, parent_task_id)
 
         result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
         await self._bus.publish(MessageEnvelope.create(

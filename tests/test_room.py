@@ -247,3 +247,111 @@ def test_kept_run_sessions_go_with_their_task(tmp_path: Any) -> None:
     removed = sweep_run_sessions(tmp_path, keep=["task-b"])
     assert sorted(p.name for p in removed) == ["task-c", "task-c"]
     assert all(dirs[(kind, "task-b")].exists() for kind in ("codex", "omp"))
+
+
+def test_a_reviewer_answers_only_the_planner() -> None:
+    for targets in ([TO_WORK], [TO_PLANNER, TO_WORK]):
+        with pytest.raises(OpError, match="only the planner") as caught:
+            check_scope(REVIEWER, MessageKind.ANSWER, everyone=False, targets=targets,
+                        reply=QUESTION_FROM_PLANNER_TO_REVIEWER)
+        assert caught.value.code is ErrorCode.FORBIDDEN
+    check_scope(REVIEWER, MessageKind.ANSWER, everyone=False, targets=[TO_PLANNER],
+                reply=QUESTION_FROM_PLANNER_TO_REVIEWER)
+
+
+def test_inbox_subscribes_before_its_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from looper.agents import room as module
+    from looper.agents.project_execution import RoomLimits
+
+    async def run() -> None:
+        room = module.RoomService()
+        calls = 0
+        message = _message("worker@s1", to=(FE.key,))
+
+        async def context(*args: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(limits=RoomLimits())
+
+        async def last_read(*args: Any, **kwargs: Any) -> int:
+            return 0
+
+        async def messages(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # The SELECT's empty result is ready when a post commits and sends its wake.
+                room._wake_inboxes("task")
+                return []
+            return [message]
+
+        monkeypatch.setattr(room, "_context", context)
+        monkeypatch.setattr(module.db_room, "last_read", last_read)
+        monkeypatch.setattr(module.db_room, "messages", messages)
+        result = await asyncio.wait_for(room.inbox("task", FE, wait_seconds=2, peek=True), timeout=0.3)
+        assert [m["id"] for m in result["messages"]] == [1]
+
+    asyncio.run(run())
+
+
+def test_reference_lengths_and_inbox_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from looper.agents import room as module
+    from looper.agents.project_execution import RoomLimits
+
+    async def run() -> None:
+        room = module.RoomService()
+        with pytest.raises(OpError, match=str(module.REF_MAX_CHARS)) as caught:
+            await room._refs(WORKER, ["x" * (module.REF_MAX_CHARS + 1)], [])
+        assert caught.value.code is ErrorCode.INVALID
+        assert await room._refs(WORKER, ["x" * module.REF_MAX_CHARS], [])
+        rows = [{**_message(WORKER.key, to=(FE.key,), id=i), "body": "x" * 20,
+                 "refs": [{"file": "f" * 40}]} for i in (1, 2)]
+
+        async def context(*args: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(limits=RoomLimits())
+
+        async def last_read(*args: Any, **kwargs: Any) -> int:
+            return 0
+
+        async def messages(*args: Any, **kwargs: Any) -> Any:
+            return rows
+
+        monkeypatch.setattr(room, "_context", context)
+        monkeypatch.setattr(module.db_room, "last_read", last_read)
+        monkeypatch.setattr(module.db_room, "messages", messages)
+        monkeypatch.setattr(module, "INBOX_MAX_CHARS", 100)
+        result = await room.inbox("task", FE, peek=True)
+        assert [m["id"] for m in result["messages"]] == [1]
+        assert result["more"]
+
+    asyncio.run(run())
+
+
+def test_delayed_planner_wakes_are_deduplicated() -> None:
+    import asyncio
+
+    from looper.agents.room import RoomService
+    from looper.agents.message import MessageType, planner_address
+
+    async def run() -> None:
+        sent: list[Any] = []
+
+        class Bus:
+            async def publish(self, envelope: Any) -> None:
+                sent.append(envelope)
+
+        room = RoomService(bus=Bus())
+        room.wake_planner_after("task", 0.01)
+        wake = room._wakes["task"]
+        room.wake_planner_after("task", 0.01)
+        assert room._wakes["task"] is wake
+        await asyncio.wait_for(wake, 0.3)
+        assert len(sent) == 1 and sent[0].message_type is MessageType.ROOM_MESSAGE
+        assert sent[0].target == planner_address("task")
+        assert not room._wakes
+
+    asyncio.run(run())

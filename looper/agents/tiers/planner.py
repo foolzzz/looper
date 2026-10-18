@@ -116,7 +116,7 @@ from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
-from ..room import seat_key
+from ..room import REF_MAX_CHARS, seat_key
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
@@ -209,6 +209,7 @@ GATE_IDLE_CHECK_SEC = 60
 GATE_RETRY_WAIT_SEC = RETRY_WAIT_SEC
 # A [ROOM] turn that failed gives its messages again with a newer message, or once this long has passed.
 ROOM_RETRY_SEC = 600
+ROOM_BATCH_MAX_CHARS = 12_000
 # Why an accepted step's branch could not be merged, for the decision turn.
 _MERGE_REASONS = {
     MergeError.CONFLICT: "its changes conflict with what the branch has now",
@@ -2273,51 +2274,74 @@ class PlannerAgent:
             return
         newest = max(int(r["id"]) for r in rows)
         failed_through, failed_at = self._room_failed
-        if newest <= failed_through and time.monotonic() - failed_at < ROOM_RETRY_SEC:
+        retry_in = ROOM_RETRY_SEC - (time.monotonic() - failed_at)
+        if newest <= failed_through and retry_in > 0:
+            room.wake_planner_after(self._task_id, retry_in)
             return
+        message, shown = self._room_message(plan, rows)
         view = plan.view()
         try:
-            reply = await self._ask(TurnKind.ROOM, self._room_message(plan, rows),
+            reply = await self._ask(TurnKind.ROOM, message,
                                     lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
             self._room_failed = (newest, time.monotonic())
+            room.wake_planner_after(self._task_id, ROOM_RETRY_SEC)
             await self._activity("error", f"Planner could not take its room messages: {exc}"[:500])
+            return
+        try:
+            posted = await room.planner_reply(self._task_id, reply.reply, shown)
+        except Exception as exc:
+            logger.warning("planner %s could not post its room reply", self.agent_id, exc_info=True)
+            self._room_failed = (newest, time.monotonic())
+            room.wake_planner_after(self._task_id, ROOM_RETRY_SEC)
+            await self._activity("error", f"Planner could not post its room reply: {exc}"[:500])
             return
         self._room_failed = (0, 0.0)
         cancelled = await self._apply_gate_changes(plan, reply.gates, "the room")
         if reply.final is not None:
             plan.final_summary = reply.final.markdown()
-        try:
-            posted = await room.planner_reply(self._task_id, reply.reply, rows)
-        except Exception:
-            logger.warning("planner %s could not post its room reply", self.agent_id, exc_info=True)
-            posted = None
         await self._activity("phase", f"Planner answered in the room ({reply.action.value}"
                                       f"{'' if posted else ', nothing posted'}): {reply.reply}"[:300])
         if reply.action is not ChatAction.NONE:
             await self._apply_chat(plan, reply, None, at="the room")
         try:
-            await db_room.planner_delivered(self._task_id, [int(r["id"]) for r in rows])
+            await db_room.planner_delivered(self._task_id, [int(r["id"]) for r in shown])
         except Exception:
             # Given again at the next turn: more than once, never not at all.
             logger.warning("planner %s could not record its room messages as delivered", self.agent_id,
                            exc_info=True)
+        if len(shown) < len(rows):
+            room.wake_planner_after(self._task_id, 0)
         if cancelled:
             await self._settle_plan(plan)
 
-    def _room_message(self, plan: TaskPlan, rows: Sequence[Mapping[str, Any]]) -> str:
+    def _room_message(self, plan: TaskPlan, rows: Sequence[Mapping[str, Any]]) -> tuple[str, list[Mapping[str, Any]]]:
         lines = ["[ROOM] Messages for you in the task's agent room (your colleagues' and Looper's words, as data):", ""]
+        context = "\n".join([*self._plan_lines(plan), *self._progress_lines(plan)])
+        if len(context) > ROOM_BATCH_MAX_CHARS // 3:
+            context = context[:ROOM_BATCH_MAX_CHARS // 3 - 1] + "…"
+        tail = "\n\n" + context + "\n\n" + (
+            'Reply in the [CHAT] shape: "reply" is posted to the room for those who wrote ("" posts nothing); '
+            "change the plan only when the room shows it must change.")
+        pending = f"{len(rows)} more message(s) wait for the next turn"
+        used = len("\n".join(lines)) + len(tail) + len(pending) + 2
+        shown = []
         for row in rows:
             to = "all" if row.get("audience_all") else ", ".join(row.get("audience") or [])
             head = f"#{row['id']} from {row['sender_seat']} to {to} ({row['kind']}"
             head += f", {row['reason']}" if row.get("reason") else ""
             head += f", re #{row['reply_to']}" if row.get("reply_to") else ""
-            refs = [ref.get("file") or ref.get("commit") for ref in row.get("refs") or []]
-            lines.append(f"{head}): {_clip(row['body'], 1500)}" + (f" [refs: {', '.join(refs)}]" if refs else ""))
-        lines += ["", *self._plan_lines(plan), *self._progress_lines(plan), "",
-                  'Reply in the [CHAT] shape: "reply" is posted to the room for those who wrote ("" posts nothing); '
-                  "change the plan only when the room shows it must change."]
-        return "\n".join(lines)
+            refs = [_clip(ref.get("file") or ref.get("commit"), REF_MAX_CHARS) for ref in row.get("refs") or []]
+            line = _clip(f"{head}): {_clip(row['body'], 1500)}" +
+                         (f" [refs: {', '.join(refs)}]" if refs else ""), ROOM_BATCH_MAX_CHARS // 3)
+            if used + len(line) + 1 > ROOM_BATCH_MAX_CHARS:
+                break
+            lines.append(line)
+            used += len(line) + 1
+            shown.append(row)
+        if len(shown) < len(rows):
+            lines.append(f"{len(rows) - len(shown)} more message(s) wait for the next turn")
+        return "\n".join(lines) + tail, shown
 
     def _step_seats(self, step: PlanStep) -> list[str]:
         """The room seats of ``step``: its Worker's, its Reviewer's, its review role's."""

@@ -66,6 +66,7 @@ INBOX_MAX_CHARS = 8_000
 FIRST_TURN_MAX_CHARS = 2_000
 WATCHES_PER_RUN = 5
 REFS_MAX = 10
+REF_MAX_CHARS = 200
 READ_LIMIT_MAX = 50
 GIT_TIMEOUT_SEC = 10
 PLANNER = "planner"
@@ -321,6 +322,8 @@ def check_scope(sender: Seat, kind: MessageKind, *, everyone: bool, targets: Seq
         if to_review:
             raise OpError(ErrorCode.FORBIDDEN, f"a Reviewer asks Workers or the planner, not Reviewers "
                                                f"({', '.join(t.name for t in to_review)})")
+        if kind is MessageKind.ANSWER and [t.name for t in targets] != [PLANNER]:
+            raise OpError(ErrorCode.FORBIDDEN, "a Reviewer may answer only the planner")
         if kind is MessageKind.ANSWER and reply is not None and not addressed(reply, sender):
             raise OpError(ErrorCode.FORBIDDEN, "you may answer only a question put to you")
         return
@@ -363,6 +366,8 @@ def message_view(message: Mapping[str, Any], seat: Seat | None = None) -> dict[s
     }
     if message.get("reply_to"):
         view["reply_to"] = message["reply_to"]
+    if message.get("answers_ids"):
+        view["answers_ids"] = list(message["answers_ids"])
     if files := [ref["file"] for ref in refs if ref.get("file")]:
         view["files"] = files
     if commits := [ref["commit"] for ref in refs if ref.get("commit")]:
@@ -376,6 +381,16 @@ def message_view(message: Mapping[str, Any], seat: Seat | None = None) -> dict[s
     if seat is not None and addressed(message, seat):
         view["for_you"] = True
     return view
+
+
+def _message_chars(message: Mapping[str, Any]) -> int:
+    return len(message["body"]) + sum(len(str(ref.get("file") or ref.get("commit") or ""))
+                                      for ref in message.get("refs") or [])
+
+
+def _answered_ids(rows: Iterable[Mapping[str, Any]]) -> set[int]:
+    return {question_id for row in rows if row["kind"] == MessageKind.ANSWER.value
+            for question_id in [row.get("reply_to"), *(row.get("answers_ids") or [])] if question_id is not None}
 
 
 def _line(text: str, limit: int) -> str:
@@ -539,10 +554,6 @@ class RoomService:
         text = str(body or "").strip()
         if not text:
             raise OpError(ErrorCode.INVALID, "body must not be empty")
-        if len(text) > limits.message_max_chars:
-            raise OpError(ErrorCode.INVALID, f"body has {len(text)} characters; this project allows at most "
-                                             f"{limits.message_max_chars} (room_message_max_chars): say it shorter, "
-                                             "and point to files or commits for the details")
         reply = None
         if reply_to is not None:
             reply = await db_room.get(task_id, int(reply_to))
@@ -561,23 +572,31 @@ class RoomService:
         targets = [] if everyone else self._targets(context, sender, names)
         check_scope(sender, message_kind, everyone=everyone, targets=targets, reply=reply)
         refs = await self._refs(sender, files, commits)
-        if sender.kind is not MemberKind.PLANNER:
-            await self._check_rates(task_id, sender, everyone, limits)
-        if await db_room.count(task_id) >= limits.messages_per_task:
+        size = _message_chars({"body": text, "refs": refs})
+        if size > limits.message_max_chars:
+            raise OpError(ErrorCode.INVALID, f"body has {size} characters; this project allows at most "
+                                             f"{limits.message_max_chars} (room_message_max_chars): say it shorter, "
+                                             "and point to files or commits for the details")
+        to_planner = not everyone and any(t.name == PLANNER for t in targets)
+        cc_planner = sender.kind is MemberKind.REVIEW or any(MemberKind.REVIEW in t.kinds for t in targets)
+        stored = None
+        async with db_room.task_transaction(task_id) as conn:
+            if sender.kind is not MemberKind.PLANNER:
+                await self._check_rates(task_id, sender, everyone, limits, pool=conn)
+            if await db_room.count(task_id, pool=conn) < limits.messages_per_task:
+                stored = await db_room.add(
+                    task_id, sender_seat=sender.key, sender_kind=sender.kind.value, kind=message_kind.value, body=text,
+                    audience=[t.name for t in targets], audience_all=everyone, sender_step=sender.step_id,
+                    sender_run=sender.run, cc_planner=cc_planner, reply_to=reply["id"] if reply else None, refs=refs,
+                    planner_pending=to_planner, pool=conn,
+                )
+        if stored is None:
             await self._escalate_once(task_id, Reason.ROOM_FULL, f"The task's room holds {limits.messages_per_task} "
                                       "messages (room_messages_per_task): it takes no more. Settle what is open "
                                       "yourself, or raise the limit in the project's Execution settings.")
             raise OpError(ErrorCode.RATE_LIMITED, f"this task's room is full ({limits.messages_per_task} messages, "
                                                   "room_messages_per_task); tell what you need in your report, and "
                                                   "the Planner was told")
-        to_planner = not everyone and any(t.name == PLANNER for t in targets)
-        cc_planner = sender.kind is MemberKind.REVIEW or any(MemberKind.REVIEW in t.kinds for t in targets)
-        stored = await db_room.add(
-            task_id, sender_seat=sender.key, sender_kind=sender.kind.value, kind=message_kind.value, body=text,
-            audience=[t.name for t in targets], audience_all=everyone, sender_step=sender.step_id,
-            sender_run=sender.run, cc_planner=cc_planner, reply_to=reply["id"] if reply else None, refs=refs,
-            planner_pending=to_planner,
-        )
         if to_planner:
             self._wake_planner(task_id)
         try:
@@ -595,6 +614,8 @@ class RoomService:
         commits = [str(c).strip() for c in commits or () if str(c).strip()]
         if len(files) > REFS_MAX or len(commits) > REFS_MAX:
             raise OpError(ErrorCode.INVALID, f"at most {REFS_MAX} files and {REFS_MAX} commits")
+        if any(len(ref) > REF_MAX_CHARS for ref in [*files, *commits]):
+            raise OpError(ErrorCode.INVALID, f"each reference allows at most {REF_MAX_CHARS} characters")
         if bad := next((c for c in commits if not _COMMIT.fullmatch(c)), None):
             raise OpError(ErrorCode.INVALID, f"{bad!r} is not a commit id (4 to 40 hex digits)")
         refs: list[dict[str, Any]] = [{"file": f, **({"work_dir": sender.work_dir} if sender.work_dir else {})}
@@ -604,13 +625,13 @@ class RoomService:
             refs.append({"commit": commit, "resolved": resolved})
         return refs
 
-    async def _check_rates(self, task_id: str, sender: Seat, everyone: bool, limits: RoomLimits) -> None:
+    async def _check_rates(self, task_id: str, sender: Seat, everyone: bool, limits: RoomLimits, *, pool: Any = None) -> None:
         if sender.run is None:
             return
-        if await db_room.count(task_id, sender_run=sender.run, since_seconds=60) >= limits.post_per_minute:
+        if await db_room.count(task_id, sender_run=sender.run, since_seconds=60, pool=pool) >= limits.post_per_minute:
             raise OpError(ErrorCode.RATE_LIMITED, f"you posted {limits.post_per_minute} messages in the last minute "
                                                   "(room_post_per_minute): wait, or say more in fewer messages")
-        if everyone and await db_room.count(task_id, sender_run=sender.run, audience_all=True) \
+        if everyone and await db_room.count(task_id, sender_run=sender.run, audience_all=True, pool=pool) \
                 >= limits.broadcasts_per_run:
             raise OpError(ErrorCode.RATE_LIMITED, f"this run posted to everyone {limits.broadcasts_per_run} times "
                                                   "(room_broadcasts_per_run): name the seats or roles who need it")
@@ -750,9 +771,14 @@ class RoomService:
         return stored
 
     async def _escalate_once(self, task_id: str, reason: Reason, body: str) -> None:
-        if not await db_room.has_escalation(task_id, reason.value):
-            await self._looper(task_id, MessageKind.ESCALATION, reason, body, audience=[PLANNER], pending=True)
-            self._wake_planner(task_id)
+        async with db_room.task_transaction(task_id) as conn:
+            if await db_room.has_escalation(task_id, reason.value, pool=conn):
+                return
+            await db_room.add(task_id, sender_seat=LOOPER, sender_kind=MemberKind.LOOPER.value,
+                              kind=MessageKind.ESCALATION.value, body=body, audience=[PLANNER], via="looper",
+                              reason=reason.value, planner_pending=True, pool=conn)
+        self._wake_inboxes(task_id)
+        self._wake_planner(task_id)
 
     # --- Reading ---
 
@@ -767,6 +793,8 @@ class RoomService:
         deadline = loop.time() + wait
         waited = False
         while True:
+            event = self._events.setdefault(task_id, asyncio.Event())
+            event.clear()
             last = await db_room.last_read(task_id, seat.key)
             rows = await db_room.messages(task_id, after=last)
             unread = [r for r in rows if r["sender_seat"] != seat.key and visible(r, seat)]
@@ -774,7 +802,6 @@ class RoomService:
             if any(_ends_wait(r, seat) for r in unread) or remaining <= 0:
                 break
             waited = True
-            event = self._events.setdefault(task_id, asyncio.Event())
             try:
                 await asyncio.wait_for(event.wait(), timeout=remaining)
             except asyncio.TimeoutError:
@@ -782,10 +809,10 @@ class RoomService:
         taken: list[dict[str, Any]] = []
         size = 0
         for row in unread:
-            if taken and (len(taken) >= INBOX_MAX_MESSAGES or size + len(row["body"]) > INBOX_MAX_CHARS):
+            if taken and (len(taken) >= INBOX_MAX_MESSAGES or size + _message_chars(row) > INBOX_MAX_CHARS):
                 break
             taken.append(row)
-            size += len(row["body"])
+            size += _message_chars(row)
         more = len(taken) < len(unread)
         if not peek and rows:
             await db_room.mark_read(task_id, seat.key, taken[-1]["id"] if more else rows[-1]["id"])
@@ -804,20 +831,19 @@ class RoomService:
         if about is not None:
             thread = {int(about)}
             by_id = {r["id"]: r for r in rows}
-            node = by_id.get(int(about))
-            while node is not None and node.get("reply_to") in by_id and node["reply_to"] not in thread:
-                thread.add(node["reply_to"])
-                node = by_id[node["reply_to"]]
             grew = True
             while grew:
                 grew = False
                 for row in rows:
-                    if row.get("reply_to") in thread and row["id"] not in thread:
-                        thread.add(row["id"])
-                        grew = True
+                    links = {row.get("reply_to"), *(row.get("answers_ids") or [])} & by_id.keys()
+                    if row["id"] in thread or links & thread:
+                        connected = {row["id"], *links}
+                        if connected - thread:
+                            thread.update(connected)
+                            grew = True
             rows = [r for r in rows if r["id"] in thread]
         if unanswered:
-            answered = {r["reply_to"] for r in rows if r["kind"] == MessageKind.ANSWER.value}
+            answered = _answered_ids(rows)
             rows = [r for r in rows if r["kind"] == MessageKind.QUESTION.value and r["id"] not in answered]
         if kind:
             rows = [r for r in rows if r["kind"] == kind]
@@ -839,8 +865,6 @@ class RoomService:
             raise OpError(ErrorCode.INVALID, "give either presence (a seat or role) or kind (interface or announce)")
         if seat.run is None:
             raise OpError(ErrorCode.FORBIDDEN, "only a step's run watches the room")
-        if len(await db_room.open_watches(task_id, run=seat.run)) >= WATCHES_PER_RUN:
-            raise OpError(ErrorCode.RATE_LIMITED, f"a run keeps at most {WATCHES_PER_RUN} watches")
         names = {m.seat for m in context.members} | set(context.roles())
         now: list[dict[str, Any]] = []
         if presence is not None:
@@ -850,9 +874,12 @@ class RoomService:
                    if presence in (m.seat, m.role)]
         if sender is not None and sender not in names:
             raise OpError(ErrorCode.INVALID, f"no seat or role {sender!r} in this task's room")
-        watch_id = await db_room.add_watch(task_id, seat=seat.key, run=seat.run, presence=presence,
-                                           state=(state or "online") if presence is not None else None, kind=kind,
-                                           from_seat=sender, until=until)
+        async with db_room.task_transaction(task_id) as conn:
+            if len(await db_room.open_watches(task_id, run=seat.run, pool=conn)) >= WATCHES_PER_RUN:
+                raise OpError(ErrorCode.RATE_LIMITED, f"a run keeps at most {WATCHES_PER_RUN} watches")
+            watch_id = await db_room.add_watch(task_id, seat=seat.key, run=seat.run, presence=presence,
+                                               state=(state or "online") if presence is not None else None, kind=kind,
+                                               from_seat=sender, until=until, pool=conn)
         return {"watch": watch_id, **({"now": now} if presence is not None else {}),
                 "note": "a notice comes to your inbox when it happens; this run's watches end with it"}
 
@@ -941,16 +968,20 @@ class RoomService:
     # --- The Planner ---
 
     def _wake_planner(self, task_id: str) -> None:
+        self.wake_planner_after(task_id, self._batch_seconds)
+
+    def wake_planner_after(self, task_id: str, seconds: float) -> None:
+        """Schedule one room wake for a task, sharing the batch timer and its de-duplication."""
         if task_id in self._wakes or self._bus is None:
             return
         try:
-            self._wakes[task_id] = asyncio.get_running_loop().create_task(self._wake_later(task_id))
+            self._wakes[task_id] = asyncio.get_running_loop().create_task(self._wake_later(task_id, seconds))
         except RuntimeError:
             return
 
-    async def _wake_later(self, task_id: str) -> None:
+    async def _wake_later(self, task_id: str, seconds: float) -> None:
         try:
-            await asyncio.sleep(self._batch_seconds)
+            await asyncio.sleep(seconds)
         finally:
             self._wakes.pop(task_id, None)
         try:
@@ -985,6 +1016,7 @@ class RoomService:
             task_id, sender_seat=PLANNER, sender_kind=MemberKind.PLANNER.value, kind=kind.value,
             body=text[: context.limits.message_max_chars], audience=audience, via="planner_reply",
             reply_to=max(m["id"] for m in questions) if questions else None,
+            answers_ids=sorted({m["id"] for m in questions}),
             cc_planner=any(s.startswith(("reviewer@",)) for s in audience))
         for member in context.members:
             if member.seat in audience:
@@ -1004,7 +1036,7 @@ class RoomService:
             s in (r.get("audience") or ()) or s.split("@", 1)[0] in (r.get("audience") or ()) for s in seats)]
         if not sent and not received:
             return []
-        answered = {r["reply_to"] for r in rows if r["kind"] == MessageKind.ANSWER.value}
+        answered = _answered_ids(rows)
         open_out = [r for r in sent if r["kind"] == MessageKind.QUESTION.value and r["id"] not in answered]
         open_in = [r for r in received if r["kind"] == MessageKind.QUESTION.value and r["id"] not in answered]
         interface = [r for r in sent if r["kind"] == MessageKind.INTERFACE.value]
@@ -1028,7 +1060,7 @@ class RoomService:
     async def counts(self, task_id: str) -> dict[str, Any]:
         """The room's numbers, for the task page and the Manager."""
         rows = await db_room.messages(task_id)
-        answered = {r["reply_to"] for r in rows if r["kind"] == MessageKind.ANSWER.value}
+        answered = _answered_ids(rows)
         by_kind: dict[str, int] = {}
         for row in rows:
             by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + 1
@@ -1122,7 +1154,7 @@ async def task_view(task_id: str, *, runs: Mapping[str, tuple[str, datetime]] | 
     consults = await db_room.consults(task_id)
     seats = members(steps, runs or {}, {c["seat"] for c in consults if c["state"] == "running"})
     rows = await db_room.messages(task_id)
-    answered = {r["reply_to"] for r in rows if r["kind"] == MessageKind.ANSWER.value}
+    answered = _answered_ids(rows)
     by_step: dict[str, dict[str, int]] = {}
     for step_key in dict.fromkeys(m.step_key for m in seats):
         mine = [m for m in seats if m.step_key == step_key]
