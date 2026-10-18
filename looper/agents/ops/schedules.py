@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from ...db import connection as db_connection, profile_registry as db_profiles, schedules as db_schedules
+from ...db import connection as db_connection, profile_registry as db_profiles, projects as db_projects, schedules as db_schedules
 from .. import cron, schedules
 from ..project_execution import format_usd
 from ..tiers.journal import clip
@@ -175,13 +175,20 @@ async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
             "shown_to_user": "Looper adds what changed, before and after, after your reply; do not repeat it."}
 
 
-def _raises_a_cap(row: Mapping[str, Any], data: Mapping[str, Any]) -> bool:
-    """Whether a change raises a spend cap of the schedule, or removes one it has."""
+def _raises_a_cap(row: Mapping[str, Any], data: Mapping[str, Any], project_cap: float | None) -> bool:
+    """Whether a change raises a spend cap of the schedule, or removes one it has. A run's cap that is null is the
+    project's per-task cap (``COALESCE(schedule, project)`` at run time), so that is what it is compared as."""
     for cap in CAPS:
-        if cap in data and row[cap] is not None:
-            after = data[cap]
-            if after is None or (isinstance(after, (int, float)) and not isinstance(after, bool) and after > row[cap]):
-                return True
+        if cap not in data:
+            continue
+        before = row[cap] if row[cap] is not None or cap != "run_budget_usd" else project_cap
+        if before is None:
+            continue
+        after = data[cap]
+        if after is None and cap == "run_budget_usd":
+            after = project_cap
+        if after is None or (isinstance(after, (int, float)) and not isinstance(after, bool) and after > before):
+            return True
     return False
 
 
@@ -203,7 +210,8 @@ async def _confirming(call: Call) -> str | None:
                                now=datetime.now(timezone.utc), gated=gated)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
-    if not _raises_a_cap(row, data):
+    project = await db_projects.get_project(row["project_id"])
+    if not _raises_a_cap(row, data, project["task_budget_usd"] if project else None):
         return None
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     after = {**before, **{key: data[key] for key in CAPS if key in data}}

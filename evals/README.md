@@ -225,8 +225,8 @@ description; `--total-cap-usd` covers all the reps, so raise it with them:
   --model opus --reps 3 --tasks planner`, compared with
   `baselines/real-opus.json` (about $19 and 48 minutes);
 - a change to the Manager's prompt or its tools runs `dialogs --mode real
-  --reps 3` (about $1.50 and 14 minutes), and also `dialogs --mode real
-  --manager-model opus --manager-effort xhigh --reps 3` (about $3.50 and 16
+  --reps 3` (about $2.30 and 21 minutes), and also `dialogs --mode real
+  --manager-model opus --manager-effort xhigh --reps 3` (about $5.10 and 24
   minutes).
 
 Each compares with the committed baseline of its model, or with a run of the
@@ -273,10 +273,10 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about a minute. Real mode with haiku cost $1.54 for all ten
-dialogs at `--reps 3` (about $0.51 and 5 minutes a rep, measured at
-`68d7b953c`), so the default `--total-cap-usd` (0.50) stops it after about one
-rep: give it one that covers all the reps, such as 3:
+MCP; it takes about two minutes. Real mode with haiku cost $2.30 for all
+sixteen dialogs at `--reps 3` (about $0.77 and 7 minutes a rep, measured at
+`b4d3e4356`), so the default `--total-cap-usd` (0.50) stops it before the
+first rep ends: give it one that covers all the reps, such as 4:
 
 ```bash
 uv run --extra test python -m evals.prompt_regression dialogs --mode real \
@@ -285,10 +285,10 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
-model, the other roles on `--model`; all ten dialogs at `--reps 3` cost $3.49
-in about 16 minutes, about $1.16 a rep, the costliest single dialog
+model, the other roles on `--model`; all sixteen dialogs at `--reps 3` cost
+$5.14 in about 24 minutes, about $1.71 a rep, the costliest single dialog
 `config_tools` at about $0.22; give it `--max-budget-usd 3.0` and a
-`--total-cap-usd` such as 6),
+`--total-cap-usd` such as 8),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex or
 OMP agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is

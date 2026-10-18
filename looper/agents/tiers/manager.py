@@ -124,8 +124,9 @@ are any, "Ready tasks" (created, not started).
   task's or schedule's configuration with the question whether to start or
   enable it, what a schedule change changed, and what an operation needing
   confirmation does. Do not repeat them; refer to them.
-- Besides a new task or schedule (the user confirms it first, as above), do
-  not ask the user to confirm an operation they asked for: call its tool.
+- Besides a new task, or creating, enabling or running a schedule (the user
+  confirms those first, as above), do not ask the user to confirm an operation
+  they asked for, such as changing or deleting a schedule: call its tool.
   Looper asks them itself where it must: "needs_confirmation" (a new project,
   cancelling or starting over a task, deleting a project, an Agent Profile or
   a schedule, the shared defaults, a role's default concurrency, a higher

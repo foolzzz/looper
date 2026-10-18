@@ -255,6 +255,27 @@ def test_a_spend_cap_lowered_or_added_changes_at_once(
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize(("project_cap", "fields", "asks"), [
+    (5, {"run_budget_usd": 100}, True),  # null is the project's cap: $100 raises it
+    (5, {"run_budget_usd": 3}, False),  # below the project's cap
+    (5, {"run_budget_usd": 5}, False),
+    (None, {"run_budget_usd": 100}, False),  # the project has none either: any value is a decrease
+], ids=["above-project", "below-project", "equal-project", "no-project-cap"])
+def test_a_run_cap_the_schedule_does_not_set_is_the_projects_when_raising_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_cap: float | None, fields: dict[str, Any], asks: bool,
+) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool, "calc", str(tmp_path))
+        await pool.execute("UPDATE projects SET task_budget_usd = $1 WHERE id = $2", project_cap, project["id"])
+        await _schedule(project, "nightly")
+        (answer,) = await _Chat(tmp_path).say("改上限", (TOOL, {"action": "update", "schedule": "nightly",
+                                                               "fields": fields}))
+        assert answer["status"] == ("needs_confirmation" if asks else "ok"), answer
+        assert (await _view("nightly"))["run_budget_usd"] == (None if asks else fields["run_budget_usd"])
+
+    _run(test, monkeypatch)
+
+
 def test_a_change_the_dashboard_would_refuse_is_refused_before_anything_is_asked(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
