@@ -324,10 +324,10 @@ def test_every_role_run_ends_with_the_boundaries_and_a_built_in_run_is_as_before
 def test_a_role_run_loads_the_items_its_role_names_and_no_other_run_does(ran: dict[str, Any]) -> None:
     roles_task = ran["ids"]["roles"]
     loaded = {(m["agent_id"], (m["prompt_layers"].get("task_role") or {}).get("version")):
-              [item["name"] for item in (m.get("library") or {}).get("items") or []]
+              [item["name"] for item in (m.get("library") or {}).get("items") or [] if item["name"] != "looper"]
               for m in ran["layers"] if m["task_id"] == roles_task and m["agent_id"].startswith("worker-")}
     by_version = {version: names for (_, version), names in loaded.items()}
-    # tester v1 names the skill; v2 (the Planner's rewrite) names none, and the built-in Worker never loads it.
+    # (The room's own MCP server, `looper`, is in every run's items.) tester v1 names the skill; v2 (the Planner's rewrite) names none, and the built-in Worker never loads it.
     assert by_version == {1: ["role-notes"], 2: [], None: []}
     read = next(c["answer"]["result"] for c in _calls(ran, "roles") if c["tool"] == "looper_task_roles")
     assert [item["name"] for item in read["role_items"]] == ["role-notes"]
