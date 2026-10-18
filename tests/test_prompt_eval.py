@@ -666,6 +666,41 @@ def test_a_failure_that_is_not_caught_lets_the_cases_in_flight_end_and_is_raised
     assert started == ["a", "b"] and [r["id"] for r in results] == ["b"]
 
 
+def test_parallel_runs_under_a_cap_need_the_cases_own_budget() -> None:
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        raise AssertionError("no case should start")
+
+    with pytest.raises(runner.EvalError, match="--case-budget-usd"):
+        runner.run_suite((_task("a"),), run_one, total_cap_usd=1.0, jobs=2)
+    with pytest.raises(runner.EvalError, match="--case-budget-usd"):
+        runner.run(mode="real", tasks=(_task("a"),), admin_url="postgresql://unused/postgres", out_dir=Path("."),
+                   total_cap_usd=1.0, max_budget_usd=0.25, jobs=2)
+
+
+def test_an_interrupt_ends_the_cases_in_flight_before_the_run_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    running = threading.Event()
+    ended: list[str] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        running.set()
+        while not runner.INTERRUPTED.is_set():
+            time.sleep(0.01)
+        time.sleep(0.2)  # the case takes a moment to wind down
+        ended.append(task.id)
+        raise runner.EvalError("the run was interrupted")
+
+    def interrupt(*_args: Any, **_kwargs: Any) -> Any:
+        assert running.wait(5)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "wait", interrupt)
+    results: list[dict[str, Any]] = []
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_suite((_task("a"),), run_one, total_cap_usd=None, jobs=2, results=results)
+    assert ended == ["a"]  # joined before the exception left run_suite
+    assert not any(t.name.startswith("eval-case") and t.is_alive() for t in threading.enumerate())
+
+
 def test_ports_handed_out_in_one_process_are_distinct() -> None:
     with ThreadPoolExecutor(max_workers=8) as pool:
         ports = list(pool.map(lambda _: runner.free_port(), range(64)))
@@ -885,6 +920,16 @@ def test_fake_mode_runs_cases_in_parallel_with_the_same_rows(tmp_path: Path) -> 
         ("single_step", 1, "pass"), ("dependent_steps", 1, "pass"), ("single_step", 2, "pass"),
         ("dependent_steps", 2, "pass")]
     assert len({r["work_dir"] for r in written["tasks"]}) == 4
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_parallel_dialogs_each_keep_their_own_agent_and_manager(tmp_path: Path) -> None:
+    code = cli.main(["dialogs", "--mode", "fake", "--pg-url", str(DSN), "--out-dir", str(tmp_path),
+                     "--dialogs", "ask_project,status", "--jobs", "2"])
+    written = json.loads(next(tmp_path.glob("*-dialogs-fake.json")).read_text(encoding="utf-8"))
+    assert code == 0 and [(r["id"], r["outcome"]) for r in written["dialogs"]] == [
+        ("ask_project", "pass"), ("status", "pass")]
+    assert written["agent"] and written["manager_agent"] == written["agent"]
 
 
 _STALLED = EvalTask(

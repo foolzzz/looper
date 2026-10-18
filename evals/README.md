@@ -218,14 +218,15 @@ uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/ru
 A pull request runs real mode only on what its change touches, and pastes the
 tables into its description. Before a release, one run of the full tiers
 refreshes the baselines. `--total-cap-usd` covers all the reps, so raise it
-with them.
+with them. Every `--jobs` command below also takes `--case-budget-usd` (1 for
+haiku, 3 for opus; see Running cases in parallel).
 
 Per pull request, on the tasks and dialogs the change touches plus any new
 ones, with `--reps 2` and haiku (`--tasks a,b` or a task set, `--dialogs a,b`):
 
 - a change to model-visible content (a recommended prompt, a contract, the
   injection order, the injected context) runs those tasks:
-  `run --mode real --reps 2 --tasks <ids> --jobs 4`;
+  `run --mode real --reps 2 --tasks <ids> --jobs 4 --case-budget-usd 1`;
 - a change to the Planner's prompt, its contracts, the plan contract or the
   context the Planner receives also runs them on opus, `run --mode real
   --model opus --reps 2 --tasks <ids> --jobs 4`, compared with
@@ -254,8 +255,11 @@ project, a working directory and a task of its own; `dialogs` gives each case
 its own database, server, port and directories. The rows keep the task/rep
 order whatever finishes first. `--total-cap-usd` still holds with cases in
 flight: while others run, a case starts only when what is spent plus the
-`--max-budget-usd` of every case in flight and of this one is within the cap
-(a case alone is cut at the cap, as before). More jobs load the machine and the
+`--case-budget-usd` (the most one case may spend; required with `--jobs` above
+1 in real mode, since `--max-budget-usd` caps each Claude call and a case makes
+several) of every case in flight and of this one is within the cap (a case
+alone is cut at the cap, as before). On Ctrl-C the cases in flight cancel their
+tasks and end before the run writes its file. More jobs load the machine and the
 model's rate limit, so keep `--task-timeout` generous on a busy host.
 
 Each compares with the committed baseline of its model, or with a run of the

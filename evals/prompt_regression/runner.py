@@ -156,6 +156,9 @@ def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
 # --- Server --------------------------------------------------------------------------------------------
 
 
+# Set when a run is interrupted: cases in flight cancel their task and end, so no thread outlives the run.
+INTERRUPTED = threading.Event()
+
 _ISSUED_PORTS: set[int] = set()
 _PORT_LOCK = threading.Lock()
 
@@ -383,6 +386,8 @@ def run_task(
         edit_pending = task.edit_requirement is not None
         stopped_by_cap = timed_out = False
         while True:
+            if INTERRUPTED.is_set():
+                raise EvalError("the run was interrupted")
             detail = api.get(f"/api/tasks/{task_id}")
             status = detail.get("status")
             if status in metrics.TERMINAL_STATUSES:
@@ -550,13 +555,18 @@ def run_suite(
     made, always in task/rep order (a new list without), so a caller keeps what is done when the run stops
     midway. Returns the rows and whether the cap stopped the run.
 
-    Up to ``jobs`` cases run at once. While others are in flight, a case starts only when what is spent, plus
-    ``run_budget_usd`` for each in-flight case and for this one, stays within the cap, and its ``cap_left`` is the
+    Up to ``jobs`` cases run at once; under a total cap that needs ``run_budget_usd``, the most one case may spend
+    (not the per-call ``--max-budget-usd``). While others are in flight, a case starts only when what is spent,
+    plus ``run_budget_usd`` for each in-flight case and for this one, stays within the cap, and its ``cap_left`` is the
     cap less what is spent and reserved. A case alone is cut at the cap alone, as with one job.
     """
+    if jobs > 1 and total_cap_usd is not None and not run_budget_usd:
+        raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd: what one case may spend "
+                        "(--max-budget-usd caps each Claude call, and a case makes several)")
     results = [] if results is None else results
     cases = [(task, rep) for rep in range(1, reps + 1) for task in tasks]
     budget = run_budget_usd or 0.0
+    INTERRUPTED.clear()
     rows: dict[int, dict[str, Any]] = {}
     flushed = 0
     spent = 0.0
@@ -615,9 +625,11 @@ def run_suite(
                 rows[position] = row
             flush()
     except BaseException:
-        pool.shutdown(wait=False, cancel_futures=True)
+        INTERRUPTED.set()
+        pool.shutdown(wait=True, cancel_futures=True)  # the cases in flight cancel their tasks and end
+        INTERRUPTED.clear()
         for future, position in in_flight.items():
-            if future.done() and future.exception() is None:
+            if future.done() and not future.cancelled() and future.exception() is None:
                 rows[position] = future.result()
         for position in sorted(rows):
             results.append(rows[position])
@@ -685,6 +697,7 @@ def run(
     reps: int = 1,
     user_gates: str | None = None,
     jobs: int = 1,
+    case_budget_usd: float | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``), ``jobs`` at a time on the one server
     (each in a project, a working directory and a task of its own); returns the run and the JSON file
@@ -707,6 +720,8 @@ def run(
         raise EvalError(f"reps must be at least 1, not {reps}")
     if jobs < 1:
         raise EvalError(f"jobs must be at least 1, not {jobs}")
+    if jobs > 1 and total_cap_usd is not None and not case_budget_usd:
+        raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -758,7 +773,7 @@ def run(
                 reps=reps,
                 results=results,
                 jobs=jobs,
-                run_budget_usd=max_budget_usd,
+                run_budget_usd=case_budget_usd,
             )
     except BaseException as exc:
         aborted = aborted_reason(exc)
