@@ -138,15 +138,18 @@ def lead(summary: str | None) -> str:
 
 
 def notice_text(task_id: str, name: str, status: str, summary: str | None, *, channel: NotifyChannel,
-                dashboard_url: str = "") -> str:
-    """What ended and how, the start of its summary (or closing note), and the link to the task, as Markdown for
-    ``channel``. ``name`` is what the user asked for, else the requirement; the task id when both are empty."""
+                dashboard_url: str = "", extra: str | None = None) -> str:
+    """What ended and how, the start of its summary (or closing note), ``extra`` (where a worktree task's work is),
+    and the link to the task, as Markdown for ``channel``. ``name`` is what the user asked for, else the
+    requirement; the task id when both are empty."""
     flat = " ".join(name.split())
     shown = (flat if len(flat) <= NAME_CHARS else f"{flat[:NAME_CHARS]}…") or task_id
     head = "✅ 任务完成" if db_tasks.task_group(status) is db_tasks.TaskGroup.COMPLETED else "❌ 任务失败"
     lines = [f"{head} · {shown}"]
     if text := lead(summary):
         lines.append(text)
+    if extra:
+        lines.append(extra)
     lines.append(link_line(task_link(dashboard_url, task_id), channel))
     return "\n".join(lines)
 

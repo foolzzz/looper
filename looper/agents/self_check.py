@@ -304,7 +304,7 @@ async def check_step_worktrees(projects: Sequence[Mapping[str, Any]] | None) -> 
             continue
         size = ws._size_text(await ws.checkout_size(found.toplevel))
         text = f"{name}: {ws.short_branch(found.branch)}, {size} checkout"
-        missing = [path for path in project.get("step_workspace_links") or ()
+        missing = [path for path in project.get("workspace_links") or ()
                    if not os.path.lexists(Path(work_dir) / path)]
         if missing:
             problems.append(f"{text}, nothing to link at {', '.join(missing)}")

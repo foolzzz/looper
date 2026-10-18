@@ -410,7 +410,7 @@ def test_doctor_checks_git_and_the_directories_of_projects_with_step_worktrees(t
         conn = await asyncpg.connect(url)
         try:
             await ensure_schema(conn)
-            await conn.execute("INSERT INTO projects (id, name, work_dir, step_workspaces, step_workspace_links) "
+            await conn.execute("INSERT INTO projects (id, name, work_dir, step_workspaces, workspace_links) "
                                "VALUES ('proj-a', 'alarm', $1, 'worktree', $2)", str(checkout), [".venv", ".env"])
         finally:
             await conn.close()

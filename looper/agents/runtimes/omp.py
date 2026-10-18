@@ -76,6 +76,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, run_usage
+from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
     instructions,
@@ -129,6 +130,7 @@ IDLE_SEC = 24 * 3600
 
 
 class OmpRuntime(RuntimeAdapter):
+    can_replace_system_prompt = True
     type = "omp"
     label = "OMP"
     default_executable = "omp"
@@ -207,9 +209,11 @@ class OmpRuntime(RuntimeAdapter):
         project = instructions.injected_section(self.instruction_files(cwd), self.label)
         prompt = write_prompt(home, "\n\n---\n\n".join(
             part for part in (project, runtime_notes(), Path(prompt_file).read_text(encoding="utf-8")) if part))
+        prompt_flag = ("--system-prompt" if launch.system_prompt_mode is SystemPromptMode.REPLACE
+                       else "--append-system-prompt")
         return [
             "env", f"HOME={home}", executable, *self.launch_args(launch),
-            "--config", str(home / OVERLAY), "--append-system-prompt", str(prompt),
+            "--config", str(home / OVERLAY), prompt_flag, str(prompt),
             *(["--plugin-dir", str(home / "plugins" / MCP_PLUGIN)] if mcp else []),
         ]
 

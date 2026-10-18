@@ -254,6 +254,7 @@ class TestRecord:
 
         assert Launch().args() == [*permission_args(), "--model", "opus", *TEAMMATE_MODE_ARGS]  # it has agent teams
         assert Launch().record() == {
+            "system_prompt_mode": "append",
             "profile": {**BUILTIN_PROFILE.record(), "source": "builtin"},
             "model_choice": {"model": "opus", "source": "builtin", "effort": None},
             "settings_sources": {"harness": "builtin", "profile": "builtin", "effort": "builtin", "env": {},

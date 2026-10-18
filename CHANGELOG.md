@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Added
+
+- Agent Profiles can explicitly replace the runtime's default system prompt
+  (`system_prompt_mode: replace`) in Claude Code, Codex, Grok and OMP. The
+  default `append` preserves existing commands and generated files. Unsupported
+  runtimes refuse replacement on save and import; the profile editor explains
+  why, and run history records and displays the selected mode.
+
 ## [2.7.0] - 2026-10-16
 
 Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #166 in

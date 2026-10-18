@@ -261,6 +261,30 @@ CREATE INDEX IF NOT EXISTS idx_step_workspaces_task ON step_workspaces (task_id,
 -- A step has one workspace in use at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_step_workspaces_open ON step_workspaces (step_id)
     WHERE state IN ('active', 'merging');
+-- A task's workspace: the directory the user named for it (workspace_dir; '' for a task from before, whose
+-- work_dir is its workspace), how it runs there (workspace_mode: 'in_place', also when NULL, or 'worktree': in a
+-- git worktree of it, on a branch of its own) and where that branch starts (workspace_base; '': the workspace's
+-- commit when the task first starts). work_dir is where the task runs: the workspace, or the task's worktree.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_dir TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_mode TEXT CHECK (workspace_mode IN ('in_place', 'worktree'));
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workspace_base TEXT NOT NULL DEFAULT '';
+-- The git worktree a task runs in, in a worktree workspace: made when the task first starts, removed when it
+-- completes or is deleted (its branch stays in the user's repository), kept while it is stopped or failed.
+-- Code owns the states (looper/agents/task_workspaces.py).
+CREATE TABLE IF NOT EXISTS task_worktrees (
+    task_id        TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    repo_dir       TEXT NOT NULL,
+    subdir         TEXT NOT NULL DEFAULT '',
+    path           TEXT NOT NULL,
+    branch         TEXT NOT NULL,
+    base_commit    TEXT NOT NULL,
+    links          TEXT[] NOT NULL DEFAULT '{}',
+    state          TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'removed')),
+    result_commit  TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    removed_at     TIMESTAMPTZ,
+    CONSTRAINT task_worktrees_removed_check CHECK ((state = 'removed') = (removed_at IS NOT NULL))
+);
 -- links: the paths linked back to the task directory in it; merge_files: the files that kept an unmerged one from
 -- merging (the conflicting or blocking ones).
 ALTER TABLE step_workspaces ADD COLUMN IF NOT EXISTS links TEXT[] NOT NULL DEFAULT '{}';
@@ -407,6 +431,9 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 -- registry sets a new profile's (profile_registry.default_agent_teams) and a migration below turned them on once
 -- for the profiles before; the column's default is for the other runtimes, which have none.
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
+-- Existing profiles append the Looper prompt; replacement must be selected explicitly.
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS system_prompt_mode TEXT NOT NULL DEFAULT 'append'
+    CHECK (system_prompt_mode IN ('append', 'replace'));
 -- A task's profile overrides: its own choice of Agent Profile for some of its
 -- roles (the Planner, Workers or Reviewers), the only agent setting a task has.
 -- Each wins over every layer, for that task only; a profile a task chose cannot
@@ -615,9 +642,21 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_p
 -- Where a step that runs alongside others works: the task directory ('shared', also when NULL) or, in a git
 -- checkout, a worktree of its own merged back when it is accepted ('worktree').
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree'));
--- The paths, relative to the task directory, that such a worktree links back to the task directory's (NULL: none).
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspace_links TEXT[]
-    CHECK (cardinality(step_workspace_links) <= 20);
+-- The paths Looper's worktrees of the project link back to the directory they come from (NULL: none). Named
+-- step_workspace_links before task worktrees used it too (never released under that name).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+               AND table_name = 'projects' AND column_name = 'step_workspace_links') THEN
+        ALTER TABLE projects RENAME COLUMN step_workspace_links TO workspace_links;
+    END IF;
+END $$;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS workspace_links TEXT[] CHECK (cardinality(workspace_links) <= 20);
+-- Where a task that names no workspace of its own runs: in the project's directory ('in_place', also when NULL)
+-- or in a git worktree of it ('worktree'; what a new project gets), and whether the project's agents get the
+-- operator's Claude Code notes for their directory ('on', also when NULL; 'off').
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_workspaces TEXT CHECK (task_workspaces IN ('in_place', 'worktree'));
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS operator_notes TEXT CHECK (operator_notes IN ('off', 'on'));
 -- How many times the Planner may retry one step (NULL: 2).
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
     CHECK (max_step_retries >= 0 AND max_step_retries <= 20);
@@ -1350,6 +1389,17 @@ BEGIN
         ALTER TABLE schedules ADD CONSTRAINT schedules_notify_check
             CHECK (notify IN ('failures', 'alerts', 'always', 'never'));
         INSERT INTO schema_migrations (name) VALUES ('schedules_notify_alerts');
+    END IF;
+END $$;
+-- Once: a schedule a configuration import created says so (created_via 'import'), beside the dashboard's and the
+-- Manager's.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_created_via_import') THEN
+        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_created_via_check;
+        ALTER TABLE schedules ADD CONSTRAINT schedules_created_via_check
+            CHECK (created_via IN ('dashboard', 'manager', 'import'));
+        INSERT INTO schema_migrations (name) VALUES ('schedules_created_via_import');
     END IF;
 END $$;
 -- When the schedule was created or last enabled (set when enabled turns true): the no-success alert counts from it

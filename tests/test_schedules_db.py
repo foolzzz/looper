@@ -800,8 +800,8 @@ def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPat
     _run(test, monkeypatch, tmp_path)
 
 
-def test_an_export_and_import_with_schedules_present_still_work(monkeypatch: pytest.MonkeyPatch,
-                                                                tmp_path: Path) -> None:
+def test_an_export_carries_the_schedules_and_importing_it_here_again_leaves_them_running(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from tests.test_config_transfer_db import _looper
 
     async def test(env: _Env) -> None:
@@ -813,9 +813,11 @@ def test_an_export_and_import_with_schedules_present_still_work(monkeypatch: pyt
         exported = tmp_path / "config.json"
         code, _, err = await _looper(monkeypatch, url, "config", "export", str(exported), "--include-projects")
         assert code == 0, err
-        assert "schedule" not in exported.read_text()  # not exported yet (S3)
+        (project,) = json.loads(exported.read_text())["projects"]
+        assert [s["name"] for s in project["schedules"]] == ["nightly"]
         code, _, err = await _looper(monkeypatch, url, "config", "import", str(exported), "--apply")
         assert code == 0, err
-        assert await env.pool.fetchval("SELECT count(*) FROM schedules") == 1
+        # Its settings match: the import leaves it as it is, enabled.
+        assert [tuple(r) for r in await env.pool.fetch("SELECT name, enabled FROM schedules")] == [("nightly", True)]
 
     _run(test, monkeypatch, tmp_path)

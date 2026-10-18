@@ -218,6 +218,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   In <directory>:                                     each directory once, then one line
   - <title>: <summary> (<path>)                       per document, its path relative to it
 
+  ## The operator's notes for this directory      L3 (unless operator_notes is off, when the directory
+  ...                                                 has some): a read-only copy of the operator's
+                                                      Claude Code auto memory (Task workspaces)
+
   ## Task                                         L4: what this session is for
   ...                                                 (Planner: the task; Worker, Reviewer: the step)
 
@@ -929,8 +933,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   the run's MCP servers as `[mcp_servers.<name>]`, stdio and HTTP; Codex's
   own skill list and plugin sync off; `project_doc_fallback_filenames =
   ["CLAUDE.md"]`, so a project directory without `AGENTS.md` gives its
-  `CLAUDE.md`) and `AGENTS.md`: a short block of Codex runtime notes, then
-  the system prompt. The operator's `~/.codex` is
+  `CLAUDE.md`) and `AGENTS.md`: in append mode, a short block of Codex runtime
+  notes, then the system prompt. In replace mode the same text is stored in
+  `codex/instructions/<sha256>.md`, referenced by the top-level
+  `model_instructions_file` key; the home's `AGENTS.md` is empty. The operator's `~/.codex` is
   never read. A Worker or Reviewer is one `--ephemeral` process with its
   prompt on stdin, which then closes: it cannot be steered while it runs (in
   a task with an agent room, one that keeps its session in a home of its own:
@@ -1004,8 +1010,8 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   past the operator's home, so there the sources that climb (`native`,
   `claude`, `agents`, `agents-md`, `claude-md`) are off, and the work
   directory's own `AGENTS.md` (else `CLAUDE.md`) goes into the system prompt
-  instead. The system prompt is `--append-system-prompt` (that file when
-  there is one, OMP runtime notes, then the prompt), which a resumed session
+  instead. The system prompt is `--append-system-prompt` by default or
+  `--system-prompt` in replace mode (that file when there is one, OMP runtime notes, then the prompt), which a resumed session
   takes up. A Worker or Reviewer is one `--no-session`
   process with its prompt on stdin, which then closes (in a task with an agent
   room, one with a `--session-dir` of its own: [A task's agent
@@ -1040,9 +1046,11 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `skills` directories in `[skills] paths`; `shell_environment_policy.set`
   giving the agent's shell commands the operator's `HOME` and XDG
   directories back and a `GROK_HOME` without the login), `rules/looper.md`
-  (Grok runtime notes, then the system prompt; Grok reads its home's rules
-  at every start), the login link, and links to the bundled skills and user
-  guide every home shares (`grok/shared`). `HOME` is the home too because
+  (in append mode, Grok runtime notes, then the system prompt; Grok reads its
+  home's rules at every start), the login link, and links to the bundled skills and user
+  guide every home shares (`grok/shared`). In replace mode `--agent` selects
+  the generated `agent.md` with `prompt_mode: full` and the same runtime
+  notes and prompt; `rules/looper.md` is empty. `HOME` is the home too because
   Grok finds the operator's `~/.agents/skills`, `~/.claude/plugins` and
   `~/.claude/settings.json` through it whatever its config says. A project's
   instruction files are read by Grok itself, every name it knows in each
@@ -1116,6 +1124,7 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   extra environment its Claude Code guide sets; the user adds the key.
 - **Agent Profiles** (`agent_profiles`): a name, a runtime, a provider, a
   model, the effort its runs use (none: the runtime's own; no layer sets one)
+  the system prompt mode (`system_prompt_mode`, `append` by default or `replace`),
   and, for a Claude Code runtime only, whether its runs have agent teams (`agent_teams`, on by default for Claude Code profiles;
   below). The registry
   (`profiles`) shows each one with the roles its runtime can run (`roles`) and where it is selected
@@ -1170,6 +1179,33 @@ the provider's own variables. The verified Claude Code behaviour is in the
 [multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md) section 7. A
 resident process whose binding changed (provider, key, endpoint) is started
 again.
+
+**System prompt mode.** Each profile chooses `append` (the existing commands
+and generated files are unchanged) or `replace`. The adapter's typed
+`can_replace_system_prompt` capability is exposed by `/api/registry`, with
+`replace_system_prompt_refusal` giving the reason when replacement is not
+supported. Creating, updating or importing a replacement profile is refused
+with that reason (400 through the profile API) on an unsupported or unknown
+runtime; changing the runtime checks the resulting profile, including a mode
+left unchanged. The server never falls back to append. Configuration export
+and import carry the field; older files without it import as append. Profiles
+derived for another effort keep the parent's mode.
+
+| Runtime | Append | Replace |
+| --- | --- | --- |
+| Claude Code | `--append-system-prompt-file` | `--system-prompt-file`; both modes keep `--system-prompt-snapshot off` |
+| Codex | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
+| Grok | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
+| OMP | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
+
+Codex and Grok include their runtime notes with Looper's prompt in either
+mode. Replacement keeps the runtime's tools and project instruction loading;
+it removes the runtime's default prompt. The dashboard editor disables the
+mode selector with the runtime's refusal reason when replacement is not
+supported, and resets only its unsaved draft to append when moving to such a
+runtime. Profile summaries mark replacement, and each run's System prompt
+section shows `replaced default` for a replacement record. The mode is
+available through the Manager's profile configuration tool on every channel.
 
 **Agent teams.** They are on by default for Claude Code profiles: a profile
 created without `agent_teams` gets them on a Claude Code runtime and not on
@@ -1360,8 +1396,8 @@ at every place a layer governs (the system layer, each role, and each task
 role of a project with layers, at the project and at the role in the project)
 and every task's choice of profile, it selects the profile that runs what the
 old rule gave: the profile itself when that is its own effort, else an
-existing one with the same runtime, provider, model, agent teams and that
-effort, else a new ordinary one named `<profile> · <effort>`. A project layer
+existing one with the same runtime, provider, model, agent teams, system
+prompt mode and that effort, else a new ordinary one named `<profile> · <effort>`. A project layer
 selects what most of its roles need, and each other role gets its own on its
 role-in-project layer. It logs each profile added and each layer and task
 changed, then drops `agent_setting_layers.effort`. Changes apply to the next Worker or Reviewer run; a resident agent's
@@ -1377,7 +1413,8 @@ The composed system prompt goes to Claude Code as a file:
 `<runtime_root>/.local/prompts/<sha256>.md` (through a temporary file; an
 existing file is reused, one whose content no longer matches its name is
 replaced), and `system_prompt_args` passes it with
-`--append-system-prompt-file`. `--system-prompt-snapshot off` is needed for
+`--append-system-prompt-file` in append mode or `--system-prompt-file` in
+replace mode. `--system-prompt-snapshot off` is needed for
 the resident agents: by default Claude Code 2.1.285 keeps the system prompt of
 a session's first request and sends it again on every `--resume`, so a
 restarted Planner or Manager would keep running with its old prompt. A
@@ -1386,7 +1423,9 @@ sha256s of the environment and of the installed items.
 
 Every run records the prompt in `llm_records.metadata`:
 
-- `system_prompt`: the text, as before;
+- `system_prompt`: the text Looper supplies;
+- `system_prompt_mode`: `append` or `replace`, from the launch profile; an old
+  record without the field means append;
 - `system_prompt_sha256`: the hash of that text, which is also the file name;
 - `prompt_layers`: where each layer came from, built in
   `looper/agents/system_prompt.py`:
@@ -1672,10 +1711,14 @@ error; `supervise_interval_seconds` over the `planner` config; and
 and `distill_lessons` (`off`, `draft` or `write`, never null), whether a task
 that completes leaves a lessons draft or document in the project's knowledge
 (see the Planner); `step_workspaces` (`shared`, also when null, or
-`worktree`), where a step that runs alongside others works, with
-`step_workspace_links` (up to 20 paths relative to the task directory, null
-for none), what such a worktree links back to the task directory's ([Step
-workspaces](#step-workspaces)); `max_step_retries` (0 to 20, null for 2),
+`worktree`), where a step that runs alongside others works ([Step
+workspaces](#step-workspaces)); `task_workspaces` (`in_place`, also when null,
+or `worktree`; a new project gets `worktree`), where a task that names no
+directory of its own runs, `workspace_links` (up to 20 relative paths, null for
+none), what Looper's worktrees of the project link back to the directory they
+come from, and `operator_notes` (`on`, also when null, or `off`), whether the
+project's agents get the operator's notes for their directory ([Task
+workspaces](#task-workspaces)); `max_step_retries` (0 to 20, null for 2),
 how many times the Planner may retry one step: its reply contract and each
 decision turn's allowed decisions say how many are left, and a retry past it is
 refused; and `planner_roles` (`off`, also when null, or `on`) with
@@ -1732,7 +1775,8 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   switch branches or rewrite its commits; the Reviewer's gives
   `git diff <base_commit>` to see the step's changes. Ignored files, such as
   `.env` or `.venv`, are not in it, except the project's
-  `step_workspace_links`: each listed path the task directory has and the
+  `workspace_links` (named `step_workspace_links` before task worktrees used
+  them too): each listed path the task directory has and the
   worktree does not (a checked-out file is never replaced) is a symlink to the
   task directory's, shared by every step (`link`); the ones linked are kept
   on the workspace (`links`) and linked again if the worktree is re-created,
@@ -1805,13 +1849,75 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
 The eval's `--step-workspaces worktree` runs its tasks in git repositories with
 the setting.
 
+### Task workspaces
+
+A task names a workspace, the directory the user gave it (`tasks.workspace_dir`;
+the project's default directory when it names none), and runs there in place or
+in a git worktree of it (`tasks.workspace_mode`; `looper/agents/task_workspaces.py`;
+the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
+
+- **How it runs** is chosen at creation (`resolve_mode`): as the creator asks
+  (`workspace_mode`); in a worktree when it names a workspace other than its
+  project's directory; else as its project's `task_workspaces` says (null:
+  in place). A project created through the API, the task form or the Manager
+  gets `worktree`; one from before, or imported, stays in place.
+- **Its worktree** is made before its Planner first starts (the TaskRouter's
+  `prepare`, on every start, restart, continue and resume):
+  `<runtime_root>/task-worktrees/<task_id>` on branch `looper/<task_id>/task`
+  (not `looper/<task_id>`, which git could not have beside the step branches
+  `looper/<task_id>/<key>-<n>`) from `tasks.workspace_base` (a branch, tag or
+  commit; else what the workspace had checked out), with the project's
+  `workspace_links`, and `tasks.work_dir` becomes the workspace's place in it,
+  so the Planner, the Workers, the Reviewers and the step workspaces, which
+  nest in it and merge into its branch, need nothing else. A later start uses
+  it again; one whose directory was lost is made again from the branch, and
+  without the branch the start fails the task. A workspace outside git (or
+  without a commit) runs in place, noted in the activity. The activity names
+  the branch, the base, the links and the workspace's uncommitted changes
+  the worktree does not have. Rows: `task_worktrees`.
+- **At the end.** A completed task's leftovers are committed on its branch as
+  Looper (never the links), its worktree is removed and the branch stays in
+  the user's repository: the activity, the task page and the Telegram or Lark
+  end notice name it, and Looper never merges it. A stopped, failed or
+  cancelled task keeps its worktree as it is for its restart. Deleting a task
+  removes its step worktrees, commits its leftovers and removes its
+  worktree, keeping the branch (409, and nothing deleted, when they cannot be
+  committed). Starting over keeps the worktree and the branch. At startup the
+  server finishes the worktrees of completed tasks and removes directories no
+  task has, committing what they hold on their branch first.
+- **Warnings, never refusals** (`check`): `GET /api/workspaces/check` and the
+  create answers (`workspace`) say what the task will run in (its repository,
+  branch and base) and warn when a worktree (asked for, or the project's
+  default) cannot be made because the workspace is outside git (`not_git`; the task runs in place), the workspace has uncommitted changes the worktree will not have
+  (`uncommitted`), other tasks in progress work on the same repository (by its
+  main checkout; `shared`) or the checkout is over 1 GiB (`large_checkout`).
+  A base the repository does not have is a 400. The Manager's task
+  configuration says how the task runs and each warning.
+- **The operator's notes** (`looper/agents/operator_notes.py`): with the
+  project's `operator_notes` on (the default, also when null), the Planner, Workers and Reviewers get, after
+  the project's knowledge, a read-only copy of the operator's Claude Code auto
+  memory for their directory: `MEMORY.md` (its first 200 lines) and the `.md`
+  files of the memory directory it links to, in its order, within 24 KiB (a
+  file past the limit is named, not included), led by a note that they are
+  background that the task and the files win over. The directory is
+  `<$CLAUDE_CONFIG_DIR or ~/.claude>/projects/<name>/memory/`, keyed as Claude
+  Code 2.1.285 keys it: the top level of the repository's main checkout (so a
+  subdirectory, a task worktree and a step worktree have the same notes), or
+  the directory itself outside git, links resolved, every character but a
+  letter or digit a `-`, and past 200 characters the first 200, `-` and the
+  key's djb2 hash in base 36 (`LOOPER_OPERATOR_NOTES_ROOT` stands in for
+  `<config>/projects`). Looper only reads them; an `autoMemoryDirectory`
+  setting is not followed. The run records them in
+  `prompt_layers.project.operator_notes` (hash, files, omitted) and the
+  activity says which applied.
+
 ### Schedules: tasks on a time rule
 
 A project's schedules fire a full task of the project on a time rule
 ([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md), S1 and S2; the
-Manager lists, reads, enables, disables and deletes them with
-`looper_schedules`, and creating and editing them through it, and export, come
-with the rest of the Manager platform tools' T3). A schedule has a `name` (unique in the project ignoring case),
+Manager lists, reads, creates, changes, enables, disables, runs and deletes
+them with `looper_schedules`, and they move with their projects in the
+configuration file, [Moving the configuration](#moving-the-configuration-export-and-import)). A schedule has a `name` (unique in the project ignoring case),
 a `cron` rule and an IANA `timezone` (default: the server's own zone), the
 `requirement` each run's task gets (at most 27,000 characters), a `work_dir` (`''`: the project's default
 when it fires), `overlap` (`skip`, `queue` or `parallel`, with
@@ -1976,8 +2082,7 @@ dashboard only). A new schedule is disabled.
   Writing a run's end locks the schedule's row before the run's
   (`finish_run`), as every other writer does, so a delete waits for it
   instead of deadlocking with it; a message whose schedule was deleted after
-  it was written is not recorded (its outbox went with it). Schedules are not
-  in the configuration export yet, and an import leaves them alone.
+  it was written is not recorded (its outbox went with it).
 
 ### The capability catalog: items and where they are installed
 
@@ -2107,7 +2212,7 @@ and enabled flag; a role's `max_concurrency` in an older file is ignored, with
 one note, and so is a layer's other than the Workers' or the Reviewers' role
 layer, with a note each: a layer that set nothing else is skipped), `channels`, `installs` (global),
 `projects` (with `--include-projects`: fields, execution settings, layers,
-knowledge, own skills and installs) and `catalog` (each item with its files,
+knowledge, own skills, installs, and `schedules` for a project that has some) and `catalog` (each item with its files,
 or an MCP server's configuration). Catalog files are UTF-8 text, so JSON holds
 them as they are; the file is written piece by piece from one read-only,
 repeatable-read snapshot, by the CLI straight from the database (a catalog is
@@ -2131,6 +2236,22 @@ with the file's in their place: the profiles that takes are added, each layer
 it changes selects its profile (a layer the file does not give included), and
 a note says each. Tasks are not exported, so neither are their profile
 overrides.
+
+A project's schedules carry their settings (`name`, `cron`, `timezone`,
+`requirement`, `overlap`, `max_parallel_runs`, `catch_up`, the timeouts, the
+caps, the gate, `notify` and `notify_target`), their Agent Profiles by name
+(`profiles`) and their `task_limits`; not whether they are enabled, their runs,
+messages, counters or alerts, nor their own directory: a schedule that had one
+is flagged `repoint`. The import matches a schedule by project and name,
+ignoring case (`project.schedules`): one it adds is created disabled
+(`created_via` `import`), one whose settings differ is rewritten disabled (its
+directory here stays), one that matches is left as it is, enabled or not.
+Enabling is the approval (scheduled-tasks RFC D6), so a schedule nobody here
+approved never runs on its own; a note lists them, to check their directory and
+gate here first. A schedule the API would refuse (a bad or too frequent rule,
+an unknown profile or field) is skipped with the reason, and a `notify_target`
+the sender allowlists here (as the import leaves the channels) do not allow is
+dropped, with a note.
 
 An import matches entries by natural key: an item by kind and name (a
 project's own skill within its project), a project, runtime, provider or
@@ -2252,15 +2373,15 @@ So:
 
 The Manager acts on Looper through MCP tools, one catalog in
 `looper/agents/ops/` ([Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md),
-T1, T2 and the schedules part of T3). Each tool has a name, a description, a
+T1, T2 and T3). Each tool has a name, a description, a
 JSON Schema for its arguments, a risk tier and the code that runs it; the
 code is what the dashboard's API calls (`projects`, the TaskRouter's
 messages, `db.task_changes`, `agent_settings`, `profile_registry`, `catalog`,
 `db.llm_records`, `schedules`), so both check alike and a refusal carries the
 dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
-409 `conflict`, its 400 `invalid`). The definitions of the 15 tools take
-13.4 KB of the Manager's context (the JSON of `tools/list`), the contract
-2.8 KB.
+409 `conflict`, its 400 `invalid`). The definitions of the 16 tools take
+15.0 KB of the Manager's context (the JSON of `tools/list`, 14,988 bytes), the
+contract 3.3 KB.
 
 - **Reaching Looper.** `looper serve` makes one `ManagerOps`
   (`ops/service.py`) with a random token at start. Every launch of the
@@ -2321,26 +2442,26 @@ dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
 |---|---|---|
 | `looper_overview` | Task counts by group, the running tasks (with their own Worker and Reviewer limits, when set) and step runs, each active project's load against its limits, today's spend, unhealthy components | read |
 | `looper_tasks` | `list` (newest first; by `query` words in the id, name, requirement or project, by `group`, by `project`; at most `limit`) or `get` one task: status, phase, directory, requirement, steps, supplements (delivered or not), latest progress note, result, cost, and its Worker and Reviewer concurrency limits with their source (as `GET /api/tasks/:id` gives them) | read |
-| `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (else the project's default; a new project, or one without a default, needs one), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
+| `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (its workspace; else the project's default; a new project, or one without a default, needs one), `workspace_mode` and `base` (only when the user asks: [Task workspaces](#task-workspaces)), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (how the task runs in its directory and each warning, the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
 | `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a running one; `restart` a stopped, failed or cancelled one, going on from its saved plan (`TASK_RESTART` `continue`); `start_over` one, planned anew with its steps, plan and Planner session deleted (`start_over`; the confirmation says how many accepted steps it deletes); `cancel` a running one | write; start_over and cancel are high |
 | `looper_task_instruct` | Add the user's words to a running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
 | `looper_task_gate_reply` | Add the user's message this turn answers to a user gate waiting for them (`task_id`, `gate`, `end` to end the discussion), as the task page does: Looper sends the message itself, or the `excerpt` of it the model names, which must be in it word for word; a turn that answers no message is refused. The channel message it is is kept, so the Planner's reply goes under it when it came from the gate's chat ([User gates](#user-gates)) | write |
 | `looper_task_update` | Change a task: its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it) | write |
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
 | `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`), `delete` one without tasks or schedules (`projects.deletable_project` refuses before anything is asked; the confirmation says its settings, allowed list, installs, knowledge and own skills go with it, and its directory's files stay) | list and get read; write; delete is high |
-| `looper_agent_profiles` | `list` the profiles (runtime, provider, model, effort, agent teams, the roles it can run, where it is used), the runtimes and the providers with their models; `create` (`name`, `runtime` by id, name or type, `provider` by id or name, `model`, `effort`, `agent_teams`), `update` (a null `effort` clears it), `delete` one nothing selects (`profile_registry.deletable_profile` names where it is used, before anything is asked) | list reads; write; delete is high |
+| `looper_agent_profiles` | `list` the profiles (runtime, provider, model, effort, agent teams, system prompt mode, the roles it can run, where it is used), the runtimes and the providers with their models; `create` (`name`, `runtime` by id, name or type, `provider` by id or name, `model`, `effort`, `agent_teams`, `system_prompt_mode`), `update` (a null `effort` clears it), `delete` one nothing selects (`profile_registry.deletable_profile` names where it is used, before anything is asked) | list reads; write; delete is high |
 | `looper_providers` | `list` (auth, protocols, base URL, models, whether an API key is set, profile count); `register` an API-key provider (`name`, `protocols`, `base_url`, `models` by name, `env`) without its key, as `POST /api/providers` does; the answer tells the user where to enter the key | list reads; write |
 | `looper_catalog` | `list` the items (kind, qualified name, description) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
-| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `enable` or `disable` one (`schedules.update_schedule`, as its switch does; the answer says when it was so already); `delete` one (`schedules.delete_schedule`). A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; delete is high |
+| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the settings `POST /api/projects/:id/schedules` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, gate, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`). A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
+| `looper_config_export` | Write `looper config export`'s file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`looper config import`, or Settings → Import / Export) | read |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
 not one of these tools yet; nor are a project's execution settings, a role's
-prompt, name, turns and switch, changing or removing a provider, adding
-items to the catalog, or creating, editing, running now or exporting a
-schedule (the project's Schedules tab does those).
+prompt, name, turns and switch, changing or removing a provider, or adding
+items to the catalog.
 
 ### A task's Planner's tools
 
@@ -2995,7 +3116,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | Table | Purpose |
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
-| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)) |
+| `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
@@ -3007,18 +3129,18 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
-| `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, `effort` (its runs'; null: the runtime's own), `agent_teams` (Claude Code's agent teams: on by default for Claude Code profiles, set by the registry and once by the upgrade; the column's default, false, is for other runtimes), `builtin`; a provider still used by one is not deleted |
+| `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, `effort` (its runs'; null: the runtime's own), `agent_teams` (Claude Code's agent teams: on by default for Claude Code profiles, set by the registry and once by the upgrade; the column's default, false, is for other runtimes), `system_prompt_mode` (`append` by default or `replace`, enforced by a CHECK), `builtin`; a provider still used by one is not deleted |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
 | `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; a profile on a list is not deleted |
-| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
+| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
@@ -3097,7 +3219,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Task Detail**: Overview (status, phase, times, steps ("n/m done": the accepted steps of those not skipped, then how many are in review and how many skipped; the step list's badges use the Pipeline's names) and the task's cost with its run count; the requirement, with Edit while the task has not ended and its earlier versions under History, then the supplements, each with how it came and whether the Planner has seen it; then Progress: once the task has ended, its final summary (completed) or closing note (failed, stopped) as Markdown, then the Planner's latest progress note (done, now, next, risks, estimate, and when) and the earlier ones under a disclosure; then "Cost by agent and model": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost, and below it (beside it on a very wide screen) the By model table: each model's runs, input, output and cache read and write tokens (compact) and cost ("–" when none of its runs has one), adding up to the task's cost, then the Manager's turns about the task on rows of their own, marked as not counted in the task's cost or its spend cap; a one-line summary of each role's Agent Profile that opens the Agents tab; steps, agent timeline, live activity feed), Pipeline (React Flow: the plan as its dependency graph, each step a node by its label and status, under the steps in its `depends_on` or the Planner, in rows by dependency depth; the steps nothing live depends on lead to the result. Done steps keep their place and edges when the plan changes, so steps a replan or a restart adds hang off them; dropped steps stay as dashed, muted history on the right of their row, with the decision that dropped them in the tooltip, which also has the instruction and the Worker and Reviewer ids), Agents (each role's Agent Profile and the Worker and Reviewer limits, each with where it comes from (a limit: this task, Settings → Roles default or built-in default), changed there until the task completes and read-only after; the roles its Planner defined with their kind and profile, marking one the project no longer allows; and every Worker and Reviewer run of its steps, in plan order, with its role (Worker, Reviewer or the defined role it ran as), the Agent Profile it ran on, where that came from and its status, each linking to its history: `GET /api/llm-records?task_id=&role=`, read again whenever a step changes), Sessions, Conversation
 - **Schedules** (`#schedules`, below Runs in the sidebar): every project's schedules from `GET /api/schedules`, re-read every 10 s, grouped by project (each group with how many of the project's schedules are on and a link to the project's Schedules tab to add or edit one). A filter bar above it: Project (All, or any project) and Status (All, Enabled, Disabled), which combine and are kept in the address (`#schedules?project=<id>&enabled=true|false`, so a link and a reload keep them; an unknown value is All), filtered in the page; while one is set it says "Showing K of N" with Clear filters, and when nothing matches the list says so, with Clear filters. Each row shows the name (opening its detail view), the rule in words, the next run in the schedule's zone (or Disabled), the last run's status, time and task, "Failing" or "No success lately" while an alert is on, and today's spend (against the daily budget when set); a disabled schedule is dimmed (a dashed edge, a muted name). Beside it, the enable switch (`PUT /api/schedules/:id` with `enabled`: the switch shows the new value while it saves, then "Turned on" or "Turned off"; a refusal puts it back and says why) Run now (its answer, as on the project tab) and Delete schedule, which asks inline first ("Delete <name>? Its tasks stay.", as on the project tab) and takes the row out of the list. Loading, empty and error states, and a failed refresh keeps the last list with the error. **A schedule** (`#schedules/<id>`): back to all schedules; its name, project (a link), rule in words, the switch, Run now, "Edit on the project" (its row on the project's Schedules tab, where it is edited) and Delete schedule (the same inline confirmation; once it is deleted, back to all schedules); the next run, the last run with the alerts, and today's spend against the daily budget; its settings (rule and cron, time zone, work directory, gate and its timeout, notify and to whom, the budgets per run and per day, run timeout, overlap and catch-up, the Agent Profiles it sets, by name) with the requirement folded; and the run history, the same as on the project tab. Re-read every 10 s; an unknown id says it was not found.
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its row in Settings → Roles.
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper supplied (the runtime's built-in system prompt is not included): its title shows the prompt's size, its short sha256, an `isolated` badge and, for replace runs, `replaced default`, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested, and, for a Claude Code runtime, an "Agent teams" checkbox, checked by default); **Roles** (`roles`: a line naming the roles the server has, then a collapsible row for the Shared defaults (the system layer, which the dashboard calls the shared defaults wherever it names a value's source) and one per role, all closed at first and any number open. Wherever the dashboard names an Agent Profile (these summaries, its dropdowns), it adds " · <effort>" when the profile has an effort its name does not end with already. A closed row is a one-line summary: for the Shared defaults the number of roles, the Agent Profile, spend cap and how many environment variables are set; for a role its job, the Agent Profile in effect and whether it is shared or its own, the Workers' or Reviewers' default limit per task, and "Disabled" or "unsaved" when so. An open role has "Overrides for this role" (its layer, each field saying what applies now and from which layer, with the Workers' "Workers at once in each task (default)" or the Reviewers' "Reviewers at once in each task (default)") and "Role prompt and limits" (the role prompt as one text, with a line saying it is the role layer that Looper combines at launch with the harness, project, task and reply format into the system prompt a run's history shows, reset to the recommended one, max turns, timeout, enabled, and the note that every agent has every tool with `--dangerously-skip-permissions`); closing a row keeps its unsaved edits, and `#settings/roles/<role>` or `#settings/roles/shared` opens that row and scrolls to it); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
 
 ### Real-Time Updates
@@ -3158,9 +3280,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/schedules/:id/notifications` | GET | The schedule's messages, newest first (`?limit=` as for runs): `notification_id`, `kind`, `run_id`, `channel`, `chat`, `text`, `status`, `error`, `created_at`; 404 |
 | `/api/schedules/preview` | POST | `{cron, timezone?, count?, gated?}` (1–20, default 5; `gated`: checked as a schedule with a gate command, 1 minute apart instead of 5): `valid`, `description`, the `next` fire times and `min_interval_seconds`, or `valid` false with the `error`; 400 only for a malformed body |
 | `/api/tasks` | GET | A page of the tasks, newest first (by creation, then id): `?limit=` (default 50, at most 200) of them, older than the task `?before=` when given; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's, `?status=` one status's (400 for an unknown one), and they combine. Answers `tasks`, `next_before` (the cursor for the next page, null at the end) and `counts` (how many tasks each status holds under the project, group and schedule filters, every page included); 400 for a bad `limit` or an unknown `before`. Each task has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
-| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
+| `/api/workspaces/check` | GET | What a new task in `?dir=` (else `?project_id=`'s directory) would run in, with `?mode=` and `?base=` as the create form has them: `mode` (`in_place` outside git), `requested_mode`, `default_mode`, `git` (`repository`, `branch`, `head`, `base_commit`; null outside git), `warnings` (`kind`, `text`, and `files` or `tasks`), `notes` (whether the directory has operator's notes, which files) and `notes_on` (whether the project gives them). 400 as `/api/tasks/create` |
+| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing); `workspace_mode` (`worktree`, `in_place`) and `base` ([Task workspaces](#task-workspaces)). Answers `workspace`, the workspace check. 400 for a bad `workspace_mode`, a `base` without a worktree or one the repository does not have, a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces)) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces); no undo commands for a task in a worktree of its own); `task_workspace` (`workspace_dir`, `mode`, `base`, and `worktree`: `branch`, `base_commit`, `path`, `repository`, `links`, `state`, `result_commit`, `removed_at` and the `commands` that take the work over, null before its first start or in place: [Task workspaces](#task-workspaces)) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again from its saved plan (`TASK_RESTART` `continue`), or, with `"start_over": true`, plan it anew, its steps, plan and Planner session deleted; 400 when `start_over` is not a boolean. It also starts a ready one, as before |
@@ -3186,12 +3309,12 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/roles/:role/reset-prompt` | POST | Reset the role prompt to the recommended one |
 | `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `profile_id` (an Agent Profile's id), `env` as `[{key, value}]`, `run_budget_usd`, `max_concurrency`; `null` = not set) and `effective` (what applies, each field with its `source` layer; the profile as `profile`: `{profile_id, name, model, effort, runtime, provider}`; `effort` is the profile's, source `profile`, or `builtin` (null) when it has none; the Workers and Reviewers also `max_concurrency`, the default for every task, source `role` or `builtin`), and `limits` (with `builtin_profile`: `{profile_id, name}`, and `concurrency_max`) |
 | `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the Agent Profile), `effort` (part of the Agent Profile: "choose or create a profile with the effort you want"), an unknown profile or one that cannot run the layer's roles, a harness over 20000 characters, a bad cap, a bad, credential-like or 51st variable, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` (each Agent Profile's agent teams switch owns it), or a `max_concurrency` that is not a whole number from 1 to 64 or is on a layer other than the Worker's or the Reviewer's role layer (concurrency is per task: a project, a role in a project and the Planner have none); nothing is stored then. A role's PUT that sets `max_concurrency` then has the WorkerPool start what the new limit lets start |
-| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`; an OAuth one with `suggested_models` and its `login`: `{state, detail}`, `state` one of `chatgpt`, `other_method`, `not_logged_in`, `unknown`, `unavailable`, for Codex's login, else `null`), each counting the profiles that use it (`profile_count`), and every Agent Profile in `profiles` (with its `profile_id`, `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
+| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`, `can_replace_system_prompt`, `replace_system_prompt_refusal`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`; an OAuth one with `suggested_models` and its `login`: `{state, detail}`, `state` one of `chatgpt`, `other_method`, `not_logged_in`, `unknown`, `unavailable`, for Codex's login, else `null`), each counting the profiles that use it (`profile_count`), and every Agent Profile in `profiles` (with its `profile_id`, `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
 | `/api/runtimes/:id/probe` | POST | Re-detect: probe again and record the version, capabilities or error; for `rt-<type>` of a type not found yet, look for it on the server's PATH and add its built-in runtime (404 when it is not there). Runtimes are built in: there is no route to register, change or delete one |
 | `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason (an `env` name the binding sets, that reads like a credential, or `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, too), 409 for a taken name |
 | `/api/providers/:id` | PUT/DELETE | Change a provider (`api_key` `***` keeps the key, `null` removes it; 400 when one of its profiles could no longer run); delete (409 while profiles use it). 400 for the built-in one |
 | `/api/providers/:id/login-problem` | DELETE | The operator checked `codex login status`: clear the forked Codex login a run recorded, so its runs start again; answers with `provider`. 400 for a provider that is not the Codex login |
-| `/api/agent-profiles` | POST | Register an Agent Profile `{name, runtime_id, provider_id, model, effort?, agent_teams?}` (`agent_teams` a boolean; left out, on for a Claude Code runtime and off for another); 201 with `profile` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together, the provider does not list the model, or `agent_teams` is on with a runtime other than Claude Code |
+| `/api/agent-profiles` | POST | Register an Agent Profile `{name, runtime_id, provider_id, model, effort?, agent_teams?, system_prompt_mode?}` (`agent_teams` a boolean; left out, on for a Claude Code runtime and off for another); 201 with `profile` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together, the provider does not list the model, or `agent_teams` is on with a runtime other than Claude Code; `system_prompt_mode` defaults to `append`, accepts only `append` or `replace`, and replacement is refused with the adapter's reason when unsupported |
 | `/api/agent-profiles/:id` | PUT/DELETE | Change a profile (checked like a new one, and for every role it is selected for; answers with `profile` and `warnings`); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
 | `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` (the roles an install may name, each ending with `task_role`) and `caps` |
