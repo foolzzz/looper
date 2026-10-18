@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs twenty-two small tasks through a disposable `looper serve` (a new
+It runs twenty-five small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -37,6 +37,9 @@ directories), one at a time over the HTTP API:
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
+| `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
+| `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work in its one review (the requirement leaves the regions to the step, so only the note can correct it) |
+| `reviewer_unrelated_note` | the same, the other way: the retry note is about the file's separator, and the work it leads to still lacks a region, so the Reviewer must not pass it; the next attempt has it and passes (exactly two reviews and two retries) |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -62,7 +65,8 @@ and cached, and output; what a runtime without prices still reports), contract v
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
 `planner_violation_reasons`), whether the Planner modified files itself (its file-editing tool
-calls, and files changed while only a Planner turn ran), the runs that ended in an error (`run_errors`,
+calls, and files changed while only a Planner turn ran), the tool calls its runtime refused the read-only Planner
+(`planner_denials`, from its runs' `permission_denials`), the runs that ended in an error (`run_errors`,
 by their records' status) and the models each role's runs reported (`models`).
 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by
@@ -129,6 +133,13 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 
 `tests/test_prompt_eval.py` runs it as part of the test suite when
 `LOOPER_TEST_DATABASE_URL` is set.
+
+A script may also give the Planner's retry notes (`retry_feedback`: a step's
+Nth retry gets its Nth note) and fail the review of some attempts
+(`failing_review_attempts`, read from the Worker's report). A script with
+`real_reviewer` plays its Planner and Workers in real mode too, and only its
+Reviewers are Claude Code: the stand-in hands Claude Code every other run of
+every task, with its arguments, so the other tasks run as before.
 
 ### Real mode: the effect, on demand
 

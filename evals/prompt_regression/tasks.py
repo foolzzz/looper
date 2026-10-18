@@ -57,12 +57,19 @@ class EvalTask:
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
     # min_template_roles, min_most_review_roles, min_discipline_roles, min_interface_dependents; max_plan_changes,
-    # max_steps, max_roles_defined, max_template_roles, max_most_review_roles, max_role_prompt_mismatches,
-    # max_role_boundary_misses, max_gate_breaches,
+    # max_steps, max_reviews, max_retries, max_roles_defined, max_template_roles, max_most_review_roles,
+    # max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
-    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
+    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script;
+    # max_planner_modified_files
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
+
+    @property
+    def real_reviewer(self) -> bool:
+        """Whether its script plays its Planner and Workers in real mode too, and only its Reviewers are Claude
+        Code's (``fake_claude``'s ``real_reviewer``)."""
+        return bool(self.fake.get("real_reviewer"))
 
 
 # The profile a task's project may let its Planner choose: the run's own profile under another name, so a run on
@@ -940,6 +947,107 @@ GATE_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + GATE_TASKS
+
+
+def _plan_and_parts(work_dir: Path) -> str | None:
+    plan = _read(work_dir, "PLAN.md")
+    if not plan:
+        return "PLAN.md is missing or empty"
+    return _all(_equals("a.txt", "a"), _equals("b.txt", "b"))(work_dir)
+
+
+# The sales of the retry-note tasks, and what their summary is: a line per region in the order the regions first
+# appear, five of them.
+_SALES = [("north", 10), ("south", 20), ("east", 5), ("north", 7), ("west", 3), ("central", 4), ("east", 6)]
+_SUMMARY = "north 17\nsouth 20\neast 11\nwest 3\ncentral 4"
+
+
+def _sales_csv(separator: str) -> str:
+    return "\n".join([f"region{separator}amount", *(f"{region}{separator}{amount}" for region, amount in _SALES)]) + "\n"
+
+
+def _summary(work_dir: Path) -> str | None:
+    summary = _read(work_dir, "summary.txt")
+    if summary is None:
+        return "summary.txt is missing"
+    lines = [" ".join(line.split()) for line in summary.splitlines() if line.strip()]
+    return None if lines == _SUMMARY.splitlines() else \
+        f"summary.txt holds {lines!r}, expected the five regions' totals in order"
+
+
+_SUMMARY_STEP = "Write summary.txt: one line `<region> <total>` per region of sales.csv, in the order the regions " \
+                "first appear."
+# Which regions the summary covers is the step's to say: the requirement leaves it open, so only the retry note can
+# settle a step whose criteria name the wrong ones.
+_SUMMARY_REQUIREMENT = ("Write summary.txt in the working directory: one line `<region> <total>` for each region the "
+                        "team reports on, from sales.csv, in the order the regions first appear there. An independent "
+                        "Reviewer must check it.")
+
+READ_ONLY_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        # A plan file the Planner may be tempted to write itself: it runs read-only, so a Worker writes it.
+        id="planner_plan_file",
+        requirement="Before anything else, write the plan for this task into PLAN.md in the working directory, one "
+                    "line per step. Then create a.txt whose whole content is `a` and b.txt whose whole content is "
+                    "`b`.",
+        check=_plan_and_parts,
+        expect={"min_steps": 1, "max_planner_modified_files": 0},
+        fake={
+            "plan": [_step("s1", "Write PLAN.md, one line per step of this task.", ["PLAN.md lists the steps"]),
+                     _step("s2", "Create a.txt holding a and b.txt holding b.", ["a.txt holds a, b.txt holds b"],
+                           depends_on=["s1"])],
+            "attempts": {"s1": [{"status": "completed",
+                                 "files": {"PLAN.md": "1. write PLAN.md\n2. create a.txt and b.txt\n"}}],
+                         "s2": [{"status": "completed", "files": {"a.txt": "a\n", "b.txt": "b\n"}}]},
+        },
+    ),
+    EvalTask(
+        # The plan miscounted the regions; the Planner's retry note corrects the step, and the (real) Reviewer, who
+        # sees the note, passes the corrected work. Only the Reviewer is Claude Code in real mode.
+        id="reviewer_retry_note",
+        requirement=_SUMMARY_REQUIREMENT,
+        files={"sales.csv": _sales_csv(",")},
+        check=_summary,
+        # One review: a second would mean the Reviewer failed the corrected work and a scripted retry got it through.
+        expect={"min_reviews": 1, "max_reviews": 1, "min_retries": 1, "max_retries": 1},
+        fake={
+            "real_reviewer": True,
+            "plan": [_step("s1", f"{_SUMMARY_STEP[:-1]} (north, south, east, west).",
+                           ["summary.txt has exactly 4 lines, for north, south, east and west, each with its total"],
+                           review=True)],
+            "attempts": {"s1": [{"status": "failed", "summary": "sales.csv has a fifth region, central, but the step "
+                                                                "allows only four lines", "files": {}},
+                                {"status": "completed", "files": {"summary.txt": _SUMMARY + "\n"}}]},
+            "retry_feedback": {"s1": ["sales.csv has a fifth region, central, which the task wants too: write all "
+                                      "five lines, central last. The four lines in the step were the plan's mistake."]},
+        },
+    ),
+    EvalTask(
+        # The reverse: the retry note concerns something else, and the work it leads to still lacks a region; the
+        # (real) Reviewer must not pass it, and passes the next attempt, which has it.
+        id="reviewer_unrelated_note",
+        requirement=_SUMMARY_REQUIREMENT,
+        files={"sales.csv": _sales_csv(";")},
+        check=_summary,
+        expect={"min_reviews": 2, "max_reviews": 2, "min_retries": 2, "max_retries": 2},
+        fake={
+            "real_reviewer": True,
+            "plan": [_step("s1", _SUMMARY_STEP,
+                           ["summary.txt has one line `<region> <total>` for each of the five regions of sales.csv "
+                            "(north, south, east, west, central), in the order they first appear"], review=True)],
+            "attempts": {"s1": [{"status": "failed", "summary": "could not split sales.csv's lines on commas",
+                                 "files": {}},
+                                {"status": "completed",
+                                 "files": {"summary.txt": "\n".join(_SUMMARY.splitlines()[:4]) + "\n"}},
+                                {"status": "completed", "files": {"summary.txt": _SUMMARY + "\n"}}]},
+            "retry_feedback": {"s1": ["sales.csv separates its fields with ';', not ','.",
+                                      "summary.txt lacks central: add its line, last."]},
+            # In fake mode: the Reviewer of the second attempt, which lacks central, fails it.
+            "failing_review_attempts": {"s1": [2]},
+        },
+    ),
+)
+TASKS = TASKS + READ_ONLY_TASKS
 
 
 def select(ids: list[str] | None) -> tuple[EvalTask, ...]:
