@@ -844,17 +844,18 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   command layouts moved out of the tiers unchanged, the
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
   are materialized in Claude Code's plugin format by
-  `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`
-  and `OmpRuntime` (`codex`, `omp`, below) translate them at launch; both
-  keep the Manager's and a Planner's session with one process per turn
-  (`runtimes/per_turn.py`). Capabilities:
+  `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
+  `OmpRuntime` and `GrokRuntime` (`codex`, `omp`, `grok`, below) translate
+  them at launch; all three keep the Manager's and a Planner's session with
+  one process per turn (`runtimes/per_turn.py`). Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
   `autonomous_turns`, `cost_report` (Claude Code has all but
   `structured_output`; Codex has `run`, `resident_session`, `resume`,
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
   `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
-  `compaction_events`).
+  `compaction_events`; Grok has `run`, `resident_session`, `resume`, `mcp`,
+  `compaction_events` and `cost_report`).
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
@@ -956,8 +957,57 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   ran becomes `compact_boundary`. `looper serve` registers the read-only
   runtime `omp` (`rt-omp`) when `omp` is on its PATH. When it starts,
   `read_only_copies` removes the OMP homes no running process names and the
-  session directories (`codex/sessions/<agent>`, `omp/sessions/<agent>`) of
-  agents whose saved session (`agent_sessions`) is not of that runtime.
+  session directories (`codex/sessions/<agent>`, `omp/sessions/<agent>`,
+  `grok/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
+  is not of that runtime.
+- **Grok** (`looper/agents/runtimes/grok.py`, xAI's `grok` CLI, verified
+  against Grok 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md))
+  runs headless `grok --prompt-file /dev/stdin --output-format
+  streaming-messages-json --always-approve --trust` with Grok's own login
+  only (the built-in provider `grok-login`, below). Each process gets
+  `GROK_HOME` and `HOME` both set to a home of Looper's own,
+  `grok/runs/<sha256>`, named on its command line (`env GROK_HOME=...
+  HOME=... grok ...`): the generated `config.toml` (Claude Code and Cursor
+  compatibility scans, memory, the update check, the shared leader,
+  telemetry and session upload off; the run's MCP servers as
+  `[mcp_servers.<name>]`, stdio, HTTP and SSE; the installed plugins'
+  `skills` directories in `[skills] paths`; `shell_environment_policy.set`
+  giving the agent's shell commands the operator's `HOME` and XDG
+  directories back and a `GROK_HOME` without the login), `rules/looper.md`
+  (Grok runtime notes, then the system prompt; Grok reads its home's rules
+  at every start), the login link, and links to the bundled skills and user
+  guide every home shares (`grok/shared`). `HOME` is the home too because
+  Grok finds the operator's `~/.agents/skills`, `~/.claude/plugins` and
+  `~/.claude/settings.json` through it whatever its config says. A project's
+  instruction files are read by Grok itself, every name it knows in each
+  directory from the repository's root down (`AGENTS.md` and `CLAUDE.md`
+  both when both are there). A Worker or Reviewer is one process with its
+  prompt on stdin, which then closes; the Manager and a Planner run one
+  process per turn with `--resume <id>` in a home of their own
+  (`grok/sessions/<agent>`, refreshed from the run home before each turn).
+  The stream is Claude Code's stream-json: each response's tokens become a
+  `usage` event, a command's output (byte values) is decoded, and the run's
+  cost is Grok's `total_cost_usd` (`runtime`; a 0 for tokens spent is
+  unknown). Grok has no spend cap and reports the cost only at the end, so a
+  per-run cap does not stop a Grok run (`runtime_cost_capped`, a warning when
+  the Agent Profile is saved). The model reaches MCP tools through Grok's
+  `search_tool` and `use_tool` as `<server>__<tool>`, which the runtime
+  notes say. `looper serve` registers the read-only runtime `grok`
+  (`rt-grok`) when `grok` is on its PATH.
+- **The Grok login** (`looper/agents/runtimes/grok_login.py`) is the
+  built-in provider `grok-login` (`prov-grok-login`, OAuth,
+  `openai-responses`), which pairs only with Grok runtimes. Every Grok home's
+  `auth.json` is a symbolic link to the operator's login file (`auth.json` in
+  the server's `GROK_HOME`, else `~/.grok`), never a copy; `XAI_API_KEY`,
+  `GROK_CODE_XAI_API_KEY` and `GROK_AUTH` are removed from the environment.
+  How Grok writes a refreshed login back is not verified (closed source; no
+  refresh was forced on the operator's login), so the homes are inspected
+  after every run and when `looper serve` starts exactly as Codex's are
+  (`runtimes/linked_login.py`, shared by both logins; the problem is
+  `system_settings.grok_login_fork`), with the same "Use the login again" on
+  the provider. The login's state is whether its file is there (`stat`,
+  never read), in the provider's view and in the `grok_login` self-check,
+  skipped while no Agent Profile uses the login.
 - **Runtimes** (`agent_runtimes`) are built in, never registered by hand: one
   per type found on the server's PATH (`rt-<type>`, named after its type;
   Claude Code's `rt-claude-code` comes with the schema and runs the server's

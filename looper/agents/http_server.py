@@ -726,11 +726,10 @@ class AgentHTTPServer:
         await writer.drain()
 
     async def _checks_now(self) -> list[dict[str, str]]:
-        """The startup self-check, with the Codex login read now: a run may have found it forked since."""
-        if not any(check.get("id") == "codex_login" for check in self._self_checks):
-            return self._self_checks
-        codex = (await self_check.codex_login_check()).to_dict()
-        return [codex if check.get("id") == "codex_login" else check for check in self._self_checks]
+        """The startup self-check, with the runtimes' own logins read now: a run may have found one forked since."""
+        now = {check.get("id"): (await self_check.LOGIN_CHECKS[check["id"]]()).to_dict()
+               for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS}
+        return [now.get(check.get("id"), check) for check in self._self_checks]
 
     async def _handle_status(self, writer: asyncio.StreamWriter) -> None:
         agents = self._supervisor.agent_status()

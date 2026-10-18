@@ -51,6 +51,7 @@
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录在 §5.0 第 3 项交付） | ✅ 已交付（looper #67） | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付（looper #70） | M9c |
+| M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -509,6 +510,23 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - `looper serve` 发现 PATH 上有 `omp` 时注册内置运行时 `omp`；启动时回收没有进程在用的 OMP 家目录，以及已保存
     会话不再属于该运行时的 Codex、OMP 会话目录。
 
+#### M9f Grok 运行时
+
+- **范围：** xAI 的 `grok` CLI（1.0.62）支持四类角色，内置 provider `grok-login` 用操作者在本机的 Grok 登录；隔离、
+  MCP、doctor、界面和评测（[Grok 运行时 RFC](../architecture/rfcs/grok-runtime-v0.zh-CN.md)）。
+- **验收：** 一次性 `looper serve` 上一个任务的四类角色都跑在 Grok 上；真实模式评测 `single_step`、`dependent_steps`、
+  `reviewed_step` 和管家对话 `status` 各跑两轮。
+- **核实后确定的做法**（核实结果写在 Grok 运行时 RFC 第 2、12 节）：
+  - headless `grok --prompt-file /dev/stdin --output-format streaming-messages-json --always-approve --trust`，每轮一个
+    进程，管家、规划者用 `--resume <id>`（`ResidentGrok`，与 Codex、OMP 共用 `per_turn.PerTurnSession`）；
+  - 隔离：`GROK_HOME` 和 `HOME` 都指向 Looper 的家目录（只设 `GROK_HOME` 时 Grok 仍按 `HOME` 读 `~/.agents/skills`、
+    `~/.claude/plugins` 和 `~/.claude/settings.json`），agent 的 shell 和 stdio MCP 服务器拿回操作者的 `HOME`；内置
+    skill 和用户文档各家目录共享一份；
+  - system prompt 是家目录的规则文件 `rules/looper.md`；MCP 写进 `config.toml`，模型经 `search_tool`/`use_tool` 调；
+  - 花费用 Grok 结果里的 `total_cost_usd`（OAuth 下也有值），单次上限停不住 Grok 的运行；
+  - 登录照 Codex 的 P1：链接、运行后和启动时检查分叉；链接代码抽成两种登录共用的 `runtimes/linked_login.py`；刷新怎样
+    写回未核实（不强制刷新操作者的 token）。
+
 #### M9d SDK 运行时与 norma
 
 - **范围：** 在适配器接口上接 SDK 类运行时；norma SDK 就绪后接入，验证它的双协议。范围在 M9a–M9c 之后再细化。
@@ -640,6 +658,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-17 | 步骤记录开始时间，任务页换任务时重新打开（looper #184）：`task_steps.started_at`（可空的 `TIMESTAMPTZ`，不回填）记下这一轮步骤第一次派发的时间，规划者派发时写入，保存时保留已有的值（`COALESCE`），重试、评审和服务重启（同一次尝试再跑）都不改它；任务重启或在花费上限处继续时，步骤回到未开始，开始时间清空，再次派发时重记，停着的时间不算在内；这一列之前的步骤和旧计划文件导入的步骤保持为空，不猜。配合 `completed_at`（最后一次进入评审或结束的时间）得出「took」：从开始到最后一次完成，含重试和评审。Pipeline 的步骤卡片和 Overview 的步骤列表按状态显示：运行中或等决定时「running for」（只在任务进行中显示），进入评审或结束后「took 3m 12s」（被丢弃的步骤「ran for」），未开始或没有记录时不显示；再次运行的步骤不再显示上一次的完成时间。#172 卡片里重试过的步骤标「First finished」不对（`completed_at` 是最后一次），改为「Finished」。任务页按任务 id 作 key（`TaskDetailRoute`）：hash 换到另一个任务时，像刷新一样从 Overview 打开，不带上一个任务的数据、启动错误和未关的确认（所有任务都有全部标签页，「有就保留」等于总是保留）。第 5.2 节去掉已完成的「步骤没有开始时间」，记下高负载下偶发失败的替身评测测试和 haiku 管家在回复里复述 API key（维护者决定暂不打码）。验证：PG 测试覆盖首次开始的保留、不猜旧行、接口返回，计划存取往返带上开始时间；Vitest 121 个；11 处逐条故意改坏都能测出，评审后的规则另有测试；一次性 `looper serve`（替身 Claude）上无头 Chrome 12 项检查通过；全量 pytest 2360 通过。 |
 | 2026-10-17 | 停机快且一定退出（looper #186，looper #177 之后）：停机时已停的 Worker 池仍立即回答 Planner 的 `KILL_WORK`，Planner 同时停掉自己的所有运行，TaskRouter 同时停掉各个 Planner；停任务和停服相撞时 kill 回复和取消同时到达，Python 3.11 的 `asyncio.wait_for` 吞掉取消，TaskRouter 的循环永远不退出，现在请求-回复改用 `asyncio.timeout`，停止时丢了取消的循环每 5 秒再取消一次，整个停机最多 15 秒（低于 launchd 的 20 秒），第二个信号立即退出；已结束任务的页头不再带转圈显示停下时的阶段。验证：3 个任务 12 个步骤在跑时 SIGTERM，修复前测试里 75.9 秒、修复后约 5 秒（真实路径 1.0 秒）；4 步的任务停止 12.3 秒变 0.7 秒；停任务后 40 毫秒发 SIGINT，三次分别 0.4、0.5、1.4 秒退出；第二个信号 0.18 秒退出，下次启动清理掉留下的 4 条运行记录。 |
 | 2026-10-17 | 规划者定义的角色 R2a（looper #181，设计见 RFC 第 18 节）：项目可以存角色模板（`project_role_templates`：类型、一句说明、角色 prompt、可选 harness 和 Profile，校验同任务角色），开关打开时 `[PLAN]`、`[RESTART]` 列出模板，规划者用 `looper_task_role_set` 的 `template` 复制成任务角色（给出的字段覆盖模板，模板的 Profile 不在列表里就不带上，版本记下来源）；用户可以在任务页编辑角色（新版本记为用户写的，同一事务存一条补充说明告诉规划者，之后规划者不能改这个角色）；写版本以写入者读到的版本为准，两边同时写时后到的一方得到冲突；配置导出导入带上模板（只增改不删）；项目页新增 Roles 标签页，任务页 Roles 一栏可编辑。新评测任务 `roles_template_fits`、`roles_template_unfit` 两个方向；全量测试 2363 通过。 |
+| 2026-10-17 | Grok 运行时（M9f）：xAI 的 `grok` CLI（1.0.62）跑四类角色，内置 provider `grok-login` 用操作者在本机的 Grok 登录（`auth.json` 链接，运行后和启动时查分叉，链接代码与 Codex 登录共用 `runtimes/linked_login.py`）；headless 每轮一个进程，事件流就是 Claude Code 的 stream-json，花费用 Grok 自己的 `total_cost_usd`；`GROK_HOME` 和 `HOME` 都指向 Looper 的家目录（只设 `GROK_HOME` 时实测仍读到操作者的 210 个 skill、4 个 Claude Code 插件和 `~/.claude/settings.json` 的权限）。验证：约 12 次真实调用核实的事实写在 Grok 运行时 RFC 第 12 节，事件流测试用录下的输出；13 个变异都被测试抓到；刷新登录怎样写回未核实（维护者决定不强制刷新）。 |
 | 2026-10-17 | 规划者定义的角色 R2b（looper #182，RFC 第 18.3–18.5 节）：步骤的评审角色改成列表 `review_roles`（每项是编号或 `{role, required}`），内置 Reviewer 通过后依次评审，必须通过的不通过就停、参考的不通过接着评，决策回合按顺序列出每道结论，只有内置和每个必须通过的都通过才能接受；v2.7.0 的 `review_role_key`、`review_role_required`、`review_role_version` 和结果里的 `role_review` 迁移成一项的列表后删掉；安装可以多选「roles naming it」（`task_role`），只给点名它的角色运行加载，角色和模板多一项 `items`；`GET /api/projects/:id/role-stats` 按角色编号跨任务汇总，项目页 Roles 标签页显示。新评测任务 `roles_two_reviews`，`roles_security_review` 加上「至多一个评审角色」作反方向。 |
 
 ## 5. 不属于本 RFC 的待办
@@ -689,6 +708,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **规划者不改文件改由工具强制（looper #168 的后续）**：规划者不改文件现在只靠角色提示词和 `[GATE]` 约定里的一句话，规划者进程在每个回合都有全部工具；真实 haiku 评测里规划者曾在关闭关卡那一轮自己写了文件。可选做法：规划者运行时禁用改文件的工具（Edit、Write 等），或在每轮结束时检查工作目录的改动并拒绝；要先看 Claude Code、Codex、OMP 各自怎样限制工具，以及规划者读项目、跑命令的需要。
 - **Manager 自己动手做小活（looper #88 的真实对话发现）**：haiku 收到「创建一个 hello.txt」这类一句话的小活时没有走任务流程，直接用自己的工具在 Manager 的工作目录里写了文件（Manager 有全部工具、不需确认）；要不要在 role prompt 里限定 Manager 不亲自改文件，或收窄它的工具，待定。
 - **OMP 运行时的已知差距（M9e）**：运行中的 OMP Worker 不能被引导（`-p` 只读一次 stdin，`--mode rpc` 能插话但未采用），评测里聊天纠偏因此多一次重试；omp 的 `task` 工具找子 agent 定义时从工作目录一路往上找 `.omp/agents`，过了仓库根也不停，工作目录在操作者家目录下时会读到 `~/.omp/agents`（如果有），Looper 关不掉，只能整个去掉 `task` 工具；工作目录不在 git 仓库里时关掉了向上查找的发现来源，工作目录自己的 `AGENTS.md`、`CLAUDE.md`、`.omp/` 等也不读；后台请求（skill 描述压缩成路由提示、压缩摘要）不在事件流里，不计入花费和单次上限；每个新进程的首个请求基本不命中提示缓存（评测里未缓存输入 101k，Codex 约 60k），可以试 `--prompt-cache-key`；每个 runtime root 第一次运行要解压约 167 MB 的原生库（`omp/natives`）。
+- **Grok 运行时的已知差距（M9f）**：运行中的 Grok Worker 不能被引导（headless 只读一次提示，ACP 的 `grok agent stdio` 没有声明运行中追加输入的扩展，未采用），规划者的消息只能留给这一步的决策轮；Grok 没有花费上限参数，花费只在一轮结束时报，所以单次上限停不住 Grok 的运行（注册时警告，任务上限照算）；Grok 把登录刷新写回 `auth.json` 的方式没有核实（闭源，维护者决定不强制刷新真实 token），靠每次运行后和启动时的分叉检查兜底；压缩事件的字段、子 agent 的响应是否出现在流里没有实跑触发；Grok 一直保存会话（没有不存的选项），一次运行的会话随它的家目录一天后删掉；被结束时正在跑的工具调用不在事件流里；只做了 Grok 自己的登录，API key provider（`[model.<id>]` 的 `api_backend`）未接。
 
 - **Reviewer 看不到重试时补充的说明（2026-10-15，告警分诊定时任务的影子运行发现）**：Planner 决定重试一个步骤时写给 Worker 的补充说明（例如放宽的边界、只需补齐某个输出），Reviewer 看不到，它按原始的步骤说明评审。结果是 Worker 照补充说明做了，评审却判不通过，整步作废、重新规划，或者多重试几次。重试时应把 Planner 的补充说明一并交给 Reviewer。
 - **定时任务里 Planner 的花费占比高（2026-10-15，告警分诊定时任务的影子运行）**：告警分诊这类每轮结构相同的定时任务里，Planner（opus · xhigh）占一轮花费的 38–48%，其中仅制定计划一次就约 $0.6。可选做法：定时任务的 Planner 用较低强度的 Profile，或者让规划参考上一轮的计划。待定。
