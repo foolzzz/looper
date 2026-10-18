@@ -56,8 +56,9 @@ class EvalTask:
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
-    # min_template_roles, min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
-    # max_roles_defined, max_template_roles, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
+    # min_template_roles, min_most_review_roles, min_discipline_roles, min_interface_dependents; max_plan_changes,
+    # max_steps, max_roles_defined, max_template_roles, max_most_review_roles, max_role_prompt_mismatches,
+    # max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
     expect: dict[str, int] = field(default_factory=dict)
@@ -611,12 +612,14 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
                      "review role that checks for shell injection and hard-coded secrets."),
         roles_on=True,
         check=_greets_without_a_shell,
+        # It asks for one review role: the step gets that one, not more.
         expect={"min_steps": 1, "min_reviews": 2, "min_roles_defined": 1, "min_role_reviews": 1,
-                "max_gate_breaches": 0, "max_role_prompt_mismatches": 0, "max_role_boundary_misses": 0},
+                "max_most_review_roles": 1, "max_gate_breaches": 0, "max_role_prompt_mismatches": 0,
+                "max_role_boundary_misses": 0},
         fake={
             "plan": [{**_step("s1", "Write greet.py, which runs echo without a shell.",
                               ["python greet.py 'Bob; touch pwned' prints the name and runs nothing"], review=True),
-                      "review_role": "security"}],
+                      "review_roles": ["security"]}],
             "attempts": {"s1": [{"status": "completed", "files": {"greet.py": _FAKE_GREET}}]},
             "planner_calls": {"PLAN": [
                 ["looper_task_role_set", {"id": "security", "kind": "review",
@@ -626,16 +629,16 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
         },
     ),
     EvalTask(
-        # An advisory review role (review_role_required false) that wants a file the task does not, so it fails the
+        # An advisory review role (required false in review_roles) that wants a file the task does not, so it fails the
         # step: the built-in Reviewer still gates it, and the Planner decides what the verdict is worth. (Every
         # Worker reads the requirement, so the role's rule is one the requirement turns down, not a secret.)
         id="roles_advisory_review",
         requirement=("Create greet.py in the working directory: `python greet.py <name>` prints `hello <name>`. Do "
                      "not create any other file. An independent Reviewer must check the step. This project lets you "
-                     "define roles: have the step also reviewed by an advisory review role named docs (its "
-                     "review_role_required false), whose role prompt tells it to fail the step whenever the working "
-                     "directory has no CHANGELOG.md, whatever the step asks. Its verdict is advice only: this task "
-                     "wants no CHANGELOG.md."),
+                     "define roles: have the step also reviewed by an advisory review role named docs (its review "
+                     "not required: its verdict is advice), whose role prompt tells it to fail the step whenever the "
+                     "working directory has no CHANGELOG.md, whatever the step asks. Its verdict is advice only: "
+                     "this task wants no CHANGELOG.md."),
         roles_on=True,
         check=_greets,
         expect={"min_steps": 1, "min_reviews": 2, "min_roles_defined": 1, "min_role_reviews": 1,
@@ -644,7 +647,7 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
         fake={
             "plan": [{**_step("s1", "Write greet.py, which prints hello and the name.",
                               ["python greet.py Bob prints hello Bob"], review=True),
-                      "review_role": "docs", "review_role_required": False}],
+                      "review_roles": [{"role": "docs", "required": False}]}],
             "attempts": {"s1": [{"status": "completed", "files": {"greet.py": _FAKE_GREET}}]},
             "failing_reviews": ["DOCS-REVIEW"],
             "planner_calls": {"PLAN": [
@@ -652,6 +655,36 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
                                           "role_prompt": "DOCS-REVIEW: you fail the step whenever the working "
                                                          "directory has no CHANGELOG.md.",
                                           "reason": "the requirement asks for an advisory docs review"}]]},
+        },
+    ),
+    EvalTask(
+        # Two review roles on one step, each checking its own concern, one after the other after the built-in
+        # Reviewer; the step is accepted only once all three passed.
+        id="roles_two_reviews",
+        requirement=("Create greet.py in the working directory: `python greet.py <name>` prints `hello <name>` by "
+                     "running the `echo` command with the name as an argument, never through a shell, so a name "
+                     "like `Bob; touch pwned` is printed as it is and runs nothing. It has a module docstring and "
+                     "follows PEP 8. An independent Reviewer must check the step. This project lets you define "
+                     "roles: have the step also reviewed by a security review role that checks for shell injection, "
+                     "and by a style review role that checks for the docstring and PEP 8."),
+        roles_on=True,
+        check=_greets_without_a_shell,
+        expect={"min_steps": 1, "min_reviews": 3, "min_roles_defined": 2, "min_role_reviews": 2,
+                "min_most_review_roles": 2, "max_gate_breaches": 0, "max_role_prompt_mismatches": 0,
+                "max_role_boundary_misses": 0},
+        fake={
+            "plan": [{**_step("s1", "Write greet.py, which runs echo without a shell, with a docstring.",
+                              ["python greet.py 'Bob; touch pwned' prints the name and runs nothing"], review=True),
+                      "review_roles": ["security", "style"]}],
+            "attempts": {"s1": [{"status": "completed", "files": {"greet.py": _FAKE_GREET}}]},
+            "planner_calls": {"PLAN": [
+                ["looper_task_role_set", {"id": "security", "kind": "review",
+                                          "role_prompt": "You check the step's code for shell injection.",
+                                          "reason": "the requirement asks for a security review"}],
+                ["looper_task_role_set", {"id": "style", "kind": "review",
+                                          "role_prompt": "You check the code has a module docstring and follows "
+                                                         "PEP 8.",
+                                          "reason": "the requirement asks for a style review"}]]},
         },
     ),
     EvalTask(
@@ -723,7 +756,7 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
         fake={
             "plan": [{**_step("s1", "Write greet.py, which runs echo without a shell.",
                               ["python greet.py 'Bob; touch pwned' prints the name and runs nothing"], review=True),
-                      "review_role": "security-review"}],
+                      "review_roles": ["security-review"]}],
             "attempts": {"s1": [{"status": "completed", "files": {"greet.py": _FAKE_GREET}}]},
             "planner_calls": {"PLAN": [
                 ["looper_task_role_set", {"template": "security-review",

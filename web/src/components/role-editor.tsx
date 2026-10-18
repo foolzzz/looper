@@ -12,6 +12,7 @@ import {
   putRoleTemplate,
   type AllowedProfile,
   type PlannerRole,
+  type RoleItem,
   type RoleTemplate,
   type RoleTemplates,
 } from "@/lib/api";
@@ -47,6 +48,57 @@ interface Definition {
   role_prompt: string;
   harness: string;
   profile_id: string;
+  items: string[];
+}
+
+/** An item by its name, or its id when the catalog no longer has it. */
+const itemName = (item: RoleItem) => (item.name ? `${item.name} (${item.kind})` : item.id);
+
+/** The items a role may name (installed for roles here), and the ones it names that are not any more. */
+function ItemChecks({
+  available,
+  named,
+  value,
+  onChange,
+}: {
+  available: RoleItem[] | null;
+  named: RoleItem[];
+  value: string[];
+  onChange: (items: string[]) => void;
+}) {
+  const id = useId();
+  const gone = named.filter((item) => !available?.some((a) => a.id === item.id));
+  const shown = [...(available ?? []), ...gone];
+  const toggle = (itemId: string, on: boolean) =>
+    onChange(on ? [...value, itemId] : value.filter((v) => v !== itemId));
+  return (
+    <fieldset className="space-y-1" aria-describedby={`${id}-help`}>
+      <legend className={LABEL}>Items</legend>
+      {shown.length > 0 && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {shown.map((item) => (
+            <label key={item.id} className="inline-flex min-h-8 cursor-pointer items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-primary"
+                checked={value.includes(item.id)}
+                onChange={(e) => toggle(item.id, e.target.checked)}
+              />
+              {itemName(item)}
+              {gone.includes(item) && <Badge variant="warning">not installed for roles now</Badge>}
+            </label>
+          ))}
+        </div>
+      )}
+      <p id={`${id}-help`} className="text-xs text-muted-foreground">
+        {available === null
+          ? "Loading the items installed for roles…"
+          : available.length === 0
+            ? "No skill or MCP server is installed for roles here: install one for \"roles naming it\" in the Skills tab."
+            : "Skills and MCP servers its runs load besides the built-in role's."}
+      </p>
+    </fieldset>
+  );
 }
 
 /** A role's prompt, harness and profile; the profile from the project's list that can run its kind. */
@@ -57,6 +109,8 @@ function DefinitionFields({
   onChange,
   limit,
   autoFocus = false,
+  available,
+  named,
 }: {
   projectId: string | null;
   kind: Kind;
@@ -65,6 +119,10 @@ function DefinitionFields({
   limit?: number;
   /** Focus the role prompt when the form opens. */
   autoFocus?: boolean;
+  /** The items a role may name here; null while they load. */
+  available: RoleItem[] | null;
+  /** The items the role or template names now. */
+  named: RoleItem[];
 }) {
   const id = useId();
   const profiles = useAllowedProfiles(projectId, kind);
@@ -134,8 +192,30 @@ function DefinitionFields({
             : `From the project's list (${AGENT_PROFILE.plural} tab).`}
         </p>
       </div>
+      <ItemChecks
+        available={available}
+        named={named}
+        value={draft.items}
+        onChange={(items) => onChange({ ...draft, items })}
+      />
     </>
   );
+}
+
+/** The items a role of project ``projectId`` may name; null while they load. */
+function useRoleItems(projectId: string | null) {
+  const [items, setItems] = useState<RoleItem[] | null>(projectId ? null : []);
+  useEffect(() => {
+    if (!projectId) return;
+    let alive = true;
+    fetchRoleTemplates(projectId)
+      .then((data) => alive && setItems(data.role_items))
+      .catch(() => alive && setItems([]));
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+  return items;
 }
 
 /** The user's edit of a task's role: its whole definition as a new version; the kind stays. */
@@ -151,7 +231,8 @@ export function TaskRoleEditor({
   onSaved: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<Definition>({ role_prompt: "", harness: "", profile_id: "" });
+  const [draft, setDraft] = useState<Definition>({ role_prompt: "", harness: "", profile_id: "", items: [] });
+  const available = useRoleItems(open ? projectId : null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   // Closing the form gives the focus back to Edit.
@@ -162,7 +243,8 @@ export function TaskRoleEditor({
     wasOpen.current = open;
   }, [open]);
   const start = () => {
-    setDraft({ role_prompt: role.role_prompt, harness: role.harness ?? "", profile_id: role.profile?.profile_id ?? "" });
+    setDraft({ role_prompt: role.role_prompt, harness: role.harness ?? "", profile_id: role.profile?.profile_id ?? "",
+               items: role.items.map((item) => item.id) });
     setError("");
     setOpen(true);
   };
@@ -174,6 +256,7 @@ export function TaskRoleEditor({
         role_prompt: draft.role_prompt,
         harness: draft.harness.trim() ? draft.harness : null,
         profile_id: draft.profile_id || null,
+        items: draft.items,
       });
       setOpen(false);
       onSaved();
@@ -192,7 +275,15 @@ export function TaskRoleEditor({
   }
   return (
     <form onSubmit={save} className={`${EDIT_BOX} space-y-3`} aria-label={`Edit role ${role.id}`}>
-      <DefinitionFields projectId={projectId} kind={role.kind} draft={draft} onChange={setDraft} autoFocus />
+      <DefinitionFields
+        projectId={projectId}
+        kind={role.kind}
+        draft={draft}
+        onChange={setDraft}
+        autoFocus
+        available={available}
+        named={role.items}
+      />
       <p className="text-xs text-muted-foreground">
         Saving writes v{role.version + 1} by you. The steps that start from then on run it; the task&apos;s Planner is
         told, and cannot change this role afterwards.
@@ -204,13 +295,16 @@ export function TaskRoleEditor({
 
 // --- A project's role templates ---
 
-const EMPTY_TEMPLATE = { key: "", kind: "work" as Kind, description: "", role_prompt: "", harness: "", profile_id: "" };
+const EMPTY_TEMPLATE = {
+  key: "", kind: "work" as Kind, description: "", role_prompt: "", harness: "", profile_id: "", items: [] as string[],
+};
 type TemplateDraft = typeof EMPTY_TEMPLATE;
 
 function TemplateForm({
   projectId,
   template,
   limit,
+  available,
   onSaved,
   onCancel,
 }: {
@@ -218,6 +312,7 @@ function TemplateForm({
   /** null: a new one. */
   template: RoleTemplate | null;
   limit: number;
+  available: RoleItem[];
   onSaved: (templates: RoleTemplates) => void;
   onCancel: () => void;
 }) {
@@ -225,7 +320,8 @@ function TemplateForm({
   const [draft, setDraft] = useState<TemplateDraft>(
     template
       ? { key: template.key, kind: template.kind, description: template.description, role_prompt: template.role_prompt,
-          harness: template.harness ?? "", profile_id: template.profile?.profile_id ?? "" }
+          harness: template.harness ?? "", profile_id: template.profile?.profile_id ?? "",
+          items: template.items.map((item) => item.id) }
       : EMPTY_TEMPLATE,
   );
   const [error, setError] = useState("");
@@ -241,6 +337,7 @@ function TemplateForm({
           role_prompt: draft.role_prompt,
           harness: draft.harness.trim() ? draft.harness : null,
           profile_id: draft.profile_id || null,
+          items: draft.items,
         }),
       );
     } catch (err) {
@@ -310,6 +407,8 @@ function TemplateForm({
         onChange={(d) => setDraft({ ...draft, ...d })}
         limit={limit}
         autoFocus={!!template}
+        available={available}
+        named={template?.items ?? []}
       />
       <FormFooter error={error} busy={busy} submit={template ? "Save" : "Add template"} onCancel={onCancel} />
     </form>
@@ -320,11 +419,13 @@ function TemplateRow({
   projectId,
   template,
   limit,
+  available,
   onTemplates,
 }: {
   projectId: string;
   template: RoleTemplate;
   limit: number;
+  available: RoleItem[];
   onTemplates: (templates: RoleTemplates) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -376,6 +477,7 @@ function TemplateRow({
                 projectId={projectId}
                 template={template}
                 limit={limit}
+                available={available}
                 onSaved={(templates) => {
                   setEditing(false);
                   onTemplates(templates);
@@ -388,6 +490,11 @@ function TemplateRow({
       }
     >
       <p className="text-xs">{template.description || <span className="text-muted-foreground">No description</span>}</p>
+      {template.items.length > 0 && (
+        <p className="text-xs">
+          <span className="text-muted-foreground">Items</span> {template.items.map(itemName).join(", ")}
+        </p>
+      )}
       <p className="line-clamp-2 whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">
         {template.role_prompt}
       </p>
@@ -428,6 +535,7 @@ export function ProjectRoleTemplates({ projectId, rolesOn }: { projectId: string
             projectId={projectId}
             template={null}
             limit={data.role_text_max_chars}
+            available={data.role_items}
             onSaved={(templates) => {
               close();
               setData(templates);
@@ -445,6 +553,7 @@ export function ProjectRoleTemplates({ projectId, rolesOn }: { projectId: string
             projectId={projectId}
             template={template}
             limit={data.role_text_max_chars}
+            available={data.role_items}
             onTemplates={setData}
           />
         ))}
