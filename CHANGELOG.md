@@ -18,6 +18,32 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-10-18
+
+### Highlights
+
+- **User gates on Lark and Telegram.** A gate in the plan settles what only the user can decide, while other steps run. Questions reach the chat the task came from, a reply in that thread goes to the gate, and the Manager can relay an answer. On unless a project turns them off. A task a schedule starts never opens a gate. ([#168](https://github.com/foolzzz/looper/pull/168), [#179](https://github.com/foolzzz/looper/pull/179))
+- **Agent room.** The Planner and each step's seats message each other, see who is online, and post an interface without a shared file. Workers cannot lobby Reviewers. A question to the seat of an ended step is answered by a read-only consult of that seat's last session; what it does not answer goes to the Planner. ([#187](https://github.com/foolzzz/looper/pull/187), [#188](https://github.com/foolzzz/looper/pull/188))
+- **Planner-defined roles and templates.** Project templates the Planner copies, the user's edit of a role on the task page, several review roles in order, catalog items a role loads, and a project's roles summed across its tasks. A run's role is named wherever runs are shown. ([#170](https://github.com/foolzzz/looper/pull/170), [#181](https://github.com/foolzzz/looper/pull/181), [#182](https://github.com/foolzzz/looper/pull/182))
+- **Grok.** xAI's `grok` CLI for the Manager, Planner, Worker and Reviewer, with a built-in login provider and a home that does not read the operator's own Grok, Claude Code or Cursor configuration. ([#185](https://github.com/foolzzz/looper/pull/185))
+- **System prompt append or replace.** Per Agent Profile. `append` is unchanged. `replace` is opt-in and drops that runtime's default guidance. A runtime that cannot replace is refused at save. ([#193](https://github.com/foolzzz/looper/pull/193))
+- **Task workspaces and operator notes.** A task runs in a git worktree of the directory it names, on a branch Looper never merges. New projects default to that. Operator notes are on for every project and reach every runtime. ([#190](https://github.com/foolzzz/looper/pull/190))
+- **Schedules from the Manager.** Create, change and run, with schedules in the configuration file, always imported disabled. Enable and run-now wait for the next message. ([#178](https://github.com/foolzzz/looper/pull/178))
+- **Task cost by model.** Tokens and cost per model on the task, the Manager's turns apart from the task's own cost and its spend cap. ([#189](https://github.com/foolzzz/looper/pull/189))
+- **A read-only Planner, and a faster stop.** The Planner's writes are refused by its tools. `looper serve` stops in seconds and always exits. Every run record reaches a terminal status. A step records when it first started. The Pipeline card opens on hover and the graph can go full screen. ([#172](https://github.com/foolzzz/looper/pull/172), [#174](https://github.com/foolzzz/looper/pull/174), [#177](https://github.com/foolzzz/looper/pull/177), [#183](https://github.com/foolzzz/looper/pull/183), [#184](https://github.com/foolzzz/looper/pull/184), [#186](https://github.com/foolzzz/looper/pull/186))
+
+### Behavior changes
+
+These are the defaults that move in this release. Each one applies without a new setting unless the line says how to turn it off.
+
+1. **User gates are on by default.** A project that never set `user_gates` now lets its Planners open gates. The attended Planner's contract grows by the gates section. Set the project to `user_gates: "off"` to keep the previous contract. A task a schedule starts still never opens a gate. ([#168](https://github.com/foolzzz/looper/pull/168), [#179](https://github.com/foolzzz/looper/pull/179))
+2. **The agent room is on by default.** A project that never set `agent_room` gives every task a room and the room tools. A question to the seat of an ended step is answered by a read-only consult of that seat's last session; what it does not answer goes to the Planner. Set `agent_room` to `off` for the previous prompts and tool lists. ([#187](https://github.com/foolzzz/looper/pull/187), [#188](https://github.com/foolzzz/looper/pull/188))
+3. **New projects default to worktree task workspaces.** A project created through the API, the task form or the Manager gets `task_workspaces: "worktree"`. An existing project and an imported project stay unset, which means tasks run in place. A task that names a directory other than its project's still gets a worktree. ([#190](https://github.com/foolzzz/looper/pull/190))
+4. **Operator notes are on by default for every project, including ones that already exist.** `operator_notes` unset means on. The notes reach every runtime, including Codex, OMP and Grok. Set a project to `off` to stop injecting them. ([#190](https://github.com/foolzzz/looper/pull/190))
+5. **Enabling a schedule and running it now need the next message.** Through the Manager, both wait for the user to confirm in the next message. The turn that created a schedule can neither enable it nor run it. If the user does not confirm, the schedule stays disabled and nothing is enabled and nothing runs. The dashboard and the HTTP API still perform the call they are given. ([#178](https://github.com/foolzzz/looper/pull/178))
+6. **The Planner is read-only, enforced by tools.** Claude Code disallows the write tools. A Grok Planner has no shell. Where a runtime cannot refuse the call, Looper records a git change after the turn and does not revert it. ([#183](https://github.com/foolzzz/looper/pull/183))
+7. **Concurrency counts one task, not the project.** Nothing limits how many tasks run at once. The role layer's Worker and Reviewer limits, and the built-in 16 and 8, apply to one task. Project-level limits are removed. See Breaking Changes. ([#173](https://github.com/foolzzz/looper/pull/173))
+
 ### Added
 
 - Agent Profiles can explicitly replace the runtime's default system prompt
