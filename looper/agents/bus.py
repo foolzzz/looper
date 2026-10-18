@@ -197,10 +197,10 @@ class MessageBus:
         self._reply_futures[envelope.message_id] = future
         try:
             await self.publish(envelope)
-            return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            self._reply_futures.pop(envelope.message_id, None)
-            raise
+            # Not asyncio.wait_for: in Python 3.11 it returns the reply when a cancellation (a stop) arrives with
+            # it, and the stop's cancellation is lost.
+            async with asyncio.timeout(timeout):
+                return await future
         finally:
             self._reply_futures.pop(envelope.message_id, None)
 

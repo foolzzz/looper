@@ -29,6 +29,8 @@ directories), one at a time over the HTTP API:
 | `roles_advisory_review` | the same switch; a greeting script reviewed by the built-in Reviewer and by an advisory review role (`review_role_required` false) that wants a CHANGELOG.md the task turns down: the role does not pass the step, the built-in Reviewer does, and the Planner decides (accept, or retry with the role's findings) |
 | `roles_multi_platform` | the same switch, and a requirement that asks for no role: one tip-of-the-day feature across a back end (`backend/tips.py`, run by the check), a web front end, an Android and an iOS client (`web/tip.js`, `android/TipClient.kt`, `ios/TipClient.swift`, no build), which must agree on an interface recorded in `api/tip_api.json`: a work role per discipline whose prompt names at least two of that platform's conventions, at least four role steps built on one interface step, at least two Workers at once, the role runs on a version defined with the boundaries before the contract, and no contract violation |
 | `roles_not_needed` | the same switch on a one-file task: the Planner defines no role and plans at most two steps |
+| `roles_template_fits` | the same switch, and the project keeps two role templates (`security-review` for steps whose code runs commands or takes untrusted input, `doc-writer` for user documentation); the script that must not run a shell, reviewed by an independent Reviewer, with no role asked for: the Planner copies `security-review` as the step's review role, which reviews after the built-in Reviewer |
+| `roles_template_unfit` | the same templates on two text files neither fits: the Planner copies no template and defines no role |
 | `gate_ambiguous` | the task's project lets its Planner open user gates (`user_gates` on); the settings file's format, name and key are the user's choice, written down nowhere: the Planner asks at a gate, the scripted user answers (TOML, `settings.toml`, `[service]`), the gate passes, a Worker reads the conclusion and the file follows the answer |
 | `gate_not_needed` | the same switch on a one-file task: no gate, at most two steps |
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
@@ -47,7 +49,8 @@ that depends on both (`bracketed_pairs`), and the most Workers that ran at once
 Planner answered by changing the plan (`plan_changes`), the Worker and Reviewer
 runs on a profile the Planner chose (`planner_profile_runs`), the roles the Planner defined (`roles_defined`)
 and the runs as one (`role_runs`; on the role's own profile, `role_profile_runs`; as a review role,
-`role_reviews`; on a prompt that is no version it defined, `role_prompt_mismatches`; without the boundaries after
+`role_reviews`; copied from a project role template, `template_roles`; on a prompt that is no version it defined,
+`role_prompt_mismatches`; without the boundaries after
 the task section, `role_boundary_misses`), the accepted steps with a review role that lack a passing built-in or
 role review where the role is required (`gate_breaches`), the reviews by an advisory review role that did not pass
 (`advisory_role_fails`), the disciplines of a task that names them with a work role of their own whose prompt
@@ -191,7 +194,8 @@ single_step,chat_correction` (task ids, or a named set: `planner`, the tasks
 whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `parallel_parts`, `interface_first`, `supplement_replan`,
 `supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
-`roles_not_needed`, `roles_multi_platform`, `gate_ambiguous`,
+`roles_not_needed`, `roles_multi_platform`, `roles_template_fits`,
+`roles_template_unfit`, `gate_ambiguous`,
 `gate_not_needed`, `gate_parallel_branch` and `gate_discoverable`; a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until

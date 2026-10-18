@@ -810,11 +810,13 @@ class ResidentClaude:
             return
         if output is not None:
             output.drop_turn()
-        # Taken while Claude runs: what it started is re-parented once it exits.
-        known = None if kill else proc_tree.tree_of(process)
-        if process.stdin is not None and not process.stdin.is_closing():
-            process.stdin.close()
+        known: proc_tree.Tree | None = None
         try:
+            if not kill:
+                # Taken and recorded while Claude runs: what it started is re-parented once it exits.
+                known = await proc_tree.begin_end(process)
+            if process.stdin is not None and not process.stdin.is_closing():
+                process.stdin.close()
             if process.returncode is None and not kill:
                 try:
                     await asyncio.wait_for(process.wait(), STOP_GRACE_SEC)
@@ -1176,15 +1178,17 @@ class ClaudeRunRecorder:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
         events added up to, or, for a whole process whose result came, what that result reports; nothing for a
         record closed already."""
+        ended = "the run had ended with its result; " if self._result is not None else ""
         if isinstance(exc, Exception):
-            why = f"Looper stopped following the run after an error: {type(exc).__name__}: {exc}"
+            why = f"{ended}Looper stopped following the run after an error: {type(exc).__name__}: {exc}"
+        elif ended:
+            why = f"{ended}Looper was stopped while it handled the result"
         elif exc is not None:
             why = "the run was stopped before it ended: it was killed, or its task or the server stopped"
         else:
             why = "the run ended without its outcome recorded"
         usage = self._usage_so_far
         if self._result is not None:
-            why += "; it had ended with its result, which Looper had not finished handling"
             usage = run_usage(self._result, price=self._launch.price if self._launch is not None else None) \
                 .filled_from(usage)
         await self._close(ended_by(exc), output_text=None, session_id=(self._result or {}).get("session_id"),
