@@ -7,14 +7,14 @@ the Schedules page's list, a schedule's view and its runs, ``create_schedule``,
 and a refusal carries the dashboard's message. A schedule is named by its id or
 its name, ignoring case, within ``project`` when given; a name more than one
 project has is refused, naming each. Listing and reading are ``read``; the
-changes are ``write``, but for deleting and for a change that raises or removes
-a spend cap, which are ``high``: the user is shown what it does and confirms
-first.
+changes are ``write``, but for deleting, enabling, running now and a change that
+raises or removes a spend cap, which are ``high``: the user is shown what it does
+and confirms in the next message.
 
 A new schedule is disabled. Looper adds its configuration (the rule in words,
 its next fire times, what it runs and what bounds it) to the reply, with the
 question whether to enable it: enabling is the approval (scheduled-tasks RFC
-D6), so a schedule this turn created is neither enabled nor run in this turn
+D6), confirmed in the user's next message, so a schedule this turn created is neither enabled nor run in this turn
 (``Turn.created``): the user has not seen it yet. A change adds what it
 changed, before and after.
 """
@@ -103,10 +103,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
     if action == "create":
         return await _create(call)
     row = await _schedule(arguments)
-    if action in ("enable", "run") and row["id"] in call.turn.created:
-        raise OpError(ErrorCode.CONFLICT, f"schedule {row['name']} was created in this turn: Looper shows the user its "
-                                          "configuration after your reply, with the question whether to enable it. "
-                                          f"Do not {action} it now; do it when the user answers")
+    _not_created_now(call, row)
     if action == "update":
         return await _update(call, row)
     if action == "run":
@@ -143,6 +140,15 @@ def _fields(arguments: Mapping[str, Any], action: str) -> dict[str, Any]:
     if "profiles" in data:
         data["profile_overrides"] = data.pop("profiles")
     return data
+
+
+def _not_created_now(call: Call, row: Mapping[str, Any]) -> None:
+    """Refuses enabling or running a schedule this turn created."""
+    action = call.arguments["action"]
+    if action in ("enable", "run") and row["id"] in call.turn.created:
+        raise OpError(ErrorCode.CONFLICT, f"schedule {row['name']} was created in this turn: Looper shows the user its "
+                                          "configuration after your reply, with the question whether to enable it. "
+                                          f"Do not {action} it now; do it when the user answers")
 
 
 async def _create(call: Call) -> dict[str, Any]:
@@ -193,11 +199,13 @@ def _raises_a_cap(row: Mapping[str, Any], data: Mapping[str, Any], project_cap: 
 
 
 async def _confirming(call: Call) -> str | None:
-    """What deleting a schedule, or a change raising or removing its spend cap, does, for the user to confirm; None
-    for any other call (its own tier)."""
+    """What deleting, enabling or running a schedule, or a change raising or removing its spend cap, does, for the
+    user to confirm; None for any other call (its own tier, and enabling one already enabled)."""
     action = call.arguments["action"]
     if action == "delete":
         return await _deleting(call)
+    if action in ("enable", "run"):
+        return await _starting(call)
     if action != "update":
         return None
     row = await _schedule(call.arguments)
@@ -217,6 +225,25 @@ async def _confirming(call: Call) -> str | None:
     after = {**before, **{key: data[key] for key in CAPS if key in data}}
     return "\n".join([f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
                       *(await _changes(before, after, only=data)).values(), "这会提高（或取消）它的花费上限。"])
+
+
+async def _starting(call: Call) -> str | None:
+    """What enabling a schedule (it then fires unattended) or running it now does, for the user to confirm."""
+    row = await _schedule(call.arguments)
+    _not_created_now(call, row)
+    action = call.arguments["action"]
+    if action == "enable" and row["enabled"]:
+        return None
+    view = (await answered(schedules.get_schedule(row["id"])))["schedule"]
+    names = await _profile_names()
+    head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
+    lines = [f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}",
+             f"- 需求：{_shown('requirement', view, names)}",
+             f"- 花费上限：每次运行 {_shown('run_budget_usd', view, names)}，每天 {_shown('daily_budget_usd', view, names)}"]
+    if action == "run":
+        return "\n".join([f"要现在运行{head}一次吗？它会立刻建出任务并开始执行，花费计入它的上限。", *lines])
+    lines.insert(1, f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}")
+    return "\n".join([f"要启用{head}吗？启用后它按规则无人值守地建任务运行。", *lines])
 
 
 async def _changes(before: Mapping[str, Any], after: Mapping[str, Any], *,
@@ -354,7 +381,8 @@ TOOLS: tuple[Tool, ...] = (
         name="looper_schedules",
         description="Schedules (a project's task on a time rule): list; get (with latest runs); create (disabled; "
                     "Looper shows it and asks whether to enable it); update; enable (its runs then start tasks "
-                    "unattended) or disable; run now; delete (the user confirms first; its tasks stay).",
+                    "unattended; the user confirms first) or disable; run now (the user confirms first); delete "
+                    "(the user confirms first; its tasks stay).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
