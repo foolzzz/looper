@@ -132,6 +132,30 @@ def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
         "at-plan-turn-start.txt", "in-plan-turn.txt"]
 
 
+def test_files_a_steps_merge_left_are_not_the_planners(tmp_path: Path) -> None:
+    # Looper merges an accepted step's worktree during or just after a Planner turn: what it wrote is not the
+    # Planner's, unless something changed it again afterwards.
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "start.py").write_text("start\n")
+    runner.init_repository(work)
+
+    def git(*args: str) -> str:
+        return runner._git_in(work, *args)
+
+    git("checkout", "-q", "-b", "step")
+    for name in ("merged.py", "changed-later.py"):
+        (work / name).write_text("the step's\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "the step's work")
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-ff", "step", "-m", "Merge s1\n\nLooper-Task: task-1\nLooper-Step: s1")
+    (work / "changed-later.py").write_text("written after the merge\n")
+    (work / "untracked.txt").write_text("new\n")
+    assert runner.merged_by_looper(work, "task-1") == {"merged.py"}
+    assert runner.merged_by_looper(work, "task-2") == set()  # another task's merges are not this one's
+
+
 @pytest.mark.parametrize(("depends_on", "pairs"), [
     ({"s1": [], "s2": [], "s3": ["s1", "s2"], "s4": ["s3"]}, 1),  # s1 and s2 only
     ({"s1": [], "s2": ["s1"], "s3": ["s2"]}, 0),  # a chain: s3 needs s1 through s2
@@ -683,7 +707,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     for task in TASKS:
         assert by_id[task.id]["success"], (task.id, by_id[task.id]["problems"])
         assert by_id[task.id]["contract_violations"]["total"] == 0
-        assert by_id[task.id]["planner_modified_files"] == 0
+        assert by_id[task.id]["planner_modified_files"] == 0, (
+            task.id, by_id[task.id]["planner_changed_files"], by_id[task.id]["planner_edit_tool_paths"])
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
     assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
