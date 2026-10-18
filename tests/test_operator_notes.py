@@ -106,7 +106,7 @@ def test_the_notes_stay_within_their_limit(tmp_path: Path, _env: Path) -> None:
     memory(_env, os.path.realpath(plain), {"MEMORY.md": index,
                                            **{f"n{i}.md": "x" * 3000 for i in range(300)}})
     found = read_notes(str(plain))
-    assert len(found.text.encode("utf-8")) <= NOTES_MAX_BYTES + 400  # the closing list of what was left out
+    assert len(found.text.encode("utf-8")) <= NOTES_MAX_BYTES
     assert "[Note 199]" in found.text and "[Note 200]" not in found.text  # as much of the index as Claude Code loads
     assert found.files[0] == "MEMORY.md" and found.omitted and set(found.files[1:]).isdisjoint(found.omitted)
 
@@ -212,3 +212,30 @@ def test_a_worker_gets_them_unless_its_project_turns_them_off(agent_db: object, 
     result, seen = _run_step()
     assert result["status"] == "completed"
     assert ("NOTE-MARK-59322" in seen["prompt"]) is given and (asked == [seen["work_dir"]]) is given
+
+
+@pytest.mark.parametrize("content", ["x" * 30000, "记" * 10000, "[Missing](missing.md)\n" + "x" * 30000])
+def test_the_index_and_footer_share_the_notes_byte_budget(tmp_path: Path, _env: Path, content: str) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    memory(_env, os.path.realpath(plain), {"MEMORY.md": content})
+    found = read_notes(str(plain))
+    assert found.files == ("MEMORY.md",)
+    assert len(found.text.encode("utf-8")) <= NOTES_MAX_BYTES
+    assert "�" not in found.text
+    if "missing.md" in content:
+        assert found.omitted == ("missing.md",) and "Not included" in found.text
+
+
+def test_a_symlinked_index_cannot_escape_the_memory_directory(tmp_path: Path, _env: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    outside = tmp_path / "private.md"
+    outside.write_text("private content")
+    directory = memory(_env, os.path.realpath(plain), {})
+    (directory / "MEMORY.md").symlink_to(outside)
+    assert read_notes(str(plain)) == OperatorNotes()
+    (directory / "MEMORY.md").unlink()
+    (directory / "inside.md").write_text("contained notes")
+    (directory / "MEMORY.md").symlink_to(directory / "inside.md")
+    assert "contained notes" in read_notes(str(plain)).text

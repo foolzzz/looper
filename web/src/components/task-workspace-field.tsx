@@ -75,7 +75,7 @@ export function TaskWorkspaceField({
             value={value.mode}
             onChange={(e) => {
               const mode = e.target.value as WorkspaceMode | "";
-              onChange({ mode, base: mode === "in_place" ? "" : value.base });
+              onChange({ mode, base: (mode || check?.default_mode) === "in_place" ? "" : value.base });
             }}
             className={SELECT}
           >

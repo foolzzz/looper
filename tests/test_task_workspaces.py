@@ -339,3 +339,116 @@ def test_the_startup_sweep_finishes_what_ended_and_removes_what_no_task_has(repo
     assert not path.exists() and not orphan.exists()
     assert git(repo, "show", "looper/task-1/task:done.txt") == "done"
     assert git(repo, "show", "looper/task-gone/task:left.txt") == "left"  # its branch stays, with what it held
+
+
+@pytest.mark.parametrize("command", ["location", "head", "branch"])
+@pytest.mark.parametrize("failure", ["timeout", "os_error", "git_error", "exit_one"])
+def test_repository_inspection_failures_never_fall_back_to_in_place(
+    repo: Path, store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, failure: str,
+) -> None:
+    original = ws._git
+
+    async def broken(cwd: Any, *args: str, **kwargs: Any) -> Any:
+        inspecting = ("location" if "--show-toplevel" in args else "head" if "HEAD^{commit}" in args
+                      else "branch" if "symbolic-ref" in args else "")
+        if inspecting == command:
+            if failure == "timeout":
+                raise ws.GitError("git inspection timed out")
+            if failure == "os_error":
+                raise OSError("git inspection unavailable")
+            return ws._Run(1 if failure == "exit_one" else 128, b"", b"fatal: inspection failed")
+        return await original(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(ws, "_git", broken)
+    with pytest.raises(TaskWorkspaceError, match="inspection"):
+        run(tw.check(str(repo), mode=WORKTREE))
+    with pytest.raises(TaskWorkspaceError, match="inspection"):
+        prepare(store, task("task-1", repo), tmp_path / "rt")
+    assert not store.worktrees and not store.work_dirs and not store.notes
+
+
+def test_prepare_retry_repairs_the_tasks_work_dir(repo: Path, store: Store, tmp_path: Path,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import tasks
+
+    async def unavailable(*_: Any) -> None:
+        raise RuntimeError("task update unavailable")
+
+    root = tmp_path / "rt"
+    row = task("task-1", repo / "app")
+    monkeypatch.setattr(tasks, "set_work_dir", unavailable)
+    with pytest.raises(RuntimeError, match="task update unavailable"):
+        prepare(store, row, root)
+    assert store.worktrees["task-1"]["state"] == "active" and not store.work_dirs
+    monkeypatch.setattr(tasks, "set_work_dir", store.set_work_dir)
+    work_dir = prepare(store, row, root)
+    assert store.work_dirs.get("task-1") == work_dir == str(root / "task-worktrees" / "task-1" / "app")
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout", "os_error", "detached", "wrong_branch", "pending",
+                                     "common", "checkouts", "links"])
+def test_sweep_preserves_unverifiable_orphans(repo: Path, store: Store, tmp_path: Path,
+                                            monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+                                            failure: str) -> None:
+    root = tmp_path / "rt"
+    path = Path(prepare(store, task("task-1", repo), root))
+    (path / "keep.txt").write_text("uncommitted work\n")
+    store.worktrees.clear()
+    original = ws._git
+
+    async def broken(cwd: Any, *args: str, **kwargs: Any) -> Any:
+        if "symbolic-ref" in args and failure not in ("pending", "common", "checkouts", "links"):
+            if failure == "timeout":
+                raise ws.GitError("verification timed out")
+            if failure == "os_error":
+                raise OSError("verification unavailable")
+            return ws._Run(1 if failure == "detached" else 128 if failure == "exit" else 0,
+                           b"refs/heads/other" if failure == "wrong_branch" else b"", b"verification failed")
+        if ((failure == "pending" and "add" in args) or (failure == "common" and "--git-common-dir" in args)
+                or (failure == "checkouts" and "--porcelain" in args) or (failure == "links" and "ls-files" in args)):
+            raise ws.GitError("cannot inspect pending changes")
+        return await original(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(ws, "_git", broken)
+    assert run(tw.sweep(root)) == 0
+    assert (path / "keep.txt").read_text() == "uncommitted work\n"
+    assert "leaving" in caplog.text
+
+
+@pytest.mark.parametrize("source_worktree", [False, True])
+def test_sweep_never_commits_orphan_workspace_links(repo: Path, store: Store, tmp_path: Path,
+                                                   source_worktree: bool) -> None:
+    if source_worktree:
+        source = tmp_path / "source"
+        git(repo, "worktree", "add", "-q", "-b", "source", str(source))
+    else:
+        source = repo
+    (source / "app" / "node_modules").mkdir()
+    (source / "app" / ".venv").mkdir()
+    root = tmp_path / "rt"
+    path = Path(prepare(store, task("task-1", source / "app"), root, links=("node_modules", ".venv")))
+    (path / "result.txt").write_text("retained result\n")
+    git(path, "add", "-A")
+    git(path, "commit", "-qm", "worker: result and links")
+    store.worktrees.clear()
+    assert run(tw.sweep(root)) == 1
+    tracked = git(repo, "ls-tree", "-r", "--name-only", "looper/task-1/task").splitlines()
+    assert "app/result.txt" in tracked
+    assert "app/node_modules" not in tracked and "app/.venv" not in tracked
+
+
+def test_a_detached_workspace_can_still_run_in_a_worktree(repo: Path, store: Store, tmp_path: Path) -> None:
+    git(repo, "checkout", "-q", "--detach")
+    found = run(tw.check(str(repo), mode=WORKTREE))
+    assert found["mode"] == "worktree" and found["git"]["branch"] is None
+    path = prepare(store, task("task-1", repo), tmp_path / "rt")
+    assert path != str(repo) and store.work_dirs["task-1"] == path
+
+
+def test_a_repository_without_a_commit_does_not_silently_run_in_place(tmp_path: Path, store: Store) -> None:
+    path = tmp_path / "empty-repo"
+    path.mkdir()
+    git(path, "init", "-q", "-b", "main")
+    with pytest.raises(TaskWorkspaceError, match="no readable commit"):
+        prepare(store, task("task-1", path), tmp_path / "rt")
+    assert not store.work_dirs and not store.notes

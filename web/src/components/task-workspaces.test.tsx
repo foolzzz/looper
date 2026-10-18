@@ -1,7 +1,10 @@
+// @vitest-environment happy-dom
+import { act, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
-import { WorkspaceSummary } from "@/components/task-workspace-field";
+import { TaskWorkspaceField, WorkspaceSummary, type WorkspaceChoice } from "@/components/task-workspace-field";
 import { executionChanges, executionDraft } from "@/components/project-execution";
 import type { Project, StepWorkspace, TaskDetail, WorkspaceCheck } from "@/lib/api";
 
@@ -125,5 +128,59 @@ describe("WorkspaceSummary", () => {
     expect(text(renderToStaticMarkup(<WorkspaceSummary check={{ ...check, mode: "in_place", git: null, warnings: [],
                                                                notes: { found: false, files: [], omitted: [] } }} />)))
       .toBe("In /srv/calc itself (not a git repository).");
+  });
+});
+
+describe("TaskWorkspaceField", () => {
+  it("clears the base when Default resolves to an in-place project", async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.useFakeTimers();
+    const requests: URL[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      requests.push(url);
+      return new Response(JSON.stringify({
+        workspace: "/srv/calc", mode: url.searchParams.get("mode") || "in_place", default_mode: "in_place",
+        git: { repository: "/srv/calc", branch: "main", head: "a".repeat(40) },
+        warnings: [], notes: { found: false, files: [], omitted: [] },
+      }), { status: 200 });
+    }));
+    let choice: WorkspaceChoice = { mode: "", base: "" };
+    function Form() {
+      const [value, setValue] = useState(choice);
+      choice = value;
+      return <TaskWorkspaceField dir="/srv/calc" projectId="p1" value={value} onChange={setValue} />;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Form />));
+      await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+      const mode = container.querySelector("select")!;
+      await act(async () => {
+        mode.value = "worktree";
+        mode.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      const base = container.querySelector("input")!;
+      await act(async () => {
+        // Bypass React's value tracker, as a user editing the field does.
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(base, "release");
+        base.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      expect(choice).toEqual({ mode: "worktree", base: "release" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+      await act(async () => {
+        mode.value = "";
+        mode.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(choice).toEqual({ mode: "", base: "" });
+      expect(container.querySelector("input")).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+      expect(requests.at(-1)?.searchParams.has("base")).toBe(false);
+    } finally {
+      act(() => root.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });

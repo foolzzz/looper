@@ -164,21 +164,30 @@ class _Repository:
 
 
 async def _repository(workspace: str) -> _Repository | None:
-    """The workspace's repository, or None when it is not in a git work tree with a commit."""
+    """The workspace's repository, None only outside a git work tree; inspection failures raise."""
     if not Path(workspace).is_dir():
-        return None
+        raise TaskWorkspaceError(f"cannot inspect the workspace {workspace}: not a directory")
     try:
         where = await ws._git(workspace, "rev-parse", "--show-toplevel", "--show-prefix", check=False)
         if where.returncode != 0:
-            return None
+            if where.stderr.startswith((b"fatal: not a git repository (or any of the parent",
+                                        b"fatal: this operation must be run in a work tree")):
+                return None
+            raise ws.GitError(where.stderr.decode("utf-8", "replace").strip()[:500] or
+                              f"git repository inspection failed: exit {where.returncode}")
         lines = where.stdout.decode("utf-8", "surrogateescape").split("\n")
         toplevel, subdir = lines[0], (lines[1] if len(lines) > 1 else "").rstrip("/")
         head = await ws._git(toplevel, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False)
         if head.returncode != 0:
-            return None
+            raise ws.GitError(head.stderr.decode("utf-8", "replace").strip()[:500] or
+                              "git HEAD inspection failed: the repository has no readable commit")
         branch = await ws._git(toplevel, "symbolic-ref", "-q", "HEAD", check=False)
-    except ws.GitError:
-        return None
+        if branch.returncode != 0 and not (branch.returncode == 1 and not branch.stdout and not branch.stderr):
+            # symbolic-ref -q exits 1 without output for a detached HEAD.
+            raise ws.GitError(branch.stderr.decode("utf-8", "replace").strip()[:500] or
+                              f"git branch inspection failed: exit {branch.returncode}")
+    except (ws.GitError, OSError, asyncio.TimeoutError) as exc:
+        raise TaskWorkspaceError(f"cannot inspect the workspace {workspace}: {exc}") from None
     return _Repository(toplevel, subdir, head.text, branch.text if branch.returncode == 0 else "")
 
 
@@ -300,6 +309,7 @@ async def prepare(task: Mapping[str, Any], *, runtime_root: Path, links: Sequenc
         if not (Path(worktree.path) / ".git").exists():
             await _restore(worktree)
             await note("phase", f"The task's worktree was gone: made again from its branch {worktree.branch}")
+        await db_tasks.set_work_dir(task_id, worktree.work_dir)
         return worktree.work_dir
     workspace = str(task.get("workspace_dir") or work_dir)
     repo = await _repository(workspace)
@@ -422,16 +432,29 @@ async def sweep(runtime_root: Path) -> int:
         for path in sorted(p for p in root.iterdir() if p.is_dir()):
             if path.resolve() in known:
                 continue
-            branch = await ws._git(path, "symbolic-ref", "-q", "HEAD", check=False) if (path / ".git").is_file() \
-                else None
-            if branch is not None and branch.returncode == 0 and branch.text.endswith("/task") \
-                    and branch.text.startswith("refs/heads/looper/"):
-                try:
-                    await ws.commit_pending(path, [], f"looper: commit what task {path.name} left uncommitted"
-                                                      f"\n\nLooper-Task: {path.name}")
-                except ws.GitError:
-                    logger.warning("cannot commit what %s holds; leaving it", path, exc_info=True)
-                    continue
-            await ws.remove_orphan(path, keep_branch=True)
+            try:
+                if not (path / ".git").is_file():
+                    raise ws.GitError("not a verifiable git worktree")
+                branch = await ws._git(path, "symbolic-ref", "-q", "HEAD")
+                if branch.text != f"refs/heads/{task_branch(path.name)}":
+                    raise ws.GitError("the orphan is no longer on its task branch")
+                common = await ws._git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                # With no row left, recover workspace links by their targets in the repository's other checkouts.
+                checkouts = await ws._git(path, "worktree", "list", "--porcelain", "-z")
+                sources = [Path(field.removeprefix("worktree ")) for field in checkouts.fields
+                           if field.startswith("worktree ") and field != f"worktree {path}"]
+                candidates = await ws._git(path, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+                repo = Path(common.text).parent
+                links = [name for name in dict.fromkeys(candidates.fields) if name and (path / name).is_symlink()
+                         and any(os.readlink(path / name) == str(source / name) for source in sources)]
+                await ws.commit_pending(path, links, f"looper: commit what task {path.name} left uncommitted"
+                                                     f"\n\nLooper-Task: {path.name}")
+                await ws.forget_worktree(str(repo), path)
+            except (ws.GitError, OSError, asyncio.TimeoutError):
+                logger.warning("cannot verify or commit what %s holds; leaving it", path, exc_info=True)
+                continue
+            if path.exists():
+                await asyncio.to_thread(shutil.rmtree, path)
+            ws._remove_empty(path.parent)
             removed += 1
     return removed

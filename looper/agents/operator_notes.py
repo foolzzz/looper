@@ -152,33 +152,42 @@ def read_notes(work_dir: str) -> OperatorNotes:
     except OSError:
         return NO_NOTES
     index_path = root / INDEX
-    if not index_path.is_file():
-        return NO_NOTES
     try:
-        lines = index_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        real = index_path.resolve(strict=True)
+        if not real.is_relative_to(root) or not real.is_file():
+            return NO_NOTES
+        lines = real.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return NO_NOTES
     except OSError as exc:
         return OperatorNotes(error=f"cannot read the operator's notes: {exc.strerror or exc}")
-    index = "\n".join(lines[:INDEX_MAX_LINES]).strip()
+    prefix = "\n".join([HEADING, LEAD, "", f"### {INDEX}", ""])
+    budget = NOTES_MAX_BYTES - len(prefix.encode("utf-8"))
+    index = "\n".join(lines[:INDEX_MAX_LINES]).strip().encode("utf-8")[:budget].decode("utf-8", "ignore")
+    footer = f"\n\nNot included (past the {NOTES_MAX_BYTES // 1024} KiB limit, or not readable): "
+    names = [name for name in dict.fromkeys(_LINK.findall(index)) if name != INDEX]
+    # Reserve the whole possible footer before fitting the index and linked files.
+    reserved = len((footer + ", ".join(names)).encode("utf-8")) if names else 0
+    index = index.encode("utf-8")[:max(0, budget - reserved)].decode("utf-8", "ignore").strip()
     if not index:
         return NO_NOTES
-    parts = [HEADING, LEAD, "", f"### {INDEX}", index]
-    used = len("\n".join(parts).encode("utf-8"))
+    parts = [prefix + index]
+    used = len(parts[0].encode("utf-8"))
     files, omitted = [INDEX], []
     for name in dict.fromkeys(_LINK.findall(index)):
         if name == INDEX:
             continue
-        text = _read(root / name, root, NOTES_MAX_BYTES - used)
-        block = f"\n### {name}\n{text.strip()}" if text is not None else ""
-        if not block or used + len(block.encode("utf-8")) > NOTES_MAX_BYTES:
+        text = _read(root / name, root, NOTES_MAX_BYTES - used - reserved)
+        block = f"\n\n### {name}\n{text.strip()}" if text is not None else ""
+        if not block or used + len(block.encode("utf-8")) + reserved > NOTES_MAX_BYTES:
             omitted.append(name)
             continue
         parts.append(block)
         used += len(block.encode("utf-8"))
         files.append(name)
     if omitted:
-        parts.append(f"\nNot included (past the {NOTES_MAX_BYTES // 1024} KiB limit, or not readable): "
-                     f"{', '.join(omitted)}")
-    return OperatorNotes(text="\n".join(parts), files=tuple(files), omitted=tuple(omitted))
+        parts.append(footer + ", ".join(omitted))
+    return OperatorNotes(text="".join(parts), files=tuple(files), omitted=tuple(omitted))
 
 
 async def load_notes(work_dir: str) -> OperatorNotes:
