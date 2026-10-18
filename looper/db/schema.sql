@@ -147,6 +147,14 @@ ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS feedback TEXT[] NOT NULL DEFAULT
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS reviewer_id TEXT;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS missed_messages TEXT[] NOT NULL DEFAULT '{}';
 
+-- When the step's run was first dispatched (its first Worker started), kept through its retries and reviews, and
+-- through a server restart (its attempt runs again as the same attempt). A step sent back to not started (a
+-- restart of the task, or its continue at the spend cap) has none, and gets a new one when it is dispatched again,
+-- so the time the task was stopped does not count. Null until then, and for the steps of a server before this
+-- column: no start is guessed for them. With completed_at (the last time it went to review or ended) it gives how
+-- long the step took.
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+
 -- A task's plan beside its steps: one row per task, replaced when the task
 -- is planned again. The task's requirement, directory and project stay on
 -- tasks; the project itself is read again before every Planner turn.
@@ -947,6 +955,25 @@ CREATE TABLE IF NOT EXISTS task_roles (
     reason       TEXT NOT NULL DEFAULT '',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (task_id, role_key, version)
+);
+-- Who wrote a version ('planner' with its tool, 'user' on the task page; a user's current version the Planner may
+-- not change) and the project role template it was copied from (NULL: written from scratch).
+ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT 'planner'
+    CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user'));
+ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS template_key TEXT;
+-- A project's role templates: roles its tasks' Planners copy as task roles (looper_task_role_set's template), the
+-- copy a version of the task role of its own. Checked like a task role (looper/agents/role_templates.py); its
+-- profile counts only while the project allows it.
+CREATE TABLE IF NOT EXISTS project_role_templates (
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    template_key  TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('work', 'review')),
+    description   TEXT NOT NULL DEFAULT '',
+    role_prompt   TEXT NOT NULL CHECK (role_prompt <> ''),
+    harness       TEXT,
+    profile_id    TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, template_key)
 );
 -- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the review role that reviews
 -- it after the built-in Reviewer (NULL: none; only on a reviewed step) and whether that review blocks the step

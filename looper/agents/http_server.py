@@ -21,7 +21,7 @@ from typing import Any
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    overview, profile_registry, project_skills, projects, request_guard, schedules, self_check,
+    overview, profile_registry, project_skills, projects, request_guard, role_api, schedules, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -308,6 +308,7 @@ class AgentHTTPServer:
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
     _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
+    _RE_TASK_ROLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/roles/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     # A user gate of the task, by its step's label (planner_protocol._STEP_ID).
     _RE_TASK_GATE_MESSAGES = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
                                         r"/messages$")
@@ -324,6 +325,9 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
+    _RE_PROJECT_ROLE_TEMPLATES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$")
+    _RE_PROJECT_ROLE_TEMPLATE = re.compile(
+        r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
@@ -396,6 +400,10 @@ class AgentHTTPServer:
                 source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
         elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
+        elif (m := self._RE_TASK_ROLE.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: role_api.edit_task_role(
+                m.group(1), m.group(2), projects.json_object(body), task_router=self._task_router,
+                bus=self._supervisor.bus, source=self._web_adapter._address))
         elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: gate_service.thread(m.group(1), m.group(2)))
         elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "POST":
@@ -534,6 +542,13 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
                 m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ROLE_TEMPLATES.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: role_api.templates_view(m.group(1)))
+        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: role_api.put_template(
+                m.group(1), m.group(2), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: role_api.delete_template(m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))

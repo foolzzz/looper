@@ -19,6 +19,12 @@ A role never changes the contract, the tools or the permissions; every run of
 one ends with the boundaries (``agent_settings.Boundaries``), which its own
 harness replaces nothing of (``system_prompt.build_role_prompt``). A project
 lets its Planners define roles only with ``planner_roles`` ``on``.
+
+A version records who wrote it (``Via``): the Planner, or the user on the task
+page (``role_api.edit_task_role``), whose current version the Planner may not
+change; and the project role template it was copied from (``role_templates``).
+The checks a definition passes, whoever writes it, are ``check_definition`` and
+``allowed_profile``.
 """
 
 from __future__ import annotations
@@ -51,8 +57,57 @@ class RoleKind(str, Enum):
         return "work role" if self is RoleKind.WORK else "review role"
 
 
+class Via(str, Enum):
+    """Who wrote a version of a task role."""
+
+    PLANNER = "planner"
+    USER = "user"
+
+
 class RoleError(ValueError):
     """A role definition Looper refuses; the message says how to fix it."""
+
+
+class RoleForbidden(RoleError):
+    """A definition its project's consent refuses: a profile its list does not hold."""
+
+
+# What a template's description may hold: a line for the Planner.
+DESCRIPTION_MAX_CHARS = 300
+
+
+def check_definition(kind: Any, role_prompt: Any, harness: Any, limit: int) -> tuple[RoleKind, str, str | None]:
+    """A role's kind and its two texts as stored, each at most ``limit`` characters; raises ``RoleError``."""
+    try:
+        checked = RoleKind(kind)
+    except ValueError:
+        raise RoleError(f"kind must be one of {', '.join(k.value for k in RoleKind)}; got {str(kind)[:40]!r}") from None
+    prompt = role_text(role_prompt, "role_prompt", limit) if role_prompt is not None else ""
+    if not prompt:
+        raise RoleError("role_prompt is required: what the role is responsible for and how it works")
+    return checked, prompt, role_text(harness or "", "harness", limit) or None
+
+
+async def allowed_profile(project_id: str | None, wanted: str, kind: RoleKind) -> Mapping[str, Any]:
+    """The Agent Profile ``wanted`` (an id or a name) for a role of ``kind`` in project ``project_id``: one on the
+    project's list (``RoleForbidden`` otherwise) that can run the kind (``RoleError`` otherwise)."""
+    from ..db import projects as db_projects
+    from .profile_registry import RegistryError, check_selection
+
+    allowed = await db_projects.allowed_profiles(project_id) if project_id else []
+    if not allowed:
+        raise RoleForbidden("the project lets no role choose an Agent Profile (its list is empty): leave profile_id "
+                            "out")
+    profile = next((p for p in allowed if p["id"] == wanted), None) or next(
+        (p for p in allowed if str(p["name"]).casefold() == str(wanted).strip().casefold()), None)
+    if profile is None:
+        raise RoleForbidden(f"{wanted!r} is not on the project's list; you may choose: "
+                            f"{', '.join(p['name'] for p in allowed)}")
+    try:
+        await check_selection(profile["id"], [kind.agent.value])
+    except RegistryError as exc:
+        raise RoleError(str(exc)) from None
+    return profile
 
 
 def role_key(raw: Any) -> str:
@@ -231,7 +286,11 @@ async def roles_view(task_id: str, steps: list[Mapping[str, Any]]) -> dict[str, 
                          "allowed": bool(current["profile_allowed"])} if current["profile_id"] else None),
             "role_prompt": current["role_prompt"], "harness": current["harness"], "reason": current["reason"],
             "created_at": current["created_at"],
+            # Who wrote the current version (the Planner, or the user, whose definition stands), and the template
+            # it was copied from.
+            "via": current.get("via") or Via.PLANNER.value, "template": current.get("template_key"),
             "versions": [{"version": row["version"], "created_at": row["created_at"], "reason": row["reason"],
+                          "via": row.get("via") or Via.PLANNER.value, "template": row.get("template_key"),
                           "sha256": sha256_text(row["role_prompt"])} for row in rows],
             "steps": [s.get("step_key") or s["id"] for s in named if s["status"] != "skipped"],
             "stats": _stats(own, named, reviews),
