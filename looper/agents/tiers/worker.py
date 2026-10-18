@@ -38,6 +38,7 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -54,6 +55,8 @@ from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
 from ..runtimes import RuntimeAdapter
 from ..task_roles import TaskRole, run_role
+from ..project_execution import ProjectExecution
+from ..room import room_section, run_seat, run_session_dir
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -298,6 +301,28 @@ class WorkerConfig:
     sandbox: str = "workspace-write"
 
 
+# How often a run gets a room reminder at most.
+REMINDER_INTERVAL_SEC = 60.0
+
+
+@dataclass
+class _Reminders:
+    """A running Claude's room reminders (``WorkerPool.remind``)."""
+
+    pending: str | None = None  # the one waiting for a tool call to run
+    uuids: set[str] = field(default_factory=set)  # the ones written, by the uuid Claude names in a result
+    last_at: float = float("-inf")
+    tools_running: int = 0  # its tool calls that have no result yet
+    sent: int = 0
+
+
+def answers_only_reminders(result_event: dict[str, Any], reminders: set[str]) -> bool:
+    """Whether ``result_event`` ends a turn Claude ran only for room reminders: the user messages it answers
+    (``user_message_uuids``) are all reminders. Such a turn's result never replaces the run's outcome."""
+    answered = result_event.get("user_message_uuids") or []
+    return bool(answered) and bool(reminders) and all(u in reminders for u in answered)
+
+
 @dataclass
 class WorkerProcess:
     """Tracks a single Worker subprocess."""
@@ -343,6 +368,10 @@ class WorkerPool:
         self._workers_dir.mkdir(parents=True, exist_ok=True)
         # stdin of each running Claude, open until its result, and its runtime: more user turns go here.
         self._inputs: dict[str, tuple[asyncio.StreamWriter, RuntimeAdapter]] = {}
+        # The agent room's tools for the runs (``ops.room.RoomOps``); without them a run has no room.
+        self.room_ops: Any = None
+        # Each running Claude's room reminders: the one waiting for a tool call to run, the uuids written, when.
+        self._reminders: dict[str, _Reminders] = {}
 
     @property
     def agent_id(self) -> str:
@@ -489,6 +518,44 @@ class WorkerPool:
         logger.info("worker %s received a user turn (%d chars)", worker_id, len(text))
         return True
 
+    def room_runs(self, task_id: str) -> dict[str, tuple[str, datetime]]:
+        """The runs of ``task_id``'s steps this pool has, waiting (``pending``) or ``running``, and since when: who is
+        online in the task's room."""
+        return {wp.worker_id: (wp.status, wp.since) for wp in self._active.values()
+                if wp.parent_task_id == task_id and wp.status in ("pending", "running")}
+
+    async def remind(self, worker_id: str, text: str) -> bool:
+        """Tell a running Claude that the room has something for it: one line, written while one of its tool calls
+        runs (Claude then folds it into the turn it is in, at the next tool result; written while it writes its final
+        reply, it would start a turn of its own after the report), at most every ``REMINDER_INTERVAL_SEC``. A
+        reminder that cannot go now waits for the next tool call; the newest replaces it. Whether it went now."""
+        state = self._reminders.get(worker_id)
+        if state is None:
+            return False
+        state.pending = text
+        return await self._flush_reminder(worker_id)
+
+    async def _flush_reminder(self, worker_id: str) -> bool:
+        state = self._reminders.get(worker_id)
+        running = self._inputs.get(worker_id)
+        if state is None or state.pending is None or running is None or not state.tools_running:
+            return False
+        if time.monotonic() - state.last_at < REMINDER_INTERVAL_SEC:
+            return False
+        stdin, runtime = running
+        reminder = f"looper-reminder-{uuid.uuid4().hex[:12]}"
+        try:
+            await runtime.write_turn(stdin, state.pending, uuid=reminder)
+        except (BrokenPipeError, ConnectionResetError, RuntimeError):
+            return False
+        state.uuids.add(reminder)
+        state.pending, state.last_at = None, time.monotonic()
+        state.sent += 1
+        wp = self._active.get(worker_id)
+        if wp is not None and wp.parent_task_id:
+            await self._activity(wp.parent_task_id, worker_id, "phase", "Room reminder sent")
+        return True
+
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         worker_id = envelope.target.agent_id
         if worker_id in self._active or worker_id in self._tasks:
@@ -583,8 +650,13 @@ class WorkerPool:
         )
         self._active[worker_id] = wp
 
+        # Its seat in its task's room: online once it runs, offline once it ends (watches on it fire).
+        seat = run_seat(payload, is_verify=is_verify, run=worker_id) if self.room_ops is not None and parent_task_id \
+            else None
         await self._take_slot(wp)
         wp.status, wp.since = "running", datetime.now(timezone.utc)
+        if seat is not None:
+            await self.room_ops.room.presence_changed(parent_task_id, seat, online=True)
         if parent_task_id:
             try:
                 label = "Reviewer" if is_verify else "Worker"
@@ -609,6 +681,15 @@ class WorkerPool:
             wp.status = "failed"
             wp.result = {"status": "failed", "error": str(exc)}
             logger.exception("worker %s failed on task %s", worker_id, task_id)
+        finally:
+            self._reminders.pop(worker_id, None)
+            if seat is not None:
+                # Its token stops working, with the files that carry it, before anything else waits.
+                self.room_ops.revoke_run(worker_id)
+                try:
+                    await self.room_ops.room.presence_changed(parent_task_id, seat, online=False)
+                except Exception:
+                    logger.exception("worker %s could not announce it left task %s's room", worker_id, parent_task_id)
 
         result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
         await self._bus.publish(MessageEnvelope.create(
@@ -692,6 +773,23 @@ class WorkerPool:
                 return {"passed": False, "findings": [agent_settings.profile_error],
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
+        # The task's agent room, where its project has it on: the run's token and MCP entry, the room's section of
+        # its system prompt, and what its first turn says of the room.
+        seat, room_text = None, ""
+        if self.room_ops is not None and parent_task_id and ProjectExecution.from_row(project).room_on:
+            seat = run_seat(payload, is_verify=is_verify, run=worker_id)
+            try:
+                token = self.room_ops.issue(parent_task_id, seat)
+                library = await self.room_ops.library_with_server(library, self._runtime_root, token, worker_id)
+                prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat)}"
+                room_text = room_section(seat)
+            except Exception as exc:
+                logger.warning("worker %s: the task's room is unavailable", worker_id, exc_info=True)
+                self.room_ops.revoke_run(worker_id)
+                seat = None
+                await self._activity(parent_task_id, worker_id, "error",
+                                     f"Warning: the task's room is unavailable ({type(exc).__name__}: {exc}); this "
+                                     "run goes without it"[:500])
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         background = str((project or {}).get("background") or "")
         if task_role is None:
@@ -708,6 +806,7 @@ class WorkerPool:
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
                 contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
                 knowledge=knowledge,
+                room=room_text,
             )
         else:
             system_prompt = build_role_prompt(
@@ -722,6 +821,7 @@ class WorkerPool:
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
                 contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
                 knowledge=knowledge,
+                room=room_text,
             )
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "phase",
@@ -754,8 +854,12 @@ class WorkerPool:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
         runtime = launch.runtime
+        # A run in a room keeps its session, for a later consult (Codex and OMP keep none otherwise).
+        session_dir = run_session_dir(self._runtime_root, runtime.type, parent_task_id, worker_id) \
+            if seat is not None else None
         command = runtime.run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
-                                      prompt_file=prompt_file, launch=launch, max_turns=max_turns)
+                                      prompt_file=prompt_file, launch=launch, max_turns=max_turns,
+                                      session_dir=session_dir)
 
         if parent_task_id:
             cmd_display = _display_command(command) + f"  (prompt on stdin, {len(prompt)} chars)"
@@ -807,6 +911,8 @@ class WorkerPool:
             try:
                 await runtime.write_turn(process.stdin, prompt)
                 self._inputs[worker_id] = (process.stdin, runtime)
+                if seat is not None and runtime.run_input:
+                    self._reminders[worker_id] = _Reminders()
             except (BrokenPipeError, ConnectionResetError):
                 # Claude exited before reading; its output decides the outcome.
                 logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
@@ -818,9 +924,12 @@ class WorkerPool:
 
             result_event: dict[str, Any] | None = None
             finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
+            # The last result, for the run's cost (a session's totals), when a later turn answered only room
+            # reminders: result_event stays the outcome then.
+            last_result: dict[str, Any] | None = None
 
             async def _read_stream() -> None:
-                nonlocal result_event, finished
+                nonlocal result_event, finished, last_result
                 assert process.stdout is not None
                 async for event in runtime.parse(process.stdout, model=launch.model):
                     await recorder.record(event)
@@ -838,6 +947,11 @@ class WorkerPool:
                         content_blocks = msg.get("content", [])
                         if not isinstance(content_blocks, list):
                             content_blocks = []
+                        if (reminders := self._reminders.get(worker_id)) is not None and (
+                                calls := sum(1 for b in content_blocks if b.get("type") == "tool_use")):
+                            # A tool call runs: a reminder written now is folded into this turn.
+                            reminders.tools_running += calls
+                            await self._flush_reminder(worker_id)
                         for block in content_blocks:
                             block_type = block.get("type", "")
                             if block_type == "tool_use":
@@ -868,11 +982,25 @@ class WorkerPool:
                                         except Exception:
                                             logger.debug("failed to insert text activity", exc_info=True)
 
+                    elif event_type == "user" and (reminders := self._reminders.get(worker_id)) is not None:
+                        content = (event.get("message") or {}).get("content")
+                        done = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result") \
+                            if isinstance(content, list) else 0
+                        reminders.tools_running = max(0, reminders.tools_running - done)
+
                     elif event_type == "result":
                         # Background work (an agent team's teammates) can end in turns of Claude's own after this
                         # one, each with a result of its own, also once stdin is closed: the run's last result is
-                        # its outcome.
-                        result_event = finished = event
+                        # its outcome, unless its turn only answered room reminders (``answers_only_reminders``).
+                        reminders = self._reminders.get(worker_id)
+                        if result_event is not None and reminders is not None \
+                                and answers_only_reminders(event, reminders.uuids):
+                            last_result = finished = event
+                            logger.info("worker %s: a turn that only answered room reminders keeps the outcome "
+                                        "before it", worker_id)
+                        else:
+                            result_event = finished = event
+                            last_result = None
                         _end_input()
 
             async def _report_finished(event: dict[str, Any]) -> None:
@@ -918,8 +1046,10 @@ class WorkerPool:
                 if timed_out:
                     raise asyncio.TimeoutError(error) from exc
                 raise
-            if finished is not None and finished is result_event:
+            if finished is not None and finished in (result_event, last_result):
                 await _report_finished(finished)
+            # The cost is the last result's (the session's totals); the outcome is result_event's.
+            recorded = last_result or result_event
 
             final_text = str((result_event or {}).get("result") or "") or None
             return_code = process.returncode or 0
@@ -939,7 +1069,7 @@ class WorkerPool:
                     stderr_bytes = await process.stderr.read()
                     stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
                 error = f"Claude Code exited with code {return_code}"
-                await recorder.finish(output_text=final_text, result_event=result_event, error=error,
+                await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error, "stderr": stderr[:500]}
             if return_code != 0:
@@ -957,7 +1087,7 @@ class WorkerPool:
             # A review that says "not passed" is still a successful run; only work
             # failures are the run's error.
             error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
-            await recorder.finish(output_text=final_text, result_event=result_event, error=error,
+            await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                   outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
             return outcome
 

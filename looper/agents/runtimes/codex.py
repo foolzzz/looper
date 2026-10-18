@@ -190,9 +190,15 @@ class CodexRuntime(RuntimeAdapter):
         return ["resume", session_id]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """One run: no session kept (``--ephemeral``), the prompt read from stdin (``-``)."""
-        return [*self._command(executable, prompt_file, launch), "--ephemeral", "-"]
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """One run: no session kept (``--ephemeral``), the prompt read from stdin (``-``). With ``session_dir`` the
+        run keeps its session there instead: that directory is its home, given the run home's configuration, its
+        instructions and its login link as a resident session's is (``_sync_home``)."""
+        command = self._command(executable, prompt_file, launch)
+        if session_dir is None:
+            return [*command, "--ephemeral", "-"]
+        _sync_home(Path(command[1].removeprefix("CODEX_HOME=")), session_dir)
+        return ["env", f"CODEX_HOME={session_dir}", *command[2:], "-"]
 
     def resident_session(self, label: str) -> ResidentCodex:
         return ResidentCodex(label=label)
@@ -295,6 +301,11 @@ def _toml_key(key: str) -> str:
     return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
 
 
+# Looper's own MCP entry (``ops.service.SERVER_NAME``), and how long Codex waits for one of its tool calls.
+LOOPER_SERVER = "looper"
+LOOPER_TOOL_TIMEOUT_SEC = 150
+
+
 def mcp_servers(library: AgentLibrary) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
     """The run's MCP servers as Codex's ``[mcp_servers.<name>]`` tables, and the ones Codex cannot reach.
 
@@ -314,6 +325,10 @@ def mcp_servers(library: AgentLibrary) -> tuple[list[tuple[str, dict[str, Any]]]
             table: dict[str, Any] = {"command": server["command"], "args": list(server.get("args") or [])}
             if server.get("env"):
                 table["env"] = dict(server["env"])
+            if name == LOOPER_SERVER:
+                # Over the agent room inbox's longest wait and its margin (``mcp_server.WAIT_MARGIN_SECONDS``);
+                # Codex 0.162.0 reads the key (``codex mcp get --json``), and its own default is shorter.
+                table["tool_timeout_sec"] = LOOPER_TOOL_TIMEOUT_SEC
         elif transport == "http":
             table = {"url": server["url"]}
             if server.get("headers"):

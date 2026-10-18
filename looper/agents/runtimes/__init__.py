@@ -199,6 +199,9 @@ class RuntimeAdapter(ABC):
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset()
+    # Whether a run reads more user turns while it runs (``write_turn`` after the prompt): a forwarded message, a
+    # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
+    run_input: ClassVar[bool] = False
     # How it keeps a run that must not change files from changing them (``Launch.read_only``).
     read_only: ClassVar[ReadOnly] = ReadOnly.CHECK
     # Whether a run priced by the runtime's own figure (``CostSource.RUNTIME``) stops at its per-run spend cap:
@@ -245,8 +248,10 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """A one-off run's command; its prompt and later user turns come on stdin."""
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """A one-off run's command; its prompt and later user turns come on stdin. With ``session_dir`` a runtime
+        that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
+        later (the agent room's consults); Claude Code keeps every run's session in its own place."""
 
     # --- Sessions and the stream ---
 

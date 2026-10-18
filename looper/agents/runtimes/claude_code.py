@@ -110,6 +110,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT})
+    run_input = True  # stdin stays open until the run's first result
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     # Its own login (the Claude subscription), and an API key for Anthropic's API or an Anthropic-format endpoint.
     auth_kinds = frozenset({AuthKind.OAUTH, AuthKind.API_KEY})
@@ -226,7 +227,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         return ["--resume", session_id]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        # Claude Code keeps every run's session (in its own configuration directory): ``session_dir`` is not used.
         return [
             executable,
             "--print",

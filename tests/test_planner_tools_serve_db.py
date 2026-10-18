@@ -195,7 +195,9 @@ def test_the_planner_gets_its_own_tools_and_how_to_use_them(ran: dict[str, Any])
         assert ran["details"][variant]["status"] == "completed", (variant, ran["log"][-3000:])
         started, listed = _log(ran["state"], "planner.jsonl", variant)
         assert started["guide"] is True and started["token"].startswith("planner.")
-        assert listed["tools"] == ["looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency"]
+        # The agent room is on by default, so its tools are listed after the Planner's own.
+        assert listed["tools"] == ["looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency",
+                                   "looper_room_roster", "looper_room_post", "looper_room_inbox", "looper_room_read"]
     # One token per task; none works once its task has ended, and none is in the server's log or left on disk.
     assert len(set(ran["tokens"].values())) == len(VARIANTS)
     assert ran["after_end"] == {variant: 401 for variant in VARIANTS}

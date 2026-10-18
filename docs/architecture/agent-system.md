@@ -932,7 +932,9 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `CLAUDE.md`) and `AGENTS.md`: a short block of Codex runtime notes, then
   the system prompt. The operator's `~/.codex` is
   never read. A Worker or Reviewer is one `--ephemeral` process with its
-  prompt on stdin, which then closes: it cannot be steered while it runs.
+  prompt on stdin, which then closes: it cannot be steered while it runs (in
+  a task with an agent room, one that keeps its session in a home of its own:
+  [A task's agent room](#a-tasks-agent-room)).
   The Manager and a Planner run one process per turn that resumes the
   session (`exec ... resume <thread> -`, `ResidentCodex`), in a home of their
   own (`codex/sessions/manager`, `codex/sessions/planner-<task_id>`) whose
@@ -1005,7 +1007,9 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   instead. The system prompt is `--append-system-prompt` (that file when
   there is one, OMP runtime notes, then the prompt), which a resumed session
   takes up. A Worker or Reviewer is one `--no-session`
-  process with its prompt on stdin, which then closes. The Manager and a
+  process with its prompt on stdin, which then closes (in a task with an agent
+  room, one with a `--session-dir` of its own: [A task's agent
+  room](#a-tasks-agent-room)). The Manager and a
   Planner run one process per turn with `--session-dir omp/sessions/<agent>`
   and `--resume <id>` (`ResidentOmp`); the turn that starts a new session
   removes the agent's earlier ones. The installed plugins load natively
@@ -1681,7 +1685,14 @@ and its harness may each be ([Roles a task's Planner
 defines](#roles-a-tasks-planner-defines)); and `user_gates` (`on`, also when
 null, or `off`) with `gate_reminder_hours` (0 to 168, null for 24, 0 for none),
 whether the project's Planners may open user gates and how often a gate that
-waits for the user is noted as still waiting ([User gates](#user-gates)).
+waits for the user is noted as still waiting ([User gates](#user-gates)); and
+`agent_room` (`on`, also when null: on by default, unlike the switches above;
+or `off`) with its limits `room_post_per_minute` (1 to 60, null for 6),
+`room_broadcasts_per_run` (0 to 50, null for 5), `room_message_max_chars`
+(500 to 20,000, null for 4,000), `room_messages_per_task` (20 to 5,000, null
+for 300), `room_ping_pong_rounds` (2 to 50, null for 6) and
+`room_wait_max_seconds` (0 to 120, null for 60) ([A task's agent
+room](#a-tasks-agent-room)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -2335,8 +2346,10 @@ schedule (the project's Schedules tab does those).
 
 Each task's Planner has four MCP tools of its own, which act on its task
 only (`looper/agents/ops/planner.py`, [Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md)
-section 8.3, decisions 9 and 10), and two more for its roles where its project
-lets it define them ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)).
+section 8.3, decisions 9 and 10), two more for its roles where its project
+lets it define them ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)),
+and four of its task's agent room where its project has the room on ([A task's
+agent room](#a-tasks-agent-room)).
 
 - **Reaching Looper.** `looper serve` makes one `PlannerOps`. A Planner gets a
   token for its task when it starts (`planner.` and 43 random characters,
@@ -2705,6 +2718,106 @@ refused with the reason and what to do instead.
   as a node of its own; the Dashboard and the Tasks page have the Needs you
   group; a Planner's thread on the Chat page says when its task waits at a
   gate.
+
+### A task's agent room
+
+In a project with `agent_room` on (the default), a task's Planner and the
+agents of its steps message each other in the task's room ([Agent room
+RFC](rfcs/agent-room-v0.zh-CN.md), R1a; `looper/agents/room.py`, the tools in
+`looper/agents/ops/room.py`, the rows in `room_messages`, `room_reads` and
+`room_watches`). With it off, every prompt, tool list and command line is as
+before.
+
+- **Seats.** A member is the Planner (`planner`) or a seat, `<role>@<step
+  key>`: the task role a step runs as (`backend_rd@s2`), else `worker@s2`;
+  its Reviewer `reviewer@s2`, its review role `security@s2`. A retry is a
+  new run in the same seat. Presence is derived, never stored: a seat whose
+  run the WorkerPool has is `online` (or `waiting` for room in its task),
+  else `offline` once a run was in it, else `planned`, or `dropped` with its
+  step. Gates have no seat. Looper writes as `looper`.
+- **Tokens and tools.** Each Worker and Reviewer run in such a project gets
+  a token of its own (`run.` and 43 random characters, a hash in memory, never
+  logged) naming its task and seat, and Looper's MCP entry through the agent
+  library on all three runtimes (`library_with_server`); both go when the run
+  ends (`RoomOps.revoke_run`, which deletes the MCP files that carry the token).
+  `/api/agent/v1/` tells a run's token by its prefix. A work seat has
+  `looper_room_roster`, `looper_room_post`, `looper_room_inbox`,
+  `looper_room_read` and `looper_room_watch`; a review seat all but the watch;
+  the Planner the review seat's four on its own token where its project has the
+  room on (its writes, as its other tools', only in a turn Looper sent it).
+- **Scope** (`room.check_scope`). The sender is the token's seat, never an
+  argument. A work seat posts to work seats, roles, the Planner and everyone,
+  and to a review seat only an answer to that seat's own question to it
+  (Workers do not lobby Reviewers). A review seat only asks (`question`) work
+  seats or the Planner, never everyone, and answers the Planner; its messages
+  and those to it are marked `cc_planner`. The Planner posts anything to
+  anyone. A seat sees what is for everyone, what it sent and what names it or
+  its role; the Planner sees everything. Kinds: `info`, `question`, `answer`
+  (with `reply_to` a question), `interface`, `announce`; Looper's `notice` and
+  `escalation`. Messages are only added; they go with their task and with a
+  start-over (`reset_task_for_restart`). Refused posts are a task activity line.
+- **Delivery is pulled.** A run's first user turn says its seat, who is
+  online, the messages for it in full and the interface posts it has not read
+  (within 2,000 characters), after the Findings; the system prompt has the
+  room's section after the task (and before a role's boundaries;
+  `prompt_layers.room`). `looper_room_inbox` gives the unread messages oldest
+  first (`for_you` on those that name the seat; at most 20 and 8,000
+  characters) and marks them read per seat (a retry reads on); `peek` reads
+  without marking; `wait_seconds` waits, up to the project's
+  `room_wait_max_seconds`, for a message for the seat or an interface post.
+  Every tool's answer carries the seat's unread counts.
+- **Reminders.** A run on a runtime that reads user turns while it runs
+  (`RuntimeAdapter.run_input`: Claude Code; not a stored capability) that a
+  message names, or that an interface post or a watch reaches, gets one line,
+  never the message (`WorkerPool.remind`), at most every 60 s. It is written
+  only while one of its tool calls runs (the stream's `tool_use` and
+  `tool_result`): Claude Code 2.1.285 folds a user turn written then into the
+  turn it is in at the next tool result, but runs one written while it writes
+  its final reply as a turn of its own after the report. Reminders carry a
+  uuid (`looper-reminder-…`), and a result whose `user_message_uuids` are all
+  the run's reminders never replaces the run's outcome; the cost is still the
+  last result's (the session's totals).
+- **The Planner.** A message for `planner`, and every escalation, is stored
+  `planner_pending` and wakes the Planner (`ROOM_MESSAGE`) after a 30 s batch
+  (`ROOM_BATCH_SECONDS`); after the event it is in, the Planner gives all that
+  wait in one `[ROOM]` turn, answered in the `[CHAT]` shape (gate changes,
+  actions and `final` as there). A non-empty `reply` is posted for those who
+  wrote, as the answer to their questions (`via` `planner_reply`); they are
+  delivered once the reply is taken. A failed turn gives them again with a
+  newer message, or 10 minutes later at the next event. A `[DECISION]` on a
+  step, and each running step in a `[SUPERVISE]`, carry what the step's seats
+  did in the room (sent, received, interface posts, unanswered questions).
+  The reply contract and the tools' guide name `[ROOM]` and the room only
+  where it is on (`reply_contract(..., room=True)`).
+- **Escalations** (`reason`): a question for a seat no run is in
+  (`consult_fallback`: `not_started`, or `runtime_cannot` until the consults
+  of R1b), with a notice to the asker; two seats trading
+  `room_ping_pong_rounds` messages to each other only, with no answer between
+  (`ping_pong`, once at that count); an interface post that replies to an
+  earlier one that a seat whose step ended had read (`interface_changed`); the
+  room at `room_messages_per_task` (`room_full`, once).
+- **Limits.** A run posts at most `room_post_per_minute` messages a minute and
+  `room_broadcasts_per_run` to everyone; a message has at most
+  `room_message_max_chars`; a task holds `room_messages_per_task`. Past one,
+  `rate_limited` (a new error code) or `invalid`. A run keeps at most 5 watches;
+  they end with it. The Planner is held to the length and the task's total
+  only.
+- **Kept sessions.** A Codex or OMP run in a room keeps its session, for the
+  consults to come: Codex in a home of its own
+  (`.local/codex/run-sessions/<task>/<run>`, given the run home's
+  configuration as a resident session's is, without `--ephemeral`; the
+  Codex login check looks at these homes too), OMP with `--session-dir
+  .local/omp/run-sessions/<task>/<run>` in place of `--no-session`. They go
+  when the task is planned anew or deleted, and when the server starts after
+  it ended a week ago (`RUN_SESSIONS_KEPT_DAYS`). Claude Code keeps every
+  run's session itself.
+- **Reading it.** `GET /api/tasks/:id/room` (`kind`, `from`, `unanswered`,
+  `after`, `limit`) gives the seats with their presence, the messages oldest
+  first (with `answered` and `cc_planner`), the counts and each step's (sent,
+  received, unanswered, each message once per step); `GET /api/tasks/:id` has
+  the counts as `room`. The task page's Room tab shows them; a Pipeline step
+  its counts. The Manager reads a room with `looper_tasks` action `room`; it
+  never posts in this phase, nor does the user.
 
 ### Turns Claude runs on its own
 

@@ -11,12 +11,13 @@ import dataclasses
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from evals.prompt_regression import __main__ as cli
-from evals.prompt_regression import compare, metrics, runner
+from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
@@ -132,6 +133,30 @@ def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
         "at-plan-turn-start.txt", "in-plan-turn.txt"]
 
 
+def test_files_a_steps_merge_left_are_not_the_planners(tmp_path: Path) -> None:
+    # Looper merges an accepted step's worktree during or just after a Planner turn: what it wrote is not the
+    # Planner's, unless something changed it again afterwards.
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "start.py").write_text("start\n")
+    runner.init_repository(work)
+
+    def git(*args: str) -> str:
+        return runner._git_in(work, *args)
+
+    git("checkout", "-q", "-b", "step")
+    for name in ("merged.py", "changed-later.py"):
+        (work / name).write_text("the step's\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "the step's work")
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-ff", "step", "-m", "Merge s1\n\nLooper-Task: task-1\nLooper-Step: s1")
+    (work / "changed-later.py").write_text("written after the merge\n")
+    (work / "untracked.txt").write_text("new\n")
+    assert runner.merged_by_looper(work, "task-1") == {"merged.py"}
+    assert runner.merged_by_looper(work, "task-2") == set()  # another task's merges are not this one's
+
+
 @pytest.mark.parametrize(("depends_on", "pairs"), [
     ({"s1": [], "s2": [], "s3": ["s1", "s2"], "s4": ["s3"]}, 1),  # s1 and s2 only
     ({"s1": [], "s2": ["s1"], "s3": ["s2"]}, 0),  # a chain: s3 needs s1 through s2
@@ -183,6 +208,41 @@ def test_a_discipline_counts_once_it_has_a_role_of_its_own_that_names_its_conven
     assert metrics.discipline_roles([role("fe_ios_rd", "fetch, the DOM; Swift, Codable")], (web, ios)) == 0
     assert metrics.discipline_roles([role("fe_review", "fetch and the DOM", "review")], (web,)) == 0
     assert metrics.discipline_roles(strong, ()) == 0
+
+
+@pytest.mark.parametrize(("delivery", "fields"), [
+    ("empty", ("name", "count")),
+    ("answer_only", ("name", "count")),
+    ("interface", ("name", "count")),
+    ("interface", ("label", "quantity")),
+])
+def test_fake_room_consumer_needs_the_delivered_interface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delivery: str, fields: tuple[str, str],
+) -> None:
+    task = task_list.select(["room_interface"])[0]
+    script = task.fake
+    name, count = fields
+    store = script["attempts"]["s1"][0]["files"]["store.py"]
+    (tmp_path / "store.py").write_text(store.replace('"name"', repr(name)).replace('"count"', repr(count)))
+    messages = [] if delivery == "empty" else [{"kind": "answer", "body": "Yes: only the id."}]
+    if delivery == "interface":
+        messages.insert(0, {"kind": "interface", "body": f'add_item takes {{"{name}": str, "{count}": int}}'})
+
+    def rpc(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = {"messages": messages, "more": False, "unread": {}} if params["name"] == "looper_room_inbox" else {}
+        return {"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": json.dumps({"status": "ok", "result": result})}],
+            "isError": False}}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
+    monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    problem = task.check(tmp_path)
+    if delivery == "interface":
+        assert problem is None
+    else:
+        assert problem is not None and "do not work together" in problem
 
 
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
@@ -331,10 +391,10 @@ def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123+local changes (1 rep)"
     # A run from before tokens were read has none: only the new side shows them.
     # A run from before gates were counted has none either.
-    assert ("| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |"
+    assert ("| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |"
             in lines)
-    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
-    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** "
+    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
+    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | – | – | 0.0 → **2.0** "
             "| 0.0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |" in lines)
     assert "- pass rate changed: chat_correction 1/1 → 0/1" in lines
     assert "- the base and the new run ran each case once: a pass or fail per case is a single sample" in lines
@@ -347,8 +407,8 @@ def test_comparison_without_a_base_and_with_skipped_tasks() -> None:
     lines = compare.markdown(new).splitlines()
     assert lines[0].endswith("(no earlier run to compare with)")
     assert ("| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped "
-            "| skipped | skipped |" in lines)
-    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| skipped | skipped | skipped |" in lines)
+    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     assert "- stopped at the spending cap (0.8 USD)" in lines
 
 
@@ -373,17 +433,17 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
                                        "error": "EvalError: GET /api/tasks/t answered 500"})]}
     lines = compare.markdown(new, base).splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123 (3 reps)"
-    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The mean is over the scored reps: the pass and the fail, not the error.
     assert ("| dependent_steps | 0/0 · 1 err → **1/2 · 1 err** | – → **1.5** | – | – → **0.0** | – → **0.0** "
-            "| – | – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
-    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| – | – | – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
+    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The total adds up the tasks' means (one pass through the set), over the tasks both runs have; the new run's
     # own total follows, as it has a task the base lacks.
     assert ("| **total (2 shared tasks)** | 1/1 (100%, 21–100%) · 1 timeout → **4/5 (80%, 38–96%) · 1 timeout** "
-            "| 1.0 → **2.5** | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
+            "| 1.0 → **2.5** | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
     assert ("| **total (all 3 tasks of the new run)** | 5/6 (83%, 44–97%) · 1 harness, 1 timeout | 3.5 | – | 0.0 "
-            "| 0.0 | – | 0.0 | 0.0 | – | 0.0700 |" in lines)
+            "| 0.0 | – | – | 0.0 | 0.0 | – | 0.0700 |" in lines)
     assert "- pass rate changed: dependent_steps 0/0 → 1/2" in lines
     assert "- the base ran each case once: a pass or fail per case is a single sample" in lines
     assert "- no baseline: interface_first" in lines
@@ -399,7 +459,7 @@ def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> Non
     base["tasks"][0]["id"] = "single_step"
     new = {**_run(), "tasks": _reps("single_step", _PASS, {**_PASS, "cost_usd": 0.04})}
     lines = compare.markdown(new, base).splitlines()
-    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | – "
+    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | – | – "
             "| 0.0 | 0.0 | – | 0.0200 → **0.0300** |" in lines)
     assert not any(line.startswith("| **total (all") for line in lines)  # the new run has no task of its own
     assert "- in the base, not in the new run: task_1, task_2, task_3, task_4, task_5, task_6" in lines
@@ -410,7 +470,7 @@ def test_against_a_base_of_other_tasks_there_is_no_shared_total() -> None:
     new = {**_run(), "tasks": _reps("single_step", _PASS, _PASS)}
     lines = compare.markdown(new, base).splitlines()
     assert not any(line.startswith("| **total (0 shared") for line in lines)
-    assert ("| **total (all 1 task of the new run)** | 2/2 (100%, 34–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – "
+    assert ("| **total (all 1 task of the new run)** | 2/2 (100%, 34–100%) | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – "
             "| 0.0200 |" in lines)
     assert "- no baseline: single_step" in lines
     assert "- in the base, not in the new run: dependent_steps, chat_correction" in lines
@@ -773,7 +833,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     for task in TASKS:
         assert by_id[task.id]["success"], (task.id, by_id[task.id]["problems"])
         assert by_id[task.id]["contract_violations"]["total"] == 0
-        assert by_id[task.id]["planner_modified_files"] == 0
+        assert by_id[task.id]["planner_modified_files"] == 0, (
+            task.id, by_id[task.id]["planner_changed_files"], by_id[task.id]["planner_edit_tool_paths"])
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
     assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
@@ -792,6 +853,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
                     "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
+                    "room_interface": (3, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
                     # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
                     "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
                     "reviewer_unrelated_note": (1, 2, 2, 0)}
@@ -814,6 +876,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
                      "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
+                     "room_interface": (1, 0, 2), "room_quiet": (0, 0, 1),
                      "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
                      "reviewer_unrelated_note": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
@@ -857,6 +920,13 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     # The stand-in is refused nothing: the denials are Claude Code's.
     assert all(by_id[t]["planner_denials"] == 0 for t in by_id)
     assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
+    # Only room_interface's agents use the room: the store's interface, the client's question to the Planner, and the
+    # Planner's answer in a [ROOM] turn, so nothing is left unanswered; every other task's room stays quiet.
+    room = {t: tuple(by_id[t][k] for k in ("room_messages", "room_questions", "room_unanswered", "room_interface",
+                                            "room_refused", "room_tool_calls"))
+            for t in by_id if by_id[t]["room_messages"] or by_id[t]["room_tool_calls"]}
+    assert room == {"room_interface": (3, 1, 0, 1, 0, 3)}
+    assert by_id["room_interface"]["planner_turns"]["room"] == 1
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
         "supplement_replan": 1, "requirement_edit": 1}

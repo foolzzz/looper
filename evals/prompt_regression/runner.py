@@ -309,6 +309,22 @@ def looper_commits(work_dir: Path, task_id: str) -> dict[str, int]:
     return {"merges": count("--merges"), "checkpoints": count("--no-merges")}
 
 
+def merged_by_looper(work_dir: Path, task_id: str) -> set[str]:
+    """The files as the task's step workspaces left them: unchanged since the last first-parent commit that touched
+    them, one of Looper's for the task (a step's merge). Looper writes them when it accepts a step, which can be
+    during or just after a Planner turn, so their times say nothing of the Planner."""
+    def names(*args: str) -> set[str]:
+        return set(filter(None, _git_in(work_dir, *args).splitlines()))
+
+    unchanged = names("ls-files") - names("diff", "--name-only", "HEAD")
+    return {path for path in unchanged
+            if f"Looper-Task: {task_id}" in _git_in(work_dir, "log", "-1", "--first-parent", "--format=%B", "--", path)}
+
+
+def _without(changes: dict[str, float], paths: set[str]) -> dict[str, float]:
+    return {path: mtime for path, mtime in changes.items() if path not in paths}
+
+
 def _all_activity(api: Api, task_id: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     while True:
@@ -358,6 +374,7 @@ def run_task(
         (work_dir / name).parent.mkdir(parents=True, exist_ok=True)
         (work_dir / name).write_text(content, encoding="utf-8")
     project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir)}
+    step_workspaces = task.step_workspaces or step_workspaces
     if step_workspaces:
         init_repository(work_dir)
         project["step_workspaces"] = step_workspaces
@@ -425,7 +442,8 @@ def run_task(
             activity=_all_activity(api, task_id),
             records=records,
             events=events,
-            changes=changed_files(before, snapshot(work_dir)),
+            changes=_without(changed_files(before, snapshot(work_dir)),
+                             merged_by_looper(work_dir, task_id) if step_workspaces else set()),
             work_dir=work_dir,
             check_problem=task.check(work_dir),
             expect=task.expect,
@@ -521,7 +539,8 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
                 "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
-                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "planner_plan_file"),
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface",
+                "planner_plan_file"),
 }
 
 

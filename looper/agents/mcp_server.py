@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 REQUEST_TIMEOUT_SECONDS = 120.0
+# A call that waits on Looper's side (the agent room's inbox, ``wait_seconds``) gets that long more than the rest.
+WAITING_TOOL = "looper_room_inbox"
+WAIT_MARGIN_SECONDS = 20.0
 
 # JSON-RPC 2.0 error codes.
 PARSE_ERROR = -32700
@@ -77,10 +80,17 @@ class AgentClient:
         return tools
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """The JSON object ``POST /api/agent/v1/ops/<name>`` answers; raises LooperUnavailable."""
-        return self._request(f"/api/agent/v1/ops/{urllib.parse.quote(name, safe='')}", body=arguments)
+        """The JSON object ``POST /api/agent/v1/ops/<name>`` answers; raises LooperUnavailable. A call of the room's
+        inbox that waits gets its wait more time than any other."""
+        timeout = self._timeout
+        wait = arguments.get("wait_seconds") if name == WAITING_TOOL else None
+        if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
+            timeout = max(timeout, float(wait) + WAIT_MARGIN_SECONDS)
+        return self._request(f"/api/agent/v1/ops/{urllib.parse.quote(name, safe='')}", body=arguments, timeout=timeout)
 
-    def _request(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None
+                 ) -> dict[str, Any]:
+        timeout = self._timeout if timeout is None else timeout
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         data = None
         if body is not None:
@@ -89,14 +99,14 @@ class AgentClient:
         request = urllib.request.Request(self.url + path, data=data, headers=headers,
                                          method="GET" if body is None else "POST")
         try:
-            with self._opener.open(request, timeout=self._timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 status, raw = response.status, response.read()
         except urllib.error.HTTPError as exc:  # a non-2xx answer
             status, raw = exc.code, exc.read()
         except (OSError, http.client.HTTPException) as exc:
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             if isinstance(reason, TimeoutError):
-                raise LooperTimedOut(f"no answer from {self.url} within {self._timeout:g} s") from exc
+                raise LooperTimedOut(f"no answer from {self.url} within {timeout:g} s") from exc
             raise LooperUnavailable(f"no answer from {self.url} ({reason})") from exc
         try:
             payload = json.loads(raw)

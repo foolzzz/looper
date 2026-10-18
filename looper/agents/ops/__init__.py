@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
     EXPIRED = "expired"  # a confirmation past its time or its turn
     UNAVAILABLE = "unavailable"  # Looper could not do it now (its database); the call may be tried again
+    RATE_LIMITED = "rate_limited"  # over a limit of how often or how much (a room's); the message says when
 
 
 class OpError(Exception):

@@ -265,7 +265,9 @@ def test_the_planner_defines_roles_with_its_tools_and_a_refused_definition_chang
     detail = ran["first"]["roles"]
     assert detail["status"] == "completed", ran["log"][-3000:]
     listed = _log(ran["state"], "planner.jsonl", "roles")[0]
-    assert listed["tools"][-2:] == ["looper_task_roles", "looper_task_role_set"]
+    # The role tools, then the agent room's (on by default).
+    assert listed["tools"][-6:-4] == ["looper_task_roles", "looper_task_role_set"]
+    assert listed["tools"][-4:] == ["looper_room_roster", "looper_room_post", "looper_room_inbox", "looper_room_read"]
     assert "looper_task_role_set" in listed["prompt"] and ROLES_GUIDE in listed["prompt"]
     assert '{"role": "<id>", "required": false} (its verdict is advice to\n  you)' in listed["prompt"]
     answers = [(c["arguments"].get("id"), c["answer"]["status"]) for c in _calls(ran, "roles")
@@ -322,10 +324,10 @@ def test_every_role_run_ends_with_the_boundaries_and_a_built_in_run_is_as_before
 def test_a_role_run_loads_the_items_its_role_names_and_no_other_run_does(ran: dict[str, Any]) -> None:
     roles_task = ran["ids"]["roles"]
     loaded = {(m["agent_id"], (m["prompt_layers"].get("task_role") or {}).get("version")):
-              [item["name"] for item in (m.get("library") or {}).get("items") or []]
+              [item["name"] for item in (m.get("library") or {}).get("items") or [] if item["name"] != "looper"]
               for m in ran["layers"] if m["task_id"] == roles_task and m["agent_id"].startswith("worker-")}
     by_version = {version: names for (_, version), names in loaded.items()}
-    # tester v1 names the skill; v2 (the Planner's rewrite) names none, and the built-in Worker never loads it.
+    # (The room's own MCP server, `looper`, is in every run's items.) tester v1 names the skill; v2 (the Planner's rewrite) names none, and the built-in Worker never loads it.
     assert by_version == {1: ["role-notes"], 2: [], None: []}
     read = next(c["answer"]["result"] for c in _calls(ran, "roles") if c["tool"] == "looper_task_roles")
     assert [item["name"] for item in read["role_items"]] == ["role-notes"]

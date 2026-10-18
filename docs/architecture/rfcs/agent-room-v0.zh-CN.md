@@ -1,6 +1,6 @@
 # RFC：Agent 办公台（Agent Room，v0）
 
-- **状态：** 已批准（第 4 节 D1–D7 由维护者在 2026-10-17 拍板；D8–D18 和第 19 节的问题同日按建议定下）；R1 未开始，排在用户关卡（User Gate，#162）G1、G2 之后。第 6.2、7.2、8 节标「需要验证」的几点是 R1 的第一步。
+- **状态：** 已批准（第 4 节 D1–D7 由维护者在 2026-10-17 拍板；D8–D18 和第 19 节的问题同日按建议定下）；R1a（办公台本身）进行中，R1b（唤醒咨询）随后；用户关卡 G1（#168）已合入。第 6.2、7.2 节标「需要验证」的 Claude Code 几点已在真实 CLI 上验证（2026-10-17，结果写在那两节）；Codex、OMP 的几点在 R1b 验证。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 17 项。
 - **最近更新：** 2026-10-17
 
@@ -38,7 +38,7 @@
 
 | 环节 | 现在怎么做 |
 |---|---|
-| 并行步骤 | `_dispatch_ready` 一次派出全部就绪步骤，同时跑多少只由项目和任务的并发上限决定（`WorkerPool._take_slot`） |
+| 并行步骤 | `_dispatch_ready` 一次派出全部就绪步骤，同时跑多少只由任务自己的并发上限决定（#173 起没有项目级上限，`WorkerPool._take_slot` 按任务和类型计） |
 | 步骤之间的信息 | Worker 第一轮的 user turn 带它依赖的步骤的报告摘要和「Findings so far」（`_build_work_prompt`）；之后什么都不再给 |
 | 目录 | 默认共用任务目录；`step_workspaces = worktree` 时并行步骤各在自己的 worktree 和分支上。各 worktree 共用同一个对象库：一个步骤的提交在别的 worktree 里 `git show <提交>:<路径>` 就读得到，没提交的读不到（除非按绝对路径去读别人的目录） |
 | 运行中插话 | Claude Code 的 Worker stdin 一直开着，直到第一个 `result` 才关（`_end_input`）；规划者的 `forward`、`nudge` 经 `WORKER_INPUT` 写成下一条 user turn（`send_input`，5 秒内确认）。Codex、OMP 的 `write_turn` 写完 prompt 就关 stdin，再写抛 `RuntimeError`；`WorkerPool._inputs` 在 `write_turn` 之后照样登记，`accepts_input` 对它们在第一次失败前都是真 |
@@ -86,7 +86,7 @@
 | D11 | **在线状态从运行派生**：席位有运行在跑就是在线，WorkerPool 的 `pending` 是 `waiting`，运行结束就离线；不另做心跳 | 运行的状态本来就是真相，另存一份会不一致 |
 | D12 | **规划者的 `[ROOM]` 回合沿用 CHAT 的形状**：`reply` 非空时由 Looper 作为规划者的 `answer` 发回这一批消息的发送者，动作仍是 none、forward、add_steps、replan；送达保证同任务变更：先入库、标「未送达规划者」，回复解析之后才标已送达，回合失败或服务重启后下一次先做（第 6.4 节） | 规划者的每条回答一定落到办公台上，不靠模型记得调工具；回复约定只多一种消息头，解析和校验复用 |
 | D13 | **开启办公台的项目里，Codex 和 OMP 的 Worker、Reviewer 运行保留会话**：不再带 `--ephemeral`、`--no-session`，会话存在 Looper 自己的目录里（`codex/sessions/run-<记录号>`、`omp/sessions/run-<记录号>`），任务删除或从头再来时删掉，启动时清理结束超过 7 天的任务的（第 7.2 节）。关闭办公台的项目命令行不变 | 不保留会话，这两种运行时就没法咨询，D3 只能永远退回规划者；保留会话只多占磁盘，不改运行本身 |
-| D14 | **咨询是原会话的一个分叉，只读由三层保证**：prompt 和咨询契约；运行时的限制（Claude Code 计划模式加禁用写工具，Codex 只读沙箱，OMP 能限制工具时只给只读工具）；在可以丢弃的检出里跑，并在跑完后检查目录有没有被改（第 7.3 节）。这是 RFC 决策 8「每个 agent 有全部工具」唯一的例外，只用于咨询 | 维护者要求「不改文件」。prompt 管不住模型的意外；运行时能强制的地方就强制；强制不了的地方不让它碰别人在用的目录 |
+| D14 | **咨询是原会话的一个分叉，只读由三层保证**：prompt 和咨询契约；运行时的限制（Claude Code 的 default 权限模式加禁用写工具，Codex 只读沙箱，OMP 能限制工具时只给只读工具）；在可以丢弃的检出里跑，并在跑完后检查目录有没有被改（第 7.3 节）。这是 RFC 决策 8「每个 agent 有全部工具」唯一的例外，只用于咨询 | 维护者要求「不改文件」。prompt 管不住模型的意外；运行时能强制的地方就强制；强制不了的地方不让它碰别人在用的目录 |
 | D15 | **未读计数跟着每个办公台工具的返回值走**：任何 `looper_room_*` 调用都返回这个席位的未读数（点名、接口、全体），所以 Codex、OMP 的 agent 只要用过一次办公台工具就知道有新消息。提醒只是 Claude Code 的加速，不是唯一的通道 | Codex、OMP 运行中不能插话；工具返回值是三种运行时共有的唯一回路 |
 | D16 | **限额是项目执行设置**（第 11 节），不写死：每次运行每分钟的消息数、每次运行的广播数、消息长度、每个任务的消息数、来回轮数、收件箱的最长等待、咨询的预算、超时和每个任务的次数 | 维护者不喜欢写死的上限；默认值宽松，项目可调 |
 | D17 | **第一期管家只读**：`looper_tasks` 多一个只读动作 `room`，看任务办公台上的消息；管家不发言（D6：用户的话走补充说明或用户关卡，管家代用户发言随 R2 一起做） | 管家发言就是用户发言的转述，身份规则要和 R2 一起定；只读满足「管家能回答这两个 agent 在聊什么」 |
@@ -110,12 +110,12 @@
 | 工具 | 参数 | 返回 | 风险档 |
 |---|---|---|---|
 | `looper_room_roster` | 无；可选 `role` | 每个席位：席位、角色、类型（work、review）、步骤和步骤状态、在线状态、从什么时候起、最后在线时间、能不能咨询（`consultable`）、未读的点名数；规划者；自己是哪个席位 | read |
-| `looper_room_post` | `to`：`"all"` 或角色、席位、`"planner"` 的列表；`kind`：`info`、`question`、`answer`、`interface`、`announce`；`body`；`reply_to`（`answer` 必填）；`refs`（可选，至多 10 个：`{"file": 路径}`、`{"commit": 提交, "path"?: 路径}`、`{"step": 步骤编号}`） | 消息编号；按受众逐个说明怎么送达：在线（是否提醒了）、等名额、离线（下次运行看到）、已排咨询（或在等名额）、转给了规划者（原因）；未读计数 | write |
-| `looper_room_inbox` | 可选 `wait_seconds`（0 至项目的 `room_wait_max_seconds`）；可选 `peek`（只看不标已读） | 未读的、看得到的消息，点名的在前，至多 20 条、8,000 个字符，其余留着（`more: true`）；读过的标已读。带 `wait_seconds` 且没有点名消息时，等到有点名消息或关注的事发生、或到时间为止 | read（只改自己的已读进度） |
+| `looper_room_post` | `to`：`"all"` 或角色、席位、`"planner"` 的列表；`kind`：`info`、`question`、`answer`、`interface`、`announce`；`body`；`reply_to`（`answer` 必填）；`files`、`commits`（可选，各至多 10 个：文件路径、提交号；工具参数的校验只认字符串列表，所以分成两个列表，存成类型化的 `refs`） | 消息编号；按受众逐个说明怎么送达：在线（是否提醒了）、等名额、离线（下次运行看到）、已排咨询（或在等名额）、转给了规划者（原因）；未读计数 | write |
+| `looper_room_inbox` | 可选 `wait_seconds`（0 至项目的 `room_wait_max_seconds`）；可选 `peek`（只看不标已读） | 未读的、看得到的消息，按先后（已读进度是一个位置，跳着读会漏），点名的标 `for_you`，至多 20 条、8,000 个字符，其余留着（`more: true`）；读过的标已读。带 `wait_seconds` 且没有点名消息时，等到有点名消息、接口消息（同事要照着做的东西）或关注的事发生、或到时间为止 | read（只改自己的已读进度） |
 | `looper_room_read` | 可选过滤：`kind`、`from`（角色或席位）、`about`（某条消息的整个问答链）、`unanswered`、`before`（消息编号，往前翻）、`limit`（至多 50） | 看得到的历史消息，新的在前；不改已读进度 | read |
 | `looper_room_watch` | `presence`（角色或席位，`state` 默认 `online`）或 `kind`（`interface`、`announce`，可选 `from`）；可选 `until`：`first`（默认）或 `run_end` | 关注编号。条件满足时这个席位收到一条 `notice`（算点名，会提醒）；关注随这次运行结束；每次运行至多 5 个 | write |
 
-- **校验**（返回 `invalid`、`forbidden`，或新增的错误码 `rate_limited`，消息写明怎么改）：受众里的角色、席位必须是这个任务的；`reply_to` 必须是看得到的消息，`answer` 的 `reply_to` 必须是 `question`；`body` 非空、不超过 `room_message_max_chars`；引用的提交由服务端用 `git cat-file -e` 查一下（在发送者的工作目录里，10 秒超时），查不到的照样存，标 `resolved: false`；文件路径存为相对发送者工作目录的路径，加上发送者工作目录的绝对路径，读的人知道去哪里找。
+- **校验**（返回 `invalid`、`forbidden`，或新增的错误码 `rate_limited`，消息写明怎么改）：受众里的角色、席位必须是这个任务的；`reply_to` 必须是看得到的消息，`answer` 的 `reply_to` 必须是 `question`；`body` 非空、不超过 `room_message_max_chars`；`commits` 里的提交由服务端用 `git cat-file -e` 查一下（在发送者的工作目录里，10 秒超时），查不到的照样存，标 `resolved: false`；文件路径存为相对发送者工作目录的路径，加上发送者工作目录的绝对路径，读的人知道去哪里找。
 - **限额**：每次运行每分钟 `room_post_per_minute` 条，每次运行 `room_broadcasts_per_run` 次 `to: "all"`，每个任务 `room_messages_per_task` 条。超了返回 `rate_limited`（说明多久后可以再发）；任务满了同时给规划者一条升级。
 - **自己发起的回合**：规划者自己发起的回合（后台工作结束后）只能用 read 档（同 #155）；Worker、Reviewer 的运行没有这种区分。
 - **工具返回值里都带未读计数**（D15）：`{"unread": {"addressed": 1, "interface": 2, "room": 4}}`。
@@ -127,7 +127,7 @@
 | 谁 | 范围 | 读 | 发 | 广播 `all` | 关注 | 工具列表 |
 |---|---|---|---|---|---|---|
 | 管家 | 所有任务的办公台 | 全部（`looper_tasks` 的 `room` 动作） | 不发（D17） | — | — | 不加新工具 |
-| 规划者 | 本任务 | 全部，包括别人之间的点对点 | 发给任何席位、角色，任何成员类型 | 可以 | 可以 | 五个 |
+| 规划者 | 本任务 | 全部，包括别人之间的点对点 | 发给任何席位、角色，任何成员类型 | 可以 | 不需要：发给它的消息和升级本来就会唤醒它 | 四个（没有 `looper_room_watch`；R1a 实现时定） |
 | 工作席位（Worker、工作角色） | 本任务 | 看得到的 | 发给工作席位、工作角色和规划者，任何成员类型；对评审席位只能发 `answer`，且 `reply_to` 必须是那个评审席位发给自己的 `question`（D4） | 可以，有限额；受众是全体时，评审席位也读得到（第 16 节） | 可以 | 五个 |
 | 评审席位（Reviewer、评审角色） | 本任务 | 看得到的 | 只能发 `question`（给工作席位或规划者），以及回答发给它的问题（只有规划者能问它）；它发的和发给它的，规划者都看得到（D4，自动抄送规划者，但不唤醒规划者） | 不可以 | 不可以 | 四个（没有 `looper_room_watch`） |
 | 咨询运行 | 本任务 | 看得到的（按被咨询的席位） | 不发：回答写在它的回复里，由 Looper 发（第 7 节） | — | — | `looper_room_roster`、`looper_room_read` |
@@ -143,15 +143,16 @@
 
 - **第一轮**：`WORK_ITEM`、`VERIFY_REQUEST` 多一个 `room`：这个席位是谁、在线的同事（席位、角色、步骤）、未读的点名消息全文（至多 2,000 个字符，超出的列标题）、未读的 `interface` 消息的标题行，以及未读计数。它放在第一条 user turn 里、Findings 之后，是别的 agent 的输出，按数据给（同 `dependencies`）。重试一样，读的进度按席位接着来。
 - **之后**：agent 自己调 `looper_room_inbox`。用法写明在里程碑、收尾前、要用别人的接口时看一次；收尾前那一次是契约的一部分（第 9.1 节），但不由代码检查（没看不算违约，统计里看得到「收尾时还有未读的点名消息」）。
-- **等**：`wait_seconds` 只在没有点名消息时等，有点名消息或关注的事发生就立刻返回；上限是项目的 `room_wait_max_seconds`（默认 60，至多 120，D2）。等待期间这次运行照常占着它的并发名额、照常算超时，不花 token。没有任何无限期的等待，所以不会死锁（第 16 节）。
+- **等**：`wait_seconds` 只在没有点名消息时等，有点名消息、接口消息或关注的事发生就立刻返回（接口消息算在内是 R1a 实现时定的：等别人的接口是最常见的等）；上限是项目的 `room_wait_max_seconds`（默认 60，至多 120，D2）。等待期间这次运行照常占着它的并发名额、照常算超时，不花 token。没有任何无限期的等待，所以不会死锁（第 16 节）。
 
 ### 6.2 提醒
 
-- 只给能在运行中插话的运行时：新增运行时能力 `run_input`（运行中接受 user turn，只有 Claude Code 有），WorkerPool 按能力判断，不再靠写 stdin 失败来发现（今天 Codex、OMP 的运行也登记在 `_inputs` 里）。
+- 只给能在运行中插话的运行时：适配器上的类型化属性 `RuntimeAdapter.run_input`（只有 Claude Code 为真），WorkerPool 按它判断，不再靠写 stdin 失败来发现（今天 Codex、OMP 的运行也登记在 `_inputs` 里）。R1a 实现时没有做成运行时能力（`Capability`）：能力存在 `agent_runtimes.capabilities` 里，有 CHECK 约束，加一个值要迁移已有的库，而这一条只是适配器的事实，不需要存。
 - 触发：一条消息点名这个席位（或它的角色），或者是 `interface` 广播，或者它关注的事发生了；而这个席位有运行在跑、stdin 还开着（第一个 `result` 之前）。
 - 内容一行，不带正文（实现用英文，大意）：「[Looper room] 有新消息给你：fe_rd@s4 的一个问题、backend_rd@s2 的一条接口更新。在合适的停顿点用 looper_room_inbox 看。这只是提醒：你的步骤和报告不变。」
 - 节流：每个运行至多每 60 秒一条，期间到的合并进下一条；咨询运行不提醒。
-- **风险与处理**：今天 `forward`、`nudge` 也是这样写进去的，但提醒会频繁得多。如果提醒在模型写完报告之后才被读到，它会引出一个没有报告的新回合，而「最后一个 `result` 是结果」会让这一步因缺报告失败。处理：提醒带 uuid 写入（`write_user_turn` 已支持，`--replay-user-messages` 会回显它开始的那一轮）；判定结果时，由提醒开始的回合的 `result` 不取代之前一个带合格报告的 `result`。这是按 uuid 的类型化判断，不解析文本。R1 第一步在真实 CLI 上验证提醒被读到的时机，验证不了就关掉提醒、只靠 D15（第 19 节 Q2）。
+- **什么时候写**（Claude Code 2.1.285 上实测，haiku，命令布局同 Worker 的运行）：工具调用进行中写入的 user turn，在下一个工具结果处并进当前回合（回显紧跟 tool_result，只有一个 `result`，它的 `user_message_uuids` 同时有 prompt 和提醒的 uuid）；模型正在写最终回复（没有工具调用）时写入的，先排队，第一个 `result` 带着报告照常到来，随后 Claude 为它另起一个回合（stdin 已经关了也一样，消息已经读进去了），那个 `result` 没有报告。所以提醒**只在有工具调用进行中时写**（WorkerPool 按流里的 `tool_use` 和 `tool_result` 记着），没有就留到下一个 `tool_use`。
+- **兜底**：提醒带 uuid 写入（`looper-reminder-…`）；`user_message_uuids` 全是本次运行提醒 uuid 的 `result` 不取代之前的结果（实测里第二个 `result` 的 `user_message_uuids` 只有提醒的 uuid），判定报告用最后一个不是由提醒开出的 `result`，花费仍取最后一个 `result`（它是会话的累计值）。这是按 uuid 的类型化判断，不解析文本。
 
 ### 6.3 离线和还没开始的席位
 
@@ -172,7 +173,7 @@
 - **攒批**：第一条到达后等 30 秒（`ROOM_BATCH_SECONDS`，代码常量），期间到的合成一轮 `[ROOM]` 回合。规划者正在跑别的回合时，排在它之后（同任务变更）。
 - **`[ROOM]` 的消息**：这一批消息（发送者、席位的在线状态和步骤状态、正文、引用、所属问答链的前文摘要），以及升级的类型和细节。
 - **回复**：CHAT 的形状（D12）。`reply` 非空时，Looper 以规划者的名义发一条 `answer`，`reply_to` 这一批里的问题（多个问题时 `reply_to` 最后一个、受众是所有提问者），没有问题时发 `info` 给这一批的发送者；`reply` 为空就不发。规划者在这一轮里也可以用 `looper_room_post` 分别回答（这一轮是 Looper 发起的，写操作有效）。动作 `forward`、`add_steps`、`replan`（含 `stop`）照旧。
-- **送达保证**：消息带 `planner_pending`，回复解析并执行后清掉；回合失败、进程退出、服务重启后仍是未送达，下一次规划者起来先做这一轮。
+- **送达保证**：消息带 `planner_pending`，回复解析并执行后清掉；回合失败、进程退出、服务重启后仍是未送达，下一次规划者起来先做这一轮。失败的回合不在每个事件上重试：有更新的消息时，或失败 10 分钟后的下一个事件时再给（`ROOM_RETRY_SEC`，R1a 实现时定，免得一个坏掉的回合在每个步骤结果上都重跑）。
 - **决策回合多一段**：DECISION 的消息里加上这一步的办公台摘要：它发了几条、收了几条，还没回答的问题（它问别人的、别人问它的），它发过的 `interface`。没有办公台消息时不加。
 - **巡检回合**：每个运行中的步骤那一行加上「room: 发 N、收 M、未答 K」，规划者看得出谁在闲聊、谁在等。
 
@@ -195,7 +196,7 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 1. 一条 `question` 发给一个 `offline` 的工作席位，或者规划者发给一个 `offline` 的评审席位（工作席位不能问评审席位，D4）。
 2. 能咨询的前提：这个席位有一次已经结束的运行；它的运行时这次运行存了会话（Claude Code 一直存；Codex、OMP 按 D13）；本任务的咨询次数没到 `room_consults_per_task`；这个席位现在没有新的运行在等或在跑。
 3. 同一个席位同时至多一个咨询。咨询开始之前又来的问题并进同一次；开始之后来的排下一次。
-4. 咨询按这个席位的类型占并发名额（工作席位算 Worker，评审席位算 Reviewer），在项目和任务的上限里排队，和普通运行一样（维护者 D3）。排队时提问方收到的送达说明是「已排咨询，在等 Worker 名额（1/1 在跑）；回答会进你的收件箱，不必等」。
+4. 咨询按这个席位的类型占并发名额（工作席位算 Worker，评审席位算 Reviewer），在任务的上限里排队（#173 起并发只按任务计），和普通运行一样（维护者 D3）。排队时提问方收到的送达说明是「已排咨询，在等 Worker 名额（本任务 1/1 在跑）；回答会进你的收件箱，不必等」。
 5. Looper 续接这次运行的会话的一个分叉（7.2），给咨询的 system prompt 和问题（7.4），读它的回复，把每个回答以这个席位的名义发出（`via: consult`，`reply_to` 对应的问题），抄送规划者。
 6. 回答不了或失败：转给规划者（7.5）。
 
@@ -204,12 +205,12 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 | | Claude Code | Codex | OMP |
 |---|---|---|---|
 | 会话在哪里 | 运行时自己的会话目录（按工作目录分），运行记录有 `session_id`；Looper 不删，由 Claude Code 自己按期清理（默认 30 天，需要验证） | 开启办公台时存在 `codex/sessions/run-<记录号>`（D13），会话 id 是 `thread.started` 的 `thread_id` | 开启办公台时存在 `omp/sessions/run-<记录号>`（D13），会话 id 是会话头的 `id` |
-| 怎么续接 | `--resume <id> --fork-session`：新的会话 id，原会话不变（`--fork-session` 在当前版本的行为需要验证） | 把原会话目录复制到这次咨询自己的家目录，在那里 `exec … resume <id> -`：复制就是分叉 | 把原会话目录复制到这次咨询自己的 `--session-dir`，`--resume <id>` |
-| 在哪个目录跑 | 原运行的工作目录（Claude Code 按工作目录找会话；能不能跨目录续接需要验证，能的话一律在快照里跑） | 快照；做不了快照时在原目录，靠沙箱 | 快照；omp 的只读工具验证通过后同 Codex |
-| 只读怎么强制 | 用 `--permission-mode plan` 代替 `--dangerously-skip-permissions`，加 `--disallowedTools Edit Write NotebookEdit`；`-p` 模式下计划模式是否拒绝写文件的 Bash 命令需要验证 | 用 `-c sandbox_mode="read-only"` 和 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`：系统级沙箱，写文件失败；`exec resume` 是否接受这些覆盖需要验证 | omp 若能只开只读工具（如 `--tools` 只给读、搜索类，需要验证），就这样开；否则只有 prompt，运行记录写明 `read_only.enforced: "prompt"` |
+| 怎么续接 | `--resume <id> --fork-session`：新的会话 id，原会话不变（2.1.285 实测：分叉后再续接原会话，它没见过咨询的问题） | 把原会话目录复制到这次咨询自己的家目录，在那里 `exec … resume <id> -`：复制就是分叉 | 把原会话目录复制到这次咨询自己的 `--session-dir`，`--resume <id>` |
+| 在哪个目录跑 | 快照（2.1.285 实测：在另一个目录 `--resume <id> --fork-session` 找得到会话） | 快照；做不了快照时在原目录，靠沙箱 | 快照；omp 的只读工具验证通过后同 Codex |
+| 只读怎么强制 | 不带 `--dangerously-skip-permissions`（default 权限模式），加 `--disallowedTools Edit Write NotebookEdit`。2.1.285 实测：`-p` 模式下没有人能批准，`ls`、`cat`、`git status`、`git log`、`git show` 照常放行，重定向写文件、`touch`、python 写文件、`git commit` 都被拒（"requires approval"），逐条列在 `result` 的 `permission_denials` 里，可以作为类型化的「咨询试图写」信号。plan 模式不用：它只是模型自己不写，CLI 不拦，而且模型会试图用 Write 往运行时的配置目录写计划文件 | 用 `-c sandbox_mode="read-only"` 和 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`：系统级沙箱，写文件失败；`exec resume` 是否接受这些覆盖需要验证 | omp 若能只开只读工具（如 `--tools` 只给读、搜索类，需要验证），就这样开；否则只有 prompt，运行记录写明 `read_only.enforced: "prompt"` |
 | 会话不在时 | 返回「No conversation found」，没有 init 事件（`ResidentTurn.session_started` 已有这个判断） | 退出码 1、没有事件 | 退出码 1、没有事件 |
 
-**快照**：在任务目录的仓库里 `git worktree add --detach <路径> <提交>`，咨询完删掉。提交是这个席位的结果：已合回的隔离步骤用它的结果提交 W，共用目录的步骤用任务分支此刻的末端。Claude Code 要求同一路径时，隔离步骤的 worktree 合回后已删除，就在原路径重建这个快照。没法做快照的情况：隔离步骤的 worktree 还在用（步骤在等决策、或合不进去），只在运行时能强制只读时在原 worktree 里跑；任务目录不是 git 仓库。这两种情况下运行时又强制不了只读的（OMP，或第一行的限制没验证通过），转给规划者，原因 `no_snapshot`。Claude Code 在共用的任务目录里咨询（不能跨目录续接时只能如此）同样要求它的只读限制验证通过，否则转给规划者，原因 `runtime_cannot`。
+**快照**：在任务目录的仓库里 `git worktree add --detach <路径> <提交>`，咨询完删掉。提交是这个席位的结果：已合回的隔离步骤用它的结果提交 W，共用目录的步骤用任务分支此刻的末端。没法做快照的情况：隔离步骤的 worktree 还在用（步骤在等决策、或合不进去），只在运行时能强制只读时在原 worktree 里跑；任务目录不是 git 仓库。这两种情况下运行时又强制不了只读的（OMP，或 Codex 的沙箱在 R1b 没验证通过），转给规划者，原因 `no_snapshot`。
 
 ### 7.3 只读的三层
 
@@ -275,7 +276,7 @@ room_messages                   一条消息，只追加
   sender_seat   'planner' | 'looper' | '<角色>@<步骤编号>'
   sender_kind   'planner' | 'work' | 'review' | 'looper'
   sender_step   → task_steps ON DELETE SET NULL；规划者和 Looper 为 NULL
-  sender_run    发送它的运行的 llm_records.id；可空
+  sender_run    发送它的运行的 agent id（`worker-…`、`reviewer-…`）；可空
   via           'agent' | 'consult' | 'planner_reply' | 'looper'
   audience_all  BOOLEAN
   audience      TEXT[]          角色、席位或 'planner'；audience_all 为真时为空
@@ -283,7 +284,7 @@ room_messages                   一条消息，只追加
   kind          'info' | 'question' | 'answer' | 'interface' | 'announce' | 'notice' | 'escalation'
   reason        escalation、notice 的类型（第 6.5、7.5 节）；其余为 NULL
   reply_to      → room_messages ON DELETE SET NULL
-  refs          JSONB           [{file, work_dir} | {commit, path?, resolved} | {step}]
+  refs          JSONB           [{file, work_dir} | {commit, resolved}]
   body          TEXT
   planner_pending BOOLEAN       要唤醒规划者、还没送达的
   created_at
@@ -303,7 +304,7 @@ room_watches
   fired_at, ended_at, created_at
   CHECK ((presence IS NULL) <> (kind IS NULL))
 
-room_consults
+room_consults                   （R1b）
   id, task_id, seat
   questions     BIGINT[]        room_messages.id
   source_run    被续接的运行的 llm_records.id
@@ -332,9 +333,9 @@ room_consults
 | `room_messages_per_task` | 300 | 20–5,000 | 一个任务的消息总数 |
 | `room_ping_pong_rounds` | 6 | 2–50 | 两个席位来回几轮后升级给规划者 |
 | `room_wait_max_seconds` | 60 | 0–120 | 收件箱一次最多等多久（0 为不等） |
-| `room_consult_budget_usd` | 0.20 | 0.01–5 | 一次咨询的花费上限 |
-| `room_consult_timeout_seconds` | 300 | 30–1,800 | 一次咨询的时间上限 |
-| `room_consults_per_task` | 10 | 0–100 | 一个任务至多几次咨询（0：一律转给规划者） |
+| `room_consult_budget_usd` | 0.20 | 0.01–5 | 一次咨询的花费上限（R1b）|
+| `room_consult_timeout_seconds` | 300 | 30–1,800 | 一次咨询的时间上限（R1b）|
+| `room_consults_per_task` | 10 | 0–100 | 一个任务至多几次咨询（0：一律转给规划者）（R1b）|
 
 这些设置在项目设置的 Execution 里折叠成一组「Agent room」，走现有的项目执行设置接口；随配置导出导入。
 
@@ -358,7 +359,7 @@ room_consults
 - **规划者定义的角色（#161）**：席位的角色就是任务角色的编号；没有角色的步骤用 `worker`、`reviewer`。角色的 `kind` 决定席位是工作还是评审，也就决定第 5.2 节的范围。角色 prompt 可以写「你负责后端接口，定下后发 interface」，但能力范围不随角色变。办公台一节和安全底线都由代码放在角色文本之后。
 - **用户关卡（#162，[用户关卡 RFC](user-gate-v0.zh-CN.md)）**：关卡是用户和规划者之间的讨论，办公台是 agent 之间的。Worker 需要用户拍板时，在办公台上问规划者（`question` 发给 `planner`），由规划者决定开不开关卡；Worker 自己不能开关卡，也不在运行中等关卡（关卡 RFC 第 14 节）。`[ROOM]` 回合沿用 CHAT 的形状，所以规划者可以在回答办公台的同一轮里开关卡：开关卡是用 `add_steps` 或 `replan` 加一个关卡步骤（`kind: "gate"`）；关卡 RFC 给 CHAT 加的 `gates` 只更新或取消已有的关卡，`[ROOM]` 回合同样带它。关卡是 `kind: "gate"` 的步骤，不跑 Worker、Reviewer，所以没有席位，在场名单里没有它；Pipeline 上的办公台计数也不加在关卡节点上。关卡的讨论和结论不进办公台：结论存为补充说明，之后的 Worker、Reviewer 本来就看得到；规划者要让正在跑的 Worker 立刻知道时，可以 `forward`，或在办公台上发 `announce`。两边的名字不重叠：`[GATE]` 与 `[ROOM]`，`task_user_gate*` 与 `room_*`，`reply_contract(max_retries, *, roles, gates, room)` 三节各自可选。
 - **目录隔离**：隔离的步骤看不到彼此没提交的文件，这正是办公台的主要用处。用法提醒 agent 把要共享的接口提交到自己的步骤分支并附上提交号（各 worktree 共用对象库，读得到）；`refs` 的提交由服务端查过。咨询的快照用同一套 git 工具（`step_workspaces.py`）建和删，Looper 的 git 命令照旧带 `-c core.hooksPath=/dev/null` 和超时。
-- **并发**：等收件箱时运行照常占名额；咨询按类型占名额（维护者 D3）。项目的 Worker 上限是 1 时，在跑的 Worker 问离线席位，咨询要等它结束才能开始：送达说明会写明「在等名额」，它不该干等（第 16 节）。
+- **并发**：等收件箱时运行照常占名额；咨询按类型占名额（维护者 D3）。任务的 Worker 上限是 1 时，在跑的 Worker 问离线席位，咨询要等它结束才能开始：送达说明会写明「在等名额」，它不该干等（第 16 节）。
 - **评审门**：办公台不改评审门。Reviewer 的问答抄送规划者，DECISION 消息里列出；规划者没能决策时仍按评审结论。
 - **补充说明和 `forward`**：用户的话仍然只经补充说明到规划者；`forward`、`nudge` 照旧，和提醒共用一条插话通道，提醒按 6.2 节流。
 - **重启**：消息、已读进度、关注在库里；服务重启后提醒不补发，未送达规划者的消息按 6.4 补一轮；正在跑的咨询按 `room_consults.state = running` 重排一次（同一次咨询，不重复计次）。
@@ -448,7 +449,9 @@ room_consults
 
 | 期 | 内容 | 依赖 |
 |---|---|---|
-| R1 | 项目设置（开关和第 11 节的限额）；四张表；`RoomOps` 和每次运行的令牌、端点分流、三种运行时的注入和超时；五个工具和范围矩阵；Worker、Reviewer 的办公台一节和第一轮摘要；运行时能力 `run_input` 和提醒（先验证时机）；规划者的工具、`[ROOM]` 回合、送达保证、DECISION 和巡检的摘要、升级；Codex、OMP 保留会话（D13）；唤醒咨询（三种运行时、只读三层、快照、转交）；管家 `looper_tasks` 的 `room` 动作；任务页 Room 标签、Pipeline 计数、Runs 的席位名、项目设置；统计；评测四个新任务和开关对照。分两个 PR（第 19 节 Q9）：R1a 办公台本身（咨询的位置先一律转给规划者，原因 `runtime_cannot`），R1b 唤醒咨询；两个都合入后一起发布。R1 的第一步是验证第 6.2、7.2、8 节标「需要验证」的几点，结果写回那几节 | 用户关卡 G1、G2；#161 |
+| R1 | 项目设置（开关和第 11 节的限额）；四张表；`RoomOps` 和每次运行的令牌、端点分流、三种运行时的注入和超时；五个工具和范围矩阵；Worker、Reviewer 的办公台一节和第一轮摘要；运行时能力 `run_input` 和提醒（先验证时机）；规划者的工具、`[ROOM]` 回合、送达保证、DECISION 和巡检的摘要、升级；Codex、OMP 保留会话（D13）；唤醒咨询（三种运行时、只读三层、快照、转交）；管家 `looper_tasks` 的 `room` 动作；任务页 Room 标签、Pipeline 计数、Runs 的席位名、项目设置；统计；评测四个新任务和开关对照。分两个 PR（第 19 节 Q9），两个都合入后一起发布：
+- **R1a 办公台本身**：项目设置里办公台的开关和前七个限额；`room_messages`、`room_reads`、`room_watches` 三张表；`RoomOps` 和按次运行的令牌、端点分流、三种运行时的注入；五个工具和范围矩阵；Worker、Reviewer 的办公台一节和第一轮摘要；`run_input` 和提醒；规划者的工具和 `[ROOM]` 回合；Codex、OMP 保留会话（D13）；管家 `looper_tasks` 的 `room` 动作；任务页 Room 标签。问离线、还没开始的席位的问题一律转给规划者（R1a 里的原因是 `runtime_cannot`）。
+- **R1b 唤醒咨询**：`room_consults` 表和咨询的三个限额；三种运行时的续接、分叉和只读三层；快照；转交规划者的各种原因 | 用户关卡 G1（#168）；#161 |
 | R2（本 RFC 只写不做） | 项目级办公台（同项目的任务之间）；用户在办公台发言（任务页、管家代发、渠道），及其身份和「算不算任务变更」的规则；置顶和接口看板（每个主题最新的一条 `interface`）；规划者定义角色的项目级模板接入（模板里写这个角色在办公台上的职责）；跨任务的统计和渠道告警；SDK 运行时（M9d）上的提醒 | R1 |
 
 ## 19. 已决问题（2026-10-17 答复）

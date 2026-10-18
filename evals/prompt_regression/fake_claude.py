@@ -23,7 +23,10 @@ agent system started it in:
 - a Worker (its task section says "Your step:") writes the files its step's
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
-  waits for a forwarded user turn and then writes the files given there;
+  waits for a forwarded user turn and then writes the files given there; with
+  ``room_calls`` (``{label: [[tool, arguments], ...]}``) it first makes those
+  calls of the room's tools over its ``looper`` MCP server (and answers a
+  [ROOM] turn of the Planner's with ``room_reply``, or "Noted.");
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
   marker), or the attempt under review is one the script's
@@ -231,6 +234,8 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {**_decide(script, message, retried), "progress": PROGRESS}
         elif message.startswith("[GATE]"):
             reply = _gate(script, message)
+        elif message.startswith("[ROOM]"):
+            reply = {"reply": script.get("room_reply", "Noted."), "action": "none"}
         elif message.startswith("[CHAT]"):
             reply = _chat(script, message)
         else:
@@ -247,10 +252,20 @@ def _write(work_dir: str, files: dict[str, str]) -> None:
             handle.write(content)
 
 
-def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
+def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: list[str]) -> None:
     stdin.readline()  # the start cue
     step = re.search(r"^Your step: (\S+)$", system_prompt, re.MULTILINE)
     label = step.group(1) if step else ""
+    calls = (script.get("room_calls") or {}).get(label) or []
+    rpc = _mcp(args) if calls else None
+    inbox: list[dict[str, Any]] | None = None
+    for name, arguments in calls:
+        _emit({"type": "assistant", "session_id": "fake-worker", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"toolu_{name}", "name": f"mcp__looper__{name}", "input": arguments}]}})
+        result = rpc("tools/call", {"name": name, "arguments": arguments})
+        if name == "looper_room_inbox":
+            answer = json.loads(result["result"]["content"][0]["text"])
+            inbox = (inbox or []) + (answer.get("result") or {}).get("messages", [])
     retried = re.search(r"being retried \(attempt (\d+)\)", system_prompt)
     attempt_no = int(retried.group(1)) if retried else 1
     attempts = script.get("attempts", {}).get(label) or [{"status": "completed", "files": {}}]
@@ -259,6 +274,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
         files = dict(wait.get("files") or {})
+    if inbox is not None and "cli.py" in files:
+        # The inventory client learns its fields only from the delivered interface; no interface means {}.
+        interface = next((m["body"] for m in reversed(inbox) if m.get("kind") == "interface"), "")
+        fields = re.findall(r'"([^"\n]+)"\s*:\s*(str|int)\b', interface)
+        record = ", ".join(f"{json.dumps(field)}: {'name' if kind == 'str' else 'int(count)'}"
+                           for field, kind in fields)
+        files["cli.py"] = re.sub(r"store\.add_item\(\{[^}]*\}\)", lambda _: f"store.add_item({{{record}}})",
+                                 files["cli.py"])
     time.sleep(float(attempt.get("seconds", 0)))
     work_dir = os.getcwd()
     _write(work_dir, files)
@@ -339,7 +362,7 @@ def main(argv: list[str]) -> int:
     elif review:
         _reviewer(script, system_prompt, stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
-        _worker(script, system_prompt, stdin)
+        _worker(script, system_prompt, stdin, args)
     else:
         _planner(script, args, stdin)
     return 0
