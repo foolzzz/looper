@@ -18,7 +18,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
-from .llm_records import TASK_RUN
+from .llm_records import TASK_RUN, _TASK_ROLE
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
@@ -412,9 +412,13 @@ async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -
     """``spent_since`` for each of ``schedule_ids``, in one query."""
     rows = await conn.fetch(
         f"""
-        SELECT r.schedule_id, sum(COALESCE(r.cost_usd,
-                   (SELECT sum(l.cost_usd) FROM llm_records l WHERE l.task_id = r.task_id
-                    AND {TASK_RUN.replace("agent_id", "l.agent_id")}))) AS spent
+        SELECT r.schedule_id, sum(COALESCE(r.cost_usd::numeric,
+                   (SELECT sum(g.cost_usd) FROM (
+                       SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
+                       FROM llm_records l WHERE l.task_id = r.task_id
+                       AND {TASK_RUN.replace("agent_id", "l.agent_id")}
+                       GROUP BY {_TASK_ROLE.replace("agent_id", "l.agent_id")}, l.model
+                   ) g))) AS spent
         FROM schedule_runs r WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,
         schedule_ids, since,

@@ -890,6 +890,9 @@ _HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1, "cost_usd":
     ("task-a", "ok", [_HAIKU_RUNS], None, True, "ok", None),
     ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
      None, False, "Haiku $0.04 and DeepSeek $0.02", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
+     None, False, "Haiku $0.02 and DeepSeek $0.04",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0409)"),
     # A model whose runs are all still running came after the Manager's read: the reply need not name it.
     ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
      None, False, "Haiku $0.0409", None),

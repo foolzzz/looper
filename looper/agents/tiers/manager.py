@@ -574,7 +574,7 @@ class ManagerAgent:
         """A turn recorded without a task whose calls all named one task belongs to it (its cost is counted apart
         on that task, as the Manager's)."""
         if turn is not None and recorder.task_id is None and recorder.record_id is not None \
-                and len(turn.task_ids) == 1:
+                and len(turn.task_ids) == 1 and None not in turn.task_ids:
             try:
                 await db_llm_records.link_task(recorder.record_id, next(iter(turn.task_ids)))
             except Exception:

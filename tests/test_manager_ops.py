@@ -171,7 +171,7 @@ def test_a_write_runs_in_the_turn_answering_the_user(recorded: list[dict[str, An
     assert manager_actions.masked(row["arguments"]) == {"n": 2, "api_key": "***"}
 
 
-def test_a_turn_collects_the_tasks_its_calls_name_or_create(recorded: list[dict[str, Any]]) -> None:
+def test_a_turn_collects_every_calls_task_target(recorded: list[dict[str, Any]]) -> None:
     ops = _Ops().ops
     turn = _turn("m1")
     tool = Tool("t_read", "reads", {}, Risk.READ, AsyncMock(), task_id=lambda arguments: arguments.get("task_id"))
@@ -182,7 +182,7 @@ def test_a_turn_collects_the_tasks_its_calls_name_or_create(recorded: list[dict[
         assert turn.task_ids == {"task-a"}
         await ops._record(turn, tool, {}, Risk.WRITE, "ok", result={"task_id": "task-b"})
         await ops._record(turn, tool, {}, Risk.READ, "ok")
-        assert turn.task_ids == {"task-a", "task-b"}
+        assert turn.task_ids == {"task-a", None}
         assert _turn("m2").task_ids == set()
 
     asyncio.run(test())
@@ -192,13 +192,15 @@ def test_a_turn_collects_the_tasks_its_calls_name_or_create(recorded: list[dict[
 @pytest.mark.parametrize(("task_id", "record_id", "task_ids", "linked"), [
     (None, 1, {"task-a"}, True),
     (None, 1, {"task-a", "task-b"}, False),
+    (None, 1, {"task-a", None}, False),
+    (None, 1, {None}, False),
     (None, 1, set(), False),
     ("task-b", 1, {"task-a"}, False),
     (None, None, {"task-a"}, False),
 ])
 def test_a_manager_turn_links_only_one_named_task_when_its_record_has_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task_id: str | None, record_id: int | None,
-    task_ids: set[str], linked: bool,
+    task_ids: set[str | None], linked: bool,
 ) -> None:
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
     from looper.db import llm_records
@@ -225,6 +227,42 @@ def test_a_failure_to_link_a_manager_turn_logs_and_keeps_the_turn(
     asyncio.run(manager._link_turn_task(SimpleNamespace(task_id=None, record_id=1),
                                        Turn(channel="web", chat="A", task_ids={"task-a"})))
     assert "could not link the Manager's turn to its task" in caplog.text
+
+
+@pytest.mark.parametrize(("create", "global_call", "linked"), [
+    (False, False, True), (False, True, False), (True, False, False), (True, True, False),
+])
+def test_a_manager_turn_links_only_when_every_call_names_an_existing_task(
+    recorded: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    create: bool, global_call: bool, linked: bool,
+) -> None:
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import llm_records
+
+    link = AsyncMock()
+    monkeypatch.setattr(llm_records, "link_task", link)
+    tool = Tool("t_task", "reads or creates", {"type": "object", "properties": {"task_id": {"type": "string"}}},
+                Risk.WRITE, AsyncMock(return_value={"task_id": "task-a"}),
+                task_id=lambda arguments: arguments.get("task_id"))
+    global_tool = Tool("t_global", "reads", {"type": "object"}, Risk.READ, AsyncMock(return_value={}))
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", tools=(tool, global_tool))
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    turn = _turn("m1")
+
+    async def test() -> None:
+        ops.begin_turn(turn)
+        assert (await ops.call("t_task", {} if create else {"task_id": "task-a"}))["status"] == "ok"
+        if global_call:
+            assert (await ops.call("t_global", {}))["status"] == "ok"
+        ops.end_turn(turn)
+        await manager._link_turn_task(SimpleNamespace(task_id=None, record_id=1), turn)
+
+    asyncio.run(test())
+    assert recorded[0]["task_id"] == "task-a"  # A create still names the new task in the audit trail.
+    if linked:
+        link.assert_awaited_once_with(1, "task-a")
+    else:
+        link.assert_not_awaited()
 
 
 def test_a_high_call_runs_only_when_the_next_message_in_its_chat_confirms_it(

@@ -325,10 +325,14 @@ def _week_spend_read(look: Look) -> str | None:
     return None if look.reply.strip() else "no reply"
 
 
+def _model_pattern(model: str) -> str:
+    model = model.lower()
+    names = [model, *(part for part in re.split(r"[^a-z]+", model) if len(part) >= 4 and part != "claude")]
+    return "|".join(re.escape(name) for name in names)
+
+
 def _model_named(reply: str, model: str) -> bool:
-    reply, model = reply.lower(), model.lower()
-    return model in reply or any(part in reply for part in re.split(r"[^a-z]+", model)
-                                 if len(part) >= 4 and part != "claude")
+    return re.search(_model_pattern(model), reply.lower()) is not None
 
 
 def _amount_told(reply: str, cost: float) -> bool:
@@ -358,8 +362,15 @@ def _cost_by_model_told(look: Look) -> str | None:
     if missing:
         return f"the reply does not name {', '.join(missing)}"
     if not look.fake:
+        # Each mention owns the text after it up to the next model, in prose or a table row.
+        mentions = sorted((match.start(), match.end(), row["model"]) for row in models
+                          for match in re.finditer(_model_pattern(row["model"]), look.reply.lower()))
         for row in models:
-            if row["cost_usd"] is not None and not _amount_told(look.reply, row["cost_usd"]):
+            if row["cost_usd"] is not None and not any(
+                _amount_told(look.reply[end:mentions[i + 1][0] if i + 1 < len(mentions) else len(look.reply)],
+                             row["cost_usd"])
+                for i, (_, end, model) in enumerate(mentions) if model == row["model"]
+            ):
                 return f"the reply does not give the cost of {row['model']} ({row['cost_usd']:.4f})"
     return None
 
