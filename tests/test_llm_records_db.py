@@ -258,6 +258,40 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
     _in_fresh_schema(test)
 
 
+def test_task_cost_dialog_seed_stays_fixed_when_the_manager_replies() -> None:
+    from evals.prompt_regression.dialogs import _seed_cost_task
+    from looper.db import llm_records, projects, tasks
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="eval-cost", pool=pool)
+        task_id = await _seed_cost_task(project["id"], pool=pool)
+        task = await tasks.get_task(task_id, pool=pool)
+        assert task["status"] == "running" and task["planner_id"] is None
+        before = (await llm_records.task_costs([task_id], pool=pool))[task_id]
+        models = {row["model"]: row for row in before["by_model"]}
+        assert {model: row["cost_usd"] for model, row in models.items()} == {
+            "claude-haiku-4-5-20251001": 0.018943, "deepseek-flash": 0.123456, "claude-opus-4-1": None}
+        assert (before["runs"], before["running"], before["cost_usd"]) == (3, 1, 0.142399)
+        assert models["claude-opus-4-1"]["running"] == 1
+        assert [(row["model"], row["cost_usd"]) for row in before["manager_by_model"]] == [
+            ("claude-sonnet-4-5", 0.234567)]
+        assert sum(row["input_tokens"] for row in models.values()) == 1500
+        assert sum(row["output_tokens"] for row in models.values()) == 150
+        assert sum(row["cache_read_tokens"] for row in models.values()) == 3000
+        assert sum(row["cache_creation_tokens"] for row in models.values()) == 300
+        # A real Manager turn can finish and link to the task between its tool read and the check.
+        manager = await llm_records.start_record(agent_id="manager", pool=pool)
+        await llm_records.link_task(manager, task_id, pool=pool)
+        await llm_records.finish_record(manager, status="completed", model="claude-haiku-4-5-20251001",
+                                        cost_usd=0.5, pool=pool)
+        after = (await llm_records.task_costs([task_id], pool=pool))[task_id]
+        assert {k: v for k, v in before.items() if k != "manager_by_model"} == {
+            k: v for k, v in after.items() if k != "manager_by_model"}
+        assert len(after["manager_by_model"]) == 2
+
+    _in_fresh_schema(test)
+
+
 def test_a_tasks_cost_sums_money_exactly_within_one_role_and_model() -> None:
     from looper.db import llm_records
 

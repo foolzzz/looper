@@ -898,9 +898,18 @@ _HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1, "cost_usd":
     ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
      None, False, "Haiku $0.02 and DeepSeek $0.04",
      "the reply does not give the cost of claude-haiku-4-5 (0.0409)"),
-    # A model whose runs are all still running came after the Manager's read: the reply need not name it.
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": 0.018943},
+                      {"model": "deepseek-flash", "cost_usd": 0.123456}],
+     None, False, "| Haiku | $0.019 |\n| DeepSeek | $0.123 |", None),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": 0.018943},
+                      {"model": "deepseek-flash", "cost_usd": 0.123456}],
+     None, False, "| Haiku | $0.123456 |\n| DeepSeek | $0.018943 |",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0189)"),
+    # The seeded running run is present before the read too, even though it has no amount yet.
     ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
-     None, False, "Haiku $0.0409", None),
+     None, False, "Haiku $0.0409", "the reply does not name claude-opus-4-1"),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
+     None, False, "Haiku $0.0409; Opus is still running, cost unknown", None),
 ])
 def test_a_tasks_cost_is_read_and_told_without_changes(
     monkeypatch: pytest.MonkeyPatch, task_id: str, status: str, by_model: list[dict[str, Any]],
@@ -916,6 +925,56 @@ def test_a_tasks_cost_is_read_and_told_without_changes(
     monkeypatch.setattr(dialogs.Look, "detail", lambda self, task_id=None: {"cost": {"by_model": by_model}})
     look = dialogs.Look(None, "task-a", reply, "", 0, frozenset(), fake)
     assert dialogs._cost_by_model_told(look) == problem
+
+
+@pytest.mark.parametrize("mode", ["real", "fake"])
+def test_task_cost_dialog_seeds_without_starting_an_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    seeded: list[tuple[str, str]] = []
+
+    def seed(database_url: str, project_id: str) -> str:
+        seeded.append((database_url, project_id))
+        return "task-fixed"
+
+    class Api:
+        def get(self, path: str) -> dict[str, Any]:
+            assert path == "/api/tasks"
+            return {"tasks": [{"task_id": "task-fixed"}]}
+
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text("{}", encoding="utf-8")
+
+    def ask(api: Any, session: str, text: str, **_: Any) -> str:
+        assert "task-fixed" in text
+        if mode == "fake":
+            assert json.loads(scenarios.read_text())["manager"][text] == [
+                ["looper_costs", {"task_id": "task-fixed"}]]
+        return "Haiku $0.018943; DeepSeek $0.12; Opus is running, cost unknown"
+
+    def no_start(*_: Any, **__: Any) -> str:
+        pytest.fail("task_cost must not start a Planner or Worker")
+
+    monkeypatch.setattr(dialogs, "_make_cost_task", seed)
+    monkeypatch.setattr(dialogs, "_start_slow_task", no_start)
+    monkeypatch.setattr(dialogs, "_ask", ask)
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [
+        {"tool": "looper_costs", "status": "ok", "risk": "read", "arguments": {"task_id": "task-fixed"},
+         "error_code": None}])
+    monkeypatch.setattr(dialogs.Look, "detail", lambda *_: {"cost": {"by_model": [
+        {"model": "claude-haiku-4-5", "cost_usd": 0.018943},
+        {"model": "deepseek-flash", "cost_usd": 0.123456},
+        {"model": "claude-opus-4-1", "cost_usd": None},
+    ]}})
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
+    (dialog,) = dialogs.select(["task_cost"])
+    row = dialogs.run_dialog(Api(), dialog, database_url="disposable", project_id="project-a",
+                             scenarios=scenarios, mode=mode, timeout=1)
+    assert row["outcome"] == "pass", row
+    assert seeded == [("disposable", "project-a")]
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
