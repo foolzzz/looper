@@ -10,6 +10,10 @@ import asyncio
 import dataclasses
 import json
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -619,6 +623,27 @@ def test_reps_must_be_a_whole_number_of_at_least_one(value: str) -> None:
     assert cli._parser().parse_args(["dialogs", "--reps", "3"]).reps == 3
 
 
+@pytest.mark.parametrize("command", ["run", "dialogs"])
+@pytest.mark.parametrize("value", ["-0.4", "0", "nan", "inf", "-inf"])
+def test_case_budget_must_be_finite_and_positive(
+    command: str, value: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli._parser().parse_args([command, f"--case-budget-usd={value}"])
+    assert exc.value.code == 2
+    assert "--case-budget-usd must be a finite positive number" in capsys.readouterr().err
+    assert cli._parser().parse_args([command, "--case-budget-usd", "0.4"]).case_budget_usd == 0.4
+
+
+@pytest.mark.parametrize("value", [-0.4, 0, float("nan"), float("inf"), -float("inf")])
+def test_invalid_case_budgets_are_rejected_before_scheduling(value: float) -> None:
+    def run_one(*_: Any) -> dict[str, Any]:
+        pytest.fail("an invalid case budget must not start a case")
+
+    with pytest.raises(runner.EvalError, match="finite positive number"):
+        runner.run_suite((_task("a"),), run_one, total_cap_usd=1.0, jobs=2, run_budget_usd=value)
+
+
 def test_a_task_set_is_resolved_against_the_tasks_there_are(monkeypatch: pytest.MonkeyPatch) -> None:
     planner = [task.id for task in runner.select_tasks(["planner"])]
     assert planner == [task.id for task in TASKS if task.id in runner.TASK_SETS["planner"]]
@@ -765,6 +790,203 @@ def test_a_case_that_raises_is_a_harness_error_and_the_run_goes_on() -> None:
         ("b", 2, None, None, 0.0)]  # the error's cost counts toward the cap
     assert results[1]["error"] == "ConnectionRefusedError: the server is gone" and results[1]["success"] is False
     assert results[3]["skipped"] and stopped is True
+
+
+def test_cases_run_in_parallel_up_to_the_jobs_and_the_rows_keep_their_order() -> None:
+    gate = threading.Barrier(3, timeout=10)  # three cases are in flight together, or the test times out
+    delays = {"a": 0.3, "b": 0.0, "c": 0.1, "d": 0.0}
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        if (rep, task.id) in ((1, "a"), (1, "b"), (1, "c")):
+            gate.wait()
+        time.sleep(delays[task.id])
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.0}
+
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcd"), run_one, total_cap_usd=None, reps=2, jobs=3)
+    assert stopped is False
+    assert [(r["id"], r["rep"]) for r in results] == [(t, rep) for rep in (1, 2) for t in "abcd"]
+
+
+def test_a_case_starts_only_when_the_spend_and_every_budget_in_flight_fit_the_cap() -> None:
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+    seen: list[tuple[str, float | None]] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+            seen.append((task.id, None if cap_left is None else round(cap_left, 2)))
+        time.sleep(0.2)
+        with lock:
+            running -= 1
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.1}
+
+    # Cap 1.0, budget 0.4 each: two fit (0.8), a third would pass the cap while they run (1.2).
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcdef"), run_one, total_cap_usd=1.0, jobs=4,
+                                        run_budget_usd=0.4)
+    assert peak == 2
+    assert dict(seen)["a"] == 0.4 and dict(seen)["b"] == 0.4
+    # a and b cost 0.2, c and d 0.2 more: e needs 0.4 + 0.4 + 0.4 = 1.2 after c's turn; it runs once they end.
+    assert [r["id"] for r in results] == list("abcdef") and not any(r.get("skipped") for r in results)
+    assert stopped is False
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_case_allowances_fit_the_reservations_and_total_cap(jobs: int) -> None:
+    gate = threading.Barrier(jobs, timeout=5)
+    seen: list[float] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        assert cap_left is not None
+        if task.id in "ab" and jobs == 2:
+            gate.wait()
+        seen.append(cap_left)
+        return {"outcome": "pass", "cost_usd": cap_left}
+
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcd"), run_one,
+                                        total_cap_usd=1.0, jobs=jobs, run_budget_usd=0.4)
+    if jobs == 2:
+        assert seen == pytest.approx([0.4, 0.4, 0.2])
+        assert all(0 < allowance <= 0.4 for allowance in seen)
+    else:
+        assert seen == [1.0]  # one job keeps the existing total-cap allowance
+    assert sum(row["cost_usd"] for row in results) <= 1.0
+    assert stopped and results[-1].get("skipped")
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: int,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    apis: dict[str, Any] = {}
+    gate = threading.Barrier(jobs, timeout=5)
+
+    class Api:
+        def __init__(self) -> None:
+            self.cost = 0.0
+            self.messages: list[dict[str, Any]] = []
+
+        def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+            if path == "/api/projects":
+                return {"project_id": "project-a"}
+            assert path == "/api/chat/send"
+            if not self.messages:
+                gate.wait()
+            self.cost += 0.2
+            self.messages.append({"message_id": f"{data['message_id']}:reply", "content": "ok"})
+            return {}
+
+        def get(self, path: str, **_: Any) -> dict[str, Any]:
+            if path == "/api/tasks":
+                return {"tasks": []}
+            assert path == "/api/chat/messages"
+            return {"messages": self.messages}
+
+    @contextmanager
+    def database(_: str) -> Any:
+        name = threading.current_thread().name
+        apis[name] = Api()
+        yield name, None
+
+    @contextmanager
+    def server(*, database_url: str, **_: Any) -> Any:
+        yield apis[database_url]
+
+    monkeypatch.setattr(dialogs, "fresh_database", database)
+    monkeypatch.setattr(dialogs, "running_server", server)
+    monkeypatch.setattr(dialogs, "install_claude", lambda *_, **__: None)
+    monkeypatch.setattr(dialogs, "select_agent", lambda *_, **__: {"name": "fake"})
+    monkeypatch.setattr(dialogs, "_git", lambda: {})
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+    monkeypatch.setattr(dialogs, "_usage", lambda db: (apis[db].cost, {}))
+    says = tuple(dialogs.Say(text, lambda _: None) for text in ("first", "second", "third"))
+    cases = tuple(dialogs.Dialog(t, says) for t in ("abc" if jobs == 2 else "a"))
+    result, path = dialogs.run(mode="fake", dialogs=cases,
+                               admin_url="disposable", out_dir=tmp_path, jobs=jobs,
+                               total_cap_usd=1.0, case_budget_usd=0.4)
+    rows = result["dialogs"]
+    if jobs == 2:
+        assert [row["cost_usd"] for row in rows] == [0.4, 0.4, 0.0]
+        assert all(row["error_class"] == "spending_cap" for row in rows[:2])
+        assert rows[2]["skipped"] and result["stopped_by_cap"]
+    else:
+        assert rows[0]["cost_usd"] == 0.6 and rows[0]["outcome"] == "pass"
+        assert not result["stopped_by_cap"]
+    assert result["total_cost_usd"] <= 1.0
+    assert json.loads(path.read_text())["total_cost_usd"] == result["total_cost_usd"]
+
+
+def test_parallel_cases_are_skipped_once_the_spend_reaches_the_cap() -> None:
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.5}
+
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcd"), run_one, total_cap_usd=1.0, jobs=2,
+                                        run_budget_usd=0.5)
+    assert [bool(r.get("skipped")) for r in results] == [False, False, True, True] and stopped is True
+
+
+def test_a_failure_that_is_not_caught_lets_the_cases_in_flight_end_and_is_raised() -> None:
+    started: list[str] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        started.append(task.id)
+        if task.id == "a":
+            raise RuntimeError("setup failed")
+        time.sleep(0.2)
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.0}
+
+    results: list[dict[str, Any]] = []
+    with pytest.raises(RuntimeError, match="setup failed"):
+        runner.run_suite(tuple(_task(t) for t in "abcd"), run_one, total_cap_usd=None, jobs=2, results=results,
+                         catch=False)
+    assert started == ["a", "b"] and [r["id"] for r in results] == ["b"]
+
+
+def test_parallel_runs_under_a_cap_need_the_cases_own_budget() -> None:
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        raise AssertionError("no case should start")
+
+    with pytest.raises(runner.EvalError, match="--case-budget-usd"):
+        runner.run_suite((_task("a"),), run_one, total_cap_usd=1.0, jobs=2)
+    with pytest.raises(runner.EvalError, match="--case-budget-usd"):
+        runner.run(mode="real", tasks=(_task("a"),), admin_url="postgresql://unused/postgres", out_dir=Path("."),
+                   total_cap_usd=1.0, max_budget_usd=0.25, jobs=2)
+
+
+def test_an_interrupt_ends_the_cases_in_flight_before_the_run_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    running = threading.Event()
+    ended: list[str] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        running.set()
+        while not runner.INTERRUPTED.is_set():
+            time.sleep(0.01)
+        time.sleep(0.2)  # the case takes a moment to wind down
+        ended.append(task.id)
+        raise runner.EvalError("the run was interrupted")
+
+    def interrupt(*_args: Any, **_kwargs: Any) -> Any:
+        assert running.wait(5)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "wait", interrupt)
+    results: list[dict[str, Any]] = []
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_suite((_task("a"),), run_one, total_cap_usd=None, jobs=2, results=results)
+    assert ended == ["a"]  # joined before the exception left run_suite
+    assert not any(t.name.startswith("eval-case") and t.is_alive() for t in threading.enumerate())
+
+
+def test_ports_handed_out_in_one_process_are_distinct() -> None:
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ports = list(pool.map(lambda _: runner.free_port(), range(64)))
+    assert len(set(ports)) == 64
 
 
 class _CostlyApi:
@@ -1027,6 +1249,28 @@ def test_fake_mode_repeats_each_task_rep_major_in_a_directory_of_its_own(
     shown = capsys.readouterr().out
     assert "| single_step | 2/2 | 1.0 |" in shown and "| dependent_steps | 2/2 | 2.0 |" in shown
     assert "Base: none (no committed baseline evals/prompt_regression/baselines/fake.json)" in shown
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_fake_mode_runs_cases_in_parallel_with_the_same_rows(tmp_path: Path) -> None:
+    code = cli.main(["run", "--mode", "fake", "--pg-url", str(DSN), "--out-dir", str(tmp_path),
+                     "--tasks", "single_step,dependent_steps", "--reps", "2", "--jobs", "4"])
+    written = json.loads(next(tmp_path.glob("*-fake.json")).read_text(encoding="utf-8"))
+    assert code == 0
+    assert [(r["id"], r["rep"], r["outcome"]) for r in written["tasks"]] == [
+        ("single_step", 1, "pass"), ("dependent_steps", 1, "pass"), ("single_step", 2, "pass"),
+        ("dependent_steps", 2, "pass")]
+    assert len({r["work_dir"] for r in written["tasks"]}) == 4
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_parallel_dialogs_each_keep_their_own_agent_and_manager(tmp_path: Path) -> None:
+    code = cli.main(["dialogs", "--mode", "fake", "--pg-url", str(DSN), "--out-dir", str(tmp_path),
+                     "--dialogs", "ask_project,status", "--jobs", "2"])
+    written = json.loads(next(tmp_path.glob("*-dialogs-fake.json")).read_text(encoding="utf-8"))
+    assert code == 0 and [(r["id"], r["outcome"]) for r in written["dialogs"]] == [
+        ("ask_project", "pass"), ("status", "pass")]
+    assert written["agent"] and written["manager_agent"] == written["agent"]
 
 
 _STALLED = EvalTask(

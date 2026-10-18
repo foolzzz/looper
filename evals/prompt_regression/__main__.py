@@ -23,6 +23,30 @@ def _reps(text: str) -> int:
     return value
 
 
+def _jobs(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--jobs takes a whole number, not {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"--jobs must be at least 1, not {value}")
+    return value
+
+
+def _case_budget(text: str) -> float:
+    try:
+        value = float(text)
+        runner.check_case_budget(value)
+    except (ValueError, runner.EvalError):
+        raise argparse.ArgumentTypeError("--case-budget-usd must be a finite positive number") from None
+    return value
+
+
+_JOBS_HELP = ("run this many cases at once (default 1: one after another). Rows stay in task/rep order, and "
+              "--total-cap-usd still holds: a case starts only when what is spent plus the --case-budget-usd of every "
+              "case in flight and of this one is within it (--case-budget-usd, the most one case may spend, is "
+              "required with --jobs above 1 in real mode; --max-budget-usd caps each Claude call, not a case)")
+_CASE_BUDGET_HELP = "real mode, with --jobs above 1: the most one case may spend, reserved from --total-cap-usd"
 _REPS_HELP = ("run each case this many times (default 1), rep 1 of every case first; --total-cap-usd covers them "
               "all. A rerun is a new run: never keep the best of several")
 _BASELINE_HELP = ("compare with this run file, or with the newest earlier run in --out-dir (previous); default: the "
@@ -51,6 +75,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--tasks", help="comma-separated task ids or task sets ("
                      + ", ".join(sorted(runner.TASK_SETS)) + "; default: all)")
     run.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
+    run.add_argument("--jobs", type=_jobs, default=1, help=_JOBS_HELP)
+    run.add_argument("--case-budget-usd", type=_case_budget, help=_CASE_BUDGET_HELP)
     run.add_argument("--max-budget-usd", type=float, default=0.25,
                      help="real mode: the cap of every Claude Code run (default 0.25): --max-budget-usd, or the cap "
                           "Looper keeps at the provider's prices with --provider-preset")
@@ -81,6 +107,8 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--manager-effort", help="with --manager-model: its effort, such as xhigh")
     talk.add_argument("--dialogs", help="comma-separated dialog ids (default: all)")
     talk.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
+    talk.add_argument("--jobs", type=_jobs, default=1, help=_JOBS_HELP)
+    talk.add_argument("--case-budget-usd", type=_case_budget, help=_CASE_BUDGET_HELP)
     talk.add_argument("--baseline", metavar="RUN.json|previous", help=_BASELINE_HELP)
     talk.add_argument("--max-budget-usd", type=float, default=0.25, help="real mode: the cap of every run")
     talk.add_argument("--total-cap-usd", type=float, default=0.50,
@@ -153,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
             step_workspaces=args.step_workspaces,
             reps=args.reps,
             user_gates=args.user_gates,
+            jobs=args.jobs,
+            case_budget_usd=args.case_budget_usd if real else None,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -172,6 +202,8 @@ def _dialogs(args: argparse.Namespace) -> int:
             max_budget_usd=args.max_budget_usd if real else None, total_cap_usd=args.total_cap_usd if real else None,
             timeout=args.timeout, keep_work_dirs=args.keep_work_dirs,
             manager_model=args.manager_model if real else None, manager_effort=args.manager_effort, reps=args.reps,
+            jobs=args.jobs,
+            case_budget_usd=args.case_budget_usd if real else None,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
