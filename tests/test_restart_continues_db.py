@@ -208,7 +208,8 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         with running_server(**server, log_path=root / "serve.log") as api:
             ids: dict[str, str] = {}
             for variant in VARIANTS:
-                project = {"name": f"calc-{variant}", "work_dir": str(work[variant])}
+                # In place: these restarts are of tasks in their own directories (a new project's run in worktrees).
+                project = {"name": f"calc-{variant}", "work_dir": str(work[variant]), "task_workspaces": "in_place"}
                 if variant == "worktree":
                     project["step_workspaces"] = "worktree"
                 ids[variant] = api.post("/api/tasks/create", {"requirement": f"build calc variant={variant}",

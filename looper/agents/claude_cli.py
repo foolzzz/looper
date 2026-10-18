@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from . import proc_tree
 from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
+from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
     from ..db.llm_records import RecordStatus
@@ -335,15 +336,16 @@ def permission_denials(result_event: dict[str, Any] | None) -> list[dict[str, st
     return denials
 
 
-def system_prompt_args(prompt_file: Path) -> list[str]:
-    """Append the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
+def system_prompt_args(prompt_file: Path, mode: SystemPromptMode = SystemPromptMode.APPEND) -> list[str]:
+    """Append or replace the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
 
     By default Claude Code keeps the system prompt of a session's first
     request and sends it again on every resume, ignoring a changed file; the
     snapshot is turned off so that a restarted resident agent runs with the
     prompt its record names.
     """
-    return ["--append-system-prompt-file", str(prompt_file), "--system-prompt-snapshot", "off"]
+    flag = "--system-prompt-file" if mode is SystemPromptMode.REPLACE else "--append-system-prompt-file"
+    return [flag, str(prompt_file), "--system-prompt-snapshot", "off"]
 
 _READ_CHUNK = 64 * 1024
 

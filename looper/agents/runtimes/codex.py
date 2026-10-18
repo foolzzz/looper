@@ -63,6 +63,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -70,6 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, reported_totals, run_usage
+from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
     codex_login, instructions,
@@ -102,6 +104,7 @@ _HASHED = re.compile(r"[0-9a-f]{64}")
 
 
 class CodexRuntime(RuntimeAdapter):
+    can_replace_system_prompt = True
     type = "codex"
     label = "Codex"
     default_executable = "codex"
@@ -180,8 +183,14 @@ class CodexRuntime(RuntimeAdapter):
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
         local = _local_dir(prompt_file)
         login = codex_login.login_file() if launch.profile.provider.auth is AuthKind.OAUTH else None
-        home = write_home(local, config_toml(launch, shell_home=_shell_home(local) if login else None),
-                          agents_md(prompt_file, launch), login=login)
+        agents = agents_md(prompt_file, launch)
+        instructions = None
+        if launch.system_prompt_mode is SystemPromptMode.REPLACE:
+            instructions = write_instructions(local, agents)
+            agents = ""
+        config = config_toml(launch, shell_home=_shell_home(local) if login else None,
+                             model_instructions_file=instructions)
+        home = write_home(local, config, agents, login=login)
         return ["env", f"CODEX_HOME={home}", executable, "exec", *self.launch_args(launch)]
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
@@ -362,17 +371,24 @@ def mcp_servers(library: AgentLibrary) -> tuple[list[tuple[str, dict[str, Any]]]
     return tables, skipped
 
 
-def config_toml(launch: Launch, *, shell_home: Path | None = None) -> str:
+def config_toml(launch: Launch, *, shell_home: Path | None = None,
+                model_instructions_file: Path | None = None) -> str:
     """The ``config.toml`` of a run's home: isolation, the project's CLAUDE.md where it has no AGENTS.md, the
     provider, and the MCP servers. With Codex's own login (``shell_home``, the ``CODEX_HOME`` the agent's shell
     commands get), see ``_login_config``."""
     if launch.profile.provider.auth is AuthKind.OAUTH:
         assert shell_home is not None
-        return _with_mcp(_login_config(shell_home), launch)
+        lines = _login_config(shell_home)
+        if model_instructions_file is not None:
+            lines.insert(lines.index(codex_login.CONFIG_MARKER) + 1,
+                         f"model_instructions_file = {_toml_value(str(model_instructions_file))}")
+        return _with_mcp(lines, launch)
     provider = launch.profile.provider
     lines = [
         "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
         f"model_provider = {_toml_value(PROVIDER_ID)}",
+        *([f"model_instructions_file = {_toml_value(str(model_instructions_file))}"]
+          if model_instructions_file is not None else []),
         *_instruction_lines(),
         "",
         "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
@@ -558,6 +574,48 @@ def _remove_idle_homes(runs: Path, now: float) -> None:
             continue
         if now - newest > RUN_HOME_IDLE_SEC:
             shutil.rmtree(home, ignore_errors=True)
+    _remove_idle_instructions(runs.parent, now)
+
+
+def _remove_idle_instructions(codex: Path, now: float) -> None:
+    """Reclaim old instructions only after removing idle runs; resident session references never expire."""
+    directory = codex / "instructions"
+    if not directory.is_dir():
+        return
+    referenced: set[Path] = set()
+    try:
+        for root in (codex / "runs", codex / "sessions"):
+            for config in root.rglob("config.toml"):
+                value = tomllib.loads(config.read_text(encoding="utf-8")).get("model_instructions_file")
+                if isinstance(value, str):
+                    path = Path(value)
+                    referenced.add((path if path.is_absolute() else config.parent / path).resolve())
+    except (OSError, ValueError):
+        # An unreadable or damaged home cannot prove its instructions are unreferenced.
+        return
+    for path in directory.iterdir():
+        if path.suffix != ".md" or not _HASHED.fullmatch(path.stem) or path.is_symlink():
+            continue
+        try:
+            if path.is_file() and path.resolve() not in referenced and now - path.stat().st_mtime > RUN_HOME_IDLE_SEC:
+                path.unlink()
+        except OSError:
+            continue
+
+
+def write_instructions(local: Path, text: str) -> Path:
+    """Keep replacing instructions outside run homes, so resident config copies retain a stable target."""
+    directory = _codex_dir(local) / "instructions"
+    directory.mkdir(exist_ok=True)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    target = directory / (digest + ".md")
+    try:
+        if hashlib.sha256(target.read_bytes()).hexdigest() == digest:
+            return target
+    except FileNotFoundError:
+        pass
+    _write_private(target, text)
+    return target
 
 
 def write_home(local: Path, config: str, agents: str, *, login: Path | None = None) -> Path:
@@ -573,7 +631,6 @@ def write_home(local: Path, config: str, agents: str, *, login: Path | None = No
             codex_login.link_login(target, login)
         return target
     runs.mkdir(exist_ok=True)
-    _remove_idle_homes(runs, time.time())
     building = Path(tempfile.mkdtemp(prefix=".building.", dir=runs))
     try:
         _write_private(building / "config.toml", config)
@@ -590,6 +647,8 @@ def write_home(local: Path, config: str, agents: str, *, login: Path | None = No
     finally:
         if building is not None:
             shutil.rmtree(building, ignore_errors=True)
+    # Publish the new config before reclaiming instructions: it may reference an old file itself.
+    _remove_idle_homes(runs, time.time())
     return target
 
 

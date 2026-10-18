@@ -1,5 +1,6 @@
 """The Manager's T2 tools (Manager tools RFC, section 7): projects, Agent Profiles, LLM providers, the capability
-catalog and spending; its settings tool is ``ops.settings``.
+catalog and spending; its settings tool is ``ops.settings``. And T3's configuration export (section 7.1): the
+file ``looper config export`` writes, never with secrets, into the runtime directory.
 
 Each tool calls the code the dashboard's API calls (``projects``,
 ``profile_registry``, ``catalog``, ``db.llm_records``), so both check alike
@@ -12,8 +13,10 @@ enters it on the dashboard.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Iterable, Mapping
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any, TypeVar
 
 from ...db import llm_records as db_llm_records, projects as db_projects
@@ -135,7 +138,8 @@ def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     used = profile_registry.usage_text(view["used_by"])
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider_name"], "model": view["model"], "effort": view["effort"],
-            "agent_teams": view["agent_teams"], "roles": view["roles"], "builtin": view["builtin"],
+            "agent_teams": view["agent_teams"], "system_prompt_mode": view["system_prompt_mode"],
+            "roles": view["roles"], "builtin": view["builtin"],
             "used_by": used or None}
 
 
@@ -184,7 +188,7 @@ async def _profiles(call: Call) -> dict[str, Any]:
                 "providers": [{"provider_id": p["provider_id"], "name": p["name"],
                                "models": [m["name"] for m in p["models"]] or p["suggested_models"]}
                               for p in registry["providers"]]}
-    fields = {**_given(arguments, ("name", "model", "effort", "agent_teams"), clears=("effort",)),
+    fields = {**_given(arguments, ("name", "model", "effort", "agent_teams", "system_prompt_mode"), clears=("effort",)),
               **_profile_parts(registry, arguments)}
     if action == "create":
         _required(arguments, action, "name", "runtime", "provider", "model")
@@ -344,6 +348,32 @@ async def _costs(call: Call) -> dict[str, Any]:
     return answer
 
 
+# --- looper_config_export ---
+
+EXPORT_DIR = "exports"
+EXPORT_NOTE = ("Secret values are placeholders: on this machine, `looper config export --include-secrets` includes them. "
+               "Import the file with `looper config import <file>` (a preview, then --apply) or the dashboard's "
+               "Settings → Import / Export; its schedules come in disabled.")
+
+
+async def _config_export(call: Call) -> dict[str, Any]:
+    """Write the configuration file (``looper config export``), without secrets, into the runtime directory's
+    ``exports``: never a path from chat."""
+    from ...db.connection import get_pool
+    from ..config_transfer import FORMAT, write_export
+
+    if call.platform.runtime_root is None:
+        raise OpError(ErrorCode.UNAVAILABLE, "this server has no runtime directory to write the file into")
+    folder = Path(call.platform.runtime_root) / EXPORT_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"looper-config-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}.json"
+    include_projects = bool(call.arguments.get("include_projects"))
+    async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        summary = await write_export(conn, path, include_projects=include_projects, include_secrets=False)
+    return {"path": str(path), "format": FORMAT, "bytes": summary.bytes, "counts": summary.counts,
+            "secrets_left_out": summary.secrets, "path_documents_to_repoint": summary.repoint, "note": EXPORT_NOTE}
+
+
 # --- The tools ---
 
 _PROJECT = {"type": "string", "minLength": 1, "description": "The project's name."}
@@ -382,6 +412,9 @@ TOOLS: tuple[Tool, ...] = (
                 "model": {"type": "string"},
                 "effort": {"type": "string", "description": "low, medium, high, xhigh, max; null: the runtime's."},
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
+                "system_prompt_mode": {"type": "string", "enum": ["append", "replace"],
+                                       "description": "append adds to the runtime's default system prompt; replace "
+                                                      "replaces it and is refused on unsupported runtimes."},
             },
         },
         risk=Risk.WRITE, run=_profiles, escalate=_deleting_profile, read_actions=frozenset({"list"}),
@@ -420,6 +453,14 @@ TOOLS: tuple[Tool, ...] = (
             },
         },
         risk=Risk.WRITE, run=_catalog, read_actions=frozenset({"list"}),
+    ),
+    Tool(
+        name="looper_config_export",
+        description="Export the configuration (profiles, providers, settings, channels, skills, MCP) to a file on "
+                    "this machine, never with secrets; include_projects adds each project and its schedules.",
+        schema={"type": "object", "additionalProperties": False,
+                "properties": {"include_projects": {"type": "boolean"}}},
+        risk=Risk.READ, run=_config_export,
     ),
     Tool(
         name="looper_costs",

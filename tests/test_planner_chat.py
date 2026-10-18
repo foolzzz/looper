@@ -319,21 +319,21 @@ class TestPlannerRoomDelivery:
             delivered = AsyncMock()
             monkeypatch.setattr(planner_module.db_room, "planner_pending", AsyncMock(return_value=[row]))
             monkeypatch.setattr(planner_module.db_room, "planner_delivered", delivered)
-            monkeypatch.setattr(planner_module, "ROOM_RETRY_SEC", 0.01)
+            monkeypatch.setattr(planner_module, "ROOM_RETRY_SEC", 1000)
 
             await planner._deliver_room_messages(_executing_plan())
-            room.wake_planner_after.assert_called_once_with("t1", 0.01)
+            room.wake_planner_after.assert_called_once_with("t1", 1000)
             await planner._deliver_room_messages(_executing_plan())
             assert planner._ask.await_count == 1
             assert room.wake_planner_after.call_count == 2
-            assert 0 < room.wake_planner_after.call_args.args[1] <= 0.01
+            assert 0 < room.wake_planner_after.call_args.args[1] <= 1000
             delivered.assert_not_awaited()
             room.planner_reply.assert_not_awaited()
 
-            planner._room_failed = (1, planner_module.time.monotonic() - 0.02)
+            planner._room_failed = (1, planner_module.time.monotonic() - 2000)
             await planner._deliver_room_messages(_executing_plan())
             assert planner._ask.await_count == 2
-            assert room.wake_planner_after.call_args.args == ("t1", 0.01)
+            assert room.wake_planner_after.call_args.args == ("t1", 1000)
 
         asyncio.run(run())
 

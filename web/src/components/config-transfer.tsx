@@ -34,6 +34,7 @@ const SECTION_LABELS: Record<string, string> = {
   "project.items": "Project skills",
   "project.knowledge": "Project knowledge",
   "project.role_templates": "Project role templates",
+  "project.schedules": "Project schedules",
   "project.installs": "Project installs",
 };
 const sectionLabel = (section: string) => SECTION_LABELS[section] ?? section;
@@ -377,8 +378,8 @@ export function ConfigTransferCard({ onImported }: { onImported?: () => void }) 
           <div className="text-sm">
             <div className="font-medium">Include projects</div>
             <p className="text-xs text-muted-foreground">
-              Each project&apos;s settings, knowledge, own skills and installs. Its directory stays behind; path
-              documents are re-pointed on the new machine.
+              Each project&apos;s settings, knowledge, own skills, installs and schedules. Its directory stays
+              behind; path documents are re-pointed on the new machine, and schedules come in disabled.
             </p>
           </div>
         </div>

@@ -384,3 +384,31 @@ class TestTaskProject:
         assert task.project_id == "proj-7"
         assert envelope.payload["project_id"] == "proj-7"
 
+
+
+@pytest.mark.usefixtures("agent_db")
+def test_a_task_whose_workspace_cannot_be_prepared_fails_with_why(agent_db: Any,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import task_workspaces
+
+    async def broken(*args: Any, **kwargs: Any) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(task_workspaces, "prepare", broken)
+
+    async def _run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bus = MessageBus(runtime_root=Path(tmp))
+            router = TaskRouter(runtime_root=Path(tmp))
+            await router.start(bus)
+            task = Task(task_id="task-w", requirement="r", goal_id="g", work_dir="/w", project_id="p",
+                        workspace_mode="worktree")
+            router._tasks["task-w"] = task
+            await router._start(task, _start("task-w"))
+            assert "task-w" not in router._planners and task.status == "failed"
+            await router.stop()
+            await bus.shutdown()
+
+    asyncio.run(_run())
+    failed = [c for c in agent_db.update_task_status.await_args_list if c.args[1] == "failed"]
+    assert failed and "its workspace could not be prepared: disk full" in failed[0].kwargs["error"]

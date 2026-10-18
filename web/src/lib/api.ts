@@ -108,9 +108,13 @@ export interface ProjectExecution {
   /** Where a step that runs alongside others works: the task directory ("shared", also when null) or, in a git
    * checkout on a branch, a worktree of its own merged into the branch when the step is accepted ("worktree"). */
   step_workspaces: "shared" | "worktree" | null;
-  /** The paths, relative to the task directory, that such a worktree links back to the task directory's (its
-   * ignored local state, such as .venv or .env); null = none. */
-  step_workspace_links: string[] | null;
+  /** The paths Looper's worktrees link back to the directory they come from (its ignored local state, such as
+   * .venv or .env): a task's worktree to its workspace, a step's to its task directory; null = none. */
+  workspace_links: string[] | null;
+  /** Where a task that names no directory of its own runs; null = in place. A new project gets "worktree". */
+  task_workspaces: WorkspaceMode | null;
+  /** Whether the project's agents get the operator's Claude Code notes for their directory; null = "off". */
+  operator_notes: "off" | "on" | null;
   /** How many times the Planner may retry one step, 0 to 20; null = 2. */
   max_step_retries: number | null;
   /** Whether the project's Planners may define the roles their steps run as; null = "off". */
@@ -581,8 +585,12 @@ export async function createTask(
     goal_id?: string;
     /** The Agent Profile (profile_id) of some of the task's roles, over every settings layer. */
     profile_overrides?: Partial<Record<TaskRole, string>>;
+    /** How it runs in its directory; omit for the default (`WorkspaceCheck.default_mode`). */
+    workspace_mode?: WorkspaceMode;
+    /** Where a worktree task's branch starts: a branch, tag or commit; omit for what the directory has checked out. */
+    base?: string;
   } & TaskProjectChoice,
-): Promise<{ task_id: string; status: string; created_at: string; project_id: string }> {
+): Promise<{ task_id: string; status: string; created_at: string; project_id: string; workspace: WorkspaceCheck }> {
   const res = await fetch(`${API_BASE}/tasks/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -592,6 +600,64 @@ export async function createTask(
   const data = await res.json();
   notifyProjectsChanged();
   return data;
+}
+
+/** How a task runs in its directory: in a git worktree of it, on a branch of its own, or in the directory itself. */
+export type WorkspaceMode = "worktree" | "in_place";
+
+/** What a new task in a directory would run in, and what to know before starting it. */
+export interface WorkspaceCheck {
+  workspace: string;
+  /** What it runs in: in_place when a worktree was asked for outside git. */
+  mode: WorkspaceMode;
+  requested_mode: WorkspaceMode;
+  /** The mode a task gets when it does not choose one (the form's default); only from the check. */
+  default_mode?: WorkspaceMode;
+  /** null outside git. */
+  git: { repository: string; branch: string | null; head: string; base_commit?: string } | null;
+  warnings: WorkspaceWarning[];
+  /** The operator's Claude Code notes for the directory. */
+  notes: { found: boolean; files: string[]; omitted: string[]; error?: string };
+  /** Whether the project gives its agents those notes; only from the check. */
+  notes_on?: boolean;
+}
+
+export interface WorkspaceWarning {
+  kind: "not_git" | "uncommitted" | "shared" | "large_checkout";
+  text: string;
+  files?: string[];
+  tasks?: { task_id: string; name: string; status: string; mode: WorkspaceMode }[];
+}
+
+/** What a task in `dir` (else the project's directory) would run in; no `project_id` for a project about to be made. */
+export async function checkWorkspace(
+  params: { dir?: string; project_id?: string; mode?: WorkspaceMode; base?: string },
+  signal?: AbortSignal,
+): Promise<WorkspaceCheck> {
+  const query = new URLSearchParams(Object.entries(params).filter(([, v]) => v) as [string, string][]);
+  const res = await fetch(`${API_BASE}/workspaces/check?${query}`, { signal });
+  if (!res.ok) await failed(res, "check");
+  return res.json();
+}
+
+/** A task's workspace as its page shows it. */
+export interface TaskWorkspaceView {
+  workspace_dir: string;
+  mode: WorkspaceMode;
+  base: string;
+  /** The worktree it runs in; null for a task in place, or before its first start. */
+  worktree: {
+    branch: string;
+    base_commit: string;
+    path: string;
+    repository: string;
+    links: string[];
+    state: "active" | "removed";
+    result_commit: string | null;
+    removed_at: string | null;
+    /** Run in the workspace: see the task's work, merge it, drop the branch. */
+    commands: UndoCommand[];
+  } | null;
 }
 
 /** Move a task to another project; allowed in any task status. */
@@ -1439,6 +1505,8 @@ export interface TaskDetail extends TaskInfo {
   /** Its steps' git worktrees, in a project whose parallel steps work in worktrees of their own; null (or absent)
    * when it had none. */
   step_workspaces?: TaskWorkspaces | null;
+  /** Its workspace and how it runs there (absent from an older server). */
+  task_workspace?: TaskWorkspaceView;
   /** Its agent room in numbers; null when it cannot be read. The messages are at `fetchTaskRoom`. */
   room?: RoomSummary | null;
 }
@@ -2108,9 +2176,11 @@ export interface LlmRecord {
     cwd?: string;
     /** The task step a Worker or Reviewer ran. */
     step_id?: string;
-    /** What Looper appended to Claude Code's system prompt (its built-in prompt is not included). */
+    /** The system prompt Looper supplied to the runtime. */
     system_prompt?: string;
     system_prompt_sha256?: string;
+    /** Missing on older runs, which appended to the runtime's default. */
+    system_prompt_mode?: SystemPromptMode;
     prompt_layers?: PromptLayers;
     /** The Agent Profile the run used and where it was selected (`runProfile` reads it for every run). */
     profile?: RunProfile;
@@ -2283,6 +2353,8 @@ export interface RuntimeType {
   /** The roles its capabilities let it run. */
   roles: AgentRole[];
   auth_kinds: ProviderAuth[];
+  can_replace_system_prompt: boolean;
+  replace_system_prompt_refusal: string | null;
 }
 
 /** A runtime on this machine: built in (one per type found on the server's PATH), or one registered by hand
@@ -2397,6 +2469,8 @@ export interface ProfileUsedBy {
   allowed_in: string[];
 }
 
+export type SystemPromptMode = "append" | "replace";
+
 /** An Agent Profile: a runtime, a provider and a model, with an optional effort, which its runs use. */
 export interface AgentProfile {
   profile_id: string;
@@ -2406,6 +2480,7 @@ export interface AgentProfile {
   effort: string | null;
   /** Claude Code's agent teams in its runs (Claude Code runtimes only). */
   agent_teams: boolean;
+  system_prompt_mode: SystemPromptMode;
   runtime_id: string;
   runtime_name: string;
   runtime_type: string;
@@ -2465,6 +2540,7 @@ export interface ProfileFields {
   model?: string;
   effort?: string | null;
   agent_teams?: boolean;
+  system_prompt_mode?: SystemPromptMode;
 }
 
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */

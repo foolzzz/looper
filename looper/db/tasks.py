@@ -185,9 +185,15 @@ async def create_task(
     title: str | None = None,
     schedule_id: str | None = None,
     budget_usd: float | None = None,
+    workspace_dir: str = "",
+    workspace_mode: str | None = None,
+    workspace_base: str = "",
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
+
+    ``workspace_dir`` is the directory the user named for it (``work_dir`` until the task first starts), and
+    ``workspace_mode`` and ``workspace_base`` how it runs there (``agents.task_workspaces``).
 
     ``chat_id``, ``chat_kind`` and ``chat_mention`` are who to tell when the task ends (``agents.task_notice``): a
     Telegram chat, a Lark sender's open_id, or a Lark group and the sender to @-mention there; None for a task that
@@ -201,15 +207,36 @@ async def create_task(
         """
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
-                           created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17)
+                           created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
+                           workspace_dir, workspace_mode, workspace_base)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
         config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, task_title(title), now,
-        schedule_id, budget_usd, chat_kind, chat_mention,
+        schedule_id, budget_usd, chat_kind, chat_mention, workspace_dir, workspace_mode, workspace_base,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
+
+
+async def set_work_dir(task_id: str, work_dir: str, *, pool: asyncpg.Pool | None = None) -> None:
+    """Where the task runs from now on: its worktree's task directory, once the worktree is made."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE tasks SET work_dir = $2, updated_at = now() WHERE id = $1", task_id, work_dir)
+
+
+async def active_workspaces(*, besides: str | None = None,
+                            pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """The tasks in progress (or waiting for the user) and the directory each names as its workspace (its work_dir
+    for a task from before workspaces), but ``besides``."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT id, title, goal_id, requirement, status, workspace_mode, "
+        "COALESCE(NULLIF(workspace_dir, ''), work_dir) AS workspace FROM tasks "
+        "WHERE status = ANY($1::text[]) AND id <> COALESCE($2, '') ORDER BY created_at",
+        list(ACTIVE_STATUSES), besides,
+    )
+    return [_task(row) for row in rows]
 
 
 async def update_task_status(
