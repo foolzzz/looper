@@ -118,10 +118,10 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
     and Reviewer runs as one (``role_runs``), on the role's own profile (``role_profile_runs``), as a review role
     (``role_reviews``); the roles it copied from a project role template (``template_roles``); role runs whose
     prompt is not a version the Planner defined (``role_prompt_mismatches``) or
-    whose system prompt lacks the boundaries before its contract (``role_boundary_misses``); the accepted steps with a
-    review role that lack a passing built-in review, or a passing review by their role where it is required
-    (``gate_breaches``); and the reviews by an advisory review role (``advisory_role_reviews``) and those of them that
-    did not pass (``advisory_role_fails``)."""
+    whose system prompt lacks the boundaries before its contract (``role_boundary_misses``); the most review roles
+    one step names (``most_review_roles``); the accepted steps with review roles that lack a passing built-in review,
+    or a passing review by each required one (``gate_breaches``); and the reviews by an advisory review role
+    (``advisory_role_reviews``) and those of them that did not pass (``advisory_role_fails``)."""
     defined = {(role_["id"], version["version"]): version["sha256"] for role_ in detail.get("roles") or []
                for version in role_.get("versions") or []}
     step_runs = [r for r in records if role(r) in ("worker", "reviewer")]
@@ -130,19 +130,20 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
     def layer(record: Mapping[str, Any]) -> Mapping[str, Any]:
         return record["metadata"]["prompt_layers"]["task_role"]
 
-    def passed(step_id: str, by_role: bool) -> bool:
+    def passed(step_id: str, by_role: str | None) -> bool:
+        """Whether a review of the step by ``by_role`` (None: the built-in Reviewer) passed it."""
         return any((r.get("metadata") or {}).get("step_id") == step_id and r["metadata"].get("outcome") == "passed"
-                   and bool(((r["metadata"].get("prompt_layers") or {}).get("task_role"))) is by_role
+                   and (((r["metadata"].get("prompt_layers") or {}).get("task_role") or {}).get("id")) == by_role
                    for r in step_runs if role(r) == "reviewer")
 
     prompts = [str((r.get("metadata") or {}).get("system_prompt") or "") for r in role_runs]
     steps = detail.get("steps") or []
 
-    def required(step: Mapping[str, Any]) -> bool:
-        return step.get("review_role_required") is not False
+    def review_roles(step: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        return [item for item in step.get("review_roles") or [] if isinstance(item, Mapping)]
 
-    advisory = [r for s in steps if s.get("review_role_key") and not required(s) for r in role_runs
-                if role(r) == "reviewer" and r["metadata"].get("step_id") == s["id"]]
+    advisory = [r for s in steps for item in review_roles(s) if item.get("required") is False for r in role_runs
+                if role(r) == "reviewer" and r["metadata"].get("step_id") == s["id"] and layer(r)["id"] == item["role"]]
     return {
         "roles_defined": len(detail.get("roles") or []),
         "role_runs": len(role_runs),
@@ -155,8 +156,11 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
                                       if defined.get((layer(r)["id"], layer(r)["version"])) != layer(r)["sha256"]),
         "role_boundary_misses": sum(1 for text in prompts if _BOUNDARIES_LEAD not in text
                                     or text.rfind(_BOUNDARIES_LEAD) < text.rfind("## Task")),
-        "gate_breaches": sum(1 for s in steps if s.get("review_role_key") and s.get("status") == "verified"
-                             and not (passed(s["id"], False) and (passed(s["id"], True) or not required(s)))),
+        "most_review_roles": max((len(review_roles(s)) for s in steps), default=0),
+        "gate_breaches": sum(1 for s in steps if review_roles(s) and s.get("status") == "verified"
+                             and not (passed(s["id"], None) and all(passed(s["id"], item["role"])
+                                                                    for item in review_roles(s)
+                                                                    if item.get("required") is not False))),
         "advisory_role_reviews": len(advisory),
         "advisory_role_fails": sum(1 for r in advisory if r["metadata"].get("outcome") == "not_passed"),
     }

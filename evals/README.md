@@ -26,7 +26,8 @@ directories), one at a time over the HTTP API:
 | `profile_choice` | the task's project lets its Planner choose one more Agent Profile (`eval/chosen`, the run's own profile under another name, so it costs the same) and the requirement asks for it: the Planner must choose it with its own tool (`looper_task_profile_set`) before the step runs, and the Worker run on it |
 | `roles_tester_docs` | the task's project lets its Planner define roles (`planner_roles` on) and choose `eval/chosen`; a module, its tests and its usage notes, the tests by a tester role on `eval/chosen` and the notes by a doc-writer role: at least two work roles, their steps run as them on the version defined, the tester on its profile, each role run with the boundaries before its contract |
 | `roles_security_review` | the same switch; a script that must not run a shell, reviewed by the built-in Reviewer and by a security review role: the role reviews after the built-in Reviewer, and the step is accepted only with both reviews passed |
-| `roles_advisory_review` | the same switch; a greeting script reviewed by the built-in Reviewer and by an advisory review role (`review_role_required` false) that wants a CHANGELOG.md the task turns down: the role does not pass the step, the built-in Reviewer does, and the Planner decides (accept, or retry with the role's findings) |
+| `roles_advisory_review` | the same switch; a greeting script reviewed by the built-in Reviewer and by an advisory review role (its `review_roles` item has `required` false) that wants a CHANGELOG.md the task turns down: the role does not pass the step, the built-in Reviewer does, and the Planner decides (accept, or retry with the role's findings) |
+| `roles_two_reviews` | the same switch; the script that must not run a shell, with a docstring and PEP 8, reviewed by the built-in Reviewer and by two review roles it asks for (security, style): one step names both (`most_review_roles` 2), they review one after the other after the built-in Reviewer, and the step is accepted only with all three passed. `roles_security_review` is the other direction: it asks for one review role, and no step names more (`most_review_roles` at most 1) |
 | `roles_multi_platform` | the same switch, and a requirement that asks for no role: one tip-of-the-day feature across a back end (`backend/tips.py`, run by the check), a web front end, an Android and an iOS client (`web/tip.js`, `android/TipClient.kt`, `ios/TipClient.swift`, no build), which must agree on an interface recorded in `api/tip_api.json`: a work role per discipline whose prompt names at least two of that platform's conventions, at least four role steps built on one interface step, at least two Workers at once, the role runs on a version defined with the boundaries before the contract, and no contract violation |
 | `roles_not_needed` | the same switch on a one-file task: the Planner defines no role and plans at most two steps |
 | `roles_template_fits` | the same switch, and the project keeps two role templates (`security-review` for steps whose code runs commands or takes untrusted input, `doc-writer` for user documentation); the script that must not run a shell, reviewed by an independent Reviewer, with no role asked for: the Planner copies `security-review` as the step's review role, which reviews after the built-in Reviewer |
@@ -50,7 +51,7 @@ Planner answered by changing the plan (`plan_changes`), the Worker and Reviewer
 runs on a profile the Planner chose (`planner_profile_runs`), the roles the Planner defined (`roles_defined`)
 and the runs as one (`role_runs`; on the role's own profile, `role_profile_runs`; as a review role,
 `role_reviews`; copied from a project role template, `template_roles`; on a prompt that is no version it defined,
-`role_prompt_mismatches`; without the boundaries after
+`role_prompt_mismatches`; the most review roles one step names, `most_review_roles`; without the boundaries after
 the task section, `role_boundary_misses`), the accepted steps with a review role that lack a passing built-in or
 role review where the role is required (`gate_breaches`), the reviews by an advisory review role that did not pass
 (`advisory_role_fails`), the disciplines of a task that names them with a work role of their own whose prompt
@@ -186,10 +187,11 @@ every role on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
 "provider": {"name", "protocols", "auth", "base_url"?, "api_key_env"?},
 "agent": {"name", "model", "effort"?}}`, its `agent` being the profile;
 runtimes are built in, so the profile runs on the runtime of that name or the
-built-in one of that type, such as `codex` or `omp` when on PATH, and the
-provider's key is read from the variable `api_key_env` names, never from the
-file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in Codex
-login instead, the operator's own ChatGPT login on this machine), `--tasks
+built-in one of that type, such as `codex`, `omp` or `grok` when on PATH, and
+the provider's key is read from the variable `api_key_env` names, never from
+the file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in
+Codex login instead, the operator's own ChatGPT login on this machine, and
+`"provider": {"provider_id": "prov-grok-login"}` Grok's own login), `--tasks
 single_step,chat_correction` (task ids, or a named set: `planner`, the tasks
 whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `parallel_parts`, `interface_first`, `supplement_replan`,
@@ -294,8 +296,8 @@ model, the other roles on `--model`; all ten dialogs at `--reps 3` cost $3.49
 in about 16 minutes, about $1.16 a rep, the costliest single dialog
 `config_tools` at about $0.22; give it `--max-budget-usd 3.0` and a
 `--total-cap-usd` such as 6),
-`--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex or
-OMP agent checks that runtime's tool calls), `--reps` (as for `run`),
+`--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
+OMP or Grok agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is
 `baselines/dialogs-real-<model>.json` by the Manager's model: `haiku`, and
 `opus` for the run with the Manager on opus at xhigh), `--max-budget-usd`,

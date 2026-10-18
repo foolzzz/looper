@@ -170,10 +170,10 @@ async def _task_view(task_id: str) -> dict[str, Any]:
         "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
                    "instruction": clip(s.get("instruction") or "", 200),
                    # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
-                   **{key: s[column] for key, column in (("role", "role_key"), ("review_role", "review_role_key"))
-                      if s.get(column)},
-                   **({"review_role_required": False} if s.get("review_role_key")
-                      and s.get("review_role_required") is False else {})}
+                   **({"role": s["role_key"]} if s.get("role_key") else {}),
+                   **({"review_roles": [item["role"] if item.get("required") is not False
+                                        else {"role": item["role"], "required": False}
+                                        for item in s["review_roles"]]} if s.get("review_roles") else {})}
                   for s in task.get("steps") or []],
         # The roles the task's Planner defined, when it has any (task_roles).
         **({"roles": roles} if (roles := [{"id": r["role_key"], "kind": r["kind"], "version": r["version"]}

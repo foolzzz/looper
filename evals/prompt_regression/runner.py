@@ -727,9 +727,10 @@ def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name?, type},
     "provider": {name, protocols, auth, base_url?, models?, api_key_env?} or {provider_id}, "agent": {name,
     model, effort?}}``. Runtimes are built in: the agent runs on the runtime of that name, else the built-in one
-    of that type (``codex`` or ``omp`` when on the server's PATH); a ``provider_id`` names a provider the
-    server has, such as the built-in ``prov-codex-login`` (Codex's own login); the provider's API key is read
-    from the environment variable ``api_key_env`` names, so no key is in the file or in the run's result."""
+    of that type (``codex``, ``omp`` or ``grok`` when on the server's PATH); a ``provider_id`` names a provider
+    the server has, such as the built-in ``prov-codex-login`` (Codex's own login) or ``prov-grok-login`` (Grok's);
+    the provider's API key is read from the environment variable ``api_key_env`` names, so no key is in the file
+    or in the run's result."""
     registry = api.get("/api/registry")
     wanted = spec["runtime"]
     runtime = next((r for r in registry["runtimes"] if r["name"] == wanted.get("name")), None) or next(

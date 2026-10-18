@@ -9,6 +9,8 @@ import { Switch } from "@/components/ui/switch";
 import {
   addProjectSkill,
   deleteProjectSkill,
+  defaultInstallRoles,
+  installRoleLabel,
   fetchCatalog,
   fetchProjectInstalls,
   fetchProjectSkill,
@@ -16,7 +18,7 @@ import {
   uninstall,
   updateInstall,
   updateProjectSkill,
-  type AgentRole,
+  type InstallRole,
   type Catalog,
   type CatalogItem,
   type NewProjectSkill,
@@ -125,7 +127,7 @@ function ItemHeading({ item, projectId }: { item: CatalogItem; projectId: string
 }
 
 /** A global install that reaches the project's task roles: shown here, changed in Settings. */
-function InheritedRow({ entry, projectId, taskRoles }: { entry: ProjectInstall; projectId: string; taskRoles: AgentRole[] }) {
+function InheritedRow({ entry, projectId, taskRoles }: { entry: ProjectInstall; projectId: string; taskRoles: InstallRole[] }) {
   const roles = entry.roles.filter((role) => taskRoles.includes(role));
   return (
     <li className={cn("space-y-1 border-t border-border py-2 first:border-t-0", !entry.enabled && "opacity-60")}>
@@ -133,7 +135,7 @@ function InheritedRow({ entry, projectId, taskRoles }: { entry: ProjectInstall; 
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
         <Badge variant="outline" className="py-0 text-[10px]">Global</Badge>
         <span>
-          {roles.join(", ")}
+          {roles.map(installRoleLabel).join(", ")}
           {!entry.enabled && " (off)"}
         </span>
         <a href="#settings/catalog" className="underline-offset-2 hover:text-foreground hover:underline">
@@ -158,7 +160,7 @@ function InstallRow({
 }: {
   projectId: string;
   entry: ProjectInstall;
-  taskRoles: AgentRole[];
+  taskRoles: InstallRole[];
   caps: SkillCaps;
   busy: boolean;
   onApply: Apply;
@@ -191,7 +193,7 @@ function InstallRow({
   }, [editing, body]);
 
   /** An install change answers with the install; the project's view is read again. */
-  const changeInstall = (fields: { roles?: AgentRole[]; enabled?: boolean }) =>
+  const changeInstall = (fields: { roles?: InstallRole[]; enabled?: boolean }) =>
     onApply(() => updateInstall(entry.install_id, fields).then(() => fetchProjectInstalls(projectId)));
 
   const startEdit = () => {
@@ -370,14 +372,14 @@ function InstallFromCatalog({
   catalogError: string;
   /** The items the project installs itself. */
   installed: ReadonlySet<string>;
-  taskRoles: AgentRole[];
+  taskRoles: InstallRole[];
   busy: boolean;
   error: string;
-  onInstall: (itemId: string, roles: AgentRole[]) => Promise<boolean>;
+  onInstall: (itemId: string, roles: InstallRole[]) => Promise<boolean>;
 }) {
   const id = useId();
   const [itemId, setItemId] = useState("");
-  const [roles, setRoles] = useState<AgentRole[]>(taskRoles);
+  const [roles, setRoles] = useState<InstallRole[]>(defaultInstallRoles(taskRoles));
   const candidates = catalog?.items.filter((item) => !installed.has(item.item_id)) ?? [];
   // A pick that got installed or left the catalog meanwhile is no pick.
   const picked = candidates.find((item) => item.item_id === itemId);
@@ -535,7 +537,7 @@ export function ProjectSkillsSection({ projectId }: { projectId: string }) {
     if (await apply(() => addProjectSkill(projectId, skill), "add")) setAdding(false);
   };
 
-  const install = (itemId: string, roles: AgentRole[]) =>
+  const install = (itemId: string, roles: InstallRole[]) =>
     apply(
       () =>
         installItem({ item_id: itemId, scope: "project", project_id: projectId, roles }).then(() =>
