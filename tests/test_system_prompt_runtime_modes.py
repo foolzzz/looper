@@ -86,12 +86,19 @@ def _sent_looper_text(runtime_type: str, mode: SystemPromptMode, command: list[s
 @pytest.mark.parametrize("mode", list(SystemPromptMode))
 @pytest.mark.parametrize("command_kind", ["run_command", "resident_command"])
 @pytest.mark.parametrize("custom_prompt", ["", "  Profile's identity: 自定义\n  "])
+@pytest.mark.parametrize("project_layout", ["repository", "standalone"])
 def test_prompt_blocks_match_real_launch_files(
     runtime_type: str, mode: SystemPromptMode, command_kind: str, custom_prompt: str,
-    tmp_path: Path, isolated_operator: Path,
+    project_layout: str, tmp_path: Path, isolated_operator: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # In a repository OMP lets the runtime load project instruction files itself.
-    (tmp_path / ".git").mkdir()
+    if project_layout == "repository":
+        (tmp_path / ".git").mkdir()
+    else:
+        # Temporary files can live inside the checkout. Simulate a standalone directory's
+        # discovery boundary without letting discovery read that checkout's instructions.
+        monkeypatch.setattr(omp, "outside_repository", lambda cwd: True)
+        monkeypatch.setattr(omp.instructions, "repository_root", lambda cwd: Path(cwd).absolute())
+    (tmp_path / "AGENTS.md").write_text("Project instruction: report verification evidence.")
     runtime, launch = adapter(runtime_type), _launch(runtime_type, mode)
     launch = replace(launch, settings=replace(launch.settings,
                      profile=replace(launch.profile, custom_prompt=custom_prompt.strip())))
@@ -101,10 +108,14 @@ def test_prompt_blocks_match_real_launch_files(
     command = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path, prompt_file=prompt,
                                              launch=launch)
     sent = _sent_looper_text(runtime_type, mode, command)
-    blocks = runtime.prompt_blocks(launch, text)
+    blocks = runtime.prompt_blocks(launch, text, cwd=tmp_path)
     assert "".join(block.text or "" for block in blocks if block.owner == "looper") == sent
     assert all(block.text is None and block.note for block in blocks if block.owner == "runtime")
     assert all(block.text is not None for block in blocks if block.owner == "looper")
+    if runtime_type == "omp":
+        assert ("Project instruction: report verification evidence." in sent) == (project_layout == "standalone")
+        if project_layout == "standalone":
+            assert "# Project instructions: AGENTS.md" in sent
     if custom_prompt:
         assert text.startswith(custom_prompt.strip() + "\n\nHarness")
         assert sent.startswith(custom_prompt.strip() + "\n\n")

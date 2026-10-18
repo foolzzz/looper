@@ -193,7 +193,7 @@ class CodexRuntime(RuntimeAdapter):
         home = write_home(local, config, agents, login=login)
         return ["env", f"CODEX_HOME={home}", executable, "exec", *self.launch_args(launch)]
 
-    def prompt_blocks(self, launch: Launch, looper_prompt: str) -> list[PromptBlock]:
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
                              "base instructions file" if launch.system_prompt_mode is SystemPromptMode.REPLACE
                              else "AGENTS.md")

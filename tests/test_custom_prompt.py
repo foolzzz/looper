@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -60,6 +61,47 @@ def test_custom_prompt_limit_and_whitespace() -> None:
     assert _custom_prompt(" " + "x" * HARNESS_MAX_CHARS + " ") == "x" * HARNESS_MAX_CHARS
     with pytest.raises(RegistryError, match=str(HARNESS_MAX_CHARS)):
         _custom_prompt("x" * (HARNESS_MAX_CHARS + 1))
+
+
+@pytest.mark.parametrize("value", ["\x00", "prefix\0suffix", " \n\u0000\t "])
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+def test_custom_prompt_nul_is_refused_before_create_or_update(monkeypatch, value: str, method: str) -> None:
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.db import profile_registry as db
+    from tests.test_agent_settings import _row
+    from tests.test_catalog_db import _Writer
+
+    profile = replace(BUILTIN_PROFILE, id="agent-custom", name="custom")
+    monkeypatch.setattr(db, "get_profile", AsyncMock(return_value=_row(profile)))
+    insert, update = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(db, "insert_profile", insert)
+    monkeypatch.setattr(db, "update_profile", update)
+    fields = {"custom_prompt": value}
+    if method == "POST":
+        fields.update(name="custom", runtime_id=profile.runtime.id, provider_id=profile.provider.id, model="sonnet")
+    server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
+                             task_router=SimpleNamespace())
+    writer = _Writer()
+    path = "/api/agent-profiles" + (f"/{profile.id}" if method == "PUT" else "")
+    asyncio.run(server._route_api(method, path, {}, json.dumps(fields).encode(), writer))
+    head, _, data = writer.data.partition(b"\r\n\r\n")
+    assert int(head.split()[1]) == 400
+    assert "NUL" in json.loads(data)["error"]
+    insert.assert_not_awaited()
+    update.assert_not_awaited()
+
+
+def test_rfc_records_custom_prompt_trust_and_unverified_precedence() -> None:
+    rfc = Path(__file__).resolve().parents[1] / "docs/architecture/rfcs/system-prompt-mode-v0.zh-CN.md"
+    decisions = rfc.read_text().split("### 6.2 决定", 1)[1].split("### 6.3", 1)[0]
+    assert "能编辑 Profiles" in decisions and "可信操作者输入" in decisions
+    assert "harness" in decisions and "相同" in decisions
+    assert "不保证" in decisions and "冲突指令" in decisions
+    assert "未测试" in decisions and "模型" in decisions
 
 
 def test_derived_profile_identity_and_insert_preserve_custom_prompt() -> None:

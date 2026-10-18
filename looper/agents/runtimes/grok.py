@@ -200,7 +200,7 @@ class GrokRuntime(RuntimeAdapter):
                 *(["--agent", str(home / "agent.md")] if agent is not None else []),
                 *(["--max-turns", str(max_turns)] if max_turns > 0 else [])]
 
-    def prompt_blocks(self, launch: Launch, looper_prompt: str) -> list[PromptBlock]:
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         replacing = launch.system_prompt_mode is SystemPromptMode.REPLACE
         looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
                              "agent definition" if replacing else "rules/looper.md")

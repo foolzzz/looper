@@ -447,6 +447,8 @@ def _custom_prompt(raw: Any) -> str:
 
     if not isinstance(raw, str):
         raise RegistryError("custom_prompt must be a string")
+    if "\x00" in raw:
+        raise RegistryError("custom_prompt cannot contain NUL characters")
     text = raw.strip()
     if len(text) > HARNESS_MAX_CHARS:
         raise RegistryError(f"custom_prompt has at most {HARNESS_MAX_CHARS} characters, got {len(text)}")

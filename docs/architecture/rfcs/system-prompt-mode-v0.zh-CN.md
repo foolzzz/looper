@@ -81,11 +81,11 @@ Looper 给每个 agent 一份自己的系统提示词（`SystemPrompt`），四�
 
 ### 6.2 决定
 
-1. **只加一个字段：Agent Profile 的 `custom_prompt`**（文本，默认空）。它是 Looper 拼好的主提示词里的一层，放在**最前面**（在 harness 之前）：Claude Code 的主块（第二段）、Codex 的 `AGENTS.md` 或替换文件、Grok 的 `rules/looper.md` 或 agent 定义、OMP 的追加/替换文件都以它开头。契约仍在最后，它后面不会再有用户写的内容。
+1. **只加一个字段：Agent Profile 的 `custom_prompt`**（文本，默认空）。它是 Looper 拼好的主提示词里的一层，放在**最前面**（在 harness 之前）：Claude Code 的主块（第二段）、Codex 的 `AGENTS.md` 或替换文件、Grok 的 `rules/looper.md` 或 agent 定义、OMP 的追加/替换文件都以它开头。`custom_prompt` 是可信操作者输入，由能编辑 Profiles 的人写入，与 harness 具有相同的信任级别。契约仍在最后，但这个顺序不保证契约优先于前面的文字：模型仍可能遵循 `custom_prompt` 中的冲突指令；模型是否遵守契约未测试。
 2. **第一段不提供字段**：Claude Code 的身份行没有入口（见 6.1），为一个所有运行时都拒绝的字段增加接口和界面没有意义。想让模型从头采用自己的身份，用 `system_prompt_mode=replace`，再把身份写进 `custom_prompt`；替换后身份行变成固定的 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`，这一行仍然存在，文档和预览如实标注。
 3. 与 harness、角色提示词的分工：harness 是性格和稳定性（按 Agent 类型与项目），角色提示词是角色做什么（按角色），`custom_prompt` 是**这个 Profile**无论跑什么角色都要带的文字（口径、语言、对外身份）。
 4. 默认空：空串不加任何文字，也不进 `prompt_layers`，启动参数和提示词文件与 v2.8.0 逐字节一致（有测试固定）。非空时 `prompt_layers.custom_prompt = {sha256}`。
-5. 校验：必须是字符串，长度不超过 harness 的上限（`HARNESS_MAX_CHARS`），超过或类型不对返回 400。四种运行时都能带这一层，所以没有运行时因为它被拒绝；以后出现不能带的运行时，沿用 `system_prompt_mode` 的做法（适配器的类型化属性，保存时 400，不静默丢弃）。
+5. 校验：必须是不含 NUL 字符的字符串，长度不超过 harness 的上限（`HARNESS_MAX_CHARS`），含 NUL、超过上限或类型不对返回 400。四种运行时都能带这一层，所以没有运行时因为它被拒绝；以后出现不能带的运行时，沿用 `system_prompt_mode` 的做法（适配器的类型化属性，保存时 400，不静默丢弃）。
 6. 管家的 Profile 配置工具已经编辑 `system_prompt_mode`，所以同样加 `custom_prompt`（schema 和描述对模型可见）。
 
 ### 6.3 预览

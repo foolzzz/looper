@@ -250,8 +250,9 @@ class RuntimeAdapter(ABC):
     # --- The launch ---
 
     @abstractmethod
-    def prompt_blocks(self, launch: Launch, looper_prompt: str) -> list[PromptBlock]:
-        """The ordered system inputs, using the same text layout as the real command's files."""
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        """The ordered system inputs, including injected project files when ``cwd`` is known, using the same
+        text layout as the real command's files."""
 
     @abstractmethod
     def isolation_args(self, cwd: str | Path) -> list[str]:

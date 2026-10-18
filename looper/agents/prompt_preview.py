@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 
 from ..db import profile_registry as db_profiles, projects as db_projects, role_configs as db_roles
 from ..db import project_documents as db_documents
-from .agent_settings import AgentType, Launch, load_agent_settings
+from .agent_settings import AgentType, Launch, load_agent_settings, profile_problem
 from .knowledge import AgentKnowledge, SourceKind, StoredSet, _entry, clipped_index
 from .profile_registry import AgentProfile, RegistryError, RegistryNotFound
 from .system_prompt import WORK_CONTRACT, REVIEW_CONTRACT, build_system_prompt, is_recommended
@@ -43,6 +43,8 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
     # The Manager spans projects; its launch never receives project context or project layers.
     project_id = None if agent is AgentType.MANAGER else project_id
     settings = replace(await load_agent_settings(role, project_id), profile=profile)
+    if problem := profile_problem(profile, agent):
+        raise RegistryError(problem)
     role_text, recommended = await _role_prompt(agent)
     notes = ["the Task section is filled in at launch"]
     project = None
@@ -52,15 +54,23 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         if project is None:
             raise RegistryNotFound(f"no project {project_id!r}")
         documents = await db_documents.list_documents(project_id)
-        if any(SourceKind(row["source_kind"]) is not SourceKind.PATH for row in documents):
-            notes.append("Project knowledge is omitted: its index requires launch-time directories.")
-        elif documents:
-            # Path documents already name their directory. Reuse the launch index formatting and missing-file check.
-            index = clipped_index([_entry(StoredSet(None, {}), project, row) for row in documents])
-            knowledge = AgentKnowledge(index=index, documents=len(documents))
+        entries = []
+        for document in documents:
+            if SourceKind(document["source_kind"]) is SourceKind.PATH:
+                # Reuse the launch index formatting and missing-file check without materializing files.
+                entries.append(_entry(StoredSet(None, {}), project, document))
+            else:
+                notes.append(f"Project knowledge document {document['title']!r} ({document['id']}) is omitted: "
+                             "its path requires a launch-time directory.")
+        knowledge = AgentKnowledge(index=clipped_index(entries), documents=len(entries))
         if project.get("operator_notes"):
             notes.append("Operator notes are resolved from the task's working directory at launch.")
-    notes.append("Installed skills, project instruction files and environment context are resolved at launch.")
+    cwd = (project or {}).get("work_dir") or None
+    notes.append("Installed skills, native project instruction files and environment context are resolved at launch.")
+    if cwd is None:
+        notes.append("Injected project instruction files require the task's working directory at launch.")
+    else:
+        notes.append("Injected project instruction files use the project directory; a task may use another directory.")
     if agent is AgentType.MANAGER:
         from .tiers.manager import TOOLS_CONTRACT
 
@@ -85,6 +95,6 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         "runtime": launch.runtime.type, "system_prompt_mode": profile.system_prompt_mode.value,
         "custom_prompt_set": bool(profile.custom_prompt.strip()),
         "looper_prompt_sha256": system_prompt.sha256, "prompt_layers": system_prompt.layers,
-        "blocks": [asdict(block) for block in launch.runtime.prompt_blocks(launch, system_prompt.text)],
+        "blocks": [asdict(block) for block in launch.runtime.prompt_blocks(launch, system_prompt.text, cwd=cwd)],
         "notes": notes,
     }

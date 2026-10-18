@@ -217,7 +217,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             return None
         return {**{k: v for k, v in os.environ.items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
 
-    def prompt_blocks(self, launch: Launch, looper_prompt: str) -> list[PromptBlock]:
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         return _prompt_input(launch, looper_prompt=looper_prompt)[1]
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
