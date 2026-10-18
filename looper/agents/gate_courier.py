@@ -202,6 +202,9 @@ class GateCourier:
     async def _handle(self, row: Mapping[str, Any], dashboard: GateChat | None) -> bool:
         """Post one message and note what that did; False when it waits for its next try."""
         chat = gate_chat(_task_columns(row), dashboard)
+        current = await db_user_gates.gate_state(row["step_id"])
+        if current is not None:
+            row = {**row, "state": current}
         text = message_text(row, chat, dashboard_url=self._dashboard_url) if chat is not None else None
         stale = text is not None and MessageKind(row["kind"]) in WHILE_WAITING and not GateState(row["state"]).waiting
         if chat is None or text is None or stale:

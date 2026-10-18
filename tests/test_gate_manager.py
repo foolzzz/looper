@@ -16,7 +16,7 @@ import pytest
 
 from looper.agents.bus import MessageBus
 from looper.agents.channels.chat_history import CHAT_RECORD
-from looper.agents.gate_routing import Route, RouteKind
+from looper.agents.gate_routing import EMPTY_REPLY, Route, RouteKind
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
@@ -24,7 +24,7 @@ from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 LARK = channel_address("lark", "channel-lark")
 
 
-def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route) -> dict[str, Any]:
+def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "PostgreSQL") -> dict[str, Any]:
     """One Lark message to a Manager whose routing answers ``routed``: what it published (with whether the channel
     is to store it), what it stored, and what reached its model."""
     seen: dict[str, Any] = {"model": [], "stored": []}
@@ -57,8 +57,8 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route) -> dict[str, Any]:
                 has_planner=lambda task_id: True)), tools_problem=tools_problem)
             await manager._handle(MessageEnvelope.create(
                 source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-                payload={"text": "PostgreSQL", "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p",
-                                                                   "message_id": "om_9", "reply_to": "om_1"}},
+                payload={"text": text, "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p",
+                                                           "message_id": "om_9", "reply_to": "om_1"}},
                 correlation_id="corr-1"))
             queue = bus.get_queue(LARK.agent_id)
             seen["sent"] = []
@@ -74,6 +74,17 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route) -> dict[str, Any]:
 
 @pytest.mark.usefixtures("agent_db")
 class TestGateReplies:
+    def test_an_empty_reply_refused_by_the_gate_is_answered_without_storing_it(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = _handle(monkeypatch, Route(RouteKind.REFUSED, reply=EMPTY_REPLY), text="")
+        assert seen["model"] == [] and seen["stored"] == []
+        assert seen["sent"] == [(MessageType.AGENT_REPLY, EMPTY_REPLY, False)]
+
+    def test_an_empty_message_to_no_gate_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen = _handle(monkeypatch, Route(RouteKind.NONE), text="")
+        assert seen["model"] == [] and seen["stored"] == [] and seen["sent"] == []
+
     def test_a_reply_the_gate_took_never_reaches_the_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen = _handle(monkeypatch, Route(RouteKind.DELIVERED))
         assert seen["model"] == [] and seen["sent"] == [] and seen["stored"] == []

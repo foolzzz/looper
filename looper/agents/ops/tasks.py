@@ -10,6 +10,7 @@ cancelling a task, are ``high``: the user confirms them first.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -521,10 +522,11 @@ def _relayed_text(turn: Turn, excerpt: Any) -> str:
         return message
     if not isinstance(excerpt, str) or not excerpt.strip():
         raise OpError(ErrorCode.INVALID, "excerpt is a non-empty part of the user's message")
-    if " ".join(excerpt.split()) not in " ".join(message.split()):
+    match = re.search(r"\s+".join(re.escape(word) for word in excerpt.split()), message)
+    if match is None:
         raise OpError(ErrorCode.INVALID, "excerpt must be copied word for word from the user's message; leave it "
                                          "out to pass on the whole message")
-    return excerpt
+    return message[match.start():match.end()]
 
 
 async def _gate_reply(call: Call) -> dict[str, Any]:

@@ -735,6 +735,23 @@ class TestLarkAllowlist:
             "chat_id": "oc_1", "chat_type": "group" if group else "p2p", "sender_id": OPEN_ID, "message_id": "om_7",
             **({"sender_name": "Ada Lovelace"} if group else {}), **seen}
 
+    @pytest.mark.parametrize("reference", ["reply_to", "root_id"])
+    def test_a_mention_only_reply_in_a_group_reaches_the_manager(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reference: str,
+    ) -> None:
+        event = _lark_event(OPEN_ID, "@HelperBot", chat_type="group", mentions=[BOT_MENTION],
+                            **{reference: "om_card"})
+        (message,) = self._run(tmp_path, monkeypatch, event, OPEN_ID).messages
+        assert message.payload["text"] == ""
+        assert message.payload["channel_context"][reference] == "om_card"
+
+    def test_a_mention_only_message_to_nothing_is_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event = _lark_event(OPEN_ID, "@HelperBot", chat_type="group", mentions=[BOT_MENTION])
+        seen = self._run(tmp_path, monkeypatch, event, OPEN_ID)
+        assert (seen.messages, seen.conversations, seen.reacted, seen.sent) == ([], {}, [], [])
+
     def test_an_unlisted_senders_mention_in_a_group_is_recorded_with_its_chat(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

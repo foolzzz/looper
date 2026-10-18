@@ -420,7 +420,7 @@ class LarkChannelAdapter(ChannelAdapter):
             return
 
         text = self._without_mentions(text, bot_mentions)
-        if not text.strip():
+        if not text.strip() and not (event.get("reply_to") or event.get("root_id")):
             return
 
         message_id = event.get("message_id") or ""

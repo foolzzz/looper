@@ -501,7 +501,7 @@ def test_the_manager_relays_the_users_own_message_to_a_waiting_gate(monkeypatch:
         answer, _ = await _relay(turn, {"task_id": "task-a", "gate": "g1", "excerpt": "PostgreSQL   16."}, {"task-a"})
         assert answer["status"] == "ok"
         assert [m["text"] for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"][-1] == \
-            "PostgreSQL   16."
+            "PostgreSQL 16."
         answer, _ = await _relay(turn, {"task_id": "task-a", "gate": "g1", "excerpt": "PostgreSQL 15"}, {"task-a"})
         assert answer["status"] == "error" and "word for word" in answer["error"]["message"]
 
@@ -524,6 +524,53 @@ def test_the_manager_relays_the_users_own_message_to_a_waiting_gate(monkeypatch:
         answer, _ = await _relay(_tool_turn("one more thing"), {"task_id": "task-a", "gate": "g1"}, {"task-a"})
         assert answer["status"] == "error" and answer["error"]["code"] == "conflict"
         assert "gate g1 is passed" in answer["error"]["message"]
+
+    _run(test, monkeypatch)
+
+
+def test_open_gates_filters_by_chat_before_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import user_gates
+
+        await _task_with_gate(pool, origin="channel-lark", chat=LARK_GROUP, kind="chat")
+        await _task_with_gate(pool, task_id="task-b", origin="channel-lark", chat="ou_other", kind="user",
+                              step_id="step-b1", project_name="notes")
+        await _task_with_gate(pool, task_id="task-c", origin="channel-telegram", chat="5151", kind="chat",
+                              step_id="step-c1", project_name="reports")
+        await _task_with_gate(pool, task_id="task-d", step_id="step-d1", project_name="dashboard")
+        await pool.execute("UPDATE task_user_gates SET opened_at = now() + interval '1 minute' "
+                           "WHERE step_id <> 'step-g1'")
+
+        assert len(await user_gates.open_gates(4)) == 4
+        gates = await user_gates.open_gates(1, chat=("lark", LARK_GROUP))
+        assert [gate["task_id"] for gate in gates] == ["task-a"]
+        gates = await user_gates.open_gates(1, chat=("telegram", "4242"), dashboard=True)
+        assert [gate["task_id"] for gate in gates] == ["task-d"]
+        assert await user_gates.open_gates(1, chat=("telegram", "4242"), dashboard=False) == []
+
+    _run(test, monkeypatch)
+
+
+def test_a_gate_closed_during_a_pass_posts_no_reminder(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.gate_courier import GateCourier
+
+        class ClosingPoster(_Poster):
+            async def __call__(self, *args: Any, **kwargs: Any) -> PostReceipt:
+                receipt = await super().__call__(*args, **kwargs)
+                if len(self.posts) == 1:
+                    await pool.execute("UPDATE task_user_gates SET state = 'cancelled' WHERE step_id = 'step-g1'")
+                return receipt
+
+        await _task_with_gate(pool, origin="channel-telegram", chat=TELEGRAM_CHAT, kind="chat")
+        await _say("task-a", "step-g1", "reminder", "Still waiting")
+        poster = ClosingPoster()
+        await GateCourier(poster).run_once()
+        (card,) = poster.posts
+        assert card["text"].startswith("⏸ 需要你决定")
+        assert [tuple(row) for row in await pool.fetch(
+            "SELECT kind, post_state FROM task_user_gate_messages ORDER BY id")] == [
+                ("opened", "sent"), ("reminder", "none")]
 
     _run(test, monkeypatch)
 

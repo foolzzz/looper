@@ -175,6 +175,12 @@ async def get(task_id: str, label: str, *, pool: asyncpg.Pool | asyncpg.Connecti
     return _gate(row) if row else None
 
 
+async def gate_state(step_id: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+    """The gate's current state; None when it no longer exists."""
+    pool = pool or get_pool()
+    return await pool.fetchval("SELECT state FROM task_user_gates WHERE step_id = $1", step_id)
+
+
 async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
     """The user's messages in the task's waiting gates that no turn of the Planner has had, oldest first."""
     pool = pool or get_pool()
@@ -354,16 +360,28 @@ async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *
     return _gate(row) if row else None
 
 
-async def open_gates(limit: int, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboard: bool = False,
+                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The gates that wait for the user in the tasks that run, the latest opened first, at most ``limit``, each with
     its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
-    ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``."""
+    ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``.
+    When ``chat`` is given, filter before limiting; ``dashboard`` includes tasks from no channel."""
     pool = pool or get_pool()
+    where = ""
+    args: list[Any] = [list(WAITING), list(ACTIVE_STATUSES), limit]
+    if chat is not None:
+        from ..agents.task_notice import _BY_CHANNEL_ID, TargetKind
+
+        origins = [origin for origin, channel in _BY_CHANNEL_ID.items() if channel.value == chat[0]]
+        where = (" AND t.schedule_id IS NULL AND ((t.origin_channel_id = ANY($4::text[]) AND t.chat_id = $5 "
+                 "AND t.chat_id <> '' AND t.chat_kind = ANY($6::text[])) OR ($7::boolean AND "
+                 "NOT (COALESCE(t.origin_channel_id, '') = ANY($8::text[]))))")
+        args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, list(_BY_CHANNEL_ID)]
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
                        ", p.name AS project_name, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
                        "t.schedule_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
                        "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id")
-        + " WHERE g.state = ANY($1::text[]) AND t.status = ANY($2::text[]) ORDER BY g.opened_at DESC NULLS LAST "
-          "LIMIT $3", list(WAITING), list(ACTIVE_STATUSES), limit)
+        + " WHERE g.state = ANY($1::text[]) AND t.status = ANY($2::text[])" + where
+        + " ORDER BY g.opened_at DESC NULLS LAST LIMIT $3", *args)
     return [_gate(row) for row in rows]

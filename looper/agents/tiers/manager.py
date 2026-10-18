@@ -174,7 +174,6 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 READY_TASKS_LISTED = 10
 # The most user gates waiting for the user listed before each message ("Open gates"), of the newest read.
 OPEN_GATES_LISTED = 10
-OPEN_GATES_SCANNED = 50
 
 
 def _waited(moment: Any) -> str:
@@ -469,8 +468,6 @@ class ManagerAgent:
     async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         text = envelope.payload.get("text", "")
-        if not text.strip():
-            return
         if is_new_session_command(text):
             await self._persist_chat(envelope, "user", text, envelope.message_id)
             await self._start_new_session(envelope)
@@ -481,6 +478,8 @@ class ManagerAgent:
             return
         if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
             await self._send_reply(envelope, gate.reply, persist=False)
+            return
+        if not text.strip():
             return
         origin = _message_origin(envelope)
         await self._persist_chat(envelope, "user", text, envelope.message_id)
@@ -1123,16 +1122,23 @@ class ManagerAgent:
         go to that chat (``gate_service.gate_chat``), so no other chat's gate shows in it; in the dashboard chat all,
         each with its chat. None, no section."""
         origin = _message_origin(envelope) if envelope is not None else {"channel": "web"}
-        try:
-            gates = await db_user_gates.open_gates(OPEN_GATES_SCANNED)
-            dashboard = await gate_dashboard_target() if gates else None
-        except Exception:
-            logger.warning("manager could not list the open gates", exc_info=True)
-            return ["Open gates: (could not be read)", ""]
         here = origin["channel"] in ("lark", "telegram")
         if here:
             chat = origin_chat(origin["channel"], origin["chat"] or "", group=origin["group"],
                                sender=origin["sender"] or "")
+        try:
+            if here:
+                dashboard = await gate_dashboard_target()
+                gates = await db_user_gates.open_gates(
+                    OPEN_GATES_LISTED, chat=(origin["channel"], chat),
+                    dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) ==
+                    (origin["channel"], chat))
+            else:
+                gates = await db_user_gates.open_gates(OPEN_GATES_LISTED)
+                dashboard = await gate_dashboard_target() if gates else None
+        except Exception:
+            logger.warning("manager could not list the open gates", exc_info=True)
+            return ["Open gates: (could not be read)", ""]
         listed: list[tuple[dict[str, Any], str]] = []
         for gate in gates:
             gate_chat = gate_chat_of(gate, dashboard)
