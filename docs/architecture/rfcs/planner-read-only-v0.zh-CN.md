@@ -60,7 +60,7 @@ agent-room 那一路已在 Claude Code 2.1.285 的 `--print` 模式（隔离参�
 |---|---|---|---|
 | 只读方式（`RuntimeAdapter.read_only`） | `permissions`：去掉 `--dangerously-skip-permissions`，钉住 `--permission-mode manual`（2.1.285 里默认模式的名字）和 `--permission-prompts none`（没有人回答确认，凡要确认的一律拒绝），加 `--disallowedTools Edit,Write,NotebookEdit` 和 `--allowedTools`（见 4.2） | 候选：`exec` 的 `--sandbox read-only` 加 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`。沙箱只管模型生成的 shell 命令，MCP 调用不受影响。**需要验证**：`exec resume` 是否沿用这些参数，MCP 工具调用是否仍能执行，被拒的命令在 `--json` 事件里怎样表示。验证通过前保持现状，用回退检查（`check`） | 候选：`--approval-mode write`（print 模式下没有界面可批，行为未知）或 `--tools` 白名单（去掉 bash 就没有 git log/diff）。**需要验证**；验证前用回退检查（`check`） |
 | 拒绝的记录 | `result.permission_denials`，每次拒绝一条 | 没有类型化的拒绝信号（被拒的命令只是失败） | 没有 |
-| 已核实 | Bash 的读命令放行、写命令拒绝并记录（第 2 节）；MCP 工具和技能在放行后可用、规划者照常完成任务：**需要验证**，由真实评测覆盖 | — | — |
+| 已核实 | Bash 的读命令放行、写命令拒绝并记录（第 2 节）；MCP 工具和技能在放行后可用、规划者照常完成任务：**需要验证**，由真实评测覆盖 | 一次探测（新会话加 `exec resume`，只读沙箱加 `approval_policy="never"`）：读命令照常，写文件、`touch`、`git commit` 被沙箱拒绝（命令失败，没有类型化的拒绝信号）；MCP 工具在默认的审批下被拒（「requires approval, but approval policy is never」），给该服务器加 `mcp_servers.<名字>.default_tools_approval_mode="approve"` 后在两轮里都能调用。命令行还没改，每个 MCP 服务器都要加这条配置，还要在真实规划任务里评测 | 未验证（`--approval-mode write` 和 `--tools` 白名单的探测没有得出结论） |
 
 运行记录写明怎样保证只读：`metadata.read_only` 为 `permissions` 或 `check`（只有规划者的运行有这个字段）。
 
