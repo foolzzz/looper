@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -102,12 +103,15 @@ def test_the_task_detail_and_list_carry_the_tasks_cost(monkeypatch: pytest.Monke
         cost = detail["cost"]
         assert len(cost["manager_by_model"]) == 1
         assert cost["manager_by_model"][0]["runs"] == 1
-        assert cost["manager_by_model"][0]["cost_usd"] == pytest.approx(7.0)
+        assert cost["manager_by_model"][0]["cost_usd"] == 7.0
         assert sum(r["runs"] for r in cost["by_model"]) == cost["runs"] == 5
         runs = [r for r in await llm_records.list_records(task_id="task-a", pool=pool) if r["agent_id"] != "manager"]
         assert len(runs) == cost["runs"] == 5
-        assert cost["cost_usd"] == pytest.approx(sum(r["cost_usd"] for r in runs)) == pytest.approx(0.85)
-        assert {role: (pytest.approx(row["cost_usd"]), row["runs"]) for role, row in cost["by_role"].items()} == {
+        assert cost["cost_usd"] == 0.85
+        assert sum(Decimal(str(r["cost_usd"])) for r in runs) == Decimal(str(cost["cost_usd"]))
+        assert sum(Decimal(str(r["cost_usd"] or 0)) for r in cost["by_model"]) == Decimal(str(cost["cost_usd"]))
+        assert sum(Decimal(str(r["cost_usd"])) for r in cost["by_role"].values()) == Decimal(str(cost["cost_usd"]))
+        assert {role: (row["cost_usd"], row["runs"]) for role, row in cost["by_role"].items()} == {
             "planner": (0.15, 2), "worker": (0.65, 2), "reviewer": (0.05, 1)}
         assert (cost["running"], cost["unpriced_runs"]) == (0, 0)
 

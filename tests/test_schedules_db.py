@@ -609,6 +609,28 @@ def test_run_now_fires_a_manual_run_and_keeps_the_next_fire(monkeypatch: pytest.
     _run(test, monkeypatch, tmp_path)
 
 
+def test_a_running_runs_spend_excludes_the_manager_linked_to_its_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.db import llm_records, schedules
+
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled())["schedule_id"]
+        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        task_id = run["task_id"]
+        for agent_id, cost in ((f"planner-{task_id}", 0.125), ("worker-1", 0.25), ("reviewer-1", 0.125),
+                               ("manager", 5.0)):
+            record_id = await llm_records.start_record(agent_id=agent_id, task_id=task_id, pool=env.pool)
+            await llm_records.finish_record(record_id, status="completed", cost_usd=cost, pool=env.pool)
+
+        since = datetime.fromisoformat(run["fired_at"])
+        assert await schedules.spent_since(env.pool, sid, since) == 0.5
+        assert await schedules.spent_since_each(env.pool, [sid], since) == {sid: 0.5}
+        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["spent_today_usd"] == 0.5
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_a_task_end_writes_the_run_outcome_and_the_failure_count(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
     async def test(env: _Env) -> None:

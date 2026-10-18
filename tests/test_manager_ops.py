@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -167,6 +169,62 @@ def test_a_write_runs_in_the_turn_answering_the_user(recorded: list[dict[str, An
     assert (row["channel"], row["chat"], row["message_id"], row["risk"], row["task_id"]) == (
         "web", "A", "m1", "write", "task-000000000009")
     assert manager_actions.masked(row["arguments"]) == {"n": 2, "api_key": "***"}
+
+
+def test_a_turn_collects_the_tasks_its_calls_name_or_create(recorded: list[dict[str, Any]]) -> None:
+    ops = _Ops().ops
+    turn = _turn("m1")
+    tool = Tool("t_read", "reads", {}, Risk.READ, AsyncMock(), task_id=lambda arguments: arguments.get("task_id"))
+
+    async def test() -> None:
+        await ops._record(turn, tool, {"task_id": "task-a"}, Risk.READ, "ok")
+        await ops._record(turn, tool, {"task_id": "task-a"}, Risk.READ, "ok")
+        assert turn.task_ids == {"task-a"}
+        await ops._record(turn, tool, {}, Risk.WRITE, "ok", result={"task_id": "task-b"})
+        await ops._record(turn, tool, {}, Risk.READ, "ok")
+        assert turn.task_ids == {"task-a", "task-b"}
+        assert _turn("m2").task_ids == set()
+
+    asyncio.run(test())
+    assert [row["task_id"] for row in recorded] == ["task-a", "task-a", "task-b", None]
+
+
+@pytest.mark.parametrize(("task_id", "record_id", "task_ids", "linked"), [
+    (None, 1, {"task-a"}, True),
+    (None, 1, {"task-a", "task-b"}, False),
+    (None, 1, set(), False),
+    ("task-b", 1, {"task-a"}, False),
+    (None, None, {"task-a"}, False),
+])
+def test_a_manager_turn_links_only_one_named_task_when_its_record_has_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task_id: str | None, record_id: int | None,
+    task_ids: set[str], linked: bool,
+) -> None:
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import llm_records
+
+    link = AsyncMock()
+    monkeypatch.setattr(llm_records, "link_task", link)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    recorder = SimpleNamespace(task_id=task_id, record_id=record_id)
+    asyncio.run(manager._link_turn_task(recorder, Turn(channel="web", chat="A", task_ids=task_ids)))
+    if linked:
+        link.assert_awaited_once_with(record_id, "task-a")
+    else:
+        link.assert_not_awaited()
+
+
+def test_a_failure_to_link_a_manager_turn_logs_and_keeps_the_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import llm_records
+
+    monkeypatch.setattr(llm_records, "link_task", AsyncMock(side_effect=ConnectionError("database is down")))
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    asyncio.run(manager._link_turn_task(SimpleNamespace(task_id=None, record_id=1),
+                                       Turn(channel="web", chat="A", task_ids={"task-a"})))
+    assert "could not link the Manager's turn to its task" in caplog.text
 
 
 def test_a_high_call_runs_only_when_the_next_message_in_its_chat_confirms_it(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -61,6 +62,12 @@ async def start_record(
         json.dumps(metadata) if metadata else None,
     )
     return row["id"]
+
+
+async def link_task(record_id: int, task_id: str, *, pool: asyncpg.Pool | None = None) -> None:
+    """A Manager turn whose calls all named one task belongs to it."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE llm_records SET task_id = $2 WHERE id = $1 AND task_id IS NULL", record_id, task_id)
 
 
 async def end_unfinished_records(*, pool: asyncpg.Pool | None = None) -> int:
@@ -213,6 +220,8 @@ TASK_ROLES = ("planner", "worker", "reviewer")
 _TASK_ROLE = (
     "CASE " + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
 )
+# A run of one of a task's agents (Planner, Worker, Reviewer), as task_costs counts them; the Manager is not one.
+TASK_RUN = f"{_TASK_ROLE} IS NOT NULL"
 
 
 async def list_task_runs(
@@ -311,60 +320,70 @@ async def task_costs(
     their provider's prices.
     ``by_model`` splits those runs and tokens by model, with costs adding up to ``cost_usd``.
     ``manager_by_model`` splits the Manager's turns about the task by model, not in its cost or its spend cap.
+    Money is rounded to a millionth of a dollar per group and summed exactly, so the totals, the roles and the
+    models agree.
     """
     if not task_ids:
         return {}
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"""
-        SELECT task_id, {_TASK_ROLE} AS role, count(*) AS runs,
-               count(*) FILTER (WHERE status = 'running') AS running,
-               count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
-               count(*) FILTER (WHERE cost_usd IS NOT NULL AND {EQUIVALENT}) AS equivalent_runs,
-               count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source = 'provider_price' AND NOT {EQUIVALENT})
-                   AS provider_price_runs,
-               COALESCE(sum(cost_usd), 0) AS cost_usd
-        FROM llm_records
-        WHERE task_id = ANY($1::text[]) AND {_TASK_ROLE} IS NOT NULL
-        GROUP BY task_id, role
-        """,
-        task_ids,
-    )
-    costs = {
-        task_id: {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
-                  "provider_price_runs": 0, "by_role": {role: {"cost_usd": 0.0, "runs": 0} for role in TASK_ROLES},
-                  "by_model": [], "manager_by_model": []}
-        for task_id in task_ids
-    }
-    for row in rows:
-        cost = costs[row["task_id"]]
-        for key in ("runs", "running", "unpriced_runs", "equivalent_runs", "provider_price_runs"):
-            cost[key] += row[key]
-        cost["cost_usd"] += row["cost_usd"]
-        cost["by_role"][row["role"]] = {"cost_usd": row["cost_usd"], "runs": row["runs"]}
-    rows = await pool.fetch(
-        f"""
-        SELECT task_id, ({_ROLE_FILTERS['manager']}) AS manager, model, count(*) AS runs,
+        SELECT task_id, CASE WHEN {_ROLE_FILTERS['manager']} THEN 'manager' ELSE {_TASK_ROLE} END AS role,
+               model, count(*) AS runs,
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
                count(*) FILTER (WHERE status = $2) AS interrupted_runs,
+               count(*) FILTER (WHERE cost_usd IS NOT NULL AND {EQUIVALENT}) AS equivalent_runs,
+               count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source = 'provider_price' AND NOT {EQUIVALENT})
+                   AS provider_price_runs,
                COALESCE(sum(input_tokens), 0)::bigint AS input_tokens,
                COALESCE(sum(output_tokens), 0)::bigint AS output_tokens,
                COALESCE(sum(cache_read_tokens), 0)::bigint AS cache_read_tokens,
                COALESCE(sum(cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
-               sum(cost_usd ORDER BY id) AS cost_usd  -- in one order, so a task's list and its page agree
+               round(sum(cost_usd::numeric), 6) AS cost_usd
         FROM llm_records
         WHERE task_id = ANY($1::text[]) AND ({_TASK_ROLE} IS NOT NULL OR {_ROLE_FILTERS['manager']})
-        GROUP BY task_id, manager, model
-        ORDER BY cost_usd DESC NULLS LAST, runs DESC, model NULLS LAST
+        GROUP BY 1, 2, 3
         """,
         task_ids, RecordStatus.INTERRUPTED.value,
     )
+    costs = {
+        task_id: {"cost_usd": Decimal(0), "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
+                  "provider_price_runs": 0, "by_role": {role: {"cost_usd": Decimal(0), "runs": 0}
+                                                      for role in TASK_ROLES},
+                  "by_model": {}, "manager_by_model": {}}
+        for task_id in task_ids
+    }
     for row in rows:
-        model = dict(row)
-        cost = costs[model.pop("task_id")]
-        key = "manager_by_model" if model.pop("manager") else "by_model"
-        cost[key].append(model)
+        cost = costs[row["task_id"]]
+        manager = row["role"] == "manager"
+        if not manager:
+            for key in ("runs", "running", "unpriced_runs", "equivalent_runs", "provider_price_runs"):
+                cost[key] += row[key]
+            cost["cost_usd"] += row["cost_usd"] or Decimal(0)
+            role = cost["by_role"][row["role"]]
+            role["cost_usd"] += row["cost_usd"] or Decimal(0)
+            role["runs"] += row["runs"]
+        models = cost["manager_by_model" if manager else "by_model"]
+        counts = ("runs", "running", "unpriced_runs", "interrupted_runs", "input_tokens", "output_tokens",
+                  "cache_read_tokens", "cache_creation_tokens")
+        model = models.setdefault(row["model"], {"model": row["model"], "cost_usd": None,
+                                                **dict.fromkeys(counts, 0)})
+        for key in counts:
+            model[key] += row[key]
+        if row["cost_usd"] is not None:
+            model["cost_usd"] = (model["cost_usd"] or Decimal(0)) + row["cost_usd"]
+    for cost in costs.values():
+        cost["cost_usd"] = float(cost["cost_usd"])
+        for role in cost["by_role"].values():
+            role["cost_usd"] = float(role["cost_usd"])
+        for key in ("by_model", "manager_by_model"):
+            cost[key] = sorted(cost[key].values(), key=lambda model: (
+                model["cost_usd"] is None, -(model["cost_usd"] or Decimal(0)), -model["runs"],
+                model["model"] is None, model["model"] or ""))
+            for model in cost[key]:
+                if model["cost_usd"] is not None:
+                    model["cost_usd"] = float(model["cost_usd"])
     return costs
 
 

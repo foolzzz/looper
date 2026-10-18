@@ -268,11 +268,14 @@ class ManagerOps:
 
     async def _record(self, turn: Turn, tool: Tool, arguments: Mapping[str, Any], risk: Risk, status: str, *,
                       error_code: str | None = None, result: Any = None, confirmation_id: str | None = None) -> None:
+        task_id = tool.task_id(arguments) or _created_task(result)
+        if task_id is not None:
+            turn.task_ids.add(task_id)
         try:
             await db_actions.record(
                 channel=turn.channel, chat=turn.chat, message_id=turn.message_id, tool=tool.name,
                 arguments=arguments, risk=risk.value, status=status, error_code=error_code, result=result,
-                confirmation_id=confirmation_id, task_id=tool.task_id(arguments) or _created_task(result),
+                confirmation_id=confirmation_id, task_id=task_id,
             )
         except Exception:
             logger.warning("could not record the Manager's call of %s", tool.name, exc_info=True)
