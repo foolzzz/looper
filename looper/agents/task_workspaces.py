@@ -166,7 +166,7 @@ class _Repository:
 async def _repository(workspace: str) -> _Repository | None:
     """The workspace's repository, None only outside a git work tree; inspection failures raise."""
     if not Path(workspace).is_dir():
-        raise TaskWorkspaceError(f"cannot inspect the workspace {workspace}: not a directory")
+        return None  # nothing there is no repository; the task runs in place (not_git)
     try:
         where = await ws._git(workspace, "rev-parse", "--show-toplevel", "--show-prefix", check=False)
         if where.returncode != 0:
