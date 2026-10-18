@@ -327,8 +327,8 @@ def prompt_layers(
             "knowledge_sha256": knowledge.sha256,
             "knowledge_documents": knowledge.documents,
             **({"knowledge_error": knowledge.error} if knowledge.error else {}),
-            # Unless the project turned the operator's notes off (``operator_notes``).
-            **({"operator_notes": knowledge.notes.record()} if knowledge.notes is not None else {}),
+            # Record only notes whose files were actually injected.
+            **({"operator_notes": knowledge.notes.record()} if knowledge.notes is not None and knowledge.notes.files else {}),
         },
         "task": None if task_kind is None else {
             "kind": task_kind, "task_id": task_id, "step_id": step_id, "sha256": sha256_text(task.strip()),

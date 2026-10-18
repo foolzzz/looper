@@ -285,4 +285,6 @@ def test_the_operators_notes_follow_the_knowledge_only_in_a_project_that_gives_t
     assert on.text == off.text.replace(INDEX, f"{INDEX}\n\n{notes.text}")
     assert on.text.index("Use uv.") < on.text.index(INDEX) < on.text.index("59322") < on.text.index("## Task")
     assert "operator_notes" not in off.layers["project"]
+    assert "operator_notes" not in without.layers["project"]
+    assert without.layers == off.layers
     assert on.layers["project"]["operator_notes"] == {"sha256": notes.sha256, "files": ["MEMORY.md"], "omitted": []}
