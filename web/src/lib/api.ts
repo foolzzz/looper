@@ -1960,9 +1960,11 @@ export interface LlmRecord {
     cwd?: string;
     /** The task step a Worker or Reviewer ran. */
     step_id?: string;
-    /** What Looper appended to Claude Code's system prompt (its built-in prompt is not included). */
+    /** The system prompt Looper supplied to the runtime. */
     system_prompt?: string;
     system_prompt_sha256?: string;
+    /** Missing on older runs, which appended to the runtime's default. */
+    system_prompt_mode?: SystemPromptMode;
     prompt_layers?: PromptLayers;
     /** The Agent Profile the run used and where it was selected (`runProfile` reads it for every run). */
     profile?: RunProfile;
@@ -2135,6 +2137,8 @@ export interface RuntimeType {
   /** The roles its capabilities let it run. */
   roles: AgentRole[];
   auth_kinds: ProviderAuth[];
+  can_replace_system_prompt: boolean;
+  replace_system_prompt_refusal: string | null;
 }
 
 /** A runtime on this machine: built in (one per type found on the server's PATH), or one registered by hand
@@ -2249,6 +2253,8 @@ export interface ProfileUsedBy {
   allowed_in: string[];
 }
 
+export type SystemPromptMode = "append" | "replace";
+
 /** An Agent Profile: a runtime, a provider and a model, with an optional effort, which its runs use. */
 export interface AgentProfile {
   profile_id: string;
@@ -2258,6 +2264,7 @@ export interface AgentProfile {
   effort: string | null;
   /** Claude Code's agent teams in its runs (Claude Code runtimes only). */
   agent_teams: boolean;
+  system_prompt_mode: SystemPromptMode;
   runtime_id: string;
   runtime_name: string;
   runtime_type: string;
@@ -2317,6 +2324,7 @@ export interface ProfileFields {
   model?: string;
   effort?: string | null;
   agent_teams?: boolean;
+  system_prompt_mode?: SystemPromptMode;
 }
 
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */

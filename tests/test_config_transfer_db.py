@@ -788,8 +788,8 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
                                                       layer["profile"])}
 
             expected = {k: v for k, v in old.items() if k not in ("exported_at", "agents")}
-            # A file from before agent teams has them on its Claude Code profiles, which all of its profiles are.
-            profiles = [{**a, "agent_teams": True} for a in old["agents"]]
+            # An older file uses agent teams on its Claude Code profiles and appends the system prompt.
+            profiles = [{**a, "agent_teams": True, "system_prompt_mode": "append"} for a in old["agents"]]
             # The runtime registered by hand stays behind: its profile runs on the built-in runtime of its type.
             _by_name(profiles, "beta/haiku")["runtime"] = "claude-code"
             for base, effort in (("claude-code/glm/glm-5.3[1m]", "high"), ("claude-code/sonnet", "high"),

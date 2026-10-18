@@ -45,7 +45,8 @@ it uses changes (``check_pairing``):
 - the runtime can be started with that kind of provider now
   (``RuntimeAdapter.auth_kinds``);
 - the model is one the provider lists, when it lists any;
-- agent teams are on only with a Claude Code runtime (``check_agent_teams``).
+- agent teams are on only with a Claude Code runtime (``check_agent_teams``);
+- replacing the default system prompt needs an adapter that supports it (``check_system_prompt_mode``).
 
 Where a profile is selected (a layer, or a task's choice for one of its roles),
 its runtime must have what each of those roles needs (``check_roles``,
@@ -64,7 +65,7 @@ from dataclasses import dataclass, field, fields
 from typing import Any
 
 from . import runtimes
-from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported
+from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported, SystemPromptMode
 
 NAME_MAX_CHARS = 240
 EXECUTABLE_MAX_CHARS = 1_000
@@ -162,6 +163,7 @@ class AgentProfile:
     model: str
     effort: str | None = None  # its default effort; a layer's effort wins
     agent_teams: bool = False  # Claude Code's agent teams in its runs (runtimes.claude_code)
+    system_prompt_mode: SystemPromptMode = SystemPromptMode.APPEND
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> AgentProfile:
@@ -170,6 +172,7 @@ class AgentProfile:
         return cls(
             id=row["id"], name=row["name"], model=row["model"], effort=row.get("effort"),
             agent_teams=bool(row.get("agent_teams")),
+            system_prompt_mode=SystemPromptMode(row.get("system_prompt_mode", "append")),
             runtime=RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
                                 row.get("runtime_executable") or "",
                                 frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known)),
@@ -429,6 +432,25 @@ def _agent_teams(raw: Any) -> bool:
     return raw
 
 
+def _system_prompt_mode(raw: Any) -> SystemPromptMode:
+    try:
+        return SystemPromptMode(raw)
+    except (ValueError, TypeError):
+        raise RegistryError('system_prompt_mode must be "append" or "replace"') from None
+
+
+def check_system_prompt_mode(runtime: RuntimeSpec, mode: SystemPromptMode) -> None:
+    """Refuse replacement unless the profile's final runtime explicitly supports it."""
+    if mode is not SystemPromptMode.REPLACE:
+        return
+    adapter = runtimes.ADAPTERS.get(runtime.type)
+    if adapter is None:
+        raise RegistryError(f"runtime {runtime.name!r} ({runtime.type}) cannot replace its default system prompt: "
+                            "its runtime type is unknown")
+    if refusal := runtimes.replace_refusal(adapter):
+        raise RegistryError(f"runtime {runtime.name!r}: {refusal}")
+
+
 def check_roles(profile: AgentProfile, roles: Iterable[str]) -> None:
     """Refuse ``profile`` for a role its runtime lacks a capability for."""
     adapter = runtimes.ADAPTERS.get(profile.runtime.type)
@@ -499,6 +521,8 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
             "protocols": sorted(p.value for p in adapter.protocols),
             "capabilities": sorted(c.value for c in adapter.capabilities),
             "roles": servable_roles(adapter.capabilities),
+            "can_replace_system_prompt": adapter.can_replace_system_prompt,
+            "replace_system_prompt_refusal": runtimes.replace_refusal(adapter),
             "auth_kinds": sorted(a.value for a in adapter.auth_kinds)}
 
 
@@ -620,6 +644,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) 
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
         "provider_id": row["provider_id"], "provider_name": row["provider_name"], "builtin": row["builtin"],
         "agent_teams": spec.agent_teams,
+        "system_prompt_mode": spec.system_prompt_mode.value,
         "roles": servable_roles(spec.runtime.capabilities), "used_by": dict(used_by),
         "cost": cost_basis(spec),
     }
@@ -904,7 +929,7 @@ async def delete_provider(provider_id: str) -> dict[str, Any]:
 
 # --- Agent Profiles ---
 
-_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams")
+_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "system_prompt_mode")
 
 
 async def _existing_profile(profile_id: str) -> dict[str, Any]:
@@ -929,8 +954,8 @@ async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, Provid
 
 
 async def create_profile(data: Any) -> dict[str, Any]:
-    """Register ``{name, runtime_id, provider_id, model, effort?, agent_teams?}`` (agent teams by default on a Claude
-    Code runtime); refused when it could not run."""
+    """Register a profile (system prompt appended by default, agent teams on for Claude Code); refuse settings
+    its runtime cannot run."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -938,9 +963,11 @@ async def create_profile(data: Any) -> dict[str, Any]:
     data = _fields(data, _PROFILE_FIELDS)
     fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
               "provider_id": data.get("provider_id"), "model": _model(data.get("model")),
-              "effort": _effort(data.get("effort"))}
+              "effort": _effort(data.get("effort")),
+              "system_prompt_mode": _system_prompt_mode(data.get("system_prompt_mode", "append"))}
     runtime, provider = await _parts(fields["runtime_id"], fields["provider_id"])
     fields["agent_teams"] = _agent_teams(data["agent_teams"]) if "agent_teams" in data else default_agent_teams(runtime)
+    check_system_prompt_mode(runtime, fields["system_prompt_mode"])
     check_pairing(runtime, provider, fields["model"])
     check_agent_teams(runtime, fields["agent_teams"])
     try:
@@ -980,6 +1007,8 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
         fields["effort"] = _effort(data["effort"])
     if "agent_teams" in data:
         fields["agent_teams"] = _agent_teams(data["agent_teams"])
+    if "system_prompt_mode" in data:
+        fields["system_prompt_mode"] = _system_prompt_mode(data["system_prompt_mode"])
     for name in ("runtime_id", "provider_id"):
         if name in data:
             fields[name] = data[name]
@@ -989,6 +1018,8 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
     if "agent_teams" not in fields and runtime.type != row["runtime_type"]:
         # A profile moved to a runtime of another type takes that type's default, unless the change says.
         fields["agent_teams"] = default_agent_teams(runtime)
+    check_system_prompt_mode(runtime, fields.get("system_prompt_mode",
+                                               _system_prompt_mode(row.get("system_prompt_mode", "append"))))
     check_pairing(runtime, provider, model)
     check_agent_teams(runtime, fields.get("agent_teams", bool(row.get("agent_teams"))))
     check_roles(AgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),

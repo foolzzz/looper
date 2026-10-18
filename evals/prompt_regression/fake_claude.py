@@ -302,8 +302,10 @@ def main(argv: list[str]) -> int:
         scenarios = json.load(handle)
     script = scenarios.get(os.path.realpath(os.getcwd())) or scenarios.get(_main_checkout(), {})
     system_prompt = ""
-    if "--append-system-prompt-file" in args:
-        with open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8") as handle:
+    # The prompt file comes with --append-system-prompt-file, or --system-prompt-file in a profile's replace mode.
+    flag = next((f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in args), None)
+    if flag:
+        with open(args[args.index(flag) + 1], encoding="utf-8") as handle:
             system_prompt = handle.read()
     stdin = _Stdin()
     # The role is in the task section: a Reviewer's names the step under review, a Worker's its step; the

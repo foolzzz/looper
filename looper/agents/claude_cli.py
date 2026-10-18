@@ -79,6 +79,9 @@ logger = logging.getLogger(__name__)
 # it whenever the flags change.
 ISOLATION_ID = "personal-config-off/v2"
 
+# Adapter discovery imports this module and reads ISOLATION_ID; keep that constant available first.
+from .runtimes import SystemPromptMode  # noqa: E402
+
 
 def repository_root(directory: Path) -> Path:
     """The nearest directory at or above ``directory`` holding ``.git``; ``directory`` without one."""
@@ -267,15 +270,16 @@ def permission_args() -> list[str]:
     return ["--dangerously-skip-permissions"]
 
 
-def system_prompt_args(prompt_file: Path) -> list[str]:
-    """Append the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
+def system_prompt_args(prompt_file: Path, mode: SystemPromptMode = SystemPromptMode.APPEND) -> list[str]:
+    """Append or replace the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
 
     By default Claude Code keeps the system prompt of a session's first
     request and sends it again on every resume, ignoring a changed file; the
     snapshot is turned off so that a restarted resident agent runs with the
     prompt its record names.
     """
-    return ["--append-system-prompt-file", str(prompt_file), "--system-prompt-snapshot", "off"]
+    flag = "--system-prompt-file" if mode is SystemPromptMode.REPLACE else "--append-system-prompt-file"
+    return [flag, str(prompt_file), "--system-prompt-snapshot", "off"]
 
 _READ_CHUNK = 64 * 1024
 

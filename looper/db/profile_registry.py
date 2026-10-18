@@ -22,7 +22,7 @@ from .connection import get_pool
 # The columns of an Agent Profile row joined with its runtime and provider, as one JSON object (also inside a layer).
 PROFILE_JSON = (
     "json_build_object('id', a.id, 'name', a.name, 'model', a.model, 'effort', a.effort, 'builtin', a.builtin, "
-    "'agent_teams', a.agent_teams, "
+    "'agent_teams', a.agent_teams, 'system_prompt_mode', a.system_prompt_mode, "
     "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
     "'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, 'provider_auth', p.auth, "
     "'provider_protocols', p.protocols, 'provider_oauth_runtime_type', p.oauth_runtime_type, "
@@ -205,24 +205,24 @@ async def get_profile(profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connectio
 
 
 async def insert_profile(fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> str:
-    """Add an Agent Profile (``name``, ``runtime_id``, ``provider_id``, ``model``, ``effort``, ``agent_teams``); its
-    id. Raises
+    """Add an Agent Profile (name, runtime, provider, model, effort, agent teams and prompt mode); its id. Raises
     ``asyncpg.UniqueViolationError`` for a name in use."""
     pool = pool or get_pool()
     # Profile ids keep the agent- prefix they had before the rename, so stored ids and new ones read alike.
     profile_id = new_id("agent")
     await pool.execute(
-        "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, system_prompt_mode) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         profile_id, fields["name"], fields["runtime_id"], fields["provider_id"], fields["model"], fields["effort"],
-        fields["agent_teams"],
+        fields["agent_teams"], fields.get("system_prompt_mode", "append"),
     )
     return profile_id
 
 
 async def update_profile(profile_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
     pool = pool or get_pool()
-    columns = [c for c in ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams") if c in fields]
+    columns = [c for c in ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "system_prompt_mode")
+               if c in fields]
     sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
     await pool.execute(f"UPDATE agent_profiles SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
                        profile_id, *[fields[c] for c in columns])

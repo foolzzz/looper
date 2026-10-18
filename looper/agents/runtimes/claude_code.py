@@ -104,6 +104,7 @@ def official_endpoint(base_url: str) -> bool:
 
 
 class ClaudeCodeRuntime(RuntimeAdapter):
+    can_replace_system_prompt = True
     type = "claude-code"
     label = "Claude Code"
     default_executable = "claude"
@@ -215,7 +216,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # permissions every agent shares and the plugins and skills installed for it come with the launch
             # args.
             *claude_cli.isolation_args(cwd),
-            *claude_cli.system_prompt_args(prompt_file),
+            *claude_cli.system_prompt_args(prompt_file, launch.system_prompt_mode),
             *self.launch_args(launch),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
@@ -242,7 +243,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # agent shares and the plugins and skills installed for this run
             # come with the launch args.
             *claude_cli.isolation_args(cwd),
-            *claude_cli.system_prompt_args(prompt_file),
+            *claude_cli.system_prompt_args(prompt_file, launch.system_prompt_mode),
             *self.launch_args(launch),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
