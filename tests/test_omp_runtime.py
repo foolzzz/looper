@@ -643,7 +643,7 @@ def test_a_consult_resumes_a_copy_of_the_runs_session_with_only_the_reading_tool
     (kept / "session.jsonl").write_text("{}\n")
     fork = tmp_path / "runtime" / ".local" / "omp" / "consult-sessions" / "task-1" / "consult-1"
     command = OMP.consult_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path),
-                                  launch=replace(_launch(), read_only=True), session_id="s-1", session_dir=kept,
+                                  launch=replace(_launch(), consult=True), session_id="s-1", session_dir=kept,
                                   fork_dir=fork)
     assert _flag(command, "--tools") == ["read,glob,grep"]
     assert command[-4:] == ["--session-dir", str(fork), "--resume", "s-1"] and (fork / "session.jsonl").is_file()

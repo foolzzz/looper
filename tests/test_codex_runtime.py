@@ -627,7 +627,7 @@ def test_a_consult_resumes_a_copy_of_the_runs_session_in_the_read_only_sandbox(t
     for name in ("state_5.sqlite", "state_5.sqlite-wal", "auth.json"):
         (kept / name).write_text("")
     fork = root / ".local" / "codex" / "consult-sessions" / "task-1" / "consult-1"
-    launch = replace(_launch(), read_only=True)
+    launch = replace(_launch(), consult=True)
     command = CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch,
                                     session_id="thread-1", session_dir=kept, fork_dir=fork)
     assert command[:4] == ["env", f"CODEX_HOME={fork}", "codex", "exec"] and command[-3:] == ["resume", "thread-1", "-"]
@@ -655,7 +655,7 @@ def test_a_login_consult_links_the_operators_login_and_copies_no_auth_file(
     (kept / "auth.json").write_text('{"tokens": "a copy Codex wrote over the link"}')
     fork = root / ".local" / "codex" / "consult-sessions" / "task-1" / "consult-1"
     CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root),
-                          launch=replace(_launch(provider=_login_provider()), read_only=True),
+                          launch=replace(_launch(provider=_login_provider()), consult=True),
                           session_id="thread-1", session_dir=kept, fork_dir=fork)
     link = fork / "auth.json"
     # The consult's home links the operator's login like any login run's; nothing of the run's auth.json reaches it.

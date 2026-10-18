@@ -265,7 +265,7 @@ class ConsultService:
             raise _Failed(FallbackReason.RUNTIME_CANNOT, "the seat's Agent Profile now runs on another runtime or "
                                                          "provider than its session")
         budget = min(limits.consult_budget_usd, settings.max_budget_usd or limits.consult_budget_usd)
-        launch = Launch(replace(settings, max_budget_usd=budget), role=agent, read_only=True)
+        launch = Launch(replace(settings, max_budget_usd=budget), role=agent, consult=True)
         runtime = launch.runtime
         # Where it runs: where the step ran, its runtime keeping it from writing; else a throwaway checkout.
         cwd, snapshot = str(metadata.get("cwd") or task.get("work_dir") or ""), None

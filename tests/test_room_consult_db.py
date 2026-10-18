@@ -114,8 +114,7 @@ def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_sess
         argv = record["argv"]
         assert argv[argv.index("--resume") + 1] == "s-1" and "--fork-session" in argv
         assert "--dangerously-skip-permissions" not in argv
-        assert argv[argv.index("--disallowedTools") + 1: argv.index("--disallowedTools") + 4] == \
-            ["Edit", "Write", "NotebookEdit"]
+        assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,NotebookEdit"
         assert record["system"].endswith(CONSULT_CONTRACT) and WORK_CONTRACT not in record["system"]
         assert record["prompt"].startswith("[CONSULT] You are backend_rd@s1") and "qty or quantity?" in record["prompt"]
         run = await pool.fetchrow("SELECT agent_id, cost_usd FROM llm_records WHERE agent_id LIKE 'consult-%'")

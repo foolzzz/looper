@@ -111,7 +111,7 @@ def test_a_consult_forks_one_session_into_a_home_of_its_own_and_takes_no_credent
     assert GROK.kept_session_dir(ran) == home
     before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file() and not p.is_symlink()}
     fork = root / ".local" / "grok" / "consult-sessions" / "task-1" / "consult-1"
-    launch = dataclasses.replace(_launch(), read_only=True)
+    launch = dataclasses.replace(_launch(), role=AgentType.WORKER, consult=True)
     command = GROK.consult_command("grok", cwd=tmp_path, prompt_file=_prompt_file(root, "THE CONSULT RULES"),
                                    launch=launch, session_id="sess-1", session_dir=home, fork_dir=fork, max_turns=20)
 
@@ -346,9 +346,17 @@ def test_the_config_keeps_the_operators_and_other_tools_directories_out(
     assert section.splitlines()[-len(lines):] == lines
 
 
-@pytest.mark.parametrize("read_only", [False, True], ids=["writing", "read-only"])
-def test_only_a_read_only_run_is_cut_down_to_the_reading_tools(read_only: bool, tmp_path: Path) -> None:
-    launch = _read_only_launch() if read_only else _launch()
+@pytest.mark.parametrize(("role", "consult", "read_only"), [
+    (None, False, False),
+    (AgentType.WORKER, False, False),
+    (AgentType.PLANNER, False, True),
+    (AgentType.WORKER, True, True),
+    (AgentType.PLANNER, True, True),
+])
+def test_only_a_read_only_run_is_cut_down_to_the_reading_tools(
+    role: AgentType | None, consult: bool, read_only: bool, tmp_path: Path,
+) -> None:
+    launch = dataclasses.replace(_launch(), role=role, consult=consult)
     assert launch.read_only is read_only and GROK.read_only is ReadOnly.TOOLS
     for command in (GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch),
                     GROK.resident_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)):
