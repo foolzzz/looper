@@ -2481,6 +2481,7 @@ export interface AgentProfile {
   /** Claude Code's agent teams in its runs (Claude Code runtimes only). */
   agent_teams: boolean;
   system_prompt_mode: SystemPromptMode;
+  custom_prompt: string;
   runtime_id: string;
   runtime_name: string;
   runtime_type: string;
@@ -2541,6 +2542,26 @@ export interface ProfileFields {
   effort?: string | null;
   agent_teams?: boolean;
   system_prompt_mode?: SystemPromptMode;
+  custom_prompt?: string;
+}
+
+export interface PromptBlock {
+  name: string;
+  owner: "looper" | "runtime";
+  text: string | null;
+  note: string;
+}
+
+export interface PromptPreview {
+  profile: { id: string; name: string };
+  role: AgentRole;
+  runtime: string;
+  system_prompt_mode: SystemPromptMode;
+  custom_prompt_set: boolean;
+  looper_prompt_sha256: string;
+  prompt_layers: Record<string, unknown>;
+  blocks: PromptBlock[];
+  notes: string[];
 }
 
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */
@@ -2599,6 +2620,14 @@ export function updateAgentProfile(
   fields: ProfileFields,
 ): Promise<{ profile: AgentProfile; warnings: string[] }> {
   return registryCall("PUT", `/agent-profiles/${encodeURIComponent(profileId)}`, fields, "update Agent Profile");
+}
+
+export async function fetchPromptPreview(profileId: string, role: AgentRole, projectId?: string): Promise<PromptPreview> {
+  const query = new URLSearchParams({ role });
+  if (projectId !== undefined) query.set("project_id", projectId);
+  const res = await fetch(`${API_BASE}/agent-profiles/${encodeURIComponent(profileId)}/prompt-preview?${query}`);
+  if (!res.ok) await failed(res, "preview system prompt");
+  return res.json();
 }
 
 export function deleteAgentProfile(profileId: string): Promise<{ deleted: string }> {

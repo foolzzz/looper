@@ -61,7 +61,7 @@ async def read_profiles(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every Agent Profile, its runtime and provider by name."""
     rows = await conn.fetch(
         "SELECT a.id, a.name, r.name AS runtime, p.name AS provider, a.model, a.effort, a.agent_teams, "
-        "a.system_prompt_mode, a.builtin "
+        "a.system_prompt_mode, a.custom_prompt, a.builtin "
         "FROM agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
         "JOIN llm_providers p ON p.id = a.provider_id "
         "ORDER BY a.name COLLATE \"C\""
@@ -252,17 +252,17 @@ async def write_profile(conn: asyncpg.Connection, profile_id: str | None, values
     if profile_id is None:
         profile_id = f"agent-{uuid.uuid4().hex[:12]}"
         await conn.execute(
-            "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, system_prompt_mode) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, system_prompt_mode, custom_prompt) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             profile_id, values["name"], values["runtime_id"], values["provider_id"], values["model"],
-            values["effort"], values["agent_teams"], values.get("system_prompt_mode", "append"),
+            values["effort"], values["agent_teams"], values.get("system_prompt_mode", "append"), values.get("custom_prompt", ""),
         )
     else:
         await conn.execute(
             "UPDATE agent_profiles SET runtime_id = $2, provider_id = $3, model = $4, effort = $5, agent_teams = $6, "
-            "system_prompt_mode = $7, updated_at = now() WHERE id = $1",
+            "system_prompt_mode = $7, custom_prompt = $8, updated_at = now() WHERE id = $1",
             profile_id, values["runtime_id"], values["provider_id"], values["model"], values["effort"],
-            values["agent_teams"], values.get("system_prompt_mode", "append"),
+            values["agent_teams"], values.get("system_prompt_mode", "append"), values.get("custom_prompt", ""),
         )
     return profile_id
 

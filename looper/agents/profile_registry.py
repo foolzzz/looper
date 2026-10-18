@@ -165,6 +165,7 @@ class AgentProfile:
     effort: str | None = None  # its default effort; a layer's effort wins
     agent_teams: bool = False  # Claude Code's agent teams in its runs (runtimes.claude_code)
     system_prompt_mode: SystemPromptMode = SystemPromptMode.APPEND
+    custom_prompt: str = ""
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> AgentProfile:
@@ -174,6 +175,7 @@ class AgentProfile:
             id=row["id"], name=row["name"], model=row["model"], effort=row.get("effort"),
             agent_teams=bool(row.get("agent_teams")),
             system_prompt_mode=SystemPromptMode(row.get("system_prompt_mode", "append")),
+            custom_prompt=row.get("custom_prompt", ""),
             runtime=RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
                                 row.get("runtime_executable") or "",
                                 frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known)),
@@ -188,7 +190,7 @@ class AgentProfile:
     def record(self) -> dict[str, Any]:
         """Its entry in a run's record: what it is made of, by id and name."""
         return {
-            "id": self.id, "name": self.name, "model": self.model,
+            "id": self.id, "name": self.name, "model": self.model, "custom_prompt": self.custom_prompt,
             "runtime": {"id": self.runtime.id, "name": self.runtime.name, "type": self.runtime.type},
             "provider": {"id": self.provider.id, "name": self.provider.name, "auth": self.provider.auth.value},
         }
@@ -440,6 +442,19 @@ def _system_prompt_mode(raw: Any) -> SystemPromptMode:
         raise RegistryError('system_prompt_mode must be "append" or "replace"') from None
 
 
+def _custom_prompt(raw: Any) -> str:
+    from .agent_settings import HARNESS_MAX_CHARS
+
+    if not isinstance(raw, str):
+        raise RegistryError("custom_prompt must be a string")
+    if "\x00" in raw:
+        raise RegistryError("custom_prompt cannot contain NUL characters")
+    text = raw.strip()
+    if len(text) > HARNESS_MAX_CHARS:
+        raise RegistryError(f"custom_prompt has at most {HARNESS_MAX_CHARS} characters, got {len(text)}")
+    return text
+
+
 def check_system_prompt_mode(runtime: RuntimeSpec, mode: SystemPromptMode) -> None:
     """Refuse replacement unless the profile's final runtime explicitly supports it."""
     if mode is not SystemPromptMode.REPLACE:
@@ -646,6 +661,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) 
         "provider_id": row["provider_id"], "provider_name": row["provider_name"], "builtin": row["builtin"],
         "agent_teams": spec.agent_teams,
         "system_prompt_mode": spec.system_prompt_mode.value,
+        "custom_prompt": spec.custom_prompt,
         "roles": servable_roles(spec.runtime.capabilities), "used_by": dict(used_by),
         "cost": cost_basis(spec),
     }
@@ -930,7 +946,7 @@ async def delete_provider(provider_id: str) -> dict[str, Any]:
 
 # --- Agent Profiles ---
 
-_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "system_prompt_mode")
+_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "system_prompt_mode", "custom_prompt")
 
 
 async def _existing_profile(profile_id: str) -> dict[str, Any]:
@@ -965,7 +981,8 @@ async def create_profile(data: Any) -> dict[str, Any]:
     fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
               "provider_id": data.get("provider_id"), "model": _model(data.get("model")),
               "effort": _effort(data.get("effort")),
-              "system_prompt_mode": _system_prompt_mode(data.get("system_prompt_mode", "append"))}
+              "system_prompt_mode": _system_prompt_mode(data.get("system_prompt_mode", "append")),
+              "custom_prompt": _custom_prompt(data.get("custom_prompt", ""))}
     runtime, provider = await _parts(fields["runtime_id"], fields["provider_id"])
     fields["agent_teams"] = _agent_teams(data["agent_teams"]) if "agent_teams" in data else default_agent_teams(runtime)
     check_system_prompt_mode(runtime, fields["system_prompt_mode"])
@@ -1010,6 +1027,8 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
         fields["agent_teams"] = _agent_teams(data["agent_teams"])
     if "system_prompt_mode" in data:
         fields["system_prompt_mode"] = _system_prompt_mode(data["system_prompt_mode"])
+    if "custom_prompt" in data:
+        fields["custom_prompt"] = _custom_prompt(data["custom_prompt"])
     for name in ("runtime_id", "provider_id"):
         if name in data:
             fields[name] = data[name]

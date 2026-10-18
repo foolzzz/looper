@@ -21,7 +21,7 @@ from typing import Any
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    overview, profile_registry, project_skills, projects, request_guard, role_api, schedules, self_check,
+    overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api, schedules, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -338,6 +338,7 @@ class AgentHTTPServer:
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
+    _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
@@ -527,6 +528,9 @@ class AgentHTTPServer:
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
         elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
+        elif (m := self._RE_PROFILE_PROMPT_PREVIEW.match(path)) and method == "GET":
+            await self._handle_registry(writer, HTTP_200, lambda: prompt_preview.preview(
+                m.group(1), query.get("role", ""), query.get("project_id") or None))
         elif path == "/api/agent-profiles" and method == "POST":
             await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_profile(
                 projects.json_object(body)))

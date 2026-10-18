@@ -3,14 +3,14 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentProfileForm, AgentProfilesSection } from "@/components/agent-profiles";
-import type { AgentProfile, Registry } from "@/lib/api";
+import { fetchPromptPreview, type AgentProfile, type Registry } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const REFUSAL = "the Stand-in runtime cannot replace its default system prompt";
 const PROFILE: AgentProfile = {
   profile_id: "p", name: "Profile", model: "model", effort: null, agent_teams: true,
-  system_prompt_mode: "append", runtime_id: "rt-claude-code", runtime_type: "claude-code",
+  system_prompt_mode: "append", custom_prompt: "", runtime_id: "rt-claude-code", runtime_type: "claude-code",
   runtime_name: "Claude Code", provider_id: "provider", provider_name: "Provider", builtin: false,
   roles: ["worker"], used_by: { layers: [], task_count: 0, allowed_in: [] },
   cost: { source: "runtime", equivalent: false, unpriced: [] },
@@ -40,7 +40,7 @@ const REGISTRY: Registry = {
   },
 };
 
-describe("Agent Profile system prompt mode", () => {
+describe("Agent Profile prompts", () => {
   let container: HTMLDivElement;
   let root: Root;
   let requests: { url: string; body: Record<string, unknown> }[];
@@ -119,5 +119,76 @@ describe("Agent Profile system prompt mode", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(registry), { status: 200 })));
     await act(async () => root.render(<AgentProfilesSection />));
     expect(container.textContent).toContain("agent teams on · replaces default system prompt");
+  });
+
+  it("edits and saves custom prompt text", async () => {
+    await show({ ...PROFILE, custom_prompt: "Use plain language." });
+    const label = [...container.querySelectorAll("label")].find((item) => item.textContent === "Custom prompt");
+    const field = document.getElementById(label!.htmlFor) as HTMLTextAreaElement;
+    expect(field.value).toBe("Use plain language.");
+    expect(container.textContent).toContain("Text placed first in this profile's system prompt, before the harness. Empty adds nothing.");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(field, "Speak briefly.");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(requests[0].body.custom_prompt).toBe("Speak briefly.");
+  });
+
+  it("defaults a new profile's custom prompt to empty", async () => {
+    await act(async () => root.render(<AgentProfileForm profile={null} registry={REGISTRY} onDone={() => {}} />));
+    expect(container.querySelector("textarea")!.value).toBe("");
+  });
+
+  it("loads a selected role's preview and renders blocks in order with ownership and notes", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return new Response(JSON.stringify(url.includes("prompt-preview") ? {
+        profile: { id: "p", name: "Profile" }, role: "reviewer", runtime: "claude-code", system_prompt_mode: "append",
+        custom_prompt_set: true, looper_prompt_sha256: "hash", prompt_layers: { custom_prompt: { sha256: "hash" } },
+        blocks: [
+          { name: "Default prompt", owner: "runtime", text: null, note: "Claude Code's default prompt (not shown)" },
+          { name: "Looper prompt", owner: "looper", text: "Speak briefly.\n\nHarness", note: "Appended to the main block" },
+        ], notes: ["the Task section is filled in at launch"],
+      } : { ...REGISTRY, profiles: [{ ...PROFILE, roles: ["worker", "reviewer"] }] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<AgentProfilesSection />));
+    const details = container.querySelector("details")!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")!.textContent).toBe("Preview system prompt");
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes("prompt-preview"))).toBe(false);
+    details.open = true;
+    await choose("Role", "reviewer");
+    const load = [...container.querySelectorAll("button")].find((button) => button.textContent === "Load")!;
+    await act(async () => load.click());
+    expect(fetcher.mock.calls.at(-1)![0]).toBe("/api/agent-profiles/p/prompt-preview?role=reviewer");
+    expect(details.textContent!.indexOf("Default prompt")).toBeLessThan(details.textContent!.indexOf("Looper prompt"));
+    expect(details.textContent).toContain("Runtime");
+    expect(details.textContent).toContain("Looper");
+    expect(details.textContent).toContain("Claude Code's default prompt (not shown)");
+    expect(details.textContent).toContain("the Task section is filled in at launch");
+    const boxes = details.querySelectorAll("textarea");
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0].readOnly).toBe(true);
+    expect(boxes[0].value).toBe("Speak briefly.\n\nHarness");
+    await choose("Role", "worker");
+    expect(details.querySelector("textarea")).toBeNull();
+  });
+
+  it("shows preview errors without claiming the prompt loaded", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input).includes("prompt-preview")
+      ? new Response(JSON.stringify({ error: "Profile cannot run this role" }), { status: 400 })
+      : new Response(JSON.stringify(REGISTRY), { status: 200 })));
+    await act(async () => root.render(<AgentProfilesSection />));
+    const load = [...container.querySelectorAll("button")].find((button) => button.textContent === "Load")!;
+    await act(async () => load.click());
+    expect(container.querySelector('[role="alert"]')!.textContent).toContain("Profile cannot run this role");
+    expect(container.querySelector("details textarea")).toBeNull();
+  });
+
+  it("includes and encodes the optional project in preview requests", async () => {
+    await fetchPromptPreview("p/1", "planner", "project /?");
+    expect(fetch).toHaveBeenCalledWith("/api/agent-profiles/p%2F1/prompt-preview?role=planner&project_id=project+%2F%3F");
   });
 });

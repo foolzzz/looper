@@ -702,6 +702,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **Profile 自定义提示词与分块预览**（RFC 第 6 节，已实现，验证待完成）：`custom_prompt` 默认空，放在 harness 前；贯通 Profile、配置导入导出、派生 Profile、管家工具与四种运行时。Agent Profiles 提供自定义文本编辑和按角色加载的只读预览，预览与启动共用 prompt builder 和适配器文本布局；任务段、依赖运行目录的知识索引及其他启动上下文在预览中标明。已补定向 Python/数据库与 Web 测试；指定验证入口受当前执行环境写权限限制，测试及类型检查尚未运行，真实 CLI 与浏览器验证待补。
 - **「飞书机器人 token」渠道类型（2026-10-15 定）**：和「飞书（lark-cli）」并列的另一种渠道类型，功能相同（私聊收发、回复、定时任务通知、自己的发送者白名单与按姓名添加、被拒发送者）。不经 lark-cli，直接调用飞书开放平台：app_id 和 app_secret 存进 `channel_secrets`（接口只显示是否已设置，界面打码），用 tenant_access_token 收发；收消息需要事件订阅（长连接或回调地址），做法先核实。
 - **插件与 skill 库的上下文开销**：全部导入后，opus 首个请求的 token 约增加 86%（M1.6 实测）。M8a 起导入的条目默认不加载，结合 M2 的花费数据按角色安装常用的。
 - **v2.6.0 已发布（2026-10-14）**：[release](https://github.com/foolzzz/looper/releases/tag/v2.6.0)，由 Release workflow 按 tag 构建发布，附 `looper-2.6.0-py3-none-any.whl`。发布后实测：在空白 HOME 里用 `install.sh` 全新安装（`looper 2.6.0`、`loopx` 别名、serve 与 doctor 正常）；从 v2.5.0 升级（`install.sh` 卸掉旧 `loopx` 包；首次启动把 `~/.loopx` 搬到 `~/.looper` 并留链接，按 v2.5.0 表结构先备份再迁移）。下一个版本待定。

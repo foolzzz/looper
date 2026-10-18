@@ -620,6 +620,7 @@ class ManagerAgent:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
         return build_system_prompt(
             harness=agent_settings.harness,
+            custom_prompt=agent_settings.profile.custom_prompt,
             role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
             contract_name="TOOLS_CONTRACT", contract=TOOLS_CONTRACT,
         )

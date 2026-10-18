@@ -63,7 +63,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
 
@@ -187,6 +187,32 @@ class RuntimeUnsupported(ValueError):
     """The runtime cannot do what was asked of it (yet)."""
 
 
+@dataclass(frozen=True)
+class PromptBlock:
+    """One ordered prompt input: Looper's full text, or a runtime-owned part's explanation."""
+
+    name: str
+    owner: Literal["looper", "runtime"]
+    text: str | None
+    note: str
+
+
+def runtime_prompt_text(launch: Launch, looper_prompt: str, *prefixes: str, keep_empty: bool = True) -> str:
+    """Keep adapter notes before the harness, while a profile's custom text stays first.
+
+    Empty custom text preserves the existing files byte for byte. A recorded
+    prompt which does not start with this profile's text is left intact (consults).
+    """
+    custom = launch.profile.custom_prompt.strip()
+    first = ""
+    if custom and (looper_prompt == custom or looper_prompt.startswith(custom + "\n\n")):
+        first, looper_prompt = custom + "\n\n", looper_prompt[len(custom):].removeprefix("\n\n")
+    parts = [part for part in prefixes if part]
+    if looper_prompt or keep_empty:
+        parts.append(looper_prompt)
+    return first + "\n\n---\n\n".join(parts)
+
+
 class RuntimeAdapter(ABC):
     """One runtime type. Instances are stateless; ``ADAPTERS`` holds one per type."""
 
@@ -222,6 +248,11 @@ class RuntimeAdapter(ABC):
         return self.capabilities
 
     # --- The launch ---
+
+    @abstractmethod
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        """The ordered system inputs, including injected project files when ``cwd`` is known, using the same
+        text layout as the real command's files."""
 
     @abstractmethod
     def isolation_args(self, cwd: str | Path) -> list[str]:

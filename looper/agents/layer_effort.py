@@ -95,10 +95,11 @@ class _Targets:
     def __call__(self, base: AgentProfile, effort: str | None) -> Choice:
         if (effort or None) == (base.effort or None):
             return base
-        key = (base.runtime.id, base.provider.id, base.model, base.agent_teams, base.system_prompt_mode, effort)
+        key = (base.runtime.id, base.provider.id, base.model, base.agent_teams, base.system_prompt_mode,
+               base.custom_prompt, effort)
         for profile in self.profiles:
             if (profile.runtime.id, profile.provider.id, profile.model, profile.agent_teams,
-                    profile.system_prompt_mode, profile.effort) == key:
+                    profile.system_prompt_mode, profile.custom_prompt, profile.effort) == key:
                 return profile
         if key not in self.derived:
             name, n = f"{base.name} · {effort}", 2
@@ -270,7 +271,7 @@ async def _apply(conn: Any, layers: Mapping[Key, Before], conversion: Conversion
         ids[derived.name] = await insert_profile(
             {"name": derived.name, "runtime_id": base.runtime.id, "provider_id": base.provider.id,
              "model": base.model, "effort": derived.effort, "agent_teams": base.agent_teams,
-             "system_prompt_mode": base.system_prompt_mode}, pool=conn)
+             "system_prompt_mode": base.system_prompt_mode, "custom_prompt": base.custom_prompt}, pool=conn)
         logger.info("the effort is the Agent Profile's now: added Agent Profile %r (%s with effort %s)",
                     derived.name, base.name, derived.effort)
 

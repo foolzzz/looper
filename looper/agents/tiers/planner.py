@@ -2738,7 +2738,8 @@ class PlannerAgent:
         if agent_settings.profile_error:
             # The task fails with the reason rather than run another agent.
             raise PlannerTurnError(agent_settings.profile_error)
-        system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness)
+        system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness,
+                                            custom_prompt=agent_settings.profile.custom_prompt)
         launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER)  # never with agent teams
         await self._note_background(plan.project_background)
         try:
@@ -3081,7 +3082,7 @@ class PlannerAgent:
         return begin
 
     def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings, knowledge: AgentKnowledge,
-                       harness: Harness) -> SystemPrompt:
+                       harness: Harness, *, custom_prompt: str = "") -> SystemPrompt:
         """The harness, the role prompt, the project background and knowledge index, the task, then the reply
         contract."""
         project = None
@@ -3090,6 +3091,7 @@ class PlannerAgent:
                        "updated_at": plan.project_updated_at}
         return build_system_prompt(
             harness=harness,
+            custom_prompt=custom_prompt,
             role_id="planner",
             role=settings.system_prompt,
             recommended=settings.recommended,

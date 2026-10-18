@@ -73,8 +73,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, reported_totals, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    codex_login, instructions,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+    codex_login, instructions, runtime_prompt_text,
 )
 from .instructions import InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -192,6 +192,17 @@ class CodexRuntime(RuntimeAdapter):
                              model_instructions_file=instructions)
         home = write_home(local, config, agents, login=login)
         return ["env", f"CODEX_HOME={home}", executable, "exec", *self.launch_args(launch)]
+
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
+                             "base instructions file" if launch.system_prompt_mode is SystemPromptMode.REPLACE
+                             else "AGENTS.md")
+        runtime = PromptBlock("Runtime instructions", "runtime", None, "skills/permissions notes (not shown)")
+        environment = PromptBlock("Environment", "runtime", None, "environment (not shown)")
+        if launch.system_prompt_mode is SystemPromptMode.REPLACE:
+            return [looper, runtime, environment]
+        return [PromptBlock("Base instructions", "runtime", None, "base instructions (not shown)"),
+                runtime, looper, environment]
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -524,8 +535,12 @@ def runtime_notes(catalog: RuntimeCatalog) -> str:
 
 
 def agents_md(prompt_file: Path, launch: Launch) -> str:
-    """A run's ``AGENTS.md``: the runtime notes, then Looper's system prompt as its file holds it."""
-    return runtime_notes(materialize(launch.library)) + "\n\n---\n\n" + Path(prompt_file).read_text(encoding="utf-8")
+    """A run's ``AGENTS.md``: custom text first when set, with adapter notes before the harness."""
+    return _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch)
+
+
+def _prompt_text(looper_prompt: str, launch: Launch) -> str:
+    return runtime_prompt_text(launch, looper_prompt, runtime_notes(materialize(launch.library)))
 
 
 def _codex_dir(local: Path) -> Path:

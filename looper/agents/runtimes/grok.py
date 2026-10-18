@@ -71,8 +71,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, request_tokens, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    grok_login, instructions,
+    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
+    RuntimeAdapter, RuntimeUnsupported, grok_login, instructions, runtime_prompt_text,
 )
 from .codex import _HASHED, _toml_key, _toml_value
 from .instructions import InstructionFile
@@ -199,6 +199,13 @@ class GrokRuntime(RuntimeAdapter):
         return ["env", f"GROK_HOME={home}", f"HOME={home}", executable, *args,
                 *(["--agent", str(home / "agent.md")] if agent is not None else []),
                 *(["--max-turns", str(max_turns)] if max_turns > 0 else [])]
+
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        replacing = launch.system_prompt_mode is SystemPromptMode.REPLACE
+        looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
+                             "agent definition" if replacing else "rules/looper.md")
+        return ([looper] if replacing else
+                [PromptBlock("Default prompt", "runtime", None, "Grok's default prompt (not shown)"), looper])
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -415,9 +422,13 @@ def runtime_notes(servers: list[str]) -> str:
 
 
 def rules_md(prompt_file: Path, launch: Launch) -> str:
-    """A run's ``rules/looper.md``: the runtime notes, then Looper's system prompt as its file holds it."""
+    """A run's rules: custom text first when set, with adapter notes before the harness."""
+    return _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch)
+
+
+def _prompt_text(looper_prompt: str, launch: Launch) -> str:
     servers = [name for name, _ in mcp_servers(launch.library)[0]]
-    return runtime_notes(servers) + "\n\n---\n\n" + Path(prompt_file).read_text(encoding="utf-8")
+    return runtime_prompt_text(launch, looper_prompt, runtime_notes(servers))
 
 
 def config_toml(launch: Launch, *, shell_home: Path) -> str:
