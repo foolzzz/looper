@@ -68,7 +68,7 @@ def test_a_task_names_its_workspace_and_is_told_what_it_will_run_in(
 
         status, check = await _check(server, {"dir": str(workspace), "project_id": project["id"]})
         assert status == 200 and (check["mode"], check["default_mode"], check["notes_on"]) == (
-            "worktree", "worktree", False)
+            "worktree", "worktree", True)
         assert [w["kind"] for w in check["warnings"]] == ["uncommitted", "shared"]
         assert check["notes"] == {"found": True, "files": ["MEMORY.md"], "omitted": []}
         status, here = await _check(server, {"project_id": project["id"], "mode": "worktree"})

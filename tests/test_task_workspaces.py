@@ -171,6 +171,11 @@ def test_outside_git_a_worktree_task_runs_in_place(tmp_path: Path, store: Store)
     plain.mkdir()
     found = run(tw.check(str(plain), mode=WORKTREE))
     assert (found["mode"], found["git"], [w["kind"] for w in found["warnings"]]) == ("in_place", None, ["not_git"])
+    # The project's default worktree falling back to in place is warned of too, in softer words.
+    default = run(tw.check(str(plain), mode=WORKTREE, asked=False))
+    assert [w["kind"] for w in default["warnings"]] == ["not_git"] and default["mode"] == "in_place"
+    assert default["warnings"][0]["text"] != found["warnings"][0]["text"] and "by default" in default["warnings"][0]["text"]
+    assert run(tw.check(str(plain), mode=IN_PLACE, asked=False))["warnings"] == []  # in place there is nothing to say
     assert prepare(store, task("task-p", plain), tmp_path / "rt") == str(plain)
     assert store.worktrees == {} and "not in a git repository" in store.notes[-1][1]
 

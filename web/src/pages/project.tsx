@@ -266,7 +266,7 @@ function executionRows(project: Project): [string, string][] {
     rows.push(["Steps at the same time", "A git worktree each, merged into the branch when accepted"]);
   if (project.task_workspaces === "worktree") rows.push(["Where tasks run", "In a git worktree of the directory"]);
   if (project.workspace_links?.length) rows.push(["Linked into Looper's worktrees", project.workspace_links.join(", ")]);
-  if (project.operator_notes === "on") rows.push(["Operator's notes", "Given to the agents, read-only"]);
+  if (project.operator_notes === "off") rows.push(["Operator's notes", "Not given to the agents"]);
   if (project.max_step_retries != null)
     rows.push(["Retries per step", String(project.max_step_retries)]);
   if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);

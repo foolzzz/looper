@@ -183,8 +183,8 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 @pytest.mark.usefixtures("agent_db")
-@pytest.mark.parametrize(("setting", "given"), [("on", True), ("off", False), (None, False)])
-def test_the_planner_gets_them_only_when_its_project_gives_them(planner_claude: object, agent_db: object,
+@pytest.mark.parametrize(("setting", "given"), [("on", True), ("off", False), (None, True)])
+def test_the_planner_gets_them_unless_its_project_turns_them_off(planner_claude: object, agent_db: object,
                                                               asked: list[str], setting: str | None,
                                                               given: bool) -> None:
     from test_planner_agent import WORK_OK, decide, drive, plan, step
@@ -200,8 +200,8 @@ def test_the_planner_gets_them_only_when_its_project_gives_them(planner_claude: 
 
 
 @pytest.mark.usefixtures("agent_db")
-@pytest.mark.parametrize(("setting", "given"), [("on", True), (None, False)])
-def test_a_worker_gets_them_only_when_its_project_gives_them(agent_db: object, asked: list[str],
+@pytest.mark.parametrize(("setting", "given"), [("on", True), ("off", False), (None, True)])
+def test_a_worker_gets_them_unless_its_project_turns_them_off(agent_db: object, asked: list[str],
                                                             monkeypatch: pytest.MonkeyPatch, setting: str | None,
                                                             given: bool) -> None:
     from tests.test_agent_planner_worker import _run_step, _worker_row

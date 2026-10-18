@@ -48,8 +48,8 @@ Looper 会用在很多已有的项目上，这些项目本来就有自己的工�
 | W2 | **任务 worktree 在任务第一次开始时建**（`git worktree add -b looper/<task_id>/task <路径> <基点>`），不在建任务时建：建了不开始的任务什么都不留。W 不在 git 里 → 原地跑，activity 和任务页写明原因；基点解析不出来 → 这次开始失败，任务失败并写明（建任务时的检查接口已经提醒过） | 分支名用 `looper/<task_id>/task` 而不是 `looper/<task_id>`：步骤分支是 `looper/<task_id>/<key>-<n>`，git 的引用名里两者不能并存 |
 | W3 | **结束时**（维护者定：分支留给用户，不自动合并）：完成 → 把任务 worktree 里没提交的改动按 I1 的 D8 提交到 T（Looper 身份、尾注、不签名、不跑钩子、链接不进结果），删掉 worktree，保留 T，activity、任务页和结束通知写明 T 和怎么合并。失败、停止、取消 → worktree 原样保留，`continue` 重启时接着用（同一路径、同一分支、未提交的改动都在）。删除任务 → 先提交剩余改动，再删 worktree，保留 T。`start_over` → 同一个 worktree、同一个 T 上重新规划（和原地任务的 start over 不还原目录一样）。服务启动时清扫：没有任务或任务已完成的任务 worktree 按「完成」处理 | 和步骤 worktree 的 Q4 一致：没做完的留着，用户和重启都还用得上；做完的只留分支。先提交再删，删 worktree 不会丢任何东西 |
 | W4 | **被忽略的本地状态**：I2 的 `step_workspace_links` 改名为 `workspace_links`，一个清单管两种 worktree：任务 worktree 里链接回 W，任务 worktree 里的步骤 worktree 链接回任务目录（链接再指回 W）。**链接，不复制** | 复制 `node_modules`、`.venv` 又慢又占盘，复制的 `.env` 会和用户的那份分叉；链接意味着任务往 `.venv` 里装包会改到用户的环境，这是 Q3 已经接受的取舍。改名趁 I2 还没发布：两种 worktree 用两个清单只会让人困惑 |
-| W5 | **只提醒，不阻止**（维护者定）。检查接口 `GET /api/workspaces/check` 和建任务的回答给出 `warnings`（类型化：`not_git`、`uncommitted`、`shared`、`large_checkout`），建任务表单在提交前显示，管家的回复里由代码附上，任务开始时也写进 activity。`shared`：同一个仓库（按主检出算）上还有进行中的任务：worktree 方式提醒「各在自己的分支上，合并时可能冲突」，原地方式提醒「会互相覆盖文件」 | 两个任务各有自己的 worktree，不会冲突；原地方式本来就会，值得说清。提醒由代码生成，不靠模型转述 |
-| W6 | **操作者笔记**（维护者定：只读，按项目开关）。项目设置 `operator_notes`（`on`、`off`；`NULL` = `off`）。打开时，规划者、执行者、评审者的系统提示词在项目知识之后多一节「操作者为这个目录记下的笔记（只读）」：`MEMORY.md` 和它链接的、在记忆目录里的 `.md` 文件，合计不超过 24 KiB（`MEMORY.md` 在前，超出的文件只列名字和大小）；开头说明这些是操作者自己的背景笔记，可能过时，和任务要求冲突时以任务为准，不要去改它们。运行记录的 `prompt_layers` 记下哈希、文件和是否截断。三种运行时都一样（这是 Looper 写进提示词的文字，不靠 Claude Code 的功能）；管家没有。**Looper 只读这些文件**（打开、读取、列目录），从不创建、修改、移动、删除 `~/.claude` 下的任何东西，也不把路径告诉 agent | 维护者定。默认关：这是操作者的私人笔记，按项目明确打开；关着时提示词逐字节不变 |
+| W5 | **只提醒，不阻止**（维护者定）。检查接口 `GET /api/workspaces/check` 和建任务的回答给出 `warnings`（类型化：`not_git`——项目默认的 worktree 因目录不在 git 里退回原地时也提醒，措辞轻一些；`uncommitted`、`shared`、`large_checkout`），建任务表单在提交前显示，管家的回复里由代码附上，任务开始时也写进 activity。`shared`：同一个仓库（按主检出算）上还有进行中的任务：worktree 方式提醒「各在自己的分支上，合并时可能冲突」，原地方式提醒「会互相覆盖文件」 | 两个任务各有自己的 worktree，不会冲突；原地方式本来就会，值得说清。提醒由代码生成，不靠模型转述 |
+| W6 | **操作者笔记**（维护者定：只读，按项目开关）。项目设置 `operator_notes`（`on`、`off`；`NULL` = `on`）。开着时（默认），规划者、执行者、评审者的系统提示词在项目知识之后多一节「操作者为这个目录记下的笔记（只读）」：`MEMORY.md` 和它链接的、在记忆目录里的 `.md` 文件，合计不超过 24 KiB（`MEMORY.md` 在前，超出的文件只列名字和大小）；开头说明这些是操作者自己的背景笔记，可能过时，和任务要求冲突时以任务为准，不要去改它们。运行记录的 `prompt_layers` 记下哈希、文件和是否截断。三种运行时都一样（这是 Looper 写进提示词的文字，不靠 Claude Code 的功能）；管家没有。**Looper 只读这些文件**（打开、读取、列目录），从不创建、修改、移动、删除 `~/.claude` 下的任何东西，也不把路径告诉 agent | 维护者定。维护者 2026-10-18 改为默认开（原先默认关）：笔记按项目可关；没有笔记目录的目录、关着的项目，提示词逐字节不变。已核实：Looper 启动的 Claude Code 带 `autoMemoryEnabled: false`，init 事件的 `memory_paths.auto` 为 null，不会和 Claude Code 自己加载的记忆重复 |
 | W7 | **会话历史不做**，记为后续：给规划者一个只读工具，在这个目录的历史会话里按关键词搜，返回有长度上限、经过脱敏（`log_redaction`）的片段 | 会话记录大（单个可达几十 MB）、含密钥和私人内容，整份注入不可行；搜索工具要单独设计权限和脱敏 |
 
 **笔记的位置**（在 Claude Code 2.1.285 上实测：临时 `CLAUDE_CONFIG_DIR`、无效的 API key，读 init 事件的 `memory_paths.auto`）：
@@ -90,7 +90,7 @@ task_worktrees                       一个任务的 worktree（每个任务至�
 
 projects
   task_workspaces  TEXT 'in_place' | 'worktree'；NULL = in_place
-  operator_notes   TEXT 'off' | 'on'；NULL = off
+  operator_notes   TEXT 'off' | 'on'；NULL = on
   workspace_links  TEXT[]（由 step_workspace_links 改名）
 ```
 

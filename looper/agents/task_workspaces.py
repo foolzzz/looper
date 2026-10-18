@@ -53,7 +53,7 @@ class TaskWorkspaceError(Exception):
 
 
 class WarningKind(str, Enum):
-    NOT_GIT = "not_git"  # a worktree was asked for, but the workspace is not in git: the task runs in place
+    NOT_GIT = "not_git"  # a worktree (asked for, or the default) cannot be made: the workspace is not in git
     UNCOMMITTED = "uncommitted"  # the workspace has changes its worktree will not have
     SHARED = "shared"  # other tasks in progress work on the same repository
     LARGE_CHECKOUT = "large_checkout"  # each worktree checks out this much
@@ -227,10 +227,12 @@ async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides
     if repo is None:
         if mode is TaskWorkspaces.WORKTREE:
             effective = TaskWorkspaces.IN_PLACE
-        if mode is TaskWorkspaces.WORKTREE and asked:
-            warnings.append({"kind": WarningKind.NOT_GIT.value,
-                             "text": "The workspace is not in a git repository with a commit: the task runs in "
-                                     "place, in the directory itself."})
+            # Also when the worktree is only the project's default: the user did not ask for it, so the wording is softer.
+            text = ("The workspace is not in a git repository with a commit: the task runs in place, in the "
+                    "directory itself." if asked else
+                    "This project runs tasks in a worktree by default, but the workspace is not in a git repository "
+                    "with a commit, so the task runs in place, in the directory itself.")
+            warnings.append({"kind": WarningKind.NOT_GIT.value, "text": text})
     else:
         git = {"repository": repo.toplevel, "branch": ws.short_branch(repo.branch) or None, "head": repo.head}
         if mode is TaskWorkspaces.WORKTREE:

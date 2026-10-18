@@ -29,7 +29,7 @@ Every field is optional, and ``None`` inherits today's behavior:
   (``worktree``, ``task_workspaces``); a new project gets ``worktree``;
 - ``operator_notes``: whether the project's Planners, Workers and Reviewers
   get the operator's Claude Code notes for the directory they work in, read
-  only (``on``; ``off``, also when unset; ``operator_notes``);
+  only (``on``, also when unset; ``off``; ``operator_notes``);
 - ``max_step_retries``: how many times the Planner may retry one step, 0 to
   ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset);
 - ``planner_roles``: whether the project's Planners may define the roles their
@@ -162,7 +162,7 @@ class ProjectExecution:
     @property
     def notes_on(self) -> bool:
         """Whether the project's agents get the operator's notes for their directory."""
-        return self.operator_notes is OperatorNotesMode.ON
+        return self.operator_notes is not OperatorNotesMode.OFF
 
     @property
     def step_retries(self) -> int:

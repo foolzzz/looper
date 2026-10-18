@@ -203,7 +203,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   In <directory>:                                     each directory once, then one line
   - <title>: <summary> (<path>)                       per document, its path relative to it
 
-  ## The operator's notes for this directory      L3 (only with operator_notes on, when the directory
+  ## The operator's notes for this directory      L3 (unless operator_notes is off, when the directory
   ...                                                 has some): a read-only copy of the operator's
                                                       Claude Code auto memory (Task workspaces)
 
@@ -1565,7 +1565,7 @@ workspaces](#step-workspaces)); `task_workspaces` (`in_place`, also when null,
 or `worktree`; a new project gets `worktree`), where a task that names no
 directory of its own runs, `workspace_links` (up to 20 relative paths, null for
 none), what Looper's worktrees of the project link back to the directory they
-come from, and `operator_notes` (`off`, also when null, or `on`), whether the
+come from, and `operator_notes` (`on`, also when null, or `off`), whether the
 project's agents get the operator's notes for their directory ([Task
 workspaces](#task-workspaces)); `max_step_retries` (0 to 20, null for 2),
 how many times the Planner may retry one step: its reply contract and each
@@ -1729,14 +1729,14 @@ the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
   task has, committing what they hold on their branch first.
 - **Warnings, never refusals** (`check`): `GET /api/workspaces/check` and the
   create answers (`workspace`) say what the task will run in (its repository,
-  branch and base) and warn when a worktree was asked for outside git
-  (`not_git`), the workspace has uncommitted changes the worktree will not have
+  branch and base) and warn when a worktree (asked for, or the project's
+  default) cannot be made because the workspace is outside git (`not_git`; the task runs in place), the workspace has uncommitted changes the worktree will not have
   (`uncommitted`), other tasks in progress work on the same repository (by its
   main checkout; `shared`) or the checkout is over 1 GiB (`large_checkout`).
   A base the repository does not have is a 400. The Manager's task
   configuration says how the task runs and each warning.
 - **The operator's notes** (`looper/agents/operator_notes.py`): with the
-  project's `operator_notes` on, the Planner, Workers and Reviewers get, after
+  project's `operator_notes` on (the default, also when null), the Planner, Workers and Reviewers get, after
   the project's knowledge, a read-only copy of the operator's Claude Code auto
   memory for their directory: `MEMORY.md` (its first 200 lines) and the `.md`
   files of the memory directory it links to, in its order, within 24 KiB (a

@@ -209,10 +209,10 @@ export function ProjectExecutionFields({
         </div>
         <div className="space-y-1">
           {label("operator_notes", "Operator's notes")}
-          {/* Not set is off; there is no layer to inherit from. */}
+          {/* Not set is on; there is no layer to inherit from. */}
           <select
             id={`${idPrefix}-operator_notes`}
-            value={draft.operator_notes || "off"}
+            value={draft.operator_notes || "on"}
             onChange={set("operator_notes")}
             aria-describedby={`${idPrefix}-operator_notes-help`}
             className={SELECT}
@@ -221,8 +221,8 @@ export function ProjectExecutionFields({
             <option value="on">On</option>
           </select>
           <p id={`${idPrefix}-operator_notes-help`} className="text-xs text-muted-foreground">
-            When on, the project&apos;s Planners, Workers and Reviewers get a read-only copy of your Claude Code notes
-            (its auto memory) for the directory they work in. Looper never changes them.
+            On unless you turn it off: the project&apos;s Planners, Workers and Reviewers get a read-only copy of your Claude Code notes
+            (its auto memory) for the directory they work in, whichever runtime runs the step. Looper never changes them.
           </p>
         </div>
         <div className="space-y-1">
