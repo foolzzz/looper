@@ -21,7 +21,7 @@ from typing import Any
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    overview, profile_registry, project_skills, projects, request_guard, schedules, self_check,
+    overview, profile_registry, project_skills, projects, request_guard, role_api, schedules, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -308,10 +308,12 @@ class AgentHTTPServer:
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
     _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
+    _RE_TASK_ROLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/roles/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     # A user gate of the task, by its step's label (planner_protocol._STEP_ID).
     _RE_TASK_GATE_MESSAGES = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
                                         r"/messages$")
     _RE_TASK_GATE_END = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/end$")
+    _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
@@ -323,6 +325,9 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
+    _RE_PROJECT_ROLE_TEMPLATES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$")
+    _RE_PROJECT_ROLE_TEMPLATE = re.compile(
+        r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
@@ -395,12 +400,18 @@ class AgentHTTPServer:
                 source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
         elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
+        elif (m := self._RE_TASK_ROLE.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: role_api.edit_task_role(
+                m.group(1), m.group(2), projects.json_object(body), task_router=self._task_router,
+                bus=self._supervisor.bus, source=self._web_adapter._address))
         elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: gate_service.thread(m.group(1), m.group(2)))
         elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=False))
         elif (m := self._RE_TASK_GATE_END.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=True))
+        elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
                 m.group(1), self._supervisor.bus, self._web_adapter._address))
@@ -531,6 +542,13 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
                 m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ROLE_TEMPLATES.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: role_api.templates_view(m.group(1)))
+        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: role_api.put_template(
+                m.group(1), m.group(2), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: role_api.delete_template(m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
@@ -659,6 +677,31 @@ class AgentHTTPServer:
             task_id, label, projects.json_object(body) if body else {},
             has_planner=self._task_router.has_planner(task_id), bus=self._supervisor.bus,
             source=self._web_adapter._address, end=end)
+
+    async def _discard_workspace(self, task_id: str, workspace_id: int) -> dict[str, Any]:
+        """The user drops a step worktree a task that is not running keeps: its directory and branch go. The task's
+        row is locked meanwhile, so a restart waits until the worktree is gone and its Planner reads it so."""
+        from ..db import activity as db_activity, connection as db_connection, step_workspaces as db_step_workspaces
+        from ..db.tasks import ACTIVE_STATUSES
+        from . import step_workspaces
+
+        async with db_connection.transaction() as conn:
+            status = await db_step_workspaces.lock_task(conn, task_id)
+            row = await db_step_workspaces.get(workspace_id, pool=conn)
+            if status is None or row is None or row["task_id"] != task_id:
+                raise projects.RequestError(HTTP_404, "no such step worktree in this task")
+            if status in ACTIVE_STATUSES or self._task_router.has_planner(task_id):
+                raise projects.RequestError(HTTP_409, "stop the task before discarding its step worktrees")
+            try:
+                workspace = await step_workspaces.discard(step_workspaces.StepWorkspace.from_row(row))
+            except step_workspaces.IllegalTransition as exc:
+                raise projects.RequestError(HTTP_409, str(exc)) from None
+            await db_step_workspaces.save(workspace.row(), pool=conn)
+        await db_activity.insert_activity(
+            task_id=task_id, kind="phase",
+            summary=f"Discarded a step worktree from the task page: branch {workspace.branch} and its directory "
+                    "removed"[:500])
+        return {"workspace": workspace.view()}
 
     async def _preview_schedule(self, body: bytes) -> dict[str, Any]:
         return schedules.preview(projects.json_object(body))
@@ -1219,6 +1262,7 @@ class AgentHTTPServer:
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
             gates = await gate_service.gates_view(task_id) if raw else []
+            workspaces = await self._task_workspaces(task_id, raw.get("steps", [])) if raw else None
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -1265,6 +1309,9 @@ class AgentHTTPServer:
             # The user gates of its plan, in plan order: state, agenda, findings, how each closed, and whom each
             # waiting one waits for (gate_service.gate_view); their discussions are at .../gates/<step>/messages.
             "gates": gates,
+            # Its steps' worktrees, in a project with step workspaces (null when it had none): where its branch
+            # started, each worktree oldest first, and the commands that undo the task's commits.
+            "step_workspaces": workspaces,
             # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
             # in a task with such runs.
             **({"run_roles": ran_as} if ran_as else {}),
@@ -1292,6 +1339,18 @@ class AgentHTTPServer:
         }
         writer.write(_json_response(HTTP_200, _serialize(result)))
         await writer.drain()
+
+    @staticmethod
+    async def _task_workspaces(task_id: str, steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+        from ..db import step_workspaces as db_step_workspaces
+        from . import step_workspaces
+
+        rows = await db_step_workspaces.list_for_task(task_id)
+        if not rows:
+            return None
+        start = await db_step_workspaces.task_start(task_id)
+        return step_workspaces.task_view(task_id, rows, start_branch=start[0], start_commit=start[1],
+                                         step_keys={str(s["id"]): str(s.get("step_key") or "") for s in steps})
 
     async def _handle_task_activity(
         self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,

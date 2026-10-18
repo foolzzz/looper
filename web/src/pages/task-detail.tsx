@@ -31,14 +31,17 @@ import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref, runRoleLabel } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
+import { TaskRoleEditor } from "@/components/role-editor";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
+import { TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
-import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
+import { workspacesByStep } from "@/lib/workspaces";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -159,12 +162,13 @@ const PHASE_CONFIG: Record<string, { label: string; icon: typeof Clock; color: s
   failed: { label: "Failed", icon: AlertCircle, color: "text-destructive" },
 };
 
-function phaseBadge(phase: string) {
+/** The task's phase, spinning only while the task runs (`live`); a task that has ended keeps the phase it was in. */
+function phaseBadge(phase: string, live: boolean) {
   const cfg = PHASE_CONFIG[phase] || PHASE_CONFIG.pending;
   const Icon = cfg.icon;
   return (
     <div className="flex items-center gap-1.5">
-      {(phase === "planning" || phase === "executing") ? (
+      {live && (phase === "planning" || phase === "executing") ? (
         <Loader2 className={cn("h-4 w-4 animate-spin", cfg.color)} />
       ) : (
         <Icon className={cn("h-4 w-4", cfg.color)} />
@@ -612,10 +616,17 @@ function showGate(step: TaskStep) {
   target?.focus({ preventScroll: true });
 }
 
+/** How long a step took, or has run while its task runs (`stepSpan`); nothing before it started. */
+function StepSpan({ step, active }: { step: TaskStep; active: boolean }) {
+  const span = stepSpan(step, active);
+  return span && <span className="text-xs tabular-nums text-muted-foreground">{span.label} {span.text}</span>;
+}
+
 function OverviewTab({
   task,
   onContinued,
   onOpenAgents,
+  onRoleEdited,
   onGateChanged,
   gateFocus,
   onGateShown,
@@ -623,6 +634,8 @@ function OverviewTab({
   task: TaskDetail;
   onContinued: () => void;
   onOpenAgents: () => void;
+  /** After the user saved a new version of one of the task's roles. */
+  onRoleEdited: () => void;
   /** After the user wrote in a gate or ended its discussion, with the gate as the server answered. */
   onGateChanged: (gate: UserGate) => void;
   /** The gate step the Pipeline asked to show, until it is shown. */
@@ -651,6 +664,7 @@ function OverviewTab({
   const dropped = steps.filter((s) => s.status === "skipped").length;
   const cancelledGates = steps.filter(cancelledGate).length;
   const isActive = isActiveTask(task);
+  const worktrees = workspacesByStep(task);
 
   return (
     <div className="space-y-6 p-5">
@@ -671,8 +685,8 @@ function OverviewTab({
           <div className="mt-1">{taskStatusBadge(task.status)}</div>
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
-          <p className="text-xs text-muted-foreground">Phase</p>
-          <div className="mt-1">{phaseBadge(task.phase || "pending")}</div>
+          <p className="text-xs text-muted-foreground">{isActive ? "Phase" : "Last phase"}</p>
+          <div className="mt-1">{phaseBadge(task.phase || "pending", isActive)}</div>
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Created</p>
@@ -726,7 +740,7 @@ function OverviewTab({
 
       {task.agents && <TaskAgentsSummary agents={task.agents} onOpen={onOpenAgents} />}
 
-      <TaskRoles task={task} />
+      <TaskRoles task={task} onEdited={onRoleEdited} />
 
       {steps.length > 0 && (
         <div>
@@ -751,6 +765,8 @@ function OverviewTab({
                         </a>
                       )}
                       {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
+                      <StepSpan step={step} active={isActive} />
+                      <WorktreeMarker workspaces={worktrees.get(step.id)} />
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
                           Waiting for{" "}
@@ -779,6 +795,8 @@ function OverviewTab({
           </div>
         </div>
       )}
+
+      <TaskWorkspaces task={task} onChanged={onContinued} />
 
       {task.status === "completed" && task.project_id && (
         <LessonsDraftNote taskId={task.task_id} projectId={task.project_id} />
@@ -945,9 +963,14 @@ function RoleStatsLine({ stats }: { stats: RoleStats }) {
 
 const ROLE_TEXT = "mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted px-3 py-2 font-mono text-xs";
 
+/** Who wrote a version, and the template it was copied from. */
+function versionSource(v: { via: PlannerRole["via"]; template: string | null }) {
+  return [v.via === "user" && "by you", v.template && `from template ${v.template}`].filter(Boolean).join(", ");
+}
+
 /** A role's line (kind, version, profile, the steps that name it, its numbers), opening on its prompt, harness and
- * versions. */
-function RoleRow({ role }: { role: PlannerRole }) {
+ * versions, and, while the task has not completed, the user's edit. */
+function RoleRow({ role, task, onEdited }: { role: PlannerRole; task: TaskDetail; onEdited: () => void }) {
   return (
     <li>
       <details className="group">
@@ -961,6 +984,11 @@ function RoleRow({ role }: { role: PlannerRole }) {
               <span className="break-all font-mono text-sm font-semibold">{role.id}</span>
               <Badge variant="outline">{role.kind === "work" ? "Work" : "Review"}</Badge>
               <span className="font-mono text-xs text-muted-foreground">v{role.version}</span>
+              {role.via === "user" && (
+                <Badge variant="default" title="You wrote its current version: the Planner cannot change it">
+                  edited by you
+                </Badge>
+              )}
               <RoleProfile role={role} />
             </span>
             <span className="block text-xs">
@@ -971,6 +999,9 @@ function RoleRow({ role }: { role: PlannerRole }) {
           </span>
         </summary>
         <div className="space-y-3 border-t border-border py-3 pl-10 pr-4 text-xs">
+          {task.agents?.editable && (
+            <TaskRoleEditor taskId={task.task_id} projectId={task.project_id ?? null} role={role} onSaved={onEdited} />
+          )}
           <div>
             <p className="font-medium text-muted-foreground">Role prompt</p>
             <pre className={ROLE_TEXT}>{role.role_prompt}</pre>
@@ -990,6 +1021,7 @@ function RoleRow({ role }: { role: PlannerRole }) {
                 <li key={v.version} className="whitespace-pre-wrap break-words">
                   <span className="font-mono">v{v.version}</span>
                   <span className="text-muted-foreground"> · {formatTime(v.created_at)}</span>
+                  {versionSource(v) && <span className="text-muted-foreground"> · {versionSource(v)}</span>}
                   {v.reason && ` · ${v.reason}`}
                 </li>
               ))}
@@ -1003,7 +1035,7 @@ function RoleRow({ role }: { role: PlannerRole }) {
 
 /** The roles the task's Planner defined, then the built-in Worker's and Reviewer's numbers to compare them with;
  * nothing while it defined none. */
-function TaskRoles({ task }: { task: TaskDetail }) {
+function TaskRoles({ task, onEdited }: { task: TaskDetail; onEdited: () => void }) {
   if (!task.roles?.length) return null;
   const builtin = task.builtin_role_stats;
   const builtinRows: [string, string, RoleStats][] = builtin
@@ -1019,7 +1051,7 @@ function TaskRoles({ task }: { task: TaskDetail }) {
       </h3>
       <ul className="divide-y divide-border rounded-lg border border-border bg-card">
         {task.roles.map((role) => (
-          <RoleRow key={role.id} role={role} />
+          <RoleRow key={role.id} role={role} task={task} onEdited={onEdited} />
         ))}
         {builtinRows.map(([name, detail, stats]) => (
           <li key={name} className="space-y-1 py-3 pl-10 pr-4">
@@ -1677,6 +1709,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     };
     const levels = stepLevels(steps);
     const why = droppedBecause(task.journal || [], all);
+    const worktrees = workspacesByStep(task);
     const x = stepColumns(steps, levels, NODE_W + GAP_X);
     const depth = steps.length ? Math.max(...levels.values()) : -1;
 
@@ -1711,8 +1744,8 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
                                   detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf, stepsById: allById,
-                                        skippedBecause: why.get(step.id) });
+      cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
+                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id) });
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.
@@ -1870,7 +1903,13 @@ interface TaskDetailPageProps {
   onBack: () => void;
 }
 
-export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
+/** A task's page, new for each task: when the hash moves to another task, its page opens as a fresh load opens it,
+ * on its Overview, without the previous task's data, tab, start error or open confirmation. */
+export function TaskDetailRoute(props: TaskDetailPageProps) {
+  return <TaskDetailPage key={props.taskId} {...props} />;
+}
+
+function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
@@ -1943,7 +1982,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               <span className="text-xs text-muted-foreground">{taskId}</span>
               {task && taskStatusBadge(task.status)}
               {task && <ScheduledBadge task={task} />}
-              {task && task.phase && task.phase !== task.status && phaseBadge(task.phase)}
+              {task && isActiveTask(task) && task.phase && task.phase !== task.status && phaseBadge(task.phase, true)}
               {task && (
                 <TaskProjectControl
                   task={task}
@@ -2052,6 +2091,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
             task={task}
             onContinued={() => setRuns((n) => n + 1)}
             onOpenAgents={() => setTab("agents")}
+            onRoleEdited={() => setRuns((n) => n + 1)}
             onGateChanged={(gate) => {
               // Show whom the gate waits for now, then read the whole task again.
               setTask((t) => (t ? { ...t, gates: t.gates.map((g) => (g.step_id === gate.step_id ? gate : g)) } : t));

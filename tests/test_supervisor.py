@@ -16,6 +16,7 @@ from looper.agents.supervisor import (
     STABLE_SECONDS,
     AgentState,
     AgentSupervisor,
+    cancel_and_wait,
     restart_delay,
 )
 
@@ -194,3 +195,25 @@ def test_a_component_waiting_to_restart_shows_when_and_stopping_the_server_ends_
         assert supervisor._agents["worker-pool"].restarting is None
 
     asyncio.run(run())
+
+
+def test_a_task_that_lost_its_cancellation_is_cancelled_again_until_it_ends() -> None:
+    """Like a message loop whose cancellation an ``asyncio.wait_for`` dropped: it goes back to waiting for its next
+    message, which never comes; the stop cancels it again."""
+
+    async def _run() -> tuple[bool, float]:
+        async def loop() -> None:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                pass  # the cancellation lost
+            await asyncio.Event().wait()  # its next message
+
+        task = asyncio.create_task(loop())
+        await asyncio.sleep(0)
+        began = asyncio.get_running_loop().time()
+        await cancel_and_wait(task, again_after=0.2)
+        return task.cancelled(), asyncio.get_running_loop().time() - began
+
+    cancelled, took = asyncio.run(_run())
+    assert cancelled and took < 2

@@ -101,6 +101,22 @@ class TestProjectApi:
         ("supervise_interval_seconds", 86_401, "86400"),
         ("distill_lessons", "sometimes", "off, draft, write"),
         ("step_workspaces", "per-step", "shared, worktree"),
+        ("step_workspace_links", ".venv", "a list of paths"),
+        ("step_workspace_links", [".venv", 3], "a list of paths"),
+        ("step_workspace_links", [f"d{i}" for i in range(21)], "at most 20 paths, not 21"),
+        ("step_workspace_links", ["/srv/calc/.venv"], "'/srv/calc/.venv' must be relative to the task directory"),
+        ("step_workspace_links", ["../shared/.venv"], "'../shared/.venv' must not have empty, . or .. parts"),
+        ("step_workspace_links", ["a//b"], "'a//b' must not have empty, . or .. parts"),
+        ("step_workspace_links", ["./.env"], "must not have empty, . or .. parts"),
+        ("step_workspace_links", [".git/info"], "'.git/info' must not be or be in .git"),
+        ("step_workspace_links", ["sub/.git"], "must not be or be in .git"),
+        ("step_workspace_links", [".env", ".env"], "'.env' is listed twice"),
+        ("step_workspace_links", ["web", "web/node_modules"], "'web/node_modules' overlaps 'web'"),
+        ("step_workspace_links", ["web/node_modules", "web"], "'web' overlaps 'web/node_modules'"),
+        ("step_workspace_links", [""], "must be 1 to 255 characters"),
+        ("step_workspace_links", ["x" * 256], "must be 1 to 255 characters"),
+        ("step_workspace_links", ["a\\b"], "without line breaks or backslashes"),
+        ("step_workspace_links", ["a\nb"], "without line breaks or backslashes"),
         ("max_step_retries", -1, "from 0 to 20"),
         ("max_step_retries", 21, "from 0 to 20"),
         ("max_step_retries", "3", "whole number"),
@@ -129,6 +145,22 @@ class TestProjectApi:
         status, body = _call("PUT", "/api/projects/proj-a", {"max_step_retries": value})
         assert status == 200 and body["max_step_retries"] == value
         assert ProjectExecution.from_row(store.projects["proj-a"]).step_retries == retries
+
+    @pytest.mark.parametrize(("value", "stored", "links"), [
+        ([".venv", " .env ", "web/node_modules"], [".venv", ".env", "web/node_modules"],
+         (".venv", ".env", "web/node_modules")),
+        ([".venv", ".venv-tools"], [".venv", ".venv-tools"], (".venv", ".venv-tools")),  # a prefix is not inside
+        ([], None, ()),
+        (None, None, ()),
+    ])
+    def test_a_project_lists_the_paths_its_step_worktrees_link(
+        self, store: _Store, value: Any, stored: Any, links: tuple[str, ...],
+    ) -> None:
+        store.add_project("proj-a", "calc")
+        status, body = _call("PUT", "/api/projects/proj-a", {"step_workspace_links": value})
+        assert status == 200 and body["step_workspace_links"] == stored == store.projects["proj-a"].get(
+            "step_workspace_links")
+        assert ProjectExecution.from_row(store.projects["proj-a"]).workspace_links == links
 
     def test_step_workspaces_are_off_until_a_project_turns_them_on(self, store: _Store) -> None:
         store.add_project("proj-a", "calc")
@@ -299,6 +331,10 @@ class TestPlanner:
         agent_db.get_task_project.return_value = _project(task_budget_usd=0.4)
         _spend_from_records(monkeypatch, agent_db)
         claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept", summary="done"))
+        starts: list[Any] = []
+
+        def s1() -> dict[str, Any]:
+            return next(row for row in agent_db.store.steps["t1"].values() if row["key"] == "s1")
 
         async def scenario(h: Harness) -> None:
             await h.start()
@@ -307,6 +343,7 @@ class TestPlanner:
             await h.release(WORK_OK)  # s1's result arrives over the cap: dropped, and the task fails
             assert (await h.finished()).payload["fail_kind"] == "task_budget"
             await h.planner.stop()
+            starts.append(s1()["started_at"])
 
             agent_db.get_task_project.return_value = _project(task_budget_usd=2)
             agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
@@ -320,8 +357,11 @@ class TestPlanner:
             ))
             final = await h.finished()
             assert final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
+            starts.append(s1()["started_at"])
 
         h = drive(claude, hold_first(), scenario)
+        # s1 ran again from not started: a new start, so the time the task stood failed does not count.
+        assert starts[0] is not None and starts[1] > starts[0]
         assert [w.payload["step_key"] for w in h.work_items] == ["s1", "s2", "s1"]
         assert h.work_items[0].payload["task_id"] == h.work_items[2].payload["task_id"]  # the same step
         turns = claude.turns()

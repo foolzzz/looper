@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ClampedText } from "@/components/clamped-text";
 import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
 import { ProjectKnowledgeSection } from "@/components/project-knowledge";
+import { ProjectRoleTemplates } from "@/components/role-editor";
 import { ProjectSchedulesSection } from "@/components/project-schedules";
 import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
@@ -31,6 +32,7 @@ const TABS = [
   { id: "knowledge", label: "Knowledge" },
   { id: "skills", label: "Skills" },
   { id: AGENT_PROFILE.slug, label: AGENT_PROFILE.plural },
+  { id: "roles", label: "Roles" },
   { id: "schedules", label: "Schedules" },
   { id: "settings", label: "Settings" },
 ] as const;
@@ -262,6 +264,8 @@ function executionRows(project: Project): [string, string][] {
     ]);
   if (project.step_workspaces === "worktree")
     rows.push(["Steps at the same time", "A git worktree each, merged into the branch when accepted"]);
+  if (project.step_workspaces === "worktree" && project.step_workspace_links?.length)
+    rows.push(["Linked into step worktrees", project.step_workspace_links.join(", ")]);
   if (project.max_step_retries != null)
     rows.push(["Retries per step", String(project.max_step_retries)]);
   if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);
@@ -379,8 +383,8 @@ interface ProjectPageProps {
   onNavigate: (sub: string) => void;
 }
 
-/** One project: an overview, its knowledge, its skills, its Agent Profiles, its schedules and its settings, each a tab
- * with its own address. */
+/** One project: an overview, its knowledge, its skills, its Agent Profiles, its role templates, its schedules and its
+ * settings, each a tab with its own address. */
 export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
   const [projectId, tabPart, focus] = sub.split("/");
   const tab: Tab = TABS.some((t) => t.id === tabPart) ? (tabPart as Tab) : "overview";
@@ -481,6 +485,13 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
         {tab === "skills" && <ProjectSkillsSection projectId={project.project_id} />}
         {tab === AGENT_PROFILE.slug && (
           <ProjectAgentSettingsSection key={project.project_id} projectId={project.project_id} linked={focus ?? ""} />
+        )}
+        {tab === "roles" && (
+          <ProjectRoleTemplates
+            key={project.project_id}
+            projectId={project.project_id}
+            rolesOn={project.planner_roles === "on"}
+          />
         )}
         {tab === "schedules" && (
           <ProjectSchedulesSection

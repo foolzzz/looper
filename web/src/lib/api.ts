@@ -89,6 +89,9 @@ export interface ProjectExecution {
   /** Where a step that runs alongside others works: the task directory ("shared", also when null) or, in a git
    * checkout on a branch, a worktree of its own merged into the branch when the step is accepted ("worktree"). */
   step_workspaces: "shared" | "worktree" | null;
+  /** The paths, relative to the task directory, that such a worktree links back to the task directory's (its
+   * ignored local state, such as .venv or .env); null = none. */
+  step_workspace_links: string[] | null;
   /** How many times the Planner may retry one step, 0 to 20; null = 2. */
   max_step_retries: number | null;
   /** Whether the project's Planners may define the roles their steps run as; null = "off". */
@@ -505,6 +508,14 @@ export async function continueTaskAtCap(taskId: string, taskBudgetUsd: number): 
     body: JSON.stringify({ task_budget_usd: taskBudgetUsd }),
   });
   if (!res.ok) await failed(res, "continue");
+}
+
+/** Drop a step worktree a task that is not running keeps: its directory and branch are deleted. */
+export async function discardStepWorkspace(taskId: string, workspaceId: number): Promise<StepWorkspace> {
+  const res = await fetch(
+    `${API_BASE}/tasks/${encodeURIComponent(taskId)}/workspaces/${workspaceId}/discard`, { method: "POST" });
+  if (!res.ok) await failed(res, "discard");
+  return (await res.json()).workspace;
 }
 
 export interface NewProjectFields {
@@ -1385,6 +1396,58 @@ export interface TaskDetail extends TaskInfo {
   gates: UserGate[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
+  /** Its steps' git worktrees, in a project whose parallel steps work in worktrees of their own; null (or absent)
+   * when it had none. */
+  step_workspaces?: TaskWorkspaces | null;
+}
+
+/** Where a step's worktree stands: its step works in it ("active"), its branch is being merged, was merged, could
+ * not be merged ("unmerged", with `merge_error`), or it was dropped ("discarded"). */
+export type StepWorkspaceState = "active" | "merging" | "merged" | "unmerged" | "discarded";
+export type MergeError = "conflict" | "local_changes" | "branch_changed" | "step_branch_changed" | "git_failed";
+
+/** A step's git worktree: a branch of its own, merged into the task directory's branch when the step is accepted. */
+export interface StepWorkspace {
+  id: number;
+  step_id: string;
+  /** Its step's label. */
+  step_key: string;
+  branch: string;
+  /** The task directory's branch it merges into, without refs/heads/. */
+  target_branch: string;
+  /** Where its branch starts; a checkpoint of the task directory's pending changes when `checkpoint`. */
+  base_commit: string;
+  checkpoint: boolean;
+  result_commit: string | null;
+  /** The merge commit on the task directory's branch; null until there is one (none for a step that changed nothing). */
+  merge_commit: string | null;
+  state: StepWorkspaceState;
+  merge_error: MergeError | null;
+  /** The files that conflicted or were in the way, when it could not be merged. */
+  merge_files: string[];
+  /** What kept it from merging, as git said it; "" otherwise. */
+  detail: string;
+  /** The paths linked back to the task directory's in it. */
+  links: string[];
+  path: string;
+  /** When its directory and branch were removed; null while either is there. */
+  removed_at: string | null;
+  /** The user may discard it while its task is not running. */
+  discardable: boolean;
+}
+
+/** A command, run in the task directory, that undoes some of what the task did to its branch. */
+export interface UndoCommand {
+  what: string;
+  command: string;
+}
+
+export interface TaskWorkspaces {
+  /** The task directory's branch and its commit when the task dispatched its first step; null when not recorded. */
+  start: { branch: string; commit: string } | null;
+  /** Oldest first; a step retried after a failed merge has more than one. */
+  workspaces: StepWorkspace[];
+  undo: UndoCommand[];
 }
 
 /** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),
@@ -1536,6 +1599,10 @@ export interface RunRole {
   version: number;
 }
 
+/** Who wrote a version of a task's role: its Planner, or the user on the task page (the Planner cannot change a
+ * role whose current version is the user's). */
+export type RoleVia = "planner" | "user";
+
 /** A role a task's Planner defined: "work" runs a step in the built-in Worker's place; "review" reviews a step
  * after the built-in Reviewer passed it, and both must pass. */
 export interface PlannerRole {
@@ -1552,11 +1619,34 @@ export interface PlannerRole {
   harness: string | null;
   reason: string;
   created_at: string;
+  /** Who wrote the current version. */
+  via: RoleVia;
+  /** The project role template the current version was copied from, by key. */
+  template: string | null;
   /** Every version, oldest first. */
-  versions: { version: number; created_at: string; reason: string; sha256: string }[];
+  versions: { version: number; created_at: string; reason: string; via: RoleVia; template: string | null; sha256: string }[];
   /** The labels of the live steps that name it. */
   steps: string[];
   stats: RoleStats;
+}
+
+/** A task role's whole definition as the user writes it on the task page; its kind stays. null harness: the working
+ * style that applies; null profile: as the built-in role of its kind. */
+export interface TaskRoleEdit {
+  role_prompt: string;
+  harness: string | null;
+  /** One on the project's list of Agent Profiles that can run the kind. */
+  profile_id: string | null;
+}
+
+/** Write `fields` as a new version of the task's role `key`, by the user; its Planner hears of it. Fails for a
+ * completed task, or a definition that changes nothing. */
+export function editTaskRole(
+  taskId: string,
+  key: string,
+  fields: TaskRoleEdit,
+): Promise<{ id: string; version: number; changed: string[] }> {
+  return putJson(`/tasks/${encodeURIComponent(taskId)}/roles/${encodeURIComponent(key)}`, fields, "edit role");
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
@@ -1638,7 +1728,11 @@ export interface TaskStep {
   result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  /** The last time it went to review or ended; a step running again keeps it. */
   completed_at: string | null;
+  /** When its run was first dispatched, kept through its retries and reviews; null while it is not started (again,
+   * after a restart), and for a step from before starts were kept. */
+  started_at: string | null;
 }
 
 export interface ActivityEvent {
@@ -1811,7 +1905,9 @@ export interface LlmRecord {
   agent_id: string;
   task_id: string | null;
   session_id: string | null;
-  status: "running" | "completed" | "failed";
+  /** `interrupted`: Looper stopped the run before it ended (a kill, its task or the server stopping), or the server
+   * running it died. */
+  status: "running" | "completed" | "failed" | "interrupted";
   input_summary: string | null;
   output_summary: string | null;
   input_text: string | null;
@@ -2448,6 +2544,54 @@ export function setAllowedProfiles(projectId: string, profileIds: string[]): Pro
     { profile_ids: profileIds },
     "update allowed profiles",
   );
+}
+
+/** A role a project keeps for its tasks' Planners to copy: checked as a task role is, whether or not the project's
+ * Planners define roles. */
+export interface RoleTemplate {
+  /** Unique in the project; the id a copied role gets unless the Planner gives another. */
+  key: string;
+  kind: "work" | "review";
+  /** One line for the Planner: when the template fits a step. */
+  description: string;
+  role_prompt: string;
+  harness: string | null;
+  /** One the project no longer allows (allowed false) is left out of a copy. */
+  profile: { profile_id: string; name: string; allowed: boolean } | null;
+  updated_at: string;
+}
+
+export interface RoleTemplates {
+  project_id: string;
+  /** How long a template's role prompt and harness may each be. */
+  role_text_max_chars: number;
+  templates: RoleTemplate[];
+}
+
+export type RoleTemplateFields = Pick<RoleTemplate, "kind" | "description" | "role_prompt" | "harness"> & {
+  profile_id: string | null;
+};
+
+const roleTemplatesPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/role-templates`;
+
+export async function fetchRoleTemplates(projectId: string): Promise<RoleTemplates> {
+  const res = await fetch(`${API_BASE}${roleTemplatesPath(projectId)}`);
+  if (!res.ok) await failed(res, "role templates");
+  return res.json();
+}
+
+/** Create template `key` or replace it whole; resolves to the project's templates. */
+export function putRoleTemplate(projectId: string, key: string, fields: RoleTemplateFields): Promise<RoleTemplates> {
+  return putJson(`${roleTemplatesPath(projectId)}/${encodeURIComponent(key)}`, fields, "save role template");
+}
+
+/** Delete template `key`; the task roles copied from it keep their versions. */
+export async function deleteRoleTemplate(projectId: string, key: string): Promise<RoleTemplates> {
+  const res = await fetch(`${API_BASE}${roleTemplatesPath(projectId)}/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await failed(res, "delete role template");
+  return res.json();
 }
 
 // --- The capability catalog: items acquired into Looper, and where they are installed ---

@@ -134,7 +134,8 @@ class Action(str, Enum):
 
 
 SECTIONS = ("runtimes", "providers", "profiles", "settings.layers", "settings.roles", "channels", "catalog", "installs",
-            "projects", "project.layers", "project.items", "project.knowledge", "project.schedules", "project.installs")
+            "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
+            "project.schedules", "project.installs")
 # A schedule's settings the file carries as they are; its notify target, Agent Profiles and task limits are
 # ``notify_target``, ``profiles`` (by name) and ``task_limits``.
 _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
@@ -309,6 +310,16 @@ def install_entry(row: Mapping[str, Any]) -> dict[str, Any]:
             "enabled": row["enabled"]}
 
 
+def role_template_entry(row: Mapping[str, Any]) -> dict[str, Any]:
+    entry = {"key": row["template_key"], "kind": row["kind"], "description": row["description"],
+             "role_prompt": row["role_prompt"]}
+    if row["harness"]:
+        entry["harness"] = row["harness"]
+    if row["profile"]:
+        entry["profile"] = row["profile"]
+    return entry
+
+
 def document_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     entry = {"title": row["title"], "summary": row["summary"], "source_kind": row["source_kind"],
              "filename": row["filename"], "size_bytes": row["size_bytes"], "sha256": row["sha256"]}
@@ -394,9 +405,11 @@ async def export_chunks(
     if include_projects:
         from ..db.schedules import list_schedules
 
-        documents = defaultdict(list)
+        documents, templates = defaultdict(list), defaultdict(list)
         for row in await db.read_documents(conn, content=True):
             documents[row["project_id"]].append(row)
+        for row in await db.read_role_templates(conn):
+            templates[row["project_id"]].append(row)
         schedules = defaultdict(list)
         for row in await list_schedules(pool=conn):
             schedules[row["project_id"]].append(row)
@@ -417,8 +430,12 @@ async def export_chunks(
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
                 "items": owned,
                 "installs": [install_entry(r) for r in installs if r["project_id"] == project["id"]],
-                "schedules": [schedule_entry(r, profile_names) for r in schedules[project["id"]]],
             }
+            if templates[project["id"]]:
+                # Only a project that has templates names them, so a file of a project without is as before.
+                entry["role_templates"] = [role_template_entry(r) for r in templates[project["id"]]]
+            if schedules[project["id"]]:  # likewise its schedules
+                entry["schedules"] = [schedule_entry(r, profile_names) for r in schedules[project["id"]]]
             summary.repoint += sum(1 for d in entry["knowledge"] if d.get("repoint"))
             yield ("\n" if index == 0 else ",\n") + _dump(entry)
         yield "]"
@@ -776,6 +793,7 @@ class _Target:
     installs: dict[tuple[str, str | None], dict[str, Any]] = field(default_factory=dict)
     projects: dict[str, dict[str, Any]] = field(default_factory=dict)  # by lower-case name
     documents: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))
+    role_templates: dict[str, dict[str, dict[str, Any]]] = field(default_factory=lambda: defaultdict(dict))
     runtimes: dict[str, dict[str, Any]] = field(default_factory=dict)  # by name
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -798,6 +816,8 @@ class _Target:
         target.projects = {row["name"].lower(): row for row in await db.read_projects(conn)}
         for row in await db.read_documents(conn, content=False):
             target.documents[row["project_id"]].append(row)
+        for row in await db.read_role_templates(conn):
+            target.role_templates[row["project_id"]][row["template_key"]] = row
         target.runtimes = {row["name"]: row for row in await db.read_runtimes(conn)}
         target.providers = {row["name"]: row for row in await db.read_providers(conn)}
         target.profiles = {row["name"]: row for row in await db.read_profiles(conn)}
@@ -848,6 +868,7 @@ class _Importer:
         # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
         self.disabled_schedules: list[str] = []
         self.repointed_schedules: list[str] = []
+        self.role_text_limits: dict[str, int] = {}  # by project id: how long its roles' texts may be
         # Runtimes, providers and Agent Profiles by name, stored and from the file: their ids ("new:..." in a
         # preview) and what a profile is checked with.
         from .profile_registry import provider_spec, runtime_spec
@@ -1389,6 +1410,9 @@ class _Importer:
                                  execution=execution, pool=self.conn)
         self.project_ids[name.lower()] = project_id
         self.project_labels[project_id] = f"{name} / "
+        from .project_execution import ProjectExecution
+
+        self.role_text_limits[project_id] = ProjectExecution.from_row(execution).role_text_limit
         repoint = sum(1 for d in entry.get("knowledge") or () if isinstance(d, Mapping) and d.get("source_kind") == "path")
         if repoint and not (row and row.get("work_dir")):
             self.plan.notes.append(f"project {name}: {repoint} path document(s) refer to files in the project's "
@@ -1422,6 +1446,61 @@ class _Importer:
 
                 await db.write_document(self.conn, row["id"] if row else None, project_id, values)
 
+
+    async def role_templates(self, entries: Any, project_id: str, label: str) -> None:
+        """Add or update the project's role templates, checked as the dashboard checks one; a template the file
+        does not give stays. A profile that is not here, or cannot run the kind, is left out with a note."""
+        from .profile_registry import RegistryError, check_roles
+        from .task_roles import DESCRIPTION_MAX_CHARS, RoleError, check_definition, role_key
+
+        section = "project.role_templates"
+        if not isinstance(entries, list):
+            self.record(section, f"{label}role_templates", Action.SKIPPED, reason="role_templates is not a list")
+            return
+        stored = self.target.role_templates.get(project_id, {})
+        seen: set[str] = set()
+        for entry in entries:
+            raw_key = entry.get("key") if isinstance(entry, Mapping) else None
+            try:
+                entry = _mapping(entry, "a role template")
+                try:
+                    key = role_key(entry.get("key"))
+                    kind, prompt, harness = check_definition(entry.get("kind"), entry.get("role_prompt"),
+                                                             entry.get("harness"), self.role_text_limits[project_id])
+                except RoleError as exc:
+                    raise _Skip(str(exc)) from None
+                if key in seen:
+                    raise _Skip("the file gives this template twice")
+                seen.add(key)
+                description = " ".join(_string(entry.get("description", ""), "description").split())
+                if len(description) > DESCRIPTION_MAX_CHARS:
+                    raise _Skip(f"description is over {DESCRIPTION_MAX_CHARS} characters")
+                profile = entry.get("profile")
+                if profile is not None:
+                    profile = _string(profile, "profile", required=True)
+            except _Skip as exc:
+                self.record(section, f"{label}{raw_key}", Action.SKIPPED, reason=str(exc))
+                continue
+            profile_id = None
+            if profile is not None:
+                if profile not in self.profiles:
+                    self.plan.notes.append(f"{label}role template {key}: no Agent Profile {profile!r} here or in "
+                                           "the file; imported without one")
+                else:
+                    try:
+                        check_roles(self.profiles[profile][1], (kind.agent.value,))
+                        profile_id = self.profiles[profile][0]
+                    except RegistryError as exc:
+                        self.plan.notes.append(f"{label}role template {key}: {exc}; imported without a profile")
+            values = {"kind": kind.value, "description": description, "role_prompt": prompt, "harness": harness,
+                      "profile_id": profile_id}
+            row = stored.get(key)
+            current = {name: row[name] for name in values} if row else None
+            action = self.outcome(section, f"{label}{key}", current, _differs(values, current, values))
+            if self.apply and action in (Action.ADDED, Action.CHANGED):
+                from ..db import role_templates as db_templates
+
+                await db_templates.put_template(project_id, key, values, pool=self.conn)
 
     # --- schedules ---
 
@@ -1590,6 +1669,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         for item in entry.get("items") or ():
             await importer.item(item, project_id, label)
         await importer.documents(entry.get("knowledge") or [], project_id, label)
+        await importer.role_templates(entry.get("role_templates") or [], project_id, label)
         await importer.schedules(entry.get("schedules") or [], project_id, label)
     importer.schedule_notes()
     await importer.settle_layers()

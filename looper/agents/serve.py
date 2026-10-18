@@ -23,7 +23,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import signal
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -578,6 +580,37 @@ async def carry_on_tasks(task_router: TaskRouter, left: LeftRunning) -> None:
         await task_router.start_tasks(left.starting)
 
 
+# How long a shutdown may take before the server exits without finishing it: under the 20 s launchd gives a service
+# between SIGTERM and SIGKILL. The next start ends what it leaves (the agents' processes, their runs' records).
+SHUTDOWN_DEADLINE_SEC = 15.0
+
+
+def stop_signal_handler(stop: asyncio.Event, *, exit_now: Callable[[int], Any] = os._exit) -> Callable[[], None]:
+    """What SIGINT and SIGTERM do: the first starts the shutdown (``stop``), another exits at once."""
+
+    def handler() -> None:
+        if stop.is_set():
+            logger.warning("another shutdown signal: exiting now, without finishing the shutdown")
+            exit_now(1)
+            return
+        logger.info("shutdown signal received")
+        stop.set()
+
+    return handler
+
+
+async def shut_down_within(shutdown: Awaitable[None], *, deadline: float = SHUTDOWN_DEADLINE_SEC,
+                           exit_now: Callable[[int], Any] = os._exit) -> None:
+    """Run ``shutdown``; once it has taken ``deadline`` seconds, exit at once."""
+    stopping = asyncio.ensure_future(shutdown)
+    if not (await asyncio.wait({stopping}, timeout=deadline))[0]:
+        logger.error("the shutdown did not finish within %.0f s; exiting now (the next start ends what is left)",
+                     deadline)
+        exit_now(1)
+        return
+    stopping.result()
+
+
 def _local_url(host: str, port: int) -> str:
     """This server's address for a client on the same machine: loopback when it listens on every address."""
     if host in ("", "0.0.0.0"):
@@ -649,6 +682,10 @@ async def _run_agent_system(
 
     # The tasks the previous server was running: they carry on once the agents are up, or are stopped now.
     left_running = await tasks_left_running(pool)
+    # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
+    from ..db.llm_records import end_unfinished_records
+    if unfinished := await end_unfinished_records(pool=pool):
+        logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
     # The step worktrees no task keeps any more (after the orphaned tasks stopped: those keep their unmerged ones).
     from . import step_workspaces
@@ -708,6 +745,7 @@ async def _run_agent_system(
         *await asyncio.to_thread(self_check.check_claude, claude_bin),
         await self_check.codex_login_check(),
         self_check.check_lark_cli(lark_enabled),
+        await asyncio.to_thread(self_check.check_git),
     ]
     self_check.log_problems(checks)
 
@@ -787,28 +825,26 @@ async def _run_agent_system(
 
     # Wait for shutdown signal
     stop_event = asyncio.Event()
-
-    def _signal_handler() -> None:
-        logger.info("shutdown signal received")
-        stop_event.set()
-
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_handler)
+        loop.add_signal_handler(sig, stop_signal_handler(stop_event))
 
     await stop_event.wait()
 
     # --- Shutdown ---
 
-    logger.info("shutting down agent system...")
-    await gate_reminders.stop()
-    await scheduler.stop()
-    await http_server.stop()
-    await supervisor.stop_all()
-    await registry.stop_all()
-    await bus.shutdown()
-    await close_pool()
-    logger.info("agent system stopped")
+    async def shut_down() -> None:
+        logger.info("shutting down agent system...")
+        await gate_reminders.stop()
+        await scheduler.stop()
+        await http_server.stop()
+        await supervisor.stop_all()
+        await registry.stop_all()
+        await bus.shutdown()
+        await close_pool()
+        logger.info("agent system stopped")
+
+    await shut_down_within(shut_down())
 
 
 def _configure_logging(verbose: bool) -> None:

@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..bus import MessageBus
+from ..supervisor import cancel_and_wait
 from ..agent_settings import AgentSettings, AgentType, Harness, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
@@ -178,7 +179,8 @@ logger = logging.getLogger(__name__)
 from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
 from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
-from ...db import task_roles as db_roles, tasks as db_tasks, user_gates as db_user_gates
+from ...db import role_templates as db_templates, task_roles as db_roles, tasks as db_tasks
+from ...db import user_gates as db_user_gates
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
@@ -344,6 +346,9 @@ class PlanStep:
     review_stage: ReviewStage | None = None  # in review: which review it waits for
     # A gate step's gate (``user_gates``): its instruction is its topic, and no Worker runs it.
     gate: Gate | None = None
+    # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
+    # started (task_steps.started_at).
+    started_at: datetime | None = None
 
     @property
     def label(self) -> str:
@@ -503,6 +508,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "review_role_version": step.review_role_version,
         "review_stage": step.review_stage.value if step.review_stage else None,
         "kind": "gate" if step.gate is not None else "work",
+        "started_at": step.started_at,
     }
 
 
@@ -729,8 +735,6 @@ class PlannerAgent:
         # shutdown cuts off would leave them behind.
         self._remove_token_files()
         supervise_task, self._supervise_task = self._supervise_task, None
-        if supervise_task:
-            supervise_task.cancel()
         idle_task, self._idle_task = self._idle_task, None
         if idle_task:
             idle_task.cancel()
@@ -738,23 +742,47 @@ class PlannerAgent:
         cancelled = False
         try:
             if supervise_task:
-                await asyncio.wait([supervise_task])
+                await cancel_and_wait(supervise_task)
             # Stop the Workers this task still runs; otherwise they keep
             # changing files after the task is gone.
             await self._kill_running_workers()
             if loop_task:
-                loop_task.cancel()
-                # Unlike awaiting the task, this does not mistake its
-                # cancellation for ours: a cancelled stop() still propagates.
-                await asyncio.wait([loop_task])
+                await cancel_and_wait(loop_task)
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            # A turn the loop was in has already killed Claude; an idle one
-            # ends when its stdin closes. Never leave it running.
-            await self._claude.stop(kill=cancelled)
-            self._remove_token_files()  # and one a turn wrote meanwhile
+            async def cleanup(kill: bool) -> None:
+                try:
+                    for task in (supervise_task, loop_task):
+                        if task is not None and not task.done():
+                            await cancel_and_wait(task)
+                except asyncio.CancelledError:
+                    kill = True  # hurried: Claude is ended at once, and the loops not waited for yet are cancelled
+                    for task in (supervise_task, loop_task):
+                        if task is not None and not task.done():
+                            task.cancel()
+                    raise
+                finally:
+                    # A turn the loop was in has already killed Claude; an idle one
+                    # ends when its stdin closes. Never leave it running.
+                    await self._claude.stop(kill=kill)
+                    self._remove_token_files()  # and one a turn wrote meanwhile
+
+            # Run to its end even when this stop is cancelled again: a second cancellation only hurries it (Claude
+            # ended at once rather than after its grace).
+            cleaning = asyncio.create_task(cleanup(cancelled))
+            hurried = False
+            while not cleaning.done():
+                try:
+                    await asyncio.shield(cleaning)
+                except asyncio.CancelledError:
+                    if not hurried:
+                        hurried = True
+                        cleaning.cancel()
+            if hurried:
+                raise asyncio.CancelledError
+            cleaning.result()
 
     def _remove_token_files(self) -> None:
         """Delete the MCP configuration files that carry this Planner's token, which no longer works."""
@@ -851,7 +879,7 @@ class PlannerAgent:
             await self._fail_plan(plan, reason=f"Planning failed: {problem}")
             return
         try:
-            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan),
+            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
                                     lambda text: parse_plan(text, self._roles, gate_policy=self._gate_policy))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
@@ -1225,7 +1253,11 @@ class PlannerAgent:
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
+        step.started_at = step.started_at or datetime.now(timezone.utc)
         previous = (step.result or {}) if (step.result or {}).get("status") == "unmerged" else {}
+        if previous and step.workspace is not None and \
+                not await workspaces.branch_exists(step.workspace.repo_dir, str(previous.get("branch") or "")):
+            previous = {}  # the user discarded the attempt's branch: nothing to bring over
         task_role: TaskRole | None = None
         if step.role is not None:
             task_role = await self._role(step.role, step.role_version if same_attempt else None)
@@ -1374,8 +1406,18 @@ class PlannerAgent:
         except workspaces.GitError as exc:
             step.workspace = await self._discard(workspace)
             raise _NoWorkspace(str(exc)) from None
+        skipped: list[str] = []
+        if self._execution.workspace_links:
+            workspace, skipped = workspaces.link(workspace, self._execution.workspace_links)
+            step.workspace = workspace
+            await self._save_workspace(workspace)
+        linked = f"; linked to the task directory's: {', '.join(workspace.links)}" if workspace.links else ""
         await self._activity("phase", f"Step {step.label} works in a worktree of its own: branch {workspace.branch}, "
-                                      f"from {workspace.target} at {workspace.base_commit[:12]}", worker=step.worker_id)
+                                      f"from {workspace.target} at {workspace.base_commit[:12]}{linked}"[:500],
+                             worker=step.worker_id)
+        if skipped:
+            await self._activity("phase", f"Step {step.label}'s worktree did not link {'; '.join(skipped)}"[:500],
+                                 worker=step.worker_id)
 
     async def _workspace_failed(self, plan: TaskPlan, step: PlanStep, problem: str) -> None:
         """A step that needed a worktree got none: the attempt failed, and the Planner decides what follows."""
@@ -1404,6 +1446,10 @@ class PlannerAgent:
         if outcome.leftovers:
             await self._activity("phase", f"Step {step.label} left changes uncommitted: committed on its branch as "
                                           f"{outcome.leftovers[:12]}")
+        if outcome.replaced_links:
+            replaced = ", ".join(outcome.replaced_links)
+            await self._activity("phase", f"Step {step.label} replaced links to the task directory with files of its "
+                                          f"own, which are part of its result: {replaced}"[:500])
         if merged.state is not StepWorkspaceState.MERGED:
             await self._merge_failed(plan, step, outcome, decide=decide)
             return False
@@ -1975,6 +2021,7 @@ class PlannerAgent:
                  and (s.status != "pending" or s.started)]
         for step in again:
             step.status, step.worker_id, step.reviewer_id, step.review_stage = "pending", None, None, None
+            step.started_at = None  # its next dispatch starts it again: the time the task was stopped does not count
         waiting = plan.waiting_gates()
         for step in waiting:
             assert step.gate is not None
@@ -1995,7 +2042,8 @@ class PlannerAgent:
         await self._read_changes(plan, changes)
         view = plan.view()
         try:
-            reply: ChatReply | None = await self._ask(TurnKind.RESTART, self._restart_message(plan, why, changes),
+            message = self._restart_message(plan, why, changes, await self._template_lines(plan))
+            reply: ChatReply | None = await self._ask(TurnKind.RESTART, message,
                                                       lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
             await self._activity("error", f"Warning: the Planner could not take the restart: {exc}. The steps not "
@@ -2368,16 +2416,23 @@ class PlannerAgent:
         return bool(ack.payload.get("killed"))
 
     async def _kill_running_workers(self) -> None:
-        """Stop every Worker this task still runs (on task stop/cancel)."""
+        """Stop every Worker and Reviewer this task still runs (on task stop/cancel, at its spend cap), all at once:
+        each stop waits for its run's processes to end."""
         plan = self._plan
         if plan is None or self._bus is None:
             return
+        runs: list[tuple[PlanStep, str | None]] = []
         for step in plan.steps:
             if step.status == "dispatched" and step.worker_id:
-                try:
-                    await self._kill_worker(step)
-                except Exception:
-                    logger.debug("planner %s could not stop worker %s", self.agent_id, step.worker_id, exc_info=True)
+                runs.append((step, None))
+            elif step.status == "completed" and step.reviewer_id:
+                runs.append((step, step.reviewer_id))  # in review
+        stopped = await asyncio.gather(*(self._kill_worker(step, run_id) for step, run_id in runs),
+                                       return_exceptions=True)
+        for (step, run_id), outcome in zip(runs, stopped):
+            if isinstance(outcome, Exception):
+                logger.debug("planner %s could not stop run %s", self.agent_id, run_id or step.worker_id,
+                             exc_info=outcome)
 
     # --- Turns on the Planner's Claude ---
 
@@ -2407,6 +2462,23 @@ class PlannerAgent:
                 return parse(reply)
             except ProtocolError as second:
                 raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+
+    async def _template_lines(self, plan: TaskPlan) -> list[str]:
+        """The project's role templates, one line each, for a turn that plans, where its project lets its Planner
+        define roles and has templates; nothing otherwise (or when they cannot be read)."""
+        if not self._execution.roles_on or not plan.project_id:
+            return []
+        try:
+            rows = await db_templates.list_templates(plan.project_id)
+        except Exception:
+            logger.warning("planner %s cannot read its project's role templates", self.agent_id, exc_info=True)
+            return []
+        if not rows:
+            return []
+        return ["This project's role templates (when one fits a step, define its role from it with "
+                "looper_task_role_set and template):",
+                *(f"- {row['template_key']} ({row['kind']})" + (f": {_clip(row['description'], 300)}"
+                                                               if row["description"] else "") for row in rows)]
 
     async def _read_roles(self) -> None:
         """Read the task's roles by key (``self._roles``) where its project lets its Planner define them; a failed
@@ -2562,70 +2634,69 @@ class PlannerAgent:
         plan = self._plan
         assert plan is not None
         recorder = self._recorder(plan, text, process)
-        await recorder.start()
+        async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
+            async def on_event(event: dict[str, Any]) -> None:
+                await recorder.record(event)
+                session_id = event.get("session_id")
+                if isinstance(session_id, str) and session_id and session_id != plan.session_id:
+                    plan.session_id = session_id
+                    await self._save_session(plan)
+                    # The new session has its resume brief.
+                    self._pending_switch = self._pending_handoff = None
 
-        async def on_event(event: dict[str, Any]) -> None:
-            await recorder.record(event)
-            session_id = event.get("session_id")
-            if isinstance(session_id, str) and session_id and session_id != plan.session_id:
-                plan.session_id = session_id
-                await self._save_session(plan)
-                # The new session has its resume brief.
-                self._pending_switch = self._pending_handoff = None
-
-        if self._ops is not None and self._token is not None:
-            self._ops.begin_turn(self._token)  # its tools may change things in this turn only
-        try:
-            turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
-                                          limit if limit > 0 else None)
-        except TimeoutError:
-            # The turn was cancelled, which killed Claude; the next turn resumes the session.
-            error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
-            await recorder.finish(output_text=None, result_event=None, error=error)
-            raise PlannerTurnError(error) from None
-        except Exception as exc:
-            error = f"reading Claude failed: {type(exc).__name__}: {exc}"
-            await recorder.finish(output_text=None, result_event=None, error=error)
-            raise PlannerTurnError(error) from None
-        except BaseException as exc:
-            await recorder.finish(output_text=None, result_event=None,
-                                  error=f"Planner stopped reading Claude: {type(exc).__name__}")
-            raise
-        finally:
             if self._ops is not None and self._token is not None:
-                self._ops.end_turn(self._token)
+                self._ops.begin_turn(self._token)  # its tools may change things in this turn only
+            try:
+                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
+                                              limit if limit > 0 else None)
+            except TimeoutError:
+                # The turn was cancelled, which killed Claude; the next turn resumes the session.
+                error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
+                await recorder.finish(output_text=None, result_event=None, error=error)
+                raise PlannerTurnError(error) from None
+            except Exception as exc:
+                error = f"reading Claude failed: {type(exc).__name__}: {exc}"
+                await recorder.finish(output_text=None, result_event=None, error=error)
+                raise PlannerTurnError(error) from None
+            finally:
+                if self._ops is not None and self._token is not None:
+                    self._ops.end_turn(self._token)
 
-        if resuming and not turn.session_started:
-            error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
-            await recorder.finish(output_text=None, result_event=None, error=error)
-            raise _SessionNotResumed(error)
+            if resuming and not turn.session_started:
+                error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
+                await recorder.finish(output_text=None, result_event=None, error=error)
+                raise _SessionNotResumed(error)
 
-        result_event = turn.result_event
-        final_text = str((result_event or {}).get("result") or "")
-        error: str | None = None
-        if result_event is None:
-            error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
-        elif process.launch.runtime.budget_error(result_event):
-            # The process answers every later turn the same way at once: the next turn starts a new one,
-            # with a new cap, that resumes the session.
-            error = process.launch.runtime.budget_error(result_event)
-            await self._claude.stop()
-        elif result_event.get("is_error") or result_event.get("subtype") != "success":
-            error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
-        elif not final_text.strip():
-            error = "Claude Code returned an empty reply"
-        if result_event is not None:
-            plan.session_totals = self._claude.totals
-            await self._save_session(plan)
-        await recorder.finish(
-            output_text=final_text or None,
-            result_event=result_event,
-            error=error,
-            usage=turn.usage,
-        )
-        if error:
-            raise PlannerTurnError(error)
-        return final_text
+            result_event = turn.result_event
+            final_text = str((result_event or {}).get("result") or "")
+            error: str | None = None
+            over_cap = process.launch.runtime.budget_error(result_event)
+            if result_event is None:
+                error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
+            elif over_cap:
+                error = over_cap
+            elif result_event.get("is_error") or result_event.get("subtype") != "success":
+                error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
+            elif not final_text.strip():
+                error = "Claude Code returned an empty reply"
+            # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
+            # keeps what it spent.
+            await recorder.finish(
+                output_text=final_text or None,
+                result_event=result_event,
+                error=error,
+                usage=turn.usage,
+            )
+            if over_cap:
+                # The process answers every later turn the same way at once: the next turn starts a new one,
+                # with a new cap, that resumes the session.
+                await self._claude.stop()
+            if result_event is not None:
+                plan.session_totals = self._claude.totals
+                await self._save_session(plan)
+            if error:
+                raise PlannerTurnError(error)
+            return final_text
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 
@@ -2829,7 +2900,7 @@ class PlannerAgent:
         section = journal.planner_section(plan.journal)
         return ["", *section] if section else []
 
-    def _plan_message(self, plan: TaskPlan) -> str:
+    def _plan_message(self, plan: TaskPlan, templates: Sequence[str] = ()) -> str:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
                                 "later one changes it)")
@@ -2837,6 +2908,7 @@ class PlannerAgent:
             "[PLAN] Plan the task in the Task section of your instructions"
             + (", with the supplements below." if added else "."),
             *(["", *added] if added else []),
+            *(["", *templates] if templates else []),
             "",
             "You may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         ])
@@ -2995,7 +3067,7 @@ class PlannerAgent:
             "Reply with the CHAT JSON.",
         ])
 
-    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges) -> str:
+    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = ()) -> str:
         """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
         it is now and the journal."""
         lines, section = self._change_lines(plan, changes)
@@ -3011,6 +3083,7 @@ class PlannerAgent:
             "",
             *self._plan_lines(plan),
             *(["", *section] if section else []),
+            *(["", *templates] if templates else []),
             "",
             "Build on what is done: decide whether the steps not started still fit the task as it is now.",
             "Allowed actions: none (run the steps not started as they are), add_steps, replan.",
@@ -3278,11 +3351,7 @@ class PlannerAgent:
         plan.status = "stopping"  # no result is taken and nothing starts while it winds down
         await self._save(plan, plan_row=True)
         await self._activity("error", reason)
-        for step in plan.steps:
-            if step.status == "dispatched" and step.worker_id:
-                await self._kill_worker(step)
-            elif step.status == "completed" and step.reviewer_id:
-                await self._kill_worker(step, step.reviewer_id)
+        await self._kill_running_workers()
         if self._execution.on_task_budget is TaskBudgetAction.WRAP_UP:
             try:
                 summary = await self._ask(TurnKind.DECISION, self._wrap_up_message(plan, reason), parse_wrap_up)
@@ -3324,7 +3393,7 @@ class PlannerAgent:
                     step.workspace.state is StepWorkspaceState.MERGING:
                 merging.append(step)  # accepted: only its merge was cut off
             elif step.status in ("dispatched", "deciding"):
-                step.status = "pending"
+                step.status, step.started_at = "pending", None  # started again when dispatched again
                 again.append(step)
             elif step.status == "completed":
                 review.append(step)
@@ -3527,6 +3596,7 @@ class PlannerAgent:
                 review_role_version=sd.get("review_role_version"),
                 review_stage=ReviewStage(sd["review_stage"]) if sd.get("review_stage") else None,
                 gate=self._stored_gate(sd, stored.get("gates") or {}),
+                started_at=sd.get("started_at"),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:

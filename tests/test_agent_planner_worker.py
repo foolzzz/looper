@@ -169,6 +169,20 @@ _SUCCESS = (
     "'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))"
 )
 _SAVE_ARGV = "json.dump(sys.argv[1:], open('argv.json', 'w'))\n"
+# One model request as Claude Code streams it with --include-partial-messages (its usage: 900 uncached input
+# tokens, 40 output, 5000 read from the cache), and the message it wrote.
+_MODEL_REQUEST = (
+    "sys.stdin.readline()\n"
+    "def stream(kind, **event):\n"
+    "    print(json.dumps({'type': 'stream_event', 'parent_tool_use_id': None, 'event': {'type': kind, **event}}),"
+    " flush=True)\n"
+    "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 's'}), flush=True)\n"
+    "stream('message_start', message={'model': 'claude-x', 'usage': {'input_tokens': 900, 'output_tokens': 0}})\n"
+    "stream('message_delta', usage={'output_tokens': 40, 'cache_read_input_tokens': 5000})\n"
+    "stream('message_stop')\n"
+    "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'working'}]}}),"
+    " flush=True)\n"
+)
 _WARM_UP_EXIT = "if os.environ.get('WARM_UP'):\n    sys.exit()\n"
 # What Claude writes with --include-partial-messages while the model thinks.
 _THINKING_DELTA = {
@@ -1081,6 +1095,51 @@ class TestWorkerKill:
         assert result["active"] == 0  # the slot is freed
         assert result["accepts_input"] is False
         assert result["published"] is False  # a killed worker publishes no WORK_RESULT
+
+    @pytest.mark.parametrize(("killed", "cost"), [("running", None), ("reporting", 0.42)])
+    def test_a_killed_runs_record_ends_interrupted_with_what_it_spent(
+        self, agent_db: Any, killed: str, cost: float | None,
+    ) -> None:
+        """A run killed while Claude works (its task stopped, or its Planner stopped the step) ends its record
+        ``interrupted``, once, with the tokens of the model requests it made; one killed once Claude has answered,
+        while the Worker still reports the result, keeps the cost its result reported too."""
+        reporting = asyncio.Event()
+
+        async def insert_activity(**row: Any) -> None:
+            if str(row.get("summary")).startswith("Worker finished"):
+                reporting.set()
+                await asyncio.sleep(60)
+
+        agent_db.insert_activity.side_effect = insert_activity
+        answered = ("print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'total_cost_usd': 0.42, "
+                    "'usage': {'input_tokens': 900, 'output_tokens': 40, 'cache_read_input_tokens': 5000}, "
+                    "'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))")
+        claude = _MODEL_REQUEST + (answered if killed == "reporting" else "sys.stdin.readline()\ntime.sleep(60)")
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), claude)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)  # the pool subscribes
+                await bus.publish(_run_item("w1", "t1", Path(tmp)))
+                for _ in range(500):
+                    if reporting.is_set() if killed == "reporting" else agent_db.append_events.await_count >= 2:
+                        break
+                    await asyncio.sleep(0.02)
+                assert await pool.kill("w1")
+                await pool.stop()
+                await bus.shutdown()
+
+        asyncio.run(_run())
+        (call,) = agent_db.finish_record.await_args_list
+        finish = call.kwargs
+        assert finish["status"] == "interrupted"
+        assert (finish["input_tokens"], finish["output_tokens"], finish["cache_read_tokens"]) == (900, 40, 5000)
+        assert finish["cost_usd"] == cost
+        if killed == "reporting":
+            assert finish["error"] == "the run had ended with its result; Looper was stopped while it handled the result"
 
 
 def _run_item(worker_id: str, task_id: str, work_dir: Path, *, review: bool = False,

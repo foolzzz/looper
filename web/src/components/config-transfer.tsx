@@ -33,6 +33,7 @@ const SECTION_LABELS: Record<string, string> = {
   "project.layers": "Project layers",
   "project.items": "Project skills",
   "project.knowledge": "Project knowledge",
+  "project.role_templates": "Project role templates",
   "project.schedules": "Project schedules",
   "project.installs": "Project installs",
 };
