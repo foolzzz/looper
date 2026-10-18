@@ -298,6 +298,22 @@ def looper_commits(work_dir: Path, task_id: str) -> dict[str, int]:
     return {"merges": count("--merges"), "checkpoints": count("--no-merges")}
 
 
+def merged_by_looper(work_dir: Path, task_id: str) -> set[str]:
+    """The files as the task's step workspaces left them: unchanged since the last first-parent commit that touched
+    them, one of Looper's for the task (a step's merge). Looper writes them when it accepts a step, which can be
+    during or just after a Planner turn, so their times say nothing of the Planner."""
+    def names(*args: str) -> set[str]:
+        return set(filter(None, _git_in(work_dir, *args).splitlines()))
+
+    unchanged = names("ls-files") - names("diff", "--name-only", "HEAD")
+    return {path for path in unchanged
+            if f"Looper-Task: {task_id}" in _git_in(work_dir, "log", "-1", "--first-parent", "--format=%B", "--", path)}
+
+
+def _without(changes: dict[str, float], paths: set[str]) -> dict[str, float]:
+    return {path: mtime for path, mtime in changes.items() if path not in paths}
+
+
 def _all_activity(api: Api, task_id: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     while True:
@@ -362,6 +378,9 @@ def run_task(
             api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
         if task.roles_on:
             api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
+        for template in task.role_templates:
+            fields = {k: v for k, v in template.items() if k != "key"}
+            api.put(f"/api/projects/{created['project_id']}/role-templates/{template['key']}", fields)
         gates = "on" if task.user_gates else user_gates
         if gates is not None:
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
@@ -412,7 +431,8 @@ def run_task(
             activity=_all_activity(api, task_id),
             records=records,
             events=events,
-            changes=changed_files(before, snapshot(work_dir)),
+            changes=_without(changed_files(before, snapshot(work_dir)),
+                             merged_by_looper(work_dir, task_id) if step_workspaces else set()),
             work_dir=work_dir,
             check_problem=task.check(work_dir),
             expect=task.expect,
@@ -494,7 +514,8 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
-                "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform", "gate_ambiguous",
+                "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
+                "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
                 "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult"),
 }
 

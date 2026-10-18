@@ -132,6 +132,30 @@ def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
         "at-plan-turn-start.txt", "in-plan-turn.txt"]
 
 
+def test_files_a_steps_merge_left_are_not_the_planners(tmp_path: Path) -> None:
+    # Looper merges an accepted step's worktree during or just after a Planner turn: what it wrote is not the
+    # Planner's, unless something changed it again afterwards.
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "start.py").write_text("start\n")
+    runner.init_repository(work)
+
+    def git(*args: str) -> str:
+        return runner._git_in(work, *args)
+
+    git("checkout", "-q", "-b", "step")
+    for name in ("merged.py", "changed-later.py"):
+        (work / name).write_text("the step's\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "the step's work")
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-ff", "step", "-m", "Merge s1\n\nLooper-Task: task-1\nLooper-Step: s1")
+    (work / "changed-later.py").write_text("written after the merge\n")
+    (work / "untracked.txt").write_text("new\n")
+    assert runner.merged_by_looper(work, "task-1") == {"merged.py"}
+    assert runner.merged_by_looper(work, "task-2") == set()  # another task's merges are not this one's
+
+
 @pytest.mark.parametrize(("depends_on", "pairs"), [
     ({"s1": [], "s2": [], "s3": ["s1", "s2"], "s4": ["s3"]}, 1),  # s1 and s2 only
     ({"s1": [], "s2": ["s1"], "s3": ["s2"]}, 0),  # a chain: s3 needs s1 through s2
@@ -683,7 +707,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     for task in TASKS:
         assert by_id[task.id]["success"], (task.id, by_id[task.id]["problems"])
         assert by_id[task.id]["contract_violations"]["total"] == 0
-        assert by_id[task.id]["planner_modified_files"] == 0
+        assert by_id[task.id]["planner_modified_files"] == 0, (
+            task.id, by_id[task.id]["planner_changed_files"], by_id[task.id]["planner_edit_tool_paths"])
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
     assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
@@ -696,7 +721,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     # The security review role reviews its step after the built-in Reviewer.
                     "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
                     "roles_advisory_review": (1, 0, 2, 0), "roles_multi_platform": (6, 0, 0, 0),
-                    "roles_not_needed": (1, 0, 0, 0),
+                    "roles_not_needed": (1, 0, 0, 0), "roles_template_fits": (1, 0, 2, 0),
+                    "roles_template_unfit": (1, 0, 0, 0),
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
                     "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
@@ -714,6 +740,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1),
                      "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
                      "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1),
+                     "roles_template_fits": (0, 0, 1), "roles_template_unfit": (0, 0, 1),
                      # Its four platform steps run side by side between the interface step and the check.
                      "roles_multi_platform": (6, 6, 4),
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
@@ -733,7 +760,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
              for t in by_id if by_id[t]["roles_defined"] or by_id[t]["role_runs"]}
     assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
                      "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
-                     "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0)}
+                     "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0),
+                     "roles_template_fits": (1, 1, 0, 1, 0, 0, 0, 0)}
+    # Only the task whose step fits a project role template copies it.
+    assert {t: by_id[t]["template_roles"] for t in by_id if by_id[t]["template_roles"]} == {"roles_template_fits": 1}
     # Only the multi-platform task's disciplines each get a role that names their conventions, and its four
     # platform steps are built on its interface step (the tester's and the doc writer's on the module).
     assert {t: by_id[t]["discipline_roles"] for t in by_id if by_id[t]["discipline_roles"]} == {
