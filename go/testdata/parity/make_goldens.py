@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write status.json, projects.json, and overview.json from the Python handlers.
+"""Write the parity goldens from the Python handlers.
 
 Usage: python make_goldens.py --db-url postgresql://postgres:postgres@127.0.0.1:54329/loopgo_...
 
@@ -16,8 +16,10 @@ test freezes. seed.sql rows at 2026-06-15T12:00:00Z count as today. Rows in
 Normalization, the same rule the Go parity test applies before comparing:
 
 - Walk every JSON value.
-- A string matching an ISO-8601 datetime, YYYY-MM-DDTHH:MM:SS with an optional
-  fraction and a Z or ±HH:MM suffix, becomes "<time>".
+- The value of a key in _VOLATILE_TIMES (since) becomes "<time>" and is not
+  walked. Those are generated when the request runs. Seeded timestamps stay
+  as the handler returned them. _VOLATILE_TIMES is volatileTimes in
+  parity_test.go.
 - The value of a key named uptime, pid, pids, or version becomes "<volatile>"
   and is not walked. implementation and db are written as the handler returned
   them.
@@ -37,8 +39,42 @@ import urllib.parse
 from datetime import date
 from pathlib import Path
 
-_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 _VOLATILE = {"uptime", "pid", "pids", "version"}
+# Request-time timestamps only. Same set as volatileTimes in parity_test.go.
+_VOLATILE_TIMES = {"since"}
+_READS = (
+    ("status", 200),
+    ("projects", 200),
+    ("overview", 200),
+)
+# The default list, each group, one project, one limit, and two bad parameters.
+# tasks-before is the next page after tasks-limit (that page's next_before).
+# status filters the page and not the counts. schedule_id filters both.
+# tasks-combined is empty: waiting_user and the nightly schedule do not
+# overlap, while counts still follow the schedule. Dropping either predicate,
+# or applying status to the counts, changes that body.
+_TASKS = (
+    ("tasks", {}, 200),
+    ("tasks-group-needs_you", {"group": "needs_you"}, 200),
+    ("tasks-group-in_progress", {"group": "in_progress"}, 200),
+    ("tasks-group-ready", {"group": "ready"}, 200),
+    ("tasks-group-attention", {"group": "attention"}, 200),
+    ("tasks-group-completed", {"group": "completed"}, 200),
+    ("tasks-group-cancelled", {"group": "cancelled"}, 200),
+    ("tasks-group-other", {"group": "other"}, 200),
+    ("tasks-project", {"project_id": "proj-beta00002"}, 200),
+    ("tasks-limit", {"limit": "2"}, 200),
+    ("tasks-bad-group", {"group": "nope"}, 400),
+    ("tasks-bad-limit", {"limit": "0"}, 400),
+    ("tasks-before", {"limit": "2", "before": "task-asame0001"}, 200),
+    ("tasks-status", {"status": "running"}, 200),
+    ("tasks-schedule", {"schedule_id": "sched-nightly01"}, 200),
+    ("tasks-combined", {
+        "project_id": "proj-alpha0001",
+        "status": "waiting_user",
+        "schedule_id": "sched-nightly01",
+    }, 200),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -54,12 +90,13 @@ def normalize(value):
             if key in _VOLATILE:
                 out[key] = "<volatile>"
                 continue
+            if key in _VOLATILE_TIMES:
+                out[key] = "<time>"
+                continue
             out[key] = normalize(item)
         return out
     if isinstance(value, list):
         return [normalize(item) for item in value]
-    if isinstance(value, str) and _TIME.fullmatch(value):
-        return "<time>"
     return value
 
 
@@ -150,11 +187,13 @@ def _one_host(spec: str) -> tuple[str, int | None]:
     return host, int(urllib.parse.unquote(port_text))
 
 
-def response_json(raw: bytes):
+def response_json(raw: bytes, expect: int = 200):
     head, _, body = raw.partition(b"\r\n\r\n")
     status_line = head.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
-    if not status_line.endswith("200 OK"):
-        raise SystemExit(f"handler returned {status_line}")
+    parts = status_line.split(" ", 2)
+    code = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    if code != expect:
+        raise SystemExit(f"handler returned {status_line}, want {expect}")
     return json.loads(body)
 
 
@@ -228,14 +267,19 @@ async def capture(dsn: str) -> dict[str, object]:
                     return None
 
             out = {}
-            for name, method in (
-                ("status", server._handle_status),
-                ("projects", server._handle_list_projects),
-                ("overview", server._handle_overview),
-            ):
+            handlers = {
+                "status": server._handle_status,
+                "projects": server._handle_list_projects,
+                "overview": server._handle_overview,
+            }
+            for name, expect in _READS:
                 cap = Capture()
-                await method(cap)
-                out[name] = response_json(bytes(cap.buf))
+                await handlers[name](cap)
+                out[name] = response_json(bytes(cap.buf), expect)
+            for name, query, expect in _TASKS:
+                cap = Capture()
+                await server._handle_list_tasks(query, cap)
+                out[name] = response_json(bytes(cap.buf), expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -250,7 +294,8 @@ def main() -> None:
         sys.path.insert(0, str(REPO))
     asyncio.run(apply_sql(args.db_url))
     bodies = asyncio.run(capture(args.db_url))
-    for name in ("status", "projects", "overview"):
+    names = [name for name, _ in _READS] + [name for name, _, _ in _TASKS]
+    for name in names:
         payload = normalize(bodies[name])
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         (HERE / f"{name}.json").write_text(text, encoding="utf-8")

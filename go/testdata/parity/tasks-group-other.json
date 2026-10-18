@@ -1,0 +1,50 @@
+{
+  "counts": {
+    "archived": 1
+  },
+  "next_before": null,
+  "tasks": [
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-03-05T00:00:00+00:00",
+      "goal_id": "",
+      "group": "other",
+      "name": "beta archived",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta archived",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "archived",
+      "task_id": "task-archbeta01",
+      "work_dir": ""
+    }
+  ]
+}

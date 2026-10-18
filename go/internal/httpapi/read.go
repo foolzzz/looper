@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -66,10 +67,40 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// handleTasks is GET /api/tasks. The list reader stays in the db package.
-// This slice does not serve it.
+// handleTasks is GET /api/tasks. Other methods are 404, as in Python.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, r)
+	if r.Method != http.MethodGet {
+		notFound(w)
+		return
+	}
+	q, msg, err := parseTaskQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: msg})
+		return
+	}
+	ctx, cancel := readContext(r)
+	defer cancel()
+	if s.Reads == nil {
+		databaseUnavailable(w, r, errors.New("no database"))
+		return
+	}
+	if q.Before != "" {
+		ok, err := s.Reads.TaskExists(ctx, q.Before)
+		if err != nil {
+			databaseUnavailable(w, r, err)
+			return
+		}
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, errorBody{Error: "before must be a task id; " + pythonRepr(q.Before) + " is not one"})
+			return
+		}
+	}
+	body, err := s.Reads.Tasks(ctx, q)
+	if err != nil {
+		databaseUnavailable(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleTask is GET /api/tasks/<id> for a task id. Other single segments,
@@ -83,7 +114,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseTaskQuery(r *http.Request) (db.TaskQuery, string, error) {
-	values := r.URL.Query()
+	values := pythonQuery(r.URL.RawQuery)
 	group := queryValue(values, "group")
 	if group != "" && !knownGroup(group) {
 		return db.TaskQuery{}, errGroup, errors.New("group")
@@ -144,23 +175,41 @@ func knownTaskStatus(status string) bool {
 	}
 }
 
-// wholeNumber is Python's limit check: str.isdigit() and int().
-// A non-ASCII digit such as fullwidth ２ makes str.isdigit() true and int()
-// reject it. That is the same 400 as a non-digit. Overflow is the same 400.
+// wholeNumber is the numeric half of Python's limit check. Python accepts
+// every Unicode decimal digit (Nd), including fullwidth ２, because int()
+// does. A superscript such as ² is not a decimal digit: Python's int()
+// raises ValueError and that handler sends no limit 400. This server
+// answers the limit 400. Overflow is the same 400.
 func wholeNumber(s string) (int, bool) {
 	if s == "" {
 		return 0, false
 	}
+	n := 0
 	for _, r := range s {
-		if !unicode.IsDigit(r) || r < '0' || r > '9' {
+		d, ok := decimalDigit(r)
+		if !ok {
 			return 0, false
 		}
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, false
+		if n > (math.MaxInt-d)/10 {
+			return 0, false
+		}
+		n = n*10 + d
 	}
 	return n, true
+}
+
+// decimalDigit is the value of a Unicode decimal digit. Nd runs are groups
+// of ten starting at zero; two groups can sit next to each other, so the
+// value is the distance from the start of the contiguous run, modulo 10.
+func decimalDigit(r rune) (int, bool) {
+	if !unicode.IsDigit(r) {
+		return 0, false
+	}
+	start := r
+	for start > 0 && unicode.IsDigit(start-1) {
+		start--
+	}
+	return int(r-start) % 10, true
 }
 
 // pythonRepr is CPython repr for a str: single quotes, unless the string

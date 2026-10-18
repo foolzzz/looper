@@ -21,6 +21,13 @@ type recordingReads struct {
 	overviewErr               error
 	projects                  map[string]any
 	projectsErr               error
+	tasksBody                 map[string]any
+	tasksErr                  error
+	tasksQuery                db.TaskQuery
+	tasksCtx                  context.Context
+	exists                    bool
+	existsErr                 error
+	existsID                  string
 	calls                     []string
 	since                     time.Time
 }
@@ -41,14 +48,26 @@ func (r *recordingReads) Projects(context.Context) (map[string]any, error) {
 	return r.projects, r.projectsErr
 }
 
-func (r *recordingReads) TaskExists(context.Context, string) (bool, error) {
+func (r *recordingReads) TaskExists(_ context.Context, id string) (bool, error) {
 	r.calls = append(r.calls, "exists")
-	return false, errors.New("not used")
+	r.existsID = id
+	if r.existsErr != nil {
+		return false, r.existsErr
+	}
+	return r.exists, nil
 }
 
-func (r *recordingReads) Tasks(context.Context, db.TaskQuery) (map[string]any, error) {
+func (r *recordingReads) Tasks(ctx context.Context, q db.TaskQuery) (map[string]any, error) {
 	r.calls = append(r.calls, "tasks")
-	return nil, errors.New("not used")
+	r.tasksQuery = q
+	r.tasksCtx = ctx
+	if r.tasksErr != nil {
+		return nil, r.tasksErr
+	}
+	if r.tasksBody == nil {
+		return map[string]any{"tasks": []any{}, "next_before": nil, "counts": map[string]any{}}, nil
+	}
+	return r.tasksBody, nil
 }
 
 func (r *recordingReads) Task(context.Context, string) (map[string]any, error) {
@@ -67,8 +86,7 @@ func TestNotImplementedRoutes(t *testing.T) {
 		want   int
 		body   string
 	}{
-		{http.MethodGet, "/api/tasks?group=completed", http.StatusNotImplemented, notImplementedBody},
-		{http.MethodPost, "/api/tasks", http.StatusNotImplemented, notImplementedBody},
+		{http.MethodPost, "/api/tasks", http.StatusNotFound, `{"error":"not found"}`},
 		{http.MethodGet, "/api/tasks/task-abc123", http.StatusNotImplemented, notImplementedBody},
 		{http.MethodPost, "/api/tasks/task-abc123", http.StatusNotImplemented, notImplementedBody},
 		{http.MethodGet, "/api/tasks/create", http.StatusNotFound, `{"error":"not found"}`},
@@ -159,11 +177,12 @@ func TestReadErrorsDoNotLeak(t *testing.T) {
 	reads := &recordingReads{
 		overviewErr: errors.New("dial SECRET"),
 		projectsErr: errors.New("dial SECRET"),
+		tasksErr:    errors.New("dial SECRET"),
 	}
 	srv := New("dev", &fakeDB{}, "")
 	srv.Reads = reads
 	h := srv.Handler()
-	for _, path := range []string{"/api/overview", "/api/projects"} {
+	for _, path := range []string{"/api/overview", "/api/projects", "/api/tasks"} {
 		t.Run(path, func(t *testing.T) {
 			logs := captureLogs(t)
 			rr := httptest.NewRecorder()
@@ -231,7 +250,7 @@ func TestReadContextFollowsParentCancel(t *testing.T) {
 
 func TestReadWithoutDatabase(t *testing.T) {
 	h := New("dev", &fakeDB{}, "").Handler()
-	for _, path := range []string{"/api/overview", "/api/projects"} {
+	for _, path := range []string{"/api/overview", "/api/projects", "/api/tasks"} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
 		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` {

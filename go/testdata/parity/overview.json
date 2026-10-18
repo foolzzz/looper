@@ -25,6 +25,22 @@
         "running": 0,
         "waiting": 0
       }
+    },
+    {
+      "name": "proj-blank0001",
+      "project_id": "proj-blank0001",
+      "reviewers": {
+        "running": 0,
+        "waiting": 0
+      },
+      "tasks": {
+        "ready": 1,
+        "running": 0
+      },
+      "workers": {
+        "running": 0,
+        "waiting": 0
+      }
     }
   ],
   "schedules": {
@@ -46,7 +62,7 @@
     "next": [
       {
         "name": "Nightly",
-        "next_fire_at": "<time>",
+        "next_fire_at": "2020-04-01T09:00:00+00:00",
         "project_id": "proj-alpha0001",
         "project_name": "Alpha",
         "schedule_id": "sched-nightly01",
@@ -70,16 +86,16 @@
     "unpriced_runs": 0
   },
   "tasks": {
-    "attention": 0,
-    "cancelled": 0,
-    "completed": 1,
-    "in_progress": 1,
+    "attention": 4,
+    "cancelled": 1,
+    "completed": 41,
+    "in_progress": 7,
     "needs_you": 1,
     "other": 1,
     "other_statuses": {
       "archived": 1
     },
-    "ready": 1,
-    "total": 5
+    "ready": 2,
+    "total": 57
   }
 }

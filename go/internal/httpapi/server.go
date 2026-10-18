@@ -58,9 +58,9 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // GET /api/status stays method-specific so POST and PUT fall through to 405.
 // The Host/Origin guard runs before routing, matching request_guard.refusal.
 //
-// This slice serves GET /api/status, GET /api/projects and GET /api/overview.
-// The other read routes from the same milestone answer 501 and do not read
-// the database: /api/tasks, /api/tasks/<id>, and the cost routes
+// This slice serves GET /api/status, GET /api/projects, GET /api/overview,
+// and GET /api/tasks. The other read routes from the same milestone answer
+// 501 and do not read the database: /api/tasks/<id>, and the cost routes
 // /api/agents/<id>/usage and /api/llm-records.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
