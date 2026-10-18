@@ -27,6 +27,11 @@ from looper.agents.tiers.worker import judge_result
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+
+
 # --- Contract violations, read where the agent system rejects a reply ------------------------------------
 
 
@@ -265,6 +270,36 @@ def test_fake_room_consumer_needs_the_delivered_interface(
         assert problem is None
     else:
         assert problem is not None and "do not work together" in problem
+
+
+@pytest.mark.parametrize("code", ["k3v9q2x7m4p8w1z6r5t0", "k3v9q2x7m4p8w1z6r5t1"])
+@pytest.mark.parametrize("delivery", ["consult", "answer", "empty"])
+def test_fake_room_consumer_writes_only_the_delivered_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, delivery: str,
+) -> None:
+    task = task_list.select(["room_consult"])[0]
+    script = {**task.fake, "consult_answer": code}
+    (tmp_path / "code.sha256").write_text(script["attempts"]["s1"][0]["files"]["code.sha256"])
+    messages = [] if delivery == "empty" else [
+        {"kind": "answer", "via": delivery, "body": "an older answer"},
+        {"kind": "answer", "via": delivery, "body": script["consult_answer"]},
+    ]
+    if delivery == "consult":
+        messages.append({"kind": "answer", "body": "an answer from another seat"})
+    messages.append({"kind": "interface", "body": "another message"})
+
+    def rpc(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = {"messages": messages} if params["name"] == "looper_room_inbox" else {}
+        return {"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": json.dumps({"status": "ok", "result": result})}],
+            "isError": False}}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
+    monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    assert (tmp_path / "code.txt").read_text() == (code if delivery != "empty" else "") + "\n"
+    assert (task.check(tmp_path) is None) is (delivery != "empty" and code == task.fake["consult_answer"])
 
 
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:

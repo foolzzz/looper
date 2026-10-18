@@ -1098,7 +1098,7 @@ ROOM_TASKS: tuple[EvalTask, ...] = (
                            depends_on=["s1"])],
             "attempts": {
                 "s1": [{"status": "completed", "files": {"code.sha256": _FAKE_CODE_SHA}}],
-                "s2": [{"status": "completed", "files": {"code.txt": _FAKE_CODE + "\n"}}],
+                "s2": [{"status": "completed", "answer_file": "code.txt"}],
             },
             # The second step's Worker asks the first's seat, which has ended: a consult answers in its inbox.
             "room_calls": {"s2": [["looper_room_post", {"to": ["worker@s1"], "kind": "question",

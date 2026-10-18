@@ -25,8 +25,10 @@ agent system started it in:
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
   waits for a forwarded user turn and then writes the files given there; with
   ``room_calls`` (``{label: [[tool, arguments], ...]}``) it first makes those
-  calls of the room's tools over its ``looper`` MCP server (and answers a
-  [ROOM] turn of the Planner's with ``room_reply``, or "Noted."); a consult
+  calls of the room's tools over its ``looper`` MCP server; an attempt's
+  ``answer_file`` names a file to hold the last delivered consult's body,
+  else the last answer's body, plus a newline (empty when neither came); it
+  answers a [ROOM] turn of the Planner's with ``room_reply``, or "Noted."; a consult
   of a run's session answers its questions with ``consult_answer``;
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
@@ -275,6 +277,12 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
         files = dict(wait.get("files") or {})
+    if attempt.get("answer_file"):
+        messages = inbox or []
+        answer = next((m["body"] for m in reversed(messages) if m.get("via") == "consult"), None)
+        if answer is None:
+            answer = next((m["body"] for m in reversed(messages) if m.get("kind") == "answer"), "")
+        files[attempt["answer_file"]] = answer + "\n"
     if inbox is not None and "cli.py" in files:
         # The inventory client learns its fields only from the delivered interface; no interface means {}.
         interface = next((m["body"] for m in reversed(inbox) if m.get("kind") == "interface"), "")

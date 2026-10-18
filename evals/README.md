@@ -131,7 +131,9 @@ database: pass `--pg-url` (any database on the server except `loopx`) or set
 ### Fake mode: the flow, free
 
 A scripted stand-in replaces `claude` and plays each role from the task's
-script, so this checks the plumbing, not the model. It takes a few seconds:
+script, so this checks the plumbing, not the model. In `room_consult`, its
+second Worker writes the code its inbox delivered; a wrong or missing consult
+answer fails the task's file check. It takes a few seconds:
 
 ```bash
 uv run --extra test python -m evals.prompt_regression run --mode fake \
