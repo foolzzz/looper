@@ -26,7 +26,7 @@ import {
   type Runtime,
   type SelfCheck,
 } from "@/lib/api";
-import { PLANNED_RUNTIMES, RUNTIME_TYPES, roleLabel } from "@/lib/runtime-catalog";
+import { LOGIN_HELP, PLANNED_RUNTIMES, RUNTIME_TYPES, loginUsable, roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
@@ -98,7 +98,8 @@ function loginText(check: SelfCheck | null | undefined): string {
   return check.detail;
 }
 
-/** A runtime login the registry reports (Codex's `codex login status`, or a fork a run found), in words. */
+/** A runtime login the registry reports (Codex's `codex login status`, Grok's login file, or a fork a run found), in
+ * words. */
 function providerLoginText(login: ProviderLogin | null): string {
   if (!login) return "login not checked";
   return login.state === "unavailable" ? `unavailable ${login.detail}` : login.detail;
@@ -108,15 +109,17 @@ function providerLoginText(login: ProviderLogin | null): string {
 function LoginHint({ provider, typeLabel, claude }: { provider: Provider; typeLabel: string; claude?: SelfCheck | null }) {
   const own = provider.login;
   const text = own ? providerLoginText(own) : loginText(claude);
-  const failing = own ? own.state !== "chatgpt" : claude?.status === "fail";
+  const failing = own ? !loginUsable(own.state) : claude?.status === "fail";
+  const help = LOGIN_HELP[provider.oauth_runtime_type ?? ""] ?? { signIn: "" };
   let fix: React.ReactNode = null;
   if (!own && failing) {
     fix = <>(<code className="font-mono">claude auth login</code>, then restart looper serve)</>;
   } else if (own?.state === "unavailable") {
-    fix = <>(check <code className="font-mono">codex login status</code> on the server&apos;s machine, then{" "}
-      <a href={settingsHref("providers", provider.provider_id)} className="underline underline-offset-2">use the login again</a>)</>;
+    fix = <>(check {help.check ? <code className="font-mono">{help.check}</code> : "the login"} on the server&apos;s machine,
+      then <a href={settingsHref("providers", provider.provider_id)} className="underline underline-offset-2">use the login
+      again</a>)</>;
   } else if (own && failing) {
-    fix = <>(<code className="font-mono">codex login</code> with ChatGPT on the server&apos;s machine)</>;
+    fix = <>(<code className="font-mono">{help.signIn}</code>{help.how ? ` ${help.how}` : ""} on the server&apos;s machine)</>;
   }
   return (
     <p className={failing ? "flex items-start gap-1 text-warning" : undefined}>

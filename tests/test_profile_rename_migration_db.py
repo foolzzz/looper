@@ -44,10 +44,10 @@ RENAMED = [
 ]
 DROPPED = {"agent_configs": {"role", "max_concurrency"}, "agent_setting_layers": {"effort"}}
 # What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns (agent teams, on for its
-# profiles, all on Claude Code runtimes), and a built-in row.
+# profiles, all on Claude Code runtimes), and built-in rows.
 ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None, "boundaries": None},
          "agents": {"agent_teams": True}}
-ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
+ADDED_ROWS = {"llm_providers": {"prov-codex-login", "prov-grok-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 # Columns a later migration of main adds to those tables, empty on the rows from before.
 NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_text", "title", "chat_kind",

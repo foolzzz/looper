@@ -1,6 +1,6 @@
 # RFC：规划者定义的角色（v0）
 
-- **状态：** 已批准（第 4 节 D1–D3 由维护者在 2026-10-16 拍板，D3 同日补充参考评审；D4–D11 和第 17 节的问题同日按建议定下）；R1 已实现，实现见 [Agent 系统架构](../agent-system.md#roles-a-tasks-planner-defines)；R2 的设计见第 18 节（2026-10-17，第 18.7 节的取舍由维护者在 2026-10-17 确认），分 R2a、R2b 两期实现；R2a 已实现。
+- **状态：** 已批准（第 4 节 D1–D3 由维护者在 2026-10-16 拍板，D3 同日补充参考评审；D4–D11 和第 17 节的问题同日按建议定下）；R1 已实现，实现见 [Agent 系统架构](../agent-system.md#roles-a-tasks-planner-defines)；R2 的设计见第 18 节（2026-10-17，第 18.7 节的取舍由维护者在 2026-10-17 确认），分 R2a、R2b 两期实现，都已实现。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 15 项。
 - **最近更新：** 2026-10-17（加第 18 节：R2 的设计）
 
@@ -360,8 +360,8 @@ R2 不改这一点。
 - **数据**：`task_steps.review_roles JSONB NOT NULL DEFAULT '[]'`，每一项 `{role, required, version}`（`version` 是这一项最近一次
   评审用的版本，供重启时重跑同一次评审）；`review_stage` 保留（`builtin` | `role`），加 `review_position`（`role` 阶段时正在等的
   是第几项）。一次性迁移把 R1 的 `review_role_key`、`review_role_required`、`review_role_version` 写成一项的列表，然后删掉这三列
-  和 `task_steps_review_role_reviewed`，换成 `CHECK (jsonb_array_length(review_roles) = 0 OR review)`。新建库和迁移的库形状一致
-  （有测试比对）。
+  和 `task_steps_review_role_reviewed`，换成 `CHECK (jsonb_array_length(review_roles) = 0 OR review)`；已存步骤结果里的
+  `role_review` 也一并改成一项的 `role_reviews`。新建库和迁移的库形状一致（有测试比对）。
 - **评审链**（Q4 定的依次）：内置 Reviewer → 第 1 项 → 第 2 项 → …。内置不通过：直接进决策回合（同 R1）。某一项必须通过的
   评审角色不通过：后面的不再跑，进决策回合（`acceptable` 为假）。参考的不通过：记下结论，接着跑下一项。全部跑完进决策回合：
   `acceptable` 只在内置和每一项必须通过的都通过时为真，决策消息按顺序列出每一道的结论，参考的标明是参考。规划者没能决策时
@@ -373,14 +373,18 @@ R2 不改这一点。
 - **谁同意**：能力目录里的条目，运维者装给项目（或全局）时可以多选一个对象「Planner-defined roles」（安装的 `roles` 多一个值
   `task_role`）：这样的安装平时不加载给任何角色，只有点名要它的角色运行时才加载。这是运维者事先的同意，和可选 Profile 列表同一个
   思路；规划者不能让角色用没有这样装过的条目。
-- **角色怎么要**：任务角色和模板多一项 `items`（条目的限定名列表，至多 20 个）；`looper_task_role_set` 和模板接口都接受它，校验
-  每一项在这个项目里（或全局）有启用的、对象含 `task_role` 的安装。角色运行时加载同类内置角色本来的安装，再加上这个角色点名的
+- **角色怎么要**：任务角色和模板多一项 `items`（存条目的 id，至多 20 个，不重复）；`looper_task_role_set`、模板接口和任务页
+  编辑都接受它（规划者可以给 id 或名字，`looper_task_roles` 的 `role_items` 列出能选的），校验每一项在这个项目里（或全局）有
+  启用的、对象含 `task_role` 的安装，不满足的返回 `forbidden` 并列出能选的。复制模板时，不再这样安装的条目不带上，返回里
+  说明；配置导出导入按条目名字带上模板的 `items`。安装接口和界面不给 `roles` 时默认仍是内置角色，不含 `task_role`。角色运行时加载同类内置角色本来的安装，再加上这个角色点名的
   条目（同一个条目只加载一次），运行记录的 `library` 照常写出每一项。版本照旧：`items` 是版本的一部分。
-- **不做**：角色去掉同类内置角色本来就有的安装。
+- **不做**：角色去掉同类内置角色本来就有的安装；管家的 `looper_catalog` 这一期不告诉它 `task_role`（改它的描述要跑管家
+  评测），按角色的安装在界面上做。
 
 ### 18.5 跨任务的按角色汇总
 
-- **接口**：`GET /api/projects/:id/role-stats?since=<日期>`：这个项目的任务里按角色编号汇总（同一编号在不同任务里可能是不同的
+- **接口**：`GET /api/projects/:id/role-stats?since=<日期>`（`since` 可省，按任务的创建时间）：这个项目里定义过角色的任务
+  按角色编号汇总（同一编号在不同任务里可能是不同的
   定义，所以同时给出出现在几个任务里、来自哪些模板），口径同 R1 任务页的统计：运行数、花费、步骤接受和失败、重试、契约违约数和
   比率、评审通过率；内置 Worker、Reviewer 各一行作对照。不加管家工具。
 - **界面**：项目页「Roles」标签页里模板下面一张表。

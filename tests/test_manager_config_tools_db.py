@@ -205,7 +205,7 @@ def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter
             None, "https://api.deepseek.com/anthropic", [{"key": "API_TIMEOUT_MS", "value": "3000000"}])
         (listed,) = await chat.say("有哪些 provider", ("looper_providers", {"action": "list"}))
         assert [p["name"] for p in listed["result"]["providers"]] == ["claude-subscription", "codex-login",
-                                                                       "deepseek"]
+                                                                       "grok-login", "deepseek"]
         # A credential in its environment is refused as the dashboard refuses it.
         (refused,) = await chat.say("再登记一个", ("looper_providers", {
             "action": "register", "name": "other", "protocols": ["anthropic-messages"],

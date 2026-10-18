@@ -6,6 +6,7 @@ import { ClampedText } from "@/components/clamped-text";
 import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
 import { ProjectKnowledgeSection } from "@/components/project-knowledge";
 import { ProjectRoleTemplates } from "@/components/role-editor";
+import { ProjectRoleSummary } from "@/components/role-stats";
 import { ProjectSchedulesSection } from "@/components/project-schedules";
 import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
@@ -487,11 +488,10 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
           <ProjectAgentSettingsSection key={project.project_id} projectId={project.project_id} linked={focus ?? ""} />
         )}
         {tab === "roles" && (
-          <ProjectRoleTemplates
-            key={project.project_id}
-            projectId={project.project_id}
-            rolesOn={project.planner_roles === "on"}
-          />
+          <div key={project.project_id} className="space-y-4">
+            <ProjectRoleTemplates projectId={project.project_id} rolesOn={project.planner_roles === "on"} />
+            <ProjectRoleSummary projectId={project.project_id} />
+          </div>
         )}
         {tab === "schedules" && (
           <ProjectSchedulesSection

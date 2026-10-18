@@ -3,7 +3,14 @@
 import { historyHref } from "@/pages/agent-history";
 import { gateWaitsOn } from "@/lib/gates";
 import { MERGE_ERRORS, shortCommit, workspaceState } from "@/lib/workspaces";
-import type { GateAgendaItem, StepWorkspace, TaskDetail, TaskStep, UserGate } from "@/lib/api";
+import {
+  reviewingRole,
+  type GateAgendaItem,
+  type StepWorkspace,
+  type TaskDetail,
+  type TaskStep,
+  type UserGate,
+} from "@/lib/api";
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
 export interface CardLook {
@@ -106,8 +113,9 @@ function stepRoleLines(step: TaskStep) {
   const version = (v: number | null) => (v != null ? ` v${v}` : "");
   return [
     step.role_key && `${step.role_key} · work${version(step.role_version)}`,
-    step.review_role_key &&
-      `${step.review_role_key} · review${version(step.review_role_version)}${step.review_role_required === false ? " (advisory)" : ""}`,
+    ...(step.review_roles ?? []).map(
+      (item) => `${item.role} · review${version(item.version)}${item.required ? "" : " (advisory)"}`,
+    ),
   ].filter((line): line is string => !!line);
 }
 
@@ -118,15 +126,17 @@ function stepResult(step: TaskStep): CardSection[] {
   if (!result || !["completed", "deciding", "verified", "failed"].includes(step.status)) return [];
   const worked = result.status === "completed";
   const report = worked ? str(result.summary) : str(result.error) || str(result.summary);
-  const roleReview = result.role_review as Record<string, unknown> | undefined;
+  const roleReviews = (Array.isArray(result.role_reviews) ? result.role_reviews : []) as Record<string, unknown>[];
   const reasons = (findings: unknown, summary: unknown) =>
     (Array.isArray(findings) ? findings.map(String).join("\n") : "") || str(summary) || "no reason given";
-  const review =
-    roleReview && roleReview.passed !== true
-      ? `Review by role ${str(roleReview.role)} did not pass it:\n${reasons(roleReview.findings, roleReview.summary)}`
-      : result.verify_passed === false
-        ? `The review did not pass it:\n${reasons(result.verify_findings, result.verify_summary)}`
-        : "";
+  const failed = roleReviews
+    .filter((r) => r.passed !== true)
+    .map((r) => `Review by role ${str(r.role)}${r.required === false ? " (advisory)" : ""} did not pass it:\n${reasons(r.findings, r.summary)}`);
+  const review = failed.length
+    ? failed.join("\n\n")
+    : result.verify_passed === false
+      ? `The review did not pass it:\n${reasons(result.verify_findings, result.verify_summary)}`
+      : "";
   return [
     ...text(worked ? "Result" : `Result: ${str(result.status) || "unknown"}`, report,
             { clip: true, tone: worked ? undefined : "destructive" }),
@@ -193,7 +203,7 @@ export function stepCard(
         step.review && { label: "Review", value: "Needs a passing review" },
         step.status === "completed" && step.review_stage && {
           label: "Now",
-          value: `Waiting for ${step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}`,
+          value: `Waiting for ${reviewingRole(step) ? `review: ${reviewingRole(step)?.role}` : "the built-in review"}`,
         },
       ]),
       ...stepWorktree(workspaces),
