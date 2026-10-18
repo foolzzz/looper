@@ -1,0 +1,177 @@
+{
+  "counts": {
+    "failed": 1,
+    "stopped": 3
+  },
+  "next_before": null,
+  "tasks": [
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-05-16T00:00:00+00:00",
+      "goal_id": "",
+      "group": "attention",
+      "name": "beta failed",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta failed",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "failed",
+      "task_id": "task-failbeta01",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-05-15T00:00:00+00:00",
+      "goal_id": "",
+      "group": "attention",
+      "name": "beta stopped",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta stopped",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "stopped",
+      "task_id": "task-stopbeta01",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-04-02T00:00:00+00:00",
+      "goal_id": "",
+      "group": "attention",
+      "name": "File separator name",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-alpha0001",
+      "project_name": "Alpha",
+      "requirement": "should not win",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "stopped",
+      "task_id": "task-sepname001",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-04-01T00:00:00+00:00",
+      "goal_id": " \u001c ",
+      "group": "attention",
+      "name": "fallback line",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-alpha0001",
+      "project_name": "Alpha",
+      "requirement": "\u001cfallback line\u001f\nsecond line",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "stopped",
+      "task_id": "task-sepfall001",
+      "work_dir": ""
+    }
+  ]
+}

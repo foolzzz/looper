@@ -164,13 +164,13 @@ func (s *Store) Overview(ctx context.Context, since time.Time) (map[string]any, 
 		return nil, err
 	}
 	return map[string]any{
-		"tasks":          groupCounts(rows),
-		"agents":         emptyAgents(),
-		"projects":       overviewProjects(rows),
-		"idle_projects":  idleProjects(rows),
-		"spend_today":    spendView(since, spend),
-		"schedules":      schedules,
-		"health":         map[string]any{"unhealthy": []any{}},
+		"tasks":         groupCounts(rows),
+		"agents":        emptyAgents(),
+		"projects":      overviewProjects(rows),
+		"idle_projects": idleProjects(rows),
+		"spend_today":   spendView(since, spend),
+		"schedules":     schedules,
+		"health":        map[string]any{"unhealthy": []any{}},
 	}, nil
 }
 
@@ -501,7 +501,9 @@ func overviewProjects(rows []map[string]any) []any {
 		}
 	}
 	sort.Slice(active, func(i, j int) bool {
-		return strings.ToLower(names[active[i]]) < strings.ToLower(names[active[j]])
+		left := strings.ToLower(overviewLabel(names[active[i]], active[i]))
+		right := strings.ToLower(overviewLabel(names[active[j]], active[j]))
+		return left < right
 	})
 	out := make([]any, 0, len(active))
 	for _, id := range active {
@@ -509,10 +511,7 @@ func overviewProjects(rows []map[string]any) []any {
 		if groups[id] != nil {
 			ready = groups[id][groupReady]
 		}
-		name := names[id]
-		if name == "" {
-			name = id
-		}
+		name := overviewLabel(names[id], id)
 		out = append(out, map[string]any{
 			"project_id": id,
 			"name":       name,
@@ -522,6 +521,15 @@ func overviewProjects(rows []map[string]any) []any {
 		})
 	}
 	return out
+}
+
+// overviewLabel is Python's `name or project_id`. An empty name falls back to
+// the id. A whitespace-only name does not: it is truthy there.
+func overviewLabel(name, id string) string {
+	if name == "" {
+		return id
+	}
+	return name
 }
 
 func idleProjects(rows []map[string]any) int {
@@ -582,16 +590,16 @@ func scheduleView(counts map[string]any, upcoming, failing, skipped []map[string
 	bad := make([]any, 0, len(failing))
 	for _, row := range failing {
 		bad = append(bad, map[string]any{
-			"schedule_id":           row["id"],
-			"name":                  row["name"],
-			"project_id":            row["project_id"],
-			"project_name":          row["project_name"],
-			"timezone":              row["timezone"],
-			"consecutive_failures":  asInt(row["consecutive_failures"]),
-			"failures_since":        row["failures_alert_at"],
-			"stale_since":           row["stale_alert_at"],
-			"last_success_at":       row["last_success_at"],
-			"last_status":           row["last_status"],
+			"schedule_id":          row["id"],
+			"name":                 row["name"],
+			"project_id":           row["project_id"],
+			"project_name":         row["project_name"],
+			"timezone":             row["timezone"],
+			"consecutive_failures": asInt(row["consecutive_failures"]),
+			"failures_since":       row["failures_alert_at"],
+			"stale_since":          row["stale_alert_at"],
+			"last_success_at":      row["last_success_at"],
+			"last_status":          row["last_status"],
 		})
 	}
 	return map[string]any{

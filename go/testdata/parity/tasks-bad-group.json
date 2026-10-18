@@ -1,0 +1,3 @@
+{
+  "error": "group must be one of needs_you, in_progress, ready, attention, completed, cancelled, other"
+}

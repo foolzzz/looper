@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +21,9 @@ import (
 // Normalization, the same rule make_goldens.py applies before writing:
 //
 //   - Walk every JSON value.
-//   - A string matching an ISO-8601 datetime, YYYY-MM-DDTHH:MM:SS with an optional
-//     fraction and a Z or ±HH:MM suffix, becomes "<time>".
+//   - The value of a key in volatileTimes (since) becomes "<time>" and is not
+//     walked. Those are generated when the request runs. Seeded timestamps
+//     stay as written. volatileTimes is _VOLATILE_TIMES in make_goldens.py.
 //   - The value of a key named uptime, pid, pids, or version becomes "<volatile>"
 //     and is not walked. implementation and db are compared as written.
 //   - Object key order is not significant. Numbers compare by value, so 0 and 0.0
@@ -32,7 +32,37 @@ import (
 //
 // The overview clock is local noon on 2026-06-15, the same day make_goldens.py
 // freezes. Seed rows at 2026-06-15T12:00:00Z count as today. Rows in 2020 do not.
-var timeValue = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$`)
+//
+// goldenCases is the same list make_goldens.py writes.
+var (
+	volatileTimes = map[string]bool{"since": true}
+	volatileKeys  = map[string]bool{"uptime": true, "pid": true, "pids": true, "version": true}
+	goldenCases   = []struct {
+		name   string
+		path   string
+		status int
+	}{
+		{"status", "/api/status", http.StatusOK},
+		{"projects", "/api/projects", http.StatusOK},
+		{"overview", "/api/overview", http.StatusOK},
+		{"tasks", "/api/tasks", http.StatusOK},
+		{"tasks-group-needs_you", "/api/tasks?group=needs_you", http.StatusOK},
+		{"tasks-group-in_progress", "/api/tasks?group=in_progress", http.StatusOK},
+		{"tasks-group-ready", "/api/tasks?group=ready", http.StatusOK},
+		{"tasks-group-attention", "/api/tasks?group=attention", http.StatusOK},
+		{"tasks-group-completed", "/api/tasks?group=completed", http.StatusOK},
+		{"tasks-group-cancelled", "/api/tasks?group=cancelled", http.StatusOK},
+		{"tasks-group-other", "/api/tasks?group=other", http.StatusOK},
+		{"tasks-project", "/api/tasks?project_id=proj-beta00002", http.StatusOK},
+		{"tasks-limit", "/api/tasks?limit=2", http.StatusOK},
+		{"tasks-bad-group", "/api/tasks?group=nope", http.StatusBadRequest},
+		{"tasks-bad-limit", "/api/tasks?limit=0", http.StatusBadRequest},
+		{"tasks-before", "/api/tasks?limit=2&before=task-asame0001", http.StatusOK},
+		{"tasks-status", "/api/tasks?status=running", http.StatusOK},
+		{"tasks-schedule", "/api/tasks?schedule_id=sched-nightly01", http.StatusOK},
+		{"tasks-combined", "/api/tasks?project_id=proj-alpha0001&status=waiting_user&schedule_id=sched-nightly01", http.StatusOK},
+	}
+)
 
 func TestGoldenParity(t *testing.T) {
 	dsn := os.Getenv("LOOPGO_TEST_DATABASE_URL")
@@ -77,9 +107,9 @@ func TestGoldenParity(t *testing.T) {
 
 	client := srv.Client()
 	client.Timeout = 30 * time.Second
-	for _, name := range []string{"status", "projects", "overview"} {
-		t.Run(name, func(t *testing.T) {
-			resp, err := client.Get(srv.URL + "/api/" + name)
+	for _, tc := range goldenCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -88,11 +118,11 @@ func TestGoldenParity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("status %d body %s", resp.StatusCode, body)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status %d body %s, want %d", resp.StatusCode, body, tc.status)
 			}
 			got := canonical(t, body)
-			golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", "parity", name+".json"))
+			golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", "parity", tc.name+".json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -101,6 +131,33 @@ func TestGoldenParity(t *testing.T) {
 				t.Fatalf("canonical JSON differs\n got %s\nwant %s", got, want)
 			}
 		})
+	}
+}
+
+func TestNormalizeKeepsSeededTimes(t *testing.T) {
+	got := normalize(map[string]any{
+		"created_at":   "2020-01-15T00:00:00+00:00",
+		"updated_at":   "2020-01-16T00:00:00Z",
+		"next_fire_at": "2020-04-01T09:00:00+00:00",
+		"completed_at": "2020-03-04T12:00:00+00:00",
+		"note":         "not a time",
+		"uptime":       12,
+		"spend_today": map[string]any{
+			"since":          "2026-06-15T00:00:00+08:00",
+			"equivalent_usd": 1.25,
+		},
+	}).(map[string]any)
+	for _, key := range []string{"created_at", "updated_at", "next_fire_at", "completed_at"} {
+		if _, ok := got[key].(string); !ok || got[key] == "<time>" {
+			t.Fatalf("%s became %v", key, got[key])
+		}
+	}
+	if got["created_at"] != "2020-01-15T00:00:00+00:00" || got["note"] != "not a time" || got["uptime"] != "<volatile>" {
+		t.Fatalf("normalize changed a seeded value: %#v", got)
+	}
+	spend := got["spend_today"].(map[string]any)
+	if spend["since"] != "<time>" || spend["equivalent_usd"] != 1.25 {
+		t.Fatalf("spend_today %#v", spend)
 	}
 }
 
@@ -122,8 +179,12 @@ func normalize(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, item := range typed {
-			if key == "uptime" || key == "pid" || key == "pids" || key == "version" {
+			if volatileKeys[key] {
 				out[key] = "<volatile>"
+				continue
+			}
+			if volatileTimes[key] {
+				out[key] = "<time>"
 				continue
 			}
 			out[key] = normalize(item)
@@ -135,11 +196,6 @@ func normalize(value any) any {
 			out[i] = normalize(item)
 		}
 		return out
-	case string:
-		if timeValue.MatchString(typed) {
-			return "<time>"
-		}
-		return typed
 	default:
 		return value
 	}

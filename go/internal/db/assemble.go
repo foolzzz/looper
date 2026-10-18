@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Task groups, in the order Python's TaskGroup enum and the 400 message use.
@@ -136,18 +137,33 @@ func projectView(row map[string]any) map[string]any {
 
 func taskName(title, goal, requirement, id string) string {
 	for _, value := range []string{title, goal} {
-		if strings.TrimSpace(value) != "" {
-			return strings.Join(strings.Fields(value), " ")
+		if pythonStrip(value) != "" {
+			return strings.Join(pythonFields(value), " ")
 		}
 	}
-	first := strings.TrimSpace(requirement)
+	first := pythonStrip(requirement)
 	if i := strings.IndexByte(first, '\n'); i >= 0 {
-		first = strings.TrimSpace(first[:i])
+		first = pythonStrip(first[:i])
 	}
 	if first != "" {
 		return first
 	}
 	return id
+}
+
+// pythonSpace is str.isspace. unicode.IsSpace omits U+001C–U+001F. Python
+// treats those controls as whitespace, so a title of only them is empty and
+// falls through, and one with them between words collapses to single spaces.
+func pythonSpace(r rune) bool {
+	return unicode.IsSpace(r) || r >= 0x1C && r <= 0x1F
+}
+
+func pythonStrip(s string) string {
+	return strings.TrimFunc(s, pythonSpace)
+}
+
+func pythonFields(s string) []string {
+	return strings.FieldsFunc(s, pythonSpace)
 }
 
 func taskListItem(row map[string]any, cost map[string]any) map[string]any {

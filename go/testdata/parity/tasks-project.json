@@ -1,0 +1,1902 @@
+{
+  "counts": {
+    "archived": 1,
+    "cancelled": 1,
+    "completed": 41,
+    "failed": 1,
+    "stopped": 1
+  },
+  "next_before": null,
+  "tasks": [
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-05-16T00:00:00+00:00",
+      "goal_id": "",
+      "group": "attention",
+      "name": "beta failed",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta failed",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "failed",
+      "task_id": "task-failbeta01",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-05-15T00:00:00+00:00",
+      "goal_id": "",
+      "group": "attention",
+      "name": "beta stopped",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta stopped",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "stopped",
+      "task_id": "task-stopbeta01",
+      "work_dir": ""
+    },
+    {
+      "completed_at": "2020-05-14T01:00:00+00:00",
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-05-14T00:00:00+00:00",
+      "goal_id": "",
+      "group": "cancelled",
+      "name": "beta cancelled",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta cancelled",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "cancelled",
+      "task_id": "task-cancbeta01",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-03-05T00:00:00+00:00",
+      "goal_id": "",
+      "group": "other",
+      "name": "beta archived",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta archived",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "archived",
+      "task_id": "task-archbeta01",
+      "work_dir": ""
+    },
+    {
+      "completed_at": "2020-03-04T12:00:00+00:00",
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2020-03-04T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "beta finished",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "beta finished",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-donebeta01",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-31T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 1",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 1",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0001",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-30T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 2",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 2",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0002",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-29T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 3",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 3",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0003",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-28T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 4",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 4",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0004",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-27T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 5",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 5",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0005",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-26T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 6",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 6",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0006",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-25T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 7",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 7",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0007",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-24T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 8",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 8",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0008",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-23T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 9",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 9",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0009",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-22T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 10",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 10",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0010",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-21T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 11",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 11",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0011",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-20T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 12",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 12",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0012",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-19T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 13",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 13",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0013",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-18T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 14",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 14",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0014",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-17T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 15",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 15",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0015",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-16T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 16",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 16",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0016",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-15T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 17",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 17",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0017",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-14T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 18",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 18",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0018",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-13T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 19",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 19",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0019",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-12T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 20",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 20",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0020",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-11T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 21",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 21",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0021",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-10T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 22",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 22",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0022",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-09T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 23",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 23",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0023",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-08T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 24",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 24",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0024",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-07T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 25",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 25",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0025",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-06T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 26",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 26",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0026",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-05T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 27",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 27",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0027",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-04T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 28",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 28",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0028",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-03T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 29",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 29",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0029",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-02T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 30",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 30",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0030",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-12-01T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 31",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 31",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0031",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-30T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 32",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 32",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0032",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-29T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 33",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 33",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0033",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-28T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 34",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 34",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0034",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-27T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 35",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 35",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0035",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-26T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 36",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 36",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0036",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-25T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 37",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 37",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0037",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-24T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 38",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 38",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0038",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-23T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 39",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 39",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0039",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2019-11-22T00:00:00+00:00",
+      "goal_id": "",
+      "group": "completed",
+      "name": "filler 40",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-beta00002",
+      "project_name": "Beta",
+      "requirement": "filler 40",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "completed",
+      "task_id": "task-fill0040",
+      "work_dir": ""
+    }
+  ]
+}

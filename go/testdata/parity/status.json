@@ -10,8 +10,8 @@
   "checks": [],
   "status": "running",
   "tasks": {
-    "completed": 1,
-    "running": 2,
-    "total": 5
+    "completed": 41,
+    "running": 8,
+    "total": 57
   }
 }
