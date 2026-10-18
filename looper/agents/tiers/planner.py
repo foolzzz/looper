@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..bus import MessageBus
+from ..supervisor import cancel_and_wait
 from ..agent_settings import AgentSettings, AgentType, Harness, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
@@ -178,7 +179,8 @@ logger = logging.getLogger(__name__)
 from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
 from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
-from ...db import task_roles as db_roles, tasks as db_tasks, user_gates as db_user_gates
+from ...db import role_templates as db_templates, task_roles as db_roles, tasks as db_tasks
+from ...db import user_gates as db_user_gates
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
@@ -344,6 +346,9 @@ class PlanStep:
     review_stage: ReviewStage | None = None  # in review: which review it waits for
     # A gate step's gate (``user_gates``): its instruction is its topic, and no Worker runs it.
     gate: Gate | None = None
+    # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
+    # started (task_steps.started_at).
+    started_at: datetime | None = None
 
     @property
     def label(self) -> str:
@@ -503,6 +508,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "review_role_version": step.review_role_version,
         "review_stage": step.review_stage.value if step.review_stage else None,
         "kind": "gate" if step.gate is not None else "work",
+        "started_at": step.started_at,
     }
 
 
@@ -729,8 +735,6 @@ class PlannerAgent:
         # shutdown cuts off would leave them behind.
         self._remove_token_files()
         supervise_task, self._supervise_task = self._supervise_task, None
-        if supervise_task:
-            supervise_task.cancel()
         idle_task, self._idle_task = self._idle_task, None
         if idle_task:
             idle_task.cancel()
@@ -738,23 +742,47 @@ class PlannerAgent:
         cancelled = False
         try:
             if supervise_task:
-                await asyncio.wait([supervise_task])
+                await cancel_and_wait(supervise_task)
             # Stop the Workers this task still runs; otherwise they keep
             # changing files after the task is gone.
             await self._kill_running_workers()
             if loop_task:
-                loop_task.cancel()
-                # Unlike awaiting the task, this does not mistake its
-                # cancellation for ours: a cancelled stop() still propagates.
-                await asyncio.wait([loop_task])
+                await cancel_and_wait(loop_task)
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            # A turn the loop was in has already killed Claude; an idle one
-            # ends when its stdin closes. Never leave it running.
-            await self._claude.stop(kill=cancelled)
-            self._remove_token_files()  # and one a turn wrote meanwhile
+            async def cleanup(kill: bool) -> None:
+                try:
+                    for task in (supervise_task, loop_task):
+                        if task is not None and not task.done():
+                            await cancel_and_wait(task)
+                except asyncio.CancelledError:
+                    kill = True  # hurried: Claude is ended at once, and the loops not waited for yet are cancelled
+                    for task in (supervise_task, loop_task):
+                        if task is not None and not task.done():
+                            task.cancel()
+                    raise
+                finally:
+                    # A turn the loop was in has already killed Claude; an idle one
+                    # ends when its stdin closes. Never leave it running.
+                    await self._claude.stop(kill=kill)
+                    self._remove_token_files()  # and one a turn wrote meanwhile
+
+            # Run to its end even when this stop is cancelled again: a second cancellation only hurries it (Claude
+            # ended at once rather than after its grace).
+            cleaning = asyncio.create_task(cleanup(cancelled))
+            hurried = False
+            while not cleaning.done():
+                try:
+                    await asyncio.shield(cleaning)
+                except asyncio.CancelledError:
+                    if not hurried:
+                        hurried = True
+                        cleaning.cancel()
+            if hurried:
+                raise asyncio.CancelledError
+            cleaning.result()
 
     def _remove_token_files(self) -> None:
         """Delete the MCP configuration files that carry this Planner's token, which no longer works."""
@@ -851,7 +879,7 @@ class PlannerAgent:
             await self._fail_plan(plan, reason=f"Planning failed: {problem}")
             return
         try:
-            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan),
+            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
                                     lambda text: parse_plan(text, self._roles, gate_policy=self._gate_policy))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
@@ -1225,6 +1253,7 @@ class PlannerAgent:
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
+        step.started_at = step.started_at or datetime.now(timezone.utc)
         previous = (step.result or {}) if (step.result or {}).get("status") == "unmerged" else {}
         if previous and step.workspace is not None and \
                 not await workspaces.branch_exists(step.workspace.repo_dir, str(previous.get("branch") or "")):
@@ -1992,6 +2021,7 @@ class PlannerAgent:
                  and (s.status != "pending" or s.started)]
         for step in again:
             step.status, step.worker_id, step.reviewer_id, step.review_stage = "pending", None, None, None
+            step.started_at = None  # its next dispatch starts it again: the time the task was stopped does not count
         waiting = plan.waiting_gates()
         for step in waiting:
             assert step.gate is not None
@@ -2012,7 +2042,8 @@ class PlannerAgent:
         await self._read_changes(plan, changes)
         view = plan.view()
         try:
-            reply: ChatReply | None = await self._ask(TurnKind.RESTART, self._restart_message(plan, why, changes),
+            message = self._restart_message(plan, why, changes, await self._template_lines(plan))
+            reply: ChatReply | None = await self._ask(TurnKind.RESTART, message,
                                                       lambda answer: parse_chat(answer, self._checked(view)))
         except PlannerTurnError as exc:
             await self._activity("error", f"Warning: the Planner could not take the restart: {exc}. The steps not "
@@ -2385,22 +2416,23 @@ class PlannerAgent:
         return bool(ack.payload.get("killed"))
 
     async def _kill_running_workers(self) -> None:
-        """Stop every Worker and Reviewer this task still runs (on task stop/cancel)."""
+        """Stop every Worker and Reviewer this task still runs (on task stop/cancel, at its spend cap), all at once:
+        each stop waits for its run's processes to end."""
         plan = self._plan
         if plan is None or self._bus is None:
             return
+        runs: list[tuple[PlanStep, str | None]] = []
         for step in plan.steps:
             if step.status == "dispatched" and step.worker_id:
-                run_id = None
+                runs.append((step, None))
             elif step.status == "completed" and step.reviewer_id:
-                run_id = step.reviewer_id  # in review
-            else:
-                continue
-            try:
-                await self._kill_worker(step, run_id)
-            except Exception:
+                runs.append((step, step.reviewer_id))  # in review
+        stopped = await asyncio.gather(*(self._kill_worker(step, run_id) for step, run_id in runs),
+                                       return_exceptions=True)
+        for (step, run_id), outcome in zip(runs, stopped):
+            if isinstance(outcome, Exception):
                 logger.debug("planner %s could not stop run %s", self.agent_id, run_id or step.worker_id,
-                             exc_info=True)
+                             exc_info=outcome)
 
     # --- Turns on the Planner's Claude ---
 
@@ -2430,6 +2462,23 @@ class PlannerAgent:
                 return parse(reply)
             except ProtocolError as second:
                 raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+
+    async def _template_lines(self, plan: TaskPlan) -> list[str]:
+        """The project's role templates, one line each, for a turn that plans, where its project lets its Planner
+        define roles and has templates; nothing otherwise (or when they cannot be read)."""
+        if not self._execution.roles_on or not plan.project_id:
+            return []
+        try:
+            rows = await db_templates.list_templates(plan.project_id)
+        except Exception:
+            logger.warning("planner %s cannot read its project's role templates", self.agent_id, exc_info=True)
+            return []
+        if not rows:
+            return []
+        return ["This project's role templates (when one fits a step, define its role from it with "
+                "looper_task_role_set and template):",
+                *(f"- {row['template_key']} ({row['kind']})" + (f": {_clip(row['description'], 300)}"
+                                                               if row["description"] else "") for row in rows)]
 
     async def _read_roles(self) -> None:
         """Read the task's roles by key (``self._roles``) where its project lets its Planner define them; a failed
@@ -2851,7 +2900,7 @@ class PlannerAgent:
         section = journal.planner_section(plan.journal)
         return ["", *section] if section else []
 
-    def _plan_message(self, plan: TaskPlan) -> str:
+    def _plan_message(self, plan: TaskPlan, templates: Sequence[str] = ()) -> str:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
                                 "later one changes it)")
@@ -2859,6 +2908,7 @@ class PlannerAgent:
             "[PLAN] Plan the task in the Task section of your instructions"
             + (", with the supplements below." if added else "."),
             *(["", *added] if added else []),
+            *(["", *templates] if templates else []),
             "",
             "You may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         ])
@@ -3017,7 +3067,7 @@ class PlannerAgent:
             "Reply with the CHAT JSON.",
         ])
 
-    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges) -> str:
+    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = ()) -> str:
         """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
         it is now and the journal."""
         lines, section = self._change_lines(plan, changes)
@@ -3033,6 +3083,7 @@ class PlannerAgent:
             "",
             *self._plan_lines(plan),
             *(["", *section] if section else []),
+            *(["", *templates] if templates else []),
             "",
             "Build on what is done: decide whether the steps not started still fit the task as it is now.",
             "Allowed actions: none (run the steps not started as they are), add_steps, replan.",
@@ -3300,11 +3351,7 @@ class PlannerAgent:
         plan.status = "stopping"  # no result is taken and nothing starts while it winds down
         await self._save(plan, plan_row=True)
         await self._activity("error", reason)
-        for step in plan.steps:
-            if step.status == "dispatched" and step.worker_id:
-                await self._kill_worker(step)
-            elif step.status == "completed" and step.reviewer_id:
-                await self._kill_worker(step, step.reviewer_id)
+        await self._kill_running_workers()
         if self._execution.on_task_budget is TaskBudgetAction.WRAP_UP:
             try:
                 summary = await self._ask(TurnKind.DECISION, self._wrap_up_message(plan, reason), parse_wrap_up)
@@ -3346,7 +3393,7 @@ class PlannerAgent:
                     step.workspace.state is StepWorkspaceState.MERGING:
                 merging.append(step)  # accepted: only its merge was cut off
             elif step.status in ("dispatched", "deciding"):
-                step.status = "pending"
+                step.status, step.started_at = "pending", None  # started again when dispatched again
                 again.append(step)
             elif step.status == "completed":
                 review.append(step)
@@ -3549,6 +3596,7 @@ class PlannerAgent:
                 review_role_version=sd.get("review_role_version"),
                 review_stage=ReviewStage(sd["review_stage"]) if sd.get("review_stage") else None,
                 gate=self._stored_gate(sd, stored.get("gates") or {}),
+                started_at=sd.get("started_at"),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:
