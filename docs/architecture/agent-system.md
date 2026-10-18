@@ -1735,7 +1735,7 @@ or `off`) with its limits `room_post_per_minute` (1 to 60, null for 6),
 (500 to 20,000, null for 4,000), `room_messages_per_task` (20 to 5,000, null
 for 300), `room_ping_pong_rounds` (2 to 50, null for 6) and
 `room_wait_max_seconds` (0 to 120, null for 60), and its consults'
-`room_consult_budget_usd` (0.01 to 5, null for 0.20),
+`room_consult_budget_usd` (0.01 to 5, null for 0.50),
 `room_consult_timeout_seconds` (30 to 1,800, null for 300) and
 `room_consults_per_task` (0 to 100, null for 10) ([A task's agent
 room](#a-tasks-agent-room)).

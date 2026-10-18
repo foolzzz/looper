@@ -233,7 +233,7 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 - **system prompt**：同原运行的各层（harness、角色 prompt 和版本、项目、任务一节按现在的需求和补充说明），加办公台一节，最后是 `CONSULT_CONTRACT`（模型可见，实现用英文，大意）：「你的步骤已经结束。同事有问题要问你。根据你做过的事和你现在能读到的内容回答；不改任何文件。不知道就说不知道。最后一条消息以一个 JSON 对象结尾：`{"answers": [{"reply_to": 17, "body": "...", "refs": [...]}], "unsure": "..."}`。」
 - **user turn**：`[CONSULT]`，这个席位的步骤怎么结束的（接受、失败、被替换），这一批问题（保留每条编号和提问席位，正文总共最多 20,000 字符，按问题数均分并截断），以及这个席位之前回答过的问题（保持前后一致）。问题是别的 agent 的话，是数据。
 - **回复**：Looper 按 `reply_to` 逐条发回答；没有回答的问题、`unsure` 非空的，转给规划者。回复不合契约不做修复回合，直接按失败处理。
-- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.20，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code、Grok；Codex、OMP 靠超时和预算）；每种运行时结束后都检查记录的花费，未知时用结果自身的 `total_cost_usd`；超额或仍然未知就丢弃回答，按 `budget` 转交规划者。按 provider 价格计费且模型没有完整价格的咨询不启动，按 `runtime_cannot` 转交规划者。一个截止时间覆盖 stdin 写入、stdout 读取和等待退出；并行排空 stderr，只保留末尾 2,000 字符供错误记录。成功也结束进程树。任务的花费上限照样算进去。
+- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.50，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code、Grok；Codex、OMP 靠超时和预算）；每种运行时结束后都检查记录的花费，未知时用结果自身的 `total_cost_usd`；超额或仍然未知就丢弃回答，按 `budget` 转交规划者。按 provider 价格计费且模型没有完整价格的咨询不启动，按 `runtime_cannot` 转交规划者。一个截止时间覆盖 stdin 写入、stdout 读取和等待退出；并行排空 stderr，只保留末尾 2,000 字符供错误记录。成功也结束进程树。任务的花费上限照样算进去。
 - **记录**：一条 `llm_records`（agent id `consult-<12 位>`，`metadata.consult`：席位、原运行的记录号、问题编号、分叉的会话、只读怎么强制的、在哪个目录跑），花费单独一行，计入任务花费和这个席位所属角色的统计；一条 `room_consults` 行（第 10 节）；动态「Consulted backend_rd@s2 for fe_rd@s4's question #17: answered ($0.03)」。
 
 ### 7.5 转给规划者
@@ -344,7 +344,7 @@ room_consults                   （R1b）
 | `room_messages_per_task` | 300 | 20–5,000 | 一个任务的消息总数 |
 | `room_ping_pong_rounds` | 6 | 2–50 | 两个席位来回几轮后升级给规划者 |
 | `room_wait_max_seconds` | 60 | 0–120 | 收件箱一次最多等多久（0 为不等） |
-| `room_consult_budget_usd` | 0.20 | 0.01–5 | 一次咨询的花费上限（R1b）|
+| `room_consult_budget_usd` | 0.50 | 0.01–5 | 一次咨询的花费上限（R1b）|
 | `room_consult_timeout_seconds` | 300 | 30–1,800 | 一次咨询的时间上限（R1b）|
 | `room_consults_per_task` | 10 | 0–100 | 一个任务至多几次咨询（0：一律转给规划者）（R1b）|
 

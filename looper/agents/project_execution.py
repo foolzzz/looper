@@ -53,7 +53,7 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   ``room_ping_pong_rounds`` (messages two seats may trade before the Planner is
   told) and ``room_wait_max_seconds`` (how long an inbox call may wait);
 - the room's consults: ``room_consult_budget_usd`` (what one may spend,
-  ``CONSULT_BUDGET_RANGE``, 0.20 when unset), ``room_consult_timeout_seconds``
+  ``CONSULT_BUDGET_RANGE``, 0.50 when unset), ``room_consult_timeout_seconds``
   and ``room_consults_per_task`` (0: every question for a seat no run is in
   goes to the Planner), in ``ROOM_LIMITS``.
 
@@ -102,7 +102,7 @@ ROOM_LIMITS: dict[str, tuple[int, int, int, str]] = {
 }
 # What one consult may spend, in USD, and its default.
 CONSULT_BUDGET_RANGE = (0.01, 5.0)
-DEFAULT_CONSULT_BUDGET_USD = 0.20
+DEFAULT_CONSULT_BUDGET_USD = 0.50
 
 
 class ReviewPolicy(str, Enum):

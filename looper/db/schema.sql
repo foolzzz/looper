@@ -688,7 +688,7 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_ping_pong_rounds INTEGER
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_wait_max_seconds INTEGER
     CHECK (room_wait_max_seconds >= 0 AND room_wait_max_seconds <= 120);
 -- The room's consults (a question for a seat no run is in, answered by its last session): how much one may spend,
--- how long it may take, and how many a task may have (NULL: 0.20 USD, 300 s, 10; 0 consults: none).
+-- how long it may take, and how many a task may have (NULL: 0.50 USD, 300 s, 10; 0 consults: none).
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consult_budget_usd DOUBLE PRECISION
     CHECK (room_consult_budget_usd >= 0.01 AND room_consult_budget_usd <= 5);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consult_timeout_seconds INTEGER

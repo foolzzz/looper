@@ -50,6 +50,17 @@ def _project(**settings: Any) -> dict[str, Any]:
     return {"id": "proj-1", "name": "calc", "background": "", **UNSET, **settings}
 
 
+@pytest.mark.parametrize("settings, expected", [
+    ({}, 0.50),
+    ({"room_consult_budget_usd": None}, 0.50),
+    ({"room_consult_budget_usd": 0.20}, 0.20),
+])
+def test_consult_budget_inherits_the_default_unless_explicitly_set(
+    settings: dict[str, Any], expected: float,
+) -> None:
+    assert ProjectExecution.from_row(_project(**settings)).room_limits.consult_budget_usd == expected
+
+
 def _layers(agent_db: Any, *rows: dict[str, Any]) -> None:
     """The agent setting layers' rows the agents read."""
     agent_db.list_layers.return_value = list(rows)
