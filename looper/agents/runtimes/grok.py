@@ -133,7 +133,7 @@ class GrokRuntime(RuntimeAdapter):
         try:
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
                                   timeout=_PROBE_TIMEOUT_SEC, check=False,
-                                  env={**_grok_env(os.environ), "GROK_HOME": home, **dict(FIXED_ENV)})
+                                  env={**_grok_env(os.environ), "GROK_HOME": home, "HOME": home, **dict(FIXED_ENV)})
         except FileNotFoundError:
             return Probe(None, self.capabilities, f"{executable!r} was not found")
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -155,6 +155,8 @@ class GrokRuntime(RuntimeAdapter):
         what would replace it is removed from the environment."""
         if provider.auth is not AuthKind.OAUTH or provider.oauth_runtime_type != self.type:
             raise RuntimeUnsupported(f"Grok runs with its own login only; provider {provider.name!r} is not it")
+        if effort and effort not in ("low", "medium", "high", "xhigh"):
+            raise RuntimeUnsupported(f"Grok does not support effort {effort!r}; use one of: low, medium, high, xhigh")
         return ProviderBinding(args=("-m", model, *(("--effort", effort) if effort else ())), env=provider.env,
                                unset=(*DIRECTORY_VARS, *RESTORED_VARS[1:], *grok_login.ENV_UNSET))
 
@@ -174,7 +176,7 @@ class GrokRuntime(RuntimeAdapter):
         command."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         visible = {**os.environ, **dict(launch.env)}
-        return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env), **dict(FIXED_ENV)}
+        return {**_grok_env(visible), **dict(binding.env), **dict(FIXED_ENV)}
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch, max_turns: int) -> list[str]:
         args = self.launch_args(launch)  # refuses a provider it cannot run with before anything is written
@@ -286,8 +288,9 @@ def every_named(cwd: str | Path, names: tuple[str, ...]) -> list[Path]:
 
 
 def _grok_env(visible: Mapping[str, str]) -> dict[str, str]:
-    """``visible`` without the variables that point Grok elsewhere."""
-    return {k: v for k, v in visible.items() if k not in DIRECTORY_VARS}
+    """``visible`` without the variables that point Grok elsewhere or replace its login."""
+    unset = (*DIRECTORY_VARS, *RESTORED_VARS[1:], *grok_login.ENV_UNSET)
+    return {k: v for k, v in visible.items() if k not in unset}
 
 
 # --- The catalog (RFC P9) ---
@@ -481,16 +484,19 @@ def _link_shared(home: Path) -> None:
 
 
 def write_home(local: Path, config: str, rules: str, *, login: Path) -> Path:
-    """The home of the runs of this ``config.toml`` and rules file: ``<local>/grok/runs/<sha256>``, written once;
-    Grok keeps its own state there too. Its ``auth.json`` is a link to ``login`` (the operator's login file,
-    ``grok_login.link_login``), and its ``SHARED_DIRS`` link to the shared copies (``_link_shared``). Writing a new
+    """The home of the runs of this ``config.toml`` and rules file: ``<local>/grok/runs/<sha256>``, with generated
+    files restored before reuse; Grok keeps its own state there too. Its ``auth.json`` is a link to ``login``
+    (the operator's login file, ``grok_login.link_login``), and its ``SHARED_DIRS`` link to the shared copies
+    (``_link_shared``). Writing a new
     one removes the idle ones (``_remove_idle_homes``)."""
     named = f"{HOME_LAYOUT_ID}\n{config}\0{rules}\0{login}"
     key = hashlib.sha256(named.encode("utf-8")).hexdigest()
     runs = _grok_dir(local) / "runs"
     target = runs / key
-    if (target / RULES_FILE).is_file():
+    if target.is_dir():
         grok_login.link_login(target, login)
+        _write_private(target / "config.toml", config)
+        _write_private(target / RULES_FILE, rules)
         return target
     runs.mkdir(exist_ok=True)
     _remove_idle_homes(runs, time.time())
@@ -645,17 +651,18 @@ class GrokStream:
     def _result(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         result = {k: v for k, v in raw.items() if k != "modelUsage"}
         cost = raw.get("total_cost_usd")
-        if cost == 0 and any(request_tokens(raw.get("usage")).to_dict().values()):
-            del result["total_cost_usd"]
         models = raw.get("modelUsage")
         if isinstance(models, Mapping) and models:
             result["modelUsage"] = {str(name): _model_usage(usage) for name, usage in models.items()}
         else:
-            tokens = self.usage
+            tokens = request_tokens(raw.get("usage")).filled_from(self.usage)
             result["modelUsage"] = {self.model or "grok": {
                 "inputTokens": tokens.input_tokens or 0, "outputTokens": tokens.output_tokens or 0,
                 "cacheReadInputTokens": tokens.cache_read_tokens or 0,
                 "cacheCreationInputTokens": tokens.cache_creation_tokens or 0}}
+        if cost == 0 and (any(request_tokens(raw.get("usage")).to_dict().values())
+                          or any(any(usage.values()) for usage in result["modelUsage"].values())):
+            del result["total_cost_usd"]
         return result
 
 

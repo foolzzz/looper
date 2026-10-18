@@ -29,7 +29,7 @@ from looper.agents.run_usage import Usage, request_context, run_usage
 from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, adapter, grok_login
 from looper.agents.runtimes import CostSource
 from looper.agents.runtimes.grok import (
-    COMPAT_VARS, RESTORED_VARS, RULES_FILE, GrokRuntime, GrokStream, ResidentGrok, write_home,
+    COMPAT_VARS, DIRECTORY_VARS, RESTORED_VARS, RULES_FILE, GrokRuntime, GrokStream, ResidentGrok, write_home,
 )
 from looper.agents.runtimes.instructions import Delivery
 from looper.agents.system_prompt import SystemPrompt
@@ -169,6 +169,26 @@ def test_a_run_ended_by_a_signal_has_no_result() -> None:
     assert [e["type"] for e in events] == ["system"] and _result(events) is None
 
 
+@pytest.mark.parametrize("models", [None, {}], ids=["missing", "empty"])
+@pytest.mark.parametrize("seen", [Usage(), _tokens(1, 2, 0)], ids=["no-responses", "with-responses"])
+def test_a_result_without_model_usage_keeps_its_own_tokens(models: dict[str, Any] | None, seen: Usage) -> None:
+    stream = GrokStream(model="grok-4.7", usage=seen)
+    raw = {"type": "result", "usage": {"input_tokens": 123, "output_tokens": 45}}
+    if models is not None:
+        raw["modelUsage"] = models
+    (result,) = stream.translate(raw)
+    usage = run_usage(result)
+    assert (usage.input_tokens, usage.output_tokens) == (123, 45)
+
+
+@pytest.mark.parametrize("token", ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"])
+def test_zero_cost_with_tokens_only_in_model_usage_is_unknown(token: str) -> None:
+    (result,) = GrokStream().translate({"type": "result", "total_cost_usd": 0,
+                                       "usage": {"input_tokens": 0, "output_tokens": 0},
+                                       "modelUsage": {"grok-4.7": {token: 123}}})
+    assert "total_cost_usd" not in result and run_usage(result).cost_usd is None
+
+
 # --- The launch and its home ---
 
 
@@ -205,6 +225,25 @@ def test_a_run_gets_a_home_of_its_own_with_the_generated_files_and_a_link_to_the
     again = GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(root), launch=_launch())
     other = GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(root, "OTHER"), launch=_launch())
     assert again[1] == command[1] and other[1] != command[1] and "--max-turns" not in again
+
+
+@pytest.mark.parametrize("tamper", ["overwrite", "remove"])
+def test_the_next_launch_restores_a_cached_homes_generated_files(
+    tamper: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    prompt = _prompt_file(tmp_path / "runtime")
+    command = GROK.run_command("grok", cwd=tmp_path, prompt_file=prompt, launch=_launch())
+    home = _home(command)
+    expected = {name: (home / name).read_text() for name in ("config.toml", RULES_FILE)}
+    for name in expected:
+        if tamper == "overwrite":
+            (home / name).write_text("tampered")
+        else:
+            (home / name).unlink()
+    again = GROK.run_command("grok", cwd=tmp_path, prompt_file=prompt, launch=_launch())
+    assert _home(again) == home
+    assert {name: (home / name).read_text() for name in expected} == expected
 
 
 @pytest.mark.parametrize(("table", "lines"), [
@@ -284,6 +323,12 @@ def test_any_provider_but_its_own_login_fails_the_launch(provider: ProviderSpec,
 def test_without_an_effort_grok_picks_its_own(tmp_path: Path) -> None:
     command = GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=_launch(effort=""))
     assert "--effort" not in command and _flag(command, "-m") == ["grok-4.7"]
+
+
+@pytest.mark.parametrize("effort", ["max", "minimal", "unsupported"])
+def test_an_unsupported_effort_is_rejected_when_binding_the_configuration(effort: str) -> None:
+    with pytest.raises(RuntimeUnsupported, match=f"Grok.*{effort!r}.*low, medium, high, xhigh"):
+        GROK.bind_provider(LOGIN, "grok-4.7", effort)
 
 
 def _library(root: Path) -> AgentLibrary:
@@ -389,13 +434,26 @@ def test_a_run_takes_one_prompt_and_no_later_turn() -> None:
 
 
 def test_the_probe_reads_only_the_version_with_an_empty_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
     grok = fake_claude(tmp_path / "grok", (
         "import os, sys\n"
         "assert sys.argv[1:] == ['--version'] and os.listdir(os.environ['GROK_HOME']) == []\n"
         "assert 'GROK_CONFIG' not in os.environ\n"
         "print('grok 1.0.62 (1474f9cbdd91) [stable]')\n"
     ))
-    monkeypatch.setenv("GROK_CONFIG", '{"models": {}}')
+    for name in (*DIRECTORY_VARS, *RESTORED_VARS, *grok_login.ENV_UNSET):
+        monkeypatch.setenv(name, f"operator-{name}")
+    run = subprocess.run
+
+    def isolated_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        env = kwargs["env"]
+        home = env["GROK_HOME"]
+        assert env == {**GROK.environment(_launch()), "GROK_HOME": home, "HOME": home}
+        assert not set((*DIRECTORY_VARS[1:], *RESTORED_VARS[1:], *grok_login.ENV_UNSET)) & env.keys()
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", isolated_run)
     probe = GROK.probe(grok)
     assert (probe.version, probe.error) == ("grok 1.0.62 (1474f9cbdd91) [stable]", None)
     assert GROK.probe(str(tmp_path / "nothing")).error == f"{str(tmp_path / 'nothing')!r} was not found"
