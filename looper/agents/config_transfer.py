@@ -848,7 +848,7 @@ class _Importer:
     def _profile_spec(self, profile_id: str, name: str, runtime: str, provider: str, model: str,
                       effort: str | None, agent_teams: bool, system_prompt_mode: Any) -> Any:
         from .profile_registry import AgentProfile
-        from .runtimes import SystemPromptMode
+        from .system_prompt_mode import SystemPromptMode
 
         return AgentProfile(profile_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort,
                             agent_teams, SystemPromptMode(system_prompt_mode))

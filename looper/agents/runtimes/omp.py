@@ -76,9 +76,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, run_usage
+from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    SystemPromptMode, instructions,
+    instructions,
 )
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name

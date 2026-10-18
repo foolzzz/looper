@@ -63,6 +63,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -70,8 +71,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, reported_totals, run_usage
+from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported, SystemPromptMode,
+    ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
     codex_login, instructions,
 )
 from .instructions import InstructionFile
@@ -535,15 +537,47 @@ def _remove_idle_homes(runs: Path, now: float) -> None:
             continue
         if now - newest > RUN_HOME_IDLE_SEC:
             shutil.rmtree(home, ignore_errors=True)
+    _remove_idle_instructions(runs.parent, now)
+
+
+def _remove_idle_instructions(codex: Path, now: float) -> None:
+    """Reclaim old instructions only after removing idle runs; resident session references never expire."""
+    directory = codex / "instructions"
+    if not directory.is_dir():
+        return
+    referenced: set[Path] = set()
+    try:
+        for root in (codex / "runs", codex / "sessions"):
+            for config in root.rglob("config.toml"):
+                value = tomllib.loads(config.read_text(encoding="utf-8")).get("model_instructions_file")
+                if isinstance(value, str):
+                    path = Path(value)
+                    referenced.add((path if path.is_absolute() else config.parent / path).resolve())
+    except (OSError, ValueError):
+        # An unreadable or damaged home cannot prove its instructions are unreferenced.
+        return
+    for path in directory.iterdir():
+        if path.suffix != ".md" or not _HASHED.fullmatch(path.stem) or path.is_symlink():
+            continue
+        try:
+            if path.is_file() and path.resolve() not in referenced and now - path.stat().st_mtime > RUN_HOME_IDLE_SEC:
+                path.unlink()
+        except OSError:
+            continue
 
 
 def write_instructions(local: Path, text: str) -> Path:
     """Keep replacing instructions outside run homes, so resident config copies retain a stable target."""
     directory = _codex_dir(local) / "instructions"
     directory.mkdir(exist_ok=True)
-    target = directory / (hashlib.sha256(text.encode("utf-8")).hexdigest() + ".md")
-    if not target.is_file():
-        _write_private(target, text)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    target = directory / (digest + ".md")
+    try:
+        if hashlib.sha256(target.read_bytes()).hexdigest() == digest:
+            return target
+    except FileNotFoundError:
+        pass
+    _write_private(target, text)
     return target
 
 
@@ -560,7 +594,6 @@ def write_home(local: Path, config: str, agents: str, *, login: Path | None = No
             codex_login.link_login(target, login)
         return target
     runs.mkdir(exist_ok=True)
-    _remove_idle_homes(runs, time.time())
     building = Path(tempfile.mkdtemp(prefix=".building.", dir=runs))
     try:
         _write_private(building / "config.toml", config)
@@ -577,6 +610,8 @@ def write_home(local: Path, config: str, agents: str, *, login: Path | None = No
     finally:
         if building is not None:
             shutil.rmtree(building, ignore_errors=True)
+    # Publish the new config before reclaiming instructions: it may reference an old file itself.
+    _remove_idle_homes(runs, time.time())
     return target
 
 

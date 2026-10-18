@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from . import proc_tree
 from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
+from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
     from ..db.llm_records import RecordStatus
@@ -78,9 +79,6 @@ logger = logging.getLogger(__name__)
 # Names this flag set in every run's record (prompt_layers.isolation); change
 # it whenever the flags change.
 ISOLATION_ID = "personal-config-off/v2"
-
-# Adapter discovery imports this module and reads ISOLATION_ID; keep that constant available first.
-from .runtimes import SystemPromptMode  # noqa: E402
 
 
 def repository_root(directory: Path) -> Path:

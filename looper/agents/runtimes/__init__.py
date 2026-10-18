@@ -65,19 +65,14 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
+from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
+
 if TYPE_CHECKING:
     from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
     from ..run_usage import Price, Usage
     from .instructions import InstructionFile
-
-
-class SystemPromptMode(str, Enum):
-    """How Looper's prompt relates to the runtime's default system prompt."""
-
-    APPEND = "append"
-    REPLACE = "replace"
 
 
 class ApiProtocol(str, Enum):

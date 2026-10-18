@@ -2,9 +2,14 @@
 
 from dataclasses import replace
 import hashlib
+import json
 import os
 from pathlib import Path
+import shlex
 import stat
+import subprocess
+import sys
+import time
 import tomllib
 
 import pytest
@@ -28,6 +33,18 @@ def isolated_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.mark.parametrize("module", [
+    "looper.agents.claude_cli", "looper.agents.serve", "looper.agents.runtimes",
+    "looper.agents.profile_registry",
+])
+def test_runtime_modules_import_in_fresh_processes(module: str, isolated_operator: Path) -> None:
+    done = subprocess.run(
+        [sys.executable, "-B", "-c", f"import {module}"],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
 def _launch(runtime_type: str, mode: SystemPromptMode | None = None, *, oauth: bool = False) -> Launch:
     runtime = adapter(runtime_type)
     use_login = runtime_type == "grok" or oauth
@@ -46,82 +63,55 @@ def _files(root: Path) -> dict[str, bytes | str]:
             for p in root.rglob("*") if p.is_symlink() or p.is_file()}
 
 
-def _legacy_append_command(runtime_type: str, command_kind: str, prompt: Path, cwd: Path,
-                           launch: Launch) -> list[str]:
-    """The pre-mode command assembly: no mode is read and no new prompt parameter is passed."""
-    runtime, local = adapter(runtime_type), prompt.parent.parent
-    if runtime_type == "claude-code":
-        flags = (["--input-format", "stream-json", "--include-partial-messages"]
-                 if command_kind == "resident_command"
-                 else ["--include-partial-messages", "--input-format", "stream-json"])
-        return ["claude", "--print", "--verbose", "--output-format", "stream-json", *flags,
-                "--replay-user-messages", *claude_cli.isolation_args(cwd),
-                "--append-system-prompt-file", str(prompt), "--system-prompt-snapshot", "off",
-                *runtime.launch_args(launch)]
-    if runtime_type == "codex":
-        home = codex.write_home(local, codex.config_toml(launch), codex.agents_md(prompt, launch))
-        return ["env", f"CODEX_HOME={home}", "codex", "exec", *runtime.launch_args(launch),
-                *(["--ephemeral", "-"] if command_kind == "run_command" else [])]
-    if runtime_type == "grok":
-        home = grok.write_home(local, grok.config_toml(launch, shell_home=grok._shell_home(local)),
-                               grok.rules_md(prompt, launch), login=grok.grok_login.login_file())
-        return ["env", f"GROK_HOME={home}", f"HOME={home}", "grok", *runtime.launch_args(launch)]
-    visible = {**os.environ, **dict(launch.env)}
-    mcp = omp.mcp_config(launch.library, visible)
-    home = omp.write_home(local, omp.models_yml(launch),
-                           omp.overlay(launch, outside_repository=omp.outside_repository(cwd)), mcp)
-    project = omp.instructions.injected_section(runtime.instruction_files(cwd), runtime.label)
-    written = omp.write_prompt(home, "\n\n---\n\n".join(
-        part for part in (project, omp.runtime_notes(), prompt.read_text()) if part))
-    return ["env", f"HOME={home}", "omp", *runtime.launch_args(launch),
-            "--config", str(home / omp.OVERLAY), "--append-system-prompt", str(written),
-            *(["--plugin-dir", str(home / "plugins" / omp.MCP_PLUGIN)] if mcp else []),
-            *(["--no-session"] if command_kind == "run_command" else [])]
-
-
 @pytest.mark.parametrize("runtime_type", ["claude-code", "codex", "grok", "omp"])
 @pytest.mark.parametrize("command_kind", ["run_command", "resident_command"])
 def test_explicit_append_is_byte_identical_to_default_and_legacy_home(
     runtime_type: str, command_kind: str, tmp_path: Path, isolated_operator: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    prompt = SystemPrompt("Looper contract\nwith Unicode: 契约\n").write_file(tmp_path / "runtime")
-    runtime = adapter(runtime_type)
-    default = _launch(runtime_type)
-    legacy = _legacy_append_command(runtime_type, command_kind, prompt, tmp_path, default)
-    before = _files(prompt.parent.parent)
-    command = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path, prompt_file=prompt,
-                                             launch=default)
-    assert command == legacy
-    assert _files(prompt.parent.parent) == before
-    explicit = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path, prompt_file=prompt,
-                                              launch=_launch(runtime_type, SystemPromptMode.APPEND))
-    assert explicit == command
-    assert _files(prompt.parent.parent) == before
-    # Pin the original append mechanisms, bytes and content-addressed home layouts too: comparing two new
-    # launch paths alone would miss an accidental change shared by both default and explicit append.
+    # Independently transcribed from origin/main 10991b00. Never regenerate expectations with adapter helpers.
+    baseline = json.loads((Path(__file__).parent / "fixtures" / "system_prompt_append.json").read_text())
+    expected = baseline["runtimes"][runtime_type]
+    local = tmp_path / "runtime" / ".local"
+    substitutions = {
+        "<TMP>": str(tmp_path), "<LOCAL>": str(local),
+        "<SHELL_OPERATOR>": shlex.quote(str(isolated_operator)),
+    }
+
+    def render(text: str) -> str:
+        for token, value in substitutions.items():
+            text = text.replace(token, value)
+        return text
+
+    if runtime_type == "grok":
+        # The old home identity includes absolute paths, so hash the literal baseline bytes after substitution.
+        config = render(expected["files"]["grok/runs/<HOME_HASH>/config.toml"]["text"])
+        rules = expected["files"]["grok/runs/<HOME_HASH>/rules/looper.md"]["text"]
+        login = str(isolated_operator / "grok" / "auth.json")
+        substitutions["<HOME_HASH>"] = hashlib.sha256(
+            f"grok-home/v1\n{config}\0{rules}\0{login}".encode("utf-8")
+        ).hexdigest()
+    substitutions["<HOME>"] = render(expected.get("home", ""))
+    expected_argv = [render(arg) for arg in expected["argv"][command_kind]]
+    expected_env = {name: render(value) for name, value in expected["environment"].items()}
+    expected_files = {
+        render(name): (render(content["symlink"]) if "symlink" in content else render(content["text"]).encode("utf-8"))
+        for name, content in expected["files"].items()
+    }
+    monkeypatch.setattr(os, "environ", {name: render(value) for name, value in baseline["server_environment"].items()})
+    # Pin discovery inputs so neither parent repositories nor pytest's temporary-directory ancestors affect argv.
+    (tmp_path / ".git").mkdir()
     if runtime_type == "claude-code":
-        expected = ["--append-system-prompt-file", str(prompt), "--system-prompt-snapshot", "off"]
-        assert claude_cli.system_prompt_args(prompt) == expected
-        assert command[command.index(expected[0]):command.index(expected[0]) + 4] == expected
-    elif runtime_type == "codex":
-        home = Path(command[1].partition("=")[2])
-        config, agents = codex.config_toml(default), codex.agents_md(prompt, default)
-        assert (home / "config.toml").read_bytes() == config.encode()
-        assert (home / "AGENTS.md").read_bytes() == agents.encode()
-        assert "model_instructions_file" not in config
-        assert home.name == hashlib.sha256(f"{codex.HOME_LAYOUT_ID}\n{config}\0{agents}".encode()).hexdigest()
-    elif runtime_type == "grok":
-        home = Path(command[1].partition("=")[2])
-        config = grok.config_toml(default, shell_home=grok._shell_home(prompt.parent.parent))
-        rules, login = grok.rules_md(prompt, default), grok.grok_login.login_file()
-        assert (home / "config.toml").read_bytes() == config.encode()
-        assert (home / grok.RULES_FILE).read_bytes() == rules.encode()
-        assert not (home / "agent.md").exists() and "--agent" not in command
-        assert home.name == hashlib.sha256(f"{grok.HOME_LAYOUT_ID}\n{config}\0{rules}\0{login}".encode()).hexdigest()
-    else:
-        assert "--system-prompt" not in command
-        written = Path(command[command.index("--append-system-prompt") + 1])
-        assert written.read_text() == omp.runtime_notes() + "\n\n---\n\n" + prompt.read_text()
+        monkeypatch.setattr(claude_cli, "repository_root", lambda directory: Path("/"))
+    prompt = SystemPrompt(baseline["prompt"]).write_file(tmp_path / "runtime")
+    runtime = adapter(runtime_type)
+    for mode in (None, SystemPromptMode.APPEND):
+        launch = _launch(runtime_type, mode)
+        command = getattr(runtime, command_kind)(runtime.default_executable, cwd=tmp_path, prompt_file=prompt,
+                                                 launch=launch)
+        assert command == expected_argv
+        assert runtime.environment(launch) == expected_env
+        assert _files(local) == expected_files
 
 
 @pytest.mark.parametrize("runtime_type", ["claude-code", "codex", "grok", "omp"])
@@ -195,6 +185,78 @@ def test_codex_replace_key_is_top_level_and_survives_resident_home_sync(
     assert lines[lines.index(marker) + 1].startswith("model_instructions_file =")
     assert Path(config["model_instructions_file"]).read_text() == codex.agents_md(prompt, launch)
     assert (home / "AGENTS.md").read_bytes() == b""
+
+
+def test_codex_damaged_instructions_are_repaired_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    local, text = tmp_path / "local", "Complete contract: 契约\n"
+    target = codex.write_instructions(local, text)
+    target.write_bytes(b"damaged\xff")
+    target.chmod(0o644)
+    replacements = []
+    original = os.replace
+
+    def record_replace(source: str, destination: Path) -> None:
+        assert Path(source).parent == target.parent
+        assert Path(source).read_bytes() == text.encode("utf-8")
+        assert stat.S_IMODE(Path(source).stat().st_mode) == 0o600
+        replacements.append(destination)
+        original(source, destination)
+
+    monkeypatch.setattr(codex.os, "replace", record_replace)
+    assert codex.write_instructions(local, text) == target
+    assert replacements == [target]
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == target.stem
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_codex_cleanup_removes_old_instructions_after_their_run_home(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    abandoned = codex.write_instructions(local, "Abandoned contract")
+    recent = codex.write_instructions(local, "Recent contract")
+    source = codex.write_home(local, f'model_instructions_file = "{abandoned}"\n', "")
+    then = time.time() - codex.RUN_HOME_IDLE_SEC - 60
+    for path in (abandoned, source, *source.iterdir()):
+        os.utime(path, (then, then))
+    codex.write_home(local, "# New run\n", "")
+    assert not source.exists()
+    assert not abandoned.exists()
+    assert recent.is_file()
+
+
+@pytest.mark.parametrize("reference", ["run", "session", "new-run"])
+def test_codex_cleanup_keeps_old_instructions_referenced_by_homes(tmp_path: Path, reference: str) -> None:
+    local = tmp_path / "local"
+    target = codex.write_instructions(local, "Still referenced")
+    config = f'model_instructions_file = "{target}"\n'
+    then = time.time() - codex.RUN_HOME_IDLE_SEC - 60
+    if reference != "new-run":
+        source = codex.write_home(local, config, "")
+        if reference == "session":
+            session = local / "codex" / "sessions" / "resident" / "home"
+            codex._sync_home(source, session)
+            # Even an idle session keeps its instructions after its original run is reclaimed.
+            for home in (source, session):
+                for path in (home, *home.iterdir()):
+                    os.utime(path, (then, then))
+    os.utime(target, (then, then))
+    codex.write_home(local, config if reference == "new-run" else "# New run\n", "")
+    assert target.read_text() == "Still referenced"
+    if reference == "session":
+        assert not source.exists()
+        assert (session / "config.toml").read_text() == config
+
+
+def test_codex_cleanup_preserves_instructions_when_session_config_is_damaged(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    target = codex.write_instructions(local, "Potential session reference")
+    session = local / "codex" / "sessions" / "resident"
+    session.mkdir(parents=True)
+    (session / "config.toml").write_text('model_instructions_file = "unfinished')
+    then = time.time() - codex.RUN_HOME_IDLE_SEC - 60
+    os.utime(target, (then, then))
+    codex.write_home(local, "# New run\n", "")
+    assert target.read_text() == "Potential session reference"
 
 
 def test_grok_replace_agent_is_hashed_restored_and_synced(tmp_path: Path, isolated_operator: Path) -> None:

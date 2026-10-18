@@ -65,7 +65,8 @@ from dataclasses import dataclass, field, fields
 from typing import Any
 
 from . import runtimes
-from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported, SystemPromptMode
+from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported
+from .system_prompt_mode import SystemPromptMode
 
 NAME_MAX_CHARS = 240
 EXECUTABLE_MAX_CHARS = 1_000

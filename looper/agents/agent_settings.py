@@ -68,7 +68,8 @@ from typing import TYPE_CHECKING, Any
 from .profile_registry import BUILTIN_PROFILE, AgentProfile
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
-from .runtimes import AuthKind, CostSource, SystemPromptMode
+from .runtimes import AuthKind, CostSource
+from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
     from .run_usage import Price

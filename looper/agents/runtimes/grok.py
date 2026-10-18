@@ -68,9 +68,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, request_tokens, run_usage
+from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    SystemPromptMode, grok_login, instructions,
+    grok_login, instructions,
 )
 from .codex import _HASHED, _toml_key, _toml_value
 from .instructions import InstructionFile
