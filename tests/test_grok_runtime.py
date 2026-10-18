@@ -22,14 +22,14 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
 from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
 from looper.agents.run_usage import Usage, request_context, run_usage
 from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, adapter, grok_login
-from looper.agents.runtimes import CostSource
+from looper.agents.runtimes import CostSource, ReadOnly
 from looper.agents.runtimes.grok import (
     COMPAT_VARS, DIRECTORY_VARS, RESTORED_VARS, RULES_FILE, GrokRuntime, GrokStream, ResidentGrok, write_home,
 )
@@ -47,6 +47,10 @@ def _launch(*, executable: str = "grok", library: AgentLibrary | None = None, pr
                            RuntimeSpec("rt-grok", "grok", "grok", executable, GROK.capabilities),
                            provider, "grok-4.7", effort or None)
     return Launch(AgentSettings(profile=profile, env=env), library or AgentLibrary(), AgentKnowledge())
+
+
+def _read_only_launch() -> Launch:
+    return dataclasses.replace(_launch(), role=AgentType.PLANNER)
 
 
 def _prompt_file(root: Path, text: str = "LOOPER PROMPT: the contract comes last.") -> Path:
@@ -340,6 +344,18 @@ def test_the_config_keeps_the_operators_and_other_tools_directories_out(
     config = (_home(command) / "config.toml").read_text().split("\n\n")
     (section,) = [block for block in config if block.splitlines()[-len(lines) - 1:][0] == f"[{table}]"]
     assert section.splitlines()[-len(lines):] == lines
+
+
+@pytest.mark.parametrize("read_only", [False, True], ids=["writing", "read-only"])
+def test_only_a_read_only_run_is_cut_down_to_the_reading_tools(read_only: bool, tmp_path: Path) -> None:
+    launch = _read_only_launch() if read_only else _launch()
+    assert launch.read_only is read_only and GROK.read_only is ReadOnly.TOOLS
+    for command in (GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch),
+                    GROK.resident_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)):
+        # MCP tools are not in the list: Grok keeps them, through use_tool (probe, grok 1.0.62).
+        assert _flag(command, "--tools") == (["read_file,grep,list_dir"] if read_only else [])
+        assert "--always-approve" in command  # the tools are cut, not the approvals
+    assert launch.record().get("read_only") == ("tools" if read_only else None)
 
 
 def test_the_agents_shell_gets_the_operators_home_back_and_a_grok_home_without_the_login(

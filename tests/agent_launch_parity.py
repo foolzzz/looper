@@ -209,6 +209,36 @@ def without_agent_teams(argv: list[str]) -> list[str]:
     return argv[:at] + argv[at + 2:]
 
 
+# A Planner runs read-only since the fixture was made (the Planner read-only RFC): its permission flag, and the line of
+# its recommended role prompt that said it had every tool, then and now.
+_PLANNER_PERMISSIONS = (["--dangerously-skip-permissions"],
+                        ["--permission-mode", "manual", "--permission-prompts", "none",
+                         "--disallowedTools", "Edit,Write,NotebookEdit", "--allowedTools", "Skill,WebFetch,WebSearch"])
+_PLANNER_TOOLS_LINE = (
+    "- You have every tool. Read the project and run harmless commands (for\n  example to look at the build or the "
+    "tests) when that helps you plan a step\n  or judge a result, and leave the project as you found it.\n",
+    "- You run read-only: read the project and run commands that change nothing\n  (listing, reading and searching "
+    "files; git status, log, diff and show)\n  when that helps you plan a step or judge a result. Looper refuses "
+    "or\n  reports the tool calls that would change files.\n")
+
+
+def read_only_planner(expected: dict[str, dict[str, Any]], *, recommended: bool = True) -> dict[str, dict[str, Any]]:
+    """The fixture's captures with each Planner's read-only flags in place of its permission flag and, when it ran the
+    recommended role prompt (``recommended``), that prompt's line on its tools as it reads now; the other roles' as
+    they were."""
+    then, now = _PLANNER_PERMISSIONS
+    result = {}
+    for case, seen in expected.items():
+        if case.partition("@")[0] == "planner":
+            at = seen["argv"].index(then[0])
+            prompt = seen["system_prompt"]
+            assert prompt.count(_PLANNER_TOOLS_LINE[0]) == int(recommended), case
+            seen = {**seen, "argv": [*seen["argv"][:at], *now, *seen["argv"][at + len(then):]],
+                    "system_prompt": prompt.replace(*_PLANNER_TOOLS_LINE)}
+        result[case] = seen
+    return result
+
+
 def set_aside_agent_teams(captured: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The captures without agent teams, after checking each one but a Planner's had the flag and the variable and
     a Planner's had neither (the caller removed the variable from the server's environment, so a capture shows it)."""

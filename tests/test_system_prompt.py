@@ -182,6 +182,29 @@ def test_a_workers_and_a_reviewers_task_lists_the_supplements_after_the_requirem
     assert "Supplements" not in WorkerPool._task_section({**payload, "supplements": []}, "/w", is_verify=verify)
 
 
+def test_a_reviewer_reviews_against_the_notes_its_step_was_retried_with() -> None:
+    from looper.agents.tiers.worker import WorkerPool
+
+    payload = {"requirement": "Summarize sales.csv.", "step_key": "s1", "instruction": "Write summary.txt.",
+               "acceptance_criteria": ["summary.txt has 4 lines"]}
+    plain = WorkerPool._task_section(payload, "/w", is_verify=True)
+    retried = WorkerPool._task_section({**payload, "feedback": ["write all five regions", "keep their order"]}, "/w",
+                                       is_verify=True)
+    notes = ("The Planner retried this step with these notes to its Worker, oldest first. They are the Planner's "
+             "changes to the step: where a note changes the instruction or the acceptance criteria above, review "
+             "against the note; every criterion that no note changes still holds.\n- write all five regions\n"
+             "- keep their order")
+    # The notes follow the criteria they may change; without any the section is as it was.
+    assert retried == plain.replace("- summary.txt has 4 lines", f"- summary.txt has 4 lines\n\n{notes}")
+    assert "retried" not in plain and plain == WorkerPool._task_section({**payload, "feedback": []}, "/w",
+                                                                        is_verify=True)
+    # A note of several lines stays one item, its further lines under it; for the Worker as for the Reviewer.
+    long = {**payload, "feedback": ["Write all five:\n## Regions\n- central too"], "attempt": 2}
+    for verify in (True, False):
+        assert "- Write all five:\n  ## Regions\n  - central too" in WorkerPool._task_section(long, "/w",
+                                                                                            is_verify=verify)
+
+
 def test_a_long_requirement_is_clipped_with_a_visible_marker() -> None:
     requirement = "x" * (TASK_REQUIREMENT_LIMIT + 500)
     section = plan_task_section(task_id="t1", requirement=requirement, project_name="p", work_dir="/w")

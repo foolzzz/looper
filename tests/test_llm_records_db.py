@@ -54,6 +54,23 @@ def test_run_is_recorded_end_to_end() -> None:
             assert done["status"] == "completed"
             assert (done["output_text"], done["session_id"], done["cost_usd"]) == ("done", "s-1", 0.25)
             assert done["finished_at"] is not None
+            assert done["metadata"] == {"command": ["claude", "--print", "do it"], "cwd": "/tmp/p"}
+
+            # What a run was refused is added to its metadata, beside its outcome.
+            refused_id = await llm_records.start_record(agent_id="planner-task-test", task_id="task-test",
+                                                        metadata={"cwd": "/tmp/p"}, pool=pool)
+            denials = [{"tool": "Bash", "input": "echo hi > made.txt"}]
+            await llm_records.finish_record(refused_id, status="completed", outcome="passed",
+                                            metadata={"permission_denials": denials}, pool=pool)
+            refused = await llm_records.get_record(refused_id, pool=pool)
+            assert refused["metadata"] == {"cwd": "/tmp/p", "outcome": "passed", "permission_denials": denials}
+            await llm_records.add_metadata(refused_id, {"read_only_check": "compared",
+                                                       "planner_changed_files": ["笔记.md"]}, pool=pool)
+            annotated = await llm_records.get_record(refused_id, pool=pool)
+            assert annotated["metadata"] == {**refused["metadata"], "read_only_check": "compared",
+                                              "planner_changed_files": ["笔记.md"]}
+            assert (annotated["status"], annotated["finished_at"]) == (refused["status"], refused["finished_at"])
+            await pool.execute("DELETE FROM llm_records WHERE id = $1", refused_id)
             events = await llm_records.list_events(record_id, pool=pool)
             assert events[0]["event"]["message"]["content"][0]["text"] == "你好"
 

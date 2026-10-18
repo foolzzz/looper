@@ -47,6 +47,7 @@ from looper.agents.project_execution import ProjectExecution
 
 from . import metrics
 from . import tasks as task_list
+from .fake_claude import REAL_CLAUDE_ENV
 from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EvalTask
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -195,9 +196,13 @@ class Api:
 
 
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
-                   max_budget_usd: float | None = None, real_claude: str | None = None) -> Path:
-    """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget."""
+                   max_budget_usd: float | None = None, real_claude: str | None = None,
+                   real_reviewer: bool = False) -> Path:
+    """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget. With
+    ``real_reviewer`` (real mode, a task whose script plays its Planner and Workers), the stand-in hands every run
+    but those to real Claude Code (``fake_claude.REAL_CLAUDE_ENV``)."""
     bin_dir.mkdir(parents=True, exist_ok=True)
+    prefix = ""
     if mode == "fake":
         assert scenarios is not None
         target = [sys.executable, str(FAKE_CLAUDE), str(scenarios)]
@@ -205,9 +210,13 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
         if not real_claude:
             raise EvalError("real mode needs Claude Code: no 'claude' on PATH")
         target = [real_claude]
+        if real_reviewer:
+            assert scenarios is not None
+            target = [sys.executable, str(FAKE_CLAUDE), str(scenarios)]
+            prefix = f"{REAL_CLAUDE_ENV}={shlex.quote(real_claude)} "
     extra = ["--max-budget-usd", f"{max_budget_usd:g}"] if mode == "real" and max_budget_usd else []
     script = bin_dir / "claude"
-    script.write_text("#!/bin/sh\nexec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
+    script.write_text("#!/bin/sh\n" + prefix + "exec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
                       + "".join(f" {shlex.quote(part)}" for part in extra) + "\n")
     script.chmod(0o755)
     return script
@@ -530,7 +539,8 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
                 "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
-                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult"),
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult",
+                "planner_plan_file"),
 }
 
 
@@ -686,7 +696,7 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude)
+                       real_claude=real_claude, real_reviewer=any(task.real_reviewer for task in tasks))
         (root / "runtime").mkdir()
         home = root / "home" if mode == "fake" else None
         if home is not None:
