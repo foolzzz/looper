@@ -13,6 +13,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -562,6 +563,27 @@ def test_reps_must_be_a_whole_number_of_at_least_one(value: str) -> None:
     assert cli._parser().parse_args(["dialogs", "--reps", "3"]).reps == 3
 
 
+@pytest.mark.parametrize("command", ["run", "dialogs"])
+@pytest.mark.parametrize("value", ["-0.4", "0", "nan", "inf", "-inf"])
+def test_case_budget_must_be_finite_and_positive(
+    command: str, value: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli._parser().parse_args([command, f"--case-budget-usd={value}"])
+    assert exc.value.code == 2
+    assert "--case-budget-usd must be a finite positive number" in capsys.readouterr().err
+    assert cli._parser().parse_args([command, "--case-budget-usd", "0.4"]).case_budget_usd == 0.4
+
+
+@pytest.mark.parametrize("value", [-0.4, 0, float("nan"), float("inf"), -float("inf")])
+def test_invalid_case_budgets_are_rejected_before_scheduling(value: float) -> None:
+    def run_one(*_: Any) -> dict[str, Any]:
+        pytest.fail("an invalid case budget must not start a case")
+
+    with pytest.raises(runner.EvalError, match="finite positive number"):
+        runner.run_suite((_task("a"),), run_one, total_cap_usd=1.0, jobs=2, run_budget_usd=value)
+
+
 def test_a_task_set_is_resolved_against_the_tasks_there_are(monkeypatch: pytest.MonkeyPatch) -> None:
     planner = [task.id for task in runner.select_tasks(["planner"])]
     assert planner == [task.id for task in TASKS if task.id in runner.TASK_SETS["planner"]]
@@ -746,10 +768,98 @@ def test_a_case_starts_only_when_the_spend_and_every_budget_in_flight_fit_the_ca
     results, stopped = runner.run_suite(tuple(_task(t) for t in "abcdef"), run_one, total_cap_usd=1.0, jobs=4,
                                         run_budget_usd=0.4)
     assert peak == 2
-    assert dict(seen)["a"] == 1.0 and dict(seen)["b"] == 0.6  # the cap less what is reserved
+    assert dict(seen)["a"] == 0.4 and dict(seen)["b"] == 0.4
     # a and b cost 0.2, c and d 0.2 more: e needs 0.4 + 0.4 + 0.4 = 1.2 after c's turn; it runs once they end.
     assert [r["id"] for r in results] == list("abcdef") and not any(r.get("skipped") for r in results)
     assert stopped is False
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_case_allowances_fit_the_reservations_and_total_cap(jobs: int) -> None:
+    gate = threading.Barrier(jobs, timeout=5)
+    seen: list[float] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        assert cap_left is not None
+        if task.id in "ab" and jobs == 2:
+            gate.wait()
+        seen.append(cap_left)
+        return {"outcome": "pass", "cost_usd": cap_left}
+
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcd"), run_one,
+                                        total_cap_usd=1.0, jobs=jobs, run_budget_usd=0.4)
+    if jobs == 2:
+        assert seen == pytest.approx([0.4, 0.4, 0.2])
+        assert all(0 < allowance <= 0.4 for allowance in seen)
+    else:
+        assert seen == [1.0]  # one job keeps the existing total-cap allowance
+    assert sum(row["cost_usd"] for row in results) <= 1.0
+    assert stopped and results[-1].get("skipped")
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: int,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    apis: dict[str, Any] = {}
+    gate = threading.Barrier(jobs, timeout=5)
+
+    class Api:
+        def __init__(self) -> None:
+            self.cost = 0.0
+            self.messages: list[dict[str, Any]] = []
+
+        def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+            if path == "/api/projects":
+                return {"project_id": "project-a"}
+            assert path == "/api/chat/send"
+            if not self.messages:
+                gate.wait()
+            self.cost += 0.2
+            self.messages.append({"message_id": f"{data['message_id']}:reply", "content": "ok"})
+            return {}
+
+        def get(self, path: str, **_: Any) -> dict[str, Any]:
+            if path == "/api/tasks":
+                return {"tasks": []}
+            assert path == "/api/chat/messages"
+            return {"messages": self.messages}
+
+    @contextmanager
+    def database(_: str) -> Any:
+        name = threading.current_thread().name
+        apis[name] = Api()
+        yield name, None
+
+    @contextmanager
+    def server(*, database_url: str, **_: Any) -> Any:
+        yield apis[database_url]
+
+    monkeypatch.setattr(dialogs, "fresh_database", database)
+    monkeypatch.setattr(dialogs, "running_server", server)
+    monkeypatch.setattr(dialogs, "install_claude", lambda *_, **__: None)
+    monkeypatch.setattr(dialogs, "select_agent", lambda *_, **__: {"name": "fake"})
+    monkeypatch.setattr(dialogs, "_git", lambda: {})
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+    monkeypatch.setattr(dialogs, "_usage", lambda db: (apis[db].cost, {}))
+    says = tuple(dialogs.Say(text, lambda _: None) for text in ("first", "second", "third"))
+    cases = tuple(dialogs.Dialog(t, says) for t in ("abc" if jobs == 2 else "a"))
+    result, path = dialogs.run(mode="fake", dialogs=cases,
+                               admin_url="disposable", out_dir=tmp_path, jobs=jobs,
+                               total_cap_usd=1.0, case_budget_usd=0.4)
+    rows = result["dialogs"]
+    if jobs == 2:
+        assert [row["cost_usd"] for row in rows] == [0.4, 0.4, 0.0]
+        assert all(row["error_class"] == "spending_cap" for row in rows[:2])
+        assert rows[2]["skipped"] and result["stopped_by_cap"]
+    else:
+        assert rows[0]["cost_usd"] == 0.6 and rows[0]["outcome"] == "pass"
+        assert not result["stopped_by_cap"]
+    assert result["total_cost_usd"] <= 1.0
+    assert json.loads(path.read_text())["total_cost_usd"] == result["total_cost_usd"]
 
 
 def test_parallel_cases_are_skipped_once_the_spend_reaches_the_cap() -> None:

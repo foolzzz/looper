@@ -33,6 +33,15 @@ def _jobs(text: str) -> int:
     return value
 
 
+def _case_budget(text: str) -> float:
+    try:
+        value = float(text)
+        runner.check_case_budget(value)
+    except (ValueError, runner.EvalError):
+        raise argparse.ArgumentTypeError("--case-budget-usd must be a finite positive number") from None
+    return value
+
+
 _JOBS_HELP = ("run this many cases at once (default 1: one after another). Rows stay in task/rep order, and "
               "--total-cap-usd still holds: a case starts only when what is spent plus the --case-budget-usd of every "
               "case in flight and of this one is within it (--case-budget-usd, the most one case may spend, is "
@@ -67,7 +76,7 @@ def _parser() -> argparse.ArgumentParser:
                      + ", ".join(sorted(runner.TASK_SETS)) + "; default: all)")
     run.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
     run.add_argument("--jobs", type=_jobs, default=1, help=_JOBS_HELP)
-    run.add_argument("--case-budget-usd", type=float, help=_CASE_BUDGET_HELP)
+    run.add_argument("--case-budget-usd", type=_case_budget, help=_CASE_BUDGET_HELP)
     run.add_argument("--max-budget-usd", type=float, default=0.25,
                      help="real mode: the cap of every Claude Code run (default 0.25): --max-budget-usd, or the cap "
                           "Looper keeps at the provider's prices with --provider-preset")
@@ -99,7 +108,7 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--dialogs", help="comma-separated dialog ids (default: all)")
     talk.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
     talk.add_argument("--jobs", type=_jobs, default=1, help=_JOBS_HELP)
-    talk.add_argument("--case-budget-usd", type=float, help=_CASE_BUDGET_HELP)
+    talk.add_argument("--case-budget-usd", type=_case_budget, help=_CASE_BUDGET_HELP)
     talk.add_argument("--baseline", metavar="RUN.json|previous", help=_BASELINE_HELP)
     talk.add_argument("--max-budget-usd", type=float, default=0.25, help="real mode: the cap of every run")
     talk.add_argument("--total-cap-usd", type=float, default=0.50,

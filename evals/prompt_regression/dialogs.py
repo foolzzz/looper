@@ -63,12 +63,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .compare import outcome
 from .runner import (
-    INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, error_row, fresh_database, install_claude,
-    register_agent, run_suite, running_server, select_agent, write_result,
+    INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
+    fresh_database, install_claude, register_agent, run_suite, running_server, select_agent, write_result,
 )
 
 # v2: every row has rep, outcome (with error_class and error when it is an error) and models; the run has reps,
@@ -888,14 +888,23 @@ class ReplyTimeout(EvalError):
     """The Manager did not reply within the timeout."""
 
 
-def _ask(api: Api, session: str, text: str, *, timeout: float) -> str:
+class SpendingCap(EvalError):
+    """The dialog reached its case allowance."""
+
+
+def _ask(api: Api, session: str, text: str, *, timeout: float,
+         check_budget: Callable[[], None] | None = None) -> str:
     """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one."""
     message_id = f"m-{uuid.uuid4().hex[:12]}"
+    if check_budget is not None:
+        check_budget()
     api.post("/api/chat/send", {"text": text, "session_id": session, "message_id": message_id})
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if INTERRUPTED.is_set():
             raise EvalError("the run was interrupted")
+        if check_budget is not None:
+            check_budget()
         for message in api.get("/api/chat/messages", session_id=session)["messages"]:
             if message.get("message_id") == f"{message_id}:reply":
                 return str(message.get("content") or "")
@@ -903,14 +912,19 @@ def _ask(api: Api, session: str, text: str, *, timeout: float) -> str:
     raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
 
 
-def _start_slow_task(api: Api, project_id: str, *, timeout: float) -> str:
+def _start_slow_task(api: Api, project_id: str, *, timeout: float,
+                     check_budget: Callable[[], None] | None = None) -> str:
     """A task of the dialogs' project, started and under way (its plan made)."""
+    if check_budget is not None:
+        check_budget()
     task_id = api.post("/api/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["task_id"]
     api.post(f"/api/tasks/{task_id}/start", {})
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if INTERRUPTED.is_set():
             raise EvalError("the run was interrupted")
+        if check_budget is not None:
+            check_budget()
         detail = api.get(f"/api/tasks/{task_id}")
         if detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
             return task_id
@@ -1005,18 +1019,25 @@ def _stop_leftovers(api: Api) -> None:
 
 
 def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, scenarios: Path, mode: str,
-               timeout: float, runtime_root: Path | None = None) -> dict[str, Any]:
+               timeout: float, runtime_root: Path | None = None, cap_left: float | None = None) -> dict[str, Any]:
     """Run ``dialog`` on the server it has to itself; its row without its cost (read once the server stopped).
     No reply within ``timeout`` is an error of class ``timeout``, and any other exception, such as the slow task
-    not getting under way, one of class ``harness``; the turns after an error are not sent."""
+    not getting under way, one of class ``harness``; the turns after an error are not sent. With ``cap_left``,
+    check the case's spend before sending a turn and while waiting for its task or reply."""
     started, since = time.monotonic(), _last_action(database_url)
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
+
+    def check_budget() -> None:
+        if cap_left is not None and _usage(database_url)[0] >= cap_left:
+            raise SpendingCap("the dialog reached its spending cap")
+
+    budget_args = {"check_budget": check_budget} if cap_left is not None else {}
     try:
         if dialog.id == "task_cost":
             task = _make_cost_task(database_url, project_id)
         else:
-            task = _start_slow_task(api, project_id, timeout=timeout) if dialog.running_task else None
+            task = _start_slow_task(api, project_id, timeout=timeout, **budget_args) if dialog.running_task else None
         if dialog.gate and task is not None:
             open_gate(database_url, task)
         if dialog.schedule:
@@ -1033,7 +1054,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url)
-            reply = _ask(api, session, text, timeout=timeout)
+            reply = _ask(api, session, text, timeout=timeout, **budget_args)
             problem = say.check(Look(api, task, reply, database_url, since, known,
                                      fake=mode == "fake", runtime_root=runtime_root))
             trail = _trail(database_url, before)
@@ -1045,6 +1066,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem})
             if problem:
                 break
+        check_budget()
+    except SpendingCap as exc:
+        error = error_row(ErrorClass.SPENDING_CAP, str(exc), stopped_by_cap=True)
     except ReplyTimeout as exc:
         error = error_row(ErrorClass.TIMEOUT, str(exc))
     except Exception as exc:
@@ -1086,7 +1110,8 @@ def run(
         raise EvalError(f"reps must be at least 1, not {reps}")
     if jobs < 1:
         raise EvalError(f"jobs must be at least 1, not {jobs}")
-    if jobs > 1 and total_cap_usd is not None and not case_budget_usd:
+    check_case_budget(case_budget_usd)
+    if jobs > 1 and total_cap_usd is not None and case_budget_usd is None:
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()
@@ -1104,7 +1129,7 @@ def run(
     manager: dict[str, Any] = {}
     configs: dict[tuple[str, int], tuple[dict[str, Any], dict[str, Any]]] = {}  # per case, never shared
     try:
-        def run_case(dialog: Dialog, rep: int, _cap_left: float | None) -> dict[str, Any]:
+        def run_case(dialog: Dialog, rep: int, cap_left: float | None) -> dict[str, Any]:
             case = root / dialog.id / str(rep)
             work_dir = case / "work" / "calc"
             work_dir.mkdir(parents=True)
@@ -1132,7 +1157,7 @@ def run(
                                           {"name": PROJECT, "work_dir": str(work_dir)})["project_id"]
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
-                                     runtime_root=case / "runtime")
+                                     runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None)
                 cost, models = _usage(database_url)
             return {**row, "cost_usd": round(cost, 6), "models": models}
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -601,6 +602,11 @@ def select_tasks(names: list[str] | None) -> tuple[EvalTask, ...]:
     return task_list.select(ids)
 
 
+def check_case_budget(value: float | None) -> None:
+    if value is not None and (not math.isfinite(value) or value <= 0):
+        raise EvalError("--case-budget-usd must be a finite positive number")
+
+
 def run_suite(
     tasks: tuple[Any, ...],
     run_one: Callable[[Any, int, float | None], dict[str, Any]],
@@ -625,9 +631,11 @@ def run_suite(
     Up to ``jobs`` cases run at once; under a total cap that needs ``run_budget_usd``, the most one case may spend
     (not the per-call ``--max-budget-usd``). While others are in flight, a case starts only when what is spent,
     plus ``run_budget_usd`` for each in-flight case and for this one, stays within the cap, and its ``cap_left`` is the
-    cap less what is spent and reserved. A case alone is cut at the cap alone, as with one job.
+    smaller of its reserved budget and the cap less what is spent and reserved. With one job, a case is cut
+    at the cap alone.
     """
-    if jobs > 1 and total_cap_usd is not None and not run_budget_usd:
+    check_case_budget(run_budget_usd)
+    if jobs > 1 and total_cap_usd is not None and run_budget_usd is None:
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd: what one case may spend "
                         "(--max-budget-usd caps each Claude call, and a case makes several)")
     results = [] if results is None else results
@@ -675,6 +683,8 @@ def run_suite(
                 reserved = budget * len(in_flight)
                 if total_cap_usd is None or not in_flight or spent + reserved + budget <= total_cap_usd:
                     cap_left = None if total_cap_usd is None else total_cap_usd - spent - reserved
+                    if jobs > 1 and cap_left is not None:
+                        cap_left = min(budget, cap_left)
                     in_flight[pool.submit(execute, task, rep, cap_left)] = index
                     index += 1
                     continue
@@ -787,7 +797,8 @@ def run(
         raise EvalError(f"reps must be at least 1, not {reps}")
     if jobs < 1:
         raise EvalError(f"jobs must be at least 1, not {jobs}")
-    if jobs > 1 and total_cap_usd is not None and not case_budget_usd:
+    check_case_budget(case_budget_usd)
+    if jobs > 1 and total_cap_usd is not None and case_budget_usd is None:
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()  # what is being evaluated, before anything runs
