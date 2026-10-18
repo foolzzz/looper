@@ -2802,18 +2802,24 @@ before.
   Code `--resume <id> --fork-session`; Codex and OMP a copy of the session
   the run kept; Grok a home of its own holding a copy of that one session
   from the run's home, resumed with `--fork-session`, and removed afterwards),
-  read only (`Launch.read_only`: Claude Code's default
-  permission mode without `Edit`, `Write` and `NotebookEdit`, which in
-  `--print` refuses every call that needs approval, the refusals counted as
-  `denied_writes`; Codex's read-only sandbox; OMP only its reading tools,
-  `read`, `glob` and `grep`; Grok `--tools read_file,grep,list_dir`, its MCP
-  tools still callable through `use_tool`), with the run's system prompt and
+  read only (`Launch.consult`: Claude Code has only `Read`, `Glob` and `Grep`,
+  allowed without prompts; Bash and writing tools are refused, and MCP tools
+  have no allow rule in manual mode with no prompts; not verified on a real
+  run yet. Codex has its read-only sandbox; OMP `--tools read,glob,grep`;
+  Grok `--tools read_file,grep,list_dir`), with the run's system prompt and
   `CONSULT_CONTRACT` in place of its contract and a `[CONSULT]` turn listing
-  the questions and the seat's earlier consult answers. Claude Code, Codex
-  and Grok run where the step ran; OMP, whose restriction is not verified on a real
-  run, in a detached checkout of the task directory thrown away afterwards
-  (a change in it drops the answers: `wrote_files`). The checkout and fork
-  are removed even when preparing or running the consult fails. Its answers
+  the questions (their bodies share 20,000 characters) and the seat's earlier
+  consult answers. Claude Code, Codex and Grok run where the step ran. OMP's
+  reading tools are not verified on a real run; it runs in a detached checkout
+  of the task directory's branch, removed afterwards. The checkout keeps writes
+  out of the task directory and `wrote_files` catches changes inside it, dropping
+  the answers. It is not a sandbox: OMP runs as the operator's user, so a write
+  outside it (another path or the home directory) is neither prevented nor
+  detected. The checkout and fork are removed even when preparing or running
+  the consult fails. Claude Code ignores `fork_dir`: it keeps the fork in its
+  own session store, like every Claude Code session, and Looper leaves it
+  there, since Looper never changes anything in Claude Code's own directory.
+  Its answers
   are posted as the seat (`via` `consult`, `cc_planner`); its final state,
   answers and unanswered questions' escalations and notices are stored in
   one transaction, with notifications after commit. A refused state change
@@ -2825,7 +2831,12 @@ before.
   runs. A consult is a
   run of its own (`consult-<12 hex>`, in the task's cost) that takes a place
   under its task's limit of the seat's kind, and has at most
-  `room_consult_budget_usd`, `room_consult_timeout_seconds` and 20 turns; a
+  `room_consult_budget_usd`, `room_consult_timeout_seconds` and 20 turns
+  (Claude Code and Grok). Every runtime's recorded cost is checked after the
+  run; over-cap answers are dropped and the questions go to the Planner as
+  `budget`. One deadline covers writing stdin, reading stdout and waiting for
+  exit. Stderr is drained, with its last 2,000 characters kept for errors, and
+  the process tree is ended on success too. A
   task has at most `room_consults_per_task`. The seat's Agent Profile must
   still run on the session's runtime and provider. Stopping the service
   starts nothing and keeps queued and running states for recovery; killing

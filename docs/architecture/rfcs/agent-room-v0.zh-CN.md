@@ -204,17 +204,17 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 
 | | Claude Code | Codex | OMP |
 |---|---|---|---|
-| 会话在哪里 | 运行时自己的会话目录（按工作目录分），运行记录有 `session_id`；Looper 不删，由 Claude Code 自己按期清理（默认 30 天，需要验证） | 开启办公台时存在 `codex/sessions/run-<记录号>`（D13），会话 id 是 `thread.started` 的 `thread_id` | 开启办公台时存在 `omp/sessions/run-<记录号>`（D13），会话 id 是会话头的 `id` |
+| 会话在哪里 | 运行时自己的会话目录（按工作目录分），运行记录有 `session_id`；原运行的会话不动；分叉和其他 Claude Code 会话一样留在它自己的会话目录里，Looper 不改 Claude Code 自己目录下的任何内容 | 开启办公台时存在 `codex/sessions/run-<记录号>`（D13），会话 id 是 `thread.started` 的 `thread_id` | 开启办公台时存在 `omp/sessions/run-<记录号>`（D13），会话 id 是会话头的 `id` |
 | 怎么续接 | `--resume <id> --fork-session`：新的会话 id，原会话不变（2.1.285 实测：分叉后再续接原会话，它没见过咨询的问题） | 把原会话目录复制到这次咨询自己的家目录，在那里 `exec … resume <id> -`：复制就是分叉 | 把原会话目录复制到这次咨询自己的 `--session-dir`，`--resume <id>` |
-| 在哪个目录跑 | 快照（2.1.285 实测：在另一个目录 `--resume <id> --fork-session` 找得到会话） | 快照；做不了快照时在原目录，靠沙箱 | 快照；omp 的只读工具验证通过后同 Codex |
-| 只读怎么强制 | 不带 `--dangerously-skip-permissions`（default 权限模式），加 `--disallowedTools Edit Write NotebookEdit`。2.1.285 实测：`-p` 模式下没有人能批准，`ls`、`cat`、`git status`、`git log`、`git show` 照常放行，重定向写文件、`touch`、python 写文件、`git commit` 都被拒（"requires approval"），逐条列在 `result` 的 `permission_denials` 里，可以作为类型化的「咨询试图写」信号。plan 模式不用：它只是模型自己不写，CLI 不拦，而且模型会试图用 Write 往运行时的配置目录写计划文件 | 用 `-c sandbox_mode="read-only"` 和 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`：系统级沙箱，写文件失败；`exec resume` 是否接受这些覆盖需要验证 | omp 若能只开只读工具（如 `--tools` 只给读、搜索类，需要验证），就这样开；否则只有 prompt，运行记录写明 `read_only.enforced: "prompt"` |
+| 在哪个目录跑 | 步骤原目录（2.1.285 实测：在另一个目录 `--resume <id> --fork-session` 也找得到会话） | 步骤原目录，靠只读沙箱 | 任务目录分支的 detached checkout，结束后删除 |
+| 只读怎么强制 | `--tools Read,Glob,Grep` 只保留内置读工具，`--allowedTools Read,Glob,Grep` 无需确认，`--disallowedTools Bash,Edit,Write,NotebookEdit` 拒绝 shell 和写工具；manual 模式禁用确认，MCP 没有允许规则。2.1.285 的帮助列出 `--tools`，尚未验证真实运行 | 用 `-c sandbox_mode="read-only"` 和 `-c approval_policy="never"`：系统级沙箱 | `--tools read,glob,grep`，尚未验证真实运行；同时使用任务分支的临时检出，结束后删除。它不是沙箱：OMP 以操作者身份运行，检出外（其他路径、家目录）的写入既不会被阻止，也不会被发现 |
 | 会话不在时 | 返回「No conversation found」，没有 init 事件（`ResidentTurn.session_started` 已有这个判断） | 退出码 1、没有事件 | 退出码 1、没有事件 |
 
-**快照**：在任务目录的仓库里 `git worktree add --detach <路径> <提交>`，咨询完删掉。提交是这个席位的结果：已合回的隔离步骤用它的结果提交 W，共用目录的步骤用任务分支此刻的末端。没法做快照的情况：隔离步骤的 worktree 还在用（步骤在等决策、或合不进去），只在运行时能强制只读时在原 worktree 里跑；任务目录不是 git 仓库。这两种情况下运行时又强制不了只读的（OMP，或 Codex 的沙箱在 R1b 没验证通过），转给规划者，原因 `no_snapshot`。
+**快照**：OMP 在任务目录的仓库里 `git worktree add --detach <路径> HEAD`，保留任务目录在仓库中的相对位置，咨询结束后删除检出。它读取任务目录分支当前提交的内容；任务目录不是 git 仓库或创建检出失败时，按 `no_snapshot` 转给规划者。检出内的改动由 `wrote_files` 检测，检出外的写入既不会被阻止，也不会被发现。
 
 **R1b 实现时定的**（和上文不同的地方以这里为准）：
 
-- **在哪里跑**：Claude Code、Codex 和 Grok 的只读由运行时强制（Claude Code 的 default 权限模式和 Grok 的 `--tools` 已实测，Codex 是系统级沙箱），所以在步骤原来的目录里跑，读到的是现在的成果；共用目录里的步骤成果常常没提交，快照会读到旧的。只有 OMP（`--tools` 的限制没在真实运行上验证）在可丢弃的快照里跑。
+- **在哪里跑**：Claude Code 使用上表的显式读工具列表（尚未验证真实运行），Codex 使用只读沙箱，Grok 使用已实测的读工具，在步骤原目录读取当前成果。OMP 只启用读工具（`--tools read,glob,grep`，尚未验证真实运行），在任务目录分支的 detached checkout 运行，结束后删除；检出让写入不落入任务目录，`wrote_files` 检测检出内的改动。它不是沙箱：OMP 以操作者身份运行，检出外（其他路径、家目录）的写入既不会被阻止，也不会被发现。
 - **咨询没有办公台工具**：问题和这个席位以前的回答都在 `[CONSULT]` 这一轮里给出，回答写在回复里由 Looper 发出，所以咨询运行不注入 MCP，也没有令牌。
 - **发给角色的问题**：角色里只有一个跑过的席位时咨询它；有几个时转给规划者（`many_seats`），提问的人可以改问具体的席位。
 - **同一个席位同时至多一个咨询**：在排队的那次会接着收后来的问题；正在跑的期间来的问题排成下一次，等这次结束再开始。服务停止先禁止启动新咨询，取消后保留 `queued`、`running` 状态；恢复时把中断的 `running` 改回 `queued`，每个席位只启动编号最小的一条，后续依次运行。主动 kill（包括等名额时）则记为失败，原因 `stopped`，问题转给规划者。
@@ -231,9 +231,9 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 ### 7.4 咨询的 prompt 和回复
 
 - **system prompt**：同原运行的各层（harness、角色 prompt 和版本、项目、任务一节按现在的需求和补充说明），加办公台一节，最后是 `CONSULT_CONTRACT`（模型可见，实现用英文，大意）：「你的步骤已经结束。同事有问题要问你。根据你做过的事和你现在能读到的内容回答；不改任何文件。不知道就说不知道。最后一条消息以一个 JSON 对象结尾：`{"answers": [{"reply_to": 17, "body": "...", "refs": [...]}], "unsure": "..."}`。」
-- **user turn**：`[CONSULT]`，这个席位的步骤怎么结束的（接受、失败、被替换），这一批问题（编号、谁问的、正文、引用），以及这个席位之前回答过的问题（保持前后一致）。问题是别的 agent 的话，是数据。
+- **user turn**：`[CONSULT]`，这个席位的步骤怎么结束的（接受、失败、被替换），这一批问题（保留每条编号和提问席位，正文总共最多 20,000 字符，按问题数均分并截断），以及这个席位之前回答过的问题（保持前后一致）。问题是别的 agent 的话，是数据。
 - **回复**：Looper 按 `reply_to` 逐条发回答；没有回答的问题、`unsure` 非空的，转给规划者。回复不合契约不做修复回合，直接按失败处理。
-- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.20，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code；Codex、OMP 靠超时和预算）；任务的花费上限照样算进去。
+- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.20，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code、Grok；Codex、OMP 靠超时和预算）；每种运行时结束后都检查记录的花费，超额就丢弃回答，按 `budget` 转交规划者。一个截止时间覆盖 stdin 写入、stdout 读取和等待退出；并行排空 stderr，只保留末尾 2,000 字符供错误记录。成功也结束进程树。任务的花费上限照样算进去。
 - **记录**：一条 `llm_records`（agent id `consult-<12 位>`，`metadata.consult`：席位、原运行的记录号、问题编号、分叉的会话、只读怎么强制的、在哪个目录跑），花费单独一行，计入任务花费和这个席位所属角色的统计；一条 `room_consults` 行（第 10 节）；动态「Consulted backend_rd@s2 for fe_rd@s4's question #17: answered ($0.03)」。
 
 ### 7.5 转给规划者
