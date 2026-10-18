@@ -1,5 +1,6 @@
 import type { Project, ProjectExecution, ProjectUpdate } from "@/lib/api";
 import { Input } from "@/components/ui/input";
+import { ROOM_LIMITS } from "@/lib/room";
 
 /** The execution settings as the editor holds them: text, "" = inherit; a list is one item per line. */
 export type ExecutionDraft = Record<keyof ProjectExecution, string>;
@@ -19,6 +20,8 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "gate_reminder_hours",
   "task_workspaces",
   "operator_notes",
+  "agent_room",
+  ...ROOM_LIMITS.map((limit) => limit.field),
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
   "task_budget_usd",
@@ -26,6 +29,7 @@ const NUMBERS = new Set<keyof ProjectExecution>([
   "max_step_retries",
   "role_text_max_chars",
   "gate_reminder_hours",
+  ...ROOM_LIMITS.map((limit) => limit.field),
 ]);
 
 const LISTS = new Set<keyof ProjectExecution>(["workspace_links"]);
@@ -260,10 +264,10 @@ export function ProjectExecutionFields({
         </div>
         <div className="space-y-1">
           {label("user_gates", "User gates")}
-          {/* Not set is off in this release; there is no layer to inherit from. */}
+          {/* Not set is on; there is no layer to inherit from. */}
           <select
             id={`${idPrefix}-user_gates`}
-            value={draft.user_gates || "off"}
+            value={draft.user_gates || "on"}
             onChange={set("user_gates")}
             aria-describedby={`${idPrefix}-user_gates-help`}
             className={SELECT}
@@ -290,6 +294,44 @@ export function ProjectExecutionFields({
             Hours between the reminders of a gate that waits for you, noted in its discussion.
           </p>
         </div>
+        <div className="space-y-1">
+          {label("agent_room", "Agent room")}
+          {/* Not set is on: the one switch here that is on by default. */}
+          <select
+            id={`${idPrefix}-agent_room`}
+            value={draft.agent_room || "on"}
+            onChange={set("agent_room")}
+            aria-describedby={`${idPrefix}-agent_room-help`}
+            className={SELECT}
+          >
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+          <p id={`${idPrefix}-agent_room-help`} className="text-xs text-muted-foreground">
+            Lets the task&apos;s agents message each other through Looper&apos;s room tools; on by default.
+          </p>
+        </div>
+        <fieldset className="rounded-md border border-border px-3 py-3 sm:col-span-2">
+          <legend className="px-1 text-xs font-medium text-muted-foreground">Agent room limits</legend>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {ROOM_LIMITS.map(({ field, label: text, help, min, max, fallback }) => (
+              <div key={field} className="space-y-1">
+                {label(field, text)}
+                <Input
+                  id={`${idPrefix}-${field}`}
+                  inputMode="numeric"
+                  value={draft[field]}
+                  onChange={set(field)}
+                  aria-describedby={`${idPrefix}-${field}-help`}
+                  placeholder={`${fallback.toLocaleString()} (${min.toLocaleString()}–${max.toLocaleString()})`}
+                />
+                <p id={`${idPrefix}-${field}-help`} className="text-xs text-muted-foreground">
+                  {help} {min.toLocaleString()}–{max.toLocaleString()}; default {fallback.toLocaleString()}.
+                </p>
+              </div>
+            ))}
+          </div>
+        </fieldset>
       </div>
     </fieldset>
   );

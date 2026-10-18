@@ -100,6 +100,8 @@ class TurnKind(str, Enum):
     RESTART = "RESTART"
     # The user wrote in a gate's discussion (or ended it): answered in the CHAT shape plus the gate's own keys.
     GATE = "GATE"
+    # Messages for the Planner in the task's agent room, or Looper's escalations: answered in the CHAT shape.
+    ROOM = "ROOM"
     # The extra turn of a completed task whose project distills lessons; its message gives its own shape.
     LESSONS = "LESSONS"
     # The last turn of a session the next agent cannot resume: what it hands over; its message gives its shape.
@@ -1082,7 +1084,7 @@ action "none" runs the steps not started as they are; "add_steps" and
 "replan" change them first. No step runs yet, so there is no "forward" and
 no "stop".
 
-{gate_section}[SUPERVISE]: a periodic check on the Workers running now (no result arrived).
+{gate_section}{room_section}[SUPERVISE]: a periodic check on the Workers running now (no result arrived).
 The message lists each running step and its recent activity. Review only the
 ones that need it; leaving a step out is the same as "leave".
 ```json
@@ -1166,16 +1168,35 @@ close the gate once every agenda item is resolved or dropped.
 """
 
 
-def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False) -> str:
+# The [ROOM] turn, where the task's agent room is on.
+_ROOM_SECTION = """\
+[ROOM]: messages for you in the task's agent room: from the steps' seats, or
+Looper's escalations (two seats trading messages without settling it, a
+question for a seat no run is in, an interface changed after a step that used
+it ended, the room full). Reply in the [CHAT] shape: "reply" is posted to the
+room for those who wrote, as the answer to their questions ("" posts
+nothing); the action changes the plan when the room shows it must change.
+
+"""
+# The opening's list of message kinds, by whether gates and the room come.
+_KINDS = {
+    (False, False): "[PLAN], [DECISION], [CHAT] or [RESTART]. End",
+    (True, False): "[PLAN], [DECISION], [CHAT], [RESTART] or\n[GATE]. End",
+    (False, True): "[PLAN], [DECISION], [CHAT], [RESTART] or\n[ROOM]. End",
+    (True, True): "[PLAN], [DECISION], [CHAT], [RESTART],\n[GATE] or [ROOM]. End",
+}
+
+
+def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
+                   room: bool = False) -> str:
     """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
     Planners may define the roles their steps run as; with ``gates``, for a task that may open user gates or has
-    one that is not closed."""
+    one that is not closed; with ``room``, whose agents share a room."""
     return _REPLY_CONTRACT.format(
-        max_retries=max_retries, roles=_ROLE_RULES if roles else "",
-        kinds="[PLAN], [DECISION], [CHAT], [RESTART] or\n[GATE]. End" if gates
-        else "[PLAN], [DECISION], [CHAT] or [RESTART]. End",
+        max_retries=max_retries, roles=_ROLE_RULES if roles else "", kinds=_KINDS[(gates, room)],
         gate_rules=_GATE_RULES if gates else "", gate_changes=_GATE_CHANGES if gates else "",
-        chat_gates=_CHAT_GATES if gates else "", gate_section=_GATE_SECTION if gates else "")
+        chat_gates=_CHAT_GATES if gates else "", gate_section=_GATE_SECTION if gates else "",
+        room_section=_ROOM_SECTION if room else "")
 
 
 REPLY_CONTRACT = reply_contract()

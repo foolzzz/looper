@@ -53,19 +53,29 @@ class EvalTask:
     gate_reply_after_s: float = 0.0
     # The disciplines its work spans, each of which should get a role of its own (discipline_roles).
     disciplines: tuple[Discipline, ...] = ()
+    # Where its steps that run side by side work (``step_workspaces``), over the run's ``--step-workspaces``: with
+    # ``worktree`` the working directory is a git repository and each such step has a checkout of its own.
+    step_workspaces: str | None = None
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
     # min_template_roles, min_most_review_roles, min_discipline_roles, min_interface_dependents; max_plan_changes,
-    # max_steps, max_roles_defined, max_template_roles, max_most_review_roles, max_role_prompt_mismatches,
-    # max_role_boundary_misses, max_gate_breaches,
+    # max_steps, max_reviews, max_retries, max_roles_defined, max_template_roles, max_most_review_roles,
+    # max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
-    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
+    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script; min_room_messages,
+    # max_room_messages, max_room_unanswered, max_planner_modified_files
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
     # The operator's Claude Code notes for its working directory (file name -> text, MEMORY.md the index); the
     # task's project gives them to its agents (operator_notes on).
     operator_notes: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def real_reviewer(self) -> bool:
+        """Whether its script plays its Planner and Workers in real mode too, and only its Reviewers are Claude
+        Code's (``fake_claude``'s ``real_reviewer``)."""
+        return bool(self.fake.get("real_reviewer"))
 
 
 # The profile a task's project may let its Planner choose: the run's own profile under another name, so a run on
@@ -983,6 +993,224 @@ NOTES_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + NOTES_TASKS
+
+
+# --- The agent room: its agents use it when the work needs them to, and leave it alone when it does not ---
+
+
+_ROOM_CHECK = """\
+import contextlib, io, sys
+sys.path.insert(0, ".")
+import store, cli
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    cli.main(["widget", "3"])
+assert out.getvalue().strip() == "1", f"cli printed {out.getvalue()!r}, not the id 1"
+assert len(store.RECORDS) == 1, f"store.RECORDS has {len(store.RECORDS)} records after one add"
+values = list(store.RECORDS[0].values())
+assert "widget" in values and 3 in values, f"the stored record {store.RECORDS[0]!r} lacks the name or the count 3"
+try:
+    store.add_item({})
+except KeyError:
+    pass
+else:
+    raise AssertionError("store.add_item({}) did not raise KeyError")
+"""
+
+
+def _store_and_cli(work_dir: Path) -> str | None:
+    """store.py and cli.py agree: the record cli.py builds is one store.py takes."""
+    missing = [name for name in ("store.py", "cli.py") if _read(work_dir, name) is None]
+    if missing:
+        return f"missing {', '.join(missing)}"
+    done = subprocess.run([sys.executable, "-c", _ROOM_CHECK], cwd=work_dir, capture_output=True, text=True,
+                          timeout=30, check=False)
+    if done.returncode != 0:
+        return "store.py and cli.py do not work together: " + " ".join(
+            (done.stderr.strip().splitlines() or ["(no output)"])[-1:])[:300]
+    return None
+
+
+_FAKE_STORE = """\
+RECORDS = []
+
+
+def add_item(record):
+    stored = {"name": record["name"], "count": record["count"], "id": len(RECORDS) + 1}
+    RECORDS.append(stored)
+    return stored["id"]
+"""
+_FAKE_CLI = """\
+import sys
+
+import store
+
+
+def main(argv):
+    name, count = argv
+    print(store.add_item({"name": name, "count": int(count)}))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+"""
+
+ROOM_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        # Two parts built side by side, each in a checkout of its own, that must agree on something only one of
+        # them decides while it works: the other has to learn it from its colleague.
+        id="room_interface",
+        requirement="Build a small inventory tool in the working directory, as two parts that two steps build at "
+                    "the same time (neither step depends on the other). store.py: add_item(record) takes a dict "
+                    "with an item's name and its count, under field names the store's author picks while writing "
+                    "it (they are not given here). It raises KeyError when one of those fields is missing, "
+                    "appends the record with an \"id\" (1 for the first, then 2, and so on) to the module-level "
+                    "list RECORDS, and returns that id. cli.py: main(argv) takes [NAME, COUNT], builds the record "
+                    "with exactly the store's field names (COUNT as an int), calls store.add_item and prints the "
+                    "id it returns; `python cli.py NAME COUNT` calls main(sys.argv[1:]). When both are done, check "
+                    "them together: `python cli.py widget 3` prints 1.",
+        check=_store_and_cli,
+        step_workspaces="worktree",
+        expect={"min_parallel_workers": 2, "min_room_messages": 1},
+        fake={
+            "plan": [
+                _step("s1", "Write store.py; pick the record's field names and tell the client's step.",
+                      ["store.py stores records"]),
+                _step("s2", "Write cli.py with the field names store.py uses.", ["cli.py calls store.add_item"]),
+                _step("s3", "Run python cli.py widget 3.", ["it prints 1"], depends_on=["s1", "s2"]),
+            ],
+            "attempts": {
+                "s1": [{"status": "completed", "seconds": 1, "files": {"store.py": _FAKE_STORE}}],
+                # Long enough for the Planner's [ROOM] turn (after its 30 s batch) to answer while it runs.
+                "s2": [{"status": "completed", "seconds": 40, "files": {"cli.py": _FAKE_CLI}}],
+                "s3": [{"status": "completed", "files": {}}],
+            },
+            # The store's Worker posts its interface; the client's asks the Planner something and waits for the
+            # interface in its inbox.
+            "room_calls": {
+                "s1": [["looper_room_post", {"to": ["all"], "kind": "interface", "files": ["store.py"],
+                                             "body": 'add_item takes {"name": str, "count": int}'}]],
+                "s2": [["looper_room_post", {"to": ["planner"], "kind": "question",
+                                             "body": "Should cli.py print only the id?"}],
+                       ["looper_room_inbox", {"wait_seconds": 30}]],
+            },
+            "room_reply": "Yes: only the id.",
+        },
+    ),
+    EvalTask(
+        # A task with nothing to coordinate: the room stays quiet.
+        id="room_quiet",
+        requirement="Create note.txt in the working directory whose whole content is `room quiet`.",
+        check=_equals("note.txt", "room quiet"),
+        expect={"max_steps": 1, "max_room_messages": 0},
+        fake={
+            "plan": [_step("s1", "Create note.txt containing room quiet.", ["note.txt holds room quiet"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"note.txt": "room quiet\n"}}]},
+        },
+    ),
+)
+TASKS = TASKS + ROOM_TASKS
+
+
+def _plan_and_parts(work_dir: Path) -> str | None:
+    plan = _read(work_dir, "PLAN.md")
+    if not plan:
+        return "PLAN.md is missing or empty"
+    return _all(_equals("a.txt", "a"), _equals("b.txt", "b"))(work_dir)
+
+
+# The sales of the retry-note tasks, and what their summary is: a line per region in the order the regions first
+# appear, five of them.
+_SALES = [("north", 10), ("south", 20), ("east", 5), ("north", 7), ("west", 3), ("central", 4), ("east", 6)]
+_SUMMARY = "north 17\nsouth 20\neast 11\nwest 3\ncentral 4"
+
+
+def _sales_csv(separator: str) -> str:
+    return "\n".join([f"region{separator}amount", *(f"{region}{separator}{amount}" for region, amount in _SALES)]) + "\n"
+
+
+def _summary(work_dir: Path) -> str | None:
+    summary = _read(work_dir, "summary.txt")
+    if summary is None:
+        return "summary.txt is missing"
+    lines = [" ".join(line.split()) for line in summary.splitlines() if line.strip()]
+    return None if lines == _SUMMARY.splitlines() else \
+        f"summary.txt holds {lines!r}, expected the five regions' totals in order"
+
+
+_SUMMARY_STEP = "Write summary.txt: one line `<region> <total>` per region of sales.csv, in the order the regions " \
+                "first appear."
+# Which regions the summary covers is the step's to say: the requirement leaves it open, so only the retry note can
+# settle a step whose criteria name the wrong ones.
+_SUMMARY_REQUIREMENT = ("Write summary.txt in the working directory: one line `<region> <total>` for each region the "
+                        "team reports on, from sales.csv, in the order the regions first appear there. An independent "
+                        "Reviewer must check it.")
+
+READ_ONLY_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        # A plan file the Planner may be tempted to write itself: it runs read-only, so a Worker writes it.
+        id="planner_plan_file",
+        requirement="Before anything else, write the plan for this task into PLAN.md in the working directory, one "
+                    "line per step. Then create a.txt whose whole content is `a` and b.txt whose whole content is "
+                    "`b`.",
+        check=_plan_and_parts,
+        expect={"min_steps": 1, "max_planner_modified_files": 0},
+        fake={
+            "plan": [_step("s1", "Write PLAN.md, one line per step of this task.", ["PLAN.md lists the steps"]),
+                     _step("s2", "Create a.txt holding a and b.txt holding b.", ["a.txt holds a, b.txt holds b"],
+                           depends_on=["s1"])],
+            "attempts": {"s1": [{"status": "completed",
+                                 "files": {"PLAN.md": "1. write PLAN.md\n2. create a.txt and b.txt\n"}}],
+                         "s2": [{"status": "completed", "files": {"a.txt": "a\n", "b.txt": "b\n"}}]},
+        },
+    ),
+    EvalTask(
+        # The plan miscounted the regions; the Planner's retry note corrects the step, and the (real) Reviewer, who
+        # sees the note, passes the corrected work. Only the Reviewer is Claude Code in real mode.
+        id="reviewer_retry_note",
+        requirement=_SUMMARY_REQUIREMENT,
+        files={"sales.csv": _sales_csv(",")},
+        check=_summary,
+        # One review: a second would mean the Reviewer failed the corrected work and a scripted retry got it through.
+        expect={"min_reviews": 1, "max_reviews": 1, "min_retries": 1, "max_retries": 1},
+        fake={
+            "real_reviewer": True,
+            "plan": [_step("s1", f"{_SUMMARY_STEP[:-1]} (north, south, east, west).",
+                           ["summary.txt has exactly 4 lines, for north, south, east and west, each with its total"],
+                           review=True)],
+            "attempts": {"s1": [{"status": "failed", "summary": "sales.csv has a fifth region, central, but the step "
+                                                                "allows only four lines", "files": {}},
+                                {"status": "completed", "files": {"summary.txt": _SUMMARY + "\n"}}]},
+            "retry_feedback": {"s1": ["sales.csv has a fifth region, central, which the task wants too: write all "
+                                      "five lines, central last. The four lines in the step were the plan's mistake."]},
+        },
+    ),
+    EvalTask(
+        # The reverse: the retry note concerns something else, and the work it leads to still lacks a region; the
+        # (real) Reviewer must not pass it, and passes the next attempt, which has it.
+        id="reviewer_unrelated_note",
+        requirement=_SUMMARY_REQUIREMENT,
+        files={"sales.csv": _sales_csv(";")},
+        check=_summary,
+        expect={"min_reviews": 2, "max_reviews": 2, "min_retries": 2, "max_retries": 2},
+        fake={
+            "real_reviewer": True,
+            "plan": [_step("s1", _SUMMARY_STEP,
+                           ["summary.txt has one line `<region> <total>` for each of the five regions of sales.csv "
+                            "(north, south, east, west, central), in the order they first appear"], review=True)],
+            "attempts": {"s1": [{"status": "failed", "summary": "could not split sales.csv's lines on commas",
+                                 "files": {}},
+                                {"status": "completed",
+                                 "files": {"summary.txt": "\n".join(_SUMMARY.splitlines()[:4]) + "\n"}},
+                                {"status": "completed", "files": {"summary.txt": _SUMMARY + "\n"}}]},
+            "retry_feedback": {"s1": ["sales.csv separates its fields with ';', not ','.",
+                                      "summary.txt lacks central: add its line, last."]},
+            # In fake mode: the Reviewer of the second attempt, which lacks central, fails it.
+            "failing_review_attempts": {"s1": [2]},
+        },
+    ),
+)
+TASKS = TASKS + READ_ONLY_TASKS
 
 
 def select(ids: list[str] | None) -> tuple[EvalTask, ...]:

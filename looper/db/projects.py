@@ -25,7 +25,10 @@ from .tasks import ACTIVE_STATUSES
 EXECUTION_COLUMNS = (
     "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
     "distill_lessons", "step_workspaces", "workspace_links", "max_step_retries", "planner_roles",
-    "role_text_max_chars", "user_gates", "gate_reminder_hours", "task_workspaces", "operator_notes",
+    "role_text_max_chars", "user_gates", "gate_reminder_hours", "agent_room", "room_post_per_minute",
+    "room_broadcasts_per_run", "room_message_max_chars", "room_messages_per_task", "room_ping_pong_rounds",
+    "room_wait_max_seconds",
+    "task_workspaces", "operator_notes",
 )
 
 

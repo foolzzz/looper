@@ -23,6 +23,7 @@ import {
   RotateCcw,
   CirclePause,
   MessageCircleQuestionMark,
+  MessagesSquare,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ClampedText } from "@/components/clamped-text";
@@ -38,11 +39,13 @@ import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
+import { TaskRoomTab } from "@/components/task-room";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
 import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
+import { roomNote } from "@/lib/room";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -88,7 +91,7 @@ import {
   type RunRole,
 } from "@/lib/api";
 
-type Tab = "overview" | "pipeline" | "agents" | "sessions" | "conversation";
+type Tab = "overview" | "pipeline" | "room" | "agents" | "sessions" | "conversation";
 
 function stepStatusIcon(status: string) {
   switch (status) {
@@ -1727,15 +1730,18 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       }
       if (step.kind === "gate") continue;
       const look = stepLook(step.status);
+      // Its seats' messages in the task's room (keyed as the room keys its seats).
+      const room = task.room?.by_step[step.step_key || step.id];
+      const note = [step.retries ? `retry ${step.retries}` : "", roomNote(room)].filter(Boolean).join(" · ");
       ns.push({
         id: step.id,
         position,
         data: { label: <NodeLabel name={name} look={look} role={stepRoles(step, false) || undefined}
-                                  detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
+                                  detail={step.instruction} note={note || undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
       cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
-                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id) });
+                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id), room });
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.
@@ -1945,6 +1951,7 @@ function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "Overview", icon: Activity },
     { id: "pipeline", label: "Pipeline", icon: GitBranch },
+    { id: "room", label: "Room", icon: MessagesSquare },
     { id: "agents", label: "Agents", icon: Bot },
     { id: "sessions", label: "Sessions", icon: Terminal },
     { id: "conversation", label: "Conversation", icon: MessageSquare },
@@ -2092,6 +2099,7 @@ function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           />
         )}
         {task && tab === "pipeline" && <PipelineTab task={task} onOpenGate={openGate} />}
+        {task && tab === "room" && <TaskRoomTab key={`${task.task_id}:${runs}`} task={task} />}
         {task && tab === "agents" && (
           <TaskAgentsTab task={task} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
         )}

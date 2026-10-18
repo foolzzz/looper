@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -35,10 +36,12 @@ from looper.agents.message import (
     planner_address,
 )
 from looper.agents.tiers.planner import PlannerAgent
-from looper.agents.tiers.planner_protocol import REPLY_CONTRACT
+from looper.agents.tiers.planner_protocol import DEFAULT_STEP_RETRIES, reply_contract
 from looper.agents.tiers.task import TaskRouter
 
 WEB = channel_address("web")
+# The reply contract of a task whose project never set user_gates: gates on, by default.
+DEFAULT_CONTRACT = reply_contract(DEFAULT_STEP_RETRIES, gates=True)
 
 WORK_OK = {"status": "completed", "summary": "did it", "changed_files": {"calc.py": "added"}}
 WORK_FAILED = {"status": "failed", "error": "tests fail", "summary": "tests fail"}
@@ -280,13 +283,26 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 
 def _assert_unrestricted(argv: list[str]) -> None:
-    """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
+    """The shared permission flags, once, and nothing that narrows the tools or the permissions again (every role but
+    the Planner)."""
     from looper.agents.claude_cli import permission_args
 
     flags = permission_args()
     assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
     assert argv.count("--dangerously-skip-permissions") == 1
     assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+
+
+def _assert_read_only(argv: list[str]) -> None:
+    """A Planner's read-only flags, once: Claude Code's default permission mode, pinned and with no one to answer its
+    prompts, without the file-editing tools, with its skills and web reads (and its MCP servers) allowed; nothing
+    that skips the permissions."""
+    assert "--dangerously-skip-permissions" not in argv and "--tools" not in argv
+    assert argv.count("--permission-mode") == 1 and _flag(argv, "--permission-mode") == "manual"
+    assert argv.count("--permission-prompts") == 1 and _flag(argv, "--permission-prompts") == "none"
+    assert argv.count("--disallowedTools") == 1 and _flag(argv, "--disallowedTools") == "Edit,Write,NotebookEdit"
+    assert argv.count("--allowedTools") == 1
+    assert str(_flag(argv, "--allowedTools")).startswith("Skill,WebFetch,WebSearch")
 
 
 def _sha(text: str) -> str:
@@ -411,6 +427,7 @@ class TestDecisions:
         assert review.payload["parent_task_id"] == "t1"
         assert review.payload["context"] == {"work_dir": str(h.work_dir)}
         assert review.payload["acceptance_criteria"] == ["s1 works"]
+        assert "feedback" not in review.payload  # a first attempt: no retry notes
         assert review.payload["work_result"]["changed_files"] == {"calc.py": "added"}
         assert (review.payload["requirement"], review.payload["step_key"]) == ("build the calc package", "s1")
         texts = [turn["text"] for turn in claude.turns()]
@@ -420,6 +437,26 @@ class TestDecisions:
         final = h.final()
         assert final is not None and final.payload["status"] == "completed"
         assert final.payload["summary"] == FINAL_RESULT
+
+    def test_a_retried_steps_reviewer_gets_the_notes_it_was_retried_with(self, planner_claude: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1", review=True)),
+            decide("retry", feedback="sales.csv has five regions: write all five"),
+            decide("review"),
+            decide("retry", feedback="keep the order of first appearance"),
+            decide("review"),
+            decide("accept", summary="done"),
+        )
+        reviews = iter([REVIEW_FAIL, REVIEW_PASS])
+        works = iter([WORK_FAILED, WORK_OK, WORK_OK])
+        h = drive(claude, lambda e: next(reviews) if e.message_type == MessageType.VERIFY_REQUEST else next(works))
+
+        # Each review has every note its attempt's Worker had, oldest first.
+        assert [r.payload["feedback"] for r in h.reviews] == [
+            ["sales.csv has five regions: write all five"],
+            ["sales.csv has five regions: write all five", "keep the order of first appearance"]]
+        final = h.final()
+        assert final is not None and final.payload["status"] == "completed"
 
     def test_failed_review_cannot_be_accepted(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"))
@@ -536,6 +573,173 @@ class TestDecisions:
 
 
 # --- The resident Claude ---
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestReadOnly:
+    """A Planner runs read-only: its runtime refuses what would change files and reports it, or, where the runtime
+    cannot, the Planner checks its task directory after each turn."""
+
+    def test_the_calls_claude_code_refused_are_kept_with_the_turn_and_said_in_the_activity(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents import log_redaction
+
+        monkeypatch.setattr(log_redaction, "_secrets", ("sk-live-secret-123",))
+        token = "curl -H 'Authorization: sk-live-secret-123' https://example.com/" + "x" * 200
+        refused = [{"tool_name": "Bash", "tool_use_id": "t1", "tool_input": {"command": "echo plan > PLAN.md"}},
+                   {"tool_name": "Bash", "tool_use_id": "t2", "tool_input": {"command": token}}]
+        claude = planner_claude(plan(step("s1")), decide("accept"), denied={1: refused})
+        h = drive(claude, always(WORK_OK))
+
+        assert h.final() is not None and h.final().payload["status"] == "completed"
+        notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
+        # The plan turn's record keeps both calls; on Claude Code no turn needs a directory check.
+        (kept,) = [n for n in notes if n]
+        assert list(kept) == ["permission_denials"]
+        assert [(d["tool"], d["id"]) for d in kept["permission_denials"]] == [("Bash", "t1"), ("Bash", "t2")]
+        # The activity shows each call shortened, a known secret masked.
+        (line,) = [a for a in activity(agent_db) if a.startswith("The Planner runs read-only")]
+        assert line.startswith("The Planner runs read-only: Looper refused 2 of its tool calls (Bash: echo plan > "
+                               "PLAN.md; Bash: curl -H 'Authorization: ")
+        assert "sk-live-secret-123" not in line and len(line) < 200
+
+    @pytest.mark.parametrize("enforced", [False, True], ids=["check", "permissions"])
+    def test_where_the_runtime_cannot_refuse_a_change_the_turn_that_made_it_is_reported(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch, enforced: bool,
+    ) -> None:
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        if not enforced:
+            monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        claude = planner_claude(plan(step("s1")), decide("accept"), writes={1: {"notes.md": "my plan\n"}})
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.finished()
+
+        drive(claude, always(WORK_OK), scenario)
+        reported = [line for line in activity(agent_db) if "files changed in the task directory" in line]
+        notes = [c.args[1] for c in agent_db.add_metadata.await_args_list]
+        assert all("read_only_check" not in c.kwargs.get("metadata", {})
+                   for c in agent_db.finish_record.await_args_list)
+        if enforced:
+            # Claude Code refuses such a change itself: the Planner does not look.
+            assert reported == [] and not any(notes)  # no metadata passed at all
+            return
+        # The plan turn wrote the file; the decision turn changed nothing (s1's Worker had finished by then).
+        assert reported == ["Warning: files changed in the task directory during a Planner turn, while no Worker, "
+                            "Reviewer or other task ran there (its runtime cannot refuse writes): notes.md. They are "
+                            "left as they are"]
+        assert notes == [{"read_only_check": "compared", "planner_changed_files": ["notes.md"]},
+                         {"read_only_check": "compared"}]
+
+    def test_a_turn_while_a_worker_runs_in_the_task_directory_is_not_checked(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        # s2's decision turn writes a file while s1's Worker still runs in the directory: whose change it is
+        # cannot be told, so the turn is not checked.
+        claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept"),
+                                writes={2: {"notes.md": "my plan\n"}})
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.until(lambda: len(claude.turns()) >= 2 and h.held)  # s2's decision turn has started
+            await h.release(WORK_OK)
+            await h.finished()
+
+        h = drive(claude, lambda e: None if e.payload["step_key"] == "s1" else WORK_OK, scenario)
+        assert h.final() is not None and h.final().payload["status"] == "completed"
+        assert not [line for line in activity(agent_db) if "files changed in the task directory" in line]
+        assert all("read_only_check" not in c.kwargs.get("metadata", {})
+                   for c in agent_db.finish_record.await_args_list)
+        assert [c.args[1] for c in agent_db.add_metadata.await_args_list] == [
+            {"read_only_check": "compared"}, {"read_only_check": "shared"}, {"read_only_check": "compared"}]
+
+    @pytest.mark.parametrize("where", ["another task runs there", "the other tasks cannot be read", "no git checkout"])
+    def test_a_turn_whose_change_cannot_be_told_apart_is_recorded_as_not_compared(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch, where: str,
+    ) -> None:
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        shared = where != "no git checkout"
+        agent_db.others_active_in.return_value = where == "another task runs there"
+        if where == "the other tasks cannot be read":
+            agent_db.others_active_in.side_effect = RuntimeError("database pool not initialised")
+        claude = planner_claude(plan(step("s1")), decide("accept"), writes={1: {"notes.md": "my plan\n"}})
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            if shared:  # a checkout another task's agents may change files in too
+                identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+                for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                    subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.finished()
+
+        drive(claude, always(WORK_OK), scenario)
+        assert not [line for line in activity(agent_db) if "files changed in the task directory" in line]
+        check = "shared" if shared else "no_checkout"
+        assert all("read_only_check" not in c.kwargs.get("metadata", {})
+                   for c in agent_db.finish_record.await_args_list)
+        assert [c.args[1] for c in agent_db.add_metadata.await_args_list] == [
+            {"read_only_check": check}] * 2
+
+    def test_a_turn_stopped_while_checking_files_keeps_its_outcome_and_cost(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents import step_workspaces
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        claude = planner_claude(plan(step("s1")))
+        checking = asyncio.Event()
+        tree_state = step_workspaces.tree_state
+        calls = 0
+
+        async def check_tree(work_dir: str) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # the audit after Claude answered, then the task stops
+                checking.set()
+                await asyncio.sleep(60)
+            return await tree_state(work_dir)
+
+        monkeypatch.setattr(step_workspaces, "tree_state", check_tree)
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.until(checking.is_set)
+
+        drive(claude, lambda envelope: None, scenario)
+        finishes = agent_db.finish_record.await_args_list
+        assert (finishes[0].kwargs["status"], finishes[0].kwargs["cost_usd"]) == ("completed", 0.25)
+        assert agent_db.start_record.await_count == len(finishes)
+        agent_db.add_metadata.assert_not_awaited()
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -804,7 +1008,7 @@ class TestResidentClaude:
 
         assert asyncio.run(_run()) == (True, True, True)
 
-    def test_claude_runs_unrestricted_in_the_task_directory(
+    def test_claude_runs_read_only_in_the_task_directory(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from looper.db import role_configs
@@ -821,8 +1025,9 @@ class TestResidentClaude:
         h = drive(claude, always(WORK_OK))
 
         (argv,) = claude.argvs()
-        # Every tool, no permission prompts: the role prompt, not the command, keeps it to planning.
-        _assert_unrestricted(argv)
+        # Read-only: the role prompt keeps it to planning, and Claude Code refuses what would change files.
+        _assert_read_only(argv)
+        assert _flag(argv, "--allowedTools") == "Skill,WebFetch,WebSearch"  # no MCP server: no Planner tools here
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert (_flag(argv, "--model"), _flag(argv, "--max-turns")) == ("claude-test", "9")
@@ -835,12 +1040,13 @@ class TestResidentClaude:
         assert _flag(argv, "--system-prompt-snapshot") == "off"
         (prompt,) = claude.prompts()
         assert Path(_flag(argv, "--append-system-prompt-file") or "").name == f"{_sha(prompt)}.md"
-        _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", REPLY_CONTRACT)
-        assert prompt.endswith(REPLY_CONTRACT)
+        _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", DEFAULT_CONTRACT)
+        assert prompt.endswith(DEFAULT_CONTRACT)
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format",
                        "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
-                       "--settings", "--model", "--max-turns"}
+                       "--settings", "--model", "--max-turns", "--disallowedTools", "--allowedTools",
+                       "--permission-mode", "--permission-prompts"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
 
     def test_each_turn_is_recorded_with_its_own_cost(self, planner_claude: Any, agent_db: Any) -> None:
@@ -1021,9 +1227,10 @@ class TestSystemPrompt:
 
         (prompt,) = claude.prompts()
         _in_order(prompt, f"{DEFAULT_HARNESS_PROMPT}\n\n", "You plan carefully.\n\n",
-                  "## Project: calc\nUse uv.\nPython 3.12.\n\n", "## Task\n", "build the calc package", REPLY_CONTRACT)
+                  "## Project: calc\nUse uv.\nPython 3.12.\n\n", "## Task\n", "build the calc package",
+                  DEFAULT_CONTRACT)
         assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan carefully.\n\n")
-        assert prompt.endswith(REPLY_CONTRACT)
+        assert prompt.endswith(DEFAULT_CONTRACT)
         agent_db.get_task_project.assert_awaited_with("t1")  # the task's project as it is now
         # Every turn records the system prompt it ran with, its hash and its layers.
         starts = _starts(agent_db)
@@ -1035,9 +1242,9 @@ class TestSystemPrompt:
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
                                      "updated_at": "2026-10-13T12:00:00+00:00", "knowledge_sha256": None,
                                      "knowledge_documents": 0}
-        task = prompt[prompt.index("## Task"):prompt.index(REPLY_CONTRACT)].rstrip("\n")
+        task = prompt[prompt.index("## Task"):prompt.index(DEFAULT_CONTRACT)].rstrip("\n")
         assert layers["task"] == {"kind": "plan", "task_id": "t1", "step_id": None, "sha256": _sha(task)}
-        assert layers["contract"] == {"name": "REPLY_CONTRACT", "sha256": _sha(REPLY_CONTRACT)}
+        assert layers["contract"] == {"name": "REPLY_CONTRACT", "sha256": _sha(DEFAULT_CONTRACT)}
         assert layers["isolation"] == ISOLATION_ID
         assert str(h.work_dir) in task
         assert [line for line in activity(agent_db) if "background" in line] == [
@@ -1068,7 +1275,7 @@ class TestSystemPrompt:
         assert "## Project: calc\nv1\n\n## Task" in first_prompt
         expected = f"## Project: calc\n{new_background}\n\n## Task" if new_background else "carefully.\n\n## Task"
         assert expected in second_prompt
-        assert second_prompt.endswith(REPLY_CONTRACT)
+        assert second_prompt.endswith(DEFAULT_CONTRACT)
         # A changed prompt is a new file with a new hash; the restarted process resumes the session.
         assert _flag(first, "--append-system-prompt-file") != _flag(second, "--append-system-prompt-file")
         assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
@@ -1229,7 +1436,7 @@ class TestLibrary:
         plugin, skills = plugin_dirs(argv)
         assert plugin.endswith(f"/.local/library/{demo['sha256']}/demo") and skills.endswith("/personal")
         # Every tool, Skill included, so that the library's skills reach the Planner too.
-        _assert_unrestricted(argv)
+        _assert_read_only(argv)
         assert all(s["metadata"]["library"]["items"] == [
             {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"], "plugin": "demo", "scope": "global"},
             {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"], "plugin": "personal", "scope": "global"}]
@@ -1282,12 +1489,12 @@ class TestKnowledge:
         # The stored documents' set directory, and the project's since the task runs in its own directory.
         assert Path(set_dir).parent == h.work_dir.parent / ".local" / "projects" / "proj-1" / "knowledge"
         assert mounted_project == str(project_dir)
-        _assert_unrestricted(argv)
+        _assert_read_only(argv)
         (prompt,) = claude.prompts()
         _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
                   f"In {set_dir}:\n- Glossary: Terms the code uses (Glossary.md)\n",
                   f"In {project_dir}:\n- Runbook: How to deploy (docs/runbook.md)\n\n## Task\n",
-                  REPLY_CONTRACT)
+                  DEFAULT_CONTRACT)
         index = prompt[prompt.index("## Project knowledge"):prompt.index("\n\n## Task")]
         for start in _starts(agent_db):
             project = start["metadata"]["prompt_layers"]["project"]
@@ -1383,7 +1590,7 @@ class TestProjectSkills:
         assert plugin.startswith(f"{h.work_dir.parent}/.local/library/")
         assert found[plugin] == {"deploy-check": (
             "---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\nReply DEPLOY-OK.\n")}
-        _assert_unrestricted(argv)
+        _assert_read_only(argv)
         for start in _starts(agent_db):
             library = start["metadata"]["library"]
             assert (library["role"], library["project_id"]) == ("planner", "proj-1")

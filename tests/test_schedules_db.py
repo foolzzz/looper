@@ -609,6 +609,57 @@ def test_run_now_fires_a_manual_run_and_keeps_the_next_fire(monkeypatch: pytest.
     _run(test, monkeypatch, tmp_path)
 
 
+def test_a_running_runs_spend_excludes_the_manager_linked_to_its_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.db import llm_records, schedules
+
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled())["schedule_id"]
+        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        task_id = run["task_id"]
+        for agent_id, cost in ((f"planner-{task_id}", 0.125), ("worker-1", 0.25), ("reviewer-1", 0.125),
+                               ("manager", 5.0)):
+            record_id = await llm_records.start_record(agent_id=agent_id, task_id=task_id, pool=env.pool)
+            await llm_records.finish_record(record_id, status="completed", cost_usd=cost, pool=env.pool)
+
+        since = datetime.fromisoformat(run["fired_at"])
+        assert await schedules.spent_since(env.pool, sid, since) == 0.5
+        assert await schedules.spent_since_each(env.pool, [sid], since) == {sid: 0.5}
+        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["spent_today_usd"] == 0.5
+
+    _run(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize(("agent_prefix", "model"), [("worker", "haiku"), ("planner", "sonnet")])
+def test_a_runs_spend_rounds_each_role_and_model_like_its_final_cost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_prefix: str, model: str,
+) -> None:
+    from looper.db import llm_records, schedules
+
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled())["schedule_id"]
+        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]
+        task_id = run["task_id"]
+        # Two groups round up separately; two records in one group must be summed before rounding.
+        for agent_id, run_model, cost in ((f"planner-{task_id}", "haiku", 0.0000006),
+                                          (f"{agent_prefix}-1", model, 0.0000003),
+                                          (f"{agent_prefix}-2", model, 0.0000003)):
+            record_id = await llm_records.start_record(agent_id=agent_id, task_id=task_id, pool=env.pool)
+            await llm_records.finish_record(record_id, status="completed", model=run_model, cost_usd=cost, pool=env.pool)
+
+        since = datetime.fromisoformat(run["fired_at"])
+        cost = (await llm_records.task_costs([task_id], pool=env.pool))[task_id]["cost_usd"]
+        assert cost == 0.000002
+        running = await schedules.spent_since_each(env.pool, [sid], since)
+        await env.end_task(task_id, "completed")
+        finalized = await schedules.spent_since_each(env.pool, [sid], since)
+        assert running == finalized == {sid: cost}
+        assert (await env.runs(sid))[0]["cost_usd"] == cost
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_a_task_end_writes_the_run_outcome_and_the_failure_count(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
@@ -749,8 +800,8 @@ def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPat
     _run(test, monkeypatch, tmp_path)
 
 
-def test_an_export_and_import_with_schedules_present_still_work(monkeypatch: pytest.MonkeyPatch,
-                                                                tmp_path: Path) -> None:
+def test_an_export_carries_the_schedules_and_importing_it_here_again_leaves_them_running(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from tests.test_config_transfer_db import _looper
 
     async def test(env: _Env) -> None:
@@ -762,9 +813,11 @@ def test_an_export_and_import_with_schedules_present_still_work(monkeypatch: pyt
         exported = tmp_path / "config.json"
         code, _, err = await _looper(monkeypatch, url, "config", "export", str(exported), "--include-projects")
         assert code == 0, err
-        assert "schedule" not in exported.read_text()  # not exported yet (S3)
+        (project,) = json.loads(exported.read_text())["projects"]
+        assert [s["name"] for s in project["schedules"]] == ["nightly"]
         code, _, err = await _looper(monkeypatch, url, "config", "import", str(exported), "--apply")
         assert code == 0, err
-        assert await env.pool.fetchval("SELECT count(*) FROM schedules") == 1
+        # Its settings match: the import leaves it as it is, enabled.
+        assert [tuple(r) for r in await env.pool.fetch("SELECT name, enabled FROM schedules")] == [("nightly", True)]
 
     _run(test, monkeypatch, tmp_path)

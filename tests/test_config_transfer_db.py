@@ -156,7 +156,19 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
         "kind": "review", "description": "Steps that touch auth.", "role_prompt": "Check for security problems.",
         "harness": "## How you work\nRead first.", "profile_id": sonnet, "items": [web["item_id"]]})
     await _ok("PUT", f"/api/projects/{calc}/role-templates/tester", {"kind": "work", "role_prompt": "Write tests."})
-    return {"calc": calc, "docs": docs, "mcp": mcp["item_id"], "web": web["item_id"], "skill": skill["item_id"]}
+    # Schedules: an enabled one with every setting, a directory of its own and a chat the allowlist lets in; a
+    # disabled one on the defaults.
+    nightly = (await _ok("POST", f"/api/projects/{calc}/schedules", {
+        "name": "nightly", "cron": "0 2 * * *", "timezone": "Asia/Shanghai", "requirement": "Check the deps.",
+        "work_dir": str(work_dir), "overlap": "parallel", "max_parallel_runs": 2, "catch_up": "skip",
+        "run_timeout_seconds": 1800, "run_budget_usd": 1.5, "gate_command": "echo new", "gate_timeout_seconds": 30,
+        "daily_budget_usd": 3, "notify": "always", "notify_target": {"channel": "telegram", "chat": "123456789"},
+        "profile_overrides": {"worker": "claude-code/sonnet"}, "task_limits": {"worker": 2}}))["schedule"]
+    await _ok("PUT", f"/api/schedules/{nightly['schedule_id']}", {"enabled": True})
+    await _ok("POST", f"/api/projects/{calc}/schedules", {"name": "weekly", "cron": "0 9 * * 1",
+                                                         "timezone": "UTC", "requirement": "Sum up the week."})
+    return {"calc": calc, "docs": docs, "mcp": mcp["item_id"], "web": web["item_id"], "skill": skill["item_id"],
+            "nightly": nightly["schedule_id"]}
 
 
 def _item(kind: str, name: str, files: list[dict[str, Any]], **fields: Any) -> dict[str, Any]:
@@ -203,6 +215,13 @@ async def _state(pool: Any) -> dict[str, Any]:
         templates = await db.read_role_templates(conn)
         item_names = {row["id"]: (row["kind"], row["name"]) for row in items}
         in_projects = {p: await agent_setting_layers.list_layers(p, pool=pool) for p in names}
+        from looper.db.schedules import list_schedules
+
+        profile_names = {r["id"]: r["name"] for r in await db.read_profiles(conn)}
+        schedules = {(r["project_name"], r["name"]): {
+            **{k: r[k] for k in (*_SCHEDULE_COLUMNS, "work_dir", "enabled", "created_via")},
+            "profiles": {role: profile_names[pid] for role, pid in r["profile_overrides"].items()},
+            "task_limits": r["task_limits"]} for r in await list_schedules(pool=conn)}
         return {
             "settings": {role: _without_ids(resolve(role, index_layers(layers, None)).view()) for role in ROLES},
             "project_settings": {(names[p], role.value): _without_ids(resolve(role, index_layers(in_projects[p], p),
@@ -224,17 +243,25 @@ async def _state(pool: Any) -> dict[str, Any]:
                          for p in projects},
             "knowledge": sorted((names[d["project_id"]], d["title"], d["summary"], d["source_kind"], d["filename"],
                                  d["path"], d["sha256"], d["content"]) for d in documents),
+            "schedules": schedules,
             "role_templates": sorted((names[t["project_id"]], t["template_key"], t["kind"], t["description"],
                                       t["role_prompt"], t["harness"] or "", t["profile"] or "",
                                       tuple(item_names[i] for i in t["items"])) for t in templates),
         }
 
 
+# A schedule's own settings, as its row has them.
+_SCHEDULE_COLUMNS = ("cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up", "run_timeout_seconds",
+                     "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify",
+                     "notify_channel", "notify_chat")
+
+
 async def _rows(pool: Any) -> dict[str, list[Any]]:
     """Every row of the tables an import writes, to tell that nothing changed."""
     tables = ("agent_setting_layers", "role_configs", "channel_configs", "library_items", "library_files",
               "library_mcp_servers", "library_installs", "projects", "project_documents", "agent_runtimes",
-              "llm_providers", "llm_provider_secrets", "agent_profiles", "project_role_templates")
+              "llm_providers", "llm_provider_secrets", "agent_profiles", "project_role_templates", "schedules",
+              "schedule_profile_overrides", "schedule_task_limits")
     async with pool.acquire() as conn:
         if not await conn.fetchval("SELECT to_regclass('library_installs') IS NOT NULL"):
             return {}
@@ -284,15 +311,21 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
                                                                 "names": ["environment MY_TG_TOKEN", "bot token (Settings → Channels)"]}]
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
 
-            # Agents resolve the same settings and load the same items; only the projects' directories stay
-            # behind, and the profile on the custom runtime runs on the built-in runtime of its type.
+            # Agents resolve the same settings and load the same items; only the projects' and the schedules'
+            # directories stay behind, the schedules come in disabled, and the profile on the custom runtime runs on
+            # the built-in runtime of its type.
             before, after = await _state(source), await _state(target)
             before["projects"]["calc"]["work_dir"] = ""
+            for schedule in before["schedules"].values():
+                schedule.update(work_dir="", enabled=False, created_via="import")
             before["runtimes"] = [r for r in before["runtimes"] if r["name"] != "claude-beta"]
             assert after == _replaced(before, "claude-beta", "claude-code")
+            assert after["schedules"][("calc", "nightly")]["notify_chat"] == "123456789"  # the file's allowlist lets it
             assert plan["notes"][0] == ("runtime claude-beta: runtimes are built in; its Agent Profiles run on the "
                                         "built-in claude-code runtime here")
-            assert [n.split(":")[0] for n in plan["notes"]] == ["runtime claude-beta", "project calc"]
+            assert [n.split(":")[0] for n in plan["notes"]] == [
+                "runtime claude-beta", "project calc",
+                "2 schedule(s) come in disabled (calc / nightly, calc / weekly)", "calc / nightly"]
 
             # Exporting the new installation gives the same file, but for the runtime.
             again = tmp_path / "again.json"
@@ -302,6 +335,8 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
             assert first["runtimes"] == [{"name": "claude-beta", "type": "claude-code", "executable": "claude-beta"}]
             first["runtimes"] = []
             _by_name(first["profiles"], "beta-haiku")["runtime"] = "claude-code"
+            # Here the schedule runs in its project's directory: it has none of its own to re-point.
+            assert _by_name(_by_name(first["projects"], "calc")["schedules"], "nightly").pop("repoint") is True
             assert _without_time(again) == first
 
     asyncio.run(_test())
@@ -801,13 +836,17 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             expected["providers"] = [{**_by_name(old["providers"], "glm"), "api_key": None}]
             expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [
                 {k: v for k, v in role.items() if k != "max_concurrency"} for role in old["settings"]["roles"]]}
-            # A file from before step workspaces, per-project retries, Planner roles and user gates leaves them
-            # unset.
+            # A file from before step workspaces, per-project retries, Planner roles, user gates and the agent room
+            # leaves them unset.
             expected["projects"] = [{**p, "execution": {**p["execution"], "step_workspaces": None,
                                                         "workspace_links": None, "max_step_retries": None, "planner_roles": None,
                                                         "role_text_max_chars": None, "user_gates": None,
                                                         "gate_reminder_hours": None, "task_workspaces": None,
-                                                        "operator_notes": None},
+                                                        "operator_notes": None,
+                                                        "agent_room": None, "room_post_per_minute": None,
+                                                        "room_broadcasts_per_run": None, "room_message_max_chars": None,
+                                                        "room_messages_per_task": None, "room_ping_pong_rounds": None,
+                                                        "room_wait_max_seconds": None},
                                      "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
             assert new == expected
 
@@ -877,5 +916,106 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
             assert [t["key"] for t in new["calc"]["role_templates"]] == ["mine", "security", "tester"]
             assert new["calc"]["role_templates"][1] == {**good, "key": "security"}
             assert "role_templates" not in new["docs"]
+
+    asyncio.run(_test())
+
+
+# --- Schedules ---
+
+
+def test_a_schedule_whose_settings_changed_is_rewritten_disabled_and_one_that_did_not_keeps_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def _test() -> None:
+        async with _installation() as (source, source_url), _installation() as (target, target_url):
+            await _populate(monkeypatch, source, tmp_path / "calc")
+            exported = tmp_path / "config.json"
+            assert (await _looper(monkeypatch, source_url, "config", "export", str(exported),
+                                 "--include-projects"))[0] == 0
+            calc = _by_name(json.loads(exported.read_text())["projects"], "calc")
+            nightly = _by_name(calc["schedules"], "nightly")
+            # Not whether it was enabled, nor its directory: a flag says it had one.
+            assert "enabled" not in nightly and "work_dir" not in nightly and nightly["repoint"] is True
+            assert (nightly["profiles"], nightly["task_limits"]) == ({"worker": "claude-code/sonnet"}, {"worker": 2})
+            assert (await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply"))[0] == 0
+            _serve(monkeypatch, target)
+            # As the note asks: a directory here, then each schedule enabled.
+            await target.execute("UPDATE projects SET work_dir = $1 WHERE name = 'calc'", str(tmp_path))
+            for row in await target.fetch("SELECT id FROM schedules"):
+                await _ok("PUT", f"/api/schedules/{row['id']}", {"enabled": True})
+
+            nightly["cron"] = "0 3 * * *"
+            exported.write_text(json.dumps(json.loads(exported.read_text()) | {"projects": [
+                {**calc, "schedules": [nightly, _by_name(calc["schedules"], "weekly")]}]}))
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply",
+                                          "--json")
+
+            assert code == 0, err
+            plan = _plan(out)
+            assert [c for c in plan["changes"] if c["section"] == "project.schedules"] == [
+                {"section": "project.schedules", "key": "calc / nightly", "action": "changed", "fields": ["cron"]}]
+            rows = {r["name"]: r for r in await target.fetch("SELECT * FROM schedules")}
+            assert (rows["nightly"]["cron"], rows["nightly"]["enabled"], rows["nightly"]["next_fire_at"]) == (
+                "0 3 * * *", False, None)
+            assert rows["nightly"]["rule_changed_at"] is not None
+            assert rows["weekly"]["enabled"] and rows["weekly"]["next_fire_at"] is not None
+            assert "1 schedule(s) come in disabled (calc / nightly)" in " ".join(plan["notes"])
+
+    asyncio.run(_test())
+
+
+_GOOD = {"name": "good", "cron": "0 9 * * *", "timezone": "UTC", "requirement": "Run it.",
+         "profiles": {"reviewer": "claude-code/opus"}, "task_limits": {"reviewer": 1}}
+
+
+@pytest.mark.parametrize(("bad", "reason"), [
+    ({"cron": "*/2 * * * *"}, "fires 2 minutes apart"),
+    ({"timezone": "Mars/Base"}, "unknown time zone"),
+    ({"requirement": ""}, "requirement is required"),
+    ({"profiles": {"worker": "nope"}}, "profiles.worker: no Agent Profile 'nope' here or in the file"),
+    ({"profiles": {"manager": "claude-code/opus"}}, "not 'manager'"),
+    ({"task_limits": {"planner": 2}}, "task_limits: one Planner runs a task"),
+    ({"enabled": True}, "unknown field 'enabled'"),
+    ({"name": "GOOD"}, "the file gives this schedule twice"),
+])
+def test_a_schedule_the_import_cannot_use_is_skipped_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: dict[str, Any], reason: str,
+) -> None:
+    async def _test() -> None:
+        async with _installation() as (target, target_url):
+            path = tmp_path / "config.json"
+            path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
+                {"name": "calc", "schedules": [_GOOD, {**_GOOD, "name": "bad", **bad}]}]}))
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(path), "--apply",
+                                          "--json")
+
+            assert code == 0, err
+            changes = [c for c in _plan(out)["changes"] if c["section"] == "project.schedules"]
+            assert changes[0] == {"section": "project.schedules", "key": "calc / good", "action": "added"}
+            assert changes[1]["action"] == "skipped" and reason in changes[1]["reason"], changes
+            rows = await target.fetch("SELECT name, enabled, created_via, work_dir FROM schedules")
+            assert [tuple(r) for r in rows] == [("good", False, "import", "")]
+            limits = await target.fetch("SELECT role, max_concurrency FROM schedule_task_limits")
+            assert [tuple(r) for r in limits] == [("reviewer", 1)]
+
+    asyncio.run(_test())
+
+
+def test_a_schedules_chat_this_machine_does_not_allow_is_dropped_with_a_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def _test() -> None:
+        async with _installation() as (target, target_url):
+            path = tmp_path / "config.json"
+            told = {**_GOOD, "notify_target": {"channel": "lark", "chat": "ou_elsewhere"}}
+            path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
+                {"name": "calc", "schedules": [told]}]}))
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(path), "--apply",
+                                          "--json")
+
+            assert code == 0, err
+            assert await target.fetchval("SELECT notify_channel FROM schedules WHERE name = 'good'") is None
+            assert any("lark chat 'ou_elsewhere' is not in this machine's sender allowlist" in note
+                       for note in _plan(out)["notes"])
 
     asyncio.run(_test())

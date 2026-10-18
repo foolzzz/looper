@@ -722,8 +722,9 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 @dataclass(frozen=True)
 class Launch:
     """What one agent run starts with besides its prompt: its settings (the Agent Profile with its effort, the
-    environment and per-run cap), the installed items and, for a task agent, the project knowledge; and, for every
-    agent alike, its permissions. The profile's runtime lays them out (``runtime``)."""
+    environment and per-run cap), the installed items and, for a task agent, the project knowledge; and its
+    permissions: every tool, but a Planner's run is read-only (``read_only``). The profile's runtime lays them out
+    (``runtime``)."""
 
     settings: AgentSettings = BUILTIN_SETTINGS
     library: AgentLibrary = EMPTY_LIBRARY
@@ -737,6 +738,13 @@ class Launch:
         without its decision, and the teammate's later turns are Claude's own, only logged (#26); the Planner runs
         work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass."""
         return self.profile.agent_teams and self.role is not AgentType.PLANNER
+
+    @property
+    def read_only(self) -> bool:
+        """Whether the run must not change files: a Planner's. It plans and decides, and gives every change to a
+        Worker; its runtime refuses the tools and commands that would change files where it can, and otherwise the
+        Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
+        return self.role is AgentType.PLANNER
 
     @property
     def model(self) -> str:
@@ -814,12 +822,15 @@ class Launch:
 
     def record(self) -> dict[str, Any]:
         """Its fields in a run's metadata: the Agent Profile, its model and their source, the variables' names
-        (values hashed), the installed items and their hash, the cap, and the layer each setting came from."""
+        (values hashed), the installed items and their hash, the cap, the layer each setting came from and, for a
+        read-only run, how it is kept read-only (``ReadOnly``)."""
         record: dict[str, Any] = {
             "profile": {**self.profile.record(), "source": self.settings.profile_source.value},
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
             "settings_sources": self.settings.sources(),
         }
+        if self.read_only:
+            record["read_only"] = self.runtime.read_only.value  # how it is kept from changing files
         if self.env:
             record["env"] = {
                 "sha256": self.env_sha256,

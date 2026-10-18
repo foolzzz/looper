@@ -16,7 +16,7 @@ The Planner, the Workers and the Reviewers get the same layout::
     - <title>: <summary> (<path>)  with its path relative to it (knowledge.py);
                                  agents read a document when they need it
 
-    ## The operator's notes  L3: only in a project with operator_notes on,
+    ## The operator's notes  L3: unless the project has operator_notes off,
     for this directory           when the directory has some: a read-only copy
     ...                          of the operator's Claude Code auto memory
                                  (operator_notes.py)
@@ -152,6 +152,12 @@ def _items(title: str, items: Sequence[str], *, prefix: str = "- ") -> list[str]
     return [title, *(f"{prefix}{item}" for item in items)] if items else []
 
 
+def _note(text: str) -> str:
+    """One of the Planner's retry notes as a list item: its further lines indented under it, so a note with a heading
+    or a list of its own stays one item."""
+    return "- " + text.strip().replace("\n", "\n  ")
+
+
 def plan_task_section(
     *, task_id: str, requirement: str, project_name: str, work_dir: str, project_description: str = "",
 ) -> str:
@@ -198,7 +204,7 @@ def work_task_section(
     lines += _items("Validation commands, to run after making changes:", validation_commands, prefix="$ ")
     if feedback:
         lines += ["", f"This step is being retried (attempt {attempt}). Feedback on the previous attempts:"]
-        lines += [f"- {item}" for item in feedback]
+        lines += [_note(item) for item in feedback]
     if workspace:
         lines += ["", *_worktree_lines(workspace)]
     return "\n".join(lines)
@@ -230,10 +236,12 @@ def review_task_section(
     supplements: Sequence[str] = (),
     workspace: Mapping[str, Any] | None = None,
     review_role: str = "",
+    retry_notes: Sequence[str] = (),
 ) -> str:
     """A Reviewer's task: the step under review, after the task it belongs to (as context) and its supplements,
-    and the step's own worktree when it ran in one; for a review role's Reviewer (``review_role``), that what its
-    role asks decides its verdict too."""
+    with the notes the Planner retried it with (``retry_notes``, oldest first: the Planner's changes to the step,
+    which its Worker had too), and the step's own worktree when it ran in one; for a review role's Reviewer
+    (``review_role``), that what its role asks decides its verdict too."""
     lines = ["## Task"]
     if requirement.strip():
         lines += ["The whole task, for context:", _requirement(requirement), *_supplements(supplements), ""]
@@ -241,6 +249,11 @@ def review_task_section(
     if work_dir:
         lines.append(f"Working directory: {work_dir}")
     lines += _items("Acceptance criteria to verify:", acceptance_criteria)
+    if retry_notes:
+        lines += ["", "The Planner retried this step with these notes to its Worker, oldest first. They are the "
+                      "Planner's changes to the step: where a note changes the instruction or the acceptance criteria "
+                      "above, review against the note; every criterion that no note changes still holds."]
+        lines += [_note(note) for note in retry_notes]
     if review_role:
         lines += [f"You review it as the role {review_role}: besides these criteria, what your role above asks you "
                   "to check decides your verdict too, so passed is false when the work fails either."]
@@ -314,7 +327,7 @@ def prompt_layers(
             "knowledge_sha256": knowledge.sha256,
             "knowledge_documents": knowledge.documents,
             **({"knowledge_error": knowledge.error} if knowledge.error else {}),
-            # Only in a project that gives its agents the operator's notes (``operator_notes``).
+            # Unless the project turned the operator's notes off (``operator_notes``).
             **({"operator_notes": knowledge.notes.record()} if knowledge.notes is not None else {}),
         },
         "task": None if task_kind is None else {
@@ -381,8 +394,10 @@ def build_system_prompt(
     step_id: str | None = None,
     task: str = "",
     knowledge: AgentKnowledge | None = None,
+    room: str = "",
 ) -> SystemPrompt:
-    """An agent's system prompt (harness, role, project and its knowledge index, task, contract) with its layers.
+    """An agent's system prompt (harness, role, project and its knowledge index, task, contract) with its layers;
+    ``room``, a run's agent room section (``room.room_section``), follows the task.
 
     The Manager passes neither a project nor a task, so it has no knowledge.
     """
@@ -393,14 +408,26 @@ def build_system_prompt(
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.prompt_section,
-        task=task,
+        task=_with_room(task, room),
         contract=contract,
     )
-    return SystemPrompt(text, prompt_layers(
+    layers = prompt_layers(
         role_id=role_id, role=role, recommended=recommended, contract_name=contract_name, contract=contract,
         project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task, harness=harness,
         knowledge=knowledge,
-    ))
+    )
+    return SystemPrompt(text, _room_layer(layers, room))
+
+
+def _with_room(task: str, room: str) -> str:
+    """The task section followed by a run's room section, when it has one."""
+    return f"{task.strip()}\n\n{room.strip()}" if room.strip() else task
+
+
+def _room_layer(layers: dict[str, Any], room: str) -> dict[str, Any]:
+    if room.strip():
+        layers["room"] = {"sha256": sha256_text(room.strip())}
+    return layers
 
 
 # What the boundaries of a run of a role a task's Planner defined start with: they follow everything that Planner
@@ -426,6 +453,7 @@ def build_role_prompt(
     step_id: str | None = None,
     task: str = "",
     knowledge: AgentKnowledge | None = None,
+    room: str = "",
 ) -> SystemPrompt:
     """The system prompt of a run of ``task_role``: its working style (its own harness; else the built-in harness's
     working-style part, or a layer's harness whole, which is the operator's), its role prompt, the project and its
@@ -446,7 +474,7 @@ def build_role_prompt(
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.prompt_section,
-        task=f"{task.strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
+        task=f"{_with_room(task, room).strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
         else boundaries_section(boundaries.text),
         contract=contract,
     )
@@ -459,4 +487,4 @@ def build_role_prompt(
     layers["role"]["task_role"] = task_role.key
     layers["task_role"] = task_role.record()
     layers["boundaries"] = boundaries.record()
-    return SystemPrompt(text, layers)
+    return SystemPrompt(text, _room_layer(layers, room))

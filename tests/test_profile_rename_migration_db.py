@@ -53,8 +53,10 @@ UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "project
 NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_text", "title", "chat_kind",
                          "chat_mention", "workspace_dir", "workspace_mode", "workspace_base"),
                "projects": ("step_workspaces", "workspace_links", "max_step_retries", "planner_roles",
-                            "role_text_max_chars", "user_gates", "gate_reminder_hours", "task_workspaces",
-                            "operator_notes")}
+                            "role_text_max_chars", "user_gates", "gate_reminder_hours", "agent_room",
+                            "room_post_per_minute", "room_broadcasts_per_run", "room_message_max_chars",
+                             "room_messages_per_task", "room_ping_pong_rounds", "room_wait_max_seconds",
+                             "task_workspaces", "operator_notes")}
 # What the effort's upgrade, a later migration of main, changes: each layer's effort moved onto the profiles its
 # roles ran with it, so these layers and task choices select another profile (by name here; it changes their
 # updated_at), and the profiles they take are added (EFFORT_PROFILES: model, effort).
@@ -187,8 +189,10 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
     captured["manager"]["stdin"] = captured["manager"]["stdin"].replace(f"(agent {glm_high})",
                                                                         "(agent agent-glm000000001)")
     assert sorted(captured) == sorted(MAIN)
+    # The fixture predates the Planner's read-only run (its role prompt is the scenario's own, not the recommended one).
+    expected = agent_launch_parity.read_only_planner(MAIN, recommended=False)
     for case in parity.CASES:
-        assert captured[case] == MAIN[case], case
+        assert captured[case] == expected[case], case
 
 
 def test_a_migrated_v2_6_0_database_is_shaped_like_a_new_one() -> None:

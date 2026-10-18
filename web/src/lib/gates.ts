@@ -1,4 +1,4 @@
-import type { GateState, UserGate } from "@/lib/api";
+import type { GateChannelPosts, GateState, UserGate } from "@/lib/api";
 
 /** How a gate reads: a word (color is never the only signal), a badge tone and an icon tone. */
 export interface GateLook {
@@ -62,4 +62,22 @@ export function sinceText(iso: string | null): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} h${minutes % 60 ? ` ${minutes % 60} min` : ""}`;
   return `${Math.floor(hours / 24)} d${hours % 24 ? ` ${hours % 24} h` : ""}`;
+}
+
+/** The most characters of a send error the gate panel shows; the whole text is in its tooltip. */
+export const POST_ERROR_SHOWN_CHARS = 200;
+
+/** What the gate panel says about the chat a gate's messages also go to: where, and how many could not be sent there
+ * with the latest reason (`failure`, clipped; the whole reason in `error`). null when they go to no chat. */
+export function gatePostsText(
+  posts: GateChannelPosts | null,
+): { where: string; failure: string | null; error: string } | null {
+  if (!posts) return null;
+  const where = `Also in ${posts.target}`;
+  if (posts.failed <= 0) return { where, failure: null, error: "" };
+  const channel = posts.channel === "telegram" ? "Telegram" : "Lark";
+  const error = posts.last_error?.trim() ?? "";
+  const shown = error.length > POST_ERROR_SHOWN_CHARS ? `${error.slice(0, POST_ERROR_SHOWN_CHARS)}…` : error;
+  const count = posts.failed === 1 ? "1 message" : `${posts.failed} messages`;
+  return { where, failure: `${count} could not be sent to ${channel}${shown ? `: ${shown}` : "."}`, error };
 }

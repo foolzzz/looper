@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs twenty-two small tasks through a disposable `looper serve` (a new
+It runs thirty small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -39,6 +39,11 @@ directories), one at a time over the HTTP API:
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
 | `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
 | `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
+| `room_interface` | two parts built at the same time, each in a worktree of its own (`step_workspaces` `worktree` for this task), where the store's author picks the record's field names while writing it and the client must use them: the agents must coordinate in the task's agent room (`room_messages` at least 1), and `python cli.py widget 3` works against the store |
+| `room_quiet` | a one-file task with the agent room on, as every task now has it: no room message at all (`room_messages` 0), one step |
+| `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
+| `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work in its one review (the requirement leaves the regions to the step, so only the note can correct it) |
+| `reviewer_unrelated_note` | the same, the other way: the retry note is about the file's separator, and the work it leads to still lacks a region, so the Reviewer must not pass it; the next attempt has it and passes (exactly two reviews and two retries) |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -59,12 +64,16 @@ depend on one same step (`interface_dependents`), the user gates the Planner ope
 passed, `gates_passed`, of them ended by the user, `gates_ended_by_user`; cancelled, `gates_cancelled`; the
 assumptions their summaries stated, `assumptions_stated`; the steps the closing turns added, dropped or stopped,
 `gate_plan_changes`; Worker runs while a gate waited, `gate_parallel_runs`; Worker and Reviewer runs that read a
-gate's conclusion, `conclusion_reads`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+gate's conclusion, `conclusion_reads`), what the agents did in the task's agent room (`room_messages`, Looper's notices
+and escalations apart; of them `room_questions`, `room_unanswered` and `room_interface`; `room_escalations`;
+`room_reminders`, the reminders Claude Code runs got; `room_refused`, the posts the room refused; and
+`room_tool_calls`, the runs' calls of the room's tools, reads included), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
 `planner_violation_reasons`), whether the Planner modified files itself (its file-editing tool
-calls, and files changed while only a Planner turn ran), the runs that ended in an error (`run_errors`,
+calls, and files changed while only a Planner turn ran), the tool calls its runtime refused the read-only Planner
+(`planner_denials`, from its runs' `permission_denials`), the runs that ended in an error (`run_errors`,
 by their records' status) and the models each role's runs reported (`models`).
 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by
@@ -132,6 +141,13 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 `tests/test_prompt_eval.py` runs it as part of the test suite when
 `LOOPER_TEST_DATABASE_URL` is set.
 
+A script may also give the Planner's retry notes (`retry_feedback`: a step's
+Nth retry gets its Nth note) and fail the review of some attempts
+(`failing_review_attempts`, read from the Worker's report). A script with
+`real_reviewer` plays its Planner and Workers in real mode too, and only its
+Reviewers are Claude Code: the stand-in hands Claude Code every other run of
+every task, with its arguments, so the other tasks run as before.
+
 ### Real mode: the effect, on demand
 
 Runs real Claude Code (`haiku` by default) and costs money. Every Claude Code
@@ -189,7 +205,8 @@ whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
 `roles_not_needed`, `roles_multi_platform`, `roles_template_fits`,
 `roles_template_unfit`, `gate_ambiguous`,
-`gate_not_needed`, `gate_parallel_branch` and `gate_discoverable`; a set is
+`gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface` and
+`planner_plan_file`; a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
@@ -201,9 +218,13 @@ each task reports the merge and checkpoint commits it added as
 `looper_commits`; every task's project runs its tasks in place, as before task
 workspaces, so the checks read the working directory), `--user-gates on|off` (every task's project but a gate
 task's gets that `user_gates` setting; a gate task always has gates on, so
-`--tasks planner` runs its gate tasks as they are meant to: `on` runs the
-other tasks with the gate contract, so `gates_opened` there shows how often
-the Planner asks when it need not). The runner plays the user in a task's
+`--tasks planner` runs its gate tasks as they are meant to; unset is on, as
+in Looper, so every task runs with the gate contract and `gates_opened` shows
+how often the Planner asks when it need not, and `off` runs the other tasks
+without it). Each row records the `user_gates` its Planner had (`on` or
+`off`), and the comparison lists the tasks whose setting differs from the
+base's, or that a base from before user gates G2 (unset was off then) does
+not record. The runner plays the user in a task's
 gates: when one waits for the user it posts the task's `gate_script` in turn
 (`<end>` ends the discussion; a task without one answers "No preference:
 decide yourself and state your assumptions." and then ends it). When the
@@ -230,8 +251,8 @@ description; `--total-cap-usd` covers all the reps, so raise it with them:
   --model opus --reps 3 --tasks planner`, compared with
   `baselines/real-opus.json` (about $19 and 48 minutes);
 - a change to the Manager's prompt or its tools runs `dialogs --mode real
-  --reps 3` (about $1.50 and 14 minutes), and also `dialogs --mode real
-  --manager-model opus --manager-effort xhigh --reps 3` (about $3.50 and 16
+  --reps 3` (about $2.30 and 21 minutes), and also `dialogs --mode real
+  --manager-model opus --manager-effort xhigh --reps 3` (about $5.10 and 24
   minutes).
 
 Each compares with the committed baseline of its model, or with a run of the
@@ -259,10 +280,20 @@ database, a disposable `looper serve`, and fake or real mode.
 | `concurrency` | a running task's own Worker limit changes at once (`looper_concurrency`); asked to change a project's Worker limit, which no longer exists (concurrency is per task), the Manager says so and nothing changes or waits for a confirmation, not the default in Settings → Roles either |
 | `status` | a status question is answered by reading through the tools (run it alone to try a runtime) |
 | `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
+| `task_cost` | a running task's cost by model: read for that task (`looper_costs` with its task_id), nothing changes, and the reply names each model of the task's cost and gives its cost as rounded (fake mode checks the read only) |
 | `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
+| `gate_relay` | the running task waits at a user gate (written into its plan first, so no Planner has to decide to ask): the user answers its question in the Manager's chat, and the Manager passes their words to the gate (`looper_task_gate_reply`), not as a supplement |
+| `gate_unrelated` | the same open gate, and a question about something else: nothing goes to the gate and nothing changes |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
 | `workspace_in_place` | the user asks for the task to change the project directory itself, no worktree or branch: it is created ready and runs in place (`workspace_mode` `in_place`) |
 | `workspace_default` | the user says nothing about how the task runs: it is created ready, and the Manager passes no `workspace_mode` |
+| `schedule_create` | a schedule asked for in the project is created at once, disabled, on the rule the user said (`looper_schedules` `create`), and the reply carries its configuration and the question whether to enable it; 「启用」 waits for the user's word in the next message (`needs_confirmation`, still disabled), and 「确认。」 enables it |
+| `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
+| `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |
+| `schedule_modify` | on an enabled schedule with a $1 daily cap: a new rule and a Worker limit change at once; raising the cap waits for the user's word in the next message, and a refusal leaves it |
+| `schedule_run` | on a schedule whose gate finds nothing (no task, no cost): asking when it runs next reads only; 「现在立即运行一次」 waits for the user's word in the next message and runs nothing, and 「确认。」 runs it once (`run`) |
+| `schedule_ambiguous` | two projects each have the schedule: asked to run it by name, the Manager runs neither and asks; told the project, it waits for the user's word and runs nothing, and 「确认。」 runs that one only |
+| `config_export` | the configuration is exported with its projects and their schedules into the server's runtime directory (`looper_config_export`); asked to include the API keys, every export still leaves them out |
 
 Each (dialog, rep) runs on a database, a `looper serve`, a working directory
 and a project of its own, so nothing one dialog leaves behind (a ready task, a
@@ -274,10 +305,10 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about a minute. Real mode with haiku cost $1.54 for all ten
-dialogs at `--reps 3` (about $0.51 and 5 minutes a rep, measured at
-`68d7b953c`), so the default `--total-cap-usd` (0.50) stops it after about one
-rep: give it one that covers all the reps, such as 3:
+MCP; it takes about two minutes. Real mode with haiku cost $2.30 for all
+sixteen dialogs at `--reps 3` (about $0.77 and 7 minutes a rep, measured at
+`b4d3e4356`), so the default `--total-cap-usd` (0.50) stops it before the
+first rep ends: give it one that covers all the reps, such as 4:
 
 ```bash
 uv run --extra test python -m evals.prompt_regression dialogs --mode real \
@@ -286,10 +317,10 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
-model, the other roles on `--model`; all ten dialogs at `--reps 3` cost $3.49
-in about 16 minutes, about $1.16 a rep, the costliest single dialog
+model, the other roles on `--model`; all sixteen dialogs at `--reps 3` cost
+$5.14 in about 24 minutes, about $1.71 a rep, the costliest single dialog
 `config_tools` at about $0.22; give it `--max-budget-usd 3.0` and a
-`--total-cap-usd` such as 6),
+`--total-cap-usd` such as 8),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
 OMP or Grok agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is

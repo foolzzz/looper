@@ -134,7 +134,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 
 读取方式：
 
-- `GET /api/tasks/<id>` 和 `GET /api/tasks` 的每个任务都带 `cost`：总额 `cost_usd`、`runs`、`running`（还在跑，花费未知）、`unpriced_runs`（结束了但没报花费）、`by_role`（planner、worker、reviewer 各自的 `cost_usd` 和 `runs`）。
+- `GET /api/tasks/<id>` 和 `GET /api/tasks` 的每个任务都带 `cost`：总额 `cost_usd`、`runs`、`running`（还在跑，花费未知）、`unpriced_runs`（结束了但没报花费）、`by_role`（planner、worker、reviewer 各自的 `cost_usd` 和 `runs`）；`by_model`（每个模型一行：`model`、`runs`、`running`、`unpriced_runs`、`interrupted_runs`、四种 token 之和 `input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_creation_tokens`、`cost_usd`，没有一次运行有花费时为 null；花费加起来等于 `cost_usd`）；`manager_by_model`（同样形状的行，Manager 记录时带这个任务 id（消息关于这个任务）、或工具调用只指向这一个任务的 turn，不算进任务的 `cost_usd`、`by_role`、`by_model` 和任务的花费上限；涉及多个任务或没有任务的 turn 不归任何任务）。定时任务的运行还在进行时，其花费按同样口径统计该任务已发生的花费，不含 Manager。
 - `GET /api/agents/<agent_id>/usage` 给出一个 agent 的数据，例如 `manager`、`planner-<task_id>`：
   - 总花费、运行数、压缩次数；
   - 按会话和按 UTC 日的花费；
@@ -207,7 +207,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 任何渠道发来的消息只要正好是 `/new`（去掉首尾空白，不分大小写），就由 Looper 自己处理、不交给 Claude：Manager 停掉常驻 Claude、丢掉保存的会话，下一条消息（不论来自哪个渠道）开新会话，不带续接简报；重置记成一次运行。Manager 聊天顶部的「New session」按钮发的就是 `/new`
 - 花费与上下文的展示：
   - 任务列表的每一行都显示任务目前的花费。
-  - 任务详情的 Overview 有一张「Cost」卡片，显示总额和运行次数。下面的「Cost by agent」列出 Planner、Workers、Reviewers 各自的运行次数、花费和占比，并注明还在跑的运行和没有报出花费的运行。
+  - 任务详情的 Overview 有一张「Cost」卡片，显示总额和运行次数。下面的「Cost by agent and model」列出 Planner、Workers、Reviewers 各自的运行次数、花费和占比，并注明还在跑的运行和没有报出花费的运行；下面（很宽的屏幕上在旁边）的「By model」表按模型列出运行次数、输入、输出、缓存读写 token（简写，如 1.23M）和花费，没有花费的模型显示「–」，各行加起来就是任务的花费。Manager 记录时带这个任务 id（消息关于这个任务）、或工具调用只指向这一个任务的 turn 单独成行（「Manager · 模型」），注明不算进任务的花费和任务的花费上限；涉及多个任务或没有任务的 turn 不归任何任务。
   - Manager 和 Planner 的历史页开头是「Context & cost」：
     - 最新的上下文规模、压缩次数、总花费和 turn 数；
     - 最近 100 个 turn 结束时上下文的折线，按最小值和最大值缩放，发生过压缩的 turn 画一条虚线；

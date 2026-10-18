@@ -34,7 +34,17 @@ SINGLE_LOOKUPS_MAX = 20
 
 
 class LarkCliError(RuntimeError):
-    """A lark-cli call that failed, with lark-cli's reason."""
+    """A lark-cli call that failed, with lark-cli's reason, and the Lark API's error code when it gave one."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# The Lark API's code for a message that cannot be replied to because it is gone: 230011 "The message is recalled."
+# (a message deleted through the API counts as recalled), from the reply API's error table:
+# https://open.larksuite.com/document/server-docs/im-v1/message/reply
+MESSAGE_GONE_CODES = frozenset({230011})
 
 
 def profile_name(raw: Any) -> str:
@@ -59,26 +69,37 @@ def consume_command(profile: str | None = None) -> list[str]:
 
 
 def send_command(*, chat_id: str | None = None, user_id: str | None = None, text: str | None = None,
-                 markdown: str | None = None, profile: str | None = None) -> list[str]:
+                 markdown: str | None = None, profile: str | None = None,
+                 idempotency_key: str | None = None) -> list[str]:
     """The lark-cli argv that sends, as the bot, ``text`` or ``markdown`` (a rich-text post that renders it) to a
-    chat (``oc_...``) or a user (an open_id, ``ou_...``): exactly one target and one body."""
+    chat (``oc_...``) or a user (an open_id, ``ou_...``): exactly one target and one body. With
+    ``idempotency_key`` (at most 50 characters) Lark sends one message for the key within an hour."""
     if (chat_id is None) == (user_id is None):
         raise ValueError("send to exactly one of a chat and a user")
     if (text is None) == (markdown is None):
         raise ValueError("send exactly one of text and markdown")
     target = ["--chat-id", chat_id] if chat_id is not None else ["--user-id", user_id]
     body = ["--text", text] if text is not None else ["--markdown", markdown]
-    return [*_base(profile), "im", "+messages-send", "--as", "bot", *target, *body]
+    return [*_base(profile), "im", "+messages-send", "--as", "bot", *target, *body, *_key(idempotency_key)]
 
 
 def reply_command(message_id: str, *, text: str | None = None, markdown: str | None = None,
-                  profile: str | None = None) -> list[str]:
+                  profile: str | None = None, idempotency_key: str | None = None) -> list[str]:
     """The lark-cli argv that answers, as the bot, a message (``om_...``) with ``text`` or ``markdown``: a message in
-    the same chat that quotes it."""
+    the same chat that quotes it; ``idempotency_key`` as for ``send_command``."""
     if (text is None) == (markdown is None):
         raise ValueError("reply with exactly one of text and markdown")
     body = ["--text", text] if text is not None else ["--markdown", markdown]
-    return [*_base(profile), "im", "+messages-reply", "--as", "bot", "--message-id", message_id, *body]
+    return [*_base(profile), "im", "+messages-reply", "--as", "bot", "--message-id", message_id, *body,
+            *_key(idempotency_key)]
+
+
+def _key(idempotency_key: str | None) -> list[str]:
+    if idempotency_key is None:
+        return []
+    if not 0 < len(idempotency_key) <= 50:
+        raise ValueError("an idempotency key has 1 to 50 characters")
+    return ["--idempotency-key", idempotency_key]
 
 
 def mention(open_id: str) -> str:
@@ -150,6 +171,16 @@ def failure(stderr: bytes | str) -> str:
     return f"{message} (missing scope: {', '.join(unnamed)})" if unnamed else message
 
 
+def failure_code(stderr: bytes | str) -> int | None:
+    """The Lark API's error code in lark-cli's JSON error (``error.code``); None when it printed none."""
+    text = (stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr).strip()
+    try:
+        code = json.loads(text).get("error", {}).get("code")
+    except (ValueError, AttributeError):
+        return None
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
 async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS) -> bytes:
     """Run a lark-cli call; its stdout, or ``LarkCliError`` with lark-cli's reason."""
     try:
@@ -171,7 +202,8 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS) -> byte
         await process.wait()
         raise
     if process.returncode != 0:
-        raise LarkCliError(f"lark-cli exited {process.returncode}: {failure(stderr or b'')}")
+        raise LarkCliError(f"lark-cli exited {process.returncode}: {failure(stderr or b'')}",
+                           code=failure_code(stderr or b""))
     return stdout
 
 

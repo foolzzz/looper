@@ -10,6 +10,7 @@ cancelling a task, are ``high``: the user confirms them first.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -18,8 +19,10 @@ import asyncpg
 
 from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
 from ...db import steps as db_steps, task_changes as db_changes, task_roles as db_roles, tasks as db_tasks
+from ...db import user_gates as db_user_gates
 from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
 from ..agent_settings import resolve_task_concurrency
+from ..gate_service import origin_chat, post_message as post_gate_message
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, TaskWorkspaces
 from ..project_execution import format_usd
@@ -120,6 +123,8 @@ async def _overview(call: Call) -> dict[str, Any]:
                        "state": r["state"], "elapsed_seconds": r["elapsed_seconds"]}
                       for r in agents["workers"] + agents["reviewers"]],
         "projects": view["projects"],
+        # The user gates waiting for the user's answer in the running tasks ("Open gates" lists them).
+        "waiting_gates": len(await db_user_gates.open_gates(TASKS_SEARCHED)),
         "spend_today": view["spend_today"],
         "unhealthy": view["health"]["unhealthy"],
     }
@@ -135,11 +140,11 @@ def _listed(task: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _tasks(call: Call) -> dict[str, Any]:
     arguments = call.arguments
-    if arguments["action"] == "get":
+    if arguments["action"] in ("get", "room"):
         task_id = arguments.get("task_id")
         if not task_id:
-            raise OpError(ErrorCode.INVALID, "task_id is required for action get")
-        return await _task_view(task_id)
+            raise OpError(ErrorCode.INVALID, f"task_id is required for action {arguments['action']}")
+        return await _task_view(task_id) if arguments["action"] == "get" else await _room_view(call, task_id)
     project_id = None
     if arguments.get("project"):
         project = await db_projects.find_project_by_name(project_name(arguments["project"]))
@@ -154,6 +159,25 @@ async def _tasks(call: Call) -> dict[str, Any]:
         tasks = [t for t in tasks if query in " ".join(
             str(t.get(key) or "") for key in ("id", "name", "requirement", "project_name", "goal_id")).casefold()]
     return {"tasks": [_listed(task) for task in tasks[:limit]], "more": len(tasks) > limit}
+
+
+# The newest room messages ``looper_tasks`` room shows, each clipped.
+ROOM_MESSAGES_SHOWN = 40
+
+
+async def _room_view(call: Call, task_id: str) -> dict[str, Any]:
+    """A task's agent room, read only: its seats and their presence, its numbers, its newest messages."""
+    from ..room import task_view
+
+    pool = call.platform.worker_pool
+    view = await task_view(task_id, runs=pool.room_runs(task_id) if pool is not None else None,
+                           limit=ROOM_MESSAGES_SHOWN)
+    if view is None:
+        raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}: find its id with looper_tasks")
+    return {"task_id": task_id, "enabled": view["enabled"], "counts": view["counts"],
+            "seats": [{"seat": s["seat"], "step": s["step"], "presence": s["presence"]} for s in view["seats"]],
+            "messages": [{**m, "body": clip(m["body"], 500)} for m in view["messages"]],
+            "more": view["more"]}
 
 
 async def _task_view(task_id: str) -> dict[str, Any]:
@@ -189,7 +213,29 @@ async def _task_view(task_id: str) -> dict[str, Any]:
         # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
         "concurrency": {role: view["concurrency"] for role, view in (await agents_view(task))["roles"].items()
                         if "concurrency" in view},
+        # Its user gates (looper_task_gate_reply answers one that waits for the user), when it has any.
+        **({"gates": gates} if (gates := [_gate_listed(g) for g in await db_user_gates.list_for_task(task_id)
+                                          if g.get("state") != "pending"]) else {}),
     }
+
+
+def _gate_listed(gate: Mapping[str, Any]) -> dict[str, Any]:
+    """A gate as looper_tasks shows it: its label, state, topic, questions (the open ones' options), and how it
+    closed."""
+    view: dict[str, Any] = {"gate": gate["step_key"], "state": gate["state"], "topic": clip(gate["topic"], 200),
+                            "questions": [{"id": item.get("id"), "question": clip(str(item.get("question") or ""), 200),
+                                           "status": item.get("status"),
+                                           **({"options": item["options"]} if item.get("options") else {}),
+                                           **({"answer": clip(str(item["answer"]), 200)} if item.get("answer")
+                                              else {})}
+                                          for item in gate.get("agenda") or []]}
+    if gate["state"] in ("open", "discussing"):
+        view["waiting_for"] = "planner" if gate.get("waiting_for_planner") else "user"
+    if gate.get("summary"):
+        view["summary"] = gate["summary"]
+    if gate.get("resolution"):
+        view["resolution"] = clip(gate["resolution"], 300)
+    return view
 
 
 # --- looper_task_create ---
@@ -528,6 +574,55 @@ async def _update(call: Call) -> dict[str, Any]:
     return result
 
 
+# --- looper_task_gate_reply ---
+
+
+def _relayed_text(turn: Turn, excerpt: Any) -> str:
+    """What goes into the gate: the user's message this turn answers, or the ``excerpt`` of it the model names,
+    which must be in it word for word (spaces aside). The model's own words never go."""
+    message = str(turn.envelope.payload.get("text") or "") if turn.envelope is not None else ""
+    if not message.strip():
+        raise OpError(ErrorCode.NEEDS_USER_TURN, "this turn answers no user message: there is nothing of the "
+                                                 "user's to pass on")
+    if excerpt is None:
+        return message
+    if not isinstance(excerpt, str) or not excerpt.strip():
+        raise OpError(ErrorCode.INVALID, "excerpt is a non-empty part of the user's message")
+    match = re.search(r"\s+".join(re.escape(word) for word in excerpt.split()), message)
+    if match is None:
+        raise OpError(ErrorCode.INVALID, "excerpt must be copied word for word from the user's message; leave it "
+                                         "out to pass on the whole message")
+    return message[match.start():match.end()]
+
+
+async def _gate_reply(call: Call) -> dict[str, Any]:
+    """The user's message (or the excerpt of it the model names) into the discussion of a gate that waits for them,
+    as the task page adds it (``gate_service.post_message``); the channel message it is, so the Planner's reply goes
+    under it when it came from the gate's chat."""
+    arguments, turn = call.arguments, call.turn
+    task_id, label = arguments["task_id"], arguments["gate"]
+    text = _relayed_text(turn, arguments.get("excerpt"))
+    context = (turn.envelope.payload.get("channel_context") if turn.envelope is not None else None) or {}
+    origin = None
+    if turn.channel in ("lark", "telegram"):
+        origin = {"author": (context.get("sender_name") or turn.sender) if turn.group else None,
+                  "channel": turn.channel,
+                  "chat": origin_chat(turn.channel, turn.chat or "", group=turn.group, sender=turn.sender or ""),
+                  "external_id": str(context.get("message_id") or "") or None}
+    has_planner = call.platform.task_router.has_planner(task_id)
+    try:
+        posted = await post_gate_message(task_id, label, {"text": text},
+                                         has_planner=has_planner, bus=call.platform.bus, source=MANAGER_ADDRESS,
+                                         via=_via(turn), end=bool(arguments.get("end")), origin=origin)
+    except RequestError as exc:
+        raise _request_error(exc) from None
+    kept = posted["delivered"] == "kept"
+    return {"task_id": task_id, "gate": label, "delivered": posted["delivered"],
+            "note": "the task is not running: its Planner gets it when the task continues" if kept else
+                    "its Planner answers in the gate's discussion: on the task page, and in the gate's Lark or "
+                    "Telegram chat when it has one"}
+
+
 def _task_argument(arguments: Mapping[str, Any]) -> str | None:
     task_id = arguments.get("task_id")
     return task_id if isinstance(task_id, str) and task_id else None
@@ -547,12 +642,13 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_tasks",
         description="List or search tasks (newest first), or get one task with its steps, supplements, latest "
-                    "progress note, result, cost and concurrency limits.",
+                    "progress note, result, cost and concurrency limits; room: what the task's agents said to each "
+                    "other in its room (read only).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["list", "get"]},
-                "task_id": {**_TASK_ID, "description": "The task to get (action get)."},
+                "action": {"type": "string", "enum": ["list", "get", "room"]},
+                "task_id": {**_TASK_ID, "description": "The task to get (action get, room)."},
                 "query": {"type": "string", "description": "Words to find in a task's id, name, requirement or "
                                                           "project (action list)."},
                 "group": {"type": "string", "enum": [g.value for g in db_tasks.TaskGroup],
@@ -621,6 +717,26 @@ TOOLS: tuple[Tool, ...] = (
                                     "description": "The user's words for the task, as they said them."}},
         },
         risk=Risk.WRITE, run=_instruct, task_id=_task_argument,
+    ),
+    Tool(
+        name="looper_task_gate_reply",
+        description="Pass the user's message to a user gate waiting for their answer (\"Open gates\"): Looper "
+                    "puts the message itself into the gate's discussion, and its Planner answers there. excerpt: "
+                    "only when part of the message is about the gate, that part, copied word for word. end: true "
+                    "when the user wants the Planner to go on with the conclusions so far.",
+        schema={
+            "type": "object", "required": ["task_id", "gate"], "additionalProperties": False,
+            "properties": {
+                "task_id": _TASK_ID,
+                "gate": {"type": "string", "minLength": 1, "description": "The gate's id in its task (g1, ...)."},
+                "excerpt": {"type": "string", "description": "The part of the user's message that is about the "
+                                                             "gate, copied word for word; leave it out to pass on "
+                                                             "the whole message."},
+                "end": {"type": "boolean", "description": "The user ends the discussion: the Planner closes the gate "
+                                                          "on what is settled and states its assumptions."},
+            },
+        },
+        risk=Risk.WRITE, run=_gate_reply, task_id=_task_argument,
     ),
     Tool(
         name="looper_task_update",

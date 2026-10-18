@@ -50,6 +50,22 @@ export interface TaskInfo {
 /** The agents that work on one task; their runs make up its cost. */
 export type TaskRole = "planner" | "worker" | "reviewer";
 
+/** A task's runs, tokens and cost on one model. */
+export interface TaskModelCost {
+  /** The recorded model, or null when none was recorded. */
+  model: string | null;
+  runs: number;
+  running: number;
+  unpriced_runs: number;
+  interrupted_runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  /** Null when none of the model's runs has a cost. */
+  cost_usd: number | null;
+}
+
 /** A task's cost: the sum of its runs' own costs, in total and by the role of the agent that ran. */
 export interface TaskCost {
   cost_usd: number;
@@ -64,6 +80,9 @@ export interface TaskCost {
   /** Runs Looper priced at their provider's prices. */
   provider_price_runs?: number;
   by_role: Record<TaskRole, { cost_usd: number; runs: number }>;
+  by_model: TaskModelCost[];
+  /** The Manager's turns about the task, by model; not in cost_usd or the spend cap. */
+  manager_by_model: TaskModelCost[];
 }
 
 /** The most characters a project background may have. */
@@ -107,6 +126,16 @@ export interface ProjectExecution {
   user_gates: "off" | "on" | null;
   /** Hours between the reminders of a gate that waits for the user, 0 to 168; 0 = none, null = 24. */
   gate_reminder_hours: number | null;
+  /** Whether the agents of the project's tasks share a room they message each other in; null = "on" (unlike the
+   * other switches). */
+  agent_room: "off" | "on" | null;
+  /** The room's limits (`ROOM_LIMITS` in lib/room has each one's range and default); null = the default. */
+  room_post_per_minute: number | null;
+  room_broadcasts_per_run: number | null;
+  room_message_max_chars: number | null;
+  room_messages_per_task: number | null;
+  room_ping_pong_rounds: number | null;
+  room_wait_max_seconds: number | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -371,6 +400,10 @@ export async function sendChat(
   return res.json();
 }
 
+/** Why a Lark or Telegram answer did not reach its chat: the channel no longer knew the chat (it restarted), or it
+ * could not send the answer. */
+export type DeliveryFailure = "no_chat" | "send_failed";
+
 export interface DbChatMessage {
   message_id: string;
   role: string;
@@ -378,6 +411,9 @@ export interface DbChatMessage {
   /** The channel the turn came in on: "web", "telegram" or "lark". */
   channel?: string;
   created_at: string;
+  /** Set for a Lark or Telegram answer its channel did not deliver, with the channel's error. */
+  delivery_failure?: DeliveryFailure | null;
+  delivery_error?: string | null;
 }
 
 /** A session's newest messages (up to 200), oldest first. */
@@ -1467,6 +1503,8 @@ export interface TaskDetail extends TaskInfo {
   step_workspaces?: TaskWorkspaces | null;
   /** Its workspace and how it runs there (absent from an older server). */
   task_workspace?: TaskWorkspaceView;
+  /** Its agent room in numbers; null when it cannot be read. The messages are at `fetchTaskRoom`. */
+  room?: RoomSummary | null;
 }
 
 /** Where a step's worktree stands: its step works in it ("active"), its branch is being merged, was merged, could
@@ -1516,6 +1554,95 @@ export interface TaskWorkspaces {
   /** Oldest first; a step retried after a failed merge has more than one. */
   workspaces: StepWorkspace[];
   undo: UndoCommand[];
+}
+
+// --- A task's agent room: the messages its Planner and its steps' seats send each other (read only here) ---
+
+/** Whether a seat has a run now ("online", or "waiting" for room in its task), had one ("offline"), has not started
+ * ("planned") or was dropped with its step before it ran. */
+export type RoomPresence = "online" | "waiting" | "offline" | "planned" | "dropped";
+
+/** What members post (info, question, answer, interface, announce); Looper writes notices (to a seat) and
+ * escalations (to the Planner). */
+export type RoomMessageKind = "info" | "question" | "answer" | "interface" | "announce" | "notice" | "escalation";
+
+/** Why Looper wrote a notice or an escalation. */
+export type RoomReason = "ping_pong" | "consult_fallback" | "interface_changed" | "room_full" | "watch";
+
+/** A step's seat: `<role>@<step key>` (worker@s2, backend_rd@s2, reviewer@s2). Gates have none; the Planner is not
+ * listed. */
+export interface RoomSeat {
+  seat: string;
+  role: string;
+  kind: "work" | "review";
+  step: string;
+  step_status: string;
+  presence: RoomPresence;
+  /** Since when its run is online or waiting. */
+  since?: string;
+}
+
+export interface RoomMessage {
+  id: number;
+  /** A seat, "planner" or "looper". */
+  from: string;
+  /** "all", or the seats, roles and "planner" it is for. */
+  to: "all" | string[];
+  kind: RoomMessageKind;
+  body: string;
+  /** The message it answers or follows up. */
+  reply_to?: number;
+  files?: string[];
+  commits?: string[];
+  reason?: RoomReason;
+  /** How it came other than posted by its sender's run: the Planner's reply in a [ROOM] turn, Looper's own, or a
+   * consult of an offline seat. */
+  via?: "planner_reply" | "looper" | "consult";
+  at: string;
+  /** A Reviewer's question or answer, which the Planner sees too. */
+  cc_planner: boolean;
+  /** A question with an answer. */
+  answered: boolean;
+}
+
+export interface RoomCounts {
+  messages: number;
+  by_kind: Partial<Record<RoomMessageKind, number>>;
+  questions: number;
+  unanswered: number;
+}
+
+/** A step's messages: those its seats sent, those addressed to them, and the questions they asked or were asked that
+ * have no answer. */
+export interface RoomStepCounts {
+  sent: number;
+  received: number;
+  unanswered: number;
+}
+
+/** A task's room in numbers, as the task detail has it. */
+export interface RoomSummary {
+  /** Its project has the room on (the default). */
+  enabled: boolean;
+  counts: RoomCounts;
+  /** By step key; only the steps with any. */
+  by_step: Record<string, RoomStepCounts>;
+}
+
+export interface RoomView extends RoomSummary {
+  seats: RoomSeat[];
+  /** Oldest first: the newest `limit` (500 at most), or with `after` the newer ones only. */
+  messages: RoomMessage[];
+  /** Older messages than these are not in it (with `after`: more newer ones than `limit`). */
+  more: boolean;
+}
+
+/** The task's room: its seats, its numbers and its messages; with `after` (a message id) only the newer ones. */
+export async function fetchTaskRoom(taskId: string, { after = 0 }: { after?: number } = {}): Promise<RoomView> {
+  const query = after > 0 ? `?after=${after}` : "";
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/room${query}`);
+  if (!res.ok) await failed(res, "room");
+  return res.json();
 }
 
 /** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),
@@ -1573,6 +1700,23 @@ export interface UserGate {
   opened_at: string | null;
   first_reply_at: string | null;
   closed_at: string | null;
+  /** The chat the gate's messages go to besides its task page; null when they go to no chat (a dashboard task with
+   * no gate target in Settings → Channels). */
+  channel_posts: GateChannelPosts | null;
+}
+
+/** A channel gate messages can go to. */
+export type GateChannel = "lark" | "telegram";
+
+/** How the gate's own messages fared in its chat. */
+export interface GateChannelPosts {
+  channel: GateChannel;
+  /** The chat in words, e.g. "Lark group oc_123". */
+  target: string;
+  sent: number;
+  failed: number;
+  /** Why the latest message that failed could not be sent; null when none failed. */
+  last_error: string | null;
 }
 
 /** One message of a gate's discussion: the user's, the Planner's, or Looper's own note. */
@@ -3150,6 +3294,43 @@ export async function updateChannelConfig(
     body: JSON.stringify(fields),
   });
   if (!res.ok) await failed(res, "update channel-config");
+  return res.json();
+}
+
+/** A chat of a channel: where a dashboard task's gate messages also go. */
+export interface GateTarget {
+  channel: GateChannel;
+  chat: string;
+}
+
+/** A chat a channel's sender allowlist lets in (the same list as a schedule's notify targets). */
+export interface GateTargetOption extends GateTarget {
+  label: string;
+  channel_enabled: boolean;
+}
+
+/** Where the gate messages of tasks started on the dashboard go besides the task page; null: only the task page. */
+export interface GateSettings {
+  dashboard_target: GateTarget | null;
+  /** Set when the saved chat is no longer on its channel's sender allowlist: gates then go to the task page only. */
+  dashboard_target_problem?: string | null;
+  targets: GateTargetOption[];
+}
+
+export async function fetchGateSettings(): Promise<GateSettings> {
+  const res = await fetch(`${API_BASE}/gate-settings`);
+  if (!res.ok) await failed(res, "gate settings");
+  return res.json();
+}
+
+/** Store the dashboard tasks' gate target; 400 for a chat that is not one of `targets`. */
+export async function updateGateSettings(dashboardTarget: GateTarget | null): Promise<GateSettings> {
+  const res = await fetch(`${API_BASE}/gate-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dashboard_target: dashboardTarget }),
+  });
+  if (!res.ok) await failed(res, "save gate settings");
   return res.json();
 }
 

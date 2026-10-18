@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -263,3 +265,118 @@ class TestPlannerChatThroughClaude:
         (answer,) = [r.payload["text"] for r in h.replies if r.target == WEB]
         assert answer.startswith("Planner 出错") and "error_during_execution" in answer
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+
+
+class TestPlannerRoomDelivery:
+    def test_reply_failure_keeps_messages_and_plan_for_retry(self, tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+        from looper.agents.tiers.planner_protocol import ChatAction, ChatReply
+
+        async def run() -> None:
+            rows = [{"id": 1, "sender_seat": "worker@s1", "kind": "question", "body": "which interface?"}]
+            pending = AsyncMock(side_effect=lambda task_id: list(rows))
+            delivered = AsyncMock()
+            room = SimpleNamespace(planner_reply=AsyncMock(side_effect=[RuntimeError("storage unavailable"), None]),
+                                   wake_planner_after=Mock())
+            planner = PlannerAgent(task_id="t1", runtime_root=tmp_path, ops=SimpleNamespace(room=room))
+            planner._activity = AsyncMock()
+            planner._ask = AsyncMock(return_value=ChatReply("use v2", ChatAction.FORWARD, "s1", "use v2", ()))
+            planner._apply_gate_changes = AsyncMock(return_value=False)
+            planner._apply_chat = AsyncMock()
+            monkeypatch.setattr(planner_module.db_room, "planner_pending", pending)
+            monkeypatch.setattr(planner_module.db_room, "planner_delivered", delivered)
+            plan = _executing_plan()
+
+            await planner._deliver_room_messages(plan)
+            delivered.assert_not_awaited()
+            planner._apply_gate_changes.assert_not_awaited()
+            planner._apply_chat.assert_not_awaited()
+            assert planner._room_failed[0] == 1
+            room.wake_planner_after.assert_called_once_with("t1", planner_module.ROOM_RETRY_SEC)
+            assert planner._activity.await_args.args[0] == "error"
+            await planner._deliver_room_messages(plan)
+            assert planner._ask.await_count == 1
+            assert room.wake_planner_after.call_count == 2
+            assert 0 < room.wake_planner_after.call_args.args[1] <= planner_module.ROOM_RETRY_SEC
+
+            rows.append({**rows[0], "id": 2})
+            await planner._deliver_room_messages(plan)
+            delivered.assert_awaited_once_with("t1", [1, 2])
+            planner._apply_gate_changes.assert_awaited_once()
+            planner._apply_chat.assert_awaited_once()
+            assert planner._room_failed == (0, 0.0)
+
+        asyncio.run(run())
+
+    def test_failed_turn_schedules_retry_without_another_message(self, tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+        async def run() -> None:
+            row = {"id": 1, "sender_seat": "worker@s1", "kind": "question", "body": "which interface?"}
+            room = SimpleNamespace(planner_reply=AsyncMock(), wake_planner_after=Mock())
+            planner = PlannerAgent(task_id="t1", runtime_root=tmp_path, ops=SimpleNamespace(room=room))
+            planner._activity = AsyncMock()
+            planner._ask = AsyncMock(side_effect=planner_module.PlannerTurnError("bad reply"))
+            delivered = AsyncMock()
+            monkeypatch.setattr(planner_module.db_room, "planner_pending", AsyncMock(return_value=[row]))
+            monkeypatch.setattr(planner_module.db_room, "planner_delivered", delivered)
+            monkeypatch.setattr(planner_module, "ROOM_RETRY_SEC", 0.01)
+
+            await planner._deliver_room_messages(_executing_plan())
+            room.wake_planner_after.assert_called_once_with("t1", 0.01)
+            await planner._deliver_room_messages(_executing_plan())
+            assert planner._ask.await_count == 1
+            assert room.wake_planner_after.call_count == 2
+            assert 0 < room.wake_planner_after.call_args.args[1] <= 0.01
+            delivered.assert_not_awaited()
+            room.planner_reply.assert_not_awaited()
+
+            planner._room_failed = (1, planner_module.time.monotonic() - 0.02)
+            await planner._deliver_room_messages(_executing_plan())
+            assert planner._ask.await_count == 2
+            assert room.wake_planner_after.call_args.args == ("t1", 0.01)
+
+        asyncio.run(run())
+
+    def test_room_batch_budget_leaves_unshown_messages_pending(self, tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+        from looper.agents.room import REF_MAX_CHARS
+        from looper.agents.tiers.planner_protocol import ChatAction, ChatReply
+
+        async def run() -> None:
+            rows = [{"id": i, "sender_seat": "worker@s1", "kind": "question", "body": "x" * 1500,
+                     "refs": [{"file": "f" * 1000}]} for i in range(1, 15)]
+            remaining = list(rows)
+
+            async def delivered(task_id: str, ids: list[int]) -> None:
+                remaining[:] = [r for r in remaining if r["id"] not in ids]
+
+            room = SimpleNamespace(planner_reply=AsyncMock(return_value={"id": 30}), wake_planner_after=Mock())
+            planner = PlannerAgent(task_id="t1", runtime_root=tmp_path, ops=SimpleNamespace(room=room))
+            planner._activity = AsyncMock()
+            planner._ask = AsyncMock(return_value=ChatReply("use v2", ChatAction.NONE, "", "", ()))
+            planner._apply_gate_changes = AsyncMock(return_value=False)
+            monkeypatch.setattr(planner_module.db_room, "planner_pending",
+                                AsyncMock(side_effect=lambda task_id: list(remaining)))
+            monkeypatch.setattr(planner_module.db_room, "planner_delivered", delivered)
+            plan = _executing_plan(*[
+                PlanStep(step_id=f"s{i}", index=i, instruction="work " * 100) for i in range(50)
+            ])
+
+            await planner._deliver_room_messages(plan)
+            message = planner._ask.await_args.args[1]
+            shown = room.planner_reply.await_args.args[2]
+            assert 0 < len(shown) < len(rows)
+            assert shown == rows[:len(shown)]
+            assert remaining == rows[len(shown):]
+            assert len(message) <= planner_module.ROOM_BATCH_MAX_CHARS
+            assert "f" * (REF_MAX_CHARS + 1) not in message
+            assert f"{len(remaining)} more message(s) wait for the next turn" in message
+            assert f"#{remaining[0]['id']} from " not in message
+            room.wake_planner_after.assert_called_once_with("t1", 0)
+
+            while remaining:
+                await planner._deliver_room_messages(plan)
+            assert [r["id"] for call in room.planner_reply.await_args_list for r in call.args[2]] == \
+                [r["id"] for r in rows]
+
+        asyncio.run(run())

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -51,8 +52,8 @@ WHERE task_user_gates.state NOT IN {CLOSED!r}
 
 _ADD_MESSAGE = """
 INSERT INTO task_user_gate_messages (step_id, task_id, role, kind, text, author, via, agenda_item, option, channel,
-                                     chat, external_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                     chat, external_id, post_state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $3 = 'user' THEN 'none' END)
 RETURNING *
 """
 
@@ -63,7 +64,13 @@ SELECT g.*, s.step_key, s.step_index, s.depends_on,
        EXISTS (SELECT 1 FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.role = 'user'
                AND m.id > GREATEST(g.delivered_through, g.failed_through)) AS waiting_for_planner,
        (SELECT count(*) FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.role = 'user'
-        AND m.id > g.delivered_through AND m.id <= g.failed_through) AS not_delivered
+        AND m.id > g.delivered_through AND m.id <= g.failed_through) AS not_delivered,
+       (SELECT count(*) FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.post_state = 'sent')
+           AS posts_sent,
+       (SELECT count(*) FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.post_state = 'failed')
+           AS posts_failed,
+       (SELECT m.post_error FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.post_state = 'failed'
+        ORDER BY m.id DESC LIMIT 1) AS post_last_error
 FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id
 """
 # The user's messages in a closed gate that no turn of the Planner had: they reached it while the turn that closed
@@ -168,6 +175,12 @@ async def get(task_id: str, label: str, *, pool: asyncpg.Pool | asyncpg.Connecti
     return _gate(row) if row else None
 
 
+async def gate_state(step_id: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+    """The gate's current state; None when it no longer exists."""
+    pool = pool or get_pool()
+    return await pool.fetchval("SELECT state FROM task_user_gates WHERE step_id = $1", step_id)
+
+
 async def pending(task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
     """The user's messages in the task's waiting gates that no turn of the Planner has had, oldest first."""
     pool = pool or get_pool()
@@ -248,3 +261,127 @@ async def record_reminder(step_id: str, task_id: str, text: str, *, pool: asyncp
             task_id, {"step_id": step_id, "role": "looper", "kind": "reminder", "text": text}))
         await conn.execute("UPDATE task_user_gates SET reminders = reminders + 1, last_reminded_at = now(), "
                            "updated_at = now() WHERE step_id = $1", step_id)
+
+
+# --- Channels: what Looper posts of a gate's discussion, and the replies to it (agents/gate_courier, gate_routing) ---
+
+# The messages of the Planner's and Looper's not yet handled, oldest first, each with its gate and its task: where
+# the gate's chat is (the task's origin and recorded target), and what the message's text is made of.
+_UNPOSTED = """
+SELECT m.*, g.state, g.topic, g.agenda, g.findings, g.summary, g.resolution, g.plan_change, g.opened_at,
+       g.failures, s.step_key, t.status AS task_status, t.title, t.goal_id, t.requirement, t.origin_channel_id,
+       t.chat_id AS task_chat_id, t.chat_kind, t.chat_mention, t.schedule_id
+FROM task_user_gate_messages m
+JOIN task_user_gates g ON g.step_id = m.step_id
+JOIN task_steps s ON s.id = m.step_id
+JOIN tasks t ON t.id = m.task_id
+WHERE m.post_state IS NULL AND (m.post_retry_at IS NULL OR m.post_retry_at <= now())
+  AND NOT EXISTS (SELECT 1 FROM task_user_gate_messages e WHERE e.step_id = m.step_id AND e.post_state IS NULL
+                  AND e.id < m.id AND e.post_retry_at > now())
+ORDER BY m.id
+LIMIT $1
+"""
+
+
+async def unposted(limit: int = 50, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The Planner's and Looper's messages no courier pass has handled, oldest first, with their gate and task: those
+    whose next try is due, and none of a gate behind one of its messages that waits for its next try."""
+    pool = pool or get_pool()
+    return [_gate(row) for row in await pool.fetch(_UNPOSTED, limit)]
+
+
+async def record_post(message_id: int, task_id: str, state: str, *, error: str | None = None,
+                      channel: str | None = None, chat: str | None = None, external_ids: Sequence[str] = (),
+                      pool: asyncpg.Pool | None = None) -> None:
+    """Note what posting the message ``message_id`` did (``state``: ``sent``, ``failed`` with ``error``, or
+    ``none``), with the channel messages it became in ``chat`` (a failed post may have sent some), in one
+    transaction."""
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        if external_ids:
+            await conn.executemany(
+                "INSERT INTO task_user_gate_posts (message_id, task_id, channel, chat, external_id) "
+                "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (channel, chat, external_id) DO NOTHING",
+                [(message_id, task_id, channel, chat, external_id) for external_id in external_ids])
+        await conn.execute("UPDATE task_user_gate_messages SET post_state = $2, post_error = $3, "
+                           "post_attempts = post_attempts + 1, post_retry_at = NULL WHERE id = $1",
+                           message_id, state, error)
+
+
+async def record_retry(message_id: int, error: str, retry_at: datetime, *,
+                       pool: asyncpg.Pool | None = None) -> None:
+    """Note a post of the message ``message_id`` that sent nothing and is tried again at ``retry_at``."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE task_user_gate_messages SET post_error = $2, post_attempts = post_attempts + 1, "
+                       "post_retry_at = $3 WHERE id = $1 AND post_state IS NULL", message_id, error, retry_at)
+
+
+async def first_post(step_id: str, channel: str, chat: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+    """The first channel message Looper sent for the gate on ``step_id`` to ``chat`` (its card, unless that failed);
+    None when none was."""
+    pool = pool or get_pool()
+    return await pool.fetchval(
+        "SELECT p.external_id FROM task_user_gate_posts p JOIN task_user_gate_messages m ON m.id = p.message_id "
+        "WHERE m.step_id = $1 AND p.channel = $2 AND p.chat = $3 ORDER BY p.id LIMIT 1", step_id, channel, chat)
+
+
+async def answered(step_id: str, before: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """The user's latest message in the gate on ``step_id`` before the message ``before``: what a Planner's reply
+    answers; None when there is none."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT * FROM task_user_gate_messages WHERE step_id = $1 AND role = 'user' AND id < $2 "
+                              "ORDER BY id DESC LIMIT 1", step_id, before)
+    return dict(row) if row else None
+
+
+async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *,
+                         pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """The gate a channel message is about, as it replies to ``external_ids`` in ``chat``: a message Looper posted
+    for the gate, or one of the user's in it. Lark's message ids are unique in the app, so a Lark one is found
+    in any chat (Looper posts to a user's open_id, and the user's reply comes from their chat with the bot);
+    Telegram's only within a chat. The gate's row with its step's label and its task's status; None for none."""
+    pool = pool or get_pool()
+    ids = [str(i) for i in external_ids if i]
+    if not ids:
+        return None
+    row = await pool.fetchrow(
+        """
+        SELECT g.*, s.step_key, t.status AS task_status
+        FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id JOIN tasks t ON t.id = g.task_id
+        WHERE g.step_id IN (
+            SELECT m.step_id FROM task_user_gate_posts p JOIN task_user_gate_messages m ON m.id = p.message_id
+            WHERE p.channel = $1 AND p.external_id = ANY($3::text[]) AND ($1 = 'lark' OR p.chat = $2)
+            UNION
+            SELECT m.step_id FROM task_user_gate_messages m
+            WHERE m.channel = $1 AND m.external_id = ANY($3::text[]) AND ($1 = 'lark' OR m.chat = $2))
+        ORDER BY g.opened_at DESC NULLS LAST
+        LIMIT 1
+        """, channel, chat, ids)
+    return _gate(row) if row else None
+
+
+async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboard: bool = False,
+                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The gates that wait for the user in the tasks that run, the latest opened first, at most ``limit``, each with
+    its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
+    ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``.
+    When ``chat`` is given, filter before limiting; ``dashboard`` includes tasks from no channel."""
+    pool = pool or get_pool()
+    where = ""
+    args: list[Any] = [list(WAITING), list(ACTIVE_STATUSES), limit]
+    if chat is not None:
+        from ..agents.task_notice import _BY_CHANNEL_ID, TargetKind
+
+        origins = [origin for origin, channel in _BY_CHANNEL_ID.items() if channel.value == chat[0]]
+        where = (" AND t.schedule_id IS NULL AND ((t.origin_channel_id = ANY($4::text[]) AND t.chat_id = $5 "
+                 "AND t.chat_id <> '' AND t.chat_kind = ANY($6::text[])) OR ($7::boolean AND "
+                 "NOT (COALESCE(t.origin_channel_id, '') = ANY($8::text[]))))")
+        args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, list(_BY_CHANNEL_ID)]
+    rows = await pool.fetch(
+        _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
+                       ", p.name AS project_name, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
+                       "t.schedule_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
+                       "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id")
+        + " WHERE g.state = ANY($1::text[]) AND t.status = ANY($2::text[])" + where
+        + " ORDER BY g.opened_at DESC NULLS LAST LIMIT $3", *args)
+    return [_gate(row) for row in rows]

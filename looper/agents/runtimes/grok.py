@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, request_tokens, run_usage
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter, RuntimeUnsupported,
     grok_login, instructions,
 )
 from .codex import _HASHED, _toml_key, _toml_value
@@ -107,6 +107,8 @@ INSTRUCTION_NAMES = ("Agents.md", "Claude.md", "CLAUDE.md", "CLAUDE.local.md", "
 _PLUGIN_PARTS_LEFT_OUT = ("commands", "agents", "hooks", ".mcp.json", "output-styles")
 # How long a run home may go unwritten before it is removed (``_remove_idle_homes``): far beyond any run.
 RUN_HOME_IDLE_SEC = 24 * 3600
+# The built-in tools of a run that must not change files (``Launch.read_only``): MCP tools stay, through use_tool.
+READ_ONLY_TOOLS = "read_file,grep,list_dir"
 
 
 class GrokRuntime(RuntimeAdapter):
@@ -126,6 +128,8 @@ class GrokRuntime(RuntimeAdapter):
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({*DIRECTORY_VARS, *RESTORED_VARS, *grok_login.ENV_UNSET,
                                                               *(name for name, _ in FIXED_ENV)})
     runtime_cost_capped = False
+    # A read-only run gets reading tools only (``READ_ONLY_TOOLS``).
+    read_only = ReadOnly.TOOLS
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``, with an empty ``GROK_HOME`` of its own so nothing of the operator's is read."""
@@ -162,11 +166,12 @@ class GrokRuntime(RuntimeAdapter):
 
     def launch_args(self, launch: Launch) -> list[str]:
         """The headless flags of every run: the prompt from stdin, Claude Code's stream-json, every tool without
-        asking, the project's own content trusted, no update; the model and the effort."""
+        asking (a read-only run: the reading tools only), the project's own content trusted, no update; the model and the effort."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         return [
             "--prompt-file", PROMPT_FILE, "--output-format", "streaming-messages-json",
             "--always-approve", "--trust", "--no-auto-update",
+            *(["--tools", READ_ONLY_TOOLS] if launch.read_only else []),
             *binding.args,
         ]
 

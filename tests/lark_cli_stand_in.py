@@ -28,8 +28,11 @@ world = json.load(open({world!r}))
 args = sys.argv[1:]
 with open({log!r}, "a") as log:
     log.write(json.dumps(args) + "\\n")
-def refuse(message, code=2):
-    print(json.dumps({{"ok": False, "error": {{"type": "validation", "message": message}}}}), file=sys.stderr)
+def refuse(message, code=2, api_code=None):
+    error = {{"type": "validation", "message": message}}
+    if api_code is not None:
+        error = {{"type": "api", "code": api_code, "message": message}}
+    print(json.dumps({{"ok": False, "error": error}}), file=sys.stderr)
     sys.exit(code)
 def answer(value):
     print(json.dumps(value))
@@ -37,6 +40,11 @@ def answer(value):
 name = ""
 if args[:1] == ["--profile"]:
     name, args = args[1], args[2:]
+if "--idempotency-key" in args:
+    at = args.index("--idempotency-key")
+    if len(args) <= at + 1 or not 0 < len(args[at + 1]) <= 50:
+        refuse("--idempotency-key: at most 50 characters")
+    args = args[:at] + args[at + 2:]
 profile = world["profiles"].get(name or world["active"])
 if profile is None:
     refuse('profile "%s" not found' % name, 3)
@@ -72,7 +80,7 @@ if args[:5] == ["im", "+messages-reply", "--as", "bot", "--message-id"] and len(
     if args[6] not in ("--text", "--markdown"):
         refuse("specify one of --text, --markdown or --content")
     if args[5].endswith("gone"):
-        refuse("the message was recalled")
+        refuse("the message was recalled", api_code=230011)
     with open({log!r}) as sent:
         count = sum(1 for line in sent if "+messages-reply" in line)
     answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_r%04d" % count, "chat_id": "oc_group"}}}})
