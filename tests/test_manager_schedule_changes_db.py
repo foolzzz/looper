@@ -2,7 +2,8 @@
 
 A new schedule is disabled, its configuration is shown with the question whether to enable it, and the turn that
 created it can neither enable nor run it; a change is made at once and shown before and after, but one raising or
-removing a spend cap waits for the user's word in the next message; Run now fires it as the dashboard's button does.
+removing a spend cap, enabling or running now waits for the user's word in the next message; a confirmed Run now
+fires it as the dashboard's button does.
 The configuration export writes the file, without secrets, into the runtime directory. Each call goes through
 ``ManagerOps`` in a turn of a Lark chat (``tests.test_ops_tasks_db._Chat``); what changed is read back through the
 dashboard's HTTP API. Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
@@ -20,7 +21,7 @@ from typing import Any
 import pytest
 
 from tests.test_manager_config_tools_db import _ok, _trail
-from tests.test_manager_schedule_tools_db import _schedule
+from tests.test_manager_schedule_tools_db import _confirm, _schedule, _starting_state
 from tests.test_ops_tasks_db import _Chat, _error, _project
 from tests.test_usage_api_db import DSN, _run
 
@@ -77,11 +78,40 @@ def test_a_schedule_is_created_disabled_with_its_configuration_and_enabled_only_
             "- 花费上限：每次运行 项目的每任务上限，每天 不限", "- 通知：失败时 → 只在控制台", "",
             "要启用吗？回复「启用」就启用，之后按规则无人值守地运行；也可以稍后在 Schedules 页打开它的开关。"]
 
-        (enabled,) = await chat.say("启用", (TOOL, {"action": "enable", "schedule": "deps"}))
+        (asked,) = await chat.say("启用", (TOOL, {"action": "enable", "schedule": "deps"}))
+        assert await _starting_state(pool, schedule["schedule_id"]) == (False, 0)
+        enabled = await _confirm(chat, asked)
         assert enabled["status"] == "ok"
         assert (await _view("deps"))["enabled"] is True
         assert await _trail(pool) == [(TOOL, "write", "ok"), (TOOL, "write", "error"), (TOOL, "write", "error"),
-                                      (TOOL, "write", "ok")]
+                                      (TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["enable", "run"])
+def test_a_schedule_created_this_turn_cannot_start_or_leave_a_pending_confirmation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+) -> None:
+    """The creation's configuration must reach the user before a start can even ask for confirmation."""
+    async def test(pool: Any) -> None:
+        await _project(pool, "calc", str(tmp_path))
+        chat = _Chat(tmp_path)
+        created, refused = await chat.say("建好并启用或运行", _create(), (TOOL, {"action": action, "schedule": "deps"}))
+        assert created["status"] == "ok", created
+        assert _error(refused) == "conflict" and "was created in this turn" in refused["error"]["message"]
+        sid = (await _view("deps"))["schedule_id"]
+        assert await _starting_state(pool, sid) == (False, 0)
+        (block,) = chat.turns[-1].blocks
+        assert block.startswith("定时任务已创建，还没有启用：")
+        assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE confirmation_id IS NOT NULL") == 0
+
+        # No id was issued, and the next message carries no pending-confirmation note.
+        (missing,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": "c-not-issued"}))
+        assert _error(missing) == "not_found" and chat.notes[-1] == ""
+        assert await _starting_state(pool, sid) == (False, 0)
+        assert await _trail(pool) == [(TOOL, "write", "ok"), (TOOL, "write", "error"),
+                                      ("looper_confirm", "high", "error")]
 
     _run(test, monkeypatch)
 
@@ -308,7 +338,9 @@ def test_run_now_fires_the_schedule_once_as_the_dashboards_button_does(
         scheduler = Scheduler(bus=chat.bus)
         _with(chat, scheduler=scheduler)
         try:
-            (ran,) = await chat.say("现在跑一次 nightly", (TOOL, {"action": "run", "schedule": "nightly"}))
+            (asked,) = await chat.say("现在跑一次 nightly", (TOOL, {"action": "run", "schedule": "nightly"}))
+            assert await _starting_state(pool, (await _view("nightly"))["schedule_id"]) == (False, 0)
+            ran = await _confirm(chat, asked)
         finally:
             await scheduler.stop()
 
@@ -317,6 +349,7 @@ def test_run_now_fires_the_schedule_once_as_the_dashboards_button_does(
         runs = (await _ok("GET", f"/api/schedules/{(await _view('nightly'))['schedule_id']}/runs"))["runs"]
         assert [(r["status"], r["trigger"]) for r in runs] == [(status, "manual")]
         assert ((await _view("nightly"))["enabled"], (await _view("nightly"))["next_fire_at"]) == (False, None)
+        assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "ok")]
 
     _run(test, monkeypatch)
 
@@ -324,9 +357,13 @@ def test_run_now_fires_the_schedule_once_as_the_dashboards_button_does(
 def test_run_now_without_a_scheduler_is_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
         await _schedule(await _project(pool, "calc", str(tmp_path)), "nightly")
-        (answer,) = await _Chat(tmp_path).say("跑一次", (TOOL, {"action": "run", "schedule": "nightly"}))
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("跑一次", (TOOL, {"action": "run", "schedule": "nightly"}))
+        assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+        answer = await _confirm(chat, asked)
         assert _error(answer) == "unavailable" and "runs no scheduler" in answer["error"]["message"]
         assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+        assert await _trail(pool) == [(TOOL, "high", "needs_confirmation"), (TOOL, "high", "error")]
 
     _run(test, monkeypatch)
 
@@ -334,8 +371,9 @@ def test_run_now_without_a_scheduler_is_unavailable(monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize("arguments", [
     {"action": "create", "project": "calc", "fields": DEPS},
     {"action": "update", "schedule": "nightly", "fields": {"cron": "0 10 * * *"}},
+    {"action": "enable", "schedule": "nightly"},
     {"action": "run", "schedule": "nightly"},
-], ids=["create", "update", "run"])
+], ids=["create", "update", "enable", "run"])
 def test_a_turn_claude_runs_on_its_own_creates_changes_and_runs_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: dict[str, Any],
 ) -> None:
@@ -346,6 +384,8 @@ def test_a_turn_claude_runs_on_its_own_creates_changes_and_runs_nothing(
         assert _error(answer) == "needs_user_turn"
         assert [tuple(r) for r in await pool.fetch("SELECT name, cron FROM schedules")] == [("nightly", "0 9 * * 1-5")]
         assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+        assert (await _view("nightly"))["enabled"] is False
+        assert await _trail(pool) == [(TOOL, "write", "error")]
 
     _run(test, monkeypatch)
 
