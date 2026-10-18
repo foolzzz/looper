@@ -11,8 +11,9 @@ backs the database up first and does not start without a way to
 Nothing here spends money: the Claude login is read with
 ``claude auth status``, which reads the local credentials and makes no model
 call. The Codex login (``codex_login``) is checked only when an Agent Profile
-uses it, with ``codex login status`` in a probe home; a forked login that a
-run recorded is a failure until the operator clears it.
+uses it, with ``codex login status`` in a probe home; the Grok login
+(``grok_login``) likewise, by whether its login file is there. A forked login
+that a run recorded is a failure until the operator clears it.
 
 The git checks matter for projects whose parallel steps work in worktrees of
 their own (``step_workspaces``): git 2.40 or later (serve checks it too), and,
@@ -39,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 from . import db_backup
 
 if TYPE_CHECKING:
+    from .runtimes import grok_login
     from .runtimes.codex_login import LoginStatus
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ DATABASE_FIX = (
 )
 LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on the Settings page"
 CODEX_LOGIN_FIX = "run `codex login` and sign in with ChatGPT, or give the Agent Profiles an API key provider"
+GROK_LOGIN_FIX = "run `grok login` on this machine, or give the Agent Profiles another runtime"
 GIT_FIX = "install git 2.40 or later: https://git-scm.com/downloads"
 STEP_WORKTREES_FIX = ("put the project's default directory on a branch of a git checkout with nothing in progress, "
                       "or set its parallel steps to share the task directory")
@@ -206,6 +209,44 @@ async def codex_login_check() -> Check:
     return await asyncio.to_thread(check_codex_login, profiles, problem, codex_login.cached_probe)
 
 
+def check_grok_login(profiles: int | None, problem: dict[str, str] | None,
+                     probe: Callable[[], grok_login.LoginStatus]) -> Check:
+    """Can the Agent Profiles that use Grok's own login run? ``profiles``: how many there are (``None``: unknown);
+    ``problem``: the forked login a run recorded; ``probe`` says whether the login file is there."""
+    from .runtimes.grok_login import PROBLEM_FIX, LoginState
+
+    if profiles is None:
+        return Check("grok_login", "Grok login", SKIP,
+                     "not checked: the Agent Profiles are stored in PostgreSQL, which is unreachable")
+    if not profiles:
+        return Check("grok_login", "Grok login", SKIP, "not checked: no Agent Profile uses the Grok login")
+    if problem is not None:
+        return Check("grok_login", "Grok login", FAIL,
+                     f"unavailable since {problem.get('at') or '?'}: {problem.get('detail')}", PROBLEM_FIX)
+    status = probe()
+    if status.state is LoginState.LOGGED_IN:
+        return Check("grok_login", "Grok login", OK, status.detail)
+    return Check("grok_login", "Grok login", FAIL, status.detail, GROK_LOGIN_FIX)
+
+
+async def grok_login_check() -> Check:
+    """``check_grok_login`` with the server's pool, read now (``/api/status`` asks on every poll)."""
+    from ..db import profile_registry
+    from .runtimes import grok_login
+
+    try:
+        profiles = await profile_registry.login_profile_count("grok")
+        problem = await grok_login.recorded_problem()
+    except Exception:
+        logger.warning("cannot read whether an Agent Profile uses the Grok login", exc_info=True)
+        profiles, problem = None, None
+    return await asyncio.to_thread(check_grok_login, profiles, problem, grok_login.cached_probe)
+
+
+# The checks of the runtimes' own logins, by id: what reads each now (``/api/status`` reads them on every poll).
+LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check}
+
+
 def check_lark_cli(lark_enabled: bool | None) -> Check:
     """Does the enabled Lark channel have ``lark-cli``? ``None``: whether it is enabled is unknown."""
     if lark_enabled is None:
@@ -319,6 +360,8 @@ class _DatabaseFacts:
     schema_change_pending: bool | None = None
     codex_login_profiles: int | None = None
     codex_login_problem: dict[str, str] | None = None
+    grok_login_profiles: int | None = None
+    grok_login_problem: dict[str, str] | None = None
     worktree_projects: list[dict[str, Any]] | None = None
 
 
@@ -328,6 +371,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
     from ..db.channel_configs import get_config
     from ..db.connection import schema_change_pending
     from ..db.profile_registry import login_profile_count
+    from .runtimes import grok_login
     from ..db.projects import worktree_projects
     from .runtimes.codex_login import recorded_problem
 
@@ -343,8 +387,10 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
         try:
             profiles: int | None = await login_profile_count("codex", pool=conn)
             problem = await recorded_problem(pool=conn)
+            grok_profiles: int | None = await login_profile_count("grok", pool=conn)
+            grok_problem = await grok_login.recorded_problem(pool=conn)
         except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):  # set up by an older `looper serve`
-            profiles, problem = 0, None
+            profiles, problem, grok_profiles, grok_problem = 0, None, 0, None
         try:
             worktrees: list[dict[str, Any]] | None = await worktree_projects(pool=conn)
         except asyncpg.UndefinedTableError:
@@ -357,6 +403,8 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             schema_change_pending=await schema_change_pending(conn),
             codex_login_profiles=profiles,
             codex_login_problem=problem,
+            grok_login_profiles=grok_profiles,
+            grok_login_problem=grok_problem,
             worktree_projects=worktrees,
         )
     finally:
@@ -367,14 +415,16 @@ async def run_checks(*, dsn: str, claude_bin: str = "claude") -> list[Check]:
     """Every check, reading only what it can: the channel settings and the schema state need the database."""
     database = await check_database(dsn)
     facts = await _database_facts(dsn) if database.status == OK else _DatabaseFacts()
+    from .runtimes import grok_login
     from .runtimes.codex_login import probe_login
 
     claude = await asyncio.to_thread(check_claude, claude_bin)
     codex = await asyncio.to_thread(check_codex_login, facts.codex_login_profiles, facts.codex_login_problem,
                                     probe_login)
+    grok = check_grok_login(facts.grok_login_profiles, facts.grok_login_problem, grok_login.probe_login)
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending)
     git = await asyncio.to_thread(check_git)
-    return [database, *claude, codex, check_lark_cli(facts.lark_enabled), pg_dump, git,
+    return [database, *claude, codex, grok, check_lark_cli(facts.lark_enabled), pg_dump, git,
             await check_step_worktrees(facts.worktree_projects)]
 
 
@@ -395,8 +445,8 @@ def log_problems(checks: list[Check]) -> None:
     for check in checks:
         if check.status in (FAIL, WARN):
             consequence = (" Agents cannot run until this is fixed." if check.id.startswith("claude") else
-                           " Agent Profiles with the Codex login cannot run until this is fixed."
-                           if check.id == "codex_login" else "")
+                           f" Agent Profiles with the {check.label} cannot run until this is fixed."
+                           if check.id in LOGIN_CHECKS else "")
             logger.warning("SELF-CHECK %s %s: %s.%s Fix: %s", check.status.upper(), check.label, check.detail,
                            consequence, check.fix.replace("\n", " "))
 

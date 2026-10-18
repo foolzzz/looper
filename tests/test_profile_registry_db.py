@@ -131,14 +131,18 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         (runtime,) = registry["runtimes"]
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
         assert set(runtime["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-        # Claude Code's own login, and Codex's (ChatGPT), with the models a ChatGPT login offers as suggestions.
-        claude, codex = registry["providers"]
+        # Claude Code's own login, Codex's (ChatGPT) and Grok's, with the models each offers as suggestions.
+        claude, codex, grok = registry["providers"]
         assert (claude["name"], claude["auth"], claude["oauth_runtime_type"], claude["api_key"]) == (
             "claude-subscription", "oauth", "claude-code", None)
         assert (codex["provider_id"], codex["name"], codex["builtin"], codex["auth"], codex["oauth_runtime_type"],
                 codex["protocols"], codex["models"]) == (
             "prov-codex-login", "codex-login", True, "oauth", "codex", ["openai-responses"], [])
         assert codex["suggested_models"][0] == "gpt-6.1-sol" and claude["suggested_models"] == []
+        assert (grok["provider_id"], grok["name"], grok["builtin"], grok["auth"], grok["oauth_runtime_type"],
+                grok["protocols"], grok["models"], grok["suggested_models"][0]) == (
+            "prov-grok-login", "grok-login", True, "oauth", "grok", ["openai-responses"], [], "grok-4.7")
+        assert grok["login"]["state"] == "not_logged_in"  # the tests' GROK_HOME has no login
 
     _run(_test, monkeypatch)
 
@@ -147,6 +151,7 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
     ("PUT", "/api/providers/prov-claude-subscription", {"models": [{"name": "opus"}]}),
     ("DELETE", "/api/providers/prov-claude-subscription", None),
     ("DELETE", "/api/providers/prov-codex-login", None),
+    ("DELETE", "/api/providers/prov-grok-login", None),
     ("PUT", "/api/agent-profiles/agent-claude-code-opus", {"model": "sonnet"}),
     ("DELETE", "/api/agent-profiles/agent-claude-code-opus", None),
 ])
@@ -412,7 +417,7 @@ def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.Monk
             assert "pairs only with" in payload["error"] or "share no protocol" in payload["error"]
         # A login problem is cleared only on the Codex login.
         status, payload = await _call("DELETE", "/api/providers/prov-claude-subscription/login-problem")
-        assert status == 400 and "is not the Codex login" in payload["error"]
+        assert status == 400 and "is not the Codex or Grok login" in payload["error"]
 
     _run(_test, monkeypatch)
 
@@ -499,6 +504,59 @@ def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPa
         assert (runtime["runtime_id"], runtime["builtin"], runtime["executable"], runtime["version"]) == (
             "rt-omp", True, "", "omp/18.4.3")
         assert await register_found_runtimes() == []  # once
+
+    _run(_test, monkeypatch)
+
+
+def _version_grok(path: Path) -> str:
+    """A stand-in grok that prints its version for ``--version`` and fails on anything else."""
+    return fake_claude(path, (
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('grok 1.0.62 (1474f9cbdd91) [stable]')\n    sys.exit(0)\n"
+        "sys.exit(9)\n"
+    ))
+
+
+def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_login_and_runs_every_role(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents.profile_registry import register_found_runtimes
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _version_grok(bin_dir / "grok")
+    _version_codex(bin_dir / "codex")
+
+    async def _test(_pool: Any) -> None:
+        monkeypatch.setenv("PATH", str(bin_dir))
+        assert await register_found_runtimes() == ["codex", "grok"]
+        runtime = _by_name((await _registry())["runtimes"], "grok")
+        assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
+                runtime["protocols"], runtime["roles"]) == (
+            "rt-grok", True, "grok 1.0.62 (1474f9cbdd91) [stable]", "Grok", ["openai-responses"],
+            ["manager", "planner", "worker", "reviewer"])
+
+        async def profile(provider_id: str, runtime_id: str = "rt-grok") -> tuple[int, Any]:
+            return await _call("POST", "/api/agent-profiles", {
+                "name": f"{runtime_id}-{provider_id}", "model": "grok-4.7", "runtime_id": runtime_id,
+                "provider_id": provider_id})
+
+        # Its own login: any model, priced by Grok's own figure as a subscription equivalent, which no per-run
+        # cap can stop.
+        status, payload = await profile("prov-grok-login")
+        assert status == 201, payload
+        assert payload["profile"]["cost"] == {"source": "runtime", "equivalent": True, "unpriced": []}
+        (warning,) = payload["warnings"]
+        assert "per-run spend caps do not stop its runs" in warning
+        await _ok("PUT", "/api/agent-settings/system", {"profile_id": payload["profile"]["profile_id"]})
+        # Not another runtime's login, not an API key; and its login runs no other runtime.
+        key = await _provider({"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
+                               "base_url": "http://127.0.0.1:8317/v1", "api_key": SECRET})
+        for provider_id in ("prov-codex-login", "prov-claude-subscription", key):
+            status, payload = await profile(provider_id)
+            assert status == 400, payload
+        status, payload = await profile("prov-grok-login", "rt-codex")
+        assert status == 400 and "pairs only with" in payload["error"]
 
     _run(_test, monkeypatch)
 
@@ -855,7 +913,7 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         unlimited = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {"max_concurrency": None}))
         assert unlimited["provider"]["max_concurrency"] is None
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
-        assert [(b["max_concurrency"], b["models"]) for b in builtins] == [(None, [])] * 2  # no limit, any model
+        assert [(b["max_concurrency"], b["models"]) for b in builtins] == [(None, [])] * 3  # no limit, any model
 
     _run(_test, monkeypatch)
 

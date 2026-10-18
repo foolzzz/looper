@@ -259,3 +259,146 @@ def test_a_version_is_written_only_on_top_of_the_one_its_writer_read(monkeypatch
         assert len(await _journal(pool, "task-a", "role_defined")) == 3
 
     _run(test, monkeypatch)
+
+
+async def _skill(name: str) -> str:
+    status, answer = await _call("POST", "/api/catalog/skills", {"name": name, "description": f"{name}.",
+                                                                 "content": f"Reply {name}.\n"})
+    assert status in (200, 201), answer
+    return answer["item"]["item_id"]
+
+
+async def _install(item_id: str, roles: list[str] | None, project: dict[str, Any] | None = None) -> dict[str, Any]:
+    body = {"item_id": item_id, "scope": "project" if project else "global",
+            **({"project_id": project["id"]} if project else {}), **({"roles": roles} if roles is not None else {})}
+    status, answer = await _call("POST", "/api/installs", body)
+    assert status in (200, 201), answer
+    return answer["install"]
+
+
+def test_a_role_names_the_items_installed_for_roles_and_its_runs_load_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any,
+) -> None:
+    from looper.agents.library import load_installed
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        other = await _project(pool, name="other", work_dir="/o")
+        await _task(pool, "task-a", "running", project)
+        await _roles_on(pool, project)
+        notes, lint, plain, elsewhere = [await _skill(n) for n in ("notes", "lint", "plain", "elsewhere")]
+        # An install names the roles only when asked; then it loads for no built-in role.
+        assert (await _install(plain, None))["roles"] == ["manager", "planner", "worker", "reviewer"]
+        assert (await _install(notes, ["task_role"]))["roles"] == ["task_role"]
+        assert (await _install(lint, ["task_role", "worker"], project))["roles"] == ["worker", "task_role"]
+        await _install(elsewhere, ["task_role"], other)
+        planner = _Planner(_ops(), "task-a")
+
+        read = (await planner("looper_task_roles", {}))["result"]
+        assert sorted(item["name"] for item in read["role_items"]) == ["lint", "notes"]
+        refused = [
+            ({"items": ["plain"]}, "forbidden", "'plain' is not installed for Planner-defined roles in this project"),
+            ({"items": ["elsewhere"]}, "forbidden", "you may name: "),
+            ({"items": "notes"}, "invalid", "items must be an array"),
+            ({"items": ["notes", notes]}, "invalid", "names an item twice"),
+            ({"items": ["notes"] * 21}, "invalid", "at most 20"),
+        ]
+        for arguments, code, message in refused:
+            answer = await planner("looper_task_role_set", {**TESTER, **arguments})
+            assert _error(answer) == code and message in answer["error"]["message"], (arguments, answer)
+        answer = await planner("looper_task_role_set", {**TESTER, "items": ["notes", lint]})
+        assert answer["status"] == "ok", answer
+        assert await pool.fetchval("SELECT items FROM task_roles WHERE role_key = 'tester'") == [notes, lint]
+        assert (await planner("looper_task_role_set", {**TESTER, "items": [notes, lint]}))["result"]["changed"] \
+            is False
+
+        # A run as the role loads them, a built-in run of its kind the built-in installs only.
+        as_role = await load_installed(tmp_path, "worker", project["id"], (notes, lint))
+        builtin = await load_installed(tmp_path, "worker", project["id"])
+        assert sorted(item.name for item in as_role.items) == ["lint", "notes", "plain"]
+        assert sorted(item.name for item in builtin.items) == ["lint", "plain"]
+
+        # The user's edit keeps them when it leaves them out, and changes them when it gives them.
+        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first."})
+        assert status == 200 and answer["changed"] == ["role prompt"], answer
+        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "items": ["lint"]})
+        assert status == 200 and answer["changed"] == ["items"], answer
+        status, answer, _ = await _edit("task-a", "tester", {"role_prompt": "Tests first.", "items": ["plain"]})
+        assert status == 400 and "items: 'plain' is not installed" in answer["error"]
+        status, detail = await _call("GET", "/api/tasks/task-a")
+        assert detail["roles"][0]["items"] == [{"id": lint, "kind": "skill", "name": "lint"}]
+
+        # A template names them too; a copy leaves out one that is no longer installed for roles.
+        status, answer = await _put(project, "notes-review", {**SECURITY, "items": ["notes", "lint"]})
+        assert status == 200 and [i["name"] for i in _templates(answer)["notes-review"]["items"]] == ["notes", "lint"]
+        assert [i["name"] for i in answer["role_items"]] == sorted(["lint", "notes"])
+        for items, message in ((["plain"], "items: 'plain' is not installed"), ("notes", "items must be a list")):
+            status, answer = await _put(project, "bad", {**SECURITY, "items": items})
+            assert status == 400 and message in answer["error"], answer
+        await pool.execute("UPDATE library_installs SET roles = ARRAY['worker'] WHERE item_id = $1", lint)
+        answer = await planner("looper_task_role_set", {"template": "notes-review"})
+        assert answer["status"] == "ok" and f"The template's items {lint} are not installed" in answer["result"]["note"]
+        assert await pool.fetchval("SELECT items FROM task_roles WHERE role_key = 'notes-review'") == [notes]
+
+    _run(test, monkeypatch)
+
+
+async def _get(path: str, **query: str) -> tuple[int, Any]:
+    from tests.test_task_agents_db import _server
+
+    writer = _Writer()
+    await _server()._route_api("GET", path, query, b"", writer)
+    head, _, payload = writer.data.partition(b"\r\n\r\n")
+    return int(head.split()[1]), json.loads(payload)
+
+
+def test_a_projects_role_summary_sums_each_role_across_its_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run(pool: Any, task_id: str, agent_id: str, step: str, outcome: str, cost: float,
+                  role: str | None = None) -> None:
+        layers = {"task_role": {"id": role, "kind": "work", "version": 1}} if role else {}
+        await pool.execute(
+            "INSERT INTO llm_records (agent_id, task_id, status, cost_usd, metadata) VALUES ($1, $2, 'completed', "
+            "$3, $4::jsonb)", agent_id, task_id, cost,
+            json.dumps({"step_id": f"step-{task_id}-{step}", "outcome": outcome, "prompt_layers": layers}))
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _roles_on(pool, project)
+        await _put(project, "tester", {"kind": "work", "role_prompt": TESTER["role_prompt"]})
+        for task_id in ("task-a", "task-b", "task-c"):
+            await _task(pool, task_id, "running", project)
+        # task-c defines no role: it is not counted.
+        for task_id, arguments in (("task-a", {"template": "tester"}), ("task-b", TESTER)):
+            assert (await _Planner(_ops(), task_id)("looper_task_role_set", arguments))["status"] == "ok"
+            await pool.execute("INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, status, "
+                               "role_key, review) VALUES ($1, $2, 0, 's1', 'do it', 'verified', 'tester', true), "
+                               "($3, $2, 1, 's2', 'do it', 'failed', NULL, true)",
+                               f"step-{task_id}-s1", task_id, f"step-{task_id}-s2")
+            await run(pool, task_id, f"worker-{task_id}-1", "s1", "completed", 0.25, "tester")
+            await run(pool, task_id, f"worker-{task_id}-2", "s2", "contract", 0.5)
+            await run(pool, task_id, f"reviewer-{task_id}-1", "s1", "passed", 0.05)
+        await run(pool, "task-a", "worker-task-a-3", "s1", "contract", 0.25, "tester")
+
+        status, answer = await _call("GET", f"/api/projects/{project['id']}/role-stats")
+        assert status == 200 and answer["tasks"] == 2, answer
+        (tester,) = answer["roles"]
+        assert (tester["id"], tester["kinds"], tester["tasks"], tester["templates"]) == ("tester", ["work"], 2,
+                                                                                         ["tester"])
+        assert tester["stats"] == {
+            "runs": 3, "running": 0, "cost_usd": 0.75, "contract_violations": 1, "contract_violation_rate": 0.3333,
+            "steps": 2, "accepted": 2, "failed": 0, "retries": 0, "reviews": {"passed": 2, "not_passed": 0},
+            "review_pass_rate": 1.0}
+        builtin = answer["builtin"]
+        assert (builtin["worker"]["runs"], builtin["worker"]["steps"], builtin["worker"]["failed"],
+                builtin["worker"]["contract_violations"]) == (2, 2, 2, 2)
+        assert builtin["reviewer"]["reviews"] == {"passed": 2, "not_passed": 0}
+
+        # Only the tasks created since the day given; a day that does not read as one, or no such project.
+        await pool.execute("UPDATE tasks SET created_at = now() - interval '10 days' WHERE id = 'task-a'")
+        day = (await pool.fetchval("SELECT (now() - interval '1 day')::date")).isoformat()
+        status, answer = await _get(f"/api/projects/{project['id']}/role-stats", since=day)
+        assert answer["tasks"] == 1 and answer["roles"][0]["templates"] == []
+        assert (await _get(f"/api/projects/{project['id']}/role-stats", since="soon"))[0] == 400
+        assert (await _call("GET", "/api/projects/proj-nope/role-stats"))[0] == 404
+
+    _run(test, monkeypatch)

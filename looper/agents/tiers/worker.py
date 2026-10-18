@@ -678,7 +678,9 @@ class WorkerPool:
         knowledge = await load_knowledge(self._runtime_root, project, work_dir,
                                          notes=ProjectExecution.from_row(project).notes_on)
         project_id = str((project or {}).get("id") or "") or None
-        library = await load_installed(self._runtime_root, agent.value, project_id)
+        # A run as a role loads the items it names too.
+        library = await load_installed(self._runtime_root, agent.value, project_id,
+                                       task_role.items if task_role is not None else ())
         # The task's own choice of Agent Profile for this role wins over the layers, then its Planner's for this step,
         # then its Planner's for the rest of the task.
         agent_settings = await load_agent_settings(

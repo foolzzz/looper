@@ -695,7 +695,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "supplement_no_change": (2, 0, 0, 1), "profile_choice": (1, 0, 0, 0),
                     # The security review role reviews its step after the built-in Reviewer.
                     "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
-                    "roles_advisory_review": (1, 0, 2, 0), "roles_multi_platform": (6, 0, 0, 0),
+                    "roles_advisory_review": (1, 0, 2, 0), "roles_two_reviews": (1, 0, 3, 0),
+                    "roles_multi_platform": (6, 0, 0, 0),
                     "roles_not_needed": (1, 0, 0, 0), "roles_template_fits": (1, 0, 2, 0),
                     "roles_template_unfit": (1, 0, 0, 0),
                     # A gate is a step; the steps its closing turn added follow it.
@@ -714,7 +715,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1),
                      "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1),
                      "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
-                     "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1),
+                     "roles_advisory_review": (0, 0, 1), "roles_two_reviews": (0, 0, 1), "roles_not_needed": (0, 0, 1),
                      "roles_template_fits": (0, 0, 1), "roles_template_unfit": (0, 0, 1),
                      # Its four platform steps run side by side between the interface step and the check.
                      "roles_multi_platform": (6, 6, 4),
@@ -735,8 +736,12 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
              for t in by_id if by_id[t]["roles_defined"] or by_id[t]["role_runs"]}
     assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
                      "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
+                     "roles_two_reviews": (2, 2, 0, 2, 0, 0, 0, 0),
                      "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0),
                      "roles_template_fits": (1, 1, 0, 1, 0, 0, 0, 0)}
+    # Only the two-reviews task names more than one review role on a step.
+    assert {t: by_id[t]["most_review_roles"] for t in by_id if by_id[t]["most_review_roles"]} == {
+        "roles_security_review": 1, "roles_advisory_review": 1, "roles_template_fits": 1, "roles_two_reviews": 2}
     # Only the task whose step fits a project role template copies it.
     assert {t: by_id[t]["template_roles"] for t in by_id if by_id[t]["template_roles"]} == {"roles_template_fits": 1}
     # Only the multi-platform task's disciplines each get a role that names their conventions, and its four

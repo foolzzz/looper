@@ -12,11 +12,12 @@ completes a task must carry its final summary (``FinalSummary``), which
 becomes the task's result.
 
 In a project that lets its Planners define roles (``planner_roles`` ``on``), a
-step may name the work role its Worker runs as (``role``) and the review role
-that reviews it after the built-in Reviewer (``review_role``; it blocks the step
-unless ``review_role_required`` is false, which makes it advisory); ``PlanView.roles``
-holds the task's roles, and the contract says so (``reply_contract(roles=True)``).
-Elsewhere both keys are refused, and the contract is as before.
+step may name the work role its Worker runs as (``role``) and the review roles
+that review it after the built-in Reviewer, one after another (``review_roles``,
+each a ``ReviewRoleSpec``: one blocks the step unless its ``required`` is false,
+which makes it advisory); ``PlanView.roles`` holds the task's roles, and the
+contract says so (``reply_contract(roles=True)``). Elsewhere both keys are
+refused, and the contract is as before.
 
 Where a task may open user gates (``user_gates.GatePolicy``), a step may be a
 gate instead (``GateSpec``: a topic and an agenda, ``kind: "gate"``): its
@@ -76,8 +77,11 @@ _STEP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
 _OPENING = re.compile(r"^```json[ \t]*\n", re.MULTILINE)
 _CLOSING = re.compile(r"\s*```")
 _STEP_KEYS = frozenset({"id", "instruction", "acceptance_criteria", "depends_on", "review"})
-# A step's optional keys: the task roles it runs as and is reviewed by.
-_ROLE_KEYS = frozenset({"role", "review_role", "review_role_required"})
+# A step's optional keys: the task roles it runs as and is reviewed by; and the keys a review role item may have.
+_ROLE_KEYS = frozenset({"role", "review_roles"})
+_REVIEW_ROLE_KEYS = frozenset({"role", "required"})
+# The keys of a step before it had a list of review roles (one review role), which a reply may no longer give.
+_SINGLE_REVIEW_ROLE_KEYS = ("review_role", "review_role_required")
 # A gate step's keys (``findings`` is optional), an agenda item's in a step and in a reply, and a gate change's.
 _GATE_STEP_KEYS = frozenset({"id", "kind", "topic", "agenda", "depends_on", "findings"})
 _NEW_ITEM_KEYS = frozenset({"question", "options"})
@@ -135,6 +139,15 @@ class ProtocolError(ValueError):
 
 
 @dataclass(frozen=True)
+class ReviewRoleSpec:
+    """A review role a step names: it reviews the step after the built-in Reviewer and the review roles before it,
+    and its verdict blocks the step (``required``) or only advises the Planner."""
+
+    role: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
 class StepSpec:
     """One step as the Planner's Claude writes it; ``id`` is its label within the task."""
 
@@ -144,9 +157,8 @@ class StepSpec:
     depends_on: tuple[str, ...]
     review: bool
     role: str | None = None  # the work role its Worker runs as; None: the built-in Worker
-    review_role: str | None = None  # the review role that reviews it after the built-in Reviewer
-    # Whether the review role's verdict blocks the step (True), or only advises the Planner (False).
-    review_role_required: bool = True
+    # The review roles that review it after the built-in Reviewer, in order; none: the built-in Reviewer alone.
+    review_roles: tuple[ReviewRoleSpec, ...] = ()
     # A gate step: its topic, agenda and findings (its instruction is its topic, and it has no criteria or review).
     gate: GateSpec | None = None
 
@@ -685,26 +697,25 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
 
 
 def _check_roles(step: StepSpec, roles: Mapping[str, RoleKind] | None) -> None:
-    """A step's ``role`` names a work role of the task and its ``review_role`` a review role, on a reviewed step;
-    neither is allowed where the project lets its Planner define no role."""
-    if step.role is None and step.review_role is None:
+    """A step's ``role`` names a work role of the task and each of its ``review_roles`` a review role, on a
+    reviewed step; neither is allowed where the project lets its Planner define no role."""
+    if step.role is None and not step.review_roles:
         return
     if roles is None:
         raise ProtocolError(f"step {step.id}: this project does not let you define roles (planner_roles is off): "
-                            "leave role and review_role out")
+                            "leave role and review_roles out")
     defined = ", ".join(f"{key} ({kind.value})" for key, kind in roles.items()) or "none"
-    for key, kind in ((step.role, RoleKind.WORK), (step.review_role, RoleKind.REVIEW)):
-        field = "role" if kind is RoleKind.WORK else "review_role"
-        if key is None:
-            continue
+    named = [("role", step.role, RoleKind.WORK)] if step.role is not None else []
+    named += [("review_roles", item.role, RoleKind.REVIEW) for item in step.review_roles]
+    for key_name, key, kind in named:
         if key not in roles:
-            raise ProtocolError(f"step {step.id}: {field} {key!r} is not a role of this task (defined: {defined}); "
+            raise ProtocolError(f"step {step.id}: {key_name} {key!r} is not a role of this task (defined: {defined}); "
                                 "define it with looper_task_role_set first, or leave it out")
         if roles[key] is not kind:
-            raise ProtocolError(f"step {step.id}: {field} must name a {kind.noun}; {key} is a {roles[key].noun}")
-    if step.review_role is not None and not step.review:
-        raise ProtocolError(f"step {step.id}: review_role needs \"review\": true; the built-in Reviewer reviews the "
-                            "step first, and the review role after it")
+            raise ProtocolError(f"step {step.id}: {key_name} must name a {kind.noun}; {key} is a {roles[key].noun}")
+    if step.review_roles and not step.review:
+        raise ProtocolError(f"step {step.id}: review_roles needs \"review\": true; the built-in Reviewer reviews the "
+                            "step first, and its review roles after it")
 
 
 def _find_cycle(graph: Mapping[str, Iterable[str]]) -> list[str] | None:
@@ -747,6 +758,9 @@ def _step(value: Any, index: int) -> StepSpec:
     missing = sorted(_STEP_KEYS - value.keys())
     if missing:
         raise ProtocolError(f"{where} is missing {', '.join(missing)}")
+    if old := [key for key in _SINGLE_REVIEW_ROLE_KEYS if key in value]:
+        raise ProtocolError(f'{where} gives {" and ".join(old)}: a step lists its review roles in "review_roles" now, '
+                            'each a role\'s id or {"role": "<id>", "required": false}')
     _only_keys(value, _STEP_KEYS | _ROLE_KEYS | {"kind"}, where)
     step_id = value["id"]
     if not isinstance(step_id, str) or not _STEP_ID.fullmatch(step_id):
@@ -765,19 +779,38 @@ def _step(value: Any, index: int) -> StepSpec:
     review = value["review"]
     if not isinstance(review, bool):
         raise ProtocolError(f"{where}.review must be true or false")
-    roles = {}
-    for key in ("role", "review_role"):
-        raw = value.get(key)
-        if raw is not None and (not isinstance(raw, str) or not raw):
-            raise ProtocolError(f"{where}.{key} must be a role's id")
-        roles[key] = raw
-    required = value.get("review_role_required", True)
-    if "review_role_required" in value and roles["review_role"] is None:
-        raise ProtocolError(f"{where}.review_role_required is only for a step with a review_role")
-    if not isinstance(required, bool):
-        raise ProtocolError(f"{where}.review_role_required must be true or false")
+    role = value.get("role")
+    if role is not None and (not isinstance(role, str) or not role):
+        raise ProtocolError(f"{where}.role must be a role's id")
     return StepSpec(step_id, instruction.strip(), tuple(c.strip() for c in criteria), tuple(depends_on), review,
-                    **roles, review_role_required=required)
+                    role=role, review_roles=_review_roles(value.get("review_roles"), f"{where}.review_roles"))
+
+
+def _review_roles(value: Any, where: str) -> tuple[ReviewRoleSpec, ...]:
+    """A step's ``review_roles``: each item a role's id (its review is required) or ``{"role", "required"}``, no
+    role twice; none (null or empty) for the built-in Reviewer alone."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ProtocolError(f'{where} must be a list of review roles: ids, or {{"role": "<id>", "required": false}}')
+    items: list[ReviewRoleSpec] = []
+    for index, item in enumerate(value):
+        at = f"{where}[{index}]"
+        if isinstance(item, str) and item:
+            items.append(ReviewRoleSpec(item))
+            continue
+        if not isinstance(item, dict):
+            raise ProtocolError(f'{at} must be a review role\'s id or {{"role": "<id>", "required": false}}')
+        _only_keys(item, _REVIEW_ROLE_KEYS, at)
+        role, required = item.get("role"), item.get("required", True)
+        if not isinstance(role, str) or not role:
+            raise ProtocolError(f"{at}.role must be a review role's id")
+        if not isinstance(required, bool):
+            raise ProtocolError(f"{at}.required must be true or false")
+        items.append(ReviewRoleSpec(role, required))
+    if len({item.role for item in items}) != len(items):
+        raise ProtocolError(f"{where} names a role twice")
+    return tuple(items)
 
 
 def _step_id(value: Any, where: str) -> str:
@@ -1069,11 +1102,11 @@ ones that need it; leaving a step out is the same as "leave".
 _ROLE_RULES = """\
 - Roles: a step may also have "role", a work role you defined with
   looper_task_role_set that its Worker runs as, and, when "review" is true,
-  "review_role", a review role you defined that reviews the step after the
-  built-in Reviewer (both must pass). "review_role_required": false makes the
-  review role's verdict advice to you; the built-in Reviewer still must pass.
-  Leave them out for the built-in Worker and Reviewer. The five keys above are
-  in every step.
+  "review_roles", the review roles you defined that review the step after the
+  built-in Reviewer, in that order: each item is a role's id (its review must
+  pass too) or {"role": "<id>", "required": false} (its verdict is advice to
+  you). The built-in Reviewer still must pass. Leave them out for the built-in
+  Worker and Reviewer. The five keys above are in every step.
 """
 
 
