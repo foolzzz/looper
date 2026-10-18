@@ -10,6 +10,9 @@ import asyncio
 import dataclasses
 import json
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -595,6 +598,80 @@ def test_a_case_that_raises_is_a_harness_error_and_the_run_goes_on() -> None:
     assert results[3]["skipped"] and stopped is True
 
 
+def test_cases_run_in_parallel_up_to_the_jobs_and_the_rows_keep_their_order() -> None:
+    gate = threading.Barrier(3, timeout=10)  # three cases are in flight together, or the test times out
+    delays = {"a": 0.3, "b": 0.0, "c": 0.1, "d": 0.0}
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        if (rep, task.id) in ((1, "a"), (1, "b"), (1, "c")):
+            gate.wait()
+        time.sleep(delays[task.id])
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.0}
+
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcd"), run_one, total_cap_usd=None, reps=2, jobs=3)
+    assert stopped is False
+    assert [(r["id"], r["rep"]) for r in results] == [(t, rep) for rep in (1, 2) for t in "abcd"]
+
+
+def test_a_case_starts_only_when_the_spend_and_every_budget_in_flight_fit_the_cap() -> None:
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+    seen: list[tuple[str, float | None]] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+            seen.append((task.id, None if cap_left is None else round(cap_left, 2)))
+        time.sleep(0.2)
+        with lock:
+            running -= 1
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.1}
+
+    # Cap 1.0, budget 0.4 each: two fit (0.8), a third would pass the cap while they run (1.2).
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcdef"), run_one, total_cap_usd=1.0, jobs=4,
+                                        run_budget_usd=0.4)
+    assert peak == 2
+    assert dict(seen)["a"] == 1.0 and dict(seen)["b"] == 0.6  # the cap less what is reserved
+    # a and b cost 0.2, c and d 0.2 more: e needs 0.4 + 0.4 + 0.4 = 1.2 after c's turn; it runs once they end.
+    assert [r["id"] for r in results] == list("abcdef") and not any(r.get("skipped") for r in results)
+    assert stopped is False
+
+
+def test_parallel_cases_are_skipped_once_the_spend_reaches_the_cap() -> None:
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.5}
+
+    results, stopped = runner.run_suite(tuple(_task(t) for t in "abcd"), run_one, total_cap_usd=1.0, jobs=2,
+                                        run_budget_usd=0.5)
+    assert [bool(r.get("skipped")) for r in results] == [False, False, True, True] and stopped is True
+
+
+def test_a_failure_that_is_not_caught_lets_the_cases_in_flight_end_and_is_raised() -> None:
+    started: list[str] = []
+
+    def run_one(task: EvalTask, rep: int, cap_left: float | None) -> dict[str, Any]:
+        started.append(task.id)
+        if task.id == "a":
+            raise RuntimeError("setup failed")
+        time.sleep(0.2)
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.0}
+
+    results: list[dict[str, Any]] = []
+    with pytest.raises(RuntimeError, match="setup failed"):
+        runner.run_suite(tuple(_task(t) for t in "abcd"), run_one, total_cap_usd=None, jobs=2, results=results,
+                         catch=False)
+    assert started == ["a", "b"] and [r["id"] for r in results] == ["b"]
+
+
+def test_ports_handed_out_in_one_process_are_distinct() -> None:
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ports = list(pool.map(lambda _: runner.free_port(), range(64)))
+    assert len(set(ports)) == 64
+
+
 class _CostlyApi:
     """A task whose cost grows 0.1 per poll; it is cancelled when asked and then reports so."""
 
@@ -791,6 +868,18 @@ def test_fake_mode_repeats_each_task_rep_major_in_a_directory_of_its_own(
     shown = capsys.readouterr().out
     assert "| single_step | 2/2 | 1.0 |" in shown and "| dependent_steps | 2/2 | 2.0 |" in shown
     assert "Base: none (no committed baseline evals/prompt_regression/baselines/fake.json)" in shown
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_fake_mode_runs_cases_in_parallel_with_the_same_rows(tmp_path: Path) -> None:
+    code = cli.main(["run", "--mode", "fake", "--pg-url", str(DSN), "--out-dir", str(tmp_path),
+                     "--tasks", "single_step,dependent_steps", "--reps", "2", "--jobs", "4"])
+    written = json.loads(next(tmp_path.glob("*-fake.json")).read_text(encoding="utf-8"))
+    assert code == 0
+    assert [(r["id"], r["rep"], r["outcome"]) for r in written["tasks"]] == [
+        ("single_step", 1, "pass"), ("dependent_steps", 1, "pass"), ("single_step", 2, "pass"),
+        ("dependent_steps", 2, "pass")]
+    assert len({r["work_dir"] for r in written["tasks"]}) == 4
 
 
 _STALLED = EvalTask(

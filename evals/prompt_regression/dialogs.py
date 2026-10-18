@@ -50,7 +50,7 @@ from typing import Any
 from .compare import outcome
 from .runner import (
     Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, error_row, fresh_database, install_claude,
-    register_agent, running_server, select_agent, write_result,
+    register_agent, run_suite, running_server, select_agent, write_result,
 )
 
 # v2: every row has rep, outcome (with error_class and error when it is an error) and models; the run has reps,
@@ -629,15 +629,17 @@ def run(
     *, mode: str, dialogs: tuple[Dialog, ...], admin_url: str, out_dir: Path, model: str | None = None,
     agent: str | None = None, register: dict[str, Any] | None = None, max_budget_usd: float | None = None,
     total_cap_usd: float | None = None, timeout: float | None = None, keep_work_dirs: bool = False,
-    manager_model: str | None = None, manager_effort: str | None = None, reps: int = 1,
+    manager_model: str | None = None, manager_effort: str | None = None, reps: int = 1, jobs: int = 1,
 ) -> tuple[dict[str, Any], Path]:
-    """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, each (dialog, rep) on a database, a server, a
+    """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a database, a server, a
     working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
     ``out_dir``, however the run ends (``runner.run``). With ``manager_model`` the Manager alone runs Claude Code
     with that model and ``manager_effort``. A failure to set a dialog's server up stops the run, as it would stop
     every dialog after it."""
     if reps < 1:
         raise EvalError(f"reps must be at least 1, not {reps}")
+    if jobs < 1:
+        raise EvalError(f"jobs must be at least 1, not {jobs}")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -653,42 +655,40 @@ def run(
     chosen: dict[str, Any] = {}
     manager: dict[str, Any] = {}
     try:
-        for rep in range(1, reps + 1):
-            for dialog in dialogs:
-                spent = sum(float(r.get("cost_usd") or 0.0) for r in results)
-                if stopped or (total_cap_usd is not None and spent >= total_cap_usd):
-                    stopped = True
-                    results.append({"id": dialog.id, "rep": rep, "skipped": "the spending cap was reached",
-                                    "cost_usd": 0.0})
-                    continue
-                case = root / dialog.id / str(rep)
-                work_dir = case / "work" / "calc"
-                work_dir.mkdir(parents=True)
-                scenarios = case / "scenarios.json"
-                scenarios.write_text(json.dumps({os.path.realpath(work_dir): _SLOW_FAKE, "manager": {}}),
-                                     encoding="utf-8")
-                install_claude(case / "bin", mode=mode, scenarios=scenarios,
-                               max_budget_usd=None if register is not None else max_budget_usd,
-                               real_claude=real_claude)
-                (case / "runtime").mkdir()
-                home = case / "home" if mode == "fake" else None
-                if home is not None:
-                    home.mkdir()
-                with fresh_database(admin_url) as (database_url, _):
-                    with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
-                                        log_path=logs / f"{dialog.id}-{rep}.log", home=home) as api:
-                        named = register_agent(api, register)["name"] if register is not None else agent
-                        chosen = select_agent(api, agent=named, model=model)
-                        if register is not None:
-                            api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
-                                                                   "run_budget_usd": max_budget_usd})
-                        manager = _manager_profile(api, manager_model, manager_effort) if manager_model else chosen
-                        project_id = api.post("/api/projects",
-                                              {"name": PROJECT, "work_dir": str(work_dir)})["project_id"]
-                        row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
-                                         scenarios=scenarios, mode=mode, timeout=timeout)
-                    cost, models = _usage(database_url)
-                results.append({"id": dialog.id, "rep": rep, **row, "cost_usd": round(cost, 6), "models": models})
+        def run_case(dialog: Dialog, rep: int, _cap_left: float | None) -> dict[str, Any]:
+            nonlocal chosen, manager
+            case = root / dialog.id / str(rep)
+            work_dir = case / "work" / "calc"
+            work_dir.mkdir(parents=True)
+            scenarios = case / "scenarios.json"
+            scenarios.write_text(json.dumps({os.path.realpath(work_dir): _SLOW_FAKE, "manager": {}}),
+                                 encoding="utf-8")
+            install_claude(case / "bin", mode=mode, scenarios=scenarios,
+                           max_budget_usd=None if register is not None else max_budget_usd,
+                           real_claude=real_claude)
+            (case / "runtime").mkdir()
+            home = case / "home" if mode == "fake" else None
+            if home is not None:
+                home.mkdir()
+            with fresh_database(admin_url) as (database_url, _):
+                with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
+                                    log_path=logs / f"{dialog.id}-{rep}.log", home=home) as api:
+                    named = register_agent(api, register)["name"] if register is not None else agent
+                    chosen = select_agent(api, agent=named, model=model)
+                    if register is not None:
+                        api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
+                                                               "run_budget_usd": max_budget_usd})
+                    manager = _manager_profile(api, manager_model, manager_effort) if manager_model else chosen
+                    project_id = api.post("/api/projects",
+                                          {"name": PROJECT, "work_dir": str(work_dir)})["project_id"]
+                    row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
+                                     scenarios=scenarios, mode=mode, timeout=timeout)
+                cost, models = _usage(database_url)
+            return {**row, "cost_usd": round(cost, 6), "models": models}
+
+        # A failure to set a dialog's server up is not caught: it stops the run (catch off).
+        _, stopped = run_suite(dialogs, run_case, total_cap_usd=total_cap_usd, reps=reps, results=results,
+                               jobs=jobs, run_budget_usd=max_budget_usd, catch=False)
     except BaseException as exc:
         aborted = aborted_reason(exc)
         if not isinstance(exc, Exception):
