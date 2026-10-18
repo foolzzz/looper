@@ -1,0 +1,260 @@
+{
+  "baseline": "origin/main 10991b00acd97386937f011c572ee9e4c1f947c9; hand-transcribed from source, no adapter helpers",
+  "prompt": "Looper contract\nwith Unicode: 契约\n",
+  "server_environment": {
+    "HOME": "<TMP>/operator",
+    "CODEX_HOME": "<TMP>/operator/codex",
+    "GROK_HOME": "<TMP>/operator/grok",
+    "UNCHANGED": "server-value"
+  },
+  "runtimes": {
+    "claude-code": {
+      "argv": {
+        "run_command": [
+          "claude",
+          "--print",
+          "--verbose",
+          "--output-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--input-format",
+          "stream-json",
+          "--replay-user-messages",
+          "--setting-sources",
+          "project",
+          "--strict-mcp-config",
+          "--settings",
+          "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"<TMP>/operator/.claude/CLAUDE.md\",\"<TMP>/operator/.claude/rules/**\",\"<TMP>/operator/.claude/AGENTS.md\"]}",
+          "--append-system-prompt-file",
+          "<LOCAL>/prompts/3df583ce7c9a6b9469979f4b4d6652d585c09337fd6b7993c9aab559f419e8c8.md",
+          "--system-prompt-snapshot",
+          "off",
+          "--dangerously-skip-permissions",
+          "--model",
+          "test-model"
+        ],
+        "resident_command": [
+          "claude",
+          "--print",
+          "--verbose",
+          "--output-format",
+          "stream-json",
+          "--input-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--replay-user-messages",
+          "--setting-sources",
+          "project",
+          "--strict-mcp-config",
+          "--settings",
+          "{\"autoMemoryEnabled\":false,\"claudeMdExcludes\":[\"<TMP>/operator/.claude/CLAUDE.md\",\"<TMP>/operator/.claude/rules/**\",\"<TMP>/operator/.claude/AGENTS.md\"]}",
+          "--append-system-prompt-file",
+          "<LOCAL>/prompts/3df583ce7c9a6b9469979f4b4d6652d585c09337fd6b7993c9aab559f419e8c8.md",
+          "--system-prompt-snapshot",
+          "off",
+          "--dangerously-skip-permissions",
+          "--model",
+          "test-model"
+        ]
+      },
+      "environment": {
+        "HOME": "<TMP>/operator",
+        "CODEX_HOME": "<TMP>/operator/codex",
+        "GROK_HOME": "<TMP>/operator/grok",
+        "UNCHANGED": "server-value",
+        "ANTHROPIC_BASE_URL": "http://localhost.invalid/v1",
+        "ANTHROPIC_AUTH_TOKEN": "test-only",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "test-model",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "test-model",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "test-model",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "test-model",
+        "ANTHROPIC_SMALL_FAST_MODEL": "test-model"
+      },
+      "files": {
+        "prompts/3df583ce7c9a6b9469979f4b4d6652d585c09337fd6b7993c9aab559f419e8c8.md": {
+          "text": "Looper contract\nwith Unicode: 契约\n"
+        }
+      }
+    },
+    "codex": {
+      "home": "<LOCAL>/codex/runs/aadf63cac484796fe15c729442f6b9156dea5138a9d9a37830bde7f0d3d27512",
+      "argv": {
+        "run_command": [
+          "env",
+          "CODEX_HOME=<HOME>",
+          "codex",
+          "exec",
+          "--json",
+          "--skip-git-repo-check",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "-m",
+          "test-model",
+          "--ephemeral",
+          "-"
+        ],
+        "resident_command": [
+          "env",
+          "CODEX_HOME=<HOME>",
+          "codex",
+          "exec",
+          "--json",
+          "--skip-git-repo-check",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "-m",
+          "test-model"
+        ]
+      },
+      "environment": {
+        "HOME": "<TMP>/operator",
+        "CODEX_HOME": "<TMP>/operator/codex",
+        "GROK_HOME": "<TMP>/operator/grok",
+        "UNCHANGED": "server-value",
+        "LOOPER_PROVIDER_API_KEY": "test-only"
+      },
+      "files": {
+        "prompts/3df583ce7c9a6b9469979f4b4d6652d585c09337fd6b7993c9aab559f419e8c8.md": {
+          "text": "Looper contract\nwith Unicode: 契约\n"
+        },
+        "codex/runs/aadf63cac484796fe15c729442f6b9156dea5138a9d9a37830bde7f0d3d27512/config.toml": {
+          "text": "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.\nmodel_provider = \"looper\"\n# A directory of the project without AGENTS.md: its CLAUDE.md instead.\nproject_doc_fallback_filenames = [\"CLAUDE.md\"]\n\n# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.\n[skills]\ninclude_instructions = false\n\n# No plugin marketplace sync into this home.\n[features]\nplugins = false\n\n# The agent's shell commands do not get the provider's key.\n[shell_environment_policy]\nexclude = [\"LOOPER_PROVIDER_API_KEY\"]\n\n[model_providers.looper]\nname = \"test\"\nbase_url = \"http://localhost.invalid/v1\"\nenv_key = \"LOOPER_PROVIDER_API_KEY\"\nwire_api = \"responses\"\n"
+        },
+        "codex/runs/aadf63cac484796fe15c729442f6b9156dea5138a9d9a37830bde7f0d3d27512/AGENTS.md": {
+          "text": "# Runtime notes (Codex)\n\nLooper runs you through Codex. The instructions after these notes are Looper's, not a repository's AGENTS.md.\n\n- Looper reads only your last message of each turn. When the instructions ask for a reply or a report in a given shape (such as a JSON block), put all of it in that last message.\n\n---\n\nLooper contract\nwith Unicode: 契约\n"
+        }
+      }
+    },
+    "grok": {
+      "home": "<LOCAL>/grok/runs/<HOME_HASH>",
+      "argv": {
+        "run_command": [
+          "env",
+          "GROK_HOME=<HOME>",
+          "HOME=<HOME>",
+          "grok",
+          "--prompt-file",
+          "/dev/stdin",
+          "--output-format",
+          "streaming-messages-json",
+          "--always-approve",
+          "--trust",
+          "--no-auto-update",
+          "-m",
+          "test-model"
+        ],
+        "resident_command": [
+          "env",
+          "GROK_HOME=<HOME>",
+          "HOME=<HOME>",
+          "grok",
+          "--prompt-file",
+          "/dev/stdin",
+          "--output-format",
+          "streaming-messages-json",
+          "--always-approve",
+          "--trust",
+          "--no-auto-update",
+          "-m",
+          "test-model"
+        ]
+      },
+      "environment": {
+        "HOME": "<TMP>/operator",
+        "CODEX_HOME": "<TMP>/operator/codex",
+        "UNCHANGED": "server-value",
+        "GROK_DISABLE_AUTOUPDATER": "1",
+        "GROK_MEMORY": "0",
+        "GROK_CLAUDE_SKILLS_ENABLED": "false",
+        "GROK_CLAUDE_RULES_ENABLED": "false",
+        "GROK_CLAUDE_AGENTS_ENABLED": "false",
+        "GROK_CLAUDE_MCPS_ENABLED": "false",
+        "GROK_CLAUDE_HOOKS_ENABLED": "false",
+        "GROK_CURSOR_SKILLS_ENABLED": "false",
+        "GROK_CURSOR_RULES_ENABLED": "false",
+        "GROK_CURSOR_AGENTS_ENABLED": "false",
+        "GROK_CURSOR_MCPS_ENABLED": "false",
+        "GROK_CURSOR_HOOKS_ENABLED": "false"
+      },
+      "files": {
+        "prompts/3df583ce7c9a6b9469979f4b4d6652d585c09337fd6b7993c9aab559f419e8c8.md": {
+          "text": "Looper contract\nwith Unicode: 契约\n"
+        },
+        "grok/runs/<HOME_HASH>/config.toml": {
+          "text": "# Written by Looper for its Grok runs. Only this file, rules/looper.md and the auth.json link come from Looper.\n# Grok's own login: auth.json here links to the operator's login file, never a copy.\n\n# No update check, no shared leader.\n[cli]\nauto_update = false\nuse_leader = false\n\n# No memory carried between sessions.\n[memory]\nenabled = false\n\n# No product telemetry and no session trace upload from these runs.\n[features]\ntelemetry = false\n\n[telemetry]\ntrace_upload = false\n\n# None of Claude Code's or Cursor's user directories (~/.claude, ~/.claude.json, ~/.cursor).\n[compat.claude]\nskills = false\nrules = false\nagents = false\nmcps = false\nhooks = false\n\n[compat.cursor]\nskills = false\nrules = false\nagents = false\nmcps = false\nhooks = false\n\n# The agent's shell commands get a GROK_HOME without the login, so a grok command there cannot use it or\n# log it out, and the operator's HOME and the other directories Grok does not get.\n[shell_environment_policy]\nset = { GROK_HOME = \"<LOCAL>/grok/shell-home\", HOME = \"<TMP>/operator\" }\n"
+        },
+        "grok/runs/<HOME_HASH>/rules/looper.md": {
+          "text": "# Runtime notes (Grok)\n\nLooper runs you through Grok. The instructions after these notes are Looper's.\n\n- Looper reads only your final message. When the instructions ask for a reply or a report in a given shape (such as a JSON block), put all of it in that final message.\n\n---\n\nLooper contract\nwith Unicode: 契约\n"
+        },
+        "grok/runs/<HOME_HASH>/auth.json": {
+          "symlink": "<TMP>/operator/grok/auth.json"
+        },
+        "grok/runs/<HOME_HASH>/bundled": {
+          "symlink": "<LOCAL>/grok/shared/bundled"
+        },
+        "grok/runs/<HOME_HASH>/docs": {
+          "symlink": "<LOCAL>/grok/shared/docs"
+        }
+      }
+    },
+    "omp": {
+      "home": "<LOCAL>/omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020",
+      "argv": {
+        "run_command": [
+          "env",
+          "HOME=<HOME>",
+          "omp",
+          "-p",
+          "--mode",
+          "json",
+          "--no-title",
+          "--model",
+          "looper/test-model",
+          "--config",
+          "<HOME>/looper.yml",
+          "--append-system-prompt",
+          "<HOME>/prompts/71a2608c86f94649e434ccdcbf6696e7f7f487e1833b97e8430ee960e5a3a715.md",
+          "--no-session"
+        ],
+        "resident_command": [
+          "env",
+          "HOME=<HOME>",
+          "omp",
+          "-p",
+          "--mode",
+          "json",
+          "--no-title",
+          "--model",
+          "looper/test-model",
+          "--config",
+          "<HOME>/looper.yml",
+          "--append-system-prompt",
+          "<HOME>/prompts/71a2608c86f94649e434ccdcbf6696e7f7f487e1833b97e8430ee960e5a3a715.md"
+        ]
+      },
+      "environment": {
+        "HOME": "<TMP>/operator",
+        "CODEX_HOME": "<TMP>/operator/codex",
+        "GROK_HOME": "<TMP>/operator/grok",
+        "UNCHANGED": "server-value",
+        "LOOPER_PROVIDER_API_KEY": "test-only",
+        "PI_SHELL_PREFIX": "export HOME=<SHELL_OPERATOR>; unset LOOPER_PROVIDER_API_KEY;"
+      },
+      "files": {
+        "prompts/3df583ce7c9a6b9469979f4b4d6652d585c09337fd6b7993c9aab559f419e8c8.md": {
+          "text": "Looper contract\nwith Unicode: 契约\n"
+        },
+        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/.omp/agent/models.yml": {
+          "text": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"http://localhost.invalid/v1\",\n   \"models\": [\n    {\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"test-model\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"test-model\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n"
+        },
+        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/looper.yml": {
+          "text": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"enabledModels\": [\n  \"looper/test-model\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/test-model\",\n  \"plan\": \"looper/test-model\",\n  \"slow\": \"looper/test-model\",\n  \"smol\": \"looper/test-model\",\n  \"vision\": \"looper/test-model\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+        },
+        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/.omp/natives": {
+          "symlink": "<LOCAL>/omp/natives"
+        },
+        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/prompts/71a2608c86f94649e434ccdcbf6696e7f7f487e1833b97e8430ee960e5a3a715.md": {
+          "text": "# Runtime notes (OMP)\n\nLooper runs you through OMP. The instructions after these notes are Looper's.\n\n- Looper reads only your final message. When the instructions ask for a reply or a report in a given shape (such as a JSON block), put all of it in that final message.\n\n---\n\nLooper contract\nwith Unicode: 契约\n"
+        }
+      }
+    }
+  }
+}

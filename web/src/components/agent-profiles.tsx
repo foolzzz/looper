@@ -25,6 +25,7 @@ import {
   type Registry,
   type Runtime,
   type SelfCheck,
+  type SystemPromptMode,
 } from "@/lib/api";
 import { LOGIN_HELP, PLANNED_RUNTIMES, RUNTIME_TYPES, loginUsable, roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
@@ -167,11 +168,13 @@ export function AgentProfileForm({
       model: profile?.model ?? fittingModel(provider, ""),
       effort: profile?.effort ?? "",
       agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
+      system_prompt_mode: profile?.system_prompt_mode ?? ("append" as SystemPromptMode),
     };
   });
   const action = useAction();
   const [warnings, setWarnings] = useState<string[]>([]);
   const [saved, setSaved] = useState<AgentProfile | null>(null);
+  const [promptReset, setPromptReset] = useState(false);
   const set = (change: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...change }));
   const runtime = registry.runtimes.find((r) => r.runtime_id === draft.runtime_id);
   const type = runtimeType(registry, runtime);
@@ -182,18 +185,24 @@ export function AgentProfileForm({
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
   // Agent teams are a Claude Code feature: the server refuses them on another runtime.
   const teams = type?.type === "claude-code";
+  const canReplace = type?.can_replace_system_prompt === true;
+  const replaceRefusal = canReplace ? null : type?.replace_system_prompt_refusal
+    ?? "This runtime cannot replace its default system prompt.";
   const undetected = registry.runtime_types.filter((t) => !registry.runtimes.some((r) => r.builtin && r.type === t.type));
 
   const chooseRuntime = (runtimeId: string) => {
     const next = registry.runtimes.find((r) => r.runtime_id === runtimeId);
     const providerId = firstProvider(registry, next);
-    const nextType = runtimeType(registry, next)?.type;
+    const nextRuntimeType = runtimeType(registry, next);
+    const nextType = nextRuntimeType?.type;
     // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
+    const resetPrompt = draft.system_prompt_mode === "replace" && !nextRuntimeType?.can_replace_system_prompt;
+    setPromptReset(resetPrompt);
     set({ runtime_id: runtimeId, provider_id: providerId,
           model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model),
-          agent_teams: agentTeams });
+          agent_teams: agentTeams, system_prompt_mode: resetPrompt ? "append" : draft.system_prompt_mode });
   };
   const chooseProvider = (providerId: string) => {
     if (providerId === NEW_PROVIDER) {
@@ -295,6 +304,25 @@ export function AgentProfileForm({
               <option key={level} value={level}>{level}</option>
             ))}
           </select>
+        </div>
+        <div className="space-y-1 sm:col-span-2">
+          <label htmlFor={`${id}-system-prompt`} className={LABEL}>System prompt</label>
+          <select
+            id={`${id}-system-prompt`}
+            value={draft.system_prompt_mode}
+            onChange={(e) => set({ system_prompt_mode: e.target.value as SystemPromptMode })}
+            disabled={!canReplace}
+            aria-describedby={replaceRefusal ? `${id}-system-prompt-hint` : undefined}
+            className={SELECT}
+          >
+            <option value="append">Append to the runtime&apos;s default</option>
+            <option value="replace" disabled={!canReplace}>Replace the runtime&apos;s default</option>
+          </select>
+          {replaceRefusal && (
+            <p id={`${id}-system-prompt-hint`} className="text-[11px] text-muted-foreground" role={promptReset ? "status" : undefined}>
+              {replaceRefusal}{promptReset && " The editor changed this draft to append."}
+            </p>
+          )}
         </div>
         {teams && (
           <div className="space-y-1 sm:col-span-2">
@@ -457,6 +485,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
         {runtime ? runtimeTitle(runtime) : profile.runtime_name} · {profile.provider_name} · model{" "}
         <span className="font-mono text-foreground/80">{profile.model}</span> · effort {profile.effort ?? "runtime default"}
         {profile.agent_teams && <> · <span className="text-foreground">agent teams on</span></>}
+        {profile.system_prompt_mode === "replace" && <> · <span className="text-foreground">replaces default system prompt</span></>}
         {costBasisText(profile) && ` · ${costBasisText(profile)}`}
       </p>
       <p className="text-xs text-muted-foreground">

@@ -65,6 +65,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
+from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
+
 if TYPE_CHECKING:
     from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
@@ -207,6 +209,7 @@ class RuntimeAdapter(ABC):
     # Whether a run priced by the runtime's own figure (``CostSource.RUNTIME``) stops at its per-run spend cap:
     # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
     runtime_cost_capped: ClassVar[bool] = True
+    can_replace_system_prompt: ClassVar[bool] = False
 
     # --- Registration ---
 
@@ -321,6 +324,13 @@ class RuntimeAdapter(ABC):
         """What the runtime adds to a run's record, such as the installed items it could not load; nothing
         unless the adapter says otherwise."""
         return {}
+
+
+def replace_refusal(adapter: RuntimeAdapter) -> str | None:
+    """The shared API and dashboard reason a runtime cannot replace its default prompt."""
+    if not adapter.can_replace_system_prompt:
+        return f"the {adapter.label} runtime cannot replace its default system prompt"
+    return None
 
 
 def _adapters() -> dict[str, RuntimeAdapter]:

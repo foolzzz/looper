@@ -346,8 +346,10 @@ def main(argv: list[str]) -> int:
         scenarios = json.load(handle)
     script = scenarios.get(os.path.realpath(os.getcwd())) or scenarios.get(_main_checkout(), {})
     system_prompt = ""
-    if "--append-system-prompt-file" in args:
-        with open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8") as handle:
+    # The prompt file comes with --append-system-prompt-file, or --system-prompt-file in a profile's replace mode.
+    flag = next((f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in args), None)
+    if flag:
+        with open(args[args.index(flag) + 1], encoding="utf-8") as handle:
             system_prompt = handle.read()
     review = re.search(r"^The step under review:", system_prompt, re.MULTILINE)
     real = os.environ.get(REAL_CLAUDE_ENV)

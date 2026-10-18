@@ -343,7 +343,7 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
   );
 }
 
-/** What Looper appended to Claude Code's system prompt for this run. */
+/** The system prompt Looper supplied to the runtime for this run. */
 function SystemPrompt({ record }: { record: LlmRecord }) {
   const metadata = record.metadata;
   // Runs recorded before metadata.system_prompt existed may still carry it in their command.
@@ -351,14 +351,24 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
   if (text == null) return null;
   const sha = metadata?.system_prompt_sha256;
   const layers = metadata?.prompt_layers;
+  const replaced = metadata?.system_prompt_mode === "replace";
   return (
     <Collapsible
       icon={<ScrollText className="h-3 w-3" />}
       title={
         <span className="flex items-center gap-1.5">
           <span className="truncate">
-            System prompt · {text.length} chars{sha ? ` · ${shortSha(sha)}` : " · appended by Looper"}
+            System prompt · {text.length} chars{sha ? ` · ${shortSha(sha)}` : replaced ? "" : " · appended by Looper"}
           </span>
+          {replaced && (
+            <Badge
+              variant="outline"
+              className="shrink-0 py-0 text-[10px]"
+              title="Looper replaced the runtime's default system prompt for this run"
+            >
+              replaced default
+            </Badge>
+          )}
           {layers?.isolation && (
             <Badge
               variant="outline"
@@ -379,7 +389,9 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
         </div>
       )}
       <p className="mb-2 text-[11px] text-muted-foreground">
-        The part Looper appends to Claude Code&apos;s system prompt; its built-in system prompt is not included.
+        {replaced
+          ? "The prompt Looper used to replace the runtime's default system prompt."
+          : "The part Looper appends to the runtime's system prompt; its built-in system prompt is not included."}
       </p>
       <Pre text={text} />
     </Collapsible>
