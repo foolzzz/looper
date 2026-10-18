@@ -378,6 +378,9 @@ def run_task(
             api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
         if task.roles_on:
             api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
+        for template in task.role_templates:
+            fields = {k: v for k, v in template.items() if k != "key"}
+            api.put(f"/api/projects/{created['project_id']}/role-templates/{template['key']}", fields)
         gates = "on" if task.user_gates else user_gates
         if gates is not None:
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
@@ -511,7 +514,8 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
-                "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform", "gate_ambiguous",
+                "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
+                "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
                 "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface"),
 }
 

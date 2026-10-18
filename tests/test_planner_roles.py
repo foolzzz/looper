@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from looper.agents.bus import MessageBus
-from looper.agents.message import MessageEnvelope, MessageType
+from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
 from looper.agents.tiers.planner import PlanStep, PlannerAgent, ReviewStage, TaskPlan
 from tests.test_planner_agent import (
     REVIEW_FAIL,
@@ -27,6 +27,7 @@ from tests.test_planner_agent import (
     decide,
     drive,
     plan,
+    reply,
     step,
 )
 
@@ -275,3 +276,58 @@ def test_a_planner_started_again_reads_its_steps_roles_back(agent_db: Any) -> No
     loaded = asyncio.run(run())
     assert (loaded.role, loaded.review_role, loaded.review_role_required, loaded.role_version,
             loaded.review_role_version, loaded.review_stage) == ("tester", "style", False, 2, 1, ReviewStage.ROLE)
+
+
+TEMPLATE_LINES = ("This project's role templates (when one fits a step, define its role from it with "
+                  "looper_task_role_set and template):\n- security (review): steps that change authentication\n"
+                  "- tester (work)")
+
+
+def _templates(agent_db: Any) -> None:
+    agent_db.list_templates.return_value = [
+        {"template_key": "security", "kind": "review", "description": "steps that change authentication"},
+        {"template_key": "tester", "kind": "work", "description": ""}]
+
+
+def test_the_planning_and_restart_turns_list_the_projects_role_templates(
+    planner_claude: Any, agent_db: Any, roles: _Roles,
+) -> None:
+    _templates(agent_db)
+    claude = planner_claude(plan(step("s1")), reply({"reply": "Going on.", "action": "none"}), decide("accept"))
+    held: list[MessageEnvelope] = []
+
+    def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
+        held.append(envelope)
+        return None if len(held) == 1 else WORK_OK  # the first attempt runs until the task stops
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held)
+        await h.planner.stop()
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        await h.bus.publish(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+            payload={"requirement": "build the calc package", "goal_id": "g1", "work_dir": str(h.work_dir),
+                     "project_id": "proj-1", "restart": RestartMode.CONTINUE.value, "ended": "stopped"},
+            correlation_id="corr-1"))
+        await h.finished()
+
+    h = drive(claude, outcome, scenario)
+
+    texts = [turn["text"] for turn in claude.turns()]
+    assert texts[0].startswith("[PLAN]") and texts[1].startswith("[RESTART]")
+    assert TEMPLATE_LINES in texts[0] and TEMPLATE_LINES in texts[1]
+    assert TEMPLATE_LINES not in texts[2]  # a decision turn plans nothing
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+
+
+def test_where_the_project_lets_its_planner_define_no_role_no_turn_lists_its_templates(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    _templates(agent_db)
+    claude = planner_claude(plan(step("s1")), decide("accept"))
+    drive(claude, lambda e: WORK_OK)
+
+    assert "role templates" not in claude.turns()[0]["text"]
