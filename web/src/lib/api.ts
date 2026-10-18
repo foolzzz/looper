@@ -1603,6 +1603,15 @@ export interface RunRole {
  * role whose current version is the user's). */
 export type RoleVia = "planner" | "user";
 
+/** A catalog item a role or a template names; its runs load it besides the built-in role's installs while it is
+ * installed for roles (an install's "task_role"). kind and name are null for one the catalog no longer has. */
+export interface RoleItem {
+  id: string;
+  kind: LibraryKind | null;
+  name: string | null;
+  description?: string;
+}
+
 /** A role a task's Planner defined: "work" runs a step in the built-in Worker's place; "review" reviews a step
  * after the built-in Reviewer passed it, and both must pass. */
 export interface PlannerRole {
@@ -1623,6 +1632,8 @@ export interface PlannerRole {
   via: RoleVia;
   /** The project role template the current version was copied from, by key. */
   template: string | null;
+  /** The catalog items the current version names. */
+  items: RoleItem[];
   /** Every version, oldest first. */
   versions: { version: number; created_at: string; reason: string; via: RoleVia; template: string | null; sha256: string }[];
   /** The labels of the live steps that name it. */
@@ -1637,6 +1648,8 @@ export interface TaskRoleEdit {
   harness: string | null;
   /** One on the project's list of Agent Profiles that can run the kind. */
   profile_id: string | null;
+  /** Item ids, each installed for roles in the project; left out keeps the current ones. */
+  items?: string[];
 }
 
 /** Write `fields` as a new version of the task's role `key`, by the user; its Planner hears of it. Fails for a
@@ -1692,6 +1705,19 @@ export interface JournalEntry {
   created_at: string;
 }
 
+/** A review role a step names. */
+export interface StepReviewRole {
+  role: string;
+  required: boolean;
+  version: number | null;
+}
+
+/** The review role a step in review waits for; null while it waits for the built-in Reviewer, or is not in review. */
+export function reviewingRole(step: TaskStep): StepReviewRole | null {
+  if (step.review_stage !== "role" || step.review_position == null) return null;
+  return step.review_roles[step.review_position] ?? null;
+}
+
 export interface TaskStep {
   id: string;
   task_id: string;
@@ -1713,15 +1739,15 @@ export interface TaskStep {
   review: boolean;
   /** The role its Worker runs as; null: the built-in Worker. */
   role_key: string | null;
-  /** The role that reviews it after the built-in Reviewer passed it; null: none. */
-  review_role_key: string | null;
-  /** Whether that role's verdict blocks the step (true) or only advises the Planner (false). */
-  review_role_required: boolean;
-  /** The versions of those roles its latest attempt ran with; null before it ran as one. */
+  /** The version of that role its latest attempt ran with; null before it ran as one. */
   role_version: number | null;
-  review_role_version: number | null;
-  /** Which review a step in review waits for: the built-in Reviewer's or its review role's. */
+  /** The roles that review it after the built-in Reviewer passed it, in order; each blocks the step (required) or
+   * only advises the Planner, and version is the one its latest review ran with (null before one ran). */
+  review_roles: StepReviewRole[];
+  /** Which review a step in review waits for: the built-in Reviewer's or a review role's, the one at
+   * review_position in review_roles. */
   review_stage: "builtin" | "role" | null;
+  review_position: number | null;
   retries: number;
   worker_id: string | null;
   reviewer_id: string | null;
@@ -2160,10 +2186,10 @@ export interface ProviderEnvEntry {
 }
 
 /** A runtime's own login as the server last read it: "chatgpt" (Codex's ChatGPT login, what its login provider
- * runs with), "other_method", "not_logged_in", "unknown", or "unavailable" while a forked login a run found is
- * not cleared. */
+ * runs with), "logged_in" (Grok's login file is there), "other_method", "not_logged_in", "unknown", or
+ * "unavailable" while a forked login a run found is not cleared. */
 export interface ProviderLogin {
-  state: "chatgpt" | "other_method" | "not_logged_in" | "unknown" | "unavailable";
+  state: "chatgpt" | "logged_in" | "other_method" | "not_logged_in" | "unknown" | "unavailable";
   detail: string;
 }
 
@@ -2181,7 +2207,7 @@ export interface Provider {
   models: ProviderModel[];
   /** The models its runtime's own login offers, to suggest (an OAuth provider; any model is taken). */
   suggested_models: string[];
-  /** The login's state, for an OAuth provider whose runtime reports one (Codex); null otherwise. */
+  /** The login's state, for an OAuth provider whose runtime reports one (Codex, Grok); null otherwise. */
   login: ProviderLogin | null;
   /** Its own environment variables for the runs that use it. */
   env: ProviderEnvEntry[];
@@ -2332,7 +2358,7 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
 }
 
-/** After checking `codex login status` on the machine: let runs use the Codex login again after a run found it
+/** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it
  * forked. */
 export function clearLoginProblem(providerId: string): Promise<{ provider: Provider }> {
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}/login-problem`, undefined,
@@ -2558,6 +2584,8 @@ export interface RoleTemplate {
   harness: string | null;
   /** One the project no longer allows (allowed false) is left out of a copy. */
   profile: { profile_id: string; name: string; allowed: boolean } | null;
+  /** One no longer installed for roles here is left out of a copy. */
+  items: RoleItem[];
   updated_at: string;
 }
 
@@ -2566,11 +2594,29 @@ export interface RoleTemplates {
   /** How long a template's role prompt and harness may each be. */
   role_text_max_chars: number;
   templates: RoleTemplate[];
+  /** The catalog items installed for roles here, which a role or a template may name. */
+  role_items: RoleItem[];
 }
 
 export type RoleTemplateFields = Pick<RoleTemplate, "kind" | "description" | "role_prompt" | "harness"> & {
   profile_id: string | null;
+  items: string[];
 };
+
+/** The roles a project's Planners defined, summed by id across the project's tasks with roles; one id may be
+ * another definition in each task. builtin: the built-in Worker's and Reviewer's numbers in the same tasks. */
+export interface ProjectRoleStats {
+  project_id: string;
+  tasks: number;
+  roles: { id: string; kinds: ("work" | "review")[]; tasks: number; templates: string[]; stats: RoleStats }[];
+  builtin: { worker: RoleStats; reviewer: RoleStats };
+}
+
+export async function fetchProjectRoleStats(projectId: string): Promise<ProjectRoleStats> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/role-stats`);
+  if (!res.ok) await failed(res, "role numbers");
+  return res.json();
+}
 
 const roleTemplatesPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/role-templates`;
 
@@ -2601,6 +2647,14 @@ export type LibraryKind = "plugin" | "skill" | "mcp";
  * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
 export type AgentRole = "manager" | "planner" | "worker" | "reviewer";
+/** An install's roles: the built-in ones, and "task_role", the roles a task's Planner defines: such an install loads
+ * only for a run of a role that names its item. */
+export type InstallRole = AgentRole | "task_role";
+export const TASK_ROLE: InstallRole = "task_role";
+/** An install's role in words: a built-in role's name, or what TASK_ROLE means. */
+export const installRoleLabel = (role: InstallRole) => (role === TASK_ROLE ? "roles naming it" : role);
+/** The roles a new install names unless the user picks: the built-in ones, never TASK_ROLE. */
+export const defaultInstallRoles = (roles: InstallRole[]) => roles.filter((role) => role !== TASK_ROLE);
 export type InstallScope = "global" | "project";
 
 /** An item installed on a scope for some roles; a project install never names the manager. */
@@ -2610,7 +2664,7 @@ export interface Install {
   scope: InstallScope;
   project_id: string | null;
   project_name: string | null;
-  roles: AgentRole[];
+  roles: InstallRole[];
   /** A disabled install loads nowhere, from the next run on. */
   enabled: boolean;
   created_at: string;
@@ -2698,8 +2752,8 @@ export interface Catalog {
   total_bytes: number;
   last_import: LibraryImport | null;
   last_mcp_import: McpImport | null;
-  roles: AgentRole[];
-  task_roles: AgentRole[];
+  roles: InstallRole[];
+  task_roles: InstallRole[];
   caps: {
     file_max_bytes: number;
     item_max_bytes: number;
@@ -2732,7 +2786,7 @@ export interface ProjectInstalls {
   installs: ProjectInstall[];
   /** How many skills the project wrote. */
   owned_count: number;
-  task_roles: AgentRole[];
+  task_roles: InstallRole[];
   skill_caps: SkillCaps;
 }
 
@@ -2824,7 +2878,7 @@ export async function installItem(install: {
   item_id: string;
   scope: InstallScope;
   project_id?: string;
-  roles?: AgentRole[];
+  roles?: InstallRole[];
   enabled?: boolean;
 }): Promise<InstallChange> {
   const res = await fetch(`${API_BASE}/installs`, {
@@ -2838,7 +2892,7 @@ export async function installItem(install: {
 
 export async function updateInstall(
   installId: string,
-  fields: { roles?: AgentRole[]; enabled?: boolean },
+  fields: { roles?: InstallRole[]; enabled?: boolean },
 ): Promise<InstallChange> {
   const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, {
     method: "PUT",

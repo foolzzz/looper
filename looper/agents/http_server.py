@@ -326,6 +326,7 @@ class AgentHTTPServer:
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
     _RE_PROJECT_ROLE_TEMPLATES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$")
+    _RE_PROJECT_ROLE_STATS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$")
     _RE_PROJECT_ROLE_TEMPLATE = re.compile(
         r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
@@ -542,6 +543,8 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
                 m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ROLE_STATS.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: role_api.role_stats(m.group(1), query.get("since")))
         elif (m := self._RE_PROJECT_ROLE_TEMPLATES.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: role_api.templates_view(m.group(1)))
         elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "PUT":
@@ -723,11 +726,10 @@ class AgentHTTPServer:
         await writer.drain()
 
     async def _checks_now(self) -> list[dict[str, str]]:
-        """The startup self-check, with the Codex login read now: a run may have found it forked since."""
-        if not any(check.get("id") == "codex_login" for check in self._self_checks):
-            return self._self_checks
-        codex = (await self_check.codex_login_check()).to_dict()
-        return [codex if check.get("id") == "codex_login" else check for check in self._self_checks]
+        """The startup self-check, with the runtimes' own logins read now: a run may have found one forked since."""
+        now = {check.get("id"): (await self_check.LOGIN_CHECKS[check["id"]]()).to_dict()
+               for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS}
+        return [now.get(check.get("id"), check) for check in self._self_checks]
 
     async def _handle_status(self, writer: asyncio.StreamWriter) -> None:
         agents = self._supervisor.agent_status()

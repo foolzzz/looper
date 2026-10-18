@@ -138,11 +138,11 @@ for line in sys.stdin:
         call("looper_task_role_set", {"id": "worker", "kind": "work", "role_prompt": TESTER})  # refused
         call("looper_task_role_set", {"id": "tester", "kind": "work", "role_prompt": TESTER,
                                       "harness": TESTER_HARNESS, "profile_id": "claude-code/sonnet",
-                                      "reason": "the tests need their own author"})
+                                      "items": ["role-notes"], "reason": "the tests need their own author"})
         if variant == "roles":
             call("looper_task_role_set", {"id": "security", "kind": "review", "role_prompt": SECURITY})
             call("looper_task_roles", {})
-            reply = {"steps": [spec("a", True, role="tester", review_role="security"), spec("b", True)]}
+            reply = {"steps": [spec("a", True, role="tester", review_roles=["security"]), spec("b", True)]}
         else:
             reply = {"steps": [spec("a", role="tester")]}
     elif text.startswith("[RESTART]"):
@@ -222,6 +222,10 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         with running_server(**server, log_path=root / "serve.log") as api:
             sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                                       "provider_id": "prov-claude-subscription", "model": "sonnet"})
+            # A skill installed for the roles a Planner defines only: it loads for a run of a role naming it.
+            notes = api.post("/api/catalog/skills", {"name": "role-notes", "description": "Notes for roles.",
+                                                     "content": "Reply ROLE-NOTES.\n"})["item"]
+            api.post("/api/installs", {"item_id": notes["item_id"], "scope": "global", "roles": ["task_role"]})
             ids: dict[str, str] = {}
             for variant in VARIANTS:
                 work = root / f"work-{variant}"
@@ -263,7 +267,7 @@ def test_the_planner_defines_roles_with_its_tools_and_a_refused_definition_chang
     listed = _log(ran["state"], "planner.jsonl", "roles")[0]
     assert listed["tools"][-2:] == ["looper_task_roles", "looper_task_role_set"]
     assert "looper_task_role_set" in listed["prompt"] and ROLES_GUIDE in listed["prompt"]
-    assert "\"review_role_required\": false makes the" in listed["prompt"]
+    assert '{"role": "<id>", "required": false} (its verdict is advice to\n  you)' in listed["prompt"]
     answers = [(c["arguments"].get("id"), c["answer"]["status"]) for c in _calls(ran, "roles")
                if c["tool"] == "looper_task_role_set"]
     assert answers == [("worker", "error"), ("tester", "ok"), ("security", "ok"), ("tester", "ok")]
@@ -315,6 +319,19 @@ def test_every_role_run_ends_with_the_boundaries_and_a_built_in_run_is_as_before
     assert {m["outcome"] for m in ran["layers"] if m["task_id"] == roles_task} == {"completed", "passed", "not_passed"}
 
 
+def test_a_role_run_loads_the_items_its_role_names_and_no_other_run_does(ran: dict[str, Any]) -> None:
+    roles_task = ran["ids"]["roles"]
+    loaded = {(m["agent_id"], (m["prompt_layers"].get("task_role") or {}).get("version")):
+              [item["name"] for item in (m.get("library") or {}).get("items") or []]
+              for m in ran["layers"] if m["task_id"] == roles_task and m["agent_id"].startswith("worker-")}
+    by_version = {version: names for (_, version), names in loaded.items()}
+    # tester v1 names the skill; v2 (the Planner's rewrite) names none, and the built-in Worker never loads it.
+    assert by_version == {1: ["role-notes"], 2: [], None: []}
+    read = next(c["answer"]["result"] for c in _calls(ran, "roles") if c["tool"] == "looper_task_roles")
+    assert [item["name"] for item in read["role_items"]] == ["role-notes"]
+    assert read["roles"][0]["items"]  # tester v1, by the item's id
+
+
 def test_a_run_as_a_role_is_named_by_it_wherever_runs_are_listed_and_a_built_in_run_as_before(
     ran: dict[str, Any],
 ) -> None:
@@ -344,7 +361,7 @@ def test_where_the_switch_is_off_the_planner_has_no_role_tools_and_no_step_runs_
     detail = ran["first"]["off"]
     assert detail["status"] == "completed" and detail["roles"] == []
     listed = _log(ran["state"], "planner.jsonl", "off")[0]
-    assert "looper_task_role_set" not in listed["tools"] and "review_role" not in listed["prompt"]
+    assert "looper_task_role_set" not in listed["tools"] and "review_roles" not in listed["prompt"]
     assert "define one work role per discipline" not in listed["prompt"]  # the roles guide: only with roles on
     (refused,) = _calls(ran, "off")
     assert refused["answer"]["error"]["code"] == "forbidden"

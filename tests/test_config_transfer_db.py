@@ -150,11 +150,11 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     await _ok("POST", "/api/installs", {"item_id": own_id, "scope": "project", "project_id": docs,
                                         "roles": ["worker"]})
     await _ok("POST", "/api/installs", {"item_id": web["item_id"], "scope": "project", "project_id": calc,
-                                        "roles": ["planner", "reviewer"]})
+                                        "roles": ["planner", "reviewer", "task_role"]})
     await _ok("PUT", f"/api/projects/{calc}/allowed-profiles", {"profile_ids": [sonnet]})
     await _ok("PUT", f"/api/projects/{calc}/role-templates/security", {
         "kind": "review", "description": "Steps that touch auth.", "role_prompt": "Check for security problems.",
-        "harness": "## How you work\nRead first.", "profile_id": sonnet})
+        "harness": "## How you work\nRead first.", "profile_id": sonnet, "items": [web["item_id"]]})
     await _ok("PUT", f"/api/projects/{calc}/role-templates/tester", {"kind": "work", "role_prompt": "Write tests."})
     # Schedules: an enabled one with every setting, a directory of its own and a chat the allowlist lets in; a
     # disabled one on the defaults.
@@ -213,6 +213,7 @@ async def _state(pool: Any) -> dict[str, Any]:
                 "files": files, "server": server}
         documents = await db.read_documents(conn, content=True)
         templates = await db.read_role_templates(conn)
+        item_names = {row["id"]: (row["kind"], row["name"]) for row in items}
         in_projects = {p: await agent_setting_layers.list_layers(p, pool=pool) for p in names}
         from looper.db.schedules import list_schedules
 
@@ -244,7 +245,8 @@ async def _state(pool: Any) -> dict[str, Any]:
                                  d["path"], d["sha256"], d["content"]) for d in documents),
             "schedules": schedules,
             "role_templates": sorted((names[t["project_id"]], t["template_key"], t["kind"], t["description"],
-                                      t["role_prompt"], t["harness"] or "", t["profile"] or "") for t in templates),
+                                      t["role_prompt"], t["harness"] or "", t["profile"] or "",
+                                      tuple(item_names[i] for i in t["items"])) for t in templates),
         }
 
 
@@ -863,7 +865,8 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
             path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
                 {"name": "calc", "description": "", "background": "", "execution": {"role_text_max_chars": 500},
                  "role_templates": [
-                     {**good, "key": "security", "profile": "claude-code/nowhere"},
+                     {**good, "key": "security", "profile": "claude-code/nowhere",
+                      "items": [{"kind": "skill", "name": "nowhere"}]},
                      {"key": "tester", "kind": "work", "role_prompt": "Write tests.", "harness": "## How\nTDD."},
                      {**good, "key": "security"},
                      {**good, "key": "Worker"},
@@ -893,6 +896,7 @@ def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not
             assert "is not a JSON object" in skipped["calc / None"]
             assert skipped["docs / role_templates"] == "role_templates is not a list"
             assert [n for n in plan["notes"] if "role template" in n] == [
+                "calc / role template security: no item skill:nowhere here or in the file; imported without it",
                 "calc / role template security: no Agent Profile 'claude-code/nowhere' here or in the file; imported "
                 "without one"]
             rows = {r["template_key"]: (r["kind"], r["role_prompt"], r["harness"], r["profile_id"]) for r in
