@@ -388,6 +388,30 @@ def test_against_a_base_of_other_tasks_there_is_no_shared_total() -> None:
     assert "- in the base, not in the new run: dependent_steps, chat_correction" in lines
 
 
+def test_comparison_says_which_tasks_ran_with_user_gates_other_than_the_base() -> None:
+    # Unset is on since user gates G2: a base from before (no per-task record) or one run with them off compares
+    # another contract.
+    old = _run(single_step=_OK, gate_ambiguous=_OK)
+    off = {**_run(), "tasks": [{"id": "single_step", **_PASS, "user_gates": "off"},
+                               {"id": "gate_ambiguous", **_PASS, "user_gates": "on"}]}
+    on = {**_run(), "tasks": [{"id": "single_step", **_PASS, "user_gates": "on"},
+                              {"id": "gate_ambiguous", **_PASS, "user_gates": "on"}]}
+    assert ("- the base does not record user gates per task (a run before user gates G2, where an unset setting was "
+            "off): single_step, gate_ambiguous") in compare.markdown(on, old).splitlines()
+    lines = compare.markdown(on, off).splitlines()
+    assert "- user gates differ from the base, so these rows compare different contracts: single_step (off → on)" \
+        in lines
+    assert not any("user gates" in line for line in compare.markdown(on, on).splitlines())
+
+
+@pytest.mark.parametrize(("task_gates", "run_gates", "effective"), [
+    (False, None, "on"), (False, "off", "off"), (False, "on", "on"), (True, None, "on"), (True, "off", "on")])
+def test_each_row_records_whether_its_planner_could_open_gates(task_gates: bool, run_gates: str | None,
+                                                               effective: str) -> None:
+    task = next(t for t in TASKS if t.user_gates == task_gates)
+    assert runner.effective_user_gates(task, run_gates) == effective
+
+
 def test_comparison_of_dialogs_shows_success_and_cost() -> None:
     run = {"mode": "fake", "agent": "claude-code/opus", "manager_agent": "claude-code/opus",
            "git": {"commit": "abcdef1234567", "dirty": False},

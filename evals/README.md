@@ -198,9 +198,13 @@ repository on `main` with one commit, the task's project gets that setting, and
 each task reports the merge and checkpoint commits it added as
 `looper_commits`), `--user-gates on|off` (every task's project but a gate
 task's gets that `user_gates` setting; a gate task always has gates on, so
-`--tasks planner` runs its gate tasks as they are meant to: `on` runs the
-other tasks with the gate contract, so `gates_opened` there shows how often
-the Planner asks when it need not). The runner plays the user in a task's
+`--tasks planner` runs its gate tasks as they are meant to; unset is on, as
+in Looper, so every task runs with the gate contract and `gates_opened` shows
+how often the Planner asks when it need not, and `off` runs the other tasks
+without it). Each row records the `user_gates` its Planner had (`on` or
+`off`), and the comparison lists the tasks whose setting differs from the
+base's, or that a base from before user gates G2 (unset was off then) does
+not record. The runner plays the user in a task's
 gates: when one waits for the user it posts the task's `gate_script` in turn
 (`<end>` ends the discussion; a task without one answers "No preference:
 decide yourself and state your assumptions." and then ends it). When the
@@ -258,6 +262,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
 | `task_cost` | a running task's cost by model: read for that task (`looper_costs` with its task_id), nothing changes, and the reply names each model of the task's cost and gives its cost as rounded (fake mode checks the read only) |
 | `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
+| `gate_relay` | the running task waits at a user gate (written into its plan first, so no Planner has to decide to ask): the user answers its question in the Manager's chat, and the Manager passes their words to the gate (`looper_task_gate_reply`), not as a supplement |
+| `gate_unrelated` | the same open gate, and a question about something else: nothing goes to the gate and nothing changes |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
 
 Each (dialog, rep) runs on a database, a `looper serve`, a working directory

@@ -20,13 +20,20 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   default directory or "no default directory", description cut to 80
   characters) and, when there are any, a `Ready tasks` section: the 10 newest
   tasks created but not started (id, project, goal, requirement cut to 80
-  characters). The code-owned `TOOLS_CONTRACT`, appended to the editable
+  characters), and an `Open gates` section: the 10 user gates opened last
+  that wait for the user in a running task (task, project, gate and topic, how
+  long it is open, whom it waits for, its open questions cut to 80
+  characters; [User gates](#user-gates)); in a Lark or Telegram chat only the
+  gates whose messages go to that chat ("Open gates of this chat"), in the
+  dashboard chat all, each with its chat. The code-owned `TOOLS_CONTRACT`, appended to the editable
   system prompt, says how to use the tools: read freely; change things only
   when the user's message asks, in the turn answering it; never ask for, take
   or repeat a key, token or password; before creating a
   task, know its project (never presented as decided before the user chose
   it) and its directory (never picked by Claude); a task under way gets what
-  the user adds as a supplement; refer to what Looper writes itself instead
+  the user adds as a supplement; the user's answer to an open gate goes to it
+  with `looper_task_gate_reply`, which sends the user's own message (asking
+  first which gate when it could be more than one), and nothing else does; refer to what Looper writes itself instead
   of repeating it; and never say an operation ran unless its answer was `ok`
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
@@ -66,7 +73,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   Each chat message is one user turn on its stdin; its turn starts when
   Claude starts that message and ends at the next `result`
   ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)). The reply,
-  sent to the channel, stored in `chat_messages` and recorded as the run's
+  sent to the channel, stored in `chat_messages` once sent and recorded as the run's
   output, is the turn's final answer: the result's `result`, the text of its
   last top-level assistant message (`claude_cli.answer_text`). What Claude
   writes before its tool calls ("checking the logs now…") still streams to the
@@ -94,19 +101,27 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (`planner-<task_id>`), web, Telegram and Lark chats alike, each its last 8
   messages oldest first, 300 characters each, at most 4,000 characters in
   all, without the message being answered (found by the chat's stored session
-  id, `_session_key`, in every channel). Nothing new to say, no brief. The
+  id, `_session_key`, in every channel); an answer its channel did not deliver
+  reads `- assistant (not delivered): …`. Nothing new to say, no brief. The
   Runs record's input holds the brief
-- Telegram and Lark turns are stored in `chat_messages` by the Manager (the
-  web chat's by the web channel and the chat API): the user's message before
-  Claude is called, as `<message_id>`; the reply when the Manager publishes
-  it, as `<message_id>:reply`, so a reply the channel then fails to send is
-  still recorded; a reply Claude sends on its own as `auto-<id>`. Each is
+- Telegram and Lark turns are stored in `chat_messages` (the web chat's by
+  the web channel and the chat API): the user's message, `/new` included, by
+  the Manager before Claude is called, as `<message_id>`; an answer by its
+  channel once it has tried to send it (`channels/chat_history.py`): the
+  Manager names the record in the answer's metadata (`chat_record`: the
+  session and `<message_id>:reply`, or `auto-<id>` for a reply Claude sends
+  on its own), and the channel's outbound loop stores the answer as sent, or
+  as not delivered with why (`delivery_failure`: `no_chat` when the channel
+  no longer knows the chat, after a restart; `send_failed` when Telegram or
+  `lark-cli` refused it) and the channel's error (`delivery_error`, up to 500
+  characters). An answer with no record is not stored: a code answer about a
+  user gate, whose discussion keeps it, and a Telegram group's. Each is
   stored under the session `<channel>:<chat_id>` with its `channel`. Every
   chat is stored but a Telegram group's (`_stored_chat`): a Telegram chat
   whose id is negative is a group or a channel, and nothing from it is
   stored. A Lark group chat is stored under `lark:<chat_id>`: only the
   messages that @-mention the bot, and the replies to them, come in from one.
-  A failed store is logged and never blocks the reply
+  A failed store is logged and never blocks the reply, nor stops the channel
 - `/new`, a chat message that is exactly that (trimmed, any case) from the web
   chat, Lark or Telegram (the sender allowlists apply), is answered by Looper,
   never by Claude. After any turn under way, the Manager stops its Claude and
@@ -1616,8 +1631,8 @@ refused; and `planner_roles` (`off`, also when null, or `on`) with
 `role_text_max_chars` (500 to 20,000, null for 8,000), whether the project's
 Planners may define the roles their steps run as and how long a role's prompt
 and its harness may each be ([Roles a task's Planner
-defines](#roles-a-tasks-planner-defines)); and `user_gates` (`off`, also when
-null, or `on`) with `gate_reminder_hours` (0 to 168, null for 24, 0 for none),
+defines](#roles-a-tasks-planner-defines)); and `user_gates` (`on`, also when
+null, or `off`) with `gate_reminder_hours` (0 to 168, null for 24, 0 for none),
 whether the project's Planners may open user gates and how often a gate that
 waits for the user is noted as still waiting ([User gates](#user-gates)).
 
@@ -2251,6 +2266,7 @@ dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
 | `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (else the project's default; a new project, or one without a default, needs one), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
 | `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a running one; `restart` a stopped, failed or cancelled one, going on from its saved plan (`TASK_RESTART` `continue`); `start_over` one, planned anew with its steps, plan and Planner session deleted (`start_over`; the confirmation says how many accepted steps it deletes); `cancel` a running one | write; start_over and cancel are high |
 | `looper_task_instruct` | Add the user's words to a running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
+| `looper_task_gate_reply` | Add the user's message this turn answers to a user gate waiting for them (`task_id`, `gate`, `end` to end the discussion), as the task page does: Looper sends the message itself, or the `excerpt` of it the model names, which must be in it word for word; a turn that answers no message is refused. The channel message it is is kept, so the Planner's reply goes under it when it came from the gate's chat ([User gates](#user-gates)) | write |
 | `looper_task_update` | Change a task: its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it) | write |
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
 | `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`), `delete` one without tasks or schedules (`projects.deletable_project` refuses before anything is asked; the confirmation says its settings, allowed list, installs, knowledge and own skills go with it, and its directory's files stay) | list and get read; write; delete is high |
@@ -2518,13 +2534,13 @@ it runs before it reports.
 
 ### User gates
 
-In a project with `user_gates` `on`, a task's Planner may make a step of its
-plan a gate, where it discusses with the user what only the user can decide
-([User gates RFC](rfcs/user-gate-v0.zh-CN.md), G1; `looper/agents/user_gates.py`).
-A task a schedule started never may (it runs unattended: `GatePolicy`), and
-nothing changes where gates are off (the default in this phase): the reply
-contract is byte for byte as before, and a gate step is refused with the
-reason and what to do instead.
+In a project with `user_gates` `on`, also when unset (the default), a task's
+Planner may make a step of its plan a gate, where it discusses with the user
+what only the user can decide ([User gates RFC](rfcs/user-gate-v0.zh-CN.md);
+`looper/agents/user_gates.py`). A task a schedule started never may (it runs
+unattended: `GatePolicy`), and nothing changes in a project that turned them
+`off`: the reply contract is byte for byte as before, and a gate step is
+refused with the reason and what to do instead.
 
 - **The step.** `{"id", "kind": "gate", "topic", "agenda": [{"question",
   "options"?}], "depends_on", "findings"?}` in a `[PLAN]` reply or any
@@ -2541,7 +2557,7 @@ reason and what to do instead.
   user (no step in flight) and no turn came for 15 minutes
   (`GATE_IDLE_STOP_SEC`), its resident Claude stops; the next turn resumes
   its session, and a new session's resume brief carries each waiting gate's
-  discussion so far. It keeps its place under the project's Planner limit.
+  discussion so far.
 - **The discussion.** The user's messages (`task_user_gate_messages`, from
   the dashboard: `POST /api/tasks/:id/gates/:step/messages`, or `/end` to end
   the discussion) are stored first; `GATE_MESSAGE` only wakes the Planner,
@@ -2582,13 +2598,66 @@ reason and what to do instead.
 - **Reminders.** Every 5 minutes `GateReminders` notes each gate that has
   waited for the user for its project's `gate_reminder_hours` since its
   opening, the last message the user or the Planner wrote in it and its last
-  reminder: a `reminder` note in its discussion and a line in the task's
-  activity (no channel message in this phase).
-- **The dashboard.** `GET /api/tasks/:id` lists the gates (`gates`); the
-  Overview shows a waiting gate's panel at the top (its agenda, the
-  discussion, option buttons, a message box and "End discussion"), a
-  conclusion card once it passed; the Pipeline draws a gate as a node of its
-  own; the Dashboard and the Tasks page have the Needs you group.
+  reminder: a `reminder` note in its discussion, which the courier posts to
+  the gate's chat, and a line in the task's activity.
+- **The chat.** A gate's messages also go to a chat (`gate_service.gate_chat`):
+  the Lark direct message or group (the requester @-mentioned) or the
+  Telegram chat its task came from, else, for a task asked for on the
+  dashboard or in the web chat, the chat the system setting
+  `user_gates.dashboard_target` names (`GET`/`PUT /api/gate-settings`, Settings
+  → Channels; one a channel's sender allowlist lets in, on a channel that is
+  on; it counts only while the allowlist still lets it in, and Settings says
+  when it no longer does; unset, the task page only). `GateCourier` posts
+  every 2 seconds the Planner's and Looper's messages of a discussion no pass
+  has handled (`post_state`), oldest first, through the channel's `post`, and
+  records the channel messages each became (`task_user_gate_posts`) or why it
+  failed (the gate's `channel_posts`, and an error in the activity): the card
+  is a message of its own, every later message replies under it, a Planner's
+  reply under the user's message it answers when that came from the gate's
+  chat (a Lark direct message counts as its sender's open_id, the chat Looper
+  posts to). A post that sent nothing is tried again after 2 and 8 minutes
+  (`post_attempts`, `post_retry_at`; three tries in all) before it is
+  `failed`, and the gate's later messages wait behind it. Each post carries
+  the idempotency key `gate-<message id>` (Lark sends one message per key
+  within an hour; Telegram has none, so a post retried after a lost answer may
+  arrive twice); a reply whose message is gone is posted on its own (Lark: the
+  reply API's 230011, a recalled message, which a deleted one counts as; Telegram:
+  `allow_sending_without_reply`). A card, update, reminder or "still waits"
+  message whose gate no longer waits when it is posted (after a backlog) is
+  not posted. The texts are code's, in Chinese; a Planner's reply goes as
+  written; Telegram gets plain text; in a Lark group what waits for an answer
+  says to @-mention the bot. Messages written before this are never posted
+  (the migration marks them `none`).
+- **Replies in a channel.** The Lark adapter puts a message's `reply_to` and
+  `root_id` in its `channel_context`, the Telegram one its `message_id` and
+  `reply_to_message_id`. Before the Manager's model, `gate_routing` looks up
+  the message a reply answers directly (in Lark `root_id` only when it names
+  none, so a reply to the Manager's own answer in a gate's thread stays the
+  Manager's) among the posted messages and the user's messages of gates (a
+  Lark message id in any chat, a Telegram one within its chat): a reply about
+  a gate that waits goes into its discussion (`via` the channel, the group
+  sender as its author, the channel message kept so the Planner's reply goes
+  under it) and wakes its Planner, the model never sees it and the chat's
+  history keeps nothing; for a task that is not running it is kept, and code
+  tells the user; one the gate cannot take (empty, too long) gets code's reason
+  in Chinese; a reply about a gate that no longer waits reaches the Manager
+  with a note saying so. In a Lark group only a message that @-mentions the bot
+  comes in at all. The Manager takes one message at a time, so a reply to a
+  gate waits behind a Manager turn under way before it is routed.
+- **The Manager.** Its `Open gates` section lists the waiting gates of the
+  chat it answers (all of them in the dashboard chat);
+  `looper_task_gate_reply` adds the user's own message to one (`via`
+  `manager:<channel>`, the same check as the task page: 409 for a gate that
+  does not wait or a completed task, kept for a stopped one); `looper_tasks`
+  `get` shows a task's gates and `looper_overview` the number waiting.
+- **The dashboard.** `GET /api/tasks/:id` lists the gates (`gates`, each with
+  `channel_posts`: the chat and how many of its messages went there or
+  failed); the Overview shows a waiting gate's panel at the top (its agenda,
+  the discussion, option buttons, a message box, "End discussion", and where
+  its messages go), a conclusion card once it passed; the Pipeline draws a gate
+  as a node of its own; the Dashboard and the Tasks page have the Needs you
+  group; a Planner's thread on the Chat page says when its task waits at a
+  gate.
 
 ### Turns Claude runs on its own
 
@@ -2777,7 +2846,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
-| `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
+| `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task); one row per layer and place |
@@ -2861,7 +2930,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Dashboard**: what is happening now, read from `GET /api/overview` every 5 s. A warning names each supervisor component that is not running: "is down" with when it restarts, or "keeps crashing" with its restarts in a row (and, when it is up between crashes, that it counts as stable after 5 minutes); else one muted "All components healthy" line. Task counts by group (In progress, Ready, Needs attention, Completed, and Cancelled or Other when they hold a task), each opening the Tasks page on that group (`#tasks?group=<group>`). "Agents running now": the Manager busy or idle, each running Planner with its project and task, and each Worker and Reviewer with its step (and the id of the role its task's Planner defined that it runs as) and how long it has run, or "waiting" for room under its task's limit, each linking to its agent history. "Running by project": for each project with a task in progress or ready, its running and ready tasks and its running Workers and Reviewers, with the waiting ones (a project has no limits), then how many projects are idle. "Schedules", when there is one: how many are enabled, the next 5 fires in their own zones, the failing schedules (failures in a row or an alert active, with the last run's status and the last success) and today's skipped runs by reason, each linking to its row on the project's Schedules tab. "Today's spend": the runs started since the server's local midnight, provider-priced (money) apart from the subscription equivalent (not billed), and the runs that ended without a cost.
-- **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`. Beside the Manager, a list shows its conversations on every channel (`GET /api/chat/sessions`), grouped as Dashboard chat, Lark and Telegram, each the most recently active first, with its last message's start, sender and time and its message count; it is re-read every 10 s and after each answer, and a failed read shows its error. Picking a dashboard chat opens it as the web chat thread; picking a Lark or Telegram conversation shows its newest messages read-only, with their times and no message box, re-read every 10 s, and says when only the newest 200 of more are shown. Below the md breakpoint the list opens from a button in the header.
+- **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`. Beside the Manager, a list shows its conversations on every channel (`GET /api/chat/sessions`), grouped as Dashboard chat, Lark and Telegram, each the most recently active first, with its last message's start, sender and time and its message count; it is re-read every 10 s and after each answer, and a failed read shows its error. Picking a dashboard chat opens it as the web chat thread; picking a Lark or Telegram conversation shows its newest messages read-only, with their times and no message box, re-read every 10 s, and says when only the newest 200 of more are shown; an answer its channel did not deliver says so under it, with the channel's reason. Below the md breakpoint the list opens from a button in the header.
 - **Tasks**: Task list, newest first, 50 at a time with Load more ("Showing N of M"; the newest page is re-read every 3 s and the older pages loaded stay below it), with project and status filters (`Ready` for ready tasks; the status chips filter on the server and count every task under the other filters), time display, each task's cost so far, a "Scheduled" badge linking to the schedule that created the task, Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. On a stopped, failed or cancelled task, Start (here and on its detail page) goes on from its saved plan, and Start over, after an inline confirm, plans it anew (`POST /api/tasks/start` with `start_over`). `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, `#tasks?schedule=<id>` one schedule's tasks, shown as a chip too, and they combine. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|schedules|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then six tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers and Reviewers, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, spend cap and environment (a project sets no concurrency limit), where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Schedules**: a line saying a schedule runs a full task of the project on a time rule and starts disabled, New schedule, then one collapsible row per schedule. A closed row shows the name, the rule in words, the next run in the schedule's zone (or Disabled), the last run's status and the failures in a row, with the enable switch and Run now beside it (outside the row's button). A closed row also shows "Failing" or "No success lately" while an alert is active. An open row edits every field (the gate command and timeout, the daily budget with today's spend, notify and the chat to send to, or Dashboard only, under "Before each run and after"), previews the rule's next 5 fire times as it is typed (an invalid rule says why and disables Save), saves with one Save, deletes after a confirmation, and lists the run history (the same one as a schedule's detail view): 20 runs at a time, newest first, with "Show older runs", the routine skips (nothing new, busy) hidden by a checkbox that is on at first and says how many firings there have been; each run with when it was due (the fire time on hover), how it fired (Scheduled, Catch-up with the missed count, Manual), the status, for a repeated skip ×N and until when (instead of how long it took), how long it took, the cost, the summary or error, a collapsed gate output, a note when the run carries the previous run's input, and its task by title with the task's status, linking to it. `#projects/<id>/schedules/<schedule id>` opens that row, and a task's Scheduled badge links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, offered only while the project has no tasks and no schedules.
@@ -2981,6 +3050,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/agents/:id/usage?turns=N` | GET | One agent's (`manager`, `planner-<task_id>`, ...) spending and context: `total` (`cost_usd`, `runs`, `running`, `unpriced_runs`, `compactions`), `by_session` and `by_day` (UTC; each `cost_usd`, `runs`), its latest N turns (default 100, at most 1000) oldest first with `context_tokens`, `cost_usd` and `compactions`, and `latest_context_tokens`; 400 for a bad `turns` |
+| `/api/gate-settings` | GET/PUT | Where the user gates of a task asked for on the dashboard or in the web chat go besides the task page: `{dashboard_target: {channel, chat} \| null, targets}`, `targets` the chats a channel's sender allowlist lets in (as a schedule's notify target), and `dashboard_target_problem` when the saved chat no longer is one (the gates then go to the task page only). PUT `{dashboard_target}`; 400 for a chat that is not one of them, or on a channel that is off ([User gates](#user-gates)) |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
