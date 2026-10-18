@@ -194,10 +194,10 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 ### 7.1 流程
 
 1. 一条 `question` 发给一个 `offline` 的工作席位，或者规划者发给一个 `offline` 的评审席位（工作席位不能问评审席位，D4）。
-2. 能咨询的前提：这个席位有一次已经结束的运行；它的运行时这次运行存了会话（Claude Code 一直存；Codex、OMP 按 D13）；本任务的咨询次数没到 `room_consults_per_task`；这个席位现在没有新的运行在等或在跑。
-3. 同一个席位同时至多一个咨询。咨询开始之前又来的问题并进同一次；开始之后来的排下一次。
-4. 咨询按这个席位的类型占并发名额（工作席位算 Worker，评审席位算 Reviewer），在任务的上限里排队（#173 起并发只按任务计），和普通运行一样（维护者 D3）。排队时提问方收到的送达说明是「已排咨询，在等 Worker 名额（本任务 1/1 在跑）；回答会进你的收件箱，不必等」。
-5. Looper 续接这次运行的会话的一个分叉（7.2），给咨询的 system prompt 和问题（7.4），读它的回复，把每个回答以这个席位的名义发出（`via: consult`，`reply_to` 对应的问题），抄送规划者。
+2. 能咨询的前提：这个席位有一次已经结束的运行，最新记录不再是 `running`；它的运行时这次运行存了会话（Claude Code 一直存；Codex、OMP 按 D13）；本任务的咨询次数没到 `room_consults_per_task`；这个席位现在没有新的运行在等或在跑。入队时用 `source_record` 固定这条记录，合进已有队列的问题沿用它；开始前记录丢失、没有会话、仍在运行或同一运行已有更新记录时，按 `no_session` 转给规划者，不复制正在被续写的会话。
+3. 同一个席位同时至多一个咨询。每个任务一把独立的咨询锁，同时保护任务次数上限和席位队列，不与办公台消息锁共用；咨询开始之前又来的问题并进同一次，开始之后来的排下一次。
+4. 咨询按这个席位的类型占并发名额（工作席位算 Worker，评审席位算 Reviewer），在任务的上限里排队（#173 起并发只按任务计），和普通运行一样（维护者 D3）。拿到名额后，在咨询锁内再检查任务是否还在运行、该席位是否已有咨询在跑；任务已结束就记为失败，同席位忙则留在队列里。排队时提问方收到的送达说明是「已排咨询，在等 Worker 名额（本任务 1/1 在跑）；回答会进你的收件箱，不必等」。
+5. Looper 续接这次运行的会话的一个分叉（7.2），给咨询的 system prompt 和问题（7.4），读它的回复，把每个回答以这个席位的名义发出（`via: consult`，`reply_to` 对应的问题），抄送规划者。最终状态、回答、未回答问题的升级和提问方通知在同一事务里落库，提交后才唤醒和提醒；状态推进被拒就不存消息，重复结束不会重复发回答。
 6. 回答不了或失败：转给规划者（7.5）。
 
 ### 7.2 三种运行时
@@ -217,8 +217,8 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 - **在哪里跑**：Claude Code、Codex 和 Grok 的只读由运行时强制（Claude Code 的 default 权限模式和 Grok 的 `--tools` 已实测，Codex 是系统级沙箱），所以在步骤原来的目录里跑，读到的是现在的成果；共用目录里的步骤成果常常没提交，快照会读到旧的。只有 OMP（`--tools` 的限制没在真实运行上验证）在可丢弃的快照里跑。
 - **咨询没有办公台工具**：问题和这个席位以前的回答都在 `[CONSULT]` 这一轮里给出，回答写在回复里由 Looper 发出，所以咨询运行不注入 MCP，也没有令牌。
 - **发给角色的问题**：角色里只有一个跑过的席位时咨询它；有几个时转给规划者（`many_seats`），提问的人可以改问具体的席位。
-- **同一个席位同时至多一个咨询**：在排队的那次会接着收后来的问题；正在跑的期间来的问题排成下一次，等这次结束再开始。
-- **类型化的原因**：`not_started`、`no_session`、`session_gone`、`runtime_cannot`（运行时续接不了，或这个席位的 Agent Profile 已经换了运行时或 provider）、`no_snapshot`、`limit`、`many_seats`、`budget`、`timeout`、`contract`、`wrote_files`、`unsure`（回答了别的问题，没回答这一个）。
+- **同一个席位同时至多一个咨询**：在排队的那次会接着收后来的问题；正在跑的期间来的问题排成下一次，等这次结束再开始。服务停止先禁止启动新咨询，取消后保留 `queued`、`running` 状态；恢复时把中断的 `running` 改回 `queued`，每个席位只启动编号最小的一条，后续依次运行。主动 kill（包括等名额时）则记为失败，原因 `stopped`，问题转给规划者。
+- **类型化的原因**：`not_started`、`no_session`、`session_gone`、`runtime_cannot`（运行时续接不了，或这个席位的 Agent Profile 已经换了运行时或 provider）、`no_snapshot`、`limit`、`many_seats`、`budget`、`timeout`、`contract`、`wrote_files`、`stopped`、`unsure`（回答了别的问题，没回答这一个）。
 - **被拒的写**：Claude Code 的 `permission_denials` 计入 `denied_writes`；写被拒不算失败，回答照常发出。
 - **Codex、OMP 的真实路径没验证**：本机没有能用的 OMP provider；Codex 只能用操作者的登录，按硬规则没有跑。参数来自它们的帮助和 `codex mcp get --json`。
 
@@ -226,7 +226,7 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 
 1. **prompt**：咨询的 system prompt 用 `CONSULT_CONTRACT` 代替原来的契约（7.4），开头写明这是一次咨询：只回答，不改文件，不提交，不运行会改东西的命令。
 2. **运行时限制**：上表。这是 RFC 决策 8 的唯一例外，只在咨询的命令行上；`agent_settings.Launch` 加一个只读的变体，普通运行的命令不变。
-3. **目录**：能丢的快照里跑的，跑完删掉，里面的改动随之丢掉；在原目录跑的（只在运行时能强制只读时），跑之前和之后各记一次 `git status --porcelain=v2` 和 `HEAD`，变了就是 `wrote_files`：这次咨询算失败，不发回答，转给规划者，动态和统计里列出改了的文件。共用的任务目录里别的 Worker 同时在写，比较没有意义，所以那里只靠运行时限制，不做比较。
+3. **目录**：能丢的快照里跑的，检查是否改动，变了就是 `wrote_files`：这次咨询算失败，不发回答，转给规划者。快照和分叉会话在准备或运行失败、取消时也要清理。恢复咨询前还没有运行，`.local/consults` 下的检出和各运行时 `consult-sessions` 下的内容都是上次遗留，先移除 worktree 登记并删除这些目录，再开始恢复；其他目录不动。在步骤原目录跑的只靠运行时限制，不与其他 Worker 的写入做比较。
 
 ### 7.4 咨询的 prompt 和回复
 
@@ -238,7 +238,7 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 
 ### 7.5 转给规划者
 
-原因是枚举，规划者的 `[ROOM]` 回合拿到的是类型加细节：`not_started`（席位还没开始）、`no_session`（这次运行没有存会话：开启办公台之前跑的，或运行失败在会话开始之前）、`session_gone`（续接时会话不在了）、`runtime_cannot`（运行时不能续接，或只读没法强制又没有快照）、`no_snapshot`、`limit`（本任务的咨询次数用完）、`budget`、`timeout`、`contract`、`wrote_files`。提问方收到一条 `notice`：「backend_rd@s2 没法咨询（session_gone），问题已转给规划者」。
+原因是枚举，规划者的 `[ROOM]` 回合拿到的是类型加细节：`not_started`（席位还没开始）、`no_session`（没有已结束的会话记录，或入队后有了更新的运行记录）、`session_gone`（续接时会话不在了）、`runtime_cannot`（运行时不能续接，或只读没法强制又没有快照）、`no_snapshot`、`limit`（本任务的咨询次数用完）、`budget`、`timeout`、`contract`、`wrote_files`、`stopped`（咨询被主动停止）。提问方收到一条 `notice`：「backend_rd@s2 没法咨询（session_gone），问题已转给规划者」。
 
 ## 8. 令牌与注入
 
@@ -317,8 +317,9 @@ room_watches
 room_consults                   （R1b）
   id, task_id, seat
   questions     BIGINT[]        room_messages.id
-  source_run    被续接的运行的 llm_records.id
-  consult_run   这次咨询的 llm_records.id；可空
+  source_run    被续接的运行的 agent id
+  source_record 入队时固定的已结束运行的 llm_records.id
+  consult_run   这次咨询的 agent id；可空
   runtime       运行时类型
   state         'queued' | 'running' | 'answered' | 'fallback' | 'failed'
   fallback_reason  第 7.5 节的枚举；可空

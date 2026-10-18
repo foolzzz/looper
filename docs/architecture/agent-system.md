@@ -2795,7 +2795,10 @@ before.
   where it is on (`reply_contract(..., room=True)`).
 - **Consults** (`looper/agents/consult.py`, `room_consults`). A `question`
   for one seat whose run ended (a seat, or a role with one such seat) is
-  answered by its last run's session: Looper resumes a fork of it (Claude
+  answered by its last finished run's session, pinned by `source_record`
+  when admitted; a still-running record, or a newer record before the consult
+  starts, sends the questions to the Planner (`no_session`). Looper resumes
+  a fork of it (Claude
   Code `--resume <id> --fork-session`; Codex and OMP a copy of the session
   the run kept; Grok a home of its own holding a copy of that one session
   from the run's home, resumed with `--fork-session`, and removed afterwards),
@@ -2809,19 +2812,32 @@ before.
   the questions and the seat's earlier consult answers. Claude Code, Codex
   and Grok run where the step ran; OMP, whose restriction is not verified on a real
   run, in a detached checkout of the task directory thrown away afterwards
-  (a change in it drops the answers: `wrote_files`). Its answers are posted
-  as the seat (`via` `consult`, `cc_planner`); a seat has one consult at a
-  time, and questions that come while one is queued join it. A consult is a
+  (a change in it drops the answers: `wrote_files`). The checkout and fork
+  are removed even when preparing or running the consult fails. Its answers
+  are posted as the seat (`via` `consult`, `cc_planner`); its final state,
+  answers and unanswered questions' escalations and notices are stored in
+  one transaction, with notifications after commit. A refused state change
+  stores nothing, so finishing again cannot post the answers twice. A task's
+  own consult lock guards both admission under its count limit and the
+  seat's queue; it is separate from the room's message lock. Questions that
+  come while one is queued join it. After taking capacity, starting under
+  the same lock rechecks that the task is active and no consult of the seat
+  runs. A consult is a
   run of its own (`consult-<12 hex>`, in the task's cost) that takes a place
   under its task's limit of the seat's kind, and has at most
   `room_consult_budget_usd`, `room_consult_timeout_seconds` and 20 turns; a
   task has at most `room_consults_per_task`. The seat's Agent Profile must
-  still run on the session's runtime and provider. The server's start runs
-  the consults left queued or running again.
+  still run on the session's runtime and provider. Stopping the service
+  starts nothing and keeps queued and running states for recovery; killing
+  a consult, including one waiting for capacity, fails it with `stopped`
+  and sends its questions to the Planner. Before recovery starts anything,
+  it removes leftover checkouts in `.local/consults` and every runtime's
+  `consult-sessions` contents. It requeues interrupted runs, starts only the
+  oldest consult of each seat, and runs the others in order when it ends.
 - **Escalations** (`reason`): a question no seat can take (`consult_fallback`,
   with the typed reason: `not_started`, `no_session`, `session_gone`,
   `runtime_cannot`, `no_snapshot`, `limit`, `many_seats`, `budget`, `timeout`,
-  `contract`, `wrote_files` or `unsure`), with a notice to the asker; two seats trading
+  `contract`, `wrote_files`, `stopped` or `unsure`), with a notice to the asker; two seats trading
   `room_ping_pong_rounds` messages to each other only, with no answer between
   (`ping_pong`, once at that count); an interface post that replies to an
   earlier one that a seat whose step ended had read (`interface_changed`); the
