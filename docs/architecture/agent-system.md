@@ -2750,14 +2750,17 @@ before.
   for one seat whose run ended (a seat, or a role with one such seat) is
   answered by its last run's session: Looper resumes a fork of it (Claude
   Code `--resume <id> --fork-session`; Codex and OMP a copy of the session
-  the run kept), read only (`Launch.read_only`: Claude Code's default
+  the run kept; Grok a home of its own holding a copy of that one session
+  from the run's home, resumed with `--fork-session`, and removed afterwards),
+  read only (`Launch.read_only`: Claude Code's default
   permission mode without `Edit`, `Write` and `NotebookEdit`, which in
   `--print` refuses every call that needs approval, the refusals counted as
   `denied_writes`; Codex's read-only sandbox; OMP only its reading tools,
-  `read`, `glob` and `grep`), with the run's system prompt and
+  `read`, `glob` and `grep`; Grok `--tools read_file,grep,list_dir`, its MCP
+  tools still callable through `use_tool`), with the run's system prompt and
   `CONSULT_CONTRACT` in place of its contract and a `[CONSULT]` turn listing
-  the questions and the seat's earlier consult answers. Claude Code and Codex
-  run where the step ran; OMP, whose restriction is not verified on a real
+  the questions and the seat's earlier consult answers. Claude Code, Codex
+  and Grok run where the step ran; OMP, whose restriction is not verified on a real
   run, in a detached checkout of the task directory thrown away afterwards
   (a change in it drops the answers: `wrote_files`). Its answers are posted
   as the seat (`via` `consult`, `cc_planner`); a seat has one consult at a
