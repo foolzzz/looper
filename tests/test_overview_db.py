@@ -387,3 +387,22 @@ def test_the_tasks_list_pages_newest_first_under_its_filters(monkeypatch: pytest
             assert status == 400 and says in body["error"], body
 
     _run(test, monkeypatch)
+
+
+def test_another_task_running_in_a_directory_is_found_and_an_ended_one_or_itself_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import projects, tasks as db_tasks
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="alpha", pool=pool)
+        rows = [("task-self", "/w/a", "executing"), ("task-done", "/w/a", "completed"), ("task-other", "/w/b", "running"),
+                ("task-wait", "/w/c", "waiting_user")]
+        await pool.executemany("INSERT INTO tasks (id, requirement, work_dir, status, project_id) "
+                               "VALUES ($1, 'r', $2, $3, $4)", [(*row, project["id"]) for row in rows])
+        assert await db_tasks.others_active_in("/w/a", "task-self", pool=pool) is False  # itself, and one that ended
+        assert await db_tasks.others_active_in("/w/b", "task-self", pool=pool) is True
+        assert await db_tasks.others_active_in("/w/c", "task-self", pool=pool) is True  # waiting for its user
+        assert await db_tasks.others_active_in("/w/b", "task-other", pool=pool) is False
+
+    _run(test, monkeypatch)

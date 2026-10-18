@@ -18,6 +18,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
+from .llm_records import TASK_RUN, _TASK_ROLE
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
@@ -403,16 +404,21 @@ async def hand_on(conn: Db, run_ids: Sequence[str]) -> None:
 
 async def spent_since(conn: Db, schedule_id: str, since: datetime) -> float:
     """What the schedule's runs fired since ``since`` cost: each its recorded cost, a running one its task's so
-    far."""
+    far, as ``task_costs`` counts it."""
     return (await spent_since_each(conn, [schedule_id], since))[schedule_id]
 
 
 async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -> dict[str, float]:
     """``spent_since`` for each of ``schedule_ids``, in one query."""
     rows = await conn.fetch(
-        """
-        SELECT r.schedule_id, sum(COALESCE(r.cost_usd,
-                   (SELECT sum(l.cost_usd) FROM llm_records l WHERE l.task_id = r.task_id))) AS spent
+        f"""
+        SELECT r.schedule_id, sum(COALESCE(r.cost_usd::numeric,
+                   (SELECT sum(g.cost_usd) FROM (
+                       SELECT round(sum(l.cost_usd::numeric), 6) AS cost_usd
+                       FROM llm_records l WHERE l.task_id = r.task_id
+                       AND {TASK_RUN.replace("agent_id", "l.agent_id")}
+                       GROUP BY {_TASK_ROLE.replace("agent_id", "l.agent_id")}, l.model
+                   ) g))) AS spent
         FROM schedule_runs r WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,
         schedule_ids, since,

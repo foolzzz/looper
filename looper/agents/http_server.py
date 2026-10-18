@@ -14,7 +14,7 @@ import logging
 import mimetypes
 import re
 import urllib.parse
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from .supervisor import AgentSupervisor
 from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
 from .ops.planner import PlannerOps
+from .ops.room import RoomOps
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
@@ -135,6 +136,7 @@ class AgentHTTPServer:
         scheduler: Scheduler | None = None,
         manager_ops: ManagerOps | None = None,
         planner_ops: PlannerOps | None = None,
+        room_ops: RoomOps | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -158,6 +160,8 @@ class AgentHTTPServer:
         # The Manager's platform tools, behind /api/agent/v1/ (its token only), and each task's Planner's (its own).
         self._manager_ops = manager_ops
         self._planner_ops = planner_ops
+        # The agent room's tools of the steps' runs, each with a token of its own (``run.``).
+        self._room_ops = room_ops
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
@@ -308,6 +312,7 @@ class AgentHTTPServer:
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
     _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
+    _RE_TASK_ROOM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/room$")
     _RE_TASK_ROLE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/roles/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     # A user gate of the task, by its step's label (planner_protocol._STEP_ID).
     _RE_TASK_GATE_MESSAGES = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
@@ -416,6 +421,8 @@ class AgentHTTPServer:
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
                 m.group(1), self._supervisor.bus, self._web_adapter._address))
+        elif (m := self._RE_TASK_ROOM.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: self._task_room(m.group(1), query))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/projects" and method == "GET":
@@ -598,6 +605,10 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, self._lark_status)
         elif path == "/api/channels/lark/people" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", "")))
+        elif path == "/api/gate-settings" and method == "GET":
+            await self._answer(writer, HTTP_200, gate_service.gate_settings)
+        elif path == "/api/gate-settings" and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: gate_service.update_gate_settings(projects.json_object(body)))
         elif path == "/api/channel-configs" and method == "GET":
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
@@ -620,6 +631,9 @@ class AgentHTTPServer:
         if self._planner_ops is not None and self._planner_ops.claims(headers.get("authorization")):
             await self._handle_planner_api(method, path, headers, body, writer)
             return
+        if self._room_ops is not None and self._room_ops.claims(headers.get("authorization")):
+            await self._handle_room_api(method, path, headers, body, writer)
+            return
         ops = self._manager_ops
         if ops is None or not ops.authorized(headers.get("authorization")):
             if ops is not None:
@@ -634,6 +648,27 @@ class AgentHTTPServer:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
             writer.write(_json_response(HTTP_200, await ops.call(m.group(1), arguments)))
+        else:
+            writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
+        await writer.drain()
+
+    async def _handle_room_api(
+        self, method: str, path: str, headers: dict[str, str], body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        """A step's run's room tools, as ``_handle_agent_api`` serves the Manager's: only with a run's token that
+        still works (its run runs), for its task and seat."""
+        ops, header = self._room_ops, headers.get("authorization")
+        assert ops is not None
+        if not ops.authorized(header):
+            writer.write(_json_response(HTTP_401, {"error": "this run's token no longer works: its run ended"}))
+        elif path == f"{AGENT_API}tools" and method == "GET":
+            writer.write(_json_response(HTTP_200, {"tools": ops.listing(header)}))
+        elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
+            try:
+                arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                arguments = None
+            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
@@ -1239,11 +1274,36 @@ class AgentHTTPServer:
             await step_workspaces.remove_task(task_id)
         except Exception:
             logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+        if self._runtime_root is not None:
+            from .room import remove_run_sessions
+            remove_run_sessions(self._runtime_root, task_id)
         await delete_task(task_id)
         writer.write(_json_response(HTTP_200, {"deleted": task_id}))
         await writer.drain()
 
     # --- Task detail handlers ---
+
+    async def _task_room(self, task_id: str, query: Mapping[str, str]) -> dict[str, Any]:
+        """``GET /api/tasks/:id/room``: the task's agent room (``room.task_view``), filtered by ``kind``, ``from``,
+        ``unanswered`` and ``after`` (a message id; the newer ones only), at most ``limit``."""
+        from .room import TASK_VIEW_LIMIT, task_view
+
+        def number(name: str, default: int) -> int:
+            raw = query.get(name) or ""
+            if not raw:
+                return default
+            if not raw.isdigit():
+                raise projects.RequestError(HTTP_400, f"{name} must be a whole number")
+            return int(raw)
+
+        pool = self._worker_pool
+        view = await task_view(task_id, runs=pool.room_runs(task_id) if pool is not None else None,
+                               kind=query.get("kind") or None, sender=query.get("from") or None,
+                               unanswered=query.get("unanswered") in ("1", "true"),
+                               after=number("after", 0), limit=number("limit", TASK_VIEW_LIMIT))
+        if view is None:
+            raise projects.RequestError(HTTP_404, "task not found")
+        return view
 
     async def _handle_task_detail(
         self, task_id: str, writer: asyncio.StreamWriter,
@@ -1275,6 +1335,13 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_404, {"error": "task not found"}))
             await writer.drain()
             return
+        try:
+            from .room import task_view
+            room = await task_view(task_id, limit=1)
+        except Exception:
+            # The room's numbers are help on the page: without them, the task still shows.
+            logger.warning("cannot read the room of task %s", task_id, exc_info=True)
+            room = None
 
         result = {
             "task_id": raw.get("id", ""),
@@ -1314,6 +1381,9 @@ class AgentHTTPServer:
             # Its steps' worktrees, in a project with step workspaces (null when it had none): where its branch
             # started, each worktree oldest first, and the commands that undo the task's commits.
             "step_workspaces": workspaces,
+            # Its agent room in numbers: whether its project has it on, its messages by kind and its unanswered
+            # questions, and each step's (sent, received, unanswered); the messages are at .../room.
+            "room": {key: room[key] for key in ("enabled", "counts", "by_step")} if room else None,
             # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
             # in a task with such runs.
             **({"run_roles": ran_as} if ran_as else {}),

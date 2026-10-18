@@ -41,6 +41,7 @@ from .channels.registry import ChannelRegistry
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
 from . import self_check
+from .gate_courier import GateCourier
 from .gate_service import GateReminders
 from .http_server import AgentHTTPServer
 from .log_redaction import log_to_stderr
@@ -709,6 +710,13 @@ async def _run_agent_system(
     # deleted content that no running process mounts.
     from .read_only_copies import reclaim_unused
     await reclaim_unused(runtime_root)
+    # The sessions the agent room's runs kept (Codex, OMP) of tasks gone or ended over a week ago.
+    from .room import RUN_SESSIONS_KEPT_DAYS, sweep_run_sessions
+    try:
+        from ..db import room as db_room
+        sweep_run_sessions(runtime_root, await db_room.tasks_keeping_sessions(days=RUN_SESSIONS_KEPT_DAYS))
+    except Exception:
+        logger.warning("could not remove the kept sessions of ended tasks", exc_info=True)
 
     logger.info("database initialised")
 
@@ -770,8 +778,10 @@ async def _run_agent_system(
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
     scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url)
-    # It notes the user gates that have waited for the user for their project's reminder interval.
+    # It notes the user gates that have waited for the user for their project's reminder interval; the courier
+    # posts what the gates' discussions say to the chats their tasks came from.
     gate_reminders = GateReminders()
+    gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url)
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                              on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
     supervisor.register(task_router)
@@ -790,6 +800,13 @@ async def _run_agent_system(
     manager.ops = manager_ops
     planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
     task_router.planner_ops = planner_ops
+    # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
+    from .ops.room import RoomOps
+    from .room import RoomService
+    room = RoomService(bus=bus, worker_pool=worker_pool)
+    planner_ops.room = room
+    room_ops = RoomOps(room, url=_local_url(host, port))
+    worker_pool.room_ops = room_ops
 
     # --- Start ---
 
@@ -813,11 +830,13 @@ async def _run_agent_system(
         scheduler=scheduler,
         manager_ops=manager_ops,
         planner_ops=planner_ops,
+        room_ops=room_ops,
     )
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()
+    await gate_courier.start()
 
     logger.info(
         "agent system running on http://%s:%d (channels=%s)",
@@ -838,6 +857,7 @@ async def _run_agent_system(
     async def shut_down() -> None:
         logger.info("shutting down agent system...")
         await gate_reminders.stop()
+        await gate_courier.stop()
         await scheduler.stop()
         await http_server.stop()
         await supervisor.stop_all()

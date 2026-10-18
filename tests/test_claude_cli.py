@@ -2,8 +2,8 @@
 
 Covers reading stream-json output line by line with no line-length limit, the
 flags that keep the operator's personal Claude Code configuration out of an
-agent's run, the permission flags every agent shares, the system prompt file
-flags, and the run record.
+agent's run, the permission flags every agent but a Planner shares and a
+Planner's read-only flags, the system prompt file flags, and the run record.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
+from looper.agents.agent_settings import AgentType
 from looper.agents.claude_cli import isolation_args, iter_lines, system_prompt_args
 
 
@@ -99,6 +100,29 @@ class TestClaudeRunRecorder:
             "completed", "hi", "claude-x", "s-1")
         assert (finish["input_tokens"], finish["output_tokens"], finish["cost_usd"]) == (12, 3, 0.5)
         assert finish["error"] is None
+        assert "metadata" not in finish  # nothing refused, nothing checked: the record's metadata is as it was
+
+    def test_the_calls_a_run_was_refused_and_how_a_turn_was_checked_are_kept(self, agent_db: Any) -> None:
+        recorder = self._recorder()
+        metadata = {"read_only_check": "compared", "planner_changed_files": ["notes.md"]}
+
+        async def _run() -> None:
+            await recorder.annotate(metadata)  # no record yet
+            agent_db.add_metadata.assert_not_awaited()
+            await recorder.start()
+            await recorder.finish(output_text="ok", result_event={
+                "type": "result", "subtype": "success", "is_error": False, "permission_denials": [
+                    {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "touch made.txt"}}]})
+            await recorder.annotate({})
+            agent_db.add_metadata.assert_not_awaited()
+            await recorder.annotate(metadata)
+            agent_db.add_metadata.assert_awaited_once_with(agent_db.start_record.return_value, metadata)
+            agent_db.add_metadata.side_effect = RuntimeError("database pool not initialised")
+            await recorder.annotate(metadata)  # a database error never fails the run
+
+        asyncio.run(_run())
+        assert agent_db.finish_record.await_args.kwargs["metadata"] == {
+            "permission_denials": [{"tool": "Bash", "input": "touch made.txt", "id": "t"}]}
 
     @pytest.mark.parametrize(
         ("result_event", "error", "expected"),
@@ -360,19 +384,67 @@ RESTRICTING_FLAGS = {"--tools", "--allowedTools", "--allowed-tools", "--disallow
 
 
 class TestPermissionArgs:
-    def test_every_launch_carries_them_with_and_without_a_library(self, tmp_path: Path) -> None:
-        # The four agents build their commands from a Launch, so the flags cannot diverge.
+    @pytest.mark.parametrize("role", [None, AgentType.MANAGER, AgentType.WORKER, AgentType.REVIEWER])
+    def test_every_launch_but_a_planners_carries_them_with_and_without_a_library(
+        self, tmp_path: Path, role: AgentType | None,
+    ) -> None:
+        # The agents build their commands from a Launch, so the flags cannot diverge.
         from looper.agents.agent_settings import Launch
         from looper.agents.claude_cli import permission_args
         from looper.agents.library import AgentLibrary
 
         assert permission_args() == ["--dangerously-skip-permissions"]
         library = AgentLibrary(plugin_dirs=(str(tmp_path / "plugin"),))
-        for launch in (Launch(), Launch(library=library)):
+        for launch in (Launch(role=role), Launch(library=library, role=role)):
             args = launch.args()
             assert args[:len(permission_args())] == permission_args()
             assert args.count("--dangerously-skip-permissions") == 1
             assert not RESTRICTING_FLAGS & set(args)
+            assert "read_only" not in launch.record()
+
+    def test_a_planner_runs_read_only_with_its_mcp_servers_skills_and_web_reads(self, tmp_path: Path) -> None:
+        from looper.agents.agent_settings import Launch
+        from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
+
+        library = AgentLibrary(items=(LoadedItem(ItemKind.MCP, "looper", "a" * 64, plugin="", scope="builtin"),
+                                      LoadedItem(ItemKind.MCP, "docs", "b" * 64, plugin="", scope="global"),
+                                      LoadedItem(ItemKind.SKILL, "deploy", "c" * 64, plugin="personal",
+                                                 scope="global")),
+                               mcp_config=str(tmp_path / "mcp.json"))
+        launch = Launch(library=library, role=AgentType.PLANNER)
+        args = launch.args()
+        # Claude Code's default permission mode, pinned against a project's own settings, with no one to answer its
+        # prompts, so that what it would ask about is refused; no file-editing tools.
+        assert "--dangerously-skip-permissions" not in args
+        assert args[:8] == ["--permission-mode", "manual", "--permission-prompts", "none",
+                            "--disallowedTools", "Edit,Write,NotebookEdit",
+                            "--allowedTools", "Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
+        assert launch.record()["read_only"] == "permissions"
+        assert Launch(role=AgentType.PLANNER).args()[6:8] == ["--allowedTools", "Skill,WebFetch,WebSearch"]
+
+    @pytest.mark.parametrize(("server", "rule"), [
+        ("looper", "mcp__looper"), ("probe.v2", "mcp__probe_v2"), ("my server+x", "mcp__my_server_x"),
+        ("a-b_c9", "mcp__a-b_c9"),
+    ])
+    def test_an_mcp_servers_rule_names_it_as_claude_code_names_its_tools(self, server: str, rule: str) -> None:
+        from looper.agents.claude_cli import mcp_rule
+
+        assert mcp_rule(server) == rule
+
+    def test_a_refused_tool_call_is_read_from_the_result(self) -> None:
+        from looper.agents.claude_cli import DENIAL_INPUT_CHARS, permission_denials
+
+        result = {"type": "result", "permission_denials": [
+            {"tool_name": "Bash", "tool_use_id": "t1", "tool_input": {"command": "echo hi > made.txt",
+                                                                        "description": "Create made.txt"}},
+            {"tool_name": "mcp__x__write", "tool_use_id": "t2", "tool_input": {"path": "a", "text": "x" * 500}},
+            "not a denial",
+        ]}
+        denials = permission_denials(result)
+        assert denials[0] == {"tool": "Bash", "input": "echo hi > made.txt", "id": "t1"}
+        assert denials[1]["tool"] == "mcp__x__write" and len(denials[1]["input"]) == DENIAL_INPUT_CHARS
+        assert len(denials) == 2
+        assert permission_denials({"type": "result"}) == permission_denials(None) == []
 
 def test_the_system_prompt_comes_from_its_file_and_is_read_again_on_resume(tmp_path: Path) -> None:
     path = tmp_path / "abc.md"

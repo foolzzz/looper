@@ -43,8 +43,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from looper.agents.project_execution import ProjectExecution
+
 from . import metrics
 from . import tasks as task_list
+from .fake_claude import REAL_CLAUDE_ENV
 from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EvalTask
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -193,9 +196,13 @@ class Api:
 
 
 def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
-                   max_budget_usd: float | None = None, real_claude: str | None = None) -> Path:
-    """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget."""
+                   max_budget_usd: float | None = None, real_claude: str | None = None,
+                   real_reviewer: bool = False) -> Path:
+    """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget. With
+    ``real_reviewer`` (real mode, a task whose script plays its Planner and Workers), the stand-in hands every run
+    but those to real Claude Code (``fake_claude.REAL_CLAUDE_ENV``)."""
     bin_dir.mkdir(parents=True, exist_ok=True)
+    prefix = ""
     if mode == "fake":
         assert scenarios is not None
         target = [sys.executable, str(FAKE_CLAUDE), str(scenarios)]
@@ -203,9 +210,13 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
         if not real_claude:
             raise EvalError("real mode needs Claude Code: no 'claude' on PATH")
         target = [real_claude]
+        if real_reviewer:
+            assert scenarios is not None
+            target = [sys.executable, str(FAKE_CLAUDE), str(scenarios)]
+            prefix = f"{REAL_CLAUDE_ENV}={shlex.quote(real_claude)} "
     extra = ["--max-budget-usd", f"{max_budget_usd:g}"] if mode == "real" and max_budget_usd else []
     script = bin_dir / "claude"
-    script.write_text("#!/bin/sh\nexec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
+    script.write_text("#!/bin/sh\n" + prefix + "exec " + " ".join(shlex.quote(part) for part in target) + ' "$@"'
                       + "".join(f" {shlex.quote(part)}" for part in extra) + "\n")
     script.chmod(0o755)
     return script
@@ -298,6 +309,22 @@ def looper_commits(work_dir: Path, task_id: str) -> dict[str, int]:
     return {"merges": count("--merges"), "checkpoints": count("--no-merges")}
 
 
+def merged_by_looper(work_dir: Path, task_id: str) -> set[str]:
+    """The files as the task's step workspaces left them: unchanged since the last first-parent commit that touched
+    them, one of Looper's for the task (a step's merge). Looper writes them when it accepts a step, which can be
+    during or just after a Planner turn, so their times say nothing of the Planner."""
+    def names(*args: str) -> set[str]:
+        return set(filter(None, _git_in(work_dir, *args).splitlines()))
+
+    unchanged = names("ls-files") - names("diff", "--name-only", "HEAD")
+    return {path for path in unchanged
+            if f"Looper-Task: {task_id}" in _git_in(work_dir, "log", "-1", "--first-parent", "--format=%B", "--", path)}
+
+
+def _without(changes: dict[str, float], paths: set[str]) -> dict[str, float]:
+    return {path: mtime for path, mtime in changes.items() if path not in paths}
+
+
 def _all_activity(api: Api, task_id: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     while True:
@@ -347,6 +374,7 @@ def run_task(
         (work_dir / name).parent.mkdir(parents=True, exist_ok=True)
         (work_dir / name).write_text(content, encoding="utf-8")
     project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir)}
+    step_workspaces = task.step_workspaces or step_workspaces
     if step_workspaces:
         init_repository(work_dir)
         project["step_workspaces"] = step_workspaces
@@ -364,7 +392,7 @@ def run_task(
         for template in task.role_templates:
             fields = {k: v for k, v in template.items() if k != "key"}
             api.put(f"/api/projects/{created['project_id']}/role-templates/{template['key']}", fields)
-        gates = "on" if task.user_gates else user_gates
+        gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
         api.post("/api/tasks/start", {"task_id": task_id})
@@ -414,7 +442,8 @@ def run_task(
             activity=_all_activity(api, task_id),
             records=records,
             events=events,
-            changes=changed_files(before, snapshot(work_dir)),
+            changes=_without(changed_files(before, snapshot(work_dir)),
+                             merged_by_looper(work_dir, task_id) if step_workspaces else set()),
             work_dir=work_dir,
             check_problem=task.check(work_dir),
             expect=task.expect,
@@ -493,12 +522,25 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
 
 
 # Named sets of tasks for ``--tasks``, resolved against the task set: an id it does not have (yet) is left out.
+def _project_user_gates(task: EvalTask, user_gates: str | None) -> str | None:
+    """The ``user_gates`` the runner sets on ``task``'s project: on for a gate task, else the run's (None: unset)."""
+    return "on" if task.user_gates else user_gates
+
+
+def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
+    """Whether ``task``'s Planner may open user gates, ``on`` or ``off``, as its project's setting makes it
+    (``ProjectExecution.gates_on``: unset is on). Each row records it, so a comparison says when it differs."""
+    gates = _project_user_gates(task, user_gates)
+    return "on" if ProjectExecution.from_row({"user_gates": gates}).gates_on else "off"
+
+
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
                 "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
-                "gate_not_needed", "gate_parallel_branch", "gate_discoverable"),
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface",
+                "planner_plan_file"),
 }
 
 
@@ -654,7 +696,7 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude)
+                       real_claude=real_claude, real_reviewer=any(task.real_reviewer for task in tasks))
         (root / "runtime").mkdir()
         home = root / "home" if mode == "fake" else None
         if home is not None:
@@ -691,6 +733,9 @@ def run(
     finally:
         if not keep_work_dirs:
             shutil.rmtree(root, ignore_errors=True)
+        by_id = {task.id: task for task in tasks}
+        for row in results:
+            row["user_gates"] = effective_user_gates(by_id[row["id"]], user_gates)
         path = out_dir / f"{stamp}-{mode}.json"
         run_result = write_result({
             "schema": SCHEMA,

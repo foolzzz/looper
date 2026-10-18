@@ -11,12 +11,13 @@ import dataclasses
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from evals.prompt_regression import __main__ as cli
-from evals.prompt_regression import compare, metrics, runner
+from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
@@ -132,6 +133,30 @@ def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
         "at-plan-turn-start.txt", "in-plan-turn.txt"]
 
 
+def test_files_a_steps_merge_left_are_not_the_planners(tmp_path: Path) -> None:
+    # Looper merges an accepted step's worktree during or just after a Planner turn: what it wrote is not the
+    # Planner's, unless something changed it again afterwards.
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "start.py").write_text("start\n")
+    runner.init_repository(work)
+
+    def git(*args: str) -> str:
+        return runner._git_in(work, *args)
+
+    git("checkout", "-q", "-b", "step")
+    for name in ("merged.py", "changed-later.py"):
+        (work / name).write_text("the step's\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "the step's work")
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-ff", "step", "-m", "Merge s1\n\nLooper-Task: task-1\nLooper-Step: s1")
+    (work / "changed-later.py").write_text("written after the merge\n")
+    (work / "untracked.txt").write_text("new\n")
+    assert runner.merged_by_looper(work, "task-1") == {"merged.py"}
+    assert runner.merged_by_looper(work, "task-2") == set()  # another task's merges are not this one's
+
+
 @pytest.mark.parametrize(("depends_on", "pairs"), [
     ({"s1": [], "s2": [], "s3": ["s1", "s2"], "s4": ["s3"]}, 1),  # s1 and s2 only
     ({"s1": [], "s2": ["s1"], "s3": ["s2"]}, 0),  # a chain: s3 needs s1 through s2
@@ -183,6 +208,41 @@ def test_a_discipline_counts_once_it_has_a_role_of_its_own_that_names_its_conven
     assert metrics.discipline_roles([role("fe_ios_rd", "fetch, the DOM; Swift, Codable")], (web, ios)) == 0
     assert metrics.discipline_roles([role("fe_review", "fetch and the DOM", "review")], (web,)) == 0
     assert metrics.discipline_roles(strong, ()) == 0
+
+
+@pytest.mark.parametrize(("delivery", "fields"), [
+    ("empty", ("name", "count")),
+    ("answer_only", ("name", "count")),
+    ("interface", ("name", "count")),
+    ("interface", ("label", "quantity")),
+])
+def test_fake_room_consumer_needs_the_delivered_interface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delivery: str, fields: tuple[str, str],
+) -> None:
+    task = task_list.select(["room_interface"])[0]
+    script = task.fake
+    name, count = fields
+    store = script["attempts"]["s1"][0]["files"]["store.py"]
+    (tmp_path / "store.py").write_text(store.replace('"name"', repr(name)).replace('"count"', repr(count)))
+    messages = [] if delivery == "empty" else [{"kind": "answer", "body": "Yes: only the id."}]
+    if delivery == "interface":
+        messages.insert(0, {"kind": "interface", "body": f'add_item takes {{"{name}": str, "{count}": int}}'})
+
+    def rpc(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = {"messages": messages, "more": False, "unread": {}} if params["name"] == "looper_room_inbox" else {}
+        return {"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": json.dumps({"status": "ok", "result": result})}],
+            "isError": False}}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
+    monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    problem = task.check(tmp_path)
+    if delivery == "interface":
+        assert problem is None
+    else:
+        assert problem is not None and "do not work together" in problem
 
 
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
@@ -239,6 +299,34 @@ def _record(record_id: int, agent_id: str, *, input_text: str = "", step_id: str
 
 def _result(text: str) -> list[dict[str, Any]]:
     return [{"seq": 1, "event": {"type": "result", "subtype": "success", "result": text}}]
+
+
+def test_the_planners_refused_calls_are_counted_and_its_file_changes_can_be_bounded(tmp_path: Path) -> None:
+    refused = {"permission_denials": [{"tool": "Bash", "input": "echo x > PLAN.md"}, {"tool": "Bash", "input": "touch a"}]}
+    records = [{**_record(1, "planner-task-1", input_text="[PLAN] Plan the task"), "metadata": refused},
+               {**_record(2, "worker-a", step_id="step-1"), "metadata": {"permission_denials": [{"tool": "x"}]}}]
+    write = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": str(tmp_path / "PLAN.md")}}]}}
+    result = metrics.task_metrics(
+        detail={"status": "completed", "steps": [{"id": "step-1"}]}, activity=[], records=records,
+        events={1: [{"seq": 1, "event": write}]}, changes={}, work_dir=tmp_path, check_problem=None,
+        expect={"max_planner_modified_files": 0}, now=0.0)
+    assert result["planner_denials"] == 2  # the Planner's only
+    assert result["problems"] == ["planner_modified_files 1 > 0"]
+    # A Write its runtime refused changed nothing.
+    records[0]["metadata"] = {"permission_denials": [{"tool": "Write", "input": "{}", "id": "toolu_w"}]}
+    write["message"]["content"][0]["id"] = "toolu_w"
+    refused = metrics.task_metrics(
+        detail={"status": "completed", "steps": [{"id": "step-1"}]}, activity=[], records=records,
+        events={1: [{"seq": 1, "event": write}]}, changes={}, work_dir=tmp_path, check_problem=None,
+        expect={"max_planner_modified_files": 0}, now=0.0)
+    assert (refused["planner_modified_files"], refused["problems"]) == (0, [])
+    # A Write the run does not have, answered with an error, changed nothing either.
+    records[0]["metadata"] = {}
+    disabled = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_w",
+                                                         "is_error": True, "content": "Write is disabled"}]}}
+    assert metrics.edit_tool_paths([{"event": write}, {"event": disabled}], tmp_path) == []
+    assert metrics.edit_tool_paths([{"event": write}], tmp_path) == ["PLAN.md"]
 
 
 def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
@@ -303,10 +391,10 @@ def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123+local changes (1 rep)"
     # A run from before tokens were read has none: only the new side shows them.
     # A run from before gates were counted has none either.
-    assert ("| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |"
+    assert ("| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |"
             in lines)
-    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
-    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** "
+    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
+    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | – | – | 0.0 → **2.0** "
             "| 0.0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |" in lines)
     assert "- pass rate changed: chat_correction 1/1 → 0/1" in lines
     assert "- the base and the new run ran each case once: a pass or fail per case is a single sample" in lines
@@ -319,8 +407,8 @@ def test_comparison_without_a_base_and_with_skipped_tasks() -> None:
     lines = compare.markdown(new).splitlines()
     assert lines[0].endswith("(no earlier run to compare with)")
     assert ("| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped "
-            "| skipped | skipped |" in lines)
-    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| skipped | skipped | skipped |" in lines)
+    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     assert "- stopped at the spending cap (0.8 USD)" in lines
 
 
@@ -345,17 +433,17 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
                                        "error": "EvalError: GET /api/tasks/t answered 500"})]}
     lines = compare.markdown(new, base).splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123 (3 reps)"
-    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The mean is over the scored reps: the pass and the fail, not the error.
     assert ("| dependent_steps | 0/0 · 1 err → **1/2 · 1 err** | – → **1.5** | – | – → **0.0** | – → **0.0** "
-            "| – | – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
-    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| – | – | – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
+    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The total adds up the tasks' means (one pass through the set), over the tasks both runs have; the new run's
     # own total follows, as it has a task the base lacks.
     assert ("| **total (2 shared tasks)** | 1/1 (100%, 21–100%) · 1 timeout → **4/5 (80%, 38–96%) · 1 timeout** "
-            "| 1.0 → **2.5** | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
+            "| 1.0 → **2.5** | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
     assert ("| **total (all 3 tasks of the new run)** | 5/6 (83%, 44–97%) · 1 harness, 1 timeout | 3.5 | – | 0.0 "
-            "| 0.0 | – | 0.0 | 0.0 | – | 0.0700 |" in lines)
+            "| 0.0 | – | – | 0.0 | 0.0 | – | 0.0700 |" in lines)
     assert "- pass rate changed: dependent_steps 0/0 → 1/2" in lines
     assert "- the base ran each case once: a pass or fail per case is a single sample" in lines
     assert "- no baseline: interface_first" in lines
@@ -371,7 +459,7 @@ def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> Non
     base["tasks"][0]["id"] = "single_step"
     new = {**_run(), "tasks": _reps("single_step", _PASS, {**_PASS, "cost_usd": 0.04})}
     lines = compare.markdown(new, base).splitlines()
-    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | – "
+    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | – | – "
             "| 0.0 | 0.0 | – | 0.0200 → **0.0300** |" in lines)
     assert not any(line.startswith("| **total (all") for line in lines)  # the new run has no task of its own
     assert "- in the base, not in the new run: task_1, task_2, task_3, task_4, task_5, task_6" in lines
@@ -382,10 +470,34 @@ def test_against_a_base_of_other_tasks_there_is_no_shared_total() -> None:
     new = {**_run(), "tasks": _reps("single_step", _PASS, _PASS)}
     lines = compare.markdown(new, base).splitlines()
     assert not any(line.startswith("| **total (0 shared") for line in lines)
-    assert ("| **total (all 1 task of the new run)** | 2/2 (100%, 34–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – "
+    assert ("| **total (all 1 task of the new run)** | 2/2 (100%, 34–100%) | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – "
             "| 0.0200 |" in lines)
     assert "- no baseline: single_step" in lines
     assert "- in the base, not in the new run: dependent_steps, chat_correction" in lines
+
+
+def test_comparison_says_which_tasks_ran_with_user_gates_other_than_the_base() -> None:
+    # Unset is on since user gates G2: a base from before (no per-task record) or one run with them off compares
+    # another contract.
+    old = _run(single_step=_OK, gate_ambiguous=_OK)
+    off = {**_run(), "tasks": [{"id": "single_step", **_PASS, "user_gates": "off"},
+                               {"id": "gate_ambiguous", **_PASS, "user_gates": "on"}]}
+    on = {**_run(), "tasks": [{"id": "single_step", **_PASS, "user_gates": "on"},
+                              {"id": "gate_ambiguous", **_PASS, "user_gates": "on"}]}
+    assert ("- the base does not record user gates per task (a run before user gates G2, where an unset setting was "
+            "off): single_step, gate_ambiguous") in compare.markdown(on, old).splitlines()
+    lines = compare.markdown(on, off).splitlines()
+    assert "- user gates differ from the base, so these rows compare different contracts: single_step (off → on)" \
+        in lines
+    assert not any("user gates" in line for line in compare.markdown(on, on).splitlines())
+
+
+@pytest.mark.parametrize(("task_gates", "run_gates", "effective"), [
+    (False, None, "on"), (False, "off", "off"), (False, "on", "on"), (True, None, "on"), (True, "off", "on")])
+def test_each_row_records_whether_its_planner_could_open_gates(task_gates: bool, run_gates: str | None,
+                                                               effective: str) -> None:
+    task = next(t for t in TASKS if t.user_gates == task_gates)
+    assert runner.effective_user_gates(task, run_gates) == effective
 
 
 def test_comparison_of_dialogs_shows_success_and_cost() -> None:
@@ -655,6 +767,44 @@ def test_real_claude_gets_the_per_run_budget(tmp_path: Path) -> None:
         runner.install_claude(tmp_path, mode="real", max_budget_usd=0.25, real_claude=None)
 
 
+def test_with_a_real_reviewer_task_the_stand_in_hands_claude_code_every_run_but_that_tasks_others(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+    import sys
+
+    real = tmp_path / "real-claude"  # records what it was started with
+    real.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(tmp_path / 'real.jsonl')!r}, 'a')"
+                    ".write(json.dumps(sys.argv[1:]) + '\\n')\n")
+    real.chmod(0o755)
+    scripted, other = tmp_path / "scripted", tmp_path / "other"
+    for directory in (scripted, other):
+        directory.mkdir()
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text(json.dumps({str(scripted.resolve()): {"real_reviewer": True, "plan": []},
+                                     str(other.resolve()): {"plan": []}}))
+    script = runner.install_claude(tmp_path / "bin", mode="real", scenarios=scenarios, max_budget_usd=0.25,
+                                   real_claude=str(real), real_reviewer=True)
+    assert script.read_text().splitlines()[-1].startswith(f"LOOPER_EVAL_REAL_CLAUDE={real} exec ")
+
+    def started(cwd: Path, task_section: str) -> list[list[str]]:
+        prompt = tmp_path / "prompt.md"
+        prompt.write_text(task_section)
+        (tmp_path / "real.jsonl").unlink(missing_ok=True)
+        subprocess.run([str(script), "--append-system-prompt-file", str(prompt)], cwd=cwd, input="", text=True,
+                       capture_output=True, timeout=30, check=True)
+        log = tmp_path / "real.jsonl"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    review, work = "## Task\nThe step under review: s1\n", "## Task\nYour step: s1\n"
+    budget = ["--max-budget-usd", "0.25"]
+    # That task's Reviewer is Claude Code, with every argument; its Worker plays the script.
+    assert started(scripted, review) == [["--append-system-prompt-file", str(tmp_path / "prompt.md"), *budget]]
+    assert started(scripted, work) == []
+    # Every run of every other task is Claude Code's.
+    assert started(other, work) == [["--append-system-prompt-file", str(tmp_path / "prompt.md"), *budget]]
+
+
 # --- Fake mode: the task set through a real server -----------------------------------------------------
 
 
@@ -683,7 +833,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     for task in TASKS:
         assert by_id[task.id]["success"], (task.id, by_id[task.id]["problems"])
         assert by_id[task.id]["contract_violations"]["total"] == 0
-        assert by_id[task.id]["planner_modified_files"] == 0
+        assert by_id[task.id]["planner_modified_files"] == 0, (
+            task.id, by_id[task.id]["planner_changed_files"], by_id[task.id]["planner_edit_tool_paths"])
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
     assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
@@ -701,7 +852,11 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "roles_template_unfit": (1, 0, 0, 0),
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
-                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0)}
+                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
+                    "room_interface": (3, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
+                    # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
+                    "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
+                    "reviewer_unrelated_note": (1, 2, 2, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -720,7 +875,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "roles_multi_platform": (6, 6, 4),
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
-                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1)}
+                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
+                     "room_interface": (1, 0, 2), "room_quiet": (0, 0, 1),
+                     "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
+                     "reviewer_unrelated_note": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
@@ -759,7 +917,16 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
     assert by_id["gate_discoverable"]["gates_opened"] == 0
     assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
+    # The stand-in is refused nothing: the denials are Claude Code's.
+    assert all(by_id[t]["planner_denials"] == 0 for t in by_id)
     assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
+    # Only room_interface's agents use the room: the store's interface, the client's question to the Planner, and the
+    # Planner's answer in a [ROOM] turn, so nothing is left unanswered; every other task's room stays quiet.
+    room = {t: tuple(by_id[t][k] for k in ("room_messages", "room_questions", "room_unanswered", "room_interface",
+                                            "room_refused", "room_tool_calls"))
+            for t in by_id if by_id[t]["room_messages"] or by_id[t]["room_tool_calls"]}
+    assert room == {"room_interface": (3, 1, 0, 1, 0, 3)}
+    assert by_id["room_interface"]["planner_turns"]["room"] == 1
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
         "supplement_replan": 1, "requirement_edit": 1}
@@ -844,6 +1011,137 @@ def test_a_reply_claiming_a_change_is_told_from_an_explanation(reply: str, claim
     from evals.prompt_regression import dialogs
 
     assert dialogs.claims_change(reply) is claims
+
+
+@pytest.mark.parametrize(("reply", "model", "named"), [
+    ("claude-haiku-4-5-20251001: $0.02", "claude-haiku-4-5-20251001", True),
+    ("_HAIKU_RUNS: $0.02", "claude-haiku-4-5-20251001", True),
+    ("Claude Sonnet: $0.02", "claude-haiku-4-5-20251001", False),
+    ("DeepSeek: $0.02", "deepseek-flash", True),
+])
+def test_a_models_id_or_family_is_named_in_the_reply(reply: str, model: str, named: bool) -> None:
+    from evals.prompt_regression.dialogs import _model_named
+
+    assert _model_named(reply, model) is named
+
+
+@pytest.mark.parametrize(("reply", "cost", "told"), [
+    ("$0.04", 0.0409, True),
+    ("0.041", 0.0409, True),
+    ("$0.0409", 0.0409, True),
+    ("0.04 美元", 0.0409, True),
+    ("$999999", 0.0409, False),
+    ("$0.05", 0.0409, False),
+    ("0.1", 0.0409, False),
+    ("0.0", 0.0409, False),
+    ("$1,234.56", 1234.56, True),
+    ("$1,000.0409", 0.0409, False),
+    ("$0.04", 0.045, True),
+    ("$0.04", 0.045001, False),
+])
+def test_an_amount_is_told_at_the_written_precision(reply: str, cost: float, told: bool) -> None:
+    from evals.prompt_regression.dialogs import _amount_told
+
+    assert _amount_told(reply, cost) is told
+
+
+_HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1, "cost_usd": 0.0409}
+
+
+@pytest.mark.parametrize(("task_id", "status", "by_model", "write_status", "fake", "reply", "problem"), [
+    ("other", "ok", [_HAIKU_RUNS], None, False, "Haiku", "looper_costs did not read the task's cost"),
+    ("task-a", "error", [_HAIKU_RUNS], None, False, "Haiku", "looper_costs did not read the task's cost"),
+    ("task-a", "ok", [_HAIKU_RUNS], "ok", False, "Haiku", "something changed: looper_settings"),
+    ("task-a", "ok", [_HAIKU_RUNS], "needs_confirmation", False, "Haiku", "something changed: looper_settings"),
+    ("task-a", "ok", [{"model": None, "runs": 1, "running": 0, "cost_usd": 0.01}], None, False, "Haiku",
+     "the task's cost has no model to name"),
+    ("task-a", "ok", [_HAIKU_RUNS], None, False, "Sonnet", "the reply does not name claude-haiku-4-5"),
+    ("task-a", "ok", [_HAIKU_RUNS], None, False, "Haiku $999999",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0409)"),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": None}], None, False, "Haiku", None),
+    ("task-a", "ok", [_HAIKU_RUNS], None, True, "ok", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
+     None, False, "Haiku $0.04 and DeepSeek $0.02", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
+     None, False, "Haiku $0.02 and DeepSeek $0.04",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0409)"),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": 0.018943},
+                      {"model": "deepseek-flash", "cost_usd": 0.123456}],
+     None, False, "| Haiku | $0.019 |\n| DeepSeek | $0.123 |", None),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": 0.018943},
+                      {"model": "deepseek-flash", "cost_usd": 0.123456}],
+     None, False, "| Haiku | $0.123456 |\n| DeepSeek | $0.018943 |",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0189)"),
+    # The seeded running run is present before the read too, even though it has no amount yet.
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
+     None, False, "Haiku $0.0409", "the reply does not name claude-opus-4-1"),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
+     None, False, "Haiku $0.0409; Opus is still running, cost unknown", None),
+])
+def test_a_tasks_cost_is_read_and_told_without_changes(
+    monkeypatch: pytest.MonkeyPatch, task_id: str, status: str, by_model: list[dict[str, Any]],
+    write_status: str | None, fake: bool, reply: str, problem: str | None,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    actions = [{"tool": "looper_costs", "status": status, "risk": "read", "arguments": {"task_id": task_id},
+                "result": None}]
+    if write_status:
+        actions.append({"tool": "looper_settings", "status": write_status, "risk": "write"})
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: actions)
+    monkeypatch.setattr(dialogs.Look, "detail", lambda self, task_id=None: {"cost": {"by_model": by_model}})
+    look = dialogs.Look(None, "task-a", reply, "", 0, frozenset(), fake)
+    assert dialogs._cost_by_model_told(look) == problem
+
+
+@pytest.mark.parametrize("mode", ["real", "fake"])
+def test_task_cost_dialog_seeds_without_starting_an_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    seeded: list[tuple[str, str]] = []
+
+    def seed(database_url: str, project_id: str) -> str:
+        seeded.append((database_url, project_id))
+        return "task-fixed"
+
+    class Api:
+        def get(self, path: str) -> dict[str, Any]:
+            assert path == "/api/tasks"
+            return {"tasks": [{"task_id": "task-fixed"}]}
+
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text("{}", encoding="utf-8")
+
+    def ask(api: Any, session: str, text: str, **_: Any) -> str:
+        assert "task-fixed" in text
+        if mode == "fake":
+            assert json.loads(scenarios.read_text())["manager"][text] == [
+                ["looper_costs", {"task_id": "task-fixed"}]]
+        return "Haiku $0.018943; DeepSeek $0.12; Opus is running, cost unknown"
+
+    def no_start(*_: Any, **__: Any) -> str:
+        pytest.fail("task_cost must not start a Planner or Worker")
+
+    monkeypatch.setattr(dialogs, "_make_cost_task", seed)
+    monkeypatch.setattr(dialogs, "_start_slow_task", no_start)
+    monkeypatch.setattr(dialogs, "_ask", ask)
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [
+        {"tool": "looper_costs", "status": "ok", "risk": "read", "arguments": {"task_id": "task-fixed"},
+         "error_code": None}])
+    monkeypatch.setattr(dialogs.Look, "detail", lambda *_: {"cost": {"by_model": [
+        {"model": "claude-haiku-4-5", "cost_usd": 0.018943},
+        {"model": "deepseek-flash", "cost_usd": 0.123456},
+        {"model": "claude-opus-4-1", "cost_usd": None},
+    ]}})
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
+    (dialog,) = dialogs.select(["task_cost"])
+    row = dialogs.run_dialog(Api(), dialog, database_url="disposable", project_id="project-a",
+                             scenarios=scenarios, mode=mode, timeout=1)
+    assert row["outcome"] == "pass", row
+    assert seeded == [("disposable", "project-a")]
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")

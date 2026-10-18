@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -53,6 +54,23 @@ def test_run_is_recorded_end_to_end() -> None:
             assert done["status"] == "completed"
             assert (done["output_text"], done["session_id"], done["cost_usd"]) == ("done", "s-1", 0.25)
             assert done["finished_at"] is not None
+            assert done["metadata"] == {"command": ["claude", "--print", "do it"], "cwd": "/tmp/p"}
+
+            # What a run was refused is added to its metadata, beside its outcome.
+            refused_id = await llm_records.start_record(agent_id="planner-task-test", task_id="task-test",
+                                                        metadata={"cwd": "/tmp/p"}, pool=pool)
+            denials = [{"tool": "Bash", "input": "echo hi > made.txt"}]
+            await llm_records.finish_record(refused_id, status="completed", outcome="passed",
+                                            metadata={"permission_denials": denials}, pool=pool)
+            refused = await llm_records.get_record(refused_id, pool=pool)
+            assert refused["metadata"] == {"cwd": "/tmp/p", "outcome": "passed", "permission_denials": denials}
+            await llm_records.add_metadata(refused_id, {"read_only_check": "compared",
+                                                       "planner_changed_files": ["笔记.md"]}, pool=pool)
+            annotated = await llm_records.get_record(refused_id, pool=pool)
+            assert annotated["metadata"] == {**refused["metadata"], "read_only_check": "compared",
+                                              "planner_changed_files": ["笔记.md"]}
+            assert (annotated["status"], annotated["finished_at"]) == (refused["status"], refused["finished_at"])
+            await pool.execute("DELETE FROM llm_records WHERE id = $1", refused_id)
             events = await llm_records.list_events(record_id, pool=pool)
             assert events[0]["event"]["message"]["content"][0]["text"] == "你好"
 
@@ -166,20 +184,163 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
 
         costs = await llm_records.task_costs(["t1", "t2", "t3"], pool=pool)
         t1 = costs["t1"]
-        assert t1["cost_usd"] == pytest.approx(0.65)
+        assert t1["cost_usd"] == 0.65
         assert (t1["runs"], t1["running"], t1["unpriced_runs"]) == (6, 1, 1)
-        assert {role: (pytest.approx(row["cost_usd"]), row["runs"]) for role, row in t1["by_role"].items()} == {
+        assert {role: (row["cost_usd"], row["runs"]) for role, row in t1["by_role"].items()} == {
             "planner": (0.3, 2), "worker": (0.3, 3), "reviewer": (0.05, 1)}
+        assert t1["manager_by_model"] == [
+            {"model": None, "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": 9.0},
+        ]
+        assert sum(r["runs"] for r in t1["by_model"]) == t1["runs"]
         # The total is the sum of the task's runs as each is recorded.
         runs = [r for r in await llm_records.list_records(task_id="t1", pool=pool) if r["agent_id"] != "manager"]
-        assert t1["cost_usd"] == pytest.approx(sum(r["cost_usd"] or 0 for r in runs))
-        assert sum(row["cost_usd"] for row in t1["by_role"].values()) == pytest.approx(t1["cost_usd"])
+        assert Decimal(str(t1["cost_usd"])) == sum(Decimal(str(r["cost_usd"] or 0)) for r in runs)
+        assert sum(Decimal(str(r["cost_usd"])) for r in t1["by_role"].values()) == Decimal(str(t1["cost_usd"]))
+        assert sum(Decimal(str(r["cost_usd"] or 0)) for r in t1["by_model"]) == Decimal(str(t1["cost_usd"]))
         assert costs["t2"]["cost_usd"] == 1.0 and costs["t2"]["runs"] == 1
         assert costs["t3"] == {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
                                "provider_price_runs": 0, "by_role": {
             "planner": {"cost_usd": 0.0, "runs": 0}, "worker": {"cost_usd": 0.0, "runs": 0},
-            "reviewer": {"cost_usd": 0.0, "runs": 0}}}
+            "reviewer": {"cost_usd": 0.0, "runs": 0}}, "by_model": [], "manager_by_model": []}
         assert await llm_records.task_costs([], pool=pool) == {}
+
+    _in_fresh_schema(test)
+
+
+def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_about_it() -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        for agent, model, status, cost, tokens in (
+            ("planner-t1", "claude-opus-4-1", "completed", 0.5, (100, 20, 1000, 50)),
+            ("worker-a", "claude-opus-4-1", "completed", 0.25, (10, 5, 0, 0)),
+            ("worker-b", "claude-haiku-4-5", "interrupted", None, (7, 0, 0, 0)),
+            ("reviewer-c", "claude-haiku-4-5", "completed", 0.01, (1, 1, 1, 1)),
+            # input_tokens is INTEGER; two runs prove its sum can exceed 2^31.
+            ("worker-d", "deepseek-flash", "completed", None, (2_000_000_000, 0, 0, 0)),
+            ("worker-d", "deepseek-flash", "completed", None, (2_000_000_000, 0, 0, 0)),
+        ):
+            record_id = await llm_records.start_record(agent_id=agent, task_id="t1", pool=pool)
+            await llm_records.finish_record(
+                record_id, model=model, status=status, cost_usd=cost, input_tokens=tokens[0], output_tokens=tokens[1],
+                cache_read_tokens=tokens[2], cache_creation_tokens=tokens[3], pool=pool,
+            )
+        await llm_records.start_record(agent_id="worker-e", task_id="t1", pool=pool)
+        for task_id, cost in (("t1", 0.02), ("t2", 5.0)):
+            record_id = await llm_records.start_record(agent_id="manager", task_id=task_id, pool=pool)
+            await llm_records.finish_record(
+                record_id, model="claude-haiku-4-5", status="completed", cost_usd=cost, input_tokens=30,
+                output_tokens=4, cache_read_tokens=50, cache_creation_tokens=6, pool=pool,
+            )
+        record_id = await llm_records.start_record(agent_id="worker-f", task_id="t2", pool=pool)
+        await llm_records.finish_record(
+            record_id, model="claude-opus-4-1", status="completed", input_tokens=42, cost_usd=1.0, pool=pool,
+        )
+
+        costs = await llm_records.task_costs(["t1", "t2"], pool=pool)
+        t1 = costs["t1"]
+        assert t1["by_model"] == [
+            {"model": "claude-opus-4-1", "runs": 2, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 110, "output_tokens": 25, "cache_read_tokens": 1000, "cache_creation_tokens": 50,
+             "cost_usd": 0.75},
+            {"model": "claude-haiku-4-5", "runs": 2, "running": 0, "unpriced_runs": 1, "interrupted_runs": 1,
+             "input_tokens": 8, "output_tokens": 1, "cache_read_tokens": 1, "cache_creation_tokens": 1,
+             "cost_usd": 0.01},
+            {"model": "deepseek-flash", "runs": 2, "running": 0, "unpriced_runs": 2, "interrupted_runs": 0,
+             "input_tokens": 4_000_000_000, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": None},
+            {"model": None, "runs": 1, "running": 1, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": None},
+        ]
+        assert all(isinstance(row[key], int) for row in t1["by_model"] for key in (
+            "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))
+        assert t1["manager_by_model"] == [
+            {"model": "claude-haiku-4-5", "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 30, "output_tokens": 4, "cache_read_tokens": 50, "cache_creation_tokens": 6,
+             "cost_usd": 0.02},
+        ]
+        assert t1["cost_usd"] == 0.76
+        assert sum(Decimal(str(r["cost_usd"] or 0)) for r in t1["by_model"]) == Decimal(str(t1["cost_usd"]))
+        assert sum(Decimal(str(r["cost_usd"])) for r in t1["by_role"].values()) == Decimal(str(t1["cost_usd"]))
+        assert sum(r["runs"] for r in t1["by_model"]) == t1["runs"]
+        assert costs["t2"]["by_model"] == [
+            {"model": "claude-opus-4-1", "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
+             "input_tokens": 42, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cost_usd": 1.0},
+        ]
+
+    _in_fresh_schema(test)
+
+
+def test_task_cost_dialog_seed_stays_fixed_when_the_manager_replies() -> None:
+    from evals.prompt_regression.dialogs import _seed_cost_task
+    from looper.db import llm_records, projects, tasks
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="eval-cost", pool=pool)
+        task_id = await _seed_cost_task(project["id"], pool=pool)
+        task = await tasks.get_task(task_id, pool=pool)
+        assert task["status"] == "running" and task["planner_id"] is None
+        before = (await llm_records.task_costs([task_id], pool=pool))[task_id]
+        models = {row["model"]: row for row in before["by_model"]}
+        assert {model: row["cost_usd"] for model, row in models.items()} == {
+            "claude-haiku-4-5-20251001": 0.018943, "deepseek-flash": 0.123456, "claude-opus-4-1": None}
+        assert (before["runs"], before["running"], before["cost_usd"]) == (3, 1, 0.142399)
+        assert models["claude-opus-4-1"]["running"] == 1
+        assert [(row["model"], row["cost_usd"]) for row in before["manager_by_model"]] == [
+            ("claude-sonnet-4-5", 0.234567)]
+        assert sum(row["input_tokens"] for row in models.values()) == 1500
+        assert sum(row["output_tokens"] for row in models.values()) == 150
+        assert sum(row["cache_read_tokens"] for row in models.values()) == 3000
+        assert sum(row["cache_creation_tokens"] for row in models.values()) == 300
+        # A real Manager turn can finish and link to the task between its tool read and the check.
+        manager = await llm_records.start_record(agent_id="manager", pool=pool)
+        await llm_records.link_task(manager, task_id, pool=pool)
+        await llm_records.finish_record(manager, status="completed", model="claude-haiku-4-5-20251001",
+                                        cost_usd=0.5, pool=pool)
+        after = (await llm_records.task_costs([task_id], pool=pool))[task_id]
+        assert {k: v for k, v in before.items() if k != "manager_by_model"} == {
+            k: v for k, v in after.items() if k != "manager_by_model"}
+        assert len(after["manager_by_model"]) == 2
+
+    _in_fresh_schema(test)
+
+
+def test_a_tasks_cost_sums_money_exactly_within_one_role_and_model() -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        for cost in (0.1, 0.2, 0.3):
+            record_id = await llm_records.start_record(agent_id="worker-a", task_id="t1", pool=pool)
+            await llm_records.finish_record(record_id, status="completed", model="claude-haiku-4-5",
+                                            cost_usd=cost, pool=pool)
+        cost = (await llm_records.task_costs(["t1"], pool=pool))["t1"]
+        assert cost["cost_usd"] == cost["by_role"]["worker"]["cost_usd"] == cost["by_model"][0]["cost_usd"] == 0.6
+        assert sum(Decimal(str(r["cost_usd"] or 0)) for r in cost["by_model"]) == Decimal(str(cost["cost_usd"]))
+        assert sum(Decimal(str(r["cost_usd"])) for r in cost["by_role"].values()) == Decimal(str(cost["cost_usd"]))
+
+    _in_fresh_schema(test)
+
+
+def test_a_manager_record_can_link_to_a_task_but_keeps_an_existing_task() -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        record_id = await _run_record(pool, "manager", cost=0.1)
+        await llm_records.link_task(record_id, "t1", pool=pool)
+        assert (await llm_records.get_record(record_id, pool=pool))["task_id"] == "t1"
+        await llm_records.link_task(record_id, "t2", pool=pool)
+        assert (await llm_records.get_record(record_id, pool=pool))["task_id"] == "t1"
+        assigned = await _run_record(pool, "manager", task_id="t2", cost=0.2)
+        await llm_records.link_task(assigned, "t1", pool=pool)
+        assert (await llm_records.get_record(assigned, pool=pool))["task_id"] == "t2"
+        cost = (await llm_records.task_costs(["t1"], pool=pool))["t1"]
+        assert cost["cost_usd"] == 0.0
+        assert cost["manager_by_model"][0]["cost_usd"] == 0.1
+        assert cost["manager_by_model"][0]["runs"] == 1
 
     _in_fresh_schema(test)
 

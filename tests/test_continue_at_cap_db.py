@@ -102,6 +102,34 @@ def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap
     _run(test, monkeypatch)
 
 
+def test_a_manager_turn_linked_to_the_task_counts_toward_neither_its_cost_nor_its_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import llm_records, projects
+
+    async def test(pool: Any) -> None:
+        server, router, published = _setup()
+        project_id = await _failed_task(pool, router, "task_budget")
+        before = (await llm_records.task_costs(["task-a"], pool=pool))["task-a"]["cost_usd"]
+        record_id = await _run_record(pool, "manager", cost=5.0)
+        await llm_records.link_task(record_id, "task-a", pool=pool)
+
+        cost = (await llm_records.task_costs(["task-a"], pool=pool))["task-a"]
+        assert cost["cost_usd"] == before == 0.5
+        (manager,) = cost["manager_by_model"]
+        assert (manager["runs"], manager["cost_usd"]) == (1, 5.0)
+
+        status, body = await _call(server, "POST", "/api/tasks/task-a/continue", {"task_budget_usd": 0.6})
+        assert status == 200, body
+        assert (body["task_budget_usd"], body["spent_usd"], body["continued"]) == (0.6, 0.5, "task-a")
+        assert (await projects.get_project(project_id, pool=pool))["task_budget_usd"] == 0.6
+        (restart,) = published
+        assert restart.message_type is MessageType.TASK_RESTART
+        assert restart.payload == {"task_id": "task-a", "mode": "at_cap"}
+
+    _run(test, monkeypatch)
+
+
 @pytest.mark.parametrize("fail_kind, body, error", [
     (None, {"task_budget_usd": 2}, "only a task that failed at its spend cap"),  # it failed for another reason
     ("task_budget", {"task_budget_usd": 0.5}, "above the $0.5 the task has spent"),  # equal to the spend

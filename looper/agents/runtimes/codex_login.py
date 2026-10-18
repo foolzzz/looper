@@ -105,13 +105,22 @@ def _is_login_home(home: Path) -> bool:
         return False
 
 
+# Where the runs that keep their sessions (the agent room's, ``codex.run_command``'s ``session_dir``) have their
+# homes: one directory per task, one home per run.
+RUN_SESSIONS = "run-sessions"
+
+
 def inspect_homes(codex_dir: Path, target: Path) -> list[LinkProblem]:
-    """Every home under ``codex_dir`` (``runs/<sha256>``, ``sessions/<agent>``) whose ``auth.json`` is not the
-    link to ``target``: a copy or another entry in its place, or a login home whose link is gone. Each is put
-    right (the entry removed, the link put back), so it is reported once. An API key home without a link is
-    fine."""
-    return linked_login.inspect_homes((Path(codex_dir) / "runs", Path(codex_dir) / "sessions"), {LOGIN_FILE: target},
-                                      is_login_home=_is_login_home, login=LOGIN, removed=REMOVED)
+    """Every home under ``codex_dir`` (``runs/<sha256>``, ``sessions/<agent>``, ``run-sessions/<task>/<run>``)
+    whose ``auth.json`` is not the link to ``target``: a copy or another entry in its place, or a login home whose
+    link is gone. Each is put right (the entry removed, the link put back), so it is reported once. An API key home
+    without a link is fine."""
+    run_sessions = Path(codex_dir) / RUN_SESSIONS
+    tasks = (sorted(p for p in run_sessions.iterdir() if p.is_dir() and not p.is_symlink())
+             if run_sessions.is_dir() else [])
+    return linked_login.inspect_homes((Path(codex_dir) / "runs", Path(codex_dir) / "sessions", *tasks),
+                                      {LOGIN_FILE: target}, is_login_home=_is_login_home, login=LOGIN,
+                                      removed=REMOVED)
 
 
 # --- The recorded problem ---

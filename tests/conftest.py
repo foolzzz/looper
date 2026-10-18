@@ -43,6 +43,7 @@ _AGENT_DB_WRITES = (
     ("llm_records", "start_record"),
     ("llm_records", "append_events"),
     ("llm_records", "finish_record"),
+    ("llm_records", "add_metadata"),
     ("llm_records", "touch_record"),
     ("llm_records", "update_event"),
 )
@@ -54,6 +55,7 @@ _AGENT_DB_READS = (
     ("projects", "get_project", None),
     ("projects", "get_task_project", None),
     ("tasks", "list_tasks", []),
+    ("tasks", "others_active_in", False),
     ("activity", "list_activity", []),
     ("system_settings", "get_settings", {}),
     ("agent_setting_layers", "list_layers", []),
@@ -62,6 +64,8 @@ _AGENT_DB_READS = (
     ("project_documents", "list_documents", []),
     ("project_documents", "get_content", None),
     ("chat", "recent_conversations", []),
+    ("user_gates", "open_gates", []),
+    ("user_gates", "find_reference", None),
     ("role_templates", "list_templates", []),
 )
 
@@ -332,6 +336,8 @@ import json, os, sys, time
 STATE = {state!r}
 REPLIES = json.loads({replies!r})
 AUTONOMOUS = json.loads({autonomous!r})
+DENIED = json.loads({denied!r})
+WRITES = json.loads({writes!r})
 def log(name, value):
     with open(os.path.join(STATE, name), 'a') as f:
         f.write(json.dumps(value) + '\\n')
@@ -385,10 +391,12 @@ for line in sys.stdin:
     else:
         cost += 0.25
         open(session_cost, 'w').write(str(cost))
+        for name, content in WRITES.get(str(n), {{}}).items():  # a turn that changes files all the same
+            open(os.path.join(os.getcwd(), name), 'w').write(content)
         emit({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': reply}}]}},
               'parent_tool_use_id': None}})
         emit({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': reply, 'total_cost_usd': cost,
-              **answers}})
+              **answers, **({{'permission_denials': DENIED[str(n)]}} if str(n) in DENIED else {{}})}})
     emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': 'completed', 'session_id': 'sess-p'}})
     if str(n) in AUTONOMOUS:
         # Like Claude once background work started in this turn ends: a turn of its own, answering no message.
@@ -423,17 +431,22 @@ class FakePlannerClaude:
     and every turn it reads. Like Claude Code 2.1.285, each turn's lifecycle
     events, the replay of its message and its result carry the message's uuid.
     After turn N, ``autonomous[N]`` is the reply of a turn it runs on its own, as
-    Claude does once background work ends (0.25 more).
+    Claude does once background work ends (0.25 more). Turn N's result reports
+    ``denied[N]`` as its ``permission_denials``, the tool calls Claude Code refused,
+    and turn N writes ``writes[N]`` (file name to content) into its working directory.
     """
 
     def __init__(
         self, state: Path, replies: tuple[str, ...], *, linger: bool = False, forget_sessions: bool = False,
-        autonomous: dict[int, str] | None = None,
+        autonomous: dict[int, str] | None = None, denied: dict[int, list[dict[str, Any]]] | None = None,
+        writes: dict[int, dict[str, str]] | None = None,
     ) -> None:
         self.state = state
         self.bin = fake_claude(state / "fake-claude", _PLANNER_CLAUDE.format(
             state=str(state), replies=json.dumps(replies), linger=linger, forget_sessions=forget_sessions,
             autonomous=json.dumps({str(turn): text for turn, text in (autonomous or {}).items()}),
+            denied=json.dumps({str(turn): calls for turn, calls in (denied or {}).items()}),
+            writes=json.dumps({str(turn): files for turn, files in (writes or {}).items()}),
         ))
 
     def _log(self, name: str) -> list[Any]:
@@ -460,10 +473,11 @@ def planner_claude(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., Fa
 
     def make(
         *replies: str, linger: bool = False, forget_sessions: bool = False, autonomous: dict[int, str] | None = None,
+        denied: dict[int, list[dict[str, Any]]] | None = None, writes: dict[int, dict[str, str]] | None = None,
     ) -> FakePlannerClaude:
         return FakePlannerClaude(
             tmp_path_factory.mktemp("planner-claude"), replies, linger=linger, forget_sessions=forget_sessions,
-            autonomous=autonomous,
+            autonomous=autonomous, denied=denied, writes=writes,
         )
 
     return make
