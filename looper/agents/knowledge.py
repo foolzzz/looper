@@ -55,10 +55,12 @@ import os
 import re
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from .operator_notes import OperatorNotes, load_notes
 
 logger = logging.getLogger(__name__)
 
@@ -406,16 +408,23 @@ def _is_materialized(path: Path, sha256: str) -> bool:
 
 @dataclass(frozen=True)
 class AgentKnowledge:
-    """A run's knowledge: the index for its system prompt and the directories its command mounts."""
+    """A run's knowledge: the index for its system prompt and the directories its command mounts, and the
+    operator's notes for its directory when its project gives them (``operator_notes``)."""
 
     index: str = ""
     documents: int = 0
     add_dirs: tuple[str, ...] = ()  # each one --add-dir, absolute
     error: str | None = None  # why the run goes without its project's knowledge
+    notes: OperatorNotes | None = None  # None: the project does not give them
 
     @property
     def sha256(self) -> str | None:
         return _sha256(self.index.encode("utf-8")) if self.index else None
+
+    @property
+    def prompt_section(self) -> str:
+        """What the system prompt carries after the project's background: the index, then the notes."""
+        return "\n\n".join(part for part in (self.index.strip(), self.notes.text if self.notes else "") if part)
 
 
 EMPTY_KNOWLEDGE = AgentKnowledge()
@@ -433,13 +442,22 @@ def _same_directory(a: str, b: str) -> bool:
         return a == b
 
 
-async def load_knowledge(runtime_root: Path, project: Mapping[str, Any] | None, work_dir: str) -> AgentKnowledge:
-    """The knowledge of ``project`` (its row: ``id`` and ``work_dir``) for one run in ``work_dir``.
+async def load_knowledge(runtime_root: Path, project: Mapping[str, Any] | None, work_dir: str, *,
+                         notes: bool = False) -> AgentKnowledge:
+    """The knowledge of ``project`` (its row: ``id`` and ``work_dir``) for one run in ``work_dir``, with the
+    operator's notes for ``work_dir`` when ``notes`` (the project's ``operator_notes``).
 
     Stored documents are written from the database the first time a run
     needs them. When the documents cannot be read or written, the run goes
     without its knowledge and ``error`` says why.
     """
+    knowledge = await _load_documents(runtime_root, project, work_dir)
+    if not notes or not project:
+        return knowledge
+    return replace(knowledge, notes=await load_notes(work_dir))
+
+
+async def _load_documents(runtime_root: Path, project: Mapping[str, Any] | None, work_dir: str) -> AgentKnowledge:
     from ..db import project_documents as db_documents
 
     project_id = str((project or {}).get("id") or "")

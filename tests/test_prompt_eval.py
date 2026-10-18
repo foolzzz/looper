@@ -853,6 +853,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
                     "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
+                     "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
                     "room_interface": (3, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
                     # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
                     "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
@@ -876,6 +877,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
                      "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
+                      "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
                      "room_interface": (1, 0, 2), "room_quiet": (0, 0, 1),
                      "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
                      "reviewer_unrelated_note": (0, 0, 1)}

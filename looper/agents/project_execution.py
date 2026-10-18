@@ -20,9 +20,16 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   task directory (``shared``, also when unset) or, when the task directory is
   a git checkout on a branch, a worktree of its own that is merged into the
   branch when the step is accepted (``worktree``, ``step_workspaces``);
-- ``step_workspace_links``: the paths, relative to the task directory, that
-  such a worktree links back to the task directory's (its ignored local
-  state, such as ``.venv`` or ``.env``); none when unset;
+- ``workspace_links``: the paths that Looper's worktrees of the project
+  link back to the directory they come from (its ignored local state, such
+  as ``.venv`` or ``.env``): a task's worktree to its workspace, a step's to
+  its task directory; none when unset;
+- ``task_workspaces``: where a task runs: in its workspace (``in_place``, also
+  when unset) or in a git worktree of it, on a branch of its own
+  (``worktree``, ``task_workspaces``); a new project gets ``worktree``;
+- ``operator_notes``: whether the project's Planners, Workers and Reviewers
+  get the operator's Claude Code notes for the directory they work in, read
+  only (``on``, also when unset; ``off``; ``operator_notes``);
 - ``max_step_retries``: how many times the Planner may retry one step, 0 to
   ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset);
 - ``planner_roles``: whether the project's Planners may define the roles their
@@ -104,6 +111,16 @@ class StepWorkspaces(str, Enum):
     WORKTREE = "worktree"
 
 
+class TaskWorkspaces(str, Enum):
+    IN_PLACE = "in_place"
+    WORKTREE = "worktree"
+
+
+class OperatorNotesMode(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 class PlannerRoles(str, Enum):
     OFF = "off"
     ON = "on"
@@ -145,7 +162,9 @@ class ProjectExecution:
     review_policy: ReviewPolicy | None = None
     distill_lessons: LessonsMode = LessonsMode.OFF
     step_workspaces: StepWorkspaces | None = None
-    step_workspace_links: tuple[str, ...] | None = None
+    workspace_links: tuple[str, ...] | None = None
+    task_workspaces: TaskWorkspaces | None = None
+    operator_notes: OperatorNotesMode | None = None
     max_step_retries: int | None = None
     planner_roles: PlannerRoles | None = None
     role_text_max_chars: int | None = None
@@ -173,9 +192,19 @@ class ProjectExecution:
         return self.step_workspaces is StepWorkspaces.WORKTREE
 
     @property
-    def workspace_links(self) -> tuple[str, ...]:
-        """The paths a step's worktree links back to the task directory's."""
-        return self.step_workspace_links or ()
+    def link_paths(self) -> tuple[str, ...]:
+        """The paths Looper's worktrees link back to the directory they come from."""
+        return self.workspace_links or ()
+
+    @property
+    def task_mode(self) -> TaskWorkspaces:
+        """Where a task that names no workspace of its own runs."""
+        return self.task_workspaces or TaskWorkspaces.IN_PLACE
+
+    @property
+    def notes_on(self) -> bool:
+        """Whether the project's agents get the operator's notes for their directory."""
+        return self.operator_notes is not OperatorNotesMode.OFF
 
     @property
     def step_retries(self) -> int:
@@ -267,8 +296,12 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, ReviewPolicy)
     if field == "step_workspaces":
         return _choice(field, raw, StepWorkspaces)
-    if field == "step_workspace_links":
+    if field == "workspace_links":
         return _links(raw)
+    if field == "task_workspaces":
+        return _choice(field, raw, TaskWorkspaces)
+    if field == "operator_notes":
+        return _choice(field, raw, OperatorNotesMode)
     if field == "planner_roles":
         return _choice(field, raw, PlannerRoles)
     if field == "user_gates":
@@ -316,11 +349,11 @@ def _lessons_mode(raw: Any) -> LessonsMode:
 
 
 def _links(raw: Any) -> tuple[str, ...] | None:
-    """``step_workspace_links``: distinct relative paths in the task directory, none inside another; [] is none."""
+    """``workspace_links``: distinct relative paths in the task directory, none inside another; [] is none."""
     if not isinstance(raw, (list, tuple)) or not all(isinstance(item, str) for item in raw):
-        raise ValueError("step_workspace_links must be a list of paths relative to the task directory, or null")
+        raise ValueError("workspace_links must be a list of paths relative to the task directory, or null")
     if len(raw) > WORKSPACE_LINKS_MAX:
-        raise ValueError(f"step_workspace_links may have at most {WORKSPACE_LINKS_MAX} paths, not {len(raw)}")
+        raise ValueError(f"workspace_links may have at most {WORKSPACE_LINKS_MAX} paths, not {len(raw)}")
     paths: list[str] = []
     for item in raw:
         text = item.strip()
@@ -342,7 +375,7 @@ def _links(raw: Any) -> tuple[str, ...] | None:
                 paths.append(text)
                 continue
             problem = f"overlaps {nested!r}: a link cannot be inside another"
-        raise ValueError(f"step_workspace_links: {item!r} {problem}")
+        raise ValueError(f"workspace_links: {item!r} {problem}")
     return tuple(paths) or None
 
 

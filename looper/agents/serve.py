@@ -695,6 +695,14 @@ async def _run_agent_system(
             logger.info("removed %d step worktree(s) no task keeps", swept)
     except Exception:
         logger.exception("could not sweep the step worktrees")
+    # Then the tasks' own worktrees (the step worktrees are of them): those of completed or deleted tasks go, their
+    # branches stay.
+    from . import task_workspaces
+    try:
+        if swept := await task_workspaces.sweep(runtime_root):
+            logger.info("removed %d task worktree(s) of tasks that ended", swept)
+    except Exception:
+        logger.exception("could not sweep the task worktrees")
 
     # A Codex or Grok login that forked in a run the previous server did not see end (before the session
     # directories it may be in are reclaimed).

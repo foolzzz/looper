@@ -218,6 +218,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   In <directory>:                                     each directory once, then one line
   - <title>: <summary> (<path>)                       per document, its path relative to it
 
+  ## The operator's notes for this directory      L3 (unless operator_notes is off, when the directory
+  ...                                                 has some): a read-only copy of the operator's
+                                                      Claude Code auto memory (Task workspaces)
+
   ## Task                                         L4: what this session is for
   ...                                                 (Planner: the task; Worker, Reviewer: the step)
 
@@ -1707,10 +1711,14 @@ error; `supervise_interval_seconds` over the `planner` config; and
 and `distill_lessons` (`off`, `draft` or `write`, never null), whether a task
 that completes leaves a lessons draft or document in the project's knowledge
 (see the Planner); `step_workspaces` (`shared`, also when null, or
-`worktree`), where a step that runs alongside others works, with
-`step_workspace_links` (up to 20 paths relative to the task directory, null
-for none), what such a worktree links back to the task directory's ([Step
-workspaces](#step-workspaces)); `max_step_retries` (0 to 20, null for 2),
+`worktree`), where a step that runs alongside others works ([Step
+workspaces](#step-workspaces)); `task_workspaces` (`in_place`, also when null,
+or `worktree`; a new project gets `worktree`), where a task that names no
+directory of its own runs, `workspace_links` (up to 20 relative paths, null for
+none), what Looper's worktrees of the project link back to the directory they
+come from, and `operator_notes` (`on`, also when null, or `off`), whether the
+project's agents get the operator's notes for their directory ([Task
+workspaces](#task-workspaces)); `max_step_retries` (0 to 20, null for 2),
 how many times the Planner may retry one step: its reply contract and each
 decision turn's allowed decisions say how many are left, and a retry past it is
 refused; and `planner_roles` (`off`, also when null, or `on`) with
@@ -1767,7 +1775,8 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   switch branches or rewrite its commits; the Reviewer's gives
   `git diff <base_commit>` to see the step's changes. Ignored files, such as
   `.env` or `.venv`, are not in it, except the project's
-  `step_workspace_links`: each listed path the task directory has and the
+  `workspace_links` (named `step_workspace_links` before task worktrees used
+  them too): each listed path the task directory has and the
   worktree does not (a checked-out file is never replaced) is a symlink to the
   task directory's, shared by every step (`link`); the ones linked are kept
   on the workspace (`links`) and linked again if the worktree is re-created,
@@ -1839,6 +1848,68 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
 
 The eval's `--step-workspaces worktree` runs its tasks in git repositories with
 the setting.
+
+### Task workspaces
+
+A task names a workspace, the directory the user gave it (`tasks.workspace_dir`;
+the project's default directory when it names none), and runs there in place or
+in a git worktree of it (`tasks.workspace_mode`; `looper/agents/task_workspaces.py`;
+the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
+
+- **How it runs** is chosen at creation (`resolve_mode`): as the creator asks
+  (`workspace_mode`); in a worktree when it names a workspace other than its
+  project's directory; else as its project's `task_workspaces` says (null:
+  in place). A project created through the API, the task form or the Manager
+  gets `worktree`; one from before, or imported, stays in place.
+- **Its worktree** is made before its Planner first starts (the TaskRouter's
+  `prepare`, on every start, restart, continue and resume):
+  `<runtime_root>/task-worktrees/<task_id>` on branch `looper/<task_id>/task`
+  (not `looper/<task_id>`, which git could not have beside the step branches
+  `looper/<task_id>/<key>-<n>`) from `tasks.workspace_base` (a branch, tag or
+  commit; else what the workspace had checked out), with the project's
+  `workspace_links`, and `tasks.work_dir` becomes the workspace's place in it,
+  so the Planner, the Workers, the Reviewers and the step workspaces, which
+  nest in it and merge into its branch, need nothing else. A later start uses
+  it again; one whose directory was lost is made again from the branch, and
+  without the branch the start fails the task. A workspace outside git (or
+  without a commit) runs in place, noted in the activity. The activity names
+  the branch, the base, the links and the workspace's uncommitted changes
+  the worktree does not have. Rows: `task_worktrees`.
+- **At the end.** A completed task's leftovers are committed on its branch as
+  Looper (never the links), its worktree is removed and the branch stays in
+  the user's repository: the activity, the task page and the Telegram or Lark
+  end notice name it, and Looper never merges it. A stopped, failed or
+  cancelled task keeps its worktree as it is for its restart. Deleting a task
+  removes its step worktrees, commits its leftovers and removes its
+  worktree, keeping the branch (409, and nothing deleted, when they cannot be
+  committed). Starting over keeps the worktree and the branch. At startup the
+  server finishes the worktrees of completed tasks and removes directories no
+  task has, committing what they hold on their branch first.
+- **Warnings, never refusals** (`check`): `GET /api/workspaces/check` and the
+  create answers (`workspace`) say what the task will run in (its repository,
+  branch and base) and warn when a worktree (asked for, or the project's
+  default) cannot be made because the workspace is outside git (`not_git`; the task runs in place), the workspace has uncommitted changes the worktree will not have
+  (`uncommitted`), other tasks in progress work on the same repository (by its
+  main checkout; `shared`) or the checkout is over 1 GiB (`large_checkout`).
+  A base the repository does not have is a 400. The Manager's task
+  configuration says how the task runs and each warning.
+- **The operator's notes** (`looper/agents/operator_notes.py`): with the
+  project's `operator_notes` on (the default, also when null), the Planner, Workers and Reviewers get, after
+  the project's knowledge, a read-only copy of the operator's Claude Code auto
+  memory for their directory: `MEMORY.md` (its first 200 lines) and the `.md`
+  files of the memory directory it links to, in its order, within 24 KiB (a
+  file past the limit is named, not included), led by a note that they are
+  background that the task and the files win over. The directory is
+  `<$CLAUDE_CONFIG_DIR or ~/.claude>/projects/<name>/memory/`, keyed as Claude
+  Code 2.1.285 keys it: the top level of the repository's main checkout (so a
+  subdirectory, a task worktree and a step worktree have the same notes), or
+  the directory itself outside git, links resolved, every character but a
+  letter or digit a `-`, and past 200 characters the first 200, `-` and the
+  key's djb2 hash in base 36 (`LOOPER_OPERATOR_NOTES_ROOT` stands in for
+  `<config>/projects`). Looper only reads them; an `autoMemoryDirectory`
+  setting is not followed. The run records them in
+  `prompt_layers.project.operator_notes` (hash, files, omitted) and the
+  activity says which applied.
 
 ### Schedules: tasks on a time rule
 
@@ -2371,7 +2442,7 @@ contract 3.3 KB.
 |---|---|---|
 | `looper_overview` | Task counts by group, the running tasks (with their own Worker and Reviewer limits, when set) and step runs, each active project's load against its limits, today's spend, unhealthy components | read |
 | `looper_tasks` | `list` (newest first; by `query` words in the id, name, requirement or project, by `group`, by `project`; at most `limit`) or `get` one task: status, phase, directory, requirement, steps, supplements (delivered or not), latest progress note, result, cost, and its Worker and Reviewer concurrency limits with their source (as `GET /api/tasks/:id` gives them) | read |
-| `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (else the project's default; a new project, or one without a default, needs one), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
+| `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (its workspace; else the project's default; a new project, or one without a default, needs one), `workspace_mode` and `base` (only when the user asks: [Task workspaces](#task-workspaces)), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (how the task runs in its directory and each warning, the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
 | `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a running one; `restart` a stopped, failed or cancelled one, going on from its saved plan (`TASK_RESTART` `continue`); `start_over` one, planned anew with its steps, plan and Planner session deleted (`start_over`; the confirmation says how many accepted steps it deletes); `cancel` a running one | write; start_over and cancel are high |
 | `looper_task_instruct` | Add the user's words to a running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
 | `looper_task_gate_reply` | Add the user's message this turn answers to a user gate waiting for them (`task_id`, `gate`, `end` to end the discussion), as the task page does: Looper sends the message itself, or the `excerpt` of it the model names, which must be in it word for word; a turn that answers no message is refused. The channel message it is is kept, so the Planner's reply goes under it when it came from the gate's chat ([User gates](#user-gates)) | write |
@@ -3045,7 +3116,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | Table | Purpose |
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
-| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)) |
+| `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
@@ -3208,9 +3280,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/schedules/:id/notifications` | GET | The schedule's messages, newest first (`?limit=` as for runs): `notification_id`, `kind`, `run_id`, `channel`, `chat`, `text`, `status`, `error`, `created_at`; 404 |
 | `/api/schedules/preview` | POST | `{cron, timezone?, count?, gated?}` (1–20, default 5; `gated`: checked as a schedule with a gate command, 1 minute apart instead of 5): `valid`, `description`, the `next` fire times and `min_interval_seconds`, or `valid` false with the `error`; 400 only for a malformed body |
 | `/api/tasks` | GET | A page of the tasks, newest first (by creation, then id): `?limit=` (default 50, at most 200) of them, older than the task `?before=` when given; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's, `?status=` one status's (400 for an unknown one), and they combine. Answers `tasks`, `next_before` (the cursor for the next page, null at the end) and `counts` (how many tasks each status holds under the project, group and schedule filters, every page included); 400 for a bad `limit` or an unknown `before`. Each task has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
-| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
+| `/api/workspaces/check` | GET | What a new task in `?dir=` (else `?project_id=`'s directory) would run in, with `?mode=` and `?base=` as the create form has them: `mode` (`in_place` outside git), `requested_mode`, `default_mode`, `git` (`repository`, `branch`, `head`, `base_commit`; null outside git), `warnings` (`kind`, `text`, and `files` or `tasks`), `notes` (whether the directory has operator's notes, which files) and `notes_on` (whether the project gives them). 400 as `/api/tasks/create` |
+| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing); `workspace_mode` (`worktree`, `in_place`) and `base` ([Task workspaces](#task-workspaces)). Answers `workspace`, the workspace check. 400 for a bad `workspace_mode`, a `base` without a worktree or one the repository does not have, a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces)) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces); no undo commands for a task in a worktree of its own); `task_workspace` (`workspace_dir`, `mode`, `base`, and `worktree`: `branch`, `base_commit`, `path`, `repository`, `links`, `state`, `result_commit`, `removed_at` and the `commands` that take the work over, null before its first start or in place: [Task workspaces](#task-workspaces)) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again from its saved plan (`TASK_RESTART` `continue`), or, with `"start_over": true`, plan it anew, its steps, plan and Planner session deleted; 400 when `start_over` is not a boolean. It also starts a ready one, as before |

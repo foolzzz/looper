@@ -32,7 +32,8 @@ from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_RO
 from .agent_settings import concurrency, index_layers, task_agents_view
 from .bus import MessageBus
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, planner_address
-from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
+from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, TaskWorkspaces, execution_fields
+from .project_execution import format_usd
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import TaskRouter, resolve_work_dir
 
@@ -45,6 +46,7 @@ HTTP_409 = "409 Conflict"
 NAME_MAX_CHARS = 80
 BACKGROUND_MAX_CHARS = 10000
 NO_WORK_DIR = "a work directory is required: set one on the task or on its project"
+BASE_MAX_CHARS = 200
 # The roles a task may choose the Agent Profile of; the Manager spans every task.
 TASK_PROFILE_ROLES = ("planner", "worker", "reviewer")
 # Fields a project used to hold that are agent settings now (its layer and its roles' layers).
@@ -149,6 +151,9 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
             fields["execution"] = execution
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
+    if not update and "task_workspaces" not in data:
+        # A new project's tasks run in worktrees of their workspace (the task workspaces RFC, W1).
+        fields["execution"] = {**fields.get("execution", {}), "task_workspaces": TaskWorkspaces.WORKTREE.value}
     return fields
 
 
@@ -260,13 +265,20 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
     if config is not None and not isinstance(config, dict):
         raise RequestError(HTTP_400, "config must be a JSON object")
     profiles = await _profile_overrides(data.get("profile_overrides"))
+    work_dir = _task_work_dir(data.get("work_dir"), default_dir)
+    project_mode = ProjectExecution.from_row(project if project is not None else new_fields.get("execution")).task_mode
+    workspace = await task_workspace(data, work_dir=work_dir, named=bool(str(data.get("work_dir") or "").strip()),
+                                     project_dir=default_dir, project_mode=project_mode)
     task = {
         "task_id": f"task-{uuid.uuid4().hex[:12]}",
         "requirement": requirement,
         "goal_id": data.get("goal_id", ""),
-        "work_dir": _task_work_dir(data.get("work_dir"), default_dir),
+        "work_dir": work_dir,
         "config": config or {},
         "status": "init",
+        "workspace_dir": work_dir,
+        "workspace_mode": workspace["mode"],
+        "workspace_base": workspace["base"],
     }
     if project is not None and not profiles:
         created = await db_tasks.create_task(**task, project_id=project["id"])
@@ -288,7 +300,54 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
         "status": "init",
         "created_at": created["created_at"],
         "project_id": project["id"],
+        # How it runs in its workspace, and what to know before starting it (task_workspaces.check).
+        "workspace": workspace["check"],
     }
+
+
+async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, project_dir: str,
+                         project_mode: TaskWorkspaces) -> dict[str, Any]:
+    """A new task's ``workspace_mode`` (as ``data`` asks, else by ``task_workspaces.resolve_mode``) and ``base``,
+    checked: the mode, the base and the workspace check, or a 400."""
+    from . import task_workspaces
+
+    requested, base = data.get("workspace_mode"), data.get("base")
+    if requested is not None and not isinstance(requested, str):
+        raise RequestError(HTTP_400, "workspace_mode must be a string")
+    if base is not None and (not isinstance(base, str) or len(base) > BASE_MAX_CHARS or "\n" in base):
+        raise RequestError(HTTP_400, f"base must be a branch, tag or commit of at most {BASE_MAX_CHARS} characters")
+    base = (base or "").strip()
+    try:
+        mode = task_workspaces.resolve_mode(requested=requested or None, named=work_dir if named else "",
+                                            project_dir=project_dir, project_mode=project_mode)
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
+    if base and mode is not TaskWorkspaces.WORKTREE:
+        raise RequestError(HTTP_400, "base is where a task's worktree starts: give it with workspace_mode worktree")
+    try:
+        check = await task_workspaces.check(work_dir, mode=mode, base=base, asked=bool(requested))
+    except task_workspaces.TaskWorkspaceError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
+    return {"mode": mode.value, "base": base, "check": check}
+
+
+async def check_workspace(query: dict[str, str]) -> dict[str, Any]:
+    """``GET /api/workspaces/check``: what a new task in ``dir`` (else ``project_id``'s directory) would run in,
+    with ``mode`` and ``base`` as the create form has them, and the warnings."""
+    project = await _existing_project(query["project_id"]) if query.get("project_id") else None
+    named = (query.get("dir") or "").strip()
+    default_dir = str((project or {}).get("work_dir") or "")
+    work_dir = _task_work_dir(named or None, default_dir)
+    execution = ProjectExecution.from_row(project) if project is not None else ProjectExecution(
+        task_workspaces=TaskWorkspaces.WORKTREE)  # a project the form is about to create
+    from . import task_workspaces
+
+    workspace = await task_workspace({"workspace_mode": query.get("mode") or None, "base": query.get("base") or None},
+                                     work_dir=work_dir, named=bool(named), project_dir=default_dir,
+                                     project_mode=execution.task_mode)
+    default = task_workspaces.resolve_mode(requested=None, named=work_dir if named else "", project_dir=default_dir,
+                                           project_mode=execution.task_mode)
+    return {**workspace["check"], "default_mode": default.value, "notes_on": execution.notes_on}
 
 
 async def _profile_overrides(raw: Any) -> dict[str, str]:

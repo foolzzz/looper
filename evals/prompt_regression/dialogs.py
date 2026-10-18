@@ -41,6 +41,9 @@ the question a running task's gate asks in the Manager's chat, and the Manager p
 (``gate_relay``); with the same gate open, a question about something else is not passed on (``gate_unrelated``).
 The gate is written into the running task's plan in the database first (``open_gate``), so its Planner, real or
 the stand-in, need not decide to ask.
+How a task runs in its directory: in
+place when the user asks for it (``workspace_in_place``), and the default when
+they say nothing about it (``workspace_default``).
 """
 
 from __future__ import annotations
@@ -461,6 +464,19 @@ def _schedule_deleted_on_confirmation(look: Look) -> str | None:
     return None if confirmed else "the schedule went without a confirmed deletion"
 
 
+def _created_in_place(look: Look) -> str | None:
+    if problem := _created_ready(look):
+        return problem
+    mode = look.detail(look.new_tasks()[0]["task_id"])["task_workspace"]["mode"]
+    return None if mode == "in_place" else f"the task runs in a {mode}, not in place as the user asked"
+
+
+def _created_without_a_mode(look: Look) -> str | None:
+    if problem := _created_ready(look):
+        return problem
+    chose = [a["arguments"]["workspace_mode"] for a in _writes(look, status="ok", tool="looper_task_create")
+             if "workspace_mode" in a["arguments"]]
+    return f"the Manager chose workspace_mode {chose[0]!r}, which the user never asked for" if chose else None
 # The schedules dialogs that create, change and run them.
 DEPS = "eval-deps"
 OPS = "eval-ops"
@@ -734,6 +750,19 @@ DIALOGS: tuple[Dialog, ...] = (
             f"https://api.deepseek.com/anthropic，模型 deepseek-flash。它的 API key 是 {FAKE_KEY}。",
             _registered_without_the_key,
             (("looper_providers", {**_PROVIDER, "api_key": FAKE_KEY}), ("looper_providers", _PROVIDER))),
+    )),
+    # How a task runs in its directory: in place only when the user says so, else the default.
+    Dialog("workspace_in_place", (
+        Say(f"在 {PROJECT} 项目里建一个任务：在工作目录里创建 hello.py，运行时打印 hello。直接在项目目录里改，"
+            "不要开 worktree 或者新分支。目录用项目默认的。不用再问我，我确认创建。", _created_in_place,
+            (("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本",
+                                     "project": PROJECT, "workspace_mode": "in_place"}),)),
+    )),
+    Dialog("workspace_default", (
+        Say(f"在 {PROJECT} 项目里建一个任务：在工作目录里创建 hello.py，运行时打印 hello。目录用项目默认的。"
+            "不用再问我，我确认创建。", _created_without_a_mode,
+            (("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本",
+                                     "project": PROJECT}),)),
     )),
     Dialog("gate_relay", (
         Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,

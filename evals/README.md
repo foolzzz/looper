@@ -37,6 +37,8 @@ directories), one at a time over the HTTP API:
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
+| `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
+| `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
 | `room_interface` | two parts built at the same time, each in a worktree of its own (`step_workspaces` `worktree` for this task), where the store's author picks the record's field names while writing it and the client must use them: the agents must coordinate in the task's agent room (`room_messages` at least 1), and `python cli.py widget 3` works against the store |
 | `room_quiet` | a one-file task with the agent room on, as every task now has it: no room message at all (`room_messages` 0), one step |
 | `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
@@ -213,7 +215,8 @@ it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
 `--step-workspaces shared|worktree` (each working directory becomes a git
 repository on `main` with one commit, the task's project gets that setting, and
 each task reports the merge and checkpoint commits it added as
-`looper_commits`), `--user-gates on|off` (every task's project but a gate
+`looper_commits`; every task's project runs its tasks in place, as before task
+workspaces, so the checks read the working directory), `--user-gates on|off` (every task's project but a gate
 task's gets that `user_gates` setting; a gate task always has gates on, so
 `--tasks planner` runs its gate tasks as they are meant to; unset is on, as
 in Looper, so every task runs with the gate contract and `gates_opened` shows
@@ -282,6 +285,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `gate_relay` | the running task waits at a user gate (written into its plan first, so no Planner has to decide to ask): the user answers its question in the Manager's chat, and the Manager passes their words to the gate (`looper_task_gate_reply`), not as a supplement |
 | `gate_unrelated` | the same open gate, and a question about something else: nothing goes to the gate and nothing changes |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
+| `workspace_in_place` | the user asks for the task to change the project directory itself, no worktree or branch: it is created ready and runs in place (`workspace_mode` `in_place`) |
+| `workspace_default` | the user says nothing about how the task runs: it is created ready, and the Manager passes no `workspace_mode` |
 | `schedule_create` | a schedule asked for in the project is created at once, disabled, on the rule the user said (`looper_schedules` `create`), and the reply carries its configuration and the question whether to enable it; 「启用」 waits for the user's word in the next message (`needs_confirmation`, still disabled), and 「确认。」 enables it |
 | `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
 | `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |

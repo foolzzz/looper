@@ -52,6 +52,8 @@ from ..claude_cli import ClaudeRunRecorder, budget_error, ended_by
 from .. import proc_tree, reported_files
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
+from ..operator_notes import notes_note
+from ..project_execution import ProjectExecution
 from ..library import items_label, load_installed
 from ..runtimes import RuntimeAdapter
 from ..task_roles import TaskRole, run_role
@@ -754,7 +756,8 @@ class WorkerPool:
         run_timeout, max_turns = settings.timeout_seconds, settings.max_turns
         # Read as the run starts: a later change reaches the next run, not this one.
         project = await self._task_project(parent_task_id, worker_id)
-        knowledge = await load_knowledge(self._runtime_root, project, work_dir)
+        knowledge = await load_knowledge(self._runtime_root, project, work_dir,
+                                         notes=ProjectExecution.from_row(project).notes_on)
         project_id = str((project or {}).get("id") or "") or None
         # A run as a role loads the items it names too.
         library = await load_installed(self._runtime_root, agent.value, project_id,
@@ -836,6 +839,8 @@ class WorkerPool:
         if knowledge.error and parent_task_id:
             await self._activity(parent_task_id, worker_id, "error",
                                  f"Warning: {knowledge.error}; this run goes without it"[:500])
+        if knowledge.notes is not None and parent_task_id and (note := notes_note(knowledge.notes)):
+            await self._activity(parent_task_id, worker_id, "error" if knowledge.notes.error else "phase", note)
         if (in_project := [item for item in library.items if item.scope == "project"]) and parent_task_id:
             await self._activity(parent_task_id, worker_id, "phase",
                                  f"Project installs applied ({items_label(in_project)})")

@@ -41,6 +41,7 @@ import { ScheduledBadge } from "@/components/scheduled-badge";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
+import { TaskWorkspaceField, type WorkspaceChoice } from "@/components/task-workspace-field";
 import { TaskDetailRoute } from "./task-detail";
 
 const STATUS_FILTERS = [
@@ -243,6 +244,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [showCreate, setShowCreate] = useState(false);
   const [newReq, setNewReq] = useState("");
   const [newWorkDir, setNewWorkDir] = useState("");
+  const [newWorkspace, setNewWorkspace] = useState<WorkspaceChoice>({ mode: "", base: "" });
   const [newProject, setNewProject] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectDir, setNewProjectDir] = useState("");
@@ -379,6 +381,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setCreateError("");
     setNewReq("");
     setNewWorkDir("");
+    setNewWorkspace({ mode: "", base: "" });
     setNewProjectName("");
     setNewProjectDir("");
     setNewProjectDesc("");
@@ -401,6 +404,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       requirement: newReq.trim(),
       work_dir: newWorkDir.trim() || undefined,
       profile_overrides: Object.keys(overrides).length ? overrides : undefined,
+      workspace_mode: newWorkspace.mode || undefined,
+      base: newWorkspace.base.trim() || undefined,
     };
     try {
       const result = await createTask(
@@ -864,9 +869,16 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                     : projectChosen
                       ? `Required: ${isNewProject ? "the new project" : "this project"} has no default directory. `
                       : ""}
-                  Where the task's Workers run: an absolute path or one starting with ~/. Created if it does not exist.
+                  The directory the task works on: an absolute path or one starting with ~/. Created if it does not
+                  exist.
                 </p>
               </div>
+              <TaskWorkspaceField
+                dir={newWorkDir.trim() || (isNewProject ? newProjectDir.trim() : "")}
+                projectId={isNewProject ? null : newProject || null}
+                value={newWorkspace}
+                onChange={setNewWorkspace}
+              />
               <TaskProfilesField value={newProfiles} onChange={setNewProfiles} />
               <p className="text-xs text-muted-foreground">
                 The task is created <strong>ready, not started</strong>: review and edit its configuration, then press Start.

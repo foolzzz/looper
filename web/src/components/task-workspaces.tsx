@@ -217,3 +217,79 @@ function UndoCommands({ branch, workDir, commands }: { branch: string; workDir: 
     </details>
   );
 }
+
+/**
+ * The Overview's Workspace card: the directory the task works on and how it runs there; for a worktree task its
+ * branch, where it started and where its worktree is, or, once done, that the work waits on the branch for the user,
+ * with the commands that take it over (run in the workspace). Looper never merges the branch.
+ */
+export function TaskWorkspaceCard({ task }: { task: TaskDetail }) {
+  const view = task.task_workspace;
+  if (!view) return null;
+  const tree = view.worktree;
+  const started = !["init", "ready"].includes(task.status);
+  let runs: string;
+  if (tree) {
+    runs = `In a git worktree, on branch ${tree.branch}, from ${view.base || "what was checked out"} at ${tree.base_commit.slice(0, 12)}`;
+  } else if (view.mode === "worktree") {
+    runs = started
+      ? "In the directory itself: it is not in a git repository with a commit"
+      : `In a git worktree, on a branch of its own, made when the task starts${view.base ? ` from ${view.base}` : ""}`;
+  } else {
+    runs = "In the directory itself";
+  }
+  return (
+    <section aria-labelledby="task-workspace-title" className="rounded-lg border border-border bg-card p-4">
+      <h3 id="task-workspace-title" className="text-sm font-semibold">Workspace</h3>
+      <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[max-content_1fr]">
+        <dt className="text-muted-foreground">Directory</dt>
+        <dd className="break-all font-mono">{view.workspace_dir}</dd>
+        <dt className="text-muted-foreground">Runs</dt>
+        <dd className="break-words">{runs}</dd>
+        {tree?.state === "active" && (
+          <>
+            <dt className="text-muted-foreground">Worktree</dt>
+            <dd className="break-all font-mono">{tree.path}</dd>
+          </>
+        )}
+        {tree && tree.links.length > 0 && (
+          <>
+            <dt className="text-muted-foreground">Linked</dt>
+            <dd className="font-mono">{tree.links.join(", ")}</dd>
+          </>
+        )}
+      </dl>
+      {tree?.state === "removed" && (
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-success">
+          <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span className="break-words">
+            The work is on branch <code className="font-mono">{tree.branch}</code>
+            {tree.result_commit && <> at <code className="font-mono">{tree.result_commit.slice(0, 12)}</code></>} in{" "}
+            <code className="break-all font-mono">{tree.repository}</code>. Merge it when you are ready: Looper does
+            not.
+          </span>
+        </p>
+      )}
+      {tree && (
+        <details className="mt-2">
+          <summary className="flex min-h-11 cursor-pointer items-center text-xs font-medium sm:min-h-0">
+            Take the work over
+          </summary>
+          <div className="mt-2 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Run these in <code className="break-all font-mono">{view.workspace_dir}</code>.
+            </p>
+            {tree.commands.map((c) => (
+              <div key={c.command}>
+                <p className="text-xs text-muted-foreground">{c.what}</p>
+                <pre className="mt-1 overflow-x-auto rounded bg-muted px-2 py-1.5 font-mono text-xs">
+                  <code>{c.command}</code>
+                </pre>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
