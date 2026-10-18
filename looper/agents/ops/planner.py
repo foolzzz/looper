@@ -54,14 +54,16 @@ from typing import Any
 import asyncpg
 
 from ...db import activity as db_activity, agent_setting_layers as db_layers, plans as db_plans
-from ...db import projects as db_projects, steps as db_steps, task_roles as db_roles, tasks as db_tasks
+from ...db import projects as db_projects, role_templates as db_templates, steps as db_steps
+from ...db import task_roles as db_roles, tasks as db_tasks
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, PLANNER_CHOICE_ROLES, AgentType, Layer, index_layers
 from ..agent_settings import resolve
 from ..links import task_link
 from ..message import MessageEnvelope, MessageType, channel_address, planner_address
 from ..project_execution import ProjectExecution
 from ..projects import EDITABLE_STATUSES, allowed_profile_view
-from ..task_roles import RoleError, RoleKind, TaskRole, role_key, role_text
+from ..task_roles import RoleError, RoleForbidden, RoleKind, TaskRole, Via, allowed_profile, check_definition
+from ..task_roles import role_key
 from ..task_notice import Notice, NotifyTarget, link_line, notify_channel
 from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from ..tiers.worker import recheck_limits
@@ -116,7 +118,7 @@ names a role not defined yet is refused); looper_task_roles reads them.
   a short descriptive id (fe_rd, backend_rd, android_rd, ios_rd) and run each
   discipline's steps as its role. A role can also give a step a focus (a
   tester, a security review). A task of one discipline needs no role unless
-  the requirement or the user asks for one.
+  the requirement or the user asks for one, or a project template fits.
 - Pin what the platforms share first: one step writes the interface (routes,
   payloads, errors) to a file; every platform step depends on it, and they
   run side by side; a last step integrates them and checks them together.
@@ -135,6 +137,12 @@ names a role not defined yet is refused); looper_task_roles reads them.
   would.
 - Setting a role again makes a new version: attempts that start afterwards
   use it, a run already started keeps its own.
+- The project's role templates (your [PLAN] and [RESTART] messages list
+  them; looper_task_roles gives their text): when one fits a step, define the
+  role from it with "template" instead of writing one; the fields you give
+  replace the template's.
+- A role the user edited stands: you cannot change it. Name it as it is, or
+  define another role under a new id.
 """
 
 
@@ -512,7 +520,18 @@ def _role_view(row: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> di
         "profile": row["profile_name"] if row["profile_id"] and row["profile_allowed"] else None,
         **({"profile_not_allowed": row["profile_name"]} if row["profile_id"] and not row["profile_allowed"] else {}),
         "role_prompt": row["role_prompt"], "harness": row["harness"], "reason": row["reason"],
+        **({"edited_by_user": True} if row.get("via") == Via.USER.value else {}),
+        **({"template": row["template_key"]} if row.get("template_key") else {}),
         "steps": _naming(steps, key),
+    }
+
+
+def _template_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A project role template as the Planner reads it."""
+    return {
+        "id": row["template_key"], "kind": row["kind"], "description": row["description"],
+        "profile": row["profile_name"] if row["profile_id"] and row["profile_allowed"] else None,
+        "role_prompt": row["role_prompt"], "harness": row["harness"],
     }
 
 
@@ -525,6 +544,8 @@ async def _roles(call: PlannerCall) -> dict[str, Any]:
     profiles = [allowed_profile_view(row) for row in allowed]
     return {
         "roles": [_role_view(row, steps) for row in await db_roles.current(call.task_id)],
+        "templates": [_template_view(row) for row in await db_templates.list_templates(project_id)]
+        if project_id else [],
         "allowed_profiles": [{"profile_id": p["profile_id"], "name": p["name"], "model": p["model"],
                               "kinds": [kind.value for kind in RoleKind if kind.agent.value in p["roles"]]}
                              for p in profiles],
@@ -539,69 +560,89 @@ async def _roles(call: PlannerCall) -> dict[str, Any]:
 
 
 async def _role_set(call: PlannerCall) -> dict[str, Any]:
-    from ..profile_registry import RegistryError, check_selection
-
     arguments = call.arguments
     task = await _task(call.task_id)
+    project_id = task.get("project_id")
     execution = await _execution(task)
+    template: Mapping[str, Any] | None = None
+    if (wanted := arguments.get("template")) is not None:
+        template = await db_templates.get_template(project_id, wanted) if project_id else None
+        if template is None:
+            known = [row["template_key"] for row in await db_templates.list_templates(project_id)] if project_id else []
+            raise OpError(ErrorCode.INVALID, f"this project has no role template {wanted!r}; its templates: "
+                                             f"{', '.join(known) or 'none'}")
+        if arguments.get("kind") not in (None, template["kind"]):
+            raise OpError(ErrorCode.INVALID, f"template {wanted} is a {RoleKind(template['kind']).noun}: leave kind "
+                                             "out, or give its kind")
+    base = template or {}
     try:
-        key = role_key(arguments["id"])
-        kind = RoleKind(arguments["kind"])
-        prompt = role_text(arguments["role_prompt"], "role_prompt", execution.role_text_limit)
-        harness = role_text(arguments.get("harness") or "", "harness", execution.role_text_limit) or None
+        key = role_key(arguments.get("id") or (template["template_key"] if template else None))
+        kind, prompt, harness = check_definition(
+            arguments.get("kind") or base.get("kind"), arguments.get("role_prompt", base.get("role_prompt")),
+            arguments.get("harness", base.get("harness")), execution.role_text_limit)
     except RoleError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
-    if not prompt:
-        raise OpError(ErrorCode.INVALID, "role_prompt is required: what the role is responsible for and how it works")
     current = await db_roles.get(call.task_id, key)
+    if current is not None and current.get("via") == Via.USER.value:
+        raise OpError(ErrorCode.FORBIDDEN, f"the user edited role {key} (v{current['version']}); their definition "
+                                           "stands: name it in steps as it is, or define another role under a new id")
     if current is not None and current["kind"] != kind.value:
         raise OpError(ErrorCode.INVALID, f"{key} is a {RoleKind(current['kind']).noun}; a role keeps its kind: give "
                                          f"the {kind.noun} another id")
     profile: Mapping[str, Any] | None = None
-    if (wanted := arguments.get("profile_id")) is not None:
-        project_id = task.get("project_id")
-        allowed = await db_projects.allowed_profiles(project_id) if project_id else []
-        if not allowed:
-            raise OpError(ErrorCode.FORBIDDEN, "this task's project lets its Planner choose no Agent Profile (its list "
-                                               "is empty): define the role without profile_id")
+    dropped = ""
+    if (wanted_profile := arguments.get("profile_id")) is not None:
         users = await db_layers.profile_overrides(call.task_id)
         if kind.agent.value in users:
             raise OpError(ErrorCode.FORBIDDEN, f"the user chose {users[kind.agent.value]['name']} for this task's "
                                                f"{_label(kind.agent)}; their choice stands: define the role without "
                                                "profile_id")
-        profile = _match(allowed, wanted)
-        if profile is None:
-            raise OpError(ErrorCode.FORBIDDEN, f"{wanted!r} is not on the project's list; you may choose: "
-                                               f"{', '.join(p['name'] for p in allowed)}")
         try:
-            await check_selection(profile["id"], [kind.agent.value])
-        except RegistryError as exc:
+            profile = await allowed_profile(project_id, wanted_profile, kind)
+        except RoleForbidden as exc:
+            raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
+        except RoleError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
+    elif template is not None and template["profile_id"]:
+        # The template's profile comes with it while the project still allows it.
+        if template["profile_allowed"]:
+            profile = {"id": template["profile_id"], "name": template["profile_name"]}
+        else:
+            dropped = (f" The template's profile {template['profile_name']} is not on the project's list any more: the "
+                       "role runs what the built-in role would.")
     profile_id = profile["id"] if profile is not None else None
     steps = await db_steps.list_steps(call.task_id)
-    if current is not None and TaskRole.from_row(current).defines(kind, prompt, harness, profile_id):
+    template_key = template["template_key"] if template else None
+    if current is not None and TaskRole.from_row(current).defines(kind, prompt, harness, profile_id) and \
+            current.get("template_key") == template_key:
         return {"id": key, "kind": kind.value, "version": current["version"], "changed": False,
-                "steps": _naming(steps, key), "note": "the role already reads so: no new version"}
+                "steps": _naming(steps, key), "note": "the role already reads so: no new version" + dropped}
     reason = _reason(call)
-    summary = (f"Role {key} ({kind.value}) v{(current['version'] + 1) if current else 1}: "
+    summary = (f"Role {key} ({kind.value}) v{(current['version'] + 1) if current else 1}"
+               f"{f' from template {template_key}' if template_key else ''}: "
                f"profile {profile['name'] if profile else 'as the built-in ' + kind.agent.value.capitalize()}; "
                f"harness {'its own' if harness else 'the working style that applies'}; role prompt {len(prompt)} "
                "characters" + (f". Reason: {reason}" if reason else ""))
     entry = {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value, "summary": clip(summary, SUMMARY_MAX_CHARS),
              "learnings": []}
     try:
-        version = await db_roles.add_version(call.task_id, key, {"kind": kind.value, "profile_id": profile_id,
-                                                                 "role_prompt": prompt, "harness": harness,
-                                                                 "reason": reason}, entry)
+        version = await db_roles.add_version(call.task_id, key, {
+            "kind": kind.value, "profile_id": profile_id, "role_prompt": prompt, "harness": harness, "reason": reason,
+            "via": Via.PLANNER.value, "template_key": template_key}, entry,
+            after=current["version"] if current else 0)
     except asyncpg.UniqueViolationError:
-        raise OpError(ErrorCode.CONFLICT, f"role {key} changed meanwhile; look again") from None
+        version = None
     except asyncpg.ForeignKeyViolationError:
         raise OpError(ErrorCode.CONFLICT, "the profile was removed meanwhile; look again") from None
+    if version is None:
+        raise OpError(ErrorCode.CONFLICT, f"role {key} changed meanwhile; look again")
     await _activity(call.task_id, f"Planner defined role {key} v{version} ({kind.value}"
+                                  f"{', from template ' + template_key if template_key else ''}"
                                   f"{', profile ' + profile['name'] if profile else ''})")
     return {"id": key, "kind": kind.value, "version": version, "changed": True, "steps": _naming(steps, key),
+            **({"template": template_key} if template_key else {}),
             "note": "attempts that start from now on run this version; a run already started keeps its own. Name "
-                    f"it in a step's {'role' if kind is RoleKind.WORK else 'review_role'}."}
+                    f"it in a step's {'role' if kind is RoleKind.WORK else 'review_role'}." + dropped}
 
 
 _TASK_ID = {"type": "string", "minLength": 1, "description": "Your task's id; leave it out. Another task's is refused."}
@@ -674,15 +715,22 @@ ROLE_TOOLS: tuple[Tool, ...] = (
         description="Define a role for this task's steps, or a new version of one: kind work (a step's Worker runs "
                     "as it) or review (it reviews a step after the built-in Reviewer, which still has to pass it), "
                     "its role prompt, optionally its harness (how it works and communicates; Looper adds the "
-                    "boundaries) and a profile from the project's list. Give the whole definition each time. Name "
-                    "the role in a step's role or review_role.",
-        schema={"type": "object", "required": ["id", "kind", "role_prompt"], "additionalProperties": False,
+                    "boundaries) and a profile from the project's list. Give the whole definition each time, or a "
+                    "project role template to copy (the fields you give replace the template's). Name the role in "
+                    "a step's role or review_role.",
+        schema={"type": "object", "required": [], "additionalProperties": False,
                 "properties": {
                     "id": {"type": "string", "minLength": 1, "maxLength": 32,
-                           "description": "The role's id in this task: letters, digits, - _ ."},
-                    "kind": {"type": "string", "enum": [kind.value for kind in RoleKind]},
+                           "description": "The role's id in this task: letters, digits, - _ .; with template, "
+                                          "the template's id when left out."},
+                    "template": {"type": "string", "minLength": 1,
+                                 "description": "A project role template's id (looper_task_roles lists them) to "
+                                                "copy; kind and role_prompt then come from it."},
+                    "kind": {"type": "string", "enum": [kind.value for kind in RoleKind],
+                             "description": "Required without template."},
                     "role_prompt": {"type": "string", "minLength": 1,
-                                    "description": "What the role is responsible for and how it does it."},
+                                    "description": "What the role is responsible for and how it does it; required "
+                                                   "without template."},
                     "harness": {"type": "string",
                                 "description": "How it works and communicates, in place of the built-in working "
                                                "style; leave it out to keep that."},
