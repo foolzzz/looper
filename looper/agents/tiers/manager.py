@@ -592,7 +592,7 @@ class ManagerAgent:
         async with self._turn_lock:
             waiting = self.ops.begin_turn(turn) if self.ops is not None else ""
             try:
-                return await self._run_turn(message, context_envelope,
+                return await self._run_turn(message, context_envelope, ops_turn=turn,
                                             note="\n".join(part for part in (waiting, note) if part))
             finally:
                 if self.ops is not None:
@@ -615,8 +615,18 @@ class ManagerAgent:
             contract_name="TOOLS_CONTRACT", contract=TOOLS_CONTRACT,
         )
 
-    async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, note: str = "",
-                        retried: bool = False) -> str:
+    async def _link_turn_task(self, recorder: ClaudeRunRecorder, turn: Turn | None) -> None:
+        """A turn recorded without a task whose calls all named one task belongs to it (its cost is counted apart
+        on that task, as the Manager's)."""
+        if turn is not None and recorder.task_id is None and recorder.record_id is not None \
+                and len(turn.task_ids) == 1 and None not in turn.task_ids:
+            try:
+                await db_llm_records.link_task(recorder.record_id, next(iter(turn.task_ids)))
+            except Exception:
+                logger.warning("could not link the Manager's turn to its task", exc_info=True)
+
+    async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, ops_turn: Turn | None = None,
+                        note: str = "", retried: bool = False) -> str:
         await self._load_db_config()
         if not self._session_loaded:
             await self._load_session_state()
@@ -759,6 +769,7 @@ class ManagerAgent:
                     output_text="".join(text_parts) or None, result_event=None,
                     error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}", status=ended_by(exc),
                 )
+                await self._link_turn_task(recorder, ops_turn)
                 raise
 
             if resuming and not turn.session_started and not retried:
@@ -769,6 +780,7 @@ class ManagerAgent:
                 logger.warning("manager: session %s could not be resumed; starting a new session", resuming)
                 await recorder.finish(output_text=None, result_event=None, error=(
                     f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
+                await self._link_turn_task(recorder, ops_turn)
                 await self._claude.stop()
                 self._session_id, self._session_totals = None, Usage()  # its totals went with it
                 await self._save_session_state()
@@ -776,7 +788,7 @@ class ManagerAgent:
                     f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
                     profile=launch.profile.id)
                 self._pending_handoff = None
-                return await self._run_turn(message, context_envelope, note=note, retried=True)
+                return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True)
 
             result_event = turn.result_event
             # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
@@ -796,6 +808,7 @@ class ManagerAgent:
                 )),
                 usage=turn.usage,
             )
+            await self._link_turn_task(recorder, ops_turn)
             if over_cap:
                 await self._claude.stop()
             if not exited:
@@ -1014,6 +1027,7 @@ class ManagerAgent:
             await recorder.start()
 
             async def on_end(text: str, resident: ResidentTurn) -> None:
+                await self._link_turn_task(recorder, turn)
                 if self.ops is not None:
                     self.ops.end_turn(turn)
                 if resident.result_event is not None:

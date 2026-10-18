@@ -567,21 +567,26 @@ def resolve_installed(rows: Sequence[Mapping[str, Any]], project_id: str | None)
     return list(loaded.values())
 
 
-async def load_installed(runtime_root: Path, role: str, project_id: str | None = None) -> AgentLibrary:
+async def load_installed(runtime_root: Path, role: str, project_id: str | None = None,
+                         items: Sequence[str] = ()) -> AgentLibrary:
     """The items installed for one run of ``role`` in ``project_id``, materialized under ``runtime_root``.
 
     They are the enabled installs naming the role, global or in the project
-    (``resolve_installed``). An item is written from the database the first
-    time a run needs it. The plugins come first, then ``personal`` and
-    ``project``. The MCP servers go into one ``--mcp-config`` file
-    (``mcp.write_config``). When the catalog cannot be read or written, the
-    run goes without its items and its record says why.
+    (``resolve_installed``), and, for a run of a role a task's Planner defined,
+    the ``items`` (ids) it names that are installed for such roles there. An
+    item is written from the database the first time a run needs it. The
+    plugins come first, then ``personal`` and ``project``. The MCP servers go
+    into one ``--mcp-config`` file (``mcp.write_config``). When the catalog
+    cannot be read or written, the run goes without its items and its record
+    says why.
     """
     from ..db import library as db_library
 
     project_id = project_id or None
     try:
         rows = await db_library.list_installed(role, project_id)
+        if items:
+            rows = [*rows, *await db_library.list_role_items(project_id, items)]
     except Exception:
         logger.warning("cannot read the installed items; the agent runs without them", exc_info=True)
         return AgentLibrary(error="the installed items could not be read", role=role, project_id=project_id)

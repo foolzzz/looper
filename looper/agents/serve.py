@@ -696,14 +696,15 @@ async def _run_agent_system(
     except Exception:
         logger.exception("could not sweep the step worktrees")
 
-    # A Codex login that forked in a run the previous server did not see end (before the session directories
-    # it may be in are reclaimed).
-    from .runtimes import codex_login
-    try:
-        if problem := await codex_login.inspect_at_start(runtime_root):
-            logger.warning("%s", problem)
-    except Exception:
-        logger.warning("could not inspect the Codex homes for a forked login", exc_info=True)
+    # A Codex or Grok login that forked in a run the previous server did not see end (before the session
+    # directories it may be in are reclaimed).
+    from .runtimes import codex_login, grok_login
+    for login, label in ((codex_login, "Codex"), (grok_login, "Grok")):
+        try:
+            if problem := await login.inspect_at_start(runtime_root):
+                logger.warning("%s", problem)
+        except Exception:
+            logger.warning("could not inspect the %s homes for a forked login", label, exc_info=True)
 
     # Before any agent launches: remove the read-only copies of replaced or
     # deleted content that no running process mounts.
@@ -745,6 +746,7 @@ async def _run_agent_system(
         database_check,
         *await asyncio.to_thread(self_check.check_claude, claude_bin),
         await self_check.codex_login_check(),
+        await self_check.grok_login_check(),
         self_check.check_lark_cli(lark_enabled),
         await asyncio.to_thread(self_check.check_git),
     ]

@@ -19,8 +19,8 @@ const LOOKS: Record<string, CardLook> = { verified: look("Done"), failed: look("
 function step(id: string, extra: Partial<TaskStep> = {}): TaskStep {
   return {
     id, task_id: "t1", step_index: 0, step_key: id, kind: "work", instruction: "", acceptance_criteria: [], target_files: [],
-    depends_on: [], status: "pending", review: false, role_key: null, review_role_key: null, review_role_required: true,
-    role_version: null, review_role_version: null, review_stage: null, retries: 0, worker_id: null, reviewer_id: null,
+    depends_on: [], status: "pending", review: false, role_key: null, role_version: null, review_roles: [],
+    review_stage: null, review_position: null, retries: 0, worker_id: null, reviewer_id: null,
     result: null, created_at: "2026-10-17T08:00:00Z", updated_at: "2026-10-17T08:00:00Z", completed_at: null, started_at: null,
     ...extra,
   };
@@ -74,13 +74,14 @@ describe("stepCard", () => {
     const s2 = step("s2", {
       status: "verified", instruction: "Write test_greet.py.\nRun it.", acceptance_criteria: ["the test passes"],
       target_files: ["test_greet.py"], depends_on: ["s1"], role_key: "tester", role_version: 2,
-      review_role_key: "security", review_role_version: 1, review_role_required: false, review: true, retries: 1,
+      review_roles: [{ role: "security", required: false, version: 1 }, { role: "perf", required: true, version: null }],
+      review: true, retries: 1,
       worker_id: "worker-a", reviewer_id: "reviewer-b", started_at: "2026-10-17T08:01:00Z", completed_at: "2026-10-17T08:05:00Z",
       result: { status: "completed", summary: "Wrote the test; it passes." },
     });
     const card = cardOf(s2, [s1, s2]);
     expect(card).toMatchObject({ name: "s2", look: LOOKS.verified,
-                                 roles: ["tester · work v2", "security · review v1 (advisory)"] });
+                                 roles: ["tester · work v2", "security · review v1 (advisory)", "perf · review"] });
     expect(titles(card.sections)).toEqual(["Instruction", "Acceptance criteria", "Files", "Depends on", "Runs", "Result", "Timing"]);
     expect(section(card.sections, "Instruction")).toMatchObject({ text: "Write test_greet.py.\nRun it." });
     expect(section(card.sections, "Acceptance criteria")).toMatchObject({ items: ["the test passes"] });
@@ -139,7 +140,7 @@ describe("stepCard", () => {
 
     const byRole = cardOf(step("s5", { status: "verified", result: {
       status: "completed", summary: "Done.", verify_passed: true,
-      role_review: { role: "security", passed: false, findings: [], summary: "shell injection" } } }));
+      role_reviews: [{ role: "security", required: true, passed: false, findings: [], summary: "shell injection" }] } }));
     expect(section(byRole.sections, "Review")).toMatchObject({ text: "Review by role security did not pass it:\nshell injection" });
   });
 
@@ -149,8 +150,11 @@ describe("stepCard", () => {
   });
 
   it("says what a step in review waits for", () => {
-    const card = cardOf(step("s1", { status: "completed", review_stage: "role", review_role_key: "security" }));
-    expect(section(card.sections, "Runs")).toMatchObject({ facts: [{ label: "Now", value: "Waiting for review: security" }] });
+    const roles = [{ role: "security", required: true, version: 1 }, { role: "perf", required: true, version: 1 }];
+    const card = cardOf(step("s1", { status: "completed", review_stage: "role", review_roles: roles, review_position: 1 }));
+    expect(section(card.sections, "Runs")).toMatchObject({ facts: [{ label: "Now", value: "Waiting for review: perf" }] });
+    const builtin = cardOf(step("s1", { status: "completed", review_stage: "builtin", review_roles: roles }));
+    expect(section(builtin.sections, "Runs")).toMatchObject({ facts: [{ label: "Now", value: "Waiting for the built-in review" }] });
   });
 
   it("gives a dropped step's reason, or the default one", () => {

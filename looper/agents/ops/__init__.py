@@ -67,6 +67,7 @@ class Turn:
     group: bool = False  # the chat is a group chat
     envelope: MessageEnvelope | None = None
     blocks: list[str] = field(default_factory=list)
+    task_ids: set[str | None] = field(default_factory=set)  # each call's named task; None for global calls or creates
     # Looper refused a call of this turn for its token: the tools did not work, whatever Claude says.
     refused: bool = False
 
