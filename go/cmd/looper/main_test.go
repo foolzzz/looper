@@ -155,9 +155,8 @@ func TestServeShutsDown(t *testing.T) {
 	if strings.Contains(string(body), "s3cr3t-not-in-logs") {
 		t.Fatal("body leaked the database password")
 	}
-	dbUnreachable := strings.Contains(string(body), `"db":"error: unreachable"`)
-	dbTimeout := strings.Contains(string(body), `"db":"error: timeout"`)
-	if !strings.Contains(string(body), `"implementation":"go"`) || (!dbUnreachable && !dbTimeout) {
+	const want = `{"status":"running","agents":{},"tasks":{"total":0,"running":0,"completed":0},"channels":{"web":{"channel":"web","healthy":false,"active_sse_streams":0}},"checks":[]}`
+	if string(body) != want {
 		t.Fatalf("body %s", body)
 	}
 

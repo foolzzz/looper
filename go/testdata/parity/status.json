@@ -1,0 +1,17 @@
+{
+  "agents": {},
+  "channels": {
+    "web": {
+      "active_sse_streams": 0,
+      "channel": "web",
+      "healthy": false
+    }
+  },
+  "checks": [],
+  "status": "running",
+  "tasks": {
+    "completed": 1,
+    "running": 2,
+    "total": 5
+  }
+}

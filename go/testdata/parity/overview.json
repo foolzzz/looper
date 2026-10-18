@@ -1,0 +1,85 @@
+{
+  "agents": {
+    "manager": null,
+    "planners": [],
+    "reviewers": [],
+    "workers": []
+  },
+  "health": {
+    "unhealthy": []
+  },
+  "idle_projects": 1,
+  "projects": [
+    {
+      "name": "Alpha",
+      "project_id": "proj-alpha0001",
+      "reviewers": {
+        "running": 0,
+        "waiting": 0
+      },
+      "tasks": {
+        "ready": 1,
+        "running": 0
+      },
+      "workers": {
+        "running": 0,
+        "waiting": 0
+      }
+    }
+  ],
+  "schedules": {
+    "enabled": 1,
+    "failing": [
+      {
+        "consecutive_failures": 2,
+        "failures_since": null,
+        "last_status": "skipped_budget",
+        "last_success_at": null,
+        "name": "Nightly",
+        "project_id": "proj-alpha0001",
+        "project_name": "Alpha",
+        "schedule_id": "sched-nightly01",
+        "stale_since": null,
+        "timezone": "UTC"
+      }
+    ],
+    "next": [
+      {
+        "name": "Nightly",
+        "next_fire_at": "<time>",
+        "project_id": "proj-alpha0001",
+        "project_name": "Alpha",
+        "schedule_id": "sched-nightly01",
+        "timezone": "UTC"
+      }
+    ],
+    "skipped_today": {
+      "skipped_budget": 1,
+      "skipped_gate": 2,
+      "skipped_missed": 0,
+      "skipped_overlap": 0
+    },
+    "total": 1
+  },
+  "spend_today": {
+    "equivalent_usd": 1.25,
+    "provider_priced_usd": 2.0,
+    "running": 0,
+    "runs": 2,
+    "since": "<time>",
+    "unpriced_runs": 0
+  },
+  "tasks": {
+    "attention": 0,
+    "cancelled": 0,
+    "completed": 1,
+    "in_progress": 1,
+    "needs_you": 1,
+    "other": 1,
+    "other_statuses": {
+      "archived": 1
+    },
+    "ready": 1,
+    "total": 5
+  }
+}

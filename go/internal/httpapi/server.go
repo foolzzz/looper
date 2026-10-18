@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/foolzzz/looper/go/internal/db"
 )
@@ -20,11 +22,29 @@ type DBPinger interface {
 	Ping(ctx context.Context) error
 }
 
-// Server serves GET /api/status and, when WebDir is set, the dashboard files.
+// Reader is the read-only API. A nil Reads keeps the status task counts at zero
+// and answers the data routes with 500.
+type Reader interface {
+	StatusTaskCounts(ctx context.Context) (total, running, completed int, err error)
+	Overview(ctx context.Context, since time.Time) (map[string]any, error)
+	Projects(ctx context.Context) (map[string]any, error)
+	TaskExists(ctx context.Context, id string) (bool, error)
+	Tasks(ctx context.Context, q db.TaskQuery) (map[string]any, error)
+	Task(ctx context.Context, id string) (map[string]any, error)
+}
+
+// Server serves the read-only API and, when WebDir is set, the dashboard files.
+// BindHost is the listen address used by the Host header guard. Empty means
+// 127.0.0.1, which is what cmd/looper listens on.
+// Now is the clock for today's overview. Nil uses time.Now. The parity harness
+// sets it so spend and skipped runs do not follow the wall clock.
 type Server struct {
-	Version string
-	DB      DBPinger
-	WebDir  string
+	Version  string
+	DB       DBPinger
+	WebDir   string
+	Reads    Reader
+	BindHost string
+	Now      func() time.Time
 }
 
 // New builds a Server. A nil DB is reported as a database error, not a panic.
@@ -32,20 +52,71 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 	return &Server{Version: version, DB: pinger, WebDir: webDir}
 }
 
-// Handler routes the G0 API and the optional static dashboard.
+// Handler routes the read-only API and the optional static dashboard.
+// Data routes are registered without a method so a POST is 404, as in Python,
+// except the routes that answer 501 below.
+// GET /api/status stays method-specific so POST and PUT fall through to 405.
+// The Host/Origin guard runs before routing, matching request_guard.refusal.
+//
+// This slice serves GET /api/status, GET /api/projects and GET /api/overview.
+// The other read routes from the same milestone answer 501 and do not read
+// the database: /api/tasks, /api/tasks/<id>, and the cost routes
+// /api/agents/<id>/usage and /api/llm-records.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("/api/overview", s.handleOverview)
+	mux.HandleFunc("/api/projects", s.handleProjects)
+	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("/api/tasks/{id}", s.handleTask)
+	mux.HandleFunc("/api/agents/{id}/usage", notImplemented)
+	mux.HandleFunc("/api/llm-records", notImplemented)
+	mux.HandleFunc("/api/llm-records/{id}", notImplemented)
+	mux.HandleFunc("/api/llm-records/{id}/events", notImplemented)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/", s.handleRoot)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reason := requestRefusal(s.bindHost(), r); reason != "" {
+			slog.Warn("refused request", "reason", reason, "remote", r.RemoteAddr)
+			writeJSON(w, http.StatusForbidden, errorBody{Error: reason})
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
+// bindHost is the address the process listens on. serve binds loopback only.
+func (s *Server) bindHost() string {
+	if s.BindHost != "" {
+		return s.BindHost
+	}
+	return "127.0.0.1"
+}
+
+type statusTasks struct {
+	Total     int `json:"total"`
+	Running   int `json:"running"`
+	Completed int `json:"completed"`
+}
+
+type webHealth struct {
+	Channel          string `json:"channel"`
+	Healthy          bool   `json:"healthy"`
+	ActiveSSEStreams int    `json:"active_sse_streams"`
+}
+
+type statusChannels struct {
+	Web webHealth `json:"web"`
+}
+
+// statusBody is Python _handle_status. implementation, version, and db are not
+// in that object. The database probe is logged beside it and is not a field.
 type statusBody struct {
-	Status         string `json:"status"`
-	Implementation string `json:"implementation"`
-	Version        string `json:"version"`
-	DB             string `json:"db"`
+	Status   string         `json:"status"`
+	Agents   map[string]any `json:"agents"`
+	Tasks    statusTasks    `json:"tasks"`
+	Channels statusChannels `json:"channels"`
+	Checks   []any          `json:"checks"`
 }
 
 type errorBody struct {
@@ -53,24 +124,47 @@ type errorBody struct {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	dbStatus := "ok"
+	// Probe the database for the log. Python's status body does not carry the result.
 	switch {
 	case s.DB == nil:
-		dbStatus = "error: no database"
+		slog.Warn("database check failed", "err", "error: no database")
 	default:
 		ctx, cancel := context.WithTimeout(r.Context(), db.ProbeTimeout)
-		defer cancel()
-		if err := s.DB.Ping(ctx); err != nil {
-			dbStatus = db.ErrorText(err)
-			slog.Warn("database check failed", "err", dbStatus)
+		err := s.DB.Ping(ctx)
+		cancel()
+		if err != nil {
+			slog.Warn("database check failed", "err", db.ErrorText(err))
+		}
+	}
+	tasks := statusTasks{}
+	if s.Reads != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), db.ProbeTimeout)
+		total, running, completed, err := s.Reads.StatusTaskCounts(ctx)
+		cancel()
+		if err != nil {
+			slog.Warn("status task counts", "err", db.LogText(err))
+		} else {
+			tasks = statusTasks{Total: total, Running: running, Completed: completed}
 		}
 	}
 	writeJSON(w, http.StatusOK, statusBody{
-		Status:         "running",
-		Implementation: "go",
-		Version:        s.Version,
-		DB:             dbStatus,
+		Status: "running",
+		Agents: map[string]any{},
+		Tasks:  tasks,
+		Channels: statusChannels{Web: webHealth{
+			Channel:          "web",
+			Healthy:          false,
+			ActiveSSEStreams: 0,
+		}},
+		Checks: []any{},
 	})
+}
+
+func (s *Server) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
@@ -116,16 +210,25 @@ func methodNotAllowed(w http.ResponseWriter) {
 	writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: "method not allowed"})
 }
 
+// notImplemented is a route the Python server serves and this process does not.
+// The body is fixed. It is not a partial payload.
+func notImplemented(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusNotImplemented, errorBody{Error: "not implemented in the Go server yet"})
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
-	data, err := json.Marshal(v)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// Python json.dumps does not escape &, <, or >. The dashboard parses JSON.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		slog.Error("encode json", "err", err)
 		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_, _ = w.Write(data)
+	_, _ = w.Write(bytes.TrimRight(buf.Bytes(), "\n"))
 }
 
 var (

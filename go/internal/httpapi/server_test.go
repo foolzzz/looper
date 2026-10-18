@@ -45,6 +45,14 @@ func (f *fakeDB) Ping(ctx context.Context) error {
 	return f.err
 }
 
+// loopbackRequest is httptest.NewRequest with a loopback Host.
+// NewRequest uses example.com, which the Host guard refuses.
+func loopbackRequest(method, target string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	req.Host = "127.0.0.1"
+	return req
+}
+
 func assertProbeWindow(t *testing.T, limit time.Duration) {
 	t.Helper()
 	if limit < db.ProbeTimeout-200*time.Millisecond || limit > db.ProbeTimeout+50*time.Millisecond {
@@ -64,7 +72,7 @@ func TestStatus(t *testing.T) {
 		method     string
 		path       string
 		wantStatus int
-		wantDB     string
+		wantLog    string
 		wantBody   string
 		wantAllow  string
 		leak       string
@@ -76,8 +84,7 @@ func TestStatus(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/api/status",
 			wantStatus: http.StatusOK,
-			wantDB:     "ok",
-			wantBody:   `{"status":"running","implementation":"go","version":"1.2.3","db":"ok"}`,
+			wantBody:   pythonStatusZero,
 			deadline:   true,
 		},
 		{
@@ -86,7 +93,8 @@ func TestStatus(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/api/status",
 			wantStatus: http.StatusOK,
-			wantDB:     "error: unreachable",
+			wantBody:   pythonStatusZero,
+			wantLog:    "error: unreachable",
 			leak:       "connection refused",
 			deadline:   true,
 		},
@@ -96,7 +104,8 @@ func TestStatus(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/api/status",
 			wantStatus: http.StatusOK,
-			wantDB:     "error: timeout",
+			wantBody:   pythonStatusZero,
+			wantLog:    "error: timeout",
 			deadline:   true,
 		},
 		{
@@ -105,7 +114,8 @@ func TestStatus(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/api/status",
 			wantStatus: http.StatusOK,
-			wantDB:     "error: no database",
+			wantBody:   pythonStatusZero,
+			wantLog:    "error: no database",
 		},
 		{
 			name:       "post is not the spa shell",
@@ -132,7 +142,7 @@ func TestStatus(t *testing.T) {
 			pinger:     &fakeDB{},
 			webDir:     root,
 			method:     http.MethodGet,
-			path:       "/api/tasks",
+			path:       "/api/nope",
 			wantStatus: http.StatusNotFound,
 			wantBody:   `{"error":"not found"}`,
 		},
@@ -145,7 +155,7 @@ func TestStatus(t *testing.T) {
 			}
 			logs := captureLogs(t)
 			h := New("1.2.3", tt.pinger, tt.webDir).Handler()
-			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req := loopbackRequest(tt.method, tt.path)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, req)
 			if rr.Code != tt.wantStatus {
@@ -160,19 +170,20 @@ func TestStatus(t *testing.T) {
 			if tt.wantBody != "" && rr.Body.String() != tt.wantBody {
 				t.Fatalf("body %s, want %s", rr.Body.String(), tt.wantBody)
 			}
-			if tt.wantDB != "" {
-				var body statusBody
-				if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-					t.Fatal(err)
-				}
-				if body.Status != "running" || body.Implementation != "go" || body.Version != "1.2.3" || body.DB != tt.wantDB {
-					t.Fatalf("body %+v", body)
-				}
+			if tt.wantLog != "" && !strings.Contains(logs.String(), tt.wantLog) {
+				t.Fatalf("log %q, want substring %q", logs.String(), tt.wantLog)
+			}
+			if rr.Code == http.StatusOK && tt.path == "/api/status" {
 				var raw map[string]any
 				if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
 					t.Fatal(err)
 				}
-				if len(raw) != 4 {
+				for _, key := range []string{"implementation", "version", "db"} {
+					if _, ok := raw[key]; ok {
+						t.Fatalf("status includes %s, which Python does not: %s", key, rr.Body.String())
+					}
+				}
+				if len(raw) != 5 {
 					t.Fatalf("keys %v", raw)
 				}
 			}
@@ -185,12 +196,12 @@ func TestStatus(t *testing.T) {
 			if tt.leak != "" && (strings.Contains(rr.Body.String(), tt.leak) || strings.Contains(logs.String(), tt.leak)) {
 				t.Fatalf("leaked %q in body %s log %s", tt.leak, rr.Body.String(), logs.String())
 			}
-			if strings.HasPrefix(tt.wantDB, "error:") && tt.wantDB != "error: no database" && !strings.Contains(logs.String(), tt.wantDB) {
-				t.Fatalf("log %q, want substring %q", logs.String(), tt.wantDB)
-			}
 		})
 	}
 }
+
+// pythonStatusZero is GET /api/status with no reader and no live agents.
+const pythonStatusZero = `{"status":"running","agents":{},"tasks":{"total":0,"running":0,"completed":0},"channels":{"web":{"channel":"web","healthy":false,"active_sse_streams":0}},"checks":[]}`
 
 func TestStatusHidesDSNSecrets(t *testing.T) {
 	tests := []struct {
@@ -218,15 +229,14 @@ func TestStatusHidesDSNSecrets(t *testing.T) {
 
 			h := New("dev", db.Probe{DB: sqlDB}, "").Handler()
 			rr := httptest.NewRecorder()
-			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+			h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/status"))
 
 			body := rr.Body.String()
 			if rr.Code != http.StatusOK {
 				t.Fatalf("status %d", rr.Code)
 			}
-			const want = `"db":"error: invalid database URL"`
-			if !strings.Contains(body, want) {
-				t.Fatalf("body missing %s", want)
+			if body != pythonStatusZero {
+				t.Fatalf("body %s", body)
 			}
 			if strings.Contains(body, "SECRET") || strings.Contains(logs.String(), "SECRET") {
 				t.Fatal("status or log leaked SECRET")
@@ -248,12 +258,13 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 }
 
 func TestStatusPropagatesRequestCancel(t *testing.T) {
+	logs := captureLogs(t)
 	started := make(chan struct{})
 	errCh := make(chan error, 1)
 	pinger := &blockingDB{started: started, errCh: errCh}
 	h := New("1.2.3", pinger, "").Handler()
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodGet, "/api/status", nil).WithContext(ctx)
+	req := loopbackRequest(http.MethodGet, "/api/status").WithContext(ctx)
 
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -284,9 +295,11 @@ func TestStatusPropagatesRequestCancel(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 		}
-		const want = `{"status":"running","implementation":"go","version":"1.2.3","db":"error: context canceled"}`
-		if rr.Body.String() != want {
-			t.Fatalf("body %s, want %s", rr.Body.String(), want)
+		if rr.Body.String() != pythonStatusZero {
+			t.Fatalf("body %s", rr.Body.String())
+		}
+		if !strings.Contains(logs.String(), "error: context canceled") {
+			t.Fatalf("log %s", logs.String())
 		}
 	case <-time.After(time.Second):
 		t.Fatal("handler did not return after cancellation")
@@ -393,7 +406,7 @@ func TestStaticAndSPA(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req := loopbackRequest(tt.method, tt.path)
 			rr := httptest.NewRecorder()
 			tt.h.ServeHTTP(rr, req)
 			if rr.Code != tt.wantStatus {
@@ -429,7 +442,7 @@ func TestStaticAndSPA(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(empty, "app.js"), []byte("ONLY"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	req := loopbackRequest(http.MethodGet, "/app.js")
 	rr := httptest.NewRecorder()
 	emptyH.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK || rr.Body.String() != "ONLY" {
