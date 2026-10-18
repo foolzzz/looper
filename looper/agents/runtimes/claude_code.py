@@ -171,14 +171,16 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
     def launch_args(self, launch: Launch) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions (read-only for a run that must not
-        change files, ``Launch.read_only``), the model, the effort, the plugin directories of the installed items,
-        the directories of the project knowledge, the per-run spend cap (when Claude Code's own figure is the run's
-        cost), the provider's binding and, with agent teams (``Launch.agent_teams``), where teammates run."""
-        from ..claude_cli import budget_args, knowledge_args, library_args, permission_args, read_only_args
+        change files, ``Launch.read_only``; only reading tools for a consult), the model, the effort, the plugin
+        directories of the installed items, the directories of the project knowledge, the per-run spend cap (when
+        Claude Code's own figure is the run's cost), the provider's binding and, with agent teams
+        (``Launch.agent_teams``), where teammates run."""
+        from ..claude_cli import budget_args, consult_args, knowledge_args, library_args, permission_args, read_only_args
 
         provider = launch.profile.provider
         return [
-            *(read_only_args(launch.library) if launch.read_only else permission_args()),
+            *(consult_args() if launch.consult else
+              read_only_args(launch.library) if launch.read_only else permission_args()),
             "--model", launch.model,
             *(["--effort", launch.effort] if launch.effort else []),
             *library_args(launch.library),
@@ -255,7 +257,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
         """A run that resumes a fork of a finished run's session (``--resume <id> --fork-session``: a new session id,
         the original unchanged; it resumes from another directory too, verified with 2.1.285), with a ``read_only``
-        launch. Claude Code keeps its sessions itself: ``session_dir`` and ``fork_dir`` are not used."""
+        launch with only reading tools. Claude Code keeps its sessions itself, ignoring ``session_dir`` and
+        ``fork_dir``: the fork stays in its own session store like every Claude Code session, since Looper never
+        changes anything in Claude Code's own directory."""
         return [*self.run_command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch, max_turns=max_turns),
                 "--resume", session_id, "--fork-session"]
 

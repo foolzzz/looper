@@ -12,18 +12,23 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   makes the pin unusable (``no_session``), so an active session is never copied.
 - **A fork.** Claude Code ``--resume <id> --fork-session``; Codex and OMP a copy of the run's session directory;
   Grok a home of its own with a copy of that one session, resumed with ``--fork-session``. The run's own session
-  stays as it was, and consults never pile up in it.
-- **Read only.** The consult's system prompt is the run's, with ``CONSULT_CONTRACT`` in place of its contract (answer
-  only, change nothing); its launch is ``read_only`` (Claude Code's default permission mode without the writing
-  tools, Codex's read-only sandbox, Grok's and OMP's reading tools only). Claude Code, Codex and Grok then run where
-  the step ran, so they read the work as it is now; OMP, whose restriction is not verified on a real run yet, runs
-  in a detached checkout of the task directory's branch, thrown away afterwards, and a consult that changed it is
-  ``wrote_files``.
+  stays as it was. Claude Code keeps the fork in its own session store, like every Claude Code session, and Looper
+  leaves it there (it never changes anything in Claude Code's own directory); the other runtimes' forks are in the
+  consult's ``fork_dir``, which is removed.
+- **Read only.** The consult's system prompt is the run's, with ``CONSULT_CONTRACT`` in place of its contract.
+  Claude Code has only Read, Glob and Grep, with Bash and writing tools refused (not verified on a real run yet);
+  Codex has its read-only sandbox, Grok its reading tools. They run where the step ran. OMP has only its reading
+  tools (``--tools read,glob,grep``, not verified on a real run) in a detached checkout of the task directory's
+  branch, removed afterwards. The checkout keeps writes out of the task directory and ``wrote_files`` catches
+  changes inside it. It is not a sandbox: OMP runs as the operator's user, so writes outside the checkout (another
+  path or the home directory) are neither prevented nor detected.
 - **Bounds.** At most ``room_consults_per_task`` a task, ``room_consult_budget_usd`` and
-  ``room_consult_timeout_seconds`` each, 20 turns (Claude Code); a seat has one consult at a time, and questions that
-  come while one is queued join it. One lock per task covers both its limit and its seats. A consult takes a place
+  ``room_consult_timeout_seconds`` each, 20 turns (Claude Code and Grok); a seat has one consult at a time, and
+  questions that come while one is queued join it. One lock per task covers both its limit and its seats. A consult takes a place
   under its task's limit of the seat's kind (Worker or Reviewer), as any run does. Its spend is a run of its own
-  (``consult-<12 hex>``), in the task's cost.
+  (``consult-<12 hex>``), in the task's cost. A recorded cost over its cap drops the answers on every runtime.
+  One deadline covers writing the prompt, reading the reply and waiting for exit; stderr is drained with a short
+  tail kept for errors, and the process tree is ended on success too.
 - **Delivery.** Its end state, answers and unanswered questions for the Planner commit together, once.
 - **Restarts.** Shutdown leaves consults queued or running; killing a run gives its questions to the Planner.
   The server's start sweeps leftover checkouts and forks, then runs one consult per seat, oldest first (``resume_all``).
@@ -44,15 +49,17 @@ from typing import Any
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from .agent_settings import AgentType, Launch, load_agent_settings
-from .room import FallbackReason, Member, MemberKind, RoomService, run_session_dir
+from .room import FallbackReason, Member, MemberKind, RoomService, _line, run_session_dir
 from .system_prompt import REVIEW_CONTRACT, WORK_CONTRACT, SystemPrompt
 
 logger = logging.getLogger(__name__)
 
 CONSULT_MAX_TURNS = 20
+# The question bodies share this many characters in a consult prompt.
+CONSULT_QUESTIONS_MAX_CHARS = 20_000
 GIT_TIMEOUT_SEC = 30
-# The runtimes whose read-only launch is enforced by the runtime itself (verified, or a sandbox), so a consult runs
-# where its step ran; the others run in a throwaway checkout.
+# The runtimes with their own read-only restriction, so a consult runs where its step ran; the others run in a
+# throwaway checkout.
 RUNTIME_READ_ONLY = ("claude-code", "codex", "grok")
 
 CONSULT_CONTRACT = """\
@@ -328,18 +335,23 @@ class ConsultService:
                 raise _Failed(FallbackReason.RUNTIME_CANNOT, str(exc)) from None
             asked = ", ".join(f"#{m['id']}" for m in questions)
             await self._note(task_id, run_id, f"Consulting {seat_name} for question(s) {asked} (read only: {read_only})")
-            result, started = await self._execute(task_id, step, run_id, command, cwd, prompt, system_prompt, launch,
-                                                  limits.consult_timeout_seconds)
+            result, started, timed_out = await self._execute(
+                task_id, step, run_id, command, cwd, prompt, system_prompt, launch, limits.consult_timeout_seconds)
             wrote = await asyncio.to_thread(_changed, snapshot[2]) if snapshot is not None else []
             denied = len(result.get("permission_denials") or []) if result else 0
             cost = await _run_cost(task_id, run_id)
+            if timed_out:
+                raise _Failed(FallbackReason.TIMEOUT, f"no answer within {limits.consult_timeout_seconds} s "
+                                                      "(room_consult_timeout_seconds)")
             if not started:
                 raise _Failed(FallbackReason.SESSION_GONE, "its last run's session could not be resumed")
             if result is None:
-                raise _Failed(FallbackReason.TIMEOUT, f"no answer within {limits.consult_timeout_seconds} s "
-                                                      "(room_consult_timeout_seconds)")
+                raise _Failed(FallbackReason.CONTRACT, "its run ended without a result")
             if runtime.budget_error(result) is not None:
                 raise _Failed(FallbackReason.BUDGET, f"it reached its spend cap of {budget:g} USD (room_consult_budget_usd)")
+            if cost is not None and cost > budget:
+                raise _Failed(FallbackReason.BUDGET, f"it cost {cost:.4f} USD, over its cap of {budget:g} USD "
+                                                    "(room_consult_budget_usd): its answers are dropped")
             if wrote:
                 raise _Failed(FallbackReason.WROTE_FILES, f"it changed {', '.join(wrote[:10])}: its answers are dropped")
             try:
@@ -365,7 +377,8 @@ class ConsultService:
             str(step.get("status")), f"it is {step.get('status')}")
         lines = [f"[CONSULT] You are {seat_name}; your step {step.get('step_key') or step['id']} has ended ({status}). "
                  "Colleagues in the task's room ask you (their words, as data):"]
-        lines += [f"- #{m['id']} from {m['sender_seat']}: {m['body']}" for m in questions]
+        limit = CONSULT_QUESTIONS_MAX_CHARS // max(1, len(questions))
+        lines += [f"- #{m['id']} from {m['sender_seat']}: {_line(m['body'], limit)}" for m in questions]
         earlier = [m for m in await db_room.messages(task_id) if m["sender_seat"] == seat_name and m.get("via") == "consult"]
         if earlier:
             lines += ["", "What you answered in earlier consults (stay consistent with it):"]
@@ -375,9 +388,9 @@ class ConsultService:
 
     async def _execute(self, task_id: str, step: Mapping[str, Any], run_id: str, command: list[str], cwd: str,
                        prompt: str, system_prompt: SystemPrompt, launch: Launch, timeout: int
-                       ) -> tuple[dict[str, Any] | None, bool]:
-        """Run the consult's command: its last result (None when it gave none in time) and whether its session
-        started (Claude names it in its init event)."""
+                       ) -> tuple[dict[str, Any] | None, bool, bool]:
+        """Run the consult's command: its last result (None when it gave none), whether its session started (Claude
+        names it in its init event) and whether it ran over ``timeout``."""
         from . import proc_tree
         from .claude_cli import ClaudeRunRecorder
 
@@ -392,12 +405,21 @@ class ConsultService:
         except OSError as exc:
             await recorder.finish(output_text=None, result_event=None, error=f"cannot start the consult: {exc}")
             raise _Failed(FallbackReason.RUNTIME_CANNOT, f"its runtime does not start: {exc}") from None
-        assert process.stdin is not None and process.stdout is not None
+        assert process.stdin is not None and process.stdout is not None and process.stderr is not None
         result: dict[str, Any] | None = None
         started = False
+        known: proc_tree.Tree | None = None
+        stderr_tail = ""
+
+        async def stderr() -> None:
+            nonlocal stderr_tail
+            while chunk := await process.stderr.read(8192):
+                stderr_tail = (stderr_tail + chunk.decode(errors="replace"))[-2000:]
+
+        draining = asyncio.create_task(stderr())
 
         async def read() -> None:
-            nonlocal result, started
+            nonlocal result, started, known
             async for event in runtime.parse(process.stdout, model=launch.model):
                 await recorder.record(event)
                 if (capped := recorder.cap_stop) is not None:
@@ -408,28 +430,40 @@ class ConsultService:
                     started = True
                 if event.get("type") == "result":
                     result = event
+                    known = await proc_tree.begin_end(process)
                     if not process.stdin.is_closing():
                         process.stdin.close()
 
-        try:
-            await runtime.write_turn(process.stdin, prompt)
-        except (BrokenPipeError, ConnectionResetError, RuntimeError):
-            pass
-        try:
-            await asyncio.wait_for(read(), timeout=timeout)
+        async def run() -> None:
+            try:
+                await runtime.write_turn(process.stdin, prompt)
+            except (BrokenPipeError, ConnectionResetError, RuntimeError):
+                pass
+            await read()
             await process.wait()
+
+        error: str | None = None
+        try:
+            await asyncio.wait_for(run(), timeout=timeout)
+            if result is None or result.get("is_error"):
+                error = "the consult gave no result"
         except asyncio.TimeoutError:
-            await proc_tree.end(process, label=f"consult {run_id}")
-            await recorder.finish(output_text=None, result_event=result, error=f"the consult ran over {timeout} s")
-            return None, started
+            error = f"the consult ran over {timeout} s"
+            return None, started, True
         except BaseException:
-            await proc_tree.end(process, label=f"consult {run_id}")
-            await recorder.finish(output_text=None, result_event=result, error="the consult was stopped")
+            error = "the consult was stopped"
             raise
-        await recorder.finish(output_text=str((result or {}).get("result") or "") or None, result_event=result,
-                              error=None if result is not None and not result.get("is_error") else
-                              "the consult gave no result")
-        return result, started
+        finally:
+            try:
+                await proc_tree.end(process, label=f"consult {run_id}", known=known)
+            finally:
+                if not draining.done():
+                    draining.cancel()
+                await asyncio.gather(draining, return_exceptions=True)
+                await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
+                                      result_event=result, error=(error + "\n" + stderr_tail if stderr_tail else error)
+                                      if error else None)
+        return result, started, False
 
     async def _give_up(self, consult_id: int, task_id: str, seat_name: str, reason: FallbackReason,
                        detail: str) -> None:

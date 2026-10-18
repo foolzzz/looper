@@ -15,11 +15,12 @@ from typing import Any
 
 import pytest
 
-from looper.agents.consult import CONSULT_CONTRACT, consult_answers, consult_prompt
+from looper.agents.consult import CONSULT_CONTRACT
 from looper.agents.room import FallbackReason, RoomService
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 from tests.fake_claude import fake_claude
 from tests.test_room_db import FE, PLANNER, _Pool, _room_task
+from tests.test_room_consult import _repo
 from tests.test_usage_api_db import DSN, _run
 from tests.test_task_agents_db import _until
 
@@ -39,18 +40,34 @@ def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 # A Claude Code that answers a consult: it records how it was started, then answers every question its prompt names
 # (#<id>), or, as the test asks, fails to find the session, writes no JSON, leaves one unanswered or hangs.
 _CONSULTED = """
-import json, os, re, sys
+import json, os, re, sys, time, subprocess
+from pathlib import Path
+mode = os.environ.get("CONSULT_MODE", "answer")
+fork = "11111111-1111-4111-8111-111111111111"
+if mode == "no_stdin":
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
+    time.sleep(60)
 prompt = json.loads(sys.stdin.readline())["message"]["content"]
 system = open(sys.argv[sys.argv.index("--append-system-prompt-file") + 1]).read()
 open(os.environ["SEEN"], "a").write(json.dumps({"argv": sys.argv[1:], "prompt": prompt, "system": system}) + "\\n")
-mode = os.environ.get("CONSULT_MODE", "answer")
 if mode == "gone":
     print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "num_turns": 0,
                       "errors": ["No conversation found with session ID: s-1"]}), flush=True)
     sys.exit(1)
-print(json.dumps({"type": "system", "subtype": "init", "session_id": "s-fork"}), flush=True)
+session = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "consult" / (fork + ".jsonl")
+session.parent.mkdir(parents=True, exist_ok=True)
+session.write_text("fork")
+print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
+if mode in ("stderr", "no_result"):
+    sys.stderr.write("x" * 1_000_000 + "stderr tail")
+    sys.stderr.flush()
+if mode == "no_result":
+    sys.exit(1)
+if mode == "child":
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    Path(os.environ["CHILD_PID"]).write_text(str(child.pid))
 if mode == "hang":
-    import time
     time.sleep(60)
 ids = [int(i) for i in re.findall(r"^- #(\\d+) from", prompt, re.MULTILINE)]
 if mode == "prose":
@@ -58,8 +75,22 @@ if mode == "prose":
 else:
     answers = [{"reply_to": i, "body": "the field is qty"} for i in ids[: 1 if mode == "one" else None]]
     text = "Here.\\n" + json.dumps({"answers": answers, "unsure": "the rest" if mode == "one" else ""})
+tools = sys.argv[sys.argv.index("--tools") + 1].split(",") if "--tools" in sys.argv else ["Write"]
+disallowed = sys.argv[sys.argv.index("--disallowedTools") + 1].split(",") if "--disallowedTools" in sys.argv else []
+write = Path.cwd() / "consult-wrote.txt"
+denials = []
+if "Write" not in tools or "Write" in disallowed:
+    denials.append({"tool_name": "Write", "tool_input": {"file_path": str(write)}})
+else:
+    write.write_text("written")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
-                  "permission_denials": [{"tool_name": "Bash"}], "total_cost_usd": 0.01}), flush=True)
+                  "permission_denials": denials, "total_cost_usd": float(os.environ.get("CONSULT_COST", "0.01"))}), flush=True)
+if mode == "wait_exit":
+    os.close(1)
+    os.close(2)
+    time.sleep(60)
+else:
+    sys.stdin.read()
 """
 
 
@@ -114,6 +145,9 @@ def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_sess
     async def test(pool: Any) -> None:
         await _room_task(pool)
         await _ran(pool, tmp_path / "work")
+        source = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "consult" / "s-1.jsonl"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("source")
         room = RoomService(batch_seconds=0)
         _service(tmp_path, room, _Pool({"worker-2": "running"}))
         posted = await room.post("task-r", FE, kind="question", body="qty or quantity?", to=["backend_rd@s1"])
@@ -127,7 +161,14 @@ def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_sess
         argv = record["argv"]
         assert argv[argv.index("--resume") + 1] == "s-1" and "--fork-session" in argv
         assert "--dangerously-skip-permissions" not in argv
-        assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,NotebookEdit"
+        assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep"
+        assert argv[argv.index("--allowedTools") + 1] == "Read,Glob,Grep"
+        assert "Bash" in argv[argv.index("--disallowedTools") + 1].split(",")
+        assert not (tmp_path / "work" / "consult-wrote.txt").exists()
+        await room.consults.stop()
+        # The fork stays in Claude Code's store, as every Claude Code session does; the source is unchanged.
+        assert (source.parent / "11111111-1111-4111-8111-111111111111.jsonl").exists()
+        assert source.read_text() == "source"
         assert record["system"].endswith(CONSULT_CONTRACT) and WORK_CONTRACT not in record["system"]
         assert record["prompt"].startswith("[CONSULT] You are backend_rd@s1") and "qty or quantity?" in record["prompt"]
         run = await pool.fetchrow("SELECT agent_id, cost_usd FROM llm_records WHERE agent_id LIKE 'consult-%'")
@@ -145,6 +186,9 @@ def test_a_running_consult_is_recorded_for_the_next_start_and_a_shutdown_ends_it
     # A server that exits without finishing its shutdown (its deadline, a second signal, a crash) leaves a running
     # consult to the next start's sweep, which ends only the agents it finds recorded (proc_tree.spawn).
     from looper.agents import proc_tree
+
+    if proc_tree._start_time(os.getpid()) is None:
+        pytest.skip("process start times are unavailable in this environment")
 
     for name, value in (("_records", None), ("_server", None), ("_recorded", {}), ("_ending", set())):
         monkeypatch.setattr(proc_tree, name, value)
@@ -269,39 +313,6 @@ def test_a_reviewer_seat_is_consulted_only_by_the_planner(monkeypatch: pytest.Mo
     _run(test, monkeypatch)
 
 
-# --- Without a database: the contract, the answers, the throwaway checkout ---
-
-
-def test_the_consult_contract_replaces_the_runs_and_its_answers_are_read_by_question() -> None:
-    assert consult_prompt("x\n\n" + WORK_CONTRACT) == "x\n\n" + CONSULT_CONTRACT
-    assert consult_prompt("x\n\n" + REVIEW_CONTRACT) == "x\n\n" + CONSULT_CONTRACT
-    assert consult_prompt("no contract") == "no contract\n\n" + CONSULT_CONTRACT
-    text = 'ok {"answers": [{"reply_to": 3, "body": "qty"}, {"reply_to": 9, "body": "not asked"}, ' \
-           '{"reply_to": 4, "body": " "}], "unsure": "the port"}'
-    assert consult_answers(text, [3, 4]) == ({3: "qty"}, "the port")
-    with pytest.raises(ValueError):
-        consult_answers("I think qty.", [3])
-
-
-def test_a_throwaway_checkout_shows_what_the_consult_changed_and_goes(tmp_path: Path) -> None:
-    from looper.agents.consult import _changed, _cleanup, _snapshot
-
-    repo = tmp_path / "repo"
-    _repo(repo)
-    snapshot = _snapshot(repo / "app", tmp_path / "consults" / "consult-1")
-    assert snapshot is not None
-    _, target, inside = snapshot
-    assert inside == target / "app" and (inside / "a.py").read_text() == "x = 1\n"
-    assert _changed(inside) == []
-    (inside / "b.py").write_text("y = 2\n")
-    assert _changed(inside) == ["app/b.py"]
-    _cleanup(snapshot, tmp_path / "fork")
-    assert not target.exists()
-    assert "consult-1" not in subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True,
-                                             text=True).stdout
-    assert _snapshot(tmp_path / "plain", tmp_path / "consults" / "consult-2") is None
-
-
 def test_a_consult_whose_task_ended_while_it_waited_does_not_start(monkeypatch: pytest.MonkeyPatch,
                                                                     tmp_path: Path) -> None:
     seen = tmp_path / "seen.jsonl"
@@ -338,25 +349,6 @@ async def _queued(pool: Any, questions: list[int], *, state: str = "queued") -> 
                               "state) VALUES ('task-r', 'backend_rd@s1', $1, 'worker-1', $2, 'claude-code', $3) "
                               "RETURNING *", questions, record, state)
     return dict(row)
-
-
-def _repo(repo: Path) -> None:
-    """A temporary repository with app/a.py in its first tree."""
-    (repo / "app").mkdir(parents=True)
-    (repo / "app" / "a.py").write_text("x = 1\n")
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
-           "GIT_COMMITTER_EMAIL": "t@t"}
-
-    def git(*args: str, text: str = "") -> str:
-        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=repo, env=env, input=text,
-                              capture_output=True, text=True, check=True).stdout.strip()
-
-    git("init", "-q")
-    blob = git("hash-object", "-w", "--stdin", text="x = 1\n")
-    app = git("mktree", text=f"100644 blob {blob}\ta.py\n")
-    tree = git("mktree", text=f"040000 tree {app}\tapp\n")
-    commit = git("commit-tree", tree, text="init\n")
-    git("update-ref", "HEAD", commit)
 
 
 def test_shutdown_does_not_start_the_seats_next_consult(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -549,7 +541,9 @@ def test_killing_a_consult_fails_it_and_gives_its_question_to_the_planner(monkey
         service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
         try:
             question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
-            await _until(lambda: seen.exists() and seen.read_text(), "the hanging consult")
+            fork = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "consult" / \
+                "11111111-1111-4111-8111-111111111111.jsonl"
+            await _until(lambda: seen.exists() and seen.read_text() and fork.exists(), "the hanging consult")
             run = await pool.fetchval("SELECT consult_run FROM room_consults")
             assert await service.worker_pool.kill(run)
             consult = await _settled(pool)
@@ -558,6 +552,7 @@ def test_killing_a_consult_fails_it_and_gives_its_question_to_the_planner(monkey
             assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
             assert "(stopped)" in escalation["body"]
             assert not service.worker_pool._active and not service.worker_pool._tasks
+            assert fork.exists()  # it stays in Claude Code's store, as every Claude Code session does
         finally:
             await service.stop()
 
@@ -871,5 +866,102 @@ def test_killing_a_consult_waiting_for_capacity_also_gives_its_question_to_the_p
             assert not service.worker_pool._active and not service.worker_pool._tasks
         finally:
             await service.stop()
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("mode", ["stderr", "no_result", "no_stdin", "wait_exit", "child", "over_budget"])
+def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
+) -> None:
+    import time
+
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+    from looper.agents import proc_tree
+
+    monkeypatch.setenv("SEEN", str(tmp_path / "seen.jsonl"))
+    monkeypatch.setenv("CONSULT_MODE", mode)
+    monkeypatch.setenv("CHILD_PID", str(tmp_path / "child.pid"))
+    if mode == "over_budget":
+        monkeypatch.setenv("CONSULT_COST", "0.05")
+    if mode == "child" and os.getpid() not in proc_tree._snapshot():
+        # The sandbox may deny ps. List only this test's processes, using their real groups and liveness.
+        roots: list[int] = []
+        spawn = proc_tree.spawn
+
+        async def spawning(*args: Any, **kwargs: Any) -> Any:
+            process = await spawn(*args, **kwargs)
+            roots.append(process.pid)
+            return process
+
+        def snapshot() -> Any:
+            table = {}
+            child_file = tmp_path / "child.pid"
+            children = [int(child_file.read_text())] if child_file.exists() else []
+            for pid in [*roots, *children]:
+                try:
+                    group = os.getpgid(pid)
+                except ProcessLookupError:
+                    continue
+                parent = roots[0] if pid in children and roots[0] in table else os.getpid() if pid in roots else 1
+                table[pid] = (parent, group)
+            return table
+
+        monkeypatch.setattr(proc_tree, "spawn", spawning)
+        monkeypatch.setattr(proc_tree, "_snapshot", snapshot)
+    write_turn = ClaudeCodeRuntime.write_turn
+
+    async def write(self: Any, stdin: Any, text: str, **kwargs: Any) -> None:
+        await write_turn(self, stdin, text + ("x" * 1_000_000 if mode == "no_stdin" else ""), **kwargs)
+
+    monkeypatch.setattr(ClaudeCodeRuntime, "write_turn", write)
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool, room_consult_budget_usd=0.01)
+        await _ran(pool, tmp_path / "work")
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        execute = service._execute
+
+        async def bounded(*args: Any) -> Any:
+            return await execute(*args[:-1], 2)
+
+        monkeypatch.setattr(service, "_execute", bounded)
+        began = time.monotonic()
+        try:
+            question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            row = await asyncio.wait_for(_settled(pool), timeout=8)
+            await service.stop()
+            if mode in ("stderr", "child"):
+                assert row["state"] == "answered"
+            else:
+                reason = {"over_budget": "budget", "no_result": "contract"}.get(mode, "timeout")
+                assert (row["state"], row["fallback_reason"]) == ("failed", reason)
+                assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
+                escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
+                assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
+            if mode == "over_budget":
+                assert "0.0500 USD" in row["detail"] and "answers are dropped" in row["detail"]
+            if mode in ("no_stdin", "wait_exit"):
+                assert time.monotonic() - began < 7
+            if mode == "no_result":
+                error = await pool.fetchval("SELECT error FROM llm_records WHERE agent_id LIKE 'consult-%'")
+                assert error.endswith("stderr tail") and len(error) < 2100
+            if mode == "child":
+                pid = int((tmp_path / "child.pid").read_text())
+                for _ in range(50):
+                    if pid not in proc_tree._snapshot():
+                        break
+                    await asyncio.sleep(0.02)
+                with pytest.raises(ProcessLookupError):
+                    os.kill(pid, 0)
+        finally:
+            await service.stop()
+            if (tmp_path / "child.pid").exists():
+                pid = int((tmp_path / "child.pid").read_text())
+                try:
+                    os.kill(pid, 9)
+                except ProcessLookupError:
+                    pass
 
     _run(test, monkeypatch)

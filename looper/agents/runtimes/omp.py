@@ -128,9 +128,10 @@ _PLUGIN_PARTS_LEFT_OUT = ("hooks", "output-styles")
 IDLE_SEC = 24 * 3600
 
 
-# The built-in tools a read-only run has (``--tools``): those that read. omp 18.4.3 lists its tools as read, glob,
-# grep, bash, edit, ast_edit, write, task, todo and web_search; whether ``--tools`` keeps the others away is not
-# verified on a real run yet, so a read-only OMP run also works in a checkout that is thrown away after it.
+# A consult has only reading tools (--tools read,glob,grep, not verified on a real run), in a detached checkout
+# of the task directory's branch, removed afterwards. This keeps writes out of the task directory; wrote_files
+# catches changes inside the checkout. It is not a sandbox: OMP runs as the operator's user, so writes to another
+# path or the home directory are neither prevented nor detected.
 READ_ONLY_TOOLS = ("read", "glob", "grep")
 
 
