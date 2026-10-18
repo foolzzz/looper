@@ -62,7 +62,8 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator, Mapping
+import uuid
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -86,6 +87,7 @@ _PROBE_TIMEOUT_SEC = 10.0
 # Names the layout of a generated home in each run's record; change it when the layout changes.
 HOME_LAYOUT_ID = "grok-home/v1"
 RULES_FILE = "rules/looper.md"
+SESSIONS_DIR = "sessions"  # where a home keeps its sessions: <group>/<session id>
 # Where a run's prompt is read from: its stdin, to its end.
 PROMPT_FILE = "/dev/stdin"
 # What would point Grok at another home, configuration, agent or sandbox: never passed to it.
@@ -107,6 +109,8 @@ INSTRUCTION_NAMES = ("Agents.md", "Claude.md", "CLAUDE.md", "CLAUDE.local.md", "
 _PLUGIN_PARTS_LEFT_OUT = ("commands", "agents", "hooks", ".mcp.json", "output-styles")
 # How long a run home may go unwritten before it is removed (``_remove_idle_homes``): far beyond any run.
 RUN_HOME_IDLE_SEC = 24 * 3600
+# The built-in tools of a run that must not change files (``Launch.read_only``): MCP tools stay, through use_tool.
+READ_ONLY_TOOLS = "read_file,grep,list_dir"
 
 
 class GrokRuntime(RuntimeAdapter):
@@ -199,6 +203,34 @@ class GrokRuntime(RuntimeAdapter):
                     max_turns: int = 0) -> list[str]:
         """One run: the prompt read from stdin; its session stays in the run's home, removed with it."""
         return self._command(executable, prompt_file, launch, max_turns)
+
+    def kept_session_dir(self, command: Sequence[str]) -> Path | None:
+        """The home a finished run (its recorded ``command``) kept its session in: its ``GROK_HOME``."""
+        home = next((arg.partition("=")[2] for arg in list(command)[:3] if arg.startswith("GROK_HOME=")), "")
+        return Path(home) if home else None
+
+    def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                        session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
+        """A run that resumes a fork of a finished run's session: a home of its own, ``fork_dir``, with this run's
+        configuration, rules (the consult's), login link and shared directories like any run's (``_sync_home``),
+        and a copy of that one session out of the run's home (``session_dir``), and ``--resume <id> --fork-session
+        --session-id <new id>`` there, so the original home is not touched, nor shares a file with the consult. Only
+        the session's own directory is copied: not the home's other sessions, its ``auth.json`` or its caches. The
+        consult runs in the run's directory (``cwd``) with the reading tools only and no sandbox: the session's
+        sandbox is fixed when it starts, and resuming under another is refused (RFC section 9)."""
+        if session_dir is None or not session_id or session_id in (".", "..") or "/" in session_id:
+            raise RuntimeUnsupported("the run kept no session to resume")
+        groups = sorted((session_dir / SESSIONS_DIR).iterdir()) if (session_dir / SESSIONS_DIR).is_dir() else []
+        found = next((g for g in groups if not g.is_symlink() and (g / session_id).is_dir()
+                      and not (g / session_id).is_symlink()), None)
+        if found is None:
+            raise RuntimeUnsupported("the run's home no longer holds its session")
+        command = self._command(executable, prompt_file, launch, max_turns)  # the consult's rules, in a run home
+        _sync_home(Path(command[1].removeprefix("GROK_HOME=")), fork_dir)
+        shutil.copytree(found / session_id, fork_dir / SESSIONS_DIR / found.name / session_id, symlinks=True)
+        return ["env", f"GROK_HOME={fork_dir}", f"HOME={fork_dir}", *command[3:],
+                *([] if "--tools" in command else ["--tools", READ_ONLY_TOOLS]),
+                "--resume", session_id, "--fork-session", "--session-id", str(uuid.uuid4())]
 
     def resident_session(self, label: str) -> ResidentGrok:
         return ResidentGrok(label=label)
@@ -473,10 +505,10 @@ def _remove_idle_homes(runs: Path, now: float) -> None:
             shutil.rmtree(home, ignore_errors=True)
 
 
-def _link_shared(home: Path) -> None:
+def _link_shared(home: Path, grok_dir: Path | None = None) -> None:
     """Link ``home``'s ``SHARED_DIRS`` to the copies every home shares (``<grok>/shared/<name>``): Grok unpacks into
     them through the link when they are empty or out of date, and leaves them alone otherwise."""
-    shared = home.parent.parent / "shared"
+    shared = (grok_dir or home.parent.parent) / "shared"
     for name in SHARED_DIRS:
         (shared / name).mkdir(parents=True, exist_ok=True)
         if not os.path.lexists(home / name):
@@ -524,7 +556,7 @@ def _sync_home(source: Path, home: Path) -> None:
     the run home ``source``."""
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
-    _link_shared(home)
+    _link_shared(home, source.parent.parent)  # ``source`` is ``<grok>/runs/<sha256>``; a home may be elsewhere
     link = source / grok_login.LOGIN_FILE
     if link.is_symlink():
         grok_login.link_login(home, Path(os.readlink(link)))

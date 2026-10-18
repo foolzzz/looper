@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -242,6 +242,11 @@ class RuntimeAdapter(ABC):
         """A one-off run's command; its prompt and later user turns come on stdin. With ``session_dir`` a runtime
         that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
         later (the agent room's consults); Claude Code keeps every run's session in its own place."""
+
+    def kept_session_dir(self, command: Sequence[str]) -> Path | None:
+        """Where a finished run started with ``command`` kept its session itself, for a runtime that keeps it in a
+        place the command names (``consult_command``'s ``session_dir``); None for the others."""
+        return None
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:

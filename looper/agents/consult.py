@@ -7,15 +7,17 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
 
 - **What it resumes.** The newest record of the seat's last run (its step's Worker, or Reviewer): its session id,
   its runtime and provider, its system prompt. Claude Code keeps every session itself; Codex and OMP only the
-  sessions of runs in a room (``room.run_session_dir``). The seat's Agent Profile must still run on that runtime and
+  sessions of runs in a room (``room.run_session_dir``); Grok in the home its recorded command names. The seat's Agent Profile must still run on that runtime and
   provider (a session belongs to both, as the Planner's does), else ``runtime_cannot``.
-- **A fork.** Claude Code ``--resume <id> --fork-session``; Codex and OMP a copy of the run's session directory. The
-  run's own session stays as it was, and consults never pile up in it.
+- **A fork.** Claude Code ``--resume <id> --fork-session``; Codex and OMP a copy of the run's session directory;
+  Grok a home of its own with a copy of that one session, resumed with ``--fork-session``. The run's own session
+  stays as it was, and consults never pile up in it.
 - **Read only.** The consult's system prompt is the run's, with ``CONSULT_CONTRACT`` in place of its contract (answer
   only, change nothing); its launch is ``read_only`` (Claude Code's default permission mode without the writing
-  tools, Codex's read-only sandbox, OMP's reading tools only). Claude Code and Codex then run where the step ran, so
-  they read the work as it is now; OMP, whose restriction is not verified on a real run yet, runs in a detached
-  checkout of the task directory's branch, thrown away afterwards, and a consult that changed it is ``wrote_files``.
+  tools, Codex's read-only sandbox, Grok's and OMP's reading tools only). Claude Code, Codex and Grok then run where
+  the step ran, so they read the work as it is now; OMP, whose restriction is not verified on a real run yet, runs
+  in a detached checkout of the task directory's branch, thrown away afterwards, and a consult that changed it is
+  ``wrote_files``.
 - **Bounds.** At most ``room_consults_per_task`` a task, ``room_consult_budget_usd`` and
   ``room_consult_timeout_seconds`` each, 20 turns (Claude Code); a seat has one consult at a time, and questions that
   come while one is queued join it. A consult takes a place under its task's limit of the seat's kind (Worker or
@@ -47,7 +49,7 @@ CONSULT_MAX_TURNS = 20
 GIT_TIMEOUT_SEC = 30
 # The runtimes whose read-only launch is enforced by the runtime itself (verified, or a sandbox), so a consult runs
 # where its step ran; the others run in a throwaway checkout.
-RUNTIME_READ_ONLY = ("claude-code", "codex")
+RUNTIME_READ_ONLY = ("claude-code", "codex", "grok")
 
 CONSULT_CONTRACT = """\
 ## Your answer (required; code reads it)
@@ -129,7 +131,7 @@ class ConsultService:
         runtime = ((((record or {}).get("metadata") or {}).get("profile") or {}).get("runtime") or {}).get("type")
         if record is None or not record.get("session_id") or not runtime:
             return FallbackReason.NO_SESSION
-        session_dir = run_session_dir(self.runtime_root, runtime, task_id, run)
+        session_dir = self._session_dir(runtime, task_id, run, record)
         if session_dir is not None and not session_dir.is_dir():
             return FallbackReason.NO_SESSION
         queued = [c for c in await db_room.consults(task_id) if c["seat"] == member.seat and c["state"] == "queued"]
@@ -141,6 +143,15 @@ class ConsultService:
         if new and not running:  # a seat has one consult at a time: the next starts when it ends (``_next``)
             self._start(row["id"])
         return None
+
+    def _session_dir(self, runtime: str, task_id: str, run: str, record: Mapping[str, Any]) -> Path | None:
+        """Where the run kept its session when the runtime does not keep it in its own place: the directory a room
+        run was given (``room.run_session_dir``), else the one its recorded command names (Grok's home)."""
+        from .runtimes import adapter
+
+        command = (record.get("metadata") or {}).get("command")
+        return run_session_dir(self.runtime_root, runtime, task_id, run) or adapter(runtime).kept_session_dir(
+            command if isinstance(command, list) else [])
 
     @staticmethod
     async def _last_run(task_id: str, member: Member) -> str | None:
@@ -276,7 +287,7 @@ class ConsultService:
                         "read_only": read_only}})
         prompt = await self._prompt(task_id, seat_name, step, questions)
         fork_dir = self.runtime_root.absolute() / ".local" / runtime.type / "consult-sessions" / task_id / run_id
-        session_dir = run_session_dir(self.runtime_root, runtime.type, task_id, str(row["source_run"]))
+        session_dir = self._session_dir(runtime.type, task_id, str(row["source_run"]), record)
         from .runtimes import RuntimeUnsupported
 
         try:
