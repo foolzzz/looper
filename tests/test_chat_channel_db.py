@@ -93,3 +93,62 @@ def test_a_telegram_resume_brief_excludes_the_current_message() -> None:
                 connection._pool = None
 
     asyncio.run(_main())
+
+
+def test_an_answer_its_channel_could_not_send_is_stored_and_shown_as_not_delivered() -> None:
+    """``chat_history.record_reply`` on a real database: a sent answer and one the channel could not send, read
+    back by the console (``list_messages``) and in a new session's brief, which marks the second. The column takes
+    only a ``DeliveryFailure`` value."""
+    import tempfile
+    from pathlib import Path
+
+    import asyncpg
+
+    from looper.agents.channels.base import DeliveryReceipt
+    from looper.agents.channels.chat_history import CHAT_RECORD, chat_record, record_reply
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import chat as db_chat
+    from looper.db import connection
+
+    telegram = channel_address("telegram", "channel-telegram")
+
+    def answer(text: str, message_id: str) -> MessageEnvelope:
+        return MessageEnvelope.create(source=MANAGER_ADDRESS, target=telegram, message_type=MessageType.AGENT_REPLY,
+                                      payload={"text": text},
+                                      metadata={CHAT_RECORD: chat_record("telegram:42", message_id)})
+
+    async def _main() -> None:
+        async with _fresh_schema() as pool:
+            await connection.ensure_schema(pool)
+            connection._pool = pool  # record_reply and the Manager write and read through the default pool
+            try:
+                await db_chat.save_message(session_id="telegram:42", message_id="a", role="user", content="问一下",
+                                           channel="telegram")
+                await record_reply("telegram", answer("第一次回答", "a:reply"),
+                                   DeliveryReceipt(channel="telegram", success=True))
+                await db_chat.save_message(session_id="telegram:42", message_id="b", role="user", content="再问",
+                                           channel="telegram")
+                await record_reply("telegram", answer("第二次回答", "b:reply"), DeliveryReceipt(
+                    channel="telegram", success=False, error="Forbidden: bot was blocked by the user"))
+                msgs = await db_chat.list_messages("telegram:42")
+                assert [(m["content"], m["delivery_failure"], m["delivery_error"]) for m in msgs] == [
+                    ("问一下", None, None), ("第一次回答", None, None), ("再问", None, None),
+                    ("第二次回答", "send_failed", "Forbidden: bot was blocked by the user")]
+
+                env = MessageEnvelope.create(
+                    source=telegram, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": "现在", "channel_context": {"chat_id": "42"}}, correlation_id="c1")
+                with tempfile.TemporaryDirectory() as tmp:
+                    mgr = ManagerAgent(config=ManagerConfig(work_dir=Path(tmp)), runtime_root=Path(tmp))
+                    blocks = await mgr._recent_conversations(env, "现在")
+                assert blocks[-4:] == ["- user: 问一下", "- assistant: 第一次回答", "- user: 再问",
+                                       "- assistant (not delivered): 第二次回答"]
+
+                with pytest.raises(asyncpg.CheckViolationError):
+                    await db_chat.save_message(session_id="telegram:42", message_id="c:reply", role="assistant",
+                                               content="x", channel="telegram", delivery_failure="lost")
+            finally:
+                connection._pool = None
+
+    asyncio.run(_main())

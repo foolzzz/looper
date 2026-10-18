@@ -43,6 +43,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from looper.agents.project_execution import ProjectExecution
+
 from . import metrics
 from . import tasks as task_list
 from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EvalTask
@@ -381,7 +383,7 @@ def run_task(
         for template in task.role_templates:
             fields = {k: v for k, v in template.items() if k != "key"}
             api.put(f"/api/projects/{created['project_id']}/role-templates/{template['key']}", fields)
-        gates = "on" if task.user_gates else user_gates
+        gates = _project_user_gates(task, user_gates)
         if gates is not None:
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
         api.post("/api/tasks/start", {"task_id": task_id})
@@ -511,6 +513,18 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
 
 
 # Named sets of tasks for ``--tasks``, resolved against the task set: an id it does not have (yet) is left out.
+def _project_user_gates(task: EvalTask, user_gates: str | None) -> str | None:
+    """The ``user_gates`` the runner sets on ``task``'s project: on for a gate task, else the run's (None: unset)."""
+    return "on" if task.user_gates else user_gates
+
+
+def effective_user_gates(task: EvalTask, user_gates: str | None) -> str:
+    """Whether ``task``'s Planner may open user gates, ``on`` or ``off``, as its project's setting makes it
+    (``ProjectExecution.gates_on``: unset is on). Each row records it, so a comparison says when it differs."""
+    gates = _project_user_gates(task, user_gates)
+    return "on" if ProjectExecution.from_row({"user_gates": gates}).gates_on else "off"
+
+
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
@@ -709,6 +723,9 @@ def run(
     finally:
         if not keep_work_dirs:
             shutil.rmtree(root, ignore_errors=True)
+        by_id = {task.id: task for task in tasks}
+        for row in results:
+            row["user_gates"] = effective_user_gates(by_id[row["id"]], user_gates)
         path = out_dir / f"{stamp}-{mode}.json"
         run_result = write_result({
             "schema": SCHEMA,
@@ -736,9 +753,10 @@ def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name?, type},
     "provider": {name, protocols, auth, base_url?, models?, api_key_env?} or {provider_id}, "agent": {name,
     model, effort?}}``. Runtimes are built in: the agent runs on the runtime of that name, else the built-in one
-    of that type (``codex`` or ``omp`` when on the server's PATH); a ``provider_id`` names a provider the
-    server has, such as the built-in ``prov-codex-login`` (Codex's own login); the provider's API key is read
-    from the environment variable ``api_key_env`` names, so no key is in the file or in the run's result."""
+    of that type (``codex``, ``omp`` or ``grok`` when on the server's PATH); a ``provider_id`` names a provider
+    the server has, such as the built-in ``prov-codex-login`` (Codex's own login) or ``prov-grok-login`` (Grok's);
+    the provider's API key is read from the environment variable ``api_key_env`` names, so no key is in the file
+    or in the run's result."""
     registry = api.get("/api/registry")
     wanted = spec["runtime"]
     runtime = next((r for r in registry["runtimes"] if r["name"] == wanted.get("name")), None) or next(

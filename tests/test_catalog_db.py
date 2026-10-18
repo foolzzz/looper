@@ -344,7 +344,9 @@ def test_the_catalog_and_a_projects_view_show_where_each_item_is_installed(monke
                     {"name": "deploy-check", "description": "Deploy.", "content": "Reply OK."})
 
         status, catalog = await _call("GET", "/api/catalog")
-        assert status == 200 and catalog["roles"] == ["manager", *TASK_ROLES]
+        # The roles an install may name, the ones a task's Planner defines last; an install names those only when
+        # asked to (demo's names the four built-in roles).
+        assert status == 200 and catalog["roles"] == ["manager", *TASK_ROLES, "task_role"]
         by_name = {i["name"]: i for i in catalog["items"]}
         assert [(i["kind"], i["qualified_name"], i["origin"]) for i in catalog["items"]] == [
             ("plugin", "demo", "machine"), ("skill", "personal:alpha", "machine"),
@@ -362,7 +364,9 @@ def test_the_catalog_and_a_projects_view_show_where_each_item_is_installed(monke
         assert [(e["item"]["qualified_name"], e["scope"], e["inherited"]) for e in view["installs"]] == [
             ("personal:alpha", "project", False), ("project:deploy-check", "project", False),
             ("demo", "global", True)]
-        assert (view["owned_count"], view["task_roles"]) == (1, TASK_ROLES)
+        assert (view["owned_count"], view["task_roles"]) == (1, [*TASK_ROLES, "task_role"])
+        assert next(e for e in view["installs"] if e["item"]["qualified_name"] == "demo")["roles"] == [
+            "manager", *TASK_ROLES]
         _, other = await _call("GET", f"/api/projects/{docs}/installs")
         assert [e["item"]["qualified_name"] for e in other["installs"]] == ["demo"]
 

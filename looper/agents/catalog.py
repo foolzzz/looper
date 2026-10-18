@@ -12,7 +12,10 @@ itself. **Installing** puts it on a scope (``library_installs``):
 names the Manager, which spans every project, and a project's own skill is
 installed in projects only. Every agent run loads the enabled installs naming
 its role, global or in its project (``library.load_installed``), from its next
-run on; individual Workers or Reviewers are never configured.
+run on; individual Workers or Reviewers are never configured. An install may
+also name ``TASK_ROLE``, the roles a task's Planner defines: it loads only for
+a run of such a role that names its item (``task_roles.check_items``); no
+install names it unless asked to.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from typing import Any
 
 ROLES = ("manager", "planner", "worker", "reviewer")
 TASK_ROLES = ("planner", "worker", "reviewer")
+# What an install names for the roles a task's Planner defines.
+TASK_ROLE = "task_role"
 _INSTALL_FIELDS = frozenset({"item_id", "scope", "project_id", "roles", "enabled"})
 _CHANGE_FIELDS = frozenset({"roles", "enabled"})
 
@@ -57,13 +62,13 @@ class CatalogConflict(Exception):
 
 
 def scope_roles(scope: Scope) -> tuple[str, ...]:
-    """The roles an install on ``scope`` may name."""
+    """The built-in roles an install on ``scope`` names unless it says which."""
     return ROLES if scope is Scope.GLOBAL else TASK_ROLES
 
 
 def install_roles(raw: Any, scope: Scope) -> list[str]:
-    """The roles of an install: a non-empty list from ``scope_roles``, kept in ``ROLES`` order."""
-    allowed = scope_roles(scope)
+    """The roles of an install: a non-empty list from ``scope_roles`` and ``TASK_ROLE``, kept in that order."""
+    allowed = (*scope_roles(scope), TASK_ROLE)
     if not isinstance(raw, list) or not raw or not all(isinstance(role, str) for role in raw):
         raise CatalogError(f"roles is a non-empty list of {', '.join(allowed)}")
     unknown = [role for role in raw if role not in allowed]
@@ -71,7 +76,7 @@ def install_roles(raw: Any, scope: Scope) -> list[str]:
         if unknown[0] == "manager":
             raise CatalogError("a project install cannot include the manager: the Manager spans every project")
         raise CatalogError(f"unknown role {unknown[0]!r}; the roles are {', '.join(allowed)}")
-    return [role for role in ROLES if role in raw]
+    return [role for role in allowed if role in raw]
 
 
 def _scope(raw: Any) -> Scope:
@@ -177,8 +182,8 @@ async def catalog_view() -> dict[str, Any]:
         "total_bytes": sum(int(row["size_bytes"]) for row in rows),
         "last_import": report(LAST_IMPORT_KEY),
         "last_mcp_import": report(mcp.LAST_IMPORT_KEY),
-        "roles": list(ROLES),
-        "task_roles": list(TASK_ROLES),
+        "roles": [*ROLES, TASK_ROLE],
+        "task_roles": [*TASK_ROLES, TASK_ROLE],
         "caps": {
             "file_max_bytes": FILE_MAX_BYTES, "item_max_bytes": ITEM_MAX_BYTES, "item_max_files": ITEM_MAX_FILES,
             "library_max_bytes": LIBRARY_MAX_BYTES, "upload_max_bytes": UPLOAD_MAX_BYTES,
@@ -356,7 +361,7 @@ async def project_view(project_id: str) -> dict[str, Any]:
     if await db_projects.get_project(project_id) is None:
         raise CatalogNotFound(f"project {project_id!r} not found")
     installs = [row for row in await db_library.list_installs(project_id=project_id)
-                if row["scope"] == Scope.PROJECT.value or set(row["roles"]) & set(TASK_ROLES)]
+                if row["scope"] == Scope.PROJECT.value or set(row["roles"]) & {*TASK_ROLES, TASK_ROLE}]
     items = {row["id"]: row for row in await db_library.list_items()}
     entries = [{**install_view(row), "inherited": row["scope"] == Scope.GLOBAL.value,
                 "item": item_view(items[row["item_id"]])} for row in installs if row["item_id"] in items]
@@ -367,6 +372,6 @@ async def project_view(project_id: str) -> dict[str, Any]:
         "project_id": project_id,
         "installs": entries,
         "owned_count": len(owned),
-        "task_roles": list(TASK_ROLES),
+        "task_roles": [*TASK_ROLES, TASK_ROLE],
         "skill_caps": skill_caps(),
     }

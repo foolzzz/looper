@@ -6,6 +6,7 @@ import { ClampedText } from "@/components/clamped-text";
 import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
 import { ProjectKnowledgeSection } from "@/components/project-knowledge";
 import { ProjectRoleTemplates } from "@/components/role-editor";
+import { ProjectRoleSummary } from "@/components/role-stats";
 import { ProjectSchedulesSection } from "@/components/project-schedules";
 import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
@@ -272,8 +273,8 @@ function executionRows(project: Project): [string, string][] {
   if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);
   if (project.role_text_max_chars != null)
     rows.push(["Role text limit", `${project.role_text_max_chars.toLocaleString()} characters`]);
-  if (project.user_gates === "on") rows.push(["User gates", "On"]);
-  if (project.user_gates === "on" && project.gate_reminder_hours != null)
+  if (project.user_gates === "off") rows.push(["User gates", "Off"]);
+  if (project.user_gates !== "off" && project.gate_reminder_hours != null)
     rows.push([
       "Gate reminders",
       project.gate_reminder_hours === 0 ? "None" : `Every ${project.gate_reminder_hours} h`,
@@ -492,11 +493,10 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
           <ProjectAgentSettingsSection key={project.project_id} projectId={project.project_id} linked={focus ?? ""} />
         )}
         {tab === "roles" && (
-          <ProjectRoleTemplates
-            key={project.project_id}
-            projectId={project.project_id}
-            rolesOn={project.planner_roles === "on"}
-          />
+          <div key={project.project_id} className="space-y-4">
+            <ProjectRoleTemplates projectId={project.project_id} rolesOn={project.planner_roles === "on"} />
+            <ProjectRoleSummary projectId={project.project_id} />
+          </div>
         )}
         {tab === "schedules" && (
           <ProjectSchedulesSection

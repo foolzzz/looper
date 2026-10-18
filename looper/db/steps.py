@@ -7,6 +7,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
+from .tasks import step_row
 
 
 async def list_steps(
@@ -19,7 +20,7 @@ async def list_steps(
         "SELECT * FROM task_steps WHERE task_id = $1 ORDER BY step_index",
         task_id,
     )
-    return [dict(r) for r in rows]
+    return [step_row(r) for r in rows]
 
 
 async def list_steps_for_tasks(

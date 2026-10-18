@@ -28,11 +28,13 @@ The built-ins exist on every installation and are read-only: the
 ``claude-code`` runtime (the server's configured ``claude``), the
 ``claude-subscription`` provider (Claude Code's own login), the
 ``codex-login`` provider (Codex's own ChatGPT login, ``runtimes.codex_login``:
-its view carries the login's state and the models to suggest) and the
-``claude-code/opus`` profile, which every role runs when no layer selects
-another (``BUILTIN_PROFILE``). A runtime of another type is built in too once
-``looper serve`` finds its executable on PATH (``register_found_runtimes``),
-or Re-detect does (``probe_runtime``): ``codex`` for Codex, ``omp`` for OMP.
+its view carries the login's state and the models to suggest), the
+``grok-login`` provider (Grok's own login, ``runtimes.grok_login``, likewise)
+and the ``claude-code/opus`` profile, which every role runs when no layer
+selects another (``BUILTIN_PROFILE``). A runtime of another type is built in
+too once ``looper serve`` finds its executable on PATH
+(``register_found_runtimes``), or Re-detect does (``probe_runtime``):
+``codex`` for Codex, ``omp`` for OMP, ``grok`` for Grok.
 
 A profile is checked when it is created or changed, and again when a provider
 it uses changes (``check_pairing``):
@@ -555,13 +557,18 @@ def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]
     }
 
 
-async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
-    """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's:
-    ``codex_login.login_view``; Claude Code's comes from the startup self-check)."""
-    from .runtimes import codex_login
+def _login_modules() -> dict[str, Any]:
+    """The runtimes whose own login Looper links into its homes, by type, and the module of each."""
+    from .runtimes import codex_login, grok_login
 
+    return {"codex": codex_login, "grok": grok_login}
+
+
+async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
+    """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's and Grok's:
+    their module's ``login_view``; Claude Code's comes from the startup self-check)."""
     types = {row["oauth_runtime_type"] for row in providers if row["auth"] == AuthKind.OAUTH.value}
-    return {"codex": await codex_login.login_view()} if "codex" in types else {}
+    return {kind: await module.login_view() for kind, module in _login_modules().items() if kind in types}
 
 
 def cost_basis(profile: AgentProfile) -> dict[str, Any]:
@@ -586,10 +593,17 @@ def cost_basis(profile: AgentProfile) -> dict[str, Any]:
 
 
 def cost_warnings(profile: AgentProfile) -> list[str]:
-    """What registering ``profile`` should warn about: models it would run without a full price."""
-    return [f"model {model!r} has no full price with provider {profile.provider.name!r} (input, output, cache read "
-            "and cache write): its runs record tokens only and spend caps do not apply to them; add its prices to "
-            "the provider's model catalog" for model in cost_basis(profile)["unpriced"]]
+    """What registering ``profile`` should warn about: models it would run without a full price, and a runtime
+    whose own cost figure no per-run cap can stop (``RuntimeAdapter.runtime_cost_capped``)."""
+    warnings = [f"model {model!r} has no full price with provider {profile.provider.name!r} (input, output, cache "
+                "read and cache write): its runs record tokens only and spend caps do not apply to them; add its "
+                "prices to the provider's model catalog" for model in cost_basis(profile)["unpriced"]]
+    adapter = runtimes.ADAPTERS.get(profile.runtime.type)
+    if adapter is not None and adapter.cost_source(profile.provider) is runtimes.CostSource.RUNTIME \
+            and not adapter.runtime_cost_capped:
+        warnings.append(f"{adapter.label} reports a run's cost only when the run ends and has no spend cap of its "
+                        "own: per-run spend caps do not stop its runs; task spend caps count what they cost")
+    return warnings
 
 
 # Where nothing selects a profile.
@@ -863,14 +877,13 @@ async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
 
 
 async def clear_login_problem(provider_id: str) -> dict[str, Any]:
-    """Make Codex's own login available to runs again after a run found it forked: the operator has checked
-    ``codex login status`` on the machine (``codex_login.clear_problem``). The provider is one of that login."""
-    from .runtimes import codex_login
-
+    """Make a runtime's own login (Codex's or Grok's) available to runs again after a run found it forked: the
+    operator has checked it on the machine (its module's ``clear_problem``). The provider is one of that login."""
     row = await _existing_provider(provider_id)
-    if row["auth"] != AuthKind.OAUTH.value or row["oauth_runtime_type"] != "codex":
-        raise RegistryError(f"provider {row['name']!r} is not the Codex login")
-    await codex_login.clear_problem()
+    module = _login_modules().get(row["oauth_runtime_type"] or "") if row["auth"] == AuthKind.OAUTH.value else None
+    if module is None:
+        raise RegistryError(f"provider {row['name']!r} is not the Codex or Grok login")
+    await module.clear_problem()
     return await _provider_answer(provider_id)
 
 

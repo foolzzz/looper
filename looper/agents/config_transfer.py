@@ -295,13 +295,17 @@ def install_entry(row: Mapping[str, Any]) -> dict[str, Any]:
             "enabled": row["enabled"]}
 
 
-def role_template_entry(row: Mapping[str, Any]) -> dict[str, Any]:
+def role_template_entry(row: Mapping[str, Any], items: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """A template, its profile by name and its items (``items``, the catalog's rows by id) by reference."""
     entry = {"key": row["template_key"], "kind": row["kind"], "description": row["description"],
              "role_prompt": row["role_prompt"]}
     if row["harness"]:
         entry["harness"] = row["harness"]
     if row["profile"]:
         entry["profile"] = row["profile"]
+    named = [items[item_id] for item_id in row.get("items") or () if item_id in items]
+    if named:
+        entry["items"] = [_item_ref(item["kind"], item["name"], item["owner_project_name"]) for item in named]
     return entry
 
 
@@ -398,7 +402,8 @@ async def export_chunks(
             }
             if templates[project["id"]]:
                 # Only a project that has templates names them, so a file of a project without is as before.
-                entry["role_templates"] = [role_template_entry(r) for r in templates[project["id"]]]
+                by_id = {row["id"]: row for row in items}
+                entry["role_templates"] = [role_template_entry(r, by_id) for r in templates[project["id"]]]
             summary.repoint += sum(1 for d in entry["knowledge"] if d.get("repoint"))
             yield ("\n" if index == 0 else ",\n") + _dump(entry)
         yield "]"
@@ -1422,9 +1427,24 @@ class _Importer:
                 profile = entry.get("profile")
                 if profile is not None:
                     profile = _string(profile, "profile", required=True)
+                refs = entry.get("items") or []
+                if not isinstance(refs, list):
+                    raise _Skip("items is not a list")
             except _Skip as exc:
                 self.record(section, f"{label}{raw_key}", Action.SKIPPED, reason=str(exc))
                 continue
+            items = []
+            for ref in refs:
+                owner_name = ref.get("project") if isinstance(ref, Mapping) else None
+                owner = self.project_ids.get(str(owner_name).lower()) if owner_name is not None else None
+                item_id = self.item_ids.get((ref.get("kind"), ref.get("name"), owner)) if isinstance(ref, Mapping) \
+                    and (owner_name is None or owner is not None) else None
+                if item_id is None:
+                    shown = f"{ref.get('kind')}:{ref.get('name')}" if isinstance(ref, Mapping) else repr(ref)
+                    self.plan.notes.append(f"{label}role template {key}: no item {shown} here or in the file; "
+                                           "imported without it")
+                elif item_id not in items:
+                    items.append(item_id)
             profile_id = None
             if profile is not None:
                 if profile not in self.profiles:
@@ -1437,9 +1457,9 @@ class _Importer:
                     except RegistryError as exc:
                         self.plan.notes.append(f"{label}role template {key}: {exc}; imported without a profile")
             values = {"kind": kind.value, "description": description, "role_prompt": prompt, "harness": harness,
-                      "profile_id": profile_id}
+                      "profile_id": profile_id, "items": items}
             row = stored.get(key)
-            current = {name: row[name] for name in values} if row else None
+            current = {**{name: row[name] for name in values}, "items": list(row["items"] or ())} if row else None
             action = self.outcome(section, f"{label}{key}", current, _differs(values, current, values))
             if self.apply and action in (Action.ADDED, Action.CHANGED):
                 from ..db import role_templates as db_templates

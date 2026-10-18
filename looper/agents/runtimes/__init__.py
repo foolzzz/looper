@@ -34,7 +34,7 @@ command themselves. An adapter says:
 - **its own login** (``login_problem``, ``after_run``, ``login_models``):
   why a run with the runtime's login cannot start now, what a run left wrong
   with the login, and the models the form suggests for it (Codex:
-  ``codex_login``);
+  ``codex_login``; Grok: ``grok_login``; both share ``linked_login``);
 - **the project's instruction files** (``instruction_files``): which of the
   repository's ``CLAUDE.md`` and ``AGENTS.md`` a run is given, read by the
   runtime itself or put in its system prompt by Looper (``instructions``).
@@ -44,14 +44,15 @@ the MCP configuration, knowledge directories) is materialized by
 ``library.load_installed`` and ``knowledge.load_knowledge`` in Claude Code's
 plugin format; ``launch_args`` turns it into flags. A runtime of another
 format translates it at launch (Codex: ``codex.materialize``,
-``codex.config_toml``; OMP: ``omp.overlay``, ``omp.mcp_config``) and says in
-the run's record what it left out (``launch_record``).
+``codex.config_toml``; OMP: ``omp.overlay``, ``omp.mcp_config``; Grok:
+``grok.config_toml``) and says in the run's record what it left out
+(``launch_record``).
 
 A runtime whose CLI runs one turn per process keeps the Manager's and a
 Planner's session by resuming it on every turn (``per_turn.PerTurnSession``).
 
-The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``) and ``omp``
-(``omp``).
+The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
+(``omp``) and ``grok`` (``grok``).
 """
 
 from __future__ import annotations
@@ -150,8 +151,8 @@ class Probe:
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
-    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex and OMP one process per turn
-    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``)."""
+    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex, OMP and Grok one process per turn
+    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``, ``grok.ResidentGrok``)."""
 
     @property
     def label(self) -> str: ...
@@ -193,6 +194,9 @@ class RuntimeAdapter(ABC):
     # Whether a run reads more user turns while it runs (``write_turn`` after the prompt): a forwarded message, a
     # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
     run_input: ClassVar[bool] = False
+    # Whether a run priced by the runtime's own figure (``CostSource.RUNTIME``) stops at its per-run spend cap:
+    # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
+    runtime_cost_capped: ClassVar[bool] = True
 
     # --- Registration ---
 
@@ -307,9 +311,10 @@ class RuntimeAdapter(ABC):
 def _adapters() -> dict[str, RuntimeAdapter]:
     from .claude_code import ClaudeCodeRuntime
     from .codex import CodexRuntime
+    from .grok import GrokRuntime
     from .omp import OmpRuntime
 
-    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime())}
+    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

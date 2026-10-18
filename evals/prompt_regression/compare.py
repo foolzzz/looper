@@ -210,11 +210,42 @@ def _problems(run: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _notes(new: Mapping[str, Any], base: Mapping[str, Any] | None) -> list[str]:
-    """What the table alone does not say: the tasks whose pass rate moved, the single samples, the tasks one side
-    lacks."""
-    new_groups, base_groups = _by_id(new), _by_id(base) if base is not None else {}
+def _user_gates(group: list[Mapping[str, Any]]) -> str | None:
+    """Whether a task's Planner could open user gates in a run (``on``, ``off``); None for a run that did not record
+    it (before user gates G2, when an unset setting was off)."""
+    values = {str(row["user_gates"]) for row in group if row.get("user_gates")}
+    return "/".join(sorted(values)) if values else None
+
+
+def _gates_notes(new_groups: dict[str, list[Mapping[str, Any]]],
+                 base_groups: dict[str, list[Mapping[str, Any]]]) -> list[str]:
+    """The tasks whose Planner could open user gates on one side only: their rows compare different contracts."""
+    differ, unknown = [], []
+    for task_id, group in new_groups.items():
+        if task_id not in base_groups:
+            continue
+        before, after = _user_gates(base_groups[task_id]), _user_gates(group)
+        if after is None:
+            continue
+        if before is None:
+            unknown.append(task_id)
+        elif before != after:
+            differ.append(f"{task_id} ({before} → {after})")
     lines = []
+    if differ:
+        lines.append("- user gates differ from the base, so these rows compare different contracts: "
+                     + ", ".join(differ))
+    if unknown:
+        lines.append("- the base does not record user gates per task (a run before user gates G2, where an unset "
+                     "setting was off): " + ", ".join(unknown))
+    return lines
+
+
+def _notes(new: Mapping[str, Any], base: Mapping[str, Any] | None) -> list[str]:
+    """What the table alone does not say: the tasks whose pass rate moved, the tasks whose user gates differ, the
+    single samples, the tasks one side lacks."""
+    new_groups, base_groups = _by_id(new), _by_id(base) if base is not None else {}
+    lines = _gates_notes(new_groups, base_groups) if base is not None and "dialogs" not in new else []
     moved = []
     for task_id, group in new_groups.items():
         if task_id not in base_groups:
