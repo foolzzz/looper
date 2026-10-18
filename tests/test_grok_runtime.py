@@ -15,6 +15,7 @@ import json
 import os
 import stat
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,83 @@ def _operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "grok_stream"
+
+
+# --- A consult: a fork of a finished run's session ---
+
+SECRET = "SECRET-TOKEN-0451"
+
+
+def _finished_run(root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, list[str]]:
+    """A run that has ended: its command, and its home holding its session, another run's session in the same
+    group, and files that must stay out of a consult (a login written over the link, an index, caches, logs)."""
+    login = _operator(tmp_path, monkeypatch)
+    command = GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(root, "THE RUN'S RULES"), launch=_launch())
+    home = _home(command)
+    group = home / "sessions" / "%2Fwork"
+    for name in ("sess-1", "sess-2"):
+        (group / name).mkdir(parents=True)
+        (group / name / "chat_history.jsonl").write_text(f'{{"name": "{name}"}}\n')
+    (home / "sessions" / "session_search.sqlite").write_text(SECRET)
+    (home / "models_cache.json").write_text(SECRET)
+    (home / "logs").mkdir()
+    (home / "logs" / "unified.jsonl").write_text(SECRET)
+    (home / "auth.json").unlink()
+    (home / "auth.json").write_text(SECRET)  # a login Grok wrote over the link
+    return login, home, command
+
+
+def test_a_consult_forks_one_session_into_a_home_of_its_own_and_takes_no_credential_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "runtime"
+    login, home, ran = _finished_run(root, tmp_path, monkeypatch)
+    assert GROK.kept_session_dir(ran) == home
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file() and not p.is_symlink()}
+    fork = root / ".local" / "grok" / "consult-sessions" / "task-1" / "consult-1"
+    launch = dataclasses.replace(_launch(), role=AgentType.WORKER, consult=True)
+    command = GROK.consult_command("grok", cwd=tmp_path, prompt_file=_prompt_file(root, "THE CONSULT RULES"),
+                                   launch=launch, session_id="sess-1", session_dir=home, fork_dir=fork, max_turns=20)
+
+    assert command[:4] == ["env", f"GROK_HOME={fork}", f"HOME={fork}", "grok"]
+    assert _flag(command, "--resume") == ["sess-1"] and "--fork-session" in command
+    (fresh,) = _flag(command, "--session-id")
+    assert fresh != "sess-1" and uuid.UUID(fresh)
+    # The reading tools, once, and no sandbox: the session's is fixed when it starts.
+    assert _flag(command, "--tools") == ["read_file,grep,list_dir"] and "--sandbox" not in command
+    assert _flag(command, "--max-turns") == ["20"]
+    # The consult's rules, not the run's, in a home that is not the run's.
+    assert "THE CONSULT RULES" in (fork / RULES_FILE).read_text() and "THE RUN'S RULES" not in (fork / RULES_FILE).read_text()
+    # Only the one session: no other session, no index, cache or log.
+    files = sorted(str(p.relative_to(fork)) for p in fork.rglob("*") if p.is_file() or p.is_symlink())
+    assert files == ["auth.json", "bundled", "config.toml", "docs", RULES_FILE, "sessions/%2Fwork/sess-1/chat_history.jsonl"]
+    # The login is the operator's link; no file of the fork holds what the run's home did.
+    assert (fork / "auth.json").is_symlink() and os.readlink(fork / "auth.json") == str(login)
+    assert all(SECRET not in p.read_text() for p in fork.rglob("*") if p.is_file() and not p.is_symlink())
+    # The shared directories are the grok directory's, not ones made beside the consult's tasks.
+    assert os.readlink(fork / "bundled") == str(root.absolute() / ".local" / "grok" / "shared" / "bundled")
+    # The run's home is as it was.
+    assert {p: p.read_bytes() for p in home.rglob("*") if p.is_file() and not p.is_symlink()} == before
+
+
+@pytest.mark.parametrize("case", ["no home", "no session", "an unsafe id"])
+def test_a_consult_that_cannot_find_the_session_is_unsupported_and_leaves_nothing(
+    case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "runtime"
+    _, home, _ = _finished_run(root, tmp_path, monkeypatch)
+    fork = root / ".local" / "grok" / "consult-sessions" / "task-1" / "consult-1"
+    kwargs = {"no home": dict(session_dir=None, session_id="sess-1"),
+              "no session": dict(session_dir=home, session_id="sess-9"),
+              "an unsafe id": dict(session_dir=home, session_id="../../models_cache.json")}[case]
+    with pytest.raises(RuntimeUnsupported):
+        GROK.consult_command("grok", cwd=tmp_path, prompt_file=_prompt_file(root), launch=_launch(), fork_dir=fork,
+                             **kwargs)
+    assert not fork.exists()
+
+
+def test_a_command_without_a_home_names_no_kept_session() -> None:
+    assert GROK.kept_session_dir(["claude", "-p"]) is None and GROK.kept_session_dir([]) is None
 
 
 # --- Events ---
@@ -268,9 +346,17 @@ def test_the_config_keeps_the_operators_and_other_tools_directories_out(
     assert section.splitlines()[-len(lines):] == lines
 
 
-@pytest.mark.parametrize("read_only", [False, True], ids=["writing", "read-only"])
-def test_only_a_read_only_run_is_cut_down_to_the_reading_tools(read_only: bool, tmp_path: Path) -> None:
-    launch = _read_only_launch() if read_only else _launch()
+@pytest.mark.parametrize(("role", "consult", "read_only"), [
+    (None, False, False),
+    (AgentType.WORKER, False, False),
+    (AgentType.PLANNER, False, True),
+    (AgentType.WORKER, True, True),
+    (AgentType.PLANNER, True, True),
+])
+def test_only_a_read_only_run_is_cut_down_to_the_reading_tools(
+    role: AgentType | None, consult: bool, read_only: bool, tmp_path: Path,
+) -> None:
+    launch = dataclasses.replace(_launch(), role=role, consult=consult)
     assert launch.read_only is read_only and GROK.read_only is ReadOnly.TOOLS
     for command in (GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch),
                     GROK.resident_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)):

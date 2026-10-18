@@ -51,7 +51,11 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   minute), ``room_broadcasts_per_run`` (messages to everyone a run may post),
   ``room_message_max_chars``, ``room_messages_per_task``,
   ``room_ping_pong_rounds`` (messages two seats may trade before the Planner is
-  told) and ``room_wait_max_seconds`` (how long an inbox call may wait).
+  told) and ``room_wait_max_seconds`` (how long an inbox call may wait);
+- the room's consults: ``room_consult_budget_usd`` (what one may spend,
+  ``CONSULT_BUDGET_RANGE``, 0.50 when unset), ``room_consult_timeout_seconds``
+  and ``room_consults_per_task`` (0: every question for a seat no run is in
+  goes to the Planner), in ``ROOM_LIMITS``.
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -93,7 +97,12 @@ ROOM_LIMITS: dict[str, tuple[int, int, int, str]] = {
     "room_messages_per_task": (20, 5_000, 300, "messages a task's room may hold"),
     "room_ping_pong_rounds": (2, 50, 6, "messages two seats may trade before the Planner is told"),
     "room_wait_max_seconds": (0, 120, 60, "seconds an inbox call may wait"),
+    "room_consult_timeout_seconds": (30, 1_800, 300, "seconds a consult may take"),
+    "room_consults_per_task": (0, 100, 10, "consults a task may have"),
 }
+# What one consult may spend, in USD, and its default.
+CONSULT_BUDGET_RANGE = (0.01, 5.0)
+DEFAULT_CONSULT_BUDGET_USD = 0.50
 
 
 class ReviewPolicy(str, Enum):
@@ -146,6 +155,9 @@ class RoomLimits:
     messages_per_task: int = ROOM_LIMITS["room_messages_per_task"][2]
     ping_pong_rounds: int = ROOM_LIMITS["room_ping_pong_rounds"][2]
     wait_max_seconds: int = ROOM_LIMITS["room_wait_max_seconds"][2]
+    consult_timeout_seconds: int = ROOM_LIMITS["room_consult_timeout_seconds"][2]
+    consults_per_task: int = ROOM_LIMITS["room_consults_per_task"][2]
+    consult_budget_usd: float = DEFAULT_CONSULT_BUDGET_USD
 
 
 class LessonsMode(str, Enum):
@@ -177,6 +189,9 @@ class ProjectExecution:
     room_messages_per_task: int | None = None
     room_ping_pong_rounds: int | None = None
     room_wait_max_seconds: int | None = None
+    room_consult_budget_usd: float | None = None
+    room_consult_timeout_seconds: int | None = None
+    room_consults_per_task: int | None = None
 
     @property
     def review_all(self) -> bool:
@@ -238,8 +253,11 @@ class ProjectExecution:
 
     @property
     def room_limits(self) -> RoomLimits:
-        return RoomLimits(**{field.removeprefix("room_"): value for field in ROOM_LIMITS
-                             if (value := getattr(self, field)) is not None})
+        limits = {field.removeprefix("room_"): value for field in ROOM_LIMITS
+                  if (value := getattr(self, field)) is not None}
+        if self.room_consult_budget_usd is not None:
+            limits["consult_budget_usd"] = self.room_consult_budget_usd
+        return RoomLimits(**limits)
 
     @property
     def on_task_budget(self) -> TaskBudgetAction:
@@ -308,6 +326,13 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, UserGates)
     if field == "agent_room":
         return _choice(field, raw, AgentRoom)
+    if field == "room_consult_budget_usd":
+        low, high = CONSULT_BUDGET_RANGE
+        value = budget_usd(raw, field=field)
+        if value is None or not low <= value <= high:
+            raise ValueError(f"{field} (what one consult may spend) must be from {low:g} to {high:g} USD, or null "
+                             f"for {DEFAULT_CONSULT_BUDGET_USD:g}")
+        return value
     if field in ROOM_LIMITS:
         low, high, default, what = ROOM_LIMITS[field]
         if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:

@@ -163,8 +163,12 @@ class CodexRuntime(RuntimeAdapter):
         decision 8), the model and the effort, and the knowledge and skill directories."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         mounts = [*launch.knowledge.add_dirs, *materialize(launch.library).skill_dirs]
+        # A read-only run (an agent room consult) has Codex's read-only sandbox, where writing fails, in place of no
+        # sandbox at all.
+        permissions = ["-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"'] if launch.read_only \
+            else ["--dangerously-bypass-approvals-and-sandbox"]
         return [
-            "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
+            "--json", "--skip-git-repo-check", *permissions,
             *binding.args,
             *(arg for directory in dict.fromkeys(mounts) for arg in ("--add-dir", directory)),
         ]
@@ -208,6 +212,22 @@ class CodexRuntime(RuntimeAdapter):
             return [*command, "--ephemeral", "-"]
         _sync_home(Path(command[1].removeprefix("CODEX_HOME=")), session_dir)
         return ["env", f"CODEX_HOME={session_dir}", *command[2:], "-"]
+
+    def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                        session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
+        """A run that resumes a fork of a finished run's session: the session files of its home (``session_dir``,
+        where the run kept them: ``sessions/``) are copied into a new home, ``fork_dir``, which gets this run's
+        configuration, instructions and login link like any run's (``_sync_home``), and resumed there (``exec ...
+        resume <id> -``), so the original stays as it was. Nothing else of the run's home is copied: not its
+        ``auth.json``, and not Codex's state databases, which name the run's own rollout file by its absolute path,
+        so that the consult would write to it (seen with Codex 0.162.0); without them Codex finds the copy's."""
+        sessions = None if session_dir is None else session_dir / SESSIONS_DIR
+        if sessions is None or not sessions.is_dir():
+            raise RuntimeUnsupported("the run kept no session to resume")
+        shutil.copytree(sessions, fork_dir / SESSIONS_DIR, symlinks=True, dirs_exist_ok=False)
+        command = self._command(executable, prompt_file, launch)
+        _sync_home(Path(command[1].removeprefix("CODEX_HOME=")), fork_dir)
+        return ["env", f"CODEX_HOME={fork_dir}", *command[2:], "resume", session_id, "-"]
 
     def resident_session(self, label: str) -> ResidentCodex:
         return ResidentCodex(label=label)
@@ -310,6 +330,8 @@ def _toml_key(key: str) -> str:
     return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
 
 
+# Where Codex keeps a home's sessions (its rollout files).
+SESSIONS_DIR = "sessions"
 # Looper's own MCP entry (``ops.service.SERVER_NAME``), and how long Codex waits for one of its tool calls.
 LOOPER_SERVER = "looper"
 LOOPER_TOOL_TIMEOUT_SEC = 150

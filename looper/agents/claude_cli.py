@@ -265,7 +265,8 @@ def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]]) -
 
 
 def permission_args() -> list[str]:
-    """The flags that let an agent use every tool without asking; every launch but a Planner's carries them."""
+    """The flags that let an agent use every tool without asking; every launch but a Planner's or a consult's
+    carries them."""
     return ["--dangerously-skip-permissions"]
 
 
@@ -275,6 +276,8 @@ def permission_args() -> list[str]:
 READ_ONLY_MODE = ("--permission-mode", "manual", "--permission-prompts", "none")
 # The tools such a run does not have.
 WRITE_TOOLS = ("Edit", "Write", "NotebookEdit")
+# A consult has only these built-in reading tools, with no shell.
+CONSULT_TOOLS = ("Read", "Glob", "Grep")
 # The tools it may use although Claude Code's default permission mode would ask first; none of them changes a file.
 READ_ONLY_ALLOWED = ("Skill", "WebFetch", "WebSearch")
 # How much of a refused call's input its record keeps.
@@ -306,6 +309,16 @@ def read_only_args(library: AgentLibrary) -> list[str]:
     servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
     return [*READ_ONLY_MODE, "--disallowedTools", ",".join(WRITE_TOOLS),
             "--allowedTools", ",".join((*READ_ONLY_ALLOWED, *servers))]
+
+
+def consult_args() -> list[str]:
+    """The flags of a consult: ``--tools`` leaves only the built-in reading tools, the allow rule lets them run
+    without a prompt, and Bash and the writing tools are refused besides. MCP tools are not allowed, so manual
+    mode with no prompts refuses them. Not verified on a real run yet (2.1.285 lists ``--tools`` in its help).
+    """
+    tools = ",".join(CONSULT_TOOLS)
+    return [*READ_ONLY_MODE, "--tools", tools, "--allowedTools", tools,
+            "--disallowedTools", ",".join(("Bash", *WRITE_TOOLS))]
 
 
 def permission_denials(result_event: dict[str, Any] | None) -> list[dict[str, str]]:

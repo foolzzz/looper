@@ -24,9 +24,10 @@ the same seat. Looper itself writes as ``looper``.
   Planner, and every escalation, wakes it after ``ROOM_BATCH_SECONDS`` for one
   ``[ROOM]`` turn with all that came meanwhile (``planner_pending`` until that
   turn's reply is taken).
-- **A question to a seat no run is in** goes to the Planner (an
-  ``escalation``), and the asker is told; consulting the seat's last session
-  instead is R1b.
+- **A question to a seat no run is in**: one whose step ended is answered by
+  a consult of its last session (``consult``); one whose step has not started,
+  or that no consult can answer, goes to the Planner (an ``escalation``,
+  ``FallbackReason``), and the asker is told.
 - **Escalations** (``Reason``): two seats trading ``room_ping_pong_rounds``
   messages, a question no seat can take, an interface changed after a seat
   whose step ended read it, the task's room full.
@@ -43,7 +44,7 @@ import logging
 import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -102,6 +103,7 @@ class Presence(str, Enum):
     OFFLINE = "offline"  # it ran; no run now
     PLANNED = "planned"  # its step has not started
     DROPPED = "dropped"  # its step was dropped before it ran
+    CONSULTING = "consulting"  # no run is in it, but a consult of its last session runs
 
 
 class Reason(str, Enum):
@@ -115,10 +117,22 @@ class Reason(str, Enum):
 
 
 class FallbackReason(str, Enum):
-    """Why a question went to the Planner instead of its seat."""
+    """Why a question could not be answered by its seat."""
 
     NOT_STARTED = "not_started"  # the seat's step has not started
-    RUNTIME_CANNOT = "runtime_cannot"  # no run is in the seat, and its last session cannot be consulted (R1b)
+    RUNTIME_CANNOT = "runtime_cannot"  # its runtime cannot resume the session, or its profile moved to another
+    NO_SESSION = "no_session"  # its last run kept no session (or none ran in it)
+    SESSION_GONE = "session_gone"  # the session could not be resumed
+    NO_SNAPSHOT = "no_snapshot"  # it would need a throwaway checkout, and its task directory is not a git checkout
+    LIMIT = "limit"  # the task had its room_consults_per_task
+    MANY_SEATS = "many_seats"  # a role with several seats that ran: which one to ask is the asker's to say
+    BUDGET = "budget"  # its cost reached room_consult_budget_usd or could not be checked
+    TIMEOUT = "timeout"  # the consult ran over room_consult_timeout_seconds
+    STOPPED = "stopped"  # its run was stopped
+    ROOM_OFF = "room_off"  # its task's agent room was turned off before it ended
+    CONTRACT = "contract"  # its reply had no answers object
+    WROTE_FILES = "wrote_files"  # it changed its throwaway checkout: its answers are dropped
+    UNSURE = "unsure"  # it answered the others, not this one
 
 
 @dataclass(frozen=True)
@@ -174,7 +188,8 @@ class Member:
                 **({"since": self.since.isoformat()} if self.since else {})}
 
 
-def members(steps: Iterable[Mapping[str, Any]], runs: Mapping[str, tuple[str, datetime]]) -> list[Member]:
+def members(steps: Iterable[Mapping[str, Any]], runs: Mapping[str, tuple[str, datetime]],
+            consulting: Iterable[str] = ()) -> list[Member]:
     """The seats of a task's steps (``task_steps`` rows; gates have none), with their presence from the runs the
     WorkerPool has (agent id → its status, ``pending`` or ``running``, and since when): a seat whose run is there is
     online (or waiting for room), else offline once a run was in it, else planned, or dropped with its step."""
@@ -203,7 +218,9 @@ def members(steps: Iterable[Mapping[str, Any]], runs: Mapping[str, tuple[str, da
         if step.get("review_role_key"):
             found.append(seat(str(step["review_role_key"]), MemberKind.REVIEW, reviewer if stage == "role" else None,
                               stage == "role" or "role_review" in result))
-    return found
+    asked = set(consulting)
+    return [replace(m, presence=Presence.CONSULTING) if m.presence is Presence.OFFLINE and m.seat in asked else m
+            for m in found]
 
 
 # --- What a run's system prompt says of the room (after its task section) ---
@@ -227,8 +244,9 @@ WORK_ROOM_SECTION = _ROOM_INTRO + """\
   with the files or commits. A step in a worktree of its own sees the other
   steps' commits (git show <commit>:<path>), not their uncommitted files.
 - When you need a decision another seat owns, ask that seat (kind question);
-  a question for a seat no run is in goes to the Planner. Wait only as long
-  as you need (wait_seconds is bounded), and do the rest meanwhile.
+  a seat whose step ended answers from its last session (read only), else
+  the Planner does. Wait only as long as you need (wait_seconds is bounded),
+  and do the rest meanwhile.
 - Do not message Reviewers: the Planner decides what is reviewed."""
 REVIEW_ROOM_SECTION = _ROOM_INTRO + """\
 - You are a Reviewer: read the room (looper_room_inbox, looper_room_read),
@@ -402,6 +420,16 @@ def ping_pong_rounds(messages: Sequence[Mapping[str, Any]], a: str, b: str) -> i
     return rounds
 
 
+# What the Planner is told of why a question came to it.
+_FALLBACK_WHY = {
+    FallbackReason.NOT_STARTED: "its step has not started",
+    FallbackReason.RUNTIME_CANNOT: "no run is in it now, and its last session cannot be asked",
+    FallbackReason.NO_SESSION: "no run is in it now, and its last run kept no session to ask",
+    FallbackReason.MANY_SEATS: "no run is in any of its seats, and several of them ran",
+    FallbackReason.LIMIT: "no run is in it now, and the task had all its consults (room_consults_per_task)",
+}
+
+
 # --- The room ---
 
 
@@ -436,6 +464,9 @@ class RoomService:
         self.worker_pool = worker_pool
         self._batch_seconds = batch_seconds
         self._events: dict[str, asyncio.Event] = {}  # a task's waiting inboxes wake when it gets a message
+        # The consults (``consult.ConsultService``); without them a question for a seat no run is in goes to the
+        # Planner.
+        self.consults: Any = None
         self._wakes: dict[str, asyncio.Task[Any]] = {}  # a task's Planner wake waiting for the batch to fill
 
     # --- Context ---
@@ -452,7 +483,8 @@ class RoomService:
             raise OpError(ErrorCode.FORBIDDEN, f"task {task_id} has ended ({task.get('status')}): its room takes no "
                                                "more messages")
         steps = await db_steps.list_steps(task_id)
-        return _Context(task, execution, members(steps, self._runs(task_id)))
+        consulting = {c["seat"] for c in await db_room.consults(task_id) if c["state"] == "running"}
+        return _Context(task, execution, members(steps, self._runs(task_id), consulting))
 
     def _runs(self, task_id: str) -> dict[str, tuple[str, datetime]]:
         pool = self.worker_pool
@@ -630,10 +662,13 @@ class RoomService:
             entry: dict[str, Any] = {"to": target.name,
                                      "seats": [{"seat": m.seat, "presence": m.presence.value} for m in seats]}
             if message["kind"] == MessageKind.QUESTION.value and not live:
-                reason = (FallbackReason.NOT_STARTED if all(m.presence is Presence.PLANNED for m in seats)
-                          else FallbackReason.RUNTIME_CANNOT)
-                await self._question_to_planner(task_id, sender, message, target, reason)
-                entry["state"] = f"no run is in it now ({reason.value}): the Planner was given your question"
+                reason = await self._consult(task_id, seats, message)
+                if reason is None:
+                    entry["state"] = ("no run is in it now: Looper asks its last session, read only; the answer "
+                                      "comes to your inbox, so go on meanwhile")
+                else:
+                    await self.give_to_planner(task_id, message, target.name, reason, _FALLBACK_WHY[reason])
+                    entry["state"] = f"no run is in it now ({reason.value}): the Planner was given your question"
             elif not live:
                 entry["state"] = "no run is in it now: its next run reads it"
             else:
@@ -641,20 +676,91 @@ class RoomService:
             delivery.append(entry)
         return delivery
 
-    async def _question_to_planner(self, task_id: str, sender: Seat, message: Mapping[str, Any], target: Target,
-                                   reason: FallbackReason) -> None:
-        why = ("its step has not started" if reason is FallbackReason.NOT_STARTED
-               else "no run is in it now, and Looper cannot ask its last session yet")
-        await self._looper(task_id, MessageKind.ESCALATION, Reason.CONSULT_FALLBACK,
-                           f"{sender.key} asked {target.name} (message {message['id']}), but {why} "
-                           f"({reason.value}). Answer it, or say who will and when. The question: "
-                           f"{_line(message['body'], 600)}",
-                           audience=[PLANNER], reply_to=message["id"], pending=True)
-        await self._looper(task_id, MessageKind.NOTICE, Reason.CONSULT_FALLBACK,
-                           f"{target.name} cannot take your question {message['id']} now ({reason.value}): the "
-                           "Planner has it and will answer in the room.",
-                           audience=[sender.key], reply_to=message["id"])
+    async def _consult(self, task_id: str, seats: Sequence[Member], message: Mapping[str, Any]
+                       ) -> FallbackReason | None:
+        """Ask the last session of the one seat a question is for that ran (``consults.ask``); None when a consult
+        has it, else why the Planner gets it."""
+        if all(m.presence is Presence.PLANNED for m in seats):
+            return FallbackReason.NOT_STARTED
+        ran = [m for m in seats if m.presence in (Presence.OFFLINE, Presence.CONSULTING)]
+        if self.consults is None or not ran:
+            return FallbackReason.RUNTIME_CANNOT if self.consults is None else FallbackReason.NO_SESSION
+        if len(ran) > 1:
+            return FallbackReason.MANY_SEATS
+        try:
+            return await self.consults.ask(task_id, ran[0], message)
+        except Exception:
+            logger.warning("task %s: could not queue a consult of %s", task_id, ran[0].seat, exc_info=True)
+            return FallbackReason.RUNTIME_CANNOT
+
+    async def give_to_planner(self, task_id: str, message: Mapping[str, Any], target: str, reason: FallbackReason,
+                              why: str) -> None:
+        """A question ``target`` cannot answer goes to the Planner (an escalation), and its asker is told."""
+        await self._planner_fallback(task_id, message, target, reason, why)
         self._wake_planner(task_id)
+        self._wake_inboxes(task_id)
+
+    async def _planner_fallback(self, task_id: str, message: Mapping[str, Any], target: str, reason: FallbackReason,
+                                why: str, *, pool: Any = None) -> None:
+        """Store the escalation and the asker's notice for a question the seat cannot answer."""
+        asker = str(message["sender_seat"])
+        await db_room.add(task_id, sender_seat=LOOPER, sender_kind=MemberKind.LOOPER.value,
+                          kind=MessageKind.ESCALATION.value, via="looper", reason=Reason.CONSULT_FALLBACK.value,
+                          body=f"{asker} asked {target} (message {message['id']}), but {why} ({reason.value}). Answer "
+                               f"it, or say who will and when. The question: {_line(message['body'], 600)}",
+                          audience=[PLANNER], reply_to=message["id"], planner_pending=True, pool=pool)
+        if asker != PLANNER:
+            await db_room.add(task_id, sender_seat=LOOPER, sender_kind=MemberKind.LOOPER.value,
+                              kind=MessageKind.NOTICE.value, via="looper", reason=Reason.CONSULT_FALLBACK.value,
+                              body=f"{target} cannot take your question {message['id']} now ({reason.value}): the "
+                                   "Planner has it and will answer in the room.",
+                              audience=[asker], reply_to=message["id"], pool=pool)
+
+    async def finish_consult(self, task_id: str, consult_id: int, seat: str, *, state: str, expect: Sequence[str],
+                             answers: Sequence[tuple[Mapping[str, Any], str]],
+                             to_planner: Sequence[Mapping[str, Any]], reason: FallbackReason, why: str,
+                             columns: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Store a consult's outcome and messages together, then notify readers; a room turned off gets no messages
+        or notifications."""
+        task = await db_tasks.get_task(task_id)
+        if task is None:
+            raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}")
+        project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
+        execution = ProjectExecution.from_row(project)
+        async with db_room.task_transaction(task_id) as conn:
+            await db_room.consult_lock(conn, task_id)
+            if not execution.room_on:
+                return await db_room.move_consult(consult_id, "failed", expect=expect, pool=conn,
+                                                  fallback_reason=FallbackReason.ROOM_OFF.value,
+                                                  detail="its task's agent room was turned off")
+            context = _Context(task, execution, members(await db_steps.list_steps(task_id, pool=conn),
+                                                        self._runs(task_id)))
+            member = context.member(seat)
+            kind = MemberKind.REVIEW if member and member.kind is MemberKind.REVIEW else MemberKind.WORK
+            row = await db_room.move_consult(consult_id, state, expect=expect, pool=conn, **columns)
+            if row is None:
+                return None
+            covered = {q["id"] for q, _ in answers} | {q["id"] for q in to_planner}
+            to_planner = list(to_planner)
+            for question_id in row["questions"]:
+                if question_id not in covered:
+                    question = await db_room.get(task_id, int(question_id), pool=conn)
+                    if question is not None:
+                        to_planner.append(question)
+            for question, body in answers:
+                asker = str(question["sender_seat"])
+                await db_room.add(task_id, sender_seat=seat, sender_kind=kind.value, kind=MessageKind.ANSWER.value,
+                                  body=body[: context.limits.message_max_chars], audience=[asker], via="consult",
+                                  cc_planner=True, reply_to=question["id"], planner_pending=asker == PLANNER, pool=conn)
+            for question in to_planner:
+                await self._planner_fallback(task_id, question, seat, reason, why, pool=conn)
+        if to_planner or any(question["sender_seat"] == PLANNER for question, _ in answers):
+            self._wake_planner(task_id)
+        for question, _ in answers:
+            if (asker := context.member(str(question["sender_seat"]))) is not None:
+                await self._remind(task_id, asker)
+        self._wake_inboxes(task_id)
+        return row
 
     async def _after_post(self, task_id: str, context: _Context, sender: Seat, message: Mapping[str, Any],
                           reply: Mapping[str, Any] | None, targets: Sequence[Target]) -> None:
@@ -1084,7 +1190,8 @@ async def task_view(task_id: str, *, runs: Mapping[str, tuple[str, datetime]] | 
         return None
     project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
     steps = await db_steps.list_steps(task_id)
-    seats = members(steps, runs or {})
+    consults = await db_room.consults(task_id)
+    seats = members(steps, runs or {}, {c["seat"] for c in consults if c["state"] == "running"})
     rows = await db_room.messages(task_id)
     answered = _answered_ids(rows)
     by_step: dict[str, dict[str, int]] = {}
@@ -1125,4 +1232,16 @@ async def task_view(task_id: str, *, runs: Mapping[str, tuple[str, datetime]] | 
         "counts": {"messages": len(rows), "by_kind": by_kind, "questions": len(questions),
                    "unanswered": sum(1 for q in questions if q["id"] not in answered)},
         "by_step": {key: stats for key, stats in by_step.items() if any(stats.values())},
+        # The consults of seats whose run had ended: how many, how they ended, what they cost.
+        "consults": {
+            "total": len(consults),
+            "answered": sum(1 for c in consults if c["state"] == "answered"),
+            "by_reason": {reason: sum(1 for c in consults if c.get("fallback_reason") == reason)
+                          for reason in sorted({c["fallback_reason"] for c in consults if c.get("fallback_reason")})},
+            "cost_usd": round(sum(float(c["cost_usd"] or 0) for c in consults), 6),
+            "list": [{"seat": c["seat"], "questions": list(c["questions"]), "state": c["state"],
+                      "reason": c.get("fallback_reason"), "read_only": c.get("read_only"),
+                      "denied_writes": c.get("denied_writes") or 0, "cost_usd": c.get("cost_usd"),
+                      "at": c["created_at"].isoformat() if c.get("created_at") else None} for c in consults[-50:]],
+        },
     }

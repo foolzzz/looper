@@ -68,6 +68,7 @@ const PRESENCES: Record<RoomPresence, { icon: LucideIcon; tone: string }> = {
   offline: { icon: Circle, tone: "text-muted-foreground" },
   planned: { icon: CircleDashed, tone: "text-muted-foreground" },
   dropped: { icon: CircleSlash, tone: "text-muted-foreground" },
+  consulting: { icon: Loader2, tone: "text-primary" },
 };
 
 const FILTERS: { id: RoomFilter; label: string }[] = [

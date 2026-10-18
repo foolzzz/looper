@@ -136,6 +136,10 @@ export interface ProjectExecution {
   room_messages_per_task: number | null;
   room_ping_pong_rounds: number | null;
   room_wait_max_seconds: number | null;
+  /** What one consult of a seat whose run ended may spend (USD), how long it may take, how many a task may have. */
+  room_consult_budget_usd: number | null;
+  room_consult_timeout_seconds: number | null;
+  room_consults_per_task: number | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -1560,7 +1564,7 @@ export interface TaskWorkspaces {
 
 /** Whether a seat has a run now ("online", or "waiting" for room in its task), had one ("offline"), has not started
  * ("planned") or was dropped with its step before it ran. */
-export type RoomPresence = "online" | "waiting" | "offline" | "planned" | "dropped";
+export type RoomPresence = "online" | "waiting" | "offline" | "planned" | "dropped" | "consulting";
 
 /** What members post (info, question, answer, interface, announce); Looper writes notices (to a seat) and
  * escalations (to the Planner). */

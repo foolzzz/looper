@@ -319,7 +319,7 @@ export function ProjectExecutionFields({
                 {label(field, text)}
                 <Input
                   id={`${idPrefix}-${field}`}
-                  inputMode="numeric"
+                  inputMode={Number.isInteger(min) ? "numeric" : "decimal"}
                   value={draft[field]}
                   onChange={set(field)}
                   aria-describedby={`${idPrefix}-${field}-help`}

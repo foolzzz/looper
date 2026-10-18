@@ -687,6 +687,14 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_ping_pong_rounds INTEGER
     CHECK (room_ping_pong_rounds >= 2 AND room_ping_pong_rounds <= 50);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_wait_max_seconds INTEGER
     CHECK (room_wait_max_seconds >= 0 AND room_wait_max_seconds <= 120);
+-- The room's consults (a question for a seat no run is in, answered by its last session): how much one may spend,
+-- how long it may take, and how many a task may have (NULL: 0.50 USD, 300 s, 10; 0 consults: none).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consult_budget_usd DOUBLE PRECISION
+    CHECK (room_consult_budget_usd >= 0.01 AND room_consult_budget_usd <= 5);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consult_timeout_seconds INTEGER
+    CHECK (room_consult_timeout_seconds >= 30 AND room_consult_timeout_seconds <= 1800);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_consults_per_task INTEGER
+    CHECK (room_consults_per_task >= 0 AND room_consults_per_task <= 100);
 -- What a task that completes leaves in the project's knowledge, from one more
 -- Planner turn over the task journal: nothing ('off'), a draft the user
 -- confirms or discards on the project page ('draft'), or a document ('write').
@@ -1261,6 +1269,33 @@ CREATE TABLE IF NOT EXISTS room_watches (
     CONSTRAINT room_watches_what CHECK ((presence IS NULL) <> (kind IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_room_watches_open ON room_watches (task_id) WHERE ended_at IS NULL;
+-- A consult: the questions for a seat no run is in that its last run's session answers, read only, in a fork of
+-- that session (looper/agents/consult.py). source_run: the run whose session it resumes; source_record: its pinned
+-- finished llm_records row; consult_run: its own run.
+-- state: 'queued' (waiting to start, or for room in its task), 'running', then 'answered', or 'fallback' (the
+-- Planner was given the questions, fallback_reason says why) or 'failed' (it ran and gave no usable answer; the
+-- Planner has them too). read_only: how the run was kept from writing ('runtime': its runtime refuses writes;
+-- 'snapshot': it ran in a checkout thrown away after it). denied_writes: the writes its runtime refused.
+CREATE TABLE IF NOT EXISTS room_consults (
+    id               BIGSERIAL PRIMARY KEY,
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seat             TEXT NOT NULL,
+    questions        BIGINT[] NOT NULL DEFAULT '{}',
+    source_run       TEXT,
+    source_record    BIGINT,
+    consult_run      TEXT,
+    runtime          TEXT,
+    state            TEXT NOT NULL DEFAULT 'queued'
+                     CHECK (state IN ('queued', 'running', 'answered', 'fallback', 'failed')),
+    fallback_reason  TEXT,
+    read_only        TEXT CHECK (read_only IN ('runtime', 'snapshot')),
+    denied_writes    INTEGER NOT NULL DEFAULT 0,
+    cost_usd         DOUBLE PRECISION,
+    detail           TEXT NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_room_consults_task ON room_consults (task_id, id);
 
 -- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
 -- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns

@@ -812,9 +812,15 @@ async def _run_agent_system(
     from .ops.room import RoomOps
     from .room import RoomService
     room = RoomService(bus=bus, worker_pool=worker_pool)
+    from .consult import ConsultService
+    consults = ConsultService(room=room, worker_pool=worker_pool, runtime_root=runtime_root, claude_bin=claude_bin)
+    room.consults = consults
     planner_ops.room = room
     room_ops = RoomOps(room, url=_local_url(host, port))
     worker_pool.room_ops = room_ops
+
+    # The consults the last server left queued or running run again.
+    await consults.resume_all()
 
     # --- Start ---
 
@@ -864,6 +870,7 @@ async def _run_agent_system(
 
     async def shut_down() -> None:
         logger.info("shutting down agent system...")
+        await consults.stop()
         await gate_reminders.stop()
         await gate_courier.stop()
         await scheduler.stop()

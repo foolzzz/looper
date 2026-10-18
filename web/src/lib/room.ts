@@ -26,11 +26,12 @@ export const PRESENCE_LABELS: Record<RoomPresence, string> = {
   offline: "Offline",
   planned: "Not started",
   dropped: "Dropped",
+  consulting: "Being consulted",
 };
 
 const REASONS: Record<string, string> = {
   ping_pong: "Two seats went back and forth too long without an answer.",
-  consult_fallback: "The seat asked has no run to answer, so the question went to the Planner.",
+  consult_fallback: "The seat asked has no run to answer, and its last session could not answer it, so the question went to the Planner.",
   interface_changed: "An interface changed after a step that read the earlier one had ended.",
   room_full: "The task's room reached its message limit.",
   watch: "Something a run watched for happened.",
@@ -94,6 +95,9 @@ export type RoomLimitField = Extract<
   | "room_messages_per_task"
   | "room_ping_pong_rounds"
   | "room_wait_max_seconds"
+  | "room_consult_budget_usd"
+  | "room_consult_timeout_seconds"
+  | "room_consults_per_task"
 >;
 
 /** The project's room limits, with their ranges and defaults as the server checks them. */
@@ -110,4 +114,11 @@ export const ROOM_LIMITS: { field: RoomLimitField; label: string; help: string; 
     help: "Messages two seats may trade before the Planner is told.", min: 2, max: 50, fallback: 6 },
   { field: "room_wait_max_seconds", label: "Inbox wait (s)", help: "How long one inbox call may wait for a message.",
     min: 0, max: 120, fallback: 60 },
+  { field: "room_consult_budget_usd", label: "Consult budget (USD)",
+    help: "What one consult of a seat whose run ended may spend.", min: 0.01, max: 5, fallback: 0.2 },
+  { field: "room_consult_timeout_seconds", label: "Consult time (s)", help: "How long one consult may take.",
+    min: 30, max: 1800, fallback: 300 },
+  { field: "room_consults_per_task", label: "Consults per task",
+    help: "How many consults a task may have; 0 sends every such question to the Planner.", min: 0, max: 100,
+    fallback: 10 },
 ];

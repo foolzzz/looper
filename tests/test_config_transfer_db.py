@@ -846,7 +846,9 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
                                                         "agent_room": None, "room_post_per_minute": None,
                                                         "room_broadcasts_per_run": None, "room_message_max_chars": None,
                                                         "room_messages_per_task": None, "room_ping_pong_rounds": None,
-                                                        "room_wait_max_seconds": None},
+                                                        "room_wait_max_seconds": None, "room_consult_budget_usd": None,
+                                                        "room_consult_timeout_seconds": None,
+                                                        "room_consults_per_task": None},
                                      "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
             assert new == expected
 

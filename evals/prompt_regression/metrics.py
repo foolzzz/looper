@@ -204,6 +204,9 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
         "room_refused": sum(1 for r in rows if str(r.get("summary") or "").startswith("Room: ")
                             and "refused" in str(r.get("summary") or "")),
         "room_tool_calls": calls,
+        # The consults of seats whose run had ended, and those that answered.
+        "room_consults": int(room.get("consults", {}).get("total") or 0),
+        "room_consults_answered": int(room.get("consults", {}).get("answered") or 0),
     }
 
 
@@ -319,16 +322,18 @@ def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path, refused
     refused = {tool_use_id for tool_use_id in refused if tool_use_id}
     for row in events:
         event = row.get("event", row)
-        content = (event.get("message") or {}).get("content") if isinstance(event, Mapping) else None
+        message = event.get("message") if isinstance(event, Mapping) else None
+        content = message.get("content") if isinstance(message, Mapping) else None  # some events' is a string
         if isinstance(event, Mapping) and event.get("type") == "user" and isinstance(content, list):
             refused |= {block.get("tool_use_id") for block in content if isinstance(block, Mapping)
                         and block.get("type") == "tool_result" and block.get("is_error")}
     paths = []
     for row in events:
         event = row.get("event", row)
-        if not isinstance(event, Mapping) or event.get("type") != "assistant":
+        if not isinstance(event, Mapping) or event.get("type") != "assistant" \
+                or not isinstance(message := event.get("message"), Mapping):
             continue
-        for block in (event.get("message") or {}).get("content") or []:
+        for block in message.get("content") or []:
             if (isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS
                     and block.get("id") not in refused):
                 tool_input = block.get("input") or {}

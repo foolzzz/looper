@@ -1,6 +1,6 @@
 # RFC：Agent 办公台（Agent Room，v0）
 
-- **状态：** 已批准（第 4 节 D1–D7 由维护者在 2026-10-17 拍板；D8–D18 和第 19 节的问题同日按建议定下）；R1a（办公台本身）进行中，R1b（唤醒咨询）随后；用户关卡 G1（#168）已合入。第 6.2、7.2 节标「需要验证」的 Claude Code 几点已在真实 CLI 上验证（2026-10-17，结果写在那两节）；Codex、OMP 的几点在 R1b 验证。
+- **状态：** 已批准（第 4 节 D1–D7 由维护者在 2026-10-17 拍板；D8–D18 和第 19 节的问题同日按建议定下）；R1a（办公台本身）、R1b（唤醒咨询）在实现中；用户关卡 G1（#168）已合入。第 6.2、7.2 节标「需要验证」的 Claude Code 几点已在真实 CLI 上验证（2026-10-17，结果写在那两节）；Codex、OMP 的几点在 R1b 验证。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 17 项。
 - **最近更新：** 2026-10-17
 
@@ -86,7 +86,7 @@
 | D11 | **在线状态从运行派生**：席位有运行在跑就是在线，WorkerPool 的 `pending` 是 `waiting`，运行结束就离线；不另做心跳 | 运行的状态本来就是真相，另存一份会不一致 |
 | D12 | **规划者的 `[ROOM]` 回合沿用 CHAT 的形状**：`reply` 非空时由 Looper 作为规划者的 `answer` 发回这一批消息的发送者，动作仍是 none、forward、add_steps、replan；送达保证同任务变更：先入库、标「未送达规划者」，回复解析之后才标已送达，回合失败或服务重启后下一次先做（第 6.4 节） | 规划者的每条回答一定落到办公台上，不靠模型记得调工具；回复约定只多一种消息头，解析和校验复用 |
 | D13 | **开启办公台的项目里，Codex 和 OMP 的 Worker、Reviewer 运行保留会话**：不再带 `--ephemeral`、`--no-session`，会话存在 Looper 自己的目录里（`codex/sessions/run-<记录号>`、`omp/sessions/run-<记录号>`），任务删除或从头再来时删掉，启动时清理结束超过 7 天的任务的（第 7.2 节）。关闭办公台的项目命令行不变 | 不保留会话，这两种运行时就没法咨询，D3 只能永远退回规划者；保留会话只多占磁盘，不改运行本身 |
-| D14 | **咨询是原会话的一个分叉，只读由三层保证**：prompt 和咨询契约；运行时的限制（Claude Code 的 default 权限模式加禁用写工具，Codex 只读沙箱，OMP 能限制工具时只给只读工具）；在可以丢弃的检出里跑，并在跑完后检查目录有没有被改（第 7.3 节）。这是 RFC 决策 8「每个 agent 有全部工具」唯一的例外，只用于咨询 | 维护者要求「不改文件」。prompt 管不住模型的意外；运行时能强制的地方就强制；强制不了的地方不让它碰别人在用的目录 |
+| D14 | **咨询是原会话的一个分叉，只读由三层保证**：prompt 和咨询契约；运行时的限制（Claude Code 的 default 权限模式加禁用写工具，Codex 只读沙箱，Grok 和 OMP 只给只读工具）；在可以丢弃的检出里跑，并在跑完后检查目录有没有被改（第 7.3 节）。这是 RFC 决策 8「每个 agent 有全部工具」唯一的例外，只用于咨询 | 维护者要求「不改文件」。prompt 管不住模型的意外；运行时能强制的地方就强制；强制不了的地方不让它碰别人在用的目录 |
 | D15 | **未读计数跟着每个办公台工具的返回值走**：任何 `looper_room_*` 调用都返回这个席位的未读数（点名、接口、全体），所以 Codex、OMP 的 agent 只要用过一次办公台工具就知道有新消息。提醒只是 Claude Code 的加速，不是唯一的通道 | Codex、OMP 运行中不能插话；工具返回值是三种运行时共有的唯一回路 |
 | D16 | **限额是项目执行设置**（第 11 节），不写死：每次运行每分钟的消息数、每次运行的广播数、消息长度、每个任务的消息数、来回轮数、收件箱的最长等待、咨询的预算、超时和每个任务的次数 | 维护者不喜欢写死的上限；默认值宽松，项目可调 |
 | D17 | **第一期管家只读**：`looper_tasks` 多一个只读动作 `room`，看任务办公台上的消息；管家不发言（D6：用户的话走补充说明或用户关卡，管家代用户发言随 R2 一起做） | 管家发言就是用户发言的转述，身份规则要和 R2 一起定；只读满足「管家能回答这两个 agent 在聊什么」 |
@@ -194,41 +194,51 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 ### 7.1 流程
 
 1. 一条 `question` 发给一个 `offline` 的工作席位，或者规划者发给一个 `offline` 的评审席位（工作席位不能问评审席位，D4）。
-2. 能咨询的前提：这个席位有一次已经结束的运行；它的运行时这次运行存了会话（Claude Code 一直存；Codex、OMP 按 D13）；本任务的咨询次数没到 `room_consults_per_task`；这个席位现在没有新的运行在等或在跑。
-3. 同一个席位同时至多一个咨询。咨询开始之前又来的问题并进同一次；开始之后来的排下一次。
-4. 咨询按这个席位的类型占并发名额（工作席位算 Worker，评审席位算 Reviewer），在任务的上限里排队（#173 起并发只按任务计），和普通运行一样（维护者 D3）。排队时提问方收到的送达说明是「已排咨询，在等 Worker 名额（本任务 1/1 在跑）；回答会进你的收件箱，不必等」。
-5. Looper 续接这次运行的会话的一个分叉（7.2），给咨询的 system prompt 和问题（7.4），读它的回复，把每个回答以这个席位的名义发出（`via: consult`，`reply_to` 对应的问题），抄送规划者。
+2. 能咨询的前提：这个席位有一次已经结束的运行，最新记录不再是 `running`；它的运行时这次运行存了会话（Claude Code 一直存；Codex、OMP 按 D13）；本任务的咨询次数没到 `room_consults_per_task`；这个席位现在没有新的运行在等或在跑。入队时用 `source_record` 固定这条记录，合进已有队列的问题沿用它；开始前记录丢失、没有会话、仍在运行或同一运行已有更新记录时，按 `no_session` 转给规划者，不复制正在被续写的会话。
+3. 同一个席位同时至多一个咨询。每个任务一把独立的咨询锁，同时保护任务次数上限和席位队列，不与办公台消息锁共用；咨询开始之前又来的问题并进同一次，开始之后来的排下一次。
+4. 咨询按这个席位的类型占并发名额（工作席位算 Worker，评审席位算 Reviewer），在任务的上限里排队（#173 起并发只按任务计），和普通运行一样（维护者 D3）。拿到名额后，在咨询锁内再检查任务是否还在运行、该席位是否已有咨询在跑；任务已结束就记为失败，同席位忙则留在队列里。排队时提问方收到的送达说明是「已排咨询，在等 Worker 名额（本任务 1/1 在跑）；回答会进你的收件箱，不必等」。
+5. Looper 续接这次运行的会话的一个分叉（7.2），给咨询的 system prompt 和问题（7.4），读它的回复，把每个回答以这个席位的名义发出（`via: consult`，`reply_to` 对应的问题），抄送规划者。最终状态、回答、未回答问题的升级和提问方通知在同一事务里落库，提交后才唤醒和提醒；状态推进被拒就不存消息，重复结束不会重复发回答。若任务的办公台在咨询结束前关闭，咨询以 `failed`、原因 `room_off` 收尾，不存消息、不唤醒或提醒。
 6. 回答不了或失败：转给规划者（7.5）。
 
 ### 7.2 三种运行时
 
 | | Claude Code | Codex | OMP |
 |---|---|---|---|
-| 会话在哪里 | 运行时自己的会话目录（按工作目录分），运行记录有 `session_id`；Looper 不删，由 Claude Code 自己按期清理（默认 30 天，需要验证） | 开启办公台时存在 `codex/sessions/run-<记录号>`（D13），会话 id 是 `thread.started` 的 `thread_id` | 开启办公台时存在 `omp/sessions/run-<记录号>`（D13），会话 id 是会话头的 `id` |
+| 会话在哪里 | 运行时自己的会话目录（按工作目录分），运行记录有 `session_id`；原运行的会话不动；分叉和其他 Claude Code 会话一样留在它自己的会话目录里，Looper 不改 Claude Code 自己目录下的任何内容 | 开启办公台时存在 `codex/sessions/run-<记录号>`（D13），会话 id 是 `thread.started` 的 `thread_id` | 开启办公台时存在 `omp/sessions/run-<记录号>`（D13），会话 id 是会话头的 `id` |
 | 怎么续接 | `--resume <id> --fork-session`：新的会话 id，原会话不变（2.1.285 实测：分叉后再续接原会话，它没见过咨询的问题） | 把原会话目录复制到这次咨询自己的家目录，在那里 `exec … resume <id> -`：复制就是分叉 | 把原会话目录复制到这次咨询自己的 `--session-dir`，`--resume <id>` |
-| 在哪个目录跑 | 快照（2.1.285 实测：在另一个目录 `--resume <id> --fork-session` 找得到会话） | 快照；做不了快照时在原目录，靠沙箱 | 快照；omp 的只读工具验证通过后同 Codex |
-| 只读怎么强制 | 不带 `--dangerously-skip-permissions`（default 权限模式），加 `--disallowedTools Edit Write NotebookEdit`。2.1.285 实测：`-p` 模式下没有人能批准，`ls`、`cat`、`git status`、`git log`、`git show` 照常放行，重定向写文件、`touch`、python 写文件、`git commit` 都被拒（"requires approval"），逐条列在 `result` 的 `permission_denials` 里，可以作为类型化的「咨询试图写」信号。plan 模式不用：它只是模型自己不写，CLI 不拦，而且模型会试图用 Write 往运行时的配置目录写计划文件 | 用 `-c sandbox_mode="read-only"` 和 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`：系统级沙箱，写文件失败；`exec resume` 是否接受这些覆盖需要验证 | omp 若能只开只读工具（如 `--tools` 只给读、搜索类，需要验证），就这样开；否则只有 prompt，运行记录写明 `read_only.enforced: "prompt"` |
+| 在哪个目录跑 | 步骤原目录（2.1.285 实测：在另一个目录 `--resume <id> --fork-session` 也找得到会话） | 步骤原目录，靠只读沙箱 | 任务目录分支的 detached checkout，结束后删除 |
+| 只读怎么强制 | `--tools Read,Glob,Grep` 只保留内置读工具，`--allowedTools Read,Glob,Grep` 无需确认，`--disallowedTools Bash,Edit,Write,NotebookEdit` 拒绝 shell 和写工具；manual 模式禁用确认，MCP 没有允许规则。2.1.285 的帮助列出 `--tools`，尚未验证真实运行 | 用 `-c sandbox_mode="read-only"` 和 `-c approval_policy="never"`：系统级沙箱 | `--tools read,glob,grep`，尚未验证真实运行；同时使用任务分支的临时检出，结束后删除。它不是沙箱：OMP 以操作者身份运行，检出外（其他路径、家目录）的写入既不会被阻止，也不会被发现 |
 | 会话不在时 | 返回「No conversation found」，没有 init 事件（`ResidentTurn.session_started` 已有这个判断） | 退出码 1、没有事件 | 退出码 1、没有事件 |
 
-**快照**：在任务目录的仓库里 `git worktree add --detach <路径> <提交>`，咨询完删掉。提交是这个席位的结果：已合回的隔离步骤用它的结果提交 W，共用目录的步骤用任务分支此刻的末端。没法做快照的情况：隔离步骤的 worktree 还在用（步骤在等决策、或合不进去），只在运行时能强制只读时在原 worktree 里跑；任务目录不是 git 仓库。这两种情况下运行时又强制不了只读的（OMP，或 Codex 的沙箱在 R1b 没验证通过），转给规划者，原因 `no_snapshot`。
+**快照**：OMP 在任务目录的仓库里 `git worktree add --detach <路径> HEAD`，保留任务目录在仓库中的相对位置，咨询结束后删除检出。它读取任务目录分支当前提交的内容；任务目录不是 git 仓库或创建检出失败时，按 `no_snapshot` 转给规划者。检出内的改动由 `wrote_files` 检测，检出外的写入既不会被阻止，也不会被发现。
+
+**R1b 实现时定的**（和上文不同的地方以这里为准）：
+
+- **在哪里跑**：Claude Code 使用上表的显式读工具列表（尚未验证真实运行），Codex 使用只读沙箱，Grok 使用已实测的读工具，在步骤原目录读取当前成果。OMP 只启用读工具（`--tools read,glob,grep`，尚未验证真实运行），在任务目录分支的 detached checkout 运行，结束后删除；检出让写入不落入任务目录，`wrote_files` 检测检出内的改动。它不是沙箱：OMP 以操作者身份运行，检出外（其他路径、家目录）的写入既不会被阻止，也不会被发现。
+- **咨询没有办公台工具**：问题和这个席位以前的回答都在 `[CONSULT]` 这一轮里给出，回答写在回复里由 Looper 发出，所以咨询运行不注入 MCP，也没有令牌。
+- **发给角色的问题**：角色里只有一个跑过的席位时咨询它；有几个时转给规划者（`many_seats`），提问的人可以改问具体的席位。
+- **同一个席位同时至多一个咨询**：在排队的那次会接着收后来的问题；正在跑的期间来的问题排成下一次，等这次结束再开始。服务停止先禁止启动新咨询，取消后保留 `queued`、`running` 状态；恢复时把中断的 `running` 改回 `queued`，每个席位只启动编号最小的一条，后续依次运行。主动 kill（包括等名额时）则记为失败，原因 `stopped`，问题转给规划者。
+- **类型化的原因**：`not_started`、`no_session`、`session_gone`、`runtime_cannot`（运行时续接不了，或这个席位的 Agent Profile 已经换了运行时或 provider）、`no_snapshot`、`limit`、`many_seats`、`budget`、`timeout`、`contract`、`wrote_files`、`stopped`、`unsure`（回答了别的问题，没回答这一个）。
+- **被拒的写**：Claude Code 的 `permission_denials` 计入 `denied_writes`；写被拒不算失败，回答照常发出。
+- **Codex、OMP 的真实路径没验证**：本机没有能用的 OMP provider；Codex 只能用操作者的登录，按硬规则没有跑。参数来自它们的帮助和 `codex mcp get --json`。
 
 ### 7.3 只读的三层
 
 1. **prompt**：咨询的 system prompt 用 `CONSULT_CONTRACT` 代替原来的契约（7.4），开头写明这是一次咨询：只回答，不改文件，不提交，不运行会改东西的命令。
 2. **运行时限制**：上表。这是 RFC 决策 8 的唯一例外，只在咨询的命令行上；`agent_settings.Launch` 加一个只读的变体，普通运行的命令不变。
-3. **目录**：能丢的快照里跑的，跑完删掉，里面的改动随之丢掉；在原目录跑的（只在运行时能强制只读时），跑之前和之后各记一次 `git status --porcelain=v2` 和 `HEAD`，变了就是 `wrote_files`：这次咨询算失败，不发回答，转给规划者，动态和统计里列出改了的文件。共用的任务目录里别的 Worker 同时在写，比较没有意义，所以那里只靠运行时限制，不做比较。
+3. **目录**：能丢的快照里跑的，检查是否改动，变了就是 `wrote_files`：这次咨询算失败，不发回答，转给规划者。快照和分叉会话在准备或运行失败、取消时也要清理。恢复咨询前还没有运行，`.local/consults` 下的检出和各运行时 `consult-sessions` 下的内容都是上次遗留，先移除 worktree 登记并删除这些目录，再开始恢复；其他目录不动。在步骤原目录跑的只靠运行时限制，不与其他 Worker 的写入做比较。
 
 ### 7.4 咨询的 prompt 和回复
 
 - **system prompt**：同原运行的各层（harness、角色 prompt 和版本、项目、任务一节按现在的需求和补充说明），加办公台一节，最后是 `CONSULT_CONTRACT`（模型可见，实现用英文，大意）：「你的步骤已经结束。同事有问题要问你。根据你做过的事和你现在能读到的内容回答；不改任何文件。不知道就说不知道。最后一条消息以一个 JSON 对象结尾：`{"answers": [{"reply_to": 17, "body": "...", "refs": [...]}], "unsure": "..."}`。」
-- **user turn**：`[CONSULT]`，这个席位的步骤怎么结束的（接受、失败、被替换），这一批问题（编号、谁问的、正文、引用），以及这个席位之前回答过的问题（保持前后一致）。问题是别的 agent 的话，是数据。
+- **user turn**：`[CONSULT]`，这个席位的步骤怎么结束的（接受、失败、被替换），这一批问题（保留每条编号和提问席位，正文总共最多 20,000 字符，按问题数均分并截断），以及这个席位之前回答过的问题（保持前后一致）。问题是别的 agent 的话，是数据。
 - **回复**：Looper 按 `reply_to` 逐条发回答；没有回答的问题、`unsure` 非空的，转给规划者。回复不合契约不做修复回合，直接按失败处理。
-- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.20，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code；Codex、OMP 靠超时和预算）；任务的花费上限照样算进去。
+- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.50，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code、Grok；Codex、OMP 靠超时和预算）；每种运行时结束后都检查记录的花费，未知时用结果自身的 `total_cost_usd`；超额或仍然未知就丢弃回答，按 `budget` 转交规划者。按 provider 价格计费且模型没有完整价格的咨询不启动，按 `runtime_cannot` 转交规划者。一个截止时间覆盖 stdin 写入、stdout 读取和等待退出；并行排空 stderr，只保留末尾 2,000 字符供错误记录。成功也结束进程树。任务的花费上限照样算进去。
 - **记录**：一条 `llm_records`（agent id `consult-<12 位>`，`metadata.consult`：席位、原运行的记录号、问题编号、分叉的会话、只读怎么强制的、在哪个目录跑），花费单独一行，计入任务花费和这个席位所属角色的统计；一条 `room_consults` 行（第 10 节）；动态「Consulted backend_rd@s2 for fe_rd@s4's question #17: answered ($0.03)」。
 
 ### 7.5 转给规划者
 
-原因是枚举，规划者的 `[ROOM]` 回合拿到的是类型加细节：`not_started`（席位还没开始）、`no_session`（这次运行没有存会话：开启办公台之前跑的，或运行失败在会话开始之前）、`session_gone`（续接时会话不在了）、`runtime_cannot`（运行时不能续接，或只读没法强制又没有快照）、`no_snapshot`、`limit`（本任务的咨询次数用完）、`budget`、`timeout`、`contract`、`wrote_files`。提问方收到一条 `notice`：「backend_rd@s2 没法咨询（session_gone），问题已转给规划者」。
+原因是枚举，规划者的 `[ROOM]` 回合拿到的是类型加细节：`not_started`（席位还没开始）、`no_session`（没有已结束的会话记录，或入队后有了更新的运行记录）、`session_gone`（续接时会话不在了）、`runtime_cannot`（运行时不能续接，或只读没法强制又没有快照）、`no_snapshot`、`limit`（本任务的咨询次数用完）、`budget`、`timeout`、`contract`、`wrote_files`、`stopped`（咨询被主动停止）。提问方收到一条 `notice`：「backend_rd@s2 没法咨询（session_gone），问题已转给规划者」。
 
 ## 8. 令牌与注入
 
@@ -307,8 +317,9 @@ room_watches
 room_consults                   （R1b）
   id, task_id, seat
   questions     BIGINT[]        room_messages.id
-  source_run    被续接的运行的 llm_records.id
-  consult_run   这次咨询的 llm_records.id；可空
+  source_run    被续接的运行的 agent id
+  source_record 入队时固定的已结束运行的 llm_records.id
+  consult_run   这次咨询的 agent id；可空
   runtime       运行时类型
   state         'queued' | 'running' | 'answered' | 'fallback' | 'failed'
   fallback_reason  第 7.5 节的枚举；可空
@@ -333,7 +344,7 @@ room_consults                   （R1b）
 | `room_messages_per_task` | 300 | 20–5,000 | 一个任务的消息总数 |
 | `room_ping_pong_rounds` | 6 | 2–50 | 两个席位来回几轮后升级给规划者 |
 | `room_wait_max_seconds` | 60 | 0–120 | 收件箱一次最多等多久（0 为不等） |
-| `room_consult_budget_usd` | 0.20 | 0.01–5 | 一次咨询的花费上限（R1b）|
+| `room_consult_budget_usd` | 0.50 | 0.01–5 | 一次咨询的花费上限（R1b）|
 | `room_consult_timeout_seconds` | 300 | 30–1,800 | 一次咨询的时间上限（R1b）|
 | `room_consults_per_task` | 10 | 0–100 | 一个任务至多几次咨询（0：一律转给规划者）（R1b）|
 
@@ -362,7 +373,7 @@ room_consults                   （R1b）
 - **并发**：等收件箱时运行照常占名额；咨询按类型占名额（维护者 D3）。任务的 Worker 上限是 1 时，在跑的 Worker 问离线席位，咨询要等它结束才能开始：送达说明会写明「在等名额」，它不该干等（第 16 节）。
 - **评审门**：办公台不改评审门。Reviewer 的问答抄送规划者，DECISION 消息里列出；规划者没能决策时仍按评审结论。
 - **补充说明和 `forward`**：用户的话仍然只经补充说明到规划者；`forward`、`nudge` 照旧，和提醒共用一条插话通道，提醒按 6.2 节流。
-- **重启**：消息、已读进度、关注在库里；服务重启后提醒不补发，未送达规划者的消息按 6.4 补一轮；正在跑的咨询按 `room_consults.state = running` 重排一次（同一次咨询，不重复计次）。
+- **重启**：消息、已读进度、关注在库里；服务重启后提醒不补发，未送达规划者的消息按 6.4 补一轮；在 agent、任务和 HTTP 启动前清理咨询遗留的检出与分叉，并把 `room_consults.state = running` 重排一次（同一次咨询，不重复计次），每个席位先启动最旧的一条。恢复完成前，新咨询只入队。
 - **花费上限**：咨询算进任务花费；任务快到上限时（剩余不够一次 `room_consult_budget_usd`），咨询不开，原因 `budget`。
 
 ## 14. 观测
@@ -462,7 +473,7 @@ room_consults                   （R1b）
 | Q2 | Claude Code 里提醒什么时候被读到：工具调用之间，还是当前回合结束之后 | **已定：R1 先在真实 CLI 上验证。** 回合之间读到没问题；回合结束之后才读到，就靠 uuid 判定（6.2）不丢报告；连这也做不到，就关掉提醒，只靠工具返回值里的未读计数（D15） |
 | Q3 | Codex、OMP 的 Worker、Reviewer 是否在开启办公台时保留会话 | **已定：保留**（D13），放在 Looper 自己的目录里，任务删除或从头再来时删，启动时清理结束超过 7 天的 |
 | Q4 | 咨询的只读要不要用运行时的权限限制（RFC 决策 8 的例外） | **已定：要，只用于咨询**（D14）。只靠 prompt 不满足「不改文件」 |
-| Q5 | 咨询分叉还是直接续接原会话 | **已定：分叉**：Claude Code `--fork-session`，Codex、OMP 复制会话目录。原运行的历史不变，多次咨询不叠加；前后一致靠把这个席位之前的回答放进咨询的 user turn |
+| Q5 | 咨询分叉还是直接续接原会话 | **已定：分叉**：Claude Code `--fork-session`，Codex、OMP 复制会话目录，Grok 在咨询自己的家目录里放一份该会话的副本再 `--fork-session`。原运行的历史不变，多次咨询不叠加；前后一致靠把这个席位之前的回答放进咨询的 user turn |
 | Q6 | 问题发给还没开始的席位怎么办 | **已定：转给规划者**，原消息仍留给那个席位，它开始时第一轮看得到 |
 | Q7 | Reviewer 能不能读工作席位的全体广播 | **已定：能**：接口公告对评审集成有用；游说只封住点名的通道，剩下的口子由评审契约和统计兜（第 16 节） |
 | Q8 | 十个限额用十个类型化列，还是一个类型化的 JSON 列 | **已定：类型化列**，和现有执行设置一致（CHECK 约束、导出导入、管家以后改设置都现成）；界面折叠成一组 |

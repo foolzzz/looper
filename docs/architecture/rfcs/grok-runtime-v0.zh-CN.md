@@ -200,7 +200,11 @@ headless 不能插话：Worker 跑起来以后规划者的 `forward`、`nudge` �
 - Reviewer 与今天的所有运行时一样不限权限（RFC 决策 8）。
 - 咨询（Agent Room D14）：沙箱在会话开始时定下，原运行是 `off` 的会话分叉出来不能换成 `read-only`；工具层可以：
   `--resume <id> --fork-session --tools read_file,grep,list_dir` 实测生效（模型想写文件，找不到写文件的工具，工作
-  目录不变），可以作为 `read_only.enforced: "runtime"`。
+  目录不变），可以作为 `read_only.enforced: "runtime"`。分叉在咨询自己的家目录里跑（Codex 同样）：从原运行的家目录
+  只复制这一个会话的目录（不复制其他会话、索引、缓存、日志和 `auth.json`），配置、咨询的规则（`CONSULT_CONTRACT`）、
+  登录链接和共享目录按普通运行的方式写入，命令是 `--resume <id> --fork-session --session-id <新 uuid> --tools
+  read_file,grep,list_dir`，在原运行的工作目录里跑，不带 `--sandbox`；跑完整个家目录连同分叉出的会话一起删除。
+  原运行的家目录从它记录的命令（`env GROK_HOME=…`）读出，已被清理（闲置 24 小时）时走 `runtime_cannot` 转给规划者。
 - skill：装给角色的插件的 `skills` 目录写进 `[skills] paths`，由 Grok 原生加载；插件的命令、agent、hook、MCP 文件和
   输出样式不给，记在运行记录里。不声明 `claude_plugins`（不是整个插件都加载）。
 

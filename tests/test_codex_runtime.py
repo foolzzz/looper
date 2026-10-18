@@ -610,3 +610,54 @@ def test_a_run_that_keeps_its_session_has_a_home_of_its_own_and_is_not_ephemeral
     for name in ("config.toml", "AGENTS.md"):  # the run home's, as a resident session gets them
         assert (keep / name).read_text() == (run_home / name).read_text()
     assert kept[4:-1] == plain[4:-2]
+
+
+def test_a_consult_resumes_a_copy_of_the_runs_session_in_the_read_only_sandbox(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from looper.agents.runtimes import RuntimeUnsupported
+
+    root = tmp_path / "runtime"
+    kept = root / ".local" / "codex" / "run-sessions" / "task-1" / "worker-1"
+    (kept / "sessions").mkdir(parents=True)
+    (kept / "sessions" / "rollout.jsonl").write_text("{}\n")
+    # What else a run's home holds: Codex's state databases (which name the run's own rollout by its path), and with
+    # Codex's own login an auth.json, a link to the operator's login file, or a file of its own were Codex to
+    # replace the link.
+    for name in ("state_5.sqlite", "state_5.sqlite-wal", "auth.json"):
+        (kept / name).write_text("")
+    fork = root / ".local" / "codex" / "consult-sessions" / "task-1" / "consult-1"
+    launch = replace(_launch(), consult=True)
+    command = CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch,
+                                    session_id="thread-1", session_dir=kept, fork_dir=fork)
+    assert command[:4] == ["env", f"CODEX_HOME={fork}", "codex", "exec"] and command[-3:] == ["resume", "thread-1", "-"]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in command
+    assert command[command.index('sandbox_mode="read-only"') - 1] == "-c"
+    assert (fork / "sessions" / "rollout.jsonl").is_file() and (fork / "config.toml").is_file()
+    # Only the sessions are copied: no state databases, so Codex finds the copy's own rollout, and no auth.json.
+    assert sorted(p.name for p in fork.iterdir()) == ["AGENTS.md", "config.toml", "sessions"]
+    assert (kept / "sessions" / "rollout.jsonl").is_file() and (kept / "state_5.sqlite").is_file()  # the run's stays
+    with pytest.raises(RuntimeUnsupported):
+        CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch,
+                              session_id="thread-1", session_dir=None, fork_dir=fork)
+
+
+def test_a_login_consult_links_the_operators_login_and_copies_no_auth_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    login = _operator_login(tmp_path, monkeypatch, codex_home_set=True)
+    root = tmp_path / "runtime"
+    kept = root / ".local" / "codex" / "run-sessions" / "task-1" / "worker-1"
+    (kept / "sessions").mkdir(parents=True)
+    (kept / "sessions" / "rollout.jsonl").write_text("{}\n")
+    (kept / "auth.json").write_text('{"tokens": "a copy Codex wrote over the link"}')
+    fork = root / ".local" / "codex" / "consult-sessions" / "task-1" / "consult-1"
+    CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root),
+                          launch=replace(_launch(provider=_login_provider()), consult=True),
+                          session_id="thread-1", session_dir=kept, fork_dir=fork)
+    link = fork / "auth.json"
+    # The consult's home links the operator's login like any login run's; nothing of the run's auth.json reaches it.
+    assert link.is_symlink() and os.readlink(link) == str(login)
+    assert sorted(p.name for p in fork.iterdir()) == ["AGENTS.md", "auth.json", "config.toml", "sessions"]

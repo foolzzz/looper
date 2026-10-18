@@ -25,8 +25,11 @@ agent system started it in:
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
   waits for a forwarded user turn and then writes the files given there; with
   ``room_calls`` (``{label: [[tool, arguments], ...]}``) it first makes those
-  calls of the room's tools over its ``looper`` MCP server (and answers a
-  [ROOM] turn of the Planner's with ``room_reply``, or "Noted.");
+  calls of the room's tools over its ``looper`` MCP server; an attempt's
+  ``answer_file`` names a file to hold the last delivered consult's body,
+  else the last answer's body, plus a newline (empty when neither came); it
+  answers a [ROOM] turn of the Planner's with ``room_reply``, or "Noted."; a consult
+  of a run's session answers its questions with ``consult_answer``;
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
   marker), or the attempt under review is one the script's
@@ -274,6 +277,12 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
         files = dict(wait.get("files") or {})
+    if attempt.get("answer_file"):
+        messages = inbox or []
+        answer = next((m["body"] for m in reversed(messages) if m.get("via") == "consult"), None)
+        if answer is None:
+            answer = next((m["body"] for m in reversed(messages) if m.get("kind") == "answer"), "")
+        files[attempt["answer_file"]] = answer + "\n"
     if inbox is not None and "cli.py" in files:
         # The inventory client learns its fields only from the delivered interface; no interface means {}.
         interface = next((m["body"] for m in reversed(inbox) if m.get("kind") == "interface"), "")
@@ -289,6 +298,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
               "changed_files": {name: "written" for name in files},
               "deleted_files": [], "summary": attempt.get("summary") or f"step {label} attempt {attempt_no}"}
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
+
+
+def _consult(script: dict[str, Any], stdin: _Stdin) -> None:
+    """A consult of a run's session: answer every question its prompt names with the script's ``consult_answer``."""
+    prompt = _user_text(stdin.readline() or "{}")
+    ids = [int(i) for i in re.findall(r"^- #(\d+) from", prompt, re.MULTILINE)]
+    reply = {"answers": [{"reply_to": i, "body": script.get("consult_answer", "I do not know.")} for i in ids]}
+    _answer("fake-consult", "Here.\n" + json.dumps(reply), REVIEWER_RUN_COST)
 
 
 def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
@@ -361,6 +378,8 @@ def main(argv: list[str]) -> int:
     # Manager's prompt ends with Looper's tools contract.
     if "## Looper's tools (required)" in system_prompt:
         _manager(scenarios_path, args, stdin)
+    elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
+        _consult(script, stdin)
     elif review:
         _reviewer(script, system_prompt, stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):

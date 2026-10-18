@@ -31,6 +31,11 @@ from looper.agents.tiers.worker import judge_result
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+
+
 # --- Contract violations, read where the agent system rejects a reply ------------------------------------
 
 
@@ -214,6 +219,28 @@ def test_a_discipline_counts_once_it_has_a_role_of_its_own_that_names_its_conven
     assert metrics.discipline_roles(strong, ()) == 0
 
 
+@pytest.mark.parametrize(("code", "problem"), [
+    ("k3v9q2x7m4p8w1z6r5t0", None),
+    ("k3v9q2x7m4p8w1z6r5t1", "code.txt's code is not the one whose SHA-256 is in code.sha256"),
+    ("482913", "code.txt holds '482913', not 20 lowercase letters and digits"),
+    ("K3V9Q2X7M4P8W1Z6R5T0", "code.txt holds 'K3V9Q2X7M4P8W1Z6R5T0', not 20 lowercase letters and digits"),
+    (None, "missing code.txt"),
+])
+def test_the_consult_check_takes_only_the_code_whose_digest_the_first_step_wrote(
+        tmp_path: Path, code: str | None, problem: str | None) -> None:
+    import hashlib
+
+    task = next(t for t in TASKS if t.id == "room_consult")
+    (tmp_path / "code.sha256").write_text(hashlib.sha256(b"k3v9q2x7m4p8w1z6r5t0").hexdigest() + "\n")
+    if code is not None:
+        (tmp_path / "code.txt").write_text(code + "\n")
+    assert task.check(tmp_path) == problem
+    # The code is out of reach of trying every one against its digest (a 6-digit number's took a second), so only
+    # the first step's session can give it; the requirement asks for that code.
+    assert len(task_list.CODE_ALPHABET) ** task_list.CODE_LENGTH >= 2 ** 100
+    assert f"{task_list.CODE_LENGTH} lowercase letters and digits" in task.requirement
+
+
 @pytest.mark.parametrize(("delivery", "fields"), [
     ("empty", ("name", "count")),
     ("answer_only", ("name", "count")),
@@ -247,6 +274,36 @@ def test_fake_room_consumer_needs_the_delivered_interface(
         assert problem is None
     else:
         assert problem is not None and "do not work together" in problem
+
+
+@pytest.mark.parametrize("code", ["k3v9q2x7m4p8w1z6r5t0", "k3v9q2x7m4p8w1z6r5t1"])
+@pytest.mark.parametrize("delivery", ["consult", "answer", "empty"])
+def test_fake_room_consumer_writes_only_the_delivered_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, delivery: str,
+) -> None:
+    task = task_list.select(["room_consult"])[0]
+    script = {**task.fake, "consult_answer": code}
+    (tmp_path / "code.sha256").write_text(script["attempts"]["s1"][0]["files"]["code.sha256"])
+    messages = [] if delivery == "empty" else [
+        {"kind": "answer", "via": delivery, "body": "an older answer"},
+        {"kind": "answer", "via": delivery, "body": script["consult_answer"]},
+    ]
+    if delivery == "consult":
+        messages.append({"kind": "answer", "body": "an answer from another seat"})
+    messages.append({"kind": "interface", "body": "another message"})
+
+    def rpc(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = {"messages": messages} if params["name"] == "looper_room_inbox" else {}
+        return {"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": json.dumps({"status": "ok", "result": result})}],
+            "isError": False}}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
+    monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    assert (tmp_path / "code.txt").read_text() == (code if delivery != "empty" else "") + "\n"
+    assert (task.check(tmp_path) is None) is (delivery != "empty" and code == task.fake["consult_answer"])
 
 
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
@@ -331,6 +388,9 @@ def test_the_planners_refused_calls_are_counted_and_its_file_changes_can_be_boun
                                                          "is_error": True, "content": "Write is disabled"}]}}
     assert metrics.edit_tool_paths([{"event": write}, {"event": disabled}], tmp_path) == []
     assert metrics.edit_tool_paths([{"event": write}], tmp_path) == ["PLAN.md"]
+    # An event whose message is a string (not a turn's) is skipped, not an error.
+    texts = [{"event": {"type": "user", "message": "a note"}}, {"event": {"type": "assistant", "message": "a note"}}]
+    assert metrics.edit_tool_paths([*texts, {"event": write}], tmp_path) == ["PLAN.md"]
 
 
 def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
@@ -1076,7 +1136,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
                     "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
                      "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
-                    "room_interface": (3, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
+                    "room_interface": (3, 0, 0, 0), "room_consult": (2, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
                     # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
                     "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
                     "reviewer_unrelated_note": (1, 2, 2, 0)}
@@ -1100,7 +1160,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
                      "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
                       "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
-                     "room_interface": (1, 0, 2), "room_quiet": (0, 0, 1),
+                     "room_interface": (1, 0, 2), "room_consult": (0, 0, 1), "room_quiet": (0, 0, 1),
                      "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
                      "reviewer_unrelated_note": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
@@ -1144,12 +1204,14 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     # The stand-in is refused nothing: the denials are Claude Code's.
     assert all(by_id[t]["planner_denials"] == 0 for t in by_id)
     assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
-    # Only room_interface's agents use the room: the store's interface, the client's question to the Planner, and the
-    # Planner's answer in a [ROOM] turn, so nothing is left unanswered; every other task's room stays quiet.
+    # Only the room tasks' agents use the room: room_interface's store posts its interface, its client asks the
+    # Planner, which answers in a [ROOM] turn; room_consult's second step asks the first, whose run has ended, and a
+    # consult of its session answers. Nothing is left unanswered; every other task's room stays quiet.
     room = {t: tuple(by_id[t][k] for k in ("room_messages", "room_questions", "room_unanswered", "room_interface",
-                                            "room_refused", "room_tool_calls"))
+                                            "room_refused", "room_tool_calls", "room_consults",
+                                            "room_consults_answered"))
             for t in by_id if by_id[t]["room_messages"] or by_id[t]["room_tool_calls"]}
-    assert room == {"room_interface": (3, 1, 0, 1, 0, 3)}
+    assert room == {"room_interface": (3, 1, 0, 1, 0, 3, 0, 0), "room_consult": (2, 1, 0, 0, 0, 2, 1, 1)}
     assert by_id["room_interface"]["planner_turns"]["room"] == 1
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {

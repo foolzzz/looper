@@ -578,9 +578,8 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
                 "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
-                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface",
-                "planner_plan_file", "operator_notes",
-                "operator_notes_stale"),
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult",
+                "planner_plan_file", "operator_notes", "operator_notes_stale"),
 }
 
 

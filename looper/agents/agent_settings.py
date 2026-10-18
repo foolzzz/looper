@@ -724,13 +724,16 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 class Launch:
     """What one agent run starts with besides its prompt: its settings (the Agent Profile with its effort, the
     environment and per-run cap), the installed items and, for a task agent, the project knowledge; and its
-    permissions: every tool, but a Planner's run is read-only (``read_only``). The profile's runtime lays them out
-    (``runtime``)."""
+    permissions: every tool, but a Planner's run or a consult is read-only (``read_only``). The profile's runtime
+    lays them out (``runtime``)."""
 
     settings: AgentSettings = BUILTIN_SETTINGS
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
     role: AgentType | None = None  # the role the run is for; None: one that follows its profile in everything
+    # A run that must not change anything (an agent room consult): its runtime's read-only mode in place of every
+    # permission (RFC decision 8's one exception), and no agent teams.
+    consult: bool = False
 
     @property
     def system_prompt_mode(self) -> SystemPromptMode:
@@ -742,14 +745,14 @@ class Launch:
         each of its decisions are read from the result of its own turn, so a turn that waits for a teammate ends
         without its decision, and the teammate's later turns are Claude's own, only logged (#26); the Planner runs
         work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass."""
-        return self.profile.agent_teams and self.role is not AgentType.PLANNER
+        return self.profile.agent_teams and self.role is not AgentType.PLANNER and not self.read_only
 
     @property
     def read_only(self) -> bool:
-        """Whether the run must not change files: a Planner's. It plans and decides, and gives every change to a
-        Worker; its runtime refuses the tools and commands that would change files where it can, and otherwise the
-        Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
-        return self.role is AgentType.PLANNER
+        """Whether the run must not change files: a consult or a Planner's. A Planner plans and decides, and gives
+        every change to a Worker; its runtime refuses the tools and commands that would change files where it can,
+        and otherwise the Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
+        return self.role is AgentType.PLANNER or self.consult
 
     @property
     def model(self) -> str:

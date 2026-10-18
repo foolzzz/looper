@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs thirty small tasks through a disposable `looper serve` (a new
+It runs thirty-one small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -40,6 +40,7 @@ directories), one at a time over the HTTP API:
 | `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
 | `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
 | `room_interface` | two parts built at the same time, each in a worktree of its own (`step_workspaces` `worktree` for this task), where the store's author picks the record's field names while writing it and the client must use them: the agents must coordinate in the task's agent room (`room_messages` at least 1), and `python cli.py widget 3` works against the store |
+| `room_consult` | two steps, the second after the first: the first makes up a 20-character code while it runs, keeps it out of every file and its report (only its SHA-256 goes to `code.sha256`) and tells it only when asked, the second writes it to `code.txt`; only the first step's session knows it (the plan cannot carry it, and no step can find it from its SHA-256 by trying them all, as it could a 6-digit number's), so the second must ask that seat in the room, and a consult of its ended run's session answers (`room_consults` at least 1) |
 | `room_quiet` | a one-file task with the agent room on, as every task now has it: no room message at all (`room_messages` 0), one step |
 | `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
 | `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work in its one review (the requirement leaves the regions to the step, so only the note can correct it) |
@@ -67,7 +68,8 @@ assumptions their summaries stated, `assumptions_stated`; the steps the closing 
 gate's conclusion, `conclusion_reads`), what the agents did in the task's agent room (`room_messages`, Looper's notices
 and escalations apart; of them `room_questions`, `room_unanswered` and `room_interface`; `room_escalations`;
 `room_reminders`, the reminders Claude Code runs got; `room_refused`, the posts the room refused; and
-`room_tool_calls`, the runs' calls of the room's tools, reads included), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+`room_tool_calls`, the runs' calls of the room's tools, reads included; `room_consults`, the consults of seats whose run
+had ended, of them answered `room_consults_answered`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
@@ -131,7 +133,9 @@ database: pass `--pg-url` (any database on the server except `loopx`) or set
 ### Fake mode: the flow, free
 
 A scripted stand-in replaces `claude` and plays each role from the task's
-script, so this checks the plumbing, not the model. It takes a few seconds:
+script, so this checks the plumbing, not the model. In `room_consult`, its
+second Worker writes the code its inbox delivered; a wrong or missing consult
+answer fails the task's file check. It takes a few seconds:
 
 ```bash
 uv run --extra test python -m evals.prompt_regression run --mode fake \
@@ -205,8 +209,8 @@ whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
 `roles_not_needed`, `roles_multi_platform`, `roles_template_fits`,
 `roles_template_unfit`, `gate_ambiguous`,
-`gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface` and
-`planner_plan_file`; a set is
+`gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface`,
+`room_consult` and `planner_plan_file`; a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,

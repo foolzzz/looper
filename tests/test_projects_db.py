@@ -309,7 +309,9 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
             **settings, "task_budget_usd": 2.0, "step_workspaces": None, "workspace_links": None,
             "max_step_retries": None, "agent_room": None, "room_post_per_minute": None,
             "room_broadcasts_per_run": None, "room_message_max_chars": None, "room_messages_per_task": None,
-            "room_ping_pong_rounds": None, "room_wait_max_seconds": None, "task_workspaces": None, "operator_notes": None}
+            "room_ping_pong_rounds": None, "room_wait_max_seconds": None, "room_consult_budget_usd": None,
+            "room_consult_timeout_seconds": None, "room_consults_per_task": None, "task_workspaces": None,
+            "operator_notes": None}
 
         assert await projects.update_project(calc["id"], execution={"task_budget_usd": None,
                                                                     "supervise_interval_seconds": 60}, pool=pool)
