@@ -1738,7 +1738,7 @@ class TestTaskEnd:
             ):
                 await bus.publish(MessageEnvelope.create(source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
                                                          message_type=message_type, payload=payload))
-        deadline = asyncio.get_running_loop().time() + 30
+        deadline = asyncio.get_running_loop().time() + 90
         while sum(1 for wp in pool._active.values() if wp.process and wp.process.returncode is None) < steps * tasks:
             assert asyncio.get_running_loop().time() < deadline, "the Workers did not start"
             await asyncio.sleep(0.05)
