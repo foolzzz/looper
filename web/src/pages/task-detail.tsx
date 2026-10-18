@@ -2109,7 +2109,7 @@ function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           />
         )}
         {task && tab === "pipeline" && <PipelineTab task={task} onOpenGate={openGate} />}
-        {task && tab === "room" && <TaskRoomTab key={task.task_id} task={task} />}
+        {task && tab === "room" && <TaskRoomTab key={`${task.task_id}:${runs}`} task={task} />}
         {task && tab === "agents" && (
           <TaskAgentsTab task={task} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
         )}

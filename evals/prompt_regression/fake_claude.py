@@ -241,10 +241,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     label = step.group(1) if step else ""
     calls = (script.get("room_calls") or {}).get(label) or []
     rpc = _mcp(args) if calls else None
+    inbox: list[dict[str, Any]] | None = None
     for name, arguments in calls:
         _emit({"type": "assistant", "session_id": "fake-worker", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": f"toolu_{name}", "name": f"mcp__looper__{name}", "input": arguments}]}})
-        rpc("tools/call", {"name": name, "arguments": arguments})
+        result = rpc("tools/call", {"name": name, "arguments": arguments})
+        if name == "looper_room_inbox":
+            answer = json.loads(result["result"]["content"][0]["text"])
+            inbox = (inbox or []) + (answer.get("result") or {}).get("messages", [])
     retried = re.search(r"being retried \(attempt (\d+)\)", system_prompt)
     attempt_no = int(retried.group(1)) if retried else 1
     attempts = script.get("attempts", {}).get(label) or [{"status": "completed", "files": {}}]
@@ -253,6 +257,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
         files = dict(wait.get("files") or {})
+    if inbox is not None and "cli.py" in files:
+        # The inventory client learns its fields only from the delivered interface; no interface means {}.
+        interface = next((m["body"] for m in reversed(inbox) if m.get("kind") == "interface"), "")
+        fields = re.findall(r'"([^"\n]+)"\s*:\s*(str|int)\b', interface)
+        record = ", ".join(f"{json.dumps(field)}: {'name' if kind == 'str' else 'int(count)'}"
+                           for field, kind in fields)
+        files["cli.py"] = re.sub(r"store\.add_item\(\{[^}]*\}\)", lambda _: f"store.add_item({{{record}}})",
+                                 files["cli.py"])
     time.sleep(float(attempt.get("seconds", 0)))
     work_dir = os.getcwd()
     _write(work_dir, files)

@@ -11,12 +11,13 @@ import dataclasses
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from evals.prompt_regression import __main__ as cli
-from evals.prompt_regression import compare, metrics, runner
+from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
@@ -207,6 +208,41 @@ def test_a_discipline_counts_once_it_has_a_role_of_its_own_that_names_its_conven
     assert metrics.discipline_roles([role("fe_ios_rd", "fetch, the DOM; Swift, Codable")], (web, ios)) == 0
     assert metrics.discipline_roles([role("fe_review", "fetch and the DOM", "review")], (web,)) == 0
     assert metrics.discipline_roles(strong, ()) == 0
+
+
+@pytest.mark.parametrize(("delivery", "fields"), [
+    ("empty", ("name", "count")),
+    ("answer_only", ("name", "count")),
+    ("interface", ("name", "count")),
+    ("interface", ("label", "quantity")),
+])
+def test_fake_room_consumer_needs_the_delivered_interface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delivery: str, fields: tuple[str, str],
+) -> None:
+    task = task_list.select(["room_interface"])[0]
+    script = task.fake
+    name, count = fields
+    store = script["attempts"]["s1"][0]["files"]["store.py"]
+    (tmp_path / "store.py").write_text(store.replace('"name"', repr(name)).replace('"count"', repr(count)))
+    messages = [] if delivery == "empty" else [{"kind": "answer", "body": "Yes: only the id."}]
+    if delivery == "interface":
+        messages.insert(0, {"kind": "interface", "body": f'add_item takes {{"{name}": str, "{count}": int}}'})
+
+    def rpc(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = {"messages": messages, "more": False, "unread": {}} if params["name"] == "looper_room_inbox" else {}
+        return {"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": json.dumps({"status": "ok", "result": result})}],
+            "isError": False}}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
+    monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    problem = task.check(tmp_path)
+    if delivery == "interface":
+        assert problem is None
+    else:
+        assert problem is not None and "do not work together" in problem
 
 
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
