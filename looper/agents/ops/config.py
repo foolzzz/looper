@@ -316,7 +316,9 @@ async def _costs(call: Call) -> dict[str, Any]:
         task = await _task(arguments["task_id"])
         cost = (await db_llm_records.task_costs([task["id"]]))[task["id"]]
         return {"task_id": task["id"], "name": task["name"], "status": task["status"], "cost": cost,
-                "note": "cost_usd is its Planner's, Workers' and Reviewers' runs, as the task page shows it"}
+                "note": "cost_usd is its Planner's, Workers' and Reviewers' runs, as the task page shows it; "
+                        "by_model splits those runs by model and adds up to it; manager_by_model is the Manager's turns "
+                        "about the task, which neither cost_usd nor the task's spend cap counts"}
     since, until = _range(arguments)
     project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
     project_id = project["id"] if project else None

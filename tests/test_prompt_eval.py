@@ -846,6 +846,137 @@ def test_a_reply_claiming_a_change_is_told_from_an_explanation(reply: str, claim
     assert dialogs.claims_change(reply) is claims
 
 
+@pytest.mark.parametrize(("reply", "model", "named"), [
+    ("claude-haiku-4-5-20251001: $0.02", "claude-haiku-4-5-20251001", True),
+    ("_HAIKU_RUNS: $0.02", "claude-haiku-4-5-20251001", True),
+    ("Claude Sonnet: $0.02", "claude-haiku-4-5-20251001", False),
+    ("DeepSeek: $0.02", "deepseek-flash", True),
+])
+def test_a_models_id_or_family_is_named_in_the_reply(reply: str, model: str, named: bool) -> None:
+    from evals.prompt_regression.dialogs import _model_named
+
+    assert _model_named(reply, model) is named
+
+
+@pytest.mark.parametrize(("reply", "cost", "told"), [
+    ("$0.04", 0.0409, True),
+    ("0.041", 0.0409, True),
+    ("$0.0409", 0.0409, True),
+    ("0.04 美元", 0.0409, True),
+    ("$999999", 0.0409, False),
+    ("$0.05", 0.0409, False),
+    ("0.1", 0.0409, False),
+    ("0.0", 0.0409, False),
+    ("$1,234.56", 1234.56, True),
+    ("$1,000.0409", 0.0409, False),
+    ("$0.04", 0.045, True),
+    ("$0.04", 0.045001, False),
+])
+def test_an_amount_is_told_at_the_written_precision(reply: str, cost: float, told: bool) -> None:
+    from evals.prompt_regression.dialogs import _amount_told
+
+    assert _amount_told(reply, cost) is told
+
+
+_HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1, "cost_usd": 0.0409}
+
+
+@pytest.mark.parametrize(("task_id", "status", "by_model", "write_status", "fake", "reply", "problem"), [
+    ("other", "ok", [_HAIKU_RUNS], None, False, "Haiku", "looper_costs did not read the task's cost"),
+    ("task-a", "error", [_HAIKU_RUNS], None, False, "Haiku", "looper_costs did not read the task's cost"),
+    ("task-a", "ok", [_HAIKU_RUNS], "ok", False, "Haiku", "something changed: looper_settings"),
+    ("task-a", "ok", [_HAIKU_RUNS], "needs_confirmation", False, "Haiku", "something changed: looper_settings"),
+    ("task-a", "ok", [{"model": None, "runs": 1, "running": 0, "cost_usd": 0.01}], None, False, "Haiku",
+     "the task's cost has no model to name"),
+    ("task-a", "ok", [_HAIKU_RUNS], None, False, "Sonnet", "the reply does not name claude-haiku-4-5"),
+    ("task-a", "ok", [_HAIKU_RUNS], None, False, "Haiku $999999",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0409)"),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": None}], None, False, "Haiku", None),
+    ("task-a", "ok", [_HAIKU_RUNS], None, True, "ok", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
+     None, False, "Haiku $0.04 and DeepSeek $0.02", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0, "cost_usd": 0.02}],
+     None, False, "Haiku $0.02 and DeepSeek $0.04",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0409)"),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": 0.018943},
+                      {"model": "deepseek-flash", "cost_usd": 0.123456}],
+     None, False, "| Haiku | $0.019 |\n| DeepSeek | $0.123 |", None),
+    ("task-a", "ok", [{**_HAIKU_RUNS, "cost_usd": 0.018943},
+                      {"model": "deepseek-flash", "cost_usd": 0.123456}],
+     None, False, "| Haiku | $0.123456 |\n| DeepSeek | $0.018943 |",
+     "the reply does not give the cost of claude-haiku-4-5 (0.0189)"),
+    # The seeded running run is present before the read too, even though it has no amount yet.
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
+     None, False, "Haiku $0.0409", "the reply does not name claude-opus-4-1"),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1, "cost_usd": None}],
+     None, False, "Haiku $0.0409; Opus is still running, cost unknown", None),
+])
+def test_a_tasks_cost_is_read_and_told_without_changes(
+    monkeypatch: pytest.MonkeyPatch, task_id: str, status: str, by_model: list[dict[str, Any]],
+    write_status: str | None, fake: bool, reply: str, problem: str | None,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    actions = [{"tool": "looper_costs", "status": status, "risk": "read", "arguments": {"task_id": task_id},
+                "result": None}]
+    if write_status:
+        actions.append({"tool": "looper_settings", "status": write_status, "risk": "write"})
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: actions)
+    monkeypatch.setattr(dialogs.Look, "detail", lambda self, task_id=None: {"cost": {"by_model": by_model}})
+    look = dialogs.Look(None, "task-a", reply, "", 0, frozenset(), fake)
+    assert dialogs._cost_by_model_told(look) == problem
+
+
+@pytest.mark.parametrize("mode", ["real", "fake"])
+def test_task_cost_dialog_seeds_without_starting_an_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    seeded: list[tuple[str, str]] = []
+
+    def seed(database_url: str, project_id: str) -> str:
+        seeded.append((database_url, project_id))
+        return "task-fixed"
+
+    class Api:
+        def get(self, path: str) -> dict[str, Any]:
+            assert path == "/api/tasks"
+            return {"tasks": [{"task_id": "task-fixed"}]}
+
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text("{}", encoding="utf-8")
+
+    def ask(api: Any, session: str, text: str, **_: Any) -> str:
+        assert "task-fixed" in text
+        if mode == "fake":
+            assert json.loads(scenarios.read_text())["manager"][text] == [
+                ["looper_costs", {"task_id": "task-fixed"}]]
+        return "Haiku $0.018943; DeepSeek $0.12; Opus is running, cost unknown"
+
+    def no_start(*_: Any, **__: Any) -> str:
+        pytest.fail("task_cost must not start a Planner or Worker")
+
+    monkeypatch.setattr(dialogs, "_make_cost_task", seed)
+    monkeypatch.setattr(dialogs, "_start_slow_task", no_start)
+    monkeypatch.setattr(dialogs, "_ask", ask)
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [
+        {"tool": "looper_costs", "status": "ok", "risk": "read", "arguments": {"task_id": "task-fixed"},
+         "error_code": None}])
+    monkeypatch.setattr(dialogs.Look, "detail", lambda *_: {"cost": {"by_model": [
+        {"model": "claude-haiku-4-5", "cost_usd": 0.018943},
+        {"model": "deepseek-flash", "cost_usd": 0.123456},
+        {"model": "claude-opus-4-1", "cost_usd": None},
+    ]}})
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
+    (dialog,) = dialogs.select(["task_cost"])
+    row = dialogs.run_dialog(Api(), dialog, database_url="disposable", project_id="project-a",
+                             scenarios=scenarios, mode=mode, timeout=1)
+    assert row["outcome"] == "pass", row
+    assert seeded == [("disposable", "project-a")]
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path: Path) -> None:
     from evals.prompt_regression import dialogs
