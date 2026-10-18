@@ -69,6 +69,7 @@ from .profile_registry import BUILTIN_PROFILE, AgentProfile
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
 from .runtimes import AuthKind, CostSource
+from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
     from .run_usage import Price
@@ -732,6 +733,10 @@ class Launch:
     role: AgentType | None = None  # the role the run is for; None: one that follows its profile in everything
 
     @property
+    def system_prompt_mode(self) -> SystemPromptMode:
+        return self.profile.system_prompt_mode
+
+    @property
     def agent_teams(self) -> bool:
         """Whether the run has Claude Code's agent teams: its profile's, never for a Planner. A Planner's plan and
         each of its decisions are read from the result of its own turn, so a turn that waits for a teammate ends
@@ -825,6 +830,7 @@ class Launch:
         (values hashed), the installed items and their hash, the cap, the layer each setting came from and, for a
         read-only run, how it is kept read-only (``ReadOnly``)."""
         record: dict[str, Any] = {
+            "system_prompt_mode": self.system_prompt_mode.value,
             "profile": {**self.profile.record(), "source": self.settings.profile_source.value},
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
             "settings_sources": self.settings.sources(),

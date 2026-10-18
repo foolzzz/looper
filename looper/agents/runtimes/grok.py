@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, request_tokens, run_usage
+from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter, RuntimeUnsupported,
     grok_login, instructions,
@@ -112,6 +113,7 @@ READ_ONLY_TOOLS = "read_file,grep,list_dir"
 
 
 class GrokRuntime(RuntimeAdapter):
+    can_replace_system_prompt = True
     type = "grok"
     label = "Grok"
     default_executable = "grok"
@@ -186,9 +188,14 @@ class GrokRuntime(RuntimeAdapter):
     def _command(self, executable: str, prompt_file: Path, launch: Launch, max_turns: int) -> list[str]:
         args = self.launch_args(launch)  # refuses a provider it cannot run with before anything is written
         local = _local_dir(prompt_file)
-        home = write_home(local, config_toml(launch, shell_home=_shell_home(local)), rules_md(prompt_file, launch),
-                          login=grok_login.login_file())
+        rules, agent = rules_md(prompt_file, launch), None
+        if launch.system_prompt_mode is SystemPromptMode.REPLACE:
+            agent = "---\nname: looper\ndescription: Looper agent\nprompt_mode: full\n---\n\n" + rules
+            rules = ""
+        home = write_home(local, config_toml(launch, shell_home=_shell_home(local)), rules,
+                          login=grok_login.login_file(), agent=agent)
         return ["env", f"GROK_HOME={home}", f"HOME={home}", executable, *args,
+                *(["--agent", str(home / "agent.md")] if agent is not None else []),
                 *(["--max-turns", str(max_turns)] if max_turns > 0 else [])]
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
@@ -488,13 +495,15 @@ def _link_shared(home: Path) -> None:
             (home / name).symlink_to(shared / name, target_is_directory=True)
 
 
-def write_home(local: Path, config: str, rules: str, *, login: Path) -> Path:
+def write_home(local: Path, config: str, rules: str, *, login: Path, agent: str | None = None) -> Path:
     """The home of the runs of this ``config.toml`` and rules file: ``<local>/grok/runs/<sha256>``, with generated
     files restored before reuse; Grok keeps its own state there too. Its ``auth.json`` is a link to ``login``
     (the operator's login file, ``grok_login.link_login``), and its ``SHARED_DIRS`` link to the shared copies
     (``_link_shared``). Writing a new
     one removes the idle ones (``_remove_idle_homes``)."""
     named = f"{HOME_LAYOUT_ID}\n{config}\0{rules}\0{login}"
+    if agent is not None:
+        named += f"\0{agent}"
     key = hashlib.sha256(named.encode("utf-8")).hexdigest()
     runs = _grok_dir(local) / "runs"
     target = runs / key
@@ -502,6 +511,8 @@ def write_home(local: Path, config: str, rules: str, *, login: Path) -> Path:
         grok_login.link_login(target, login)
         _write_private(target / "config.toml", config)
         _write_private(target / RULES_FILE, rules)
+        if agent is not None:
+            _write_private(target / "agent.md", agent)
         return target
     runs.mkdir(exist_ok=True)
     _remove_idle_homes(runs, time.time())
@@ -509,6 +520,8 @@ def write_home(local: Path, config: str, rules: str, *, login: Path) -> Path:
     try:
         _write_private(building / "config.toml", config)
         _write_private(building / RULES_FILE, rules)
+        if agent is not None:
+            _write_private(building / "agent.md", agent)
         grok_login.link_login(building, login)
         _link_shared(building)
         try:
@@ -533,11 +546,13 @@ def _sync_home(source: Path, home: Path) -> None:
     link = source / grok_login.LOGIN_FILE
     if link.is_symlink():
         grok_login.link_login(home, Path(os.readlink(link)))
-    for name in ("config.toml", RULES_FILE):
+    for name in ("config.toml", RULES_FILE, *(["agent.md"] if (source / "agent.md").is_file() else [])):
         text = (source / name).read_text(encoding="utf-8")
         target = home / name
         if not target.is_file() or target.read_text(encoding="utf-8") != text:
             _write_private(target, text)
+    if not (source / "agent.md").is_file():
+        (home / "agent.md").unlink(missing_ok=True)
 
 
 # --- Events ---
