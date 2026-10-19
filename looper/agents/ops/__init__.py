@@ -127,7 +127,7 @@ _TYPES: dict[str, tuple[type, ...]] = {"string": (str,), "boolean": (bool,), "ob
 
 def check_arguments(schema: Mapping[str, Any], arguments: Any) -> dict[str, Any]:
     """``arguments`` checked against ``schema``: an object with the properties it declares (``type`` string,
-    integer, boolean, object or array of strings, ``enum``, ``minLength``, ``minimum``/``maximum``,
+    integer, boolean, object or array of strings, a nullable type, ``enum``, ``minLength``, ``minimum``/``maximum``,
     ``maxLength``), its ``required`` ones present, no others. Raises ``OpError(INVALID)`` naming the first
     problem, or ``OpError(FORBIDDEN)`` for an argument named like a secret, which no tool takes."""
     from ...db.manager_actions import SECRET_KEY
@@ -154,6 +154,8 @@ def check_arguments(schema: Mapping[str, Any], arguments: Any) -> dict[str, Any]
 
 def _check_value(name: str, spec: Mapping[str, Any], value: Any) -> None:
     kind = spec.get("type")
+    if isinstance(kind, list):
+        kind = next((item for item in kind if item != "null"), None)
     if kind == "integer":
         if isinstance(value, bool) or not isinstance(value, int):
             raise OpError(ErrorCode.INVALID, f"{name} must be an integer")
