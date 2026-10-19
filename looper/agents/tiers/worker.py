@@ -284,9 +284,9 @@ def judge_result(
     if missing or still_present:
         problems = []
         if missing:
-            problems.append(f"changed files not found: {', '.join(missing)}")
+            problems.append(f"changed files not found: {', '.join(reported_files.prompt_name(p) for p in missing)}")
         if still_present:
-            problems.append(f"deleted files still present: {', '.join(still_present)}")
+            problems.append(f"deleted files still present: {', '.join(reported_files.prompt_name(p) for p in still_present)}")
         looked = f" ({files.looked})" if files.looked else ""
         return _work_failed("Worker report does not match the files: " + "; ".join(problems) + looked)
     return {
@@ -748,7 +748,7 @@ class WorkerPool:
             try:
                 Path(work_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                problem = f"Cannot create work directory {work_dir}: {exc}"
+                problem = f"Cannot create work directory {reported_files.prompt_name(work_dir)}: {exc}"
         if problem:
             logger.error("worker %s: %s", worker_id, problem)
             if is_verify:
@@ -1178,9 +1178,20 @@ class WorkerPool:
         parts = ["Review the step in the Task section of your instructions. The Worker's report, to check:"]
         if work_result.get("summary"):
             parts.append(f"Summary: {work_result['summary']}")
-        parts.append(f"Files changed: {json.dumps(work_result.get('changed_files', {}), ensure_ascii=True)}")
+        changed = work_result.get("changed_files", {})
+        if isinstance(changed, dict) and any(isinstance(path, str) and len(path) > reported_files.PATH_LIMIT
+                                            for path in changed):
+            # Keep colliding previews as separate entries, with the same flag as outside locations.
+            changed = [{"path": path[:200] + "…", "description": note, "path_too_long": True}
+                       if isinstance(path, str) and len(path) > reported_files.PATH_LIMIT
+                       else {"path": path, "description": note}
+                       for path, note in changed.items()]
+        parts.append(f"Files changed: {json.dumps(changed, ensure_ascii=True)}")
         if work_result.get("deleted_files"):
-            parts.append(f"Files deleted: {json.dumps(work_result['deleted_files'], ensure_ascii=True)}")
+            deleted = [{"path": path[:200] + "…", "path_too_long": True}
+                       if isinstance(path, str) and len(path) > reported_files.PATH_LIMIT else path
+                       for path in work_result["deleted_files"]]
+            parts.append(f"Files deleted: {json.dumps(deleted, ensure_ascii=True)}")
         elsewhere = reported_files.render(work_result.get("found_elsewhere"))
         if elsewhere:
             parts += ["", elsewhere]

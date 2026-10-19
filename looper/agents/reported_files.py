@@ -260,7 +260,7 @@ def _worktrees(work_dir: Path, toplevel: Path) -> tuple[list[_Worktree], str]:
         return [], "in no other worktree of its repository"
     shown = worktrees[:MAX_WORKTREES]
     total = f"the first {len(shown)} of {len(worktrees)}" if len(worktrees) > len(shown) else str(len(shown))
-    paths = ", ".join(str(w.path) for w in shown[:5]) + (f" (+{len(shown) - 5} more)" if len(shown) > 5 else "")
+    paths = ", ".join(prompt_name(w.path) for w in shown[:5]) + (f" (+{len(shown) - 5} more)" if len(shown) > 5 else "")
     return shown, f"in {total} other worktree{'s' if len(worktrees) > 1 else ''} of its repository: {paths}"
 
 

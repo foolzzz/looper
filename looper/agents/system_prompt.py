@@ -175,7 +175,7 @@ def plan_task_section(
         "## Task",
         f"Task id: {task_id}",
         f"Project: {project}",
-        f"Working directory: {work_dir}",
+        f"Working directory: {prompt_name(work_dir)}",
         "Requirement:",
         _requirement(requirement),
     ])
@@ -203,9 +203,9 @@ def work_task_section(
                   *_supplements(supplements), ""]
     lines += [f"Your step: {step}" if step else "Your step:", instruction.strip()]
     if work_dir:
-        lines.append(f"Working directory: {work_dir}")
+        lines.append(f"Working directory: {prompt_name(work_dir)}")
     if target_files:
-        lines.append(f"Target files: {', '.join(target_files)}")
+        lines.append(f"Target files: {', '.join(prompt_name(path) for path in target_files)}")
     lines += _items("Acceptance criteria:", acceptance_criteria)
     lines += _items("Validation commands, to run after making changes:", validation_commands, prefix="$ ")
     if feedback:
@@ -254,7 +254,7 @@ def review_task_section(
         lines += ["The whole task, for context:", _requirement(requirement), *_supplements(supplements), ""]
     lines += [f"The step under review: {step}" if step else "The step under review:", instruction.strip()]
     if work_dir:
-        lines.append(f"Working directory: {work_dir}")
+        lines.append(f"Working directory: {prompt_name(work_dir)}")
     lines += _items("Acceptance criteria to verify:", acceptance_criteria)
     if retry_notes:
         lines += ["", "The Planner retried this step with these notes to its Worker, oldest first. They are the "

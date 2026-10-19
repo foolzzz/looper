@@ -692,7 +692,7 @@ def _prepare_work_dir(work_dir: str) -> str | None:
     try:
         Path(work_dir).mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return f"cannot create work directory {work_dir}: {exc}"
+        return f"cannot create work directory {reported_files.prompt_name(work_dir)}: {exc}"
     return None
 
 
@@ -3195,7 +3195,8 @@ class PlannerAgent:
         if step.isolated and step.workspace is not None:
             # Outside the directories the read-only Planner reads; git still shows its committed changes.
             workspace = step.workspace
-            lines.append(f"- worktree: {workspace.path}, on branch {workspaces.short_branch(workspace.branch)} from "
+            lines.append(f"- worktree: {reported_files.prompt_name(workspace.path)}, on branch "
+                         f"{reported_files.prompt_name(workspaces.short_branch(workspace.branch))} from "
                          f"{workspace.base_commit[:12]}")
         if result.get("error") and result.get("error") != result.get("summary"):
             lines.append(f"- error: {_clip(result['error'], 500)}")

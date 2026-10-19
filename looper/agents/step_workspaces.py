@@ -43,6 +43,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .reported_files import prompt_name
+
 logger = logging.getLogger(__name__)
 
 GIT_MIN_VERSION = (2, 40)
@@ -231,7 +233,7 @@ async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool 
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
-        raise GitError(f"cannot run git in {cwd}: {exc}") from None
+        raise GitError(f"cannot run git in {prompt_name(cwd)}: {exc}") from None
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), GIT_TIMEOUT_SEC)
     except asyncio.TimeoutError:
@@ -377,7 +379,7 @@ async def inspect(work_dir: str) -> Repo | Unusable:
             return Unusable("the task directory's HEAD is detached", repository=True)
         head = await _git(toplevel, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False)
         if head.returncode != 0:
-            return Unusable(f"{short_branch(branch.text)} has no commit yet", repository=True)
+            return Unusable(f"{prompt_name(short_branch(branch.text))} has no commit yet", repository=True)
         names = list(_IN_PROGRESS)
         paths = (await _git(toplevel, "rev-parse", *(arg for name in names for arg in ("--git-path", name)))).text
         for name, path in zip(names, paths.split("\n")):
@@ -567,7 +569,7 @@ class _Unmerged(Exception):
 
 
 def _files_detail(files: Sequence[str], limit: int = 20) -> str:
-    shown = ", ".join(files[:limit])
+    shown = ", ".join(prompt_name(path) for path in files[:limit])
     return shown + (f" (+{len(files) - limit} more)" if len(files) > limit else "")
 
 
@@ -635,17 +637,17 @@ async def _close_step_branch(workspace: StepWorkspace, step_key: str,
         head = await _git(path, "symbolic-ref", "-q", "HEAD", check=False)
         if head.text != f"refs/heads/{workspace.branch}":
             raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
-                            f"the step's checkout is no longer on its branch {workspace.branch}")
+                            f"the step's checkout is no longer on its branch {prompt_name(workspace.branch)}")
         leftovers = await commit_pending(path, [_in_worktree(workspace, p) for p in links],
                                          f"looper: commit what step {step_key} left uncommitted"
                                          + _trailers(workspace.task_id, step_key))
     tip = await _git(workspace.repo_dir, "rev-parse", "--verify", "-q", f"refs/heads/{workspace.branch}^{{commit}}",
                      check=False)
     if tip.returncode != 0:
-        raise _Unmerged(MergeError.STEP_BRANCH_CHANGED, f"the step's branch {workspace.branch} is gone")
+        raise _Unmerged(MergeError.STEP_BRANCH_CHANGED, f"the step's branch {prompt_name(workspace.branch)} is gone")
     if not await _is_ancestor(workspace.repo_dir, workspace.base_commit, tip.text):
         raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
-                        f"the step's branch {workspace.branch} no longer contains its start "
+                        f"the step's branch {prompt_name(workspace.branch)} no longer contains its start "
                         f"{workspace.base_commit[:12]}: its commits were rewritten")
     return replace(workspace, result_commit=tip.text), leftovers
 
@@ -658,11 +660,12 @@ async def _merge_into_target(workspace: StepWorkspace, step_key: str, title: str
         head_ref = await _git(repo, "symbolic-ref", "-q", "HEAD", check=False)
         if head_ref.text != workspace.target_branch:
             now_on = short_branch(head_ref.text) if head_ref.returncode == 0 else "a detached HEAD"
-            raise _Unmerged(MergeError.BRANCH_CHANGED, f"the task directory is on {now_on}, not {target}")
+            raise _Unmerged(MergeError.BRANCH_CHANGED,
+                            f"the task directory is on {prompt_name(now_on)}, not {prompt_name(target)}")
         head = await _rev(repo, "HEAD")
         if not await _is_ancestor(repo, workspace.base_commit, head):
             raise _Unmerged(MergeError.BRANCH_CHANGED,
-                            f"{target} no longer contains the step's start {workspace.base_commit[:12]}")
+                            f"{prompt_name(target)} no longer contains the step's start {workspace.base_commit[:12]}")
         if await _is_ancestor(repo, result, head):
             return workspace, ()  # nothing to merge: the step changed nothing, or its merge already landed
         computed = await _git(repo, "merge-tree", "--write-tree", "--name-only", "-z", head, result, check=False)
@@ -674,7 +677,8 @@ async def _merge_into_target(workspace: StepWorkspace, step_key: str, title: str
                     break
                 names.append(name)
             conflicts = list(dict.fromkeys(names))
-            raise _Unmerged(MergeError.CONFLICT, f"conflicts with {target} in {_files_detail(conflicts)}", conflicts)
+            raise _Unmerged(MergeError.CONFLICT,
+                            f"conflicts with {prompt_name(target)} in {_files_detail(conflicts)}", conflicts)
         if computed.returncode != 0:
             raise GitError(f"git merge-tree failed: {computed.stderr.decode('utf-8', 'replace').strip()[:500]}")
         merge_commit = (await _git(
@@ -696,7 +700,7 @@ async def _merge_into_target(workspace: StepWorkspace, step_key: str, title: str
         if await _rev(repo, "HEAD") == head:
             raise GitError(f"git merge --ff-only failed: {moved.stderr.decode('utf-8', 'replace').strip()[:500]}")
         # The branch moved meanwhile: compute the merge again on its new tip.
-    raise _Unmerged(MergeError.BRANCH_CHANGED, f"{target} kept moving while the step was merged")
+    raise _Unmerged(MergeError.BRANCH_CHANGED, f"{prompt_name(target)} kept moving while the step was merged")
 
 
 # --- Removing workspaces ---

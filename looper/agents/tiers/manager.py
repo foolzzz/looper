@@ -58,6 +58,7 @@ from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
 from ..run_usage import Usage
+from ..reported_files import prompt_name
 from .. import session_switch
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
@@ -1110,7 +1111,7 @@ class ManagerAgent:
             return ["Projects: (could not be read)", ""]
         lines = ["Projects:"]
         for project in projects:
-            directory = f"default directory {project['work_dir']}" if project["work_dir"] else "no default directory"
+            directory = f"default directory {prompt_name(project['work_dir'])}" if project["work_dir"] else "no default directory"
             line = f"  - {project['name']} ({directory})"
             description = " ".join(project["description"].split())
             if description:
