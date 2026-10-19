@@ -668,6 +668,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-18 | Agent Profile 系统提示词模式（已实现，验证待完成）：新增 `system_prompt_mode`（默认 `append`、显式 `replace`），Claude Code、Codex、Grok、OMP 分别使用原生替换机制；适配器声明替换能力，保存和导入严格拒绝不支持的运行时，不静默回退。字段贯通配置迁移与导入导出、派生 Profile、管家工具及运行记录；界面提供选择、拒绝原因与运行徽标。定向测试 381 通过、5 处变异均被测出；Codex（经本机 CPA 的请求记录代理：替换时默认的 17k 字符 Codex 提示词消失，只剩 Looper 文本）、Grok（`--agent` 的 `prompt_mode: full`；`--system-prompt-override` 无头下不生效，不采用）、OMP、Claude Code 的追加与替换都经真实模型探过；替换模式的 haiku 评测排队中。 |
 | 2026-10-17 | Agent 办公台 R1b（looper #188，叠在 #187 上）：问题发给步骤已结束的席位时，Looper 以只读方式续接它最后一次运行会话的分叉来回答（Claude Code `--resume --fork-session`，Codex、OMP 复制办公台里保留的会话），回答以这个席位的名义发出；只读由运行时强制（Claude Code 的 default 权限模式去掉写文件的工具，实测 `-p` 下写一律被拒；Codex 只读沙箱；Grok 在咨询自己的家目录里放一份会话副本、`--fork-session` 加 `--tools read_file,grep,list_dir`；OMP 只给读、搜索工具且在可丢弃的检出里跑）；一个席位同时一个咨询，占任务里同类的并发名额，预算（每次默认 $0.50）、时长和每任务次数是项目设置；咨询不了时带类型化原因转给规划者。验证：PG 上经真实 WorkerPool 和替身 Claude 的咨询及各种转交，7 处故意改坏全被抓到，fake 模式 `room_consult` 通过；Grok 的真实咨询探测通过（知道暗号、原会话文件不变、写被拒、探测目录下没有凭据），Codex、OMP 的真实路径没验证。 |
 | 2026-10-19 | Codex、OMP 的规划者只读和咨询的已知限制收尾（looper #203）：在主干上先用桩 MCP 服务器和本机 CPA（gpt-5.6-luna）探测，发现咨询（#188）合入后 Codex 规划者的命令行已带只读沙箱却没有 MCP 审批配置，MCP 调用全被拒（「requires approval, but approval policy is never」），OMP 规划者已只剩 `--tools read,glob,grep`；补上 `default_tools_approval_mode="approve"`，探测里新会话和 resume 两轮都调到了 MCP 工具、读文件照常、写文件失败；OMP 的 `--tools` 限制下 MCP 工具仍可调，写没有工具可用。`ReadOnly` 新增 `sandbox`，Codex 记 `sandbox`、OMP 记 `tools`。咨询的限制：来源会话的钉住在复制会话后再核对一次席位有没有更新的运行（Codex、OMP 复制的是完成的会话；Claude Code 在 CLI 启动时才读会话，窗口缩小但仍在，分叉只会带上更多内容，不会写入）；`git worktree add` 超时留下的半个检出连同 git 的登记一起删除并 prune；咨询进程很快退出时，同一进程组的子进程由对进程组的信号结束，进程树每 0.2 秒读一次并在记录前再读一次；自己 `setsid` 的子进程在两次读取之间产生且父进程随即退出的窗口仍在，作为已知限制写入办公台 RFC；Claude Code 咨询的 init 工具只有 Glob、Grep、Read（haiku 真实运行），OMP 咨询只有 read、glob、grep，原会话不变、工作树不变；Codex 续接真实会话时，咨询的 AGENTS.md 指令压过会话里原先的指令（append 和 replace 两种模式各一次，答出咨询的暗号）。 |
+| 2026-10-18 | HTTP API 认调用者（looper #207，设计见 [RFC](../architecture/rfcs/operator-api-auth-v0.zh-CN.md)）：`looper serve` 第一次启动时在 runtime root 生成 `operator-token`（0600），`/api/` 下除 agent 工具以外的路由（含 `/api/status`、未知路径）都要它，用 Bearer 或按端口命名的 HttpOnly、SameSite=Strict cookie，没有就 401（在读请求体之前）；本机浏览器的顶层页面加载（loopback 对端和 Host、无转发头）自动设 cookie，别的浏览器用一次 `/?token=` 登录链接；`looper service` 和评测 runner 读令牌文件，agent 拿不到它，MCP 令牌开不了用户接口。验证：每类路由 × 各种凭据、继承服务环境的子进程 401、cookie 属性和不设的情形、令牌文件各测，7 处故意改坏都能测出；一次性 `looper serve` 上无头 Chrome 不登录就看到数据、CLI 状态带令牌读到，替身模式评测 33/33；同一系统用户下的 agent 仍能有意读令牌文件或直连数据库（见第 5.2 节）。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -727,7 +728,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **规划者工具的后续（looper #155）**：项目的可选 Agent Profile 列表还不在配置导出、导入里（`config_transfer`）；规划者为某一步选的 Profile 只在任务页的 Findings 里列出，Agents 一栏只显示剩下步骤的选择，Pipeline 的步骤上没有标出；任务异常退出（服务被 SIGKILL）时，带已失效令牌的 MCP 配置文件会留在 runtime root 的 `.local/mcp/` 下，下次启动不清扫。
 - **渠道对话的存储挪到渠道层（looper #106 的后续）**：Telegram、飞书的回复现在是 Manager 发出时就记下的，渠道之后发送失败也算已回复；应改成渠道发送成功后再记。另外两点：用户发的 `/new` 本身不存（它的回复会存），以及缺少「存储失败不影响回复」的测试。
 - **评审者和规划者不知道文件在别处（looper #151 的后续）**：结果检查接受在其他 worktree 或运行期间的提交里找到的文件（`found_elsewhere`），但 Reviewer 仍在工作目录里评审，规划者看到的步骤报告也不说文件在哪，改动只在别的分支上的步骤能通过检查、却可能在评审时失败。告诉它们属于模型可见的改动，要跑真实模式评测。
-- **dashboard 的 API 不验证调用者（looper #181 评审发现）**：`looper serve` 的 HTTP API 不认身份，本机上任何进程都能调用；有 shell 的规划者（或 Worker）可以 `PUT /api/tasks/:id/roles/:key`，记成用户写的版本，同样也能改用户为任务选的 Profile、在关卡里替用户发言。所有「用户的选择优先」的规则都依赖这一点。可选做法：dashboard 用本机令牌（服务启动时生成，页面从同源读取），agent 的运行环境里没有它；或把写接口限定为来自浏览器的同源请求。
+- ~~**dashboard 的 API 不验证调用者**~~（looper #207）：用户接口改为只认 runtime root 里的用户令牌，本机浏览器加载页面即登录。剩下的是同一系统用户下有意为之的绕过：有 shell 的 agent 能读 `operator-token`、伪造浏览器请求头拿到 cookie。
+- **agent 能直连数据库（looper #207 发现）**：agent 继承服务的环境变量，其中有 `LOOPER_DATABASE_URL`（没设时默认的本机 DSN 不带密码），有 shell 的 agent 能绕过 API 直接写数据库。可选做法：agent 的环境里去掉它；更彻底的是用另一个系统用户或沙箱跑 agent。
 - **`test_fake_mode_runs_every_task_and_sees_misbehaviour` 在高负载下偶尔失败（2026-10-17 多条线并行时观察到）**：`tests/test_prompt_eval.py` 里替身模式的 `bad` 任务预期 `planner_changed_files == ["planner-notes.txt"]`，机器很忙时偶尔得到 `[]`。这个指标按文件的 mtime 和运行记录的时间窗把改动归给 Planner（`metrics.planner_changed_files`，计入本机与数据库的时钟差和 0.1 秒容差）；推测是负载高时写文件的时刻落到了记录的时间窗之外，未验证，也还没改。全量测试里遇到时先单独重跑这一项，通过即不是本次改动造成的。
 - **Manager 在回复里复述用户贴的 API key（looper #176 的基线里观察到）**：管家对话评测 `provider_key` 在 haiku 下 3 次有 2 次失败，Manager 把用户贴进来的 key 原样写进了回复；工具调用本身是干净的（登记的 provider 和 Manager 的记录里都没有这个 key），opus·xhigh 下 3 次都通过。维护者决定暂不在代码里给回复打码，先作为观察到的行为记在这里；之后可以改 Manager 的 prompt，或在回复发出前打码。
 
@@ -735,6 +737,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **任务页「What each step ran on」改读精简的运行记录**：这张表现在用 `GET /api/llm-records?task_id=&role=worker|reviewer&limit=500` 读两个角色的完整记录（`list_records` 是 `SELECT *`，替身 Claude 下每条 12–13 KB，真实 prompt 更大），每当步骤变化就重读一次，长任务一次刷新可能有几 MB。改成只取表格要用的字段：`id`、`agent_id`、`status`、`created_at`、`metadata.step_id`、Profile 及其来源（含 effort）、`prompt_layers.task_role`（新参数或新接口均可，带测试），表格和测试相应改用它。
 - **定时任务的每日花费额度按各自时区清零**：每日额度（`daily_budget_usd`）现在在服务器时区的午夜清零，不看定时任务自己的 `timezone`；要按各定时任务的时区清零另做（2026-10-17 维护者决定暂不改）。
+- **dashboard 收到 401 时的说明页**（looper #207）：现在各处显示「status 401」，应提示重新加载或用登录链接。
 
 ### 5.4 验证缺口
 
