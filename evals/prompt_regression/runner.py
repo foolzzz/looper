@@ -53,7 +53,7 @@ from looper.agents.project_execution import ProjectExecution
 from . import metrics
 from . import tasks as task_list
 from .fake_claude import REAL_CLAUDE_ENV
-from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EvalTask
+from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EVAL_VAULT, EvalTask
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FAKE_CLAUDE = Path(__file__).resolve().with_name("fake_claude.py")
@@ -399,6 +399,7 @@ def run_task(
     chosen_profile_id: str | None = None,
     user_gates: str | None = None,
     notes_root: Path | None = None,
+    vault_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
@@ -428,6 +429,10 @@ def run_task(
             raise EvalError(f"{task.id} needs the operator's notes, and the server has no notes root")
         write_notes(notes_root, work_dir, task.operator_notes)
         project["operator_notes"] = "on"
+    if task.vault:
+        if vault_dir is None:
+            raise EvalError(f"{task.id} needs the knowledge vault, and the server has no eval vault")
+        project["vault"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
     created = api.post("/api/tasks/create", {"requirement": task.requirement, "project": project})
@@ -504,6 +509,10 @@ def run_task(
             gate_asks_beyond_script=sum(1 for done in answered.values() if done > len(_script(task))),
             clock_offset=clock_offset,
             now=time.time() + clock_offset,
+            task_id=task_id,
+            vault_dir=vault_dir,
+            vault_log=_git_in(vault_dir, "log", "--format=%H%x00%s", "--name-only") if vault_dir else "",
+            vault_check=task.vault_check,
         )
         if step_workspaces:
             result["looper_commits"] = looper_commits(work_dir, task_id)
@@ -592,7 +601,8 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
                 "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
                 "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult",
-                "planner_plan_file", "operator_notes", "operator_notes_stale"),
+                "planner_plan_file", "operator_notes", "operator_notes_stale",
+                "vault_closeout_keeps", "vault_closeout_nothing"),
 }
 
 
@@ -839,10 +849,20 @@ def run(
         if home is not None:
             home.mkdir()
         notes_root = root / "operator-notes"
+        vault_dir = root / "vault" if any(task.vault for task in tasks) else None
+        if vault_dir is not None:
+            for name, content in EVAL_VAULT.items():
+                path = vault_dir / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            init_repository(vault_dir)
         with fresh_database(admin_url) as (database_url, clock_offset), running_server(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home, notes_root=notes_root,
         ) as api:
+            if vault_dir is not None:
+                api.put("/api/knowledge-vault", {"path": str(vault_dir), "writable": ["codex-mem"],
+                                                  "rules_file": "codex-mem/AGENTS.md"})
             if register is not None:
                 agent = register_agent(api, register)["name"]
             chosen = select_agent(api, agent=agent, model=model, provider=provider, run_budget_usd=max_budget_usd)
@@ -860,7 +880,7 @@ def run(
                                                      cap_left=cap_left, clock_offset=clock_offset,
                                                      step_workspaces=step_workspaces,
                                                      chosen_profile_id=chosen_profile_id, user_gates=user_gates,
-                                                     notes_root=notes_root),
+                                                     notes_root=notes_root, vault_dir=vault_dir),
                 total_cap_usd=total_cap_usd,
                 reps=reps,
                 results=results,

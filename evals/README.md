@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs thirty-five small tasks through a disposable `looper serve` (a new
+It runs thirty-seven small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -39,6 +39,8 @@ directories), one at a time over the HTTP API:
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
 | `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
 | `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
+| `vault_closeout_keeps` | the project has the knowledge vault on; adding multiplication uncovers a test runner that needs `CALC_LOCALE=C`: the Planner's closeout must keep that fact in a committed note under `codex-mem/` |
+| `vault_closeout_nothing` | the same switch on a one-file greeting task: the Planner closes out without writing a note |
 | `room_interface` | two parts built at the same time, each in a worktree of its own (`step_workspaces` `worktree` for this task), where the store's author picks the record's field names while writing it and the client must use them: the agents must coordinate in the task's agent room (`room_messages` at least 1), and `python cli.py widget 3` works against the store |
 | `room_consult` | two steps, the second after the first: the first makes up a 20-character code while it runs, keeps it out of every file and its report (only its SHA-256 goes to `code.sha256`) and tells it only when asked, the second writes it to `code.txt`; only the first step's session knows it (the plan cannot carry it, and no step can find it from its SHA-256 by trying them all, as it could a 6-digit number's), so the second must ask that seat in the room, and a consult of its ended run's session answers (`room_consults` at least 1) |
 | `room_quiet` | a one-file task with the agent room on, as every task now has it: no room message at all (`room_messages` 0), one step |
@@ -77,8 +79,11 @@ and cached, and output; what a runtime without prices still reports), contract v
 rejected; the JSON keeps why the parser rejected each Planner reply,
 `planner_violation_reasons`), whether the Planner modified files itself (its file-editing tool
 calls, and files changed while only a Planner turn ran), the tool calls its runtime refused the read-only Planner
-(`planner_denials`, from its runs' `permission_denials`), the runs that ended in an error (`run_errors`,
-by their records' status) and the models each role's runs reported (`models`).
+(`planner_denials`, from its runs' `permission_denials`), the task's vault commits (`vault_writes`, identified by
+the exact `looper: <task_id> ` subject prefix), their unique committed paths outside `codex-mem/`
+(`vault_outside`, which must be zero), and whether its activity has a `Vault closeout:` row (`vault_closeout`,
+0 or 1). A task's `vault_check` also checks the content of its committed notes. It reads the runs that ended
+in an error (`run_errors`, by their records' status) and the models each role's runs reported (`models`).
 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by
 git) and prints a Markdown table comparing it with a base: by default the
@@ -219,7 +224,8 @@ whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `roles_not_needed`, `roles_multi_platform`, `roles_template_fits`,
 `roles_template_unfit`, `gate_ambiguous`,
 `gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface`,
-`room_consult` and `planner_plan_file`; a set is
+`room_consult`, `planner_plan_file`, `operator_notes`, `operator_notes_stale`,
+`vault_closeout_keeps` and `vault_closeout_nothing` (22 tasks); a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
@@ -276,11 +282,11 @@ ones, with `--reps 2` and haiku (`--tasks a,b` or a task set, `--dialogs a,b`):
 Do not rerun after a change the model cannot see.
 
 Once before a release, on the release candidate (`main` after every merge):
-haiku on all 33 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
---case-budget-usd 2.0 --total-cap-usd 20` (about $12.32); opus,
+haiku on all 37 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
+--case-budget-usd 2.0 --total-cap-usd 20` (the earlier baseline cost about $12.32); opus,
 `run --mode real --model opus --reps 3 --tasks planner --jobs 4
---max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (20 tasks,
-about $27.73); and all 22 dialogs on haiku and on the opus xhigh Manager,
+--max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (22 tasks;
+the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the opus xhigh Manager,
 `dialogs --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
 --case-budget-usd 1.0 --total-cap-usd 8` (about $4.36) and
 `dialogs --mode real --reps 3 --jobs 4 --manager-model opus
@@ -292,11 +298,25 @@ about $27.73); and all 22 dialogs on haiku and on the opus xhigh Manager,
 
 `--jobs N` (default 1, one case after another) runs N cases (task or dialog,
 times reps) at once; the tokens and cost are the same, only the wall time
-shrinks (the committed haiku run of all 33 tasks with `--reps 3 --jobs 4`
+shrinks (the committed haiku baseline with `--reps 3 --jobs 4`
 took about 29 minutes). Use `--jobs 4`. `run` puts its cases on one server,
 each in a project, a working directory and a task of its own; `dialogs` gives each case
 its own database, server, port and directories. The rows keep the task/rep
-order whatever finishes first. `--total-cap-usd` still holds with cases in
+order whatever finishes first.
+
+When a selected task has `vault=True`, the server run also gets one shared,
+throwaway git vault beside its runtime and work directories, seeded from `EVAL_VAULT` with local git author
+settings and an initial commit. Only those tasks opt their projects in; the server's `knowledge_vault` points
+to that directory, with `codex-mem` writable and `codex-mem/AGENTS.md` as its rules. Concurrent tasks share
+this vault, and each row counts only its own commits. The vault is removed with the other temporary directories
+unless `--keep-work-dirs` is set.
+
+Repetitions share this vault too. Its rules keep one note per project, named after the project, and each
+task run has a project of its own (`eval-<task>-<suffix>`), so each repetition of `vault_closeout_keeps` keeps
+the fact in a note of its own. The fake script writes the fixed `codex-mem/projects/calc.md` with a null sha,
+which a later repetition finds taken: run the vault tasks with `--reps 1` in fake mode.
+
+`--total-cap-usd` still holds with cases in
 flight: while others run, a case starts only when what is spent plus the
 `--case-budget-usd` (the most one case may spend; required with `--jobs` above
 1 in real mode, since `--max-budget-usd` caps each Claude call and a case makes
