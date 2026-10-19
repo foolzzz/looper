@@ -1,0 +1,102 @@
+{
+  "records": [
+    {
+      "agent_id": "usage-agent01",
+      "cache_creation_tokens": null,
+      "cache_read_tokens": null,
+      "compactions": null,
+      "context_tokens": 800,
+      "cost_source": null,
+      "cost_usd": null,
+      "created_at": "2020-04-04T00:00:00+00:00",
+      "duration_ms": null,
+      "error": null,
+      "finished_at": null,
+      "id": 91003,
+      "input_summary": null,
+      "input_text": null,
+      "input_tokens": null,
+      "last_output_at": "2020-04-04T00:00:01+00:00",
+      "metadata": null,
+      "model": null,
+      "output_summary": null,
+      "output_text": null,
+      "output_tokens": null,
+      "session_id": "sess-usage-a",
+      "status": "running",
+      "task_id": null
+    },
+    {
+      "agent_id": "usage-agent01",
+      "cache_creation_tokens": null,
+      "cache_read_tokens": null,
+      "compactions": null,
+      "context_tokens": null,
+      "cost_source": null,
+      "cost_usd": null,
+      "created_at": "2020-04-03T00:00:00+00:00",
+      "duration_ms": null,
+      "error": null,
+      "finished_at": "2020-04-03T00:00:01+00:00",
+      "id": 91002,
+      "input_summary": null,
+      "input_text": null,
+      "input_tokens": null,
+      "last_output_at": null,
+      "metadata": null,
+      "model": null,
+      "output_summary": null,
+      "output_text": null,
+      "output_tokens": null,
+      "session_id": "sess-usage-b",
+      "status": "completed",
+      "task_id": null
+    },
+    {
+      "agent_id": "usage-agent01",
+      "cache_creation_tokens": null,
+      "cache_read_tokens": null,
+      "compactions": [
+        {
+          "duration_ms": 12,
+          "post_tokens": 4000,
+          "pre_tokens": 9000,
+          "trigger": "auto"
+        }
+      ],
+      "context_tokens": 1200,
+      "cost_source": "runtime",
+      "cost_usd": 0.1,
+      "created_at": "2020-04-02T00:00:00+00:00",
+      "duration_ms": null,
+      "error": null,
+      "finished_at": "2020-04-02T00:00:03+00:00",
+      "id": 91001,
+      "input_summary": null,
+      "input_text": null,
+      "input_tokens": null,
+      "last_output_at": "2020-04-02T00:00:02+00:00",
+      "metadata": {
+        "prompt_layers": {
+          "task_role": {
+            "id": "backend",
+            "kind": "work",
+            "version": 2
+          }
+        }
+      },
+      "model": "usage-model",
+      "output_summary": null,
+      "output_text": null,
+      "output_tokens": null,
+      "session_id": "sess-usage-a",
+      "status": "completed",
+      "task_id": null,
+      "task_role": {
+        "id": "backend",
+        "kind": "work",
+        "version": 2
+      }
+    }
+  ]
+}

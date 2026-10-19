@@ -1,5 +1,6 @@
 -- Parity seed for GET /api/status, GET /api/projects, GET /api/overview,
--- GET /api/tasks, and GET /api/tasks/<id>.
+-- GET /api/tasks, GET /api/tasks/<id>, GET /api/agents/<id>/usage, and
+-- GET /api/llm-records (the list, one record, and its events).
 -- Applied after looper/db/schema.sql.
 --
 -- The harness clock is local noon on 2026-06-15 (make_goldens.py and the Go
@@ -183,7 +184,10 @@ INSERT INTO llm_records (agent_id, task_id, status, cost_usd, metadata, created_
 ('worker-alphaneg', 'task-runalpha1', 'completed', -4.0, NULL, '2020-03-02T00:00:00Z'),
 ('worker-provold1', 'task-runalpha1', 'completed', -1.0, '{"profile":{"provider":{"auth":"api_key"}}}'::jsonb, '2020-03-03T00:00:00Z'),
 ('worker-alphatdy', 'task-runalpha1', 'completed', 1.25, NULL, '2026-06-15T12:00:00Z'),
-('worker-provtdy1', 'task-runalpha1', 'completed', 2.0, '{"profile":{"provider":{"auth":"api_key"}}}'::jsonb, '2026-06-15T12:00:00Z');
+-- One second after worker-alphatdy. The list is ORDER BY created_at DESC
+-- with no id tie-break, so a shared timestamp would make that page unstable.
+-- Both instants are still inside 2026-06-15 for UTC-12 through UTC+14.
+('worker-provtdy1', 'task-runalpha1', 'completed', 2.0, '{"profile":{"provider":{"auth":"api_key"}}}'::jsonb, '2026-06-15T12:00:01Z');
 
 -- Task cost for task-runalpha1, all in 2020, so spend_today stays the two
 -- positive rows above. The Manager is grouped into manager_by_model and left
@@ -330,16 +334,27 @@ INSERT INTO manager_actions (created_at, channel, tool, arguments, risk, status,
 ('2020-04-02T00:00:00Z', 'web', 'task_note', '{"text":"look at the gate"}'::jsonb, 'read', 'ok', 'task-rich00001');
 
 -- Discussing, no failed turn, and one user message still past delivered_through,
--- so the gate waits on the Planner. No origin chat and no dashboard target,
--- so channel_posts stays null. Agenda has no numbers, so the body is stable.
+-- so the gate waits on the Planner. The task keeps a Lark group target, so
+-- channel_posts is that chat. Two planner replies were sent and one looper
+-- message failed. The user's message stays post_state none, so waiting_on
+-- stays planner. Agenda has no numbers, so the body is stable.
+UPDATE tasks SET
+    origin_channel_id = 'channel-lark',
+    chat_id = 'oc_richgate01',
+    chat_kind = 'chat',
+    chat_mention = 'ou_richuser1'
+WHERE id = 'task-rich00001';
 INSERT INTO task_user_gates (step_id, task_id, topic, agenda, findings, state, failures, opened_at, created_at) VALUES (
     'step-rich0003', 'task-rich00001', 'Ship the API?',
     '[{"id":"q1","question":"Ship it?","options":["yes","no"],"status":"open"}]'::jsonb,
     'waiting on the API shape', 'discussing', 0, '2020-05-02T00:00:00Z', '2020-05-02T00:00:00Z'
 );
 
-INSERT INTO task_user_gate_messages (step_id, task_id, role, kind, text, post_state, created_at) VALUES
-('step-rich0003', 'task-rich00001', 'user', 'message', 'Please ship the read API.', 'none', '2020-05-02T00:01:00Z');
+INSERT INTO task_user_gate_messages (step_id, task_id, role, kind, text, post_state, post_error, created_at) VALUES
+('step-rich0003', 'task-rich00001', 'user', 'message', 'Please ship the read API.', 'none', NULL, '2020-05-02T00:01:00Z'),
+('step-rich0003', 'task-rich00001', 'planner', 'reply', 'Shipping the read API.', 'sent', NULL, '2020-05-02T00:02:00Z'),
+('step-rich0003', 'task-rich00001', 'planner', 'reply', 'Second note.', 'sent', NULL, '2020-05-02T00:03:00Z'),
+('step-rich0003', 'task-rich00001', 'looper', 'opened', 'Gate opened.', 'failed', 'lark timeout', '2020-05-02T00:04:00Z');
 
 -- s1 sends two questions. s2 answers the first. s4 leaves the second open.
 -- The reviewer seat on s1 gets nothing, and the gate has no seat.
@@ -492,4 +507,57 @@ INSERT INTO llm_records (
     'manager', 'task-rich00001', 'completed', 0.5, 'opus', 'runtime',
     11, 22, 3, 4,
     NULL, '2020-04-01T00:00:05Z'
+),
+-- Finished, no price: by_model keeps cost_usd null and unpriced_runs counts it.
+-- tenth and fifth are separate groups. Each cost is 2^-7 (0.0078125): exact
+-- in float8, and 7812.5 millionths. round(sum(cost_usd::numeric), 6) is half
+-- away from zero, so each group is 0.007813 and the task total adds 0.015626.
+-- Rounding the two raw values once is 0.015625. Dropping the per-group round
+-- and keeping half-even millionths leaves 0.007812 per group. All three rows
+-- are in 2020, before today's spend.
+(
+    'worker-mystery1', 'task-rich00001', 'completed', NULL, 'mystery-model', NULL,
+    3, 1, 0, 0,
+    NULL, '2020-04-01T00:00:06Z'
+),
+(
+    'worker-tenth01', 'task-rich00001', 'completed', 0.0078125, 'tenth', 'runtime',
+    4, 1, 0, 0,
+    NULL, '2020-04-01T00:00:07Z'
+),
+(
+    'worker-fifth01', 'task-rich00001', 'completed', 0.0078125, 'fifth', 'runtime',
+    5, 1, 0, 0,
+    NULL, '2020-04-01T00:00:08Z'
 );
+
+-- Not a task role, so task_costs ignores it. 91001 is priced, 91002 ended
+-- with no price, 91003 is still running. Turns are oldest first. Events on
+-- 91001 are seq 1 then 2. 91009 is absent, for the missing-record cases.
+INSERT INTO llm_records (
+    id, agent_id, task_id, session_id, status, cost_usd, model, cost_source,
+    context_tokens, compactions, metadata, created_at, finished_at, last_output_at
+) VALUES
+(
+    91001, 'usage-agent01', NULL, 'sess-usage-a', 'completed', 0.1, 'usage-model', 'runtime',
+    1200,
+    '[{"trigger":"auto","pre_tokens":9000,"post_tokens":4000,"duration_ms":12}]'::jsonb,
+    '{"prompt_layers":{"task_role":{"id":"backend","kind":"work","version":2}}}'::jsonb,
+    '2020-04-02T00:00:00Z', '2020-04-02T00:00:03Z', '2020-04-02T00:00:02Z'
+),
+(
+    91002, 'usage-agent01', NULL, 'sess-usage-b', 'completed', NULL, NULL, NULL,
+    NULL, NULL, NULL,
+    '2020-04-03T00:00:00Z', '2020-04-03T00:00:01Z', NULL
+),
+(
+    91003, 'usage-agent01', NULL, 'sess-usage-a', 'running', NULL, NULL, NULL,
+    800, NULL, NULL,
+    '2020-04-04T00:00:00Z', NULL, '2020-04-04T00:00:01Z'
+);
+
+INSERT INTO llm_record_events (record_id, seq, event, created_at) VALUES
+(91001, 1, '{"type":"text","text":"hello"}'::jsonb, '2020-04-02T00:00:01Z'),
+(91001, 2, '{"type":"text","text":"world"}'::jsonb, '2020-04-02T00:00:02Z');
+
+SELECT setval('llm_records_id_seq', (SELECT MAX(id) FROM llm_records));

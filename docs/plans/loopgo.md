@@ -71,7 +71,8 @@ uses first, with the Python field set:
 - `GET /api/projects`
 - `GET /api/tasks` and `GET /api/tasks/:id`
 - `GET /api/overview`
-- cost fields on those payloads
+- cost fields on those payloads, summed at a millionth of a dollar
+- `GET /api/agents/<id>/usage` and `GET /api/llm-records` (the list, one record, and its events)
 
 Golden JSON compares the Go server with the Python server on one seeded
 disposable database (`127.0.0.1:54329`, name `loopgo_*`, dropped after the
@@ -82,10 +83,54 @@ cross-origin Origin, and serves `GET /api/status`, `GET /api/projects`, and
 `GET /api/overview`. G1b serves `GET /api/tasks` with Python's query
 parameters, defaults, 400 messages, and ordering. G1c serves
 `GET /api/tasks/:id` with the detail Python returns when no agent is
-running. Golden JSON for these routes is `go/testdata/parity/`. The cost
-routes (`/api/agents/<id>/usage`, `/api/llm-records`) return
-`501 {"error":"not implemented in the Go server yet"}` and do not read task
-data. Those endpoints stay for a later card.
+running. G1d serves `GET /api/agents/<id>/usage` and `GET /api/llm-records`
+(the list, one record, and its events) with Python's filters, clamps, and
+400 and 500 bodies. Task costs sum millionths of a dollar and convert once.
+Golden JSON for these routes is `go/testdata/parity/`. G1 is done.
+
+These are the read-only GET routes Python still serves and Go does not.
+Later cards pick them up. Two of them are SSE streams, not JSON documents.
+`POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
+is not in this list.
+
+- `GET /api/chat/targets`
+- `GET /api/chat/sessions`
+- `GET /api/chat/messages`
+- `GET /api/chat/events` (SSE)
+- `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
+- `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)`
+- `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity`
+- `GET /api/tasks/(task-[a-zA-Z0-9]+)/conversation`
+- `GET /api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/messages`
+- `GET /api/tasks/(task-[a-zA-Z0-9]+)/room`
+- `GET /api/workspaces/check`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/schedules`
+- `GET /api/schedules`
+- `GET /api/schedules/(sched-[a-zA-Z0-9]+)`
+- `GET /api/schedules/(sched-[a-zA-Z0-9]+)/runs`
+- `GET /api/schedules/(sched-[a-zA-Z0-9]+)/notifications`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/installs`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)`
+- `GET /api/roles`
+- `GET /api/roles/([a-zA-Z0-9_-]+)`
+- `GET /api/registry`
+- `GET /api/agent-settings`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/agent-settings`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/role-stats`
+- `GET /api/projects/(proj-[a-zA-Z0-9]+)/role-templates`
+- `GET /api/config/export`
+- `GET /api/catalog`
+- `GET /api/catalog/([a-z]+-[a-zA-Z0-9]+)`
+- `GET /api/channels/lark/status`
+- `GET /api/channels/lark/people`
+- `GET /api/gate-settings`
+- `GET /api/channel-configs`
+- `GET /api/channel-configs/([a-zA-Z0-9_-]+)`
+- `GET /api/agent/v1/tools` (Manager, Planner, or room token)
 
 ### G2 — write API, no agents
 
