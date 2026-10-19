@@ -131,6 +131,23 @@ var (
 		{"role-stats-missing", "/api/projects/proj-missing01/role-stats", http.StatusNotFound},
 		{"role-stats-bad-since", "/api/projects/proj-alpha0001/role-stats?since=nope", http.StatusBadRequest},
 		{"role-stats-bad-week", "/api/projects/proj-alpha0001/role-stats?since=2010-W53-1", http.StatusBadRequest},
+		{"gate-messages", "/api/tasks/task-rich00001/gates/g1/messages", http.StatusOK},
+		{"gate-messages-missing-gate", "/api/tasks/task-rich00001/gates/nope/messages", http.StatusNotFound},
+		{"gate-messages-missing-task", "/api/tasks/task-missing01/gates/g1/messages", http.StatusNotFound},
+		{"gate-messages-min", "/api/tasks/task-min000001/gates/g1/messages", http.StatusNotFound},
+		{"room", "/api/tasks/task-rich00001/room", http.StatusOK},
+		{"room-min", "/api/tasks/task-min000001/room", http.StatusOK},
+		{"room-missing", "/api/tasks/task-missing01/room", http.StatusNotFound},
+		{"room-kind", "/api/tasks/task-rich00001/room?kind=question", http.StatusOK},
+		{"room-from", "/api/tasks/task-rich00001/room?from=backend", http.StatusOK},
+		{"room-unanswered", "/api/tasks/task-rich00001/room?unanswered=1", http.StatusOK},
+		{"room-limit", "/api/tasks/task-rich00001/room?limit=1", http.StatusOK},
+		{"room-after", "/api/tasks/task-rich00001/room?after=1", http.StatusOK},
+		{"room-bad-limit", "/api/tasks/task-rich00001/room?limit=nope", http.StatusBadRequest},
+		{"room-limit-superscript", "/api/tasks/task-rich00001/room?limit=%C2%B2", http.StatusInternalServerError},
+		{"room-limit-circled", "/api/tasks/task-rich00001/room?limit=%E2%91%A1", http.StatusInternalServerError},
+		{"room-after-superscript", "/api/tasks/task-rich00001/room?after=%C2%B2", http.StatusInternalServerError},
+		{"room-after-circled", "/api/tasks/task-rich00001/room?after=%E2%91%A1", http.StatusInternalServerError},
 	}
 )
 

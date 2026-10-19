@@ -205,6 +205,33 @@ _ROLE_STATS = (
     ("role-stats-bad-since", "proj-alpha0001", "nope", 400),
     ("role-stats-bad-week", "proj-alpha0001", "2010-W53-1", 400),
 )
+# A gate's discussion, oldest first. A missing task and a missing label share
+# the "has no gate" 404. task-min000001 has no gate g1.
+_GATE_MESSAGES = (
+    ("gate-messages", "task-rich00001", "g1", 200),
+    ("gate-messages-missing-gate", "task-rich00001", "nope", 404),
+    ("gate-messages-missing-task", "task-missing01", "g1", 404),
+    ("gate-messages-min", "task-min000001", "g1", 404),
+)
+# The task page's room. Filters narrow messages and leave the counts. limit=1
+# keeps the newest message and sets more. A non-digit limit is 400. A
+# superscript or circled digit passes str.isdigit, then int() raises
+# ValueError and the request loop answers 500.
+_ROOM = (
+    ("room", "task-rich00001", {}, 200),
+    ("room-min", "task-min000001", {}, 200),
+    ("room-missing", "task-missing01", {}, 404),
+    ("room-kind", "task-rich00001", {"kind": "question"}, 200),
+    ("room-from", "task-rich00001", {"from": "backend"}, 200),
+    ("room-unanswered", "task-rich00001", {"unanswered": "1"}, 200),
+    ("room-limit", "task-rich00001", {"limit": "1"}, 200),
+    ("room-after", "task-rich00001", {"after": "1"}, 200),
+    ("room-bad-limit", "task-rich00001", {"limit": "nope"}, 400),
+    ("room-limit-superscript", "task-rich00001", {"limit": "²"}, 500),
+    ("room-limit-circled", "task-rich00001", {"limit": "②"}, 500),
+    ("room-after-superscript", "task-rich00001", {"after": "²"}, 500),
+    ("room-after-circled", "task-rich00001", {"after": "②"}, 500),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -368,7 +395,7 @@ async def capture(dsn: str) -> dict[str, object]:
     from looper.agents.bus import MessageBus
     from looper.agents.channels.web import WebChannelAdapter
     from looper.agents import role_api
-    from looper.agents.gate_service import gate_settings
+    from looper.agents.gate_service import gate_settings, thread as gate_thread
     from looper.agents.http_server import HTTP_200, HTTP_500, AgentHTTPServer, _json_response
     from looper.agents.supervisor import AgentSupervisor
     from looper.agents.tiers.task import TaskRouter
@@ -474,6 +501,17 @@ async def capture(dsn: str) -> dict[str, object]:
                 await server._answer(cap, HTTP_200, call)
                 return response_json(bytes(cap.buf), expect)
 
+            async def answered_room(call, expect: int):
+                # int("²") raises ValueError inside _task_room. _answer does
+                # not catch it. The request loop writes 500.
+                cap = Capture()
+                try:
+                    await server._answer(cap, HTTP_200, call)
+                except ValueError:
+                    if not cap.buf:
+                        cap.write(_json_response(HTTP_500, {"error": "internal server error"}))
+                return response_json(bytes(cap.buf), expect)
+
             for name, expect in _ROLES:
                 out[name] = await take(server._handle_list_role_configs, expect)
             for name, role, expect in _ROLE:
@@ -494,6 +532,12 @@ async def capture(dsn: str) -> dict[str, object]:
                 out[name] = await answered(
                     lambda project_id=project_id, since=since: role_api.role_stats(project_id, since),
                     expect)
+            for name, task_id, label, expect in _GATE_MESSAGES:
+                out[name] = await answered(
+                    lambda task_id=task_id, label=label: gate_thread(task_id, label), expect)
+            for name, task_id, query, expect in _ROOM:
+                out[name] = await answered_room(
+                    lambda task_id=task_id, query=query: server._task_room(task_id, query), expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -529,6 +573,8 @@ def main() -> None:
         + [name for name, _ in _GATE]
         + [name for name, _, _ in _TEMPLATES]
         + [name for name, _, _, _ in _ROLE_STATS]
+        + [name for name, _, _, _ in _GATE_MESSAGES]
+        + [name for name, _, _, _ in _ROOM]
     )
     for name in names:
         payload = normalize(bodies[name])

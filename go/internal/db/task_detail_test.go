@@ -7,6 +7,32 @@ import (
 	"time"
 )
 
+func TestSenderIDsStripsPythonSpace(t *testing.T) {
+	// str.strip treats U+001C–U+001F as whitespace. strings.TrimSpace does not,
+	// so "\u001c123\u001c" used to fail the Telegram id check instead of being 123.
+	tests := []struct {
+		name string
+		raw  any
+		want []string
+	}{
+		{name: "file separators", raw: "\u001c123\u001c", want: []string{"123"}},
+		{name: "unit separator around spaces", raw: "\u001f 456 \u001e", want: []string{"456"}},
+		{name: "ordinary spaces", raw: " 123 ", want: []string{"123"}},
+		{name: "list entry", raw: []any{"\u001c123\u001c"}, want: []string{"123"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := senderIDs("telegram", tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("%#v", got)
+			}
+		})
+	}
+}
+
 func TestRoomByStep(t *testing.T) {
 	steps := []map[string]any{
 		{"id": "step-s1", "step_key": "s1", "kind": "work", "role_key": "backend", "review": true, "reviewer_id": "reviewer-1"},

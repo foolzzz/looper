@@ -113,6 +113,21 @@ Python; see the compatibility contract. Each test creates a unique
 `GET /api/projects/<id>/role-templates`, and
 `GET /api/projects/<id>/role-stats`.
 
+G1g strips a sender id with Python's `str.strip` and splits a role
+description with `str.split`, so U+001C–U+001F are whitespace in both.
+A static file is opened from the percent-encoded path: with `app.js`
+present, `/%61pp.js` is not that file. G1g serves
+`GET /api/tasks/<id>/gates/<label>/messages` and
+`GET /api/tasks/<id>/room`. The room's `after` and `limit` use
+`str.isdigit` and then `int()`. `isdigit` accepts Numeric_Type=Digit
+(a superscript such as ², a circled digit such as ②) as well as decimal
+digits. `int()` accepts only decimal digits, so ² and ② are 500 and do
+not read the database. A limit is clamped to 1..500. A value of
+4,301 digits is 500 and does not read the database. SSE stays unserved.
+`GET /api/workspaces/check` reads the workspace directory and git, so a
+golden for the seeded `/work/alpha` path is not stable on this machine.
+That route, and every route below it, stays for a later card.
+
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
@@ -120,8 +135,6 @@ is not in this list.
 
 - `GET /api/chat/events` (SSE)
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
-- `GET /api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/messages`
-- `GET /api/tasks/(task-[a-zA-Z0-9]+)/room`
 - `GET /api/workspaces/check`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/schedules`
 - `GET /api/schedules`

@@ -84,6 +84,14 @@ type recordingReads struct {
 	roleStatsErr              error
 	roleStatsProject          string
 	roleStatsSince            *time.Time
+	gateMessages              map[string]any
+	gateMessagesErr           error
+	gateTask                  string
+	gateLabel                 string
+	roomBody                  map[string]any
+	roomErr                   error
+	roomTask                  string
+	roomQuery                 db.RoomQuery
 	calls                     []string
 	since                     time.Time
 }
@@ -333,6 +341,32 @@ func (r *recordingReads) ProjectRoleStats(_ context.Context, id string, since *t
 		return map[string]any{}, nil
 	}
 	return r.roleStatsBody, nil
+}
+
+func (r *recordingReads) GateMessages(_ context.Context, taskID, label string) (map[string]any, error) {
+	r.calls = append(r.calls, "gate-messages")
+	r.gateTask = taskID
+	r.gateLabel = label
+	if r.gateMessagesErr != nil {
+		return nil, r.gateMessagesErr
+	}
+	if r.gateMessages == nil {
+		return map[string]any{}, nil
+	}
+	return r.gateMessages, nil
+}
+
+func (r *recordingReads) TaskRoom(_ context.Context, taskID string, q db.RoomQuery) (map[string]any, error) {
+	r.calls = append(r.calls, "task-room")
+	r.roomTask = taskID
+	r.roomQuery = q
+	if r.roomErr != nil {
+		return nil, r.roomErr
+	}
+	if r.roomBody == nil {
+		return map[string]any{}, nil
+	}
+	return r.roomBody, nil
 }
 
 func (r *recordingReads) ListConversation(_ context.Context, taskID string) ([]map[string]any, error) {

@@ -361,6 +361,19 @@ func TestStaticAndSPA(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "plain"), []byte("PLAIN"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A file whose name is the percent-encoding itself. Python does not decode
+	// the static path, so /%62ad.js is this file and /%61pp.js is not app.js.
+	if err := os.WriteFile(filepath.Join(root, "%62ad.js"), []byte("PCT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Raw UTF-8 and its percent-encoding are different files. Python serves
+	// /é.js as é.js. EscapedPath would look up %C3%A9.js instead.
+	if err := os.WriteFile(filepath.Join(root, "é.js"), []byte("EACUTE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "%C3%A9.js"), []byte("PCTE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	empty := t.TempDir() // no index.html
 
@@ -404,6 +417,11 @@ func TestStaticAndSPA(t *testing.T) {
 		{name: "put static", h: h, method: http.MethodPut, path: "/tasks/1", wantStatus: http.StatusMethodNotAllowed, jsonErr: `{"error":"method not allowed"}`, wantAllow: "GET, HEAD"},
 		{name: "no web dir", h: noWeb, method: http.MethodGet, path: "/", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
 		{name: "plain file", h: h, method: http.MethodGet, path: "/plain", wantStatus: http.StatusOK, wantBody: "PLAIN"},
+		{name: "encoded app.js falls back", h: h, method: http.MethodGet, path: "/%61pp.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
+		{name: "encoded asset falls back", h: h, method: http.MethodGet, path: "/assets/%61pp.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
+		{name: "encoded name is the literal file", h: h, method: http.MethodGet, path: "/%62ad.js", wantStatus: http.StatusOK, wantBody: "PCT", wantType: "javascript"},
+		{name: "raw utf-8 name", h: h, method: http.MethodGet, path: "/é.js", wantStatus: http.StatusOK, wantBody: "EACUTE", wantType: "javascript"},
+		{name: "percent-encoded utf-8 is the literal file", h: h, method: http.MethodGet, path: "/%C3%A9.js", wantStatus: http.StatusOK, wantBody: "PCTE", wantType: "javascript"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
