@@ -113,6 +113,75 @@ func TestRoleRateBoundaries(t *testing.T) {
 	}
 }
 
+func TestAssembleCostsSumsMillionths(t *testing.T) {
+	row := func(id, role, model string, cost any, runs, unpriced int) map[string]any {
+		var modelVal any
+		if model != "" {
+			modelVal = model
+		}
+		return map[string]any{
+			"task_id": id, "role": role, "model": modelVal,
+			"runs": runs, "running": 0, "unpriced_runs": unpriced, "interrupted_runs": 0,
+			"equivalent_runs": 0, "provider_price_runs": 0,
+			"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+			"cost_usd": cost,
+		}
+	}
+	rows := []map[string]any{
+		row("t", "worker", "tenth", usdMicro(100_000), 1, 0),
+		row("t", "worker", "fifth", usdMicro(200_000), 1, 0),
+		row("t", "worker", "mystery-model", nil, 5, 5),
+		row("t", "worker", "", nil, 1, 1),
+		row("t", "manager", "mgr", usdMicro(500_000), 1, 0),
+		row("u", "worker", "a", usdMicro(-100_000), 1, 0),
+		row("u", "worker", "b", usdMicro(-200_000), 1, 0),
+	}
+	got := assembleCosts([]string{"t", "u", "empty"}, rows)
+
+	want, err := strconv.ParseFloat("0.300000", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cost := got["t"]["cost_usd"]
+	tenth, fifth := 0.1, 0.2
+	if cost != want || cost == tenth+fifth {
+		t.Fatalf("total %v (%T)", cost, cost)
+	}
+	byRole := got["t"]["by_role"].(map[string]any)
+	worker := byRole["worker"].(map[string]any)
+	if worker["cost_usd"] != want || worker["runs"] != 8 {
+		t.Fatalf("worker %#v", worker)
+	}
+	if got["t"]["runs"] != 8 {
+		t.Fatalf("runs %v", got["t"]["runs"])
+	}
+	models := got["t"]["by_model"].([]any)
+	names := make([]any, len(models))
+	for i, item := range models {
+		names[i] = item.(map[string]any)["model"]
+	}
+	if len(names) != 4 || names[0] != "fifth" || names[1] != "tenth" || names[2] != "mystery-model" || names[3] != nil {
+		t.Fatalf("models %v", names)
+	}
+	if models[2].(map[string]any)["cost_usd"] != nil {
+		t.Fatal("unknown price was given a cost")
+	}
+	mgr := got["t"]["manager_by_model"].([]any)
+	if len(mgr) != 1 || mgr[0].(map[string]any)["cost_usd"] != microsToFloat(500_000) {
+		t.Fatalf("manager %#v", mgr)
+	}
+	wantNeg, err := strconv.ParseFloat("-0.300000", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["u"]["cost_usd"] != wantNeg || got["u"]["cost_usd"] == -tenth+-fifth {
+		t.Fatalf("negative %v", got["u"]["cost_usd"])
+	}
+	if got["empty"]["runs"] != 0 || got["empty"]["cost_usd"] != 0.0 {
+		t.Fatalf("empty %#v", got["empty"])
+	}
+}
+
 func assertRate(t *testing.T, name string, got any, want string) {
 	t.Helper()
 	if want == "" {

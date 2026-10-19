@@ -549,8 +549,11 @@ func isQuoteSafe(r rune) bool {
 
 func assembleCosts(ids []string, rows []map[string]any) map[string]map[string]any {
 	out := make(map[string]map[string]any, len(ids))
+	totals := make(map[string]int64, len(ids))
+	roleMoney := make(map[string]map[string]int64, len(ids))
 	for _, id := range ids {
 		out[id] = emptyCost()
+		roleMoney[id] = map[string]int64{"planner": 0, "worker": 0, "reviewer": 0}
 	}
 	models := map[string]map[string]*modelAcc{}
 	mgrModels := map[string]map[string]*modelAcc{}
@@ -564,15 +567,19 @@ func assembleCosts(ids []string, rows []map[string]any) map[string]map[string]an
 		if !ok {
 			continue
 		}
+		micro, hasMoney := moneyMicros(row["cost_usd"])
 		manager := asString(row["role"]) == "manager"
 		if !manager {
 			for _, key := range []string{"runs", "running", "unpriced_runs", "equivalent_runs", "provider_price_runs"} {
 				cost[key] = asInt(cost[key]) + asInt(row[key])
 			}
-			addMoney(cost, "cost_usd", row["cost_usd"])
-			role, _ := cost["by_role"].(map[string]any)[asString(row["role"])].(map[string]any)
+			roleName := asString(row["role"])
+			role, _ := cost["by_role"].(map[string]any)[roleName].(map[string]any)
 			if role != nil {
-				addMoney(role, "cost_usd", row["cost_usd"])
+				if hasMoney {
+					totals[id] += micro
+					roleMoney[id][roleName] += micro
+				}
 				role["runs"] = asInt(role["runs"]) + asInt(row["runs"])
 			}
 		}
@@ -594,22 +601,20 @@ func assembleCosts(ids []string, rows []map[string]any) map[string]map[string]an
 		acc.output += asInt(row["output_tokens"])
 		acc.cacheRead += asInt(row["cache_read_tokens"])
 		acc.cacheCreate += asInt(row["cache_creation_tokens"])
-		if row["cost_usd"] != nil {
-			v, _ := asFloat(row["cost_usd"])
+		if hasMoney {
 			if acc.cost == nil {
-				z := 0.0
+				z := int64(0)
 				acc.cost = &z
 			}
-			*acc.cost += v
+			*acc.cost += micro
 		}
 	}
 	for _, id := range ids {
 		cost := out[id]
-		cost["cost_usd"] = roundN(mustFloat(cost["cost_usd"]), 6)
+		cost["cost_usd"] = microsToFloat(totals[id])
 		byRole, _ := cost["by_role"].(map[string]any)
-		for _, role := range byRole {
-			m := role.(map[string]any)
-			m["cost_usd"] = roundN(mustFloat(m["cost_usd"]), 6)
+		for name, role := range byRole {
+			role.(map[string]any)["cost_usd"] = microsToFloat(roleMoney[id][name])
 		}
 		cost["by_model"] = sortModels(models[id])
 		cost["manager_by_model"] = sortModels(mgrModels[id])
@@ -619,7 +624,7 @@ func assembleCosts(ids []string, rows []map[string]any) map[string]map[string]an
 
 type modelAcc struct {
 	model       any
-	cost        *float64
+	cost        *int64
 	runs        int
 	running     int
 	unpriced    int
@@ -633,7 +638,7 @@ type modelAcc struct {
 func (m *modelAcc) view() map[string]any {
 	var cost any
 	if m.cost != nil {
-		cost = roundN(*m.cost, 6)
+		cost = microsToFloat(*m.cost)
 	}
 	return map[string]any{
 		"model":                 m.model,
@@ -650,33 +655,30 @@ func (m *modelAcc) view() map[string]any {
 }
 
 func sortModels(bucket map[string]*modelAcc) []any {
-	list := make([]map[string]any, 0, len(bucket))
+	accs := make([]*modelAcc, 0, len(bucket))
 	for _, acc := range bucket {
-		list = append(list, acc.view())
+		accs = append(accs, acc)
 	}
-	sort.Slice(list, func(i, j int) bool {
-		a, b := list[i], list[j]
-		aNil, bNil := a["cost_usd"] == nil, b["cost_usd"] == nil
+	sort.Slice(accs, func(i, j int) bool {
+		a, b := accs[i], accs[j]
+		aNil, bNil := a.cost == nil, b.cost == nil
 		if aNil != bNil {
 			return !aNil
 		}
-		if !aNil {
-			af, bf := mustFloat(a["cost_usd"]), mustFloat(b["cost_usd"])
-			if af != bf {
-				return af > bf
-			}
+		if !aNil && *a.cost != *b.cost {
+			return *a.cost > *b.cost
 		}
-		if asInt(a["runs"]) != asInt(b["runs"]) {
-			return asInt(a["runs"]) > asInt(b["runs"])
+		if a.runs != b.runs {
+			return a.runs > b.runs
 		}
-		if (a["model"] == nil) != (b["model"] == nil) {
-			return a["model"] != nil
+		if (a.model == nil) != (b.model == nil) {
+			return a.model != nil
 		}
-		return asString(a["model"]) < asString(b["model"])
+		return asString(a.model) < asString(b.model)
 	})
-	out := make([]any, len(list))
-	for i, row := range list {
-		out[i] = row
+	out := make([]any, len(accs))
+	for i, acc := range accs {
+		out[i] = acc.view()
 	}
 	return out
 }
@@ -700,15 +702,6 @@ func emptyCost() map[string]any {
 		"by_model":         []any{},
 		"manager_by_model": []any{},
 	}
-}
-
-func addMoney(m map[string]any, key string, v any) {
-	add, ok := asFloat(v)
-	if !ok {
-		return
-	}
-	cur, _ := asFloat(m[key])
-	m[key] = cur + add
 }
 
 func modelKey(v any) string {

@@ -1,0 +1,55 @@
+{
+  "agent_id": "usage-agent01",
+  "by_day": [
+    {
+      "cost_usd": 0.0,
+      "day": "2020-04-04",
+      "runs": 1
+    },
+    {
+      "cost_usd": 0.0,
+      "day": "2020-04-03",
+      "runs": 1
+    },
+    {
+      "cost_usd": 0.1,
+      "day": "2020-04-02",
+      "runs": 1
+    }
+  ],
+  "by_session": [
+    {
+      "cost_usd": 0.1,
+      "first_at": "2020-04-02T00:00:00+00:00",
+      "last_at": "2020-04-04T00:00:00+00:00",
+      "runs": 2,
+      "session_id": "sess-usage-a"
+    },
+    {
+      "cost_usd": 0.0,
+      "first_at": "2020-04-03T00:00:00+00:00",
+      "last_at": "2020-04-03T00:00:00+00:00",
+      "runs": 1,
+      "session_id": "sess-usage-b"
+    }
+  ],
+  "latest_context_tokens": 800,
+  "total": {
+    "compactions": 1,
+    "cost_usd": 0.1,
+    "running": 1,
+    "runs": 3,
+    "unpriced_runs": 1
+  },
+  "turns": [
+    {
+      "compactions": null,
+      "context_tokens": 800,
+      "cost_usd": null,
+      "created_at": "2020-04-04T00:00:00+00:00",
+      "id": 91003,
+      "session_id": "sess-usage-a",
+      "status": "running"
+    }
+  ]
+}

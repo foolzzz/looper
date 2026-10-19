@@ -49,7 +49,7 @@ func (s *Store) query(ctx context.Context, label, sql string, args ...any) ([]ma
 			}
 			row := make(map[string]any, len(fields))
 			for i, fd := range fields {
-				val, err := coerce(vals[i])
+				val, err := coerceColumn(fd.DataTypeOID, vals[i])
 				if err != nil {
 					return fmt.Errorf("column %s: %w", fd.Name, err)
 				}
@@ -68,9 +68,28 @@ func (s *Store) query(ctx context.Context, label, sql string, args ...any) ([]ma
 	return out, nil
 }
 
+// coerceColumn formats one cell. A date is YYYY-MM-DD, which is
+// datetime.date.isoformat(). pgx decodes that OID as midnight UTC, and the
+// generic time path would emit a timestamp. A numeric becomes millionths so
+// task costs can sum it exactly. Other values go through coerce.
+func coerceColumn(oid uint32, v any) (any, error) {
+	if oid == pgtype.DateOID {
+		switch t := v.(type) {
+		case nil:
+			return nil, nil
+		case time.Time:
+			return t.UTC().Format("2006-01-02"), nil
+		default:
+			return nil, fmt.Errorf("date column has %T", v)
+		}
+	}
+	return coerce(v)
+}
+
 // coerce turns a pgx value into something encoding/json can write the way
 // Python's json encoder writes the same cell: timestamps are Python's UTC
-// isoformat, JSONB is already a decoded value, numeric is a float.
+// isoformat, JSONB is already a decoded value, and numeric is millionths of
+// a dollar (usdMicro) rather than a float.
 func coerce(v any) (any, error) {
 	switch t := v.(type) {
 	case nil:
@@ -78,14 +97,14 @@ func coerce(v any) (any, error) {
 	case time.Time:
 		return pyTime(t), nil
 	case pgtype.Numeric:
-		f, err := t.Float64Value()
+		if !t.Valid {
+			return nil, nil
+		}
+		m, err := numericMicros(t)
 		if err != nil {
 			return nil, err
 		}
-		if !f.Valid {
-			return nil, nil
-		}
-		return f.Float64, nil
+		return m, nil
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {

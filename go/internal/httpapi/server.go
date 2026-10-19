@@ -22,8 +22,10 @@ type DBPinger interface {
 	Ping(ctx context.Context) error
 }
 
-// Reader is the read-only API. A nil Reads keeps the status task counts at zero
-// and answers the data routes with 500.
+// Reader is the read-only API. A nil Reads keeps the status task counts at zero.
+// Overview, projects, tasks, task detail, usage, one record, and its events
+// answer 500. The llm-records list answers 200 with an empty list, which is
+// what Python does when that query fails.
 type Reader interface {
 	StatusTaskCounts(ctx context.Context) (total, running, completed int, err error)
 	Overview(ctx context.Context, since time.Time) (map[string]any, error)
@@ -31,6 +33,10 @@ type Reader interface {
 	TaskExists(ctx context.Context, id string) (bool, error)
 	Tasks(ctx context.Context, q db.TaskQuery) (map[string]any, error)
 	Task(ctx context.Context, id string) (map[string]any, error)
+	AgentUsage(ctx context.Context, agentID string, turns int) (map[string]any, error)
+	ListRecords(ctx context.Context, q db.RecordQuery) ([]map[string]any, error)
+	GetRecord(ctx context.Context, id int64) (map[string]any, error)
+	ListEvents(ctx context.Context, id, after, limit int64) ([]map[string]any, error)
 }
 
 // Server serves the read-only API and, when WebDir is set, the dashboard files.
@@ -53,9 +59,10 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 }
 
 // Handler routes the read-only API and the optional static dashboard.
-// Data routes are registered without a method so a POST is 404, as in Python,
-// except the routes that answer 501 below.
+// Data routes are registered without a method so a POST is 404, as in Python.
 // GET /api/status stays method-specific so POST and PUT fall through to 405.
+// A pattern registered as GET also matches HEAD. The usage and llm-record
+// handlers reject that HEAD themselves; Python's method check returns 404.
 // The Host/Origin guard runs before routing, matching request_guard.refusal.
 // The path is urllib.parse.urlparse(target).path before the mux sees it.
 // A semicolon after the last slash is a path parameter and is not part of
@@ -66,8 +73,8 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // served here, including when the collapse lands under /api/.
 //
 // This slice serves GET /api/status, GET /api/projects, GET /api/overview,
-// GET /api/tasks, and GET /api/tasks/<id>. The cost routes answer 501 and do
-// not read the database: /api/agents/<id>/usage and /api/llm-records.
+// GET /api/tasks, GET /api/tasks/<id>, GET /api/agents/<id>/usage, and
+// GET /api/llm-records (the list, one record, and its events).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.handleStatus)
@@ -75,10 +82,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
 	mux.HandleFunc("/api/tasks/{id}", s.handleTask)
-	mux.HandleFunc("/api/agents/{id}/usage", notImplemented)
-	mux.HandleFunc("/api/llm-records", notImplemented)
-	mux.HandleFunc("/api/llm-records/{id}", notImplemented)
-	mux.HandleFunc("/api/llm-records/{id}/events", notImplemented)
+	mux.HandleFunc("GET /api/agents/{id}/usage", s.handleAgentUsage)
+	mux.HandleFunc("GET /api/llm-records/{id}/events", s.handleRecordEvents)
+	mux.HandleFunc("GET /api/llm-records/{id}", s.handleGetRecord)
+	mux.HandleFunc("GET /api/llm-records", s.handleListRecords)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/", s.handleRoot)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -224,12 +231,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 func methodNotAllowed(w http.ResponseWriter) {
 	w.Header().Set("Allow", "GET, HEAD")
 	writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: "method not allowed"})
-}
-
-// notImplemented is a route the Python server serves and this process does not.
-// The body is fixed. It is not a partial payload.
-func notImplemented(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, errorBody{Error: "not implemented in the Go server yet"})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

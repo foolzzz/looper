@@ -12,8 +12,6 @@ import (
 	"github.com/foolzzz/looper/go/internal/db"
 )
 
-const notImplementedBody = `{"error":"not implemented in the Go server yet"}`
-
 type recordingReads struct {
 	total, running, completed int
 	countsErr                 error
@@ -32,6 +30,21 @@ type recordingReads struct {
 	taskErr                   error
 	taskID                    string
 	taskCtx                   context.Context
+	usage                     map[string]any
+	usageErr                  error
+	usageAgent                string
+	usageTurns                int
+	records                   []map[string]any
+	recordsErr                error
+	recordQuery               db.RecordQuery
+	record                    map[string]any
+	recordErr                 error
+	recordID                  int64
+	events                    []map[string]any
+	eventsErr                 error
+	eventsID                  int64
+	eventsAfter               int64
+	eventsLimit               int64
 	calls                     []string
 	since                     time.Time
 }
@@ -87,7 +100,58 @@ func (r *recordingReads) Task(ctx context.Context, id string) (map[string]any, e
 	return r.taskBody, nil
 }
 
-func TestNotImplementedRoutes(t *testing.T) {
+func (r *recordingReads) AgentUsage(_ context.Context, agentID string, turns int) (map[string]any, error) {
+	r.calls = append(r.calls, "usage")
+	r.usageAgent = agentID
+	r.usageTurns = turns
+	if r.usageErr != nil {
+		return nil, r.usageErr
+	}
+	if r.usage == nil {
+		return map[string]any{}, nil
+	}
+	return r.usage, nil
+}
+
+func (r *recordingReads) ListRecords(_ context.Context, q db.RecordQuery) ([]map[string]any, error) {
+	r.calls = append(r.calls, "records")
+	r.recordQuery = q
+	if r.recordsErr != nil {
+		return nil, r.recordsErr
+	}
+	if r.records == nil {
+		return []map[string]any{}, nil
+	}
+	return r.records, nil
+}
+
+func (r *recordingReads) GetRecord(_ context.Context, id int64) (map[string]any, error) {
+	r.calls = append(r.calls, "record")
+	r.recordID = id
+	if r.recordErr != nil {
+		return nil, r.recordErr
+	}
+	if r.record == nil {
+		return nil, db.ErrNotFound
+	}
+	return r.record, nil
+}
+
+func (r *recordingReads) ListEvents(_ context.Context, id, after, limit int64) ([]map[string]any, error) {
+	r.calls = append(r.calls, "events")
+	r.eventsID = id
+	r.eventsAfter = after
+	r.eventsLimit = limit
+	if r.eventsErr != nil {
+		return nil, r.eventsErr
+	}
+	if r.events == nil {
+		return []map[string]any{}, nil
+	}
+	return r.events, nil
+}
+
+func TestUnroutedAPI(t *testing.T) {
 	reads := &recordingReads{}
 	srv := New("dev", &fakeDB{}, "")
 	srv.Reads = reads
@@ -100,11 +164,11 @@ func TestNotImplementedRoutes(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/tasks", http.StatusNotFound, `{"error":"not found"}`},
 		{http.MethodGet, "/api/tasks/create", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/agents/worker-1/usage", http.StatusNotImplemented, notImplementedBody},
-		{http.MethodGet, "/api/llm-records", http.StatusNotImplemented, notImplementedBody},
-		{http.MethodPut, "/api/llm-records", http.StatusNotImplemented, notImplementedBody},
-		{http.MethodGet, "/api/llm-records/12", http.StatusNotImplemented, notImplementedBody},
-		{http.MethodGet, "/api/llm-records/12/events", http.StatusNotImplemented, notImplementedBody},
+		{http.MethodPut, "/api/llm-records", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodPost, "/api/agents/worker-1/usage", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodGet, "/api/llm-records/nope", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodGet, "/api/llm-records/12/nope", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodGet, "/api/agents/bad.id/usage", http.StatusNotFound, `{"error":"not found"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
@@ -118,10 +182,8 @@ func TestNotImplementedRoutes(t *testing.T) {
 			}
 		})
 	}
-	for _, call := range reads.calls {
-		if call == "tasks" || call == "task" || call == "exists" {
-			t.Fatalf("unimplemented route read the database: %v", reads.calls)
-		}
+	if len(reads.calls) != 0 {
+		t.Fatalf("unrouted request read the database: %v", reads.calls)
 	}
 }
 
@@ -260,11 +322,19 @@ func TestReadContextFollowsParentCancel(t *testing.T) {
 
 func TestReadWithoutDatabase(t *testing.T) {
 	h := New("dev", &fakeDB{}, "").Handler()
-	for _, path := range []string{"/api/overview", "/api/projects", "/api/tasks"} {
+	for _, path := range []string{
+		"/api/overview", "/api/projects", "/api/tasks",
+		"/api/agents/worker-1/usage", "/api/llm-records/12", "/api/llm-records/12/events",
+	} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
 		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` {
 			t.Fatalf("%s %d body %s", path, rr.Code, rr.Body.String())
 		}
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records"))
+	if rr.Code != http.StatusOK || rr.Body.String() != `{"records":[]}` {
+		t.Fatalf("list without a database %d body %s", rr.Code, rr.Body.String())
 	}
 }

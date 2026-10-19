@@ -84,6 +84,50 @@ _DETAILS = (
     ("task-min", "task-min000001", 200),
     ("task-missing", "task-missing01", 404),
 )
+# usage-agent01 has a priced turn, an unpriced turn, and a running turn.
+# turns=0 clamps to 1, the same body as turns=1. "many" is the handler's 400.
+# "\x1c2" is the query turns=%1C2. str.isspace() is true for U+001C and
+# int() raises ValueError, so the handler answers 400.
+_USAGE = (
+    ("usage", "usage-agent01", {}, 200),
+    ("usage-turns", "usage-agent01", {"turns": "1"}, 200),
+    ("usage-turns-zero", "usage-agent01", {"turns": "0"}, 200),
+    ("usage-bad-turns", "usage-agent01", {"turns": "many"}, 400),
+    ("usage-bad-turns-1c", "usage-agent01", {"turns": "\x1c2"}, 400),
+)
+# The list, each filter, a page, an unknown role, and the bad parameters.
+# limit and offset are parsed outside the handler's try: a non-integer is
+# the server's 500, which take() writes when the handler raises ValueError.
+# A negative offset is a database error, and the handler answers 200 with
+# an empty list. limit=0 is a real empty page. limit=%1C2 is U+001C then 2:
+# int() rejects it, same 500 as any other non-integer.
+_RECORDS = (
+    ("llm-records", {}, 200),
+    ("llm-records-agent", {"agent_id": "usage-agent01"}, 200),
+    ("llm-records-task", {"task_id": "task-rich00001"}, 200),
+    ("llm-records-role", {"role": "manager"}, 200),
+    ("llm-records-page", {"limit": "1", "offset": "1"}, 200),
+    ("llm-records-unknown-role", {"role": "nope"}, 200),
+    ("llm-records-limit-zero", {"limit": "0"}, 200),
+    ("llm-records-neg-offset", {"offset": "-1"}, 200),
+    ("llm-records-bad-limit", {"limit": "many"}, 500),
+    ("llm-records-bad-offset", {"offset": "1.5"}, 500),
+    ("llm-records-bad-limit-1c", {"limit": "\x1c2"}, 500),
+)
+# 91001 is the priced usage turn. 91009 is not a row.
+_RECORD = (
+    ("llm-record", 91001, 200),
+    ("llm-record-missing", 91009, 404),
+)
+# after=1 keeps seq 2. A missing record is an empty list, not 404.
+# limit=-1 is a database error (500). "nope" is the handler's 400.
+_EVENTS = (
+    ("llm-record-events", 91001, {}, 200),
+    ("llm-record-events-after", 91001, {"after": "1"}, 200),
+    ("llm-record-events-bad", 91001, {"after": "nope"}, 400),
+    ("llm-record-events-missing", 91009, {}, 200),
+    ("llm-record-events-neg-limit", 91001, {"limit": "-1"}, 500),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -246,7 +290,7 @@ async def capture(dsn: str) -> dict[str, object]:
     import looper.db.connection as dbconn
     from looper.agents.bus import MessageBus
     from looper.agents.channels.web import WebChannelAdapter
-    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.http_server import HTTP_500, AgentHTTPServer, _json_response
     from looper.agents.supervisor import AgentSupervisor
     from looper.agents.tiers.task import TaskRouter
 
@@ -279,6 +323,19 @@ async def capture(dsn: str) -> dict[str, object]:
                 async def drain(self) -> None:
                     return None
 
+            async def take(call, expect: int):
+                # list_llm_records parses limit and offset outside its try.
+                # The request loop turns that ValueError into 500. This script
+                # calls the handler directly, so it writes that body when the
+                # handler wrote nothing.
+                cap = Capture()
+                try:
+                    await call(cap)
+                except ValueError:
+                    if not cap.buf:
+                        cap.write(_json_response(HTTP_500, {"error": "internal server error"}))
+                return response_json(bytes(cap.buf), expect)
+
             out = {}
             handlers = {
                 "status": server._handle_status,
@@ -286,17 +343,29 @@ async def capture(dsn: str) -> dict[str, object]:
                 "overview": server._handle_overview,
             }
             for name, expect in _READS:
-                cap = Capture()
-                await handlers[name](cap)
-                out[name] = response_json(bytes(cap.buf), expect)
+                out[name] = await take(handlers[name], expect)
             for name, query, expect in _TASKS:
-                cap = Capture()
-                await server._handle_list_tasks(query, cap)
-                out[name] = response_json(bytes(cap.buf), expect)
+                out[name] = await take(
+                    lambda cap, query=query: server._handle_list_tasks(query, cap), expect)
             for name, task_id, expect in _DETAILS:
-                cap = Capture()
-                await server._handle_task_detail(task_id, cap)
-                out[name] = response_json(bytes(cap.buf), expect)
+                out[name] = await take(
+                    lambda cap, task_id=task_id: server._handle_task_detail(task_id, cap), expect)
+            for name, agent, query, expect in _USAGE:
+                out[name] = await take(
+                    lambda cap, agent=agent, query=query: server._handle_agent_usage(agent, query, cap),
+                    expect)
+            for name, query, expect in _RECORDS:
+                out[name] = await take(
+                    lambda cap, query=query: server._handle_list_llm_records(query, cap), expect)
+            for name, record_id, expect in _RECORD:
+                out[name] = await take(
+                    lambda cap, record_id=record_id: server._handle_get_llm_record(record_id, cap),
+                    expect)
+            for name, record_id, query, expect in _EVENTS:
+                out[name] = await take(
+                    lambda cap, record_id=record_id, query=query: server._handle_llm_record_events(
+                        record_id, query, cap),
+                    expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -311,7 +380,15 @@ def main() -> None:
         sys.path.insert(0, str(REPO))
     asyncio.run(apply_sql(args.db_url))
     bodies = asyncio.run(capture(args.db_url))
-    names = [name for name, _ in _READS] + [name for name, _, _ in _TASKS] + [name for name, _, _ in _DETAILS]
+    names = (
+        [name for name, _ in _READS]
+        + [name for name, _, _ in _TASKS]
+        + [name for name, _, _ in _DETAILS]
+        + [name for name, _, _, _ in _USAGE]
+        + [name for name, _, _ in _RECORDS]
+        + [name for name, _, _ in _RECORD]
+        + [name for name, _, _, _ in _EVENTS]
+    )
     for name in names:
         payload = normalize(bodies[name])
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
