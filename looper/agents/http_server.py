@@ -611,6 +611,10 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, self._lark_status)
         elif path == "/api/channels/lark/people" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", "")))
+        elif path == "/api/channels/lark_bot/status" and method == "GET":
+            await self._answer(writer, HTTP_200, self._lark_bot_status)
+        elif path == "/api/channels/lark_bot/people" and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: self._lark_bot_people(query.get("q", "")))
         elif path == "/api/gate-settings" and method == "GET":
             await self._answer(writer, HTTP_200, gate_service.gate_settings)
         elif path == "/api/gate-settings" and method == "PUT":
@@ -1901,6 +1905,22 @@ class AgentHTTPServer:
         except lark_cli.LarkCliError as exc:
             raise projects.RequestError(HTTP_502, f"lark-cli could not search: {exc}") from None
 
+    async def _lark_bot_status(self) -> dict[str, Any]:
+        from .channels import lark_bot_settings
+
+        return await lark_bot_settings.status()
+
+    async def _lark_bot_people(self, q: str) -> dict[str, Any]:
+        from .channels import lark_bot_settings
+        from .channels.lark_api import LarkApiError
+
+        try:
+            return await lark_bot_settings.people(q)
+        except ValueError as exc:
+            raise projects.RequestError(HTTP_400, str(exc)) from None
+        except LarkApiError as exc:
+            raise projects.RequestError(HTTP_502, f"the Lark platform could not search: {exc}") from None
+
     async def _handle_list_channel_configs(self, writer: asyncio.StreamWriter) -> None:
         from .channels.allowlist import channel_view
 
@@ -1972,6 +1992,12 @@ class AgentHTTPServer:
                     from .channels import lark_settings
                     try:
                         config = await lark_settings.bound_config(current.get("config") or {}, config)
+                    except ValueError as exc:
+                        raise AllowlistError(str(exc)) from None
+                elif kind == "lark_bot":
+                    from .channels import lark_bot_settings
+                    try:
+                        config = await lark_bot_settings.bound_config(current.get("config") or {}, config)
                     except ValueError as exc:
                         raise AllowlistError(str(exc)) from None
                 data = {**data, "config": config}

@@ -350,10 +350,10 @@ async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *
         FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id JOIN tasks t ON t.id = g.task_id
         WHERE g.step_id IN (
             SELECT m.step_id FROM task_user_gate_posts p JOIN task_user_gate_messages m ON m.id = p.message_id
-            WHERE p.channel = $1 AND p.external_id = ANY($3::text[]) AND ($1 = 'lark' OR p.chat = $2)
+            WHERE p.channel = $1 AND p.external_id = ANY($3::text[]) AND ($1 IN ('lark', 'lark_bot') OR p.chat = $2)
             UNION
             SELECT m.step_id FROM task_user_gate_messages m
-            WHERE m.channel = $1 AND m.external_id = ANY($3::text[]) AND ($1 = 'lark' OR m.chat = $2))
+            WHERE m.channel = $1 AND m.external_id = ANY($3::text[]) AND ($1 IN ('lark', 'lark_bot') OR m.chat = $2))
         ORDER BY g.opened_at DESC NULLS LAST
         LIMIT 1
         """, channel, chat, ids)

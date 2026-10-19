@@ -14,6 +14,14 @@ from enum import Enum
 from typing import Any, TypedDict
 
 
+LARK_CHANNEL_TYPES = ("lark", "lark_bot")
+
+
+def is_lark(channel: str | None) -> bool:
+    """Whether a channel uses Lark messages and targets."""
+    return channel in LARK_CHANNEL_TYPES
+
+
 class MessageType(str, Enum):
     # Channel ↔ Manager
     USER_MESSAGE = "user_message"
@@ -86,7 +94,7 @@ class AgentAddress:
 
     agent_type: str  # "channel", "manager", "planner", "worker"
     agent_id: str
-    channel: str | None = None  # "web" | "telegram" | "lark" (channel tier only)
+    channel: str | None = None  # "web" | "telegram" | "lark" | "lark_bot" (channel tier only)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"agent_type": self.agent_type, "agent_id": self.agent_id}

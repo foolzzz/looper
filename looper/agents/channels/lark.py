@@ -1,43 +1,16 @@
-"""Lark (lark-cli) channel adapter: the Manager in Lark direct messages and group chats, through ``lark-cli``.
+"""The Manager in Lark direct messages and group @-mentions, over a pluggable transport.
 
-``lark-cli event consume im.message.receive_v1 --as bot`` streams the
-messages the bot receives, one flat JSON object per line (``lark-cli event
-schema im.message.receive_v1``); ``lark-cli im +messages-send --as bot`` posts
-the replies, as Markdown, to the chat each message came from, and a
-schedule's messages, as text, to a user. Every call carries the channel's
-``--profile`` when it names one (``lark_cli``): the profile chooses the app and
-so the bot.
-
-A direct message (``chat_type`` ``p2p``) is handled as it comes. In a group
-chat only a message that @-mentions the bot is: one whose ``mentions`` hold
-the bot's own open_id (``bot_open_id``, from the bot's info), never a match on
-names. Every other group message is ignored before anything else: no
-reaction, no record, nothing reaches the Manager. The bot's mention is taken
-out of the text, the Manager is told the sender's name (``sender_name``), and
-the status message and the answer are replies to the message (``+messages-reply``);
-a task's progress goes to the group, and its end notice too, @-mentioning
-the requester. So the bot posts in a group only to answer an allowlisted
-@-mention and for that task.
-
-A user gate's messages are posted directly (``post``: to the user or the
-group, or as a reply to a message, returning the id of the message sent), and
-a reply's references (``reply_to``, ``root_id``) reach the Manager in
-``channel_context``, so a reply to a gate's message can be routed to its gate.
-
-Only the senders on its allowlist (their ``open_id`` for this app) reach the
-Manager: anyone else is dropped with one log line, recorded as a rejected
-sender (``on_rejected``: who, and in which group chat) and gets no reply, and
-an empty list keeps the adapter from starting. A message that reaches the
-Manager first gets the bot's 「Get」 reaction (``status_line.Reactions``).
+Only allowlisted senders reach the Manager. Group messages must mention the
+bot; answers and status lines reply to that message, while task notices go
+to the group and mention their requester. Gate posts preserve external ids
+and reply references for routing and idempotent retries.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
-from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -50,47 +23,14 @@ from ..message import (
     channel_address,
 )
 from ..task_notice import Notice, NotifyTarget, TargetKind
-from . import lark_cli
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
-from .lark_cli import (
-    MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, consume_command, edit_command, mention, reaction_command, reply_command, run,
-    run_json, send_command, sent_message_id,
-)
+from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
+from .lark_transport import CliTransport, LarkTransport
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
-
-# How much of the consumer's stderr is kept for the log line written when it stops.
-_CONSUMER_STDERR_LINES = 5
-# How long a consumer gets to stop after its stdin closes, and then after SIGTERM, before it is killed.
-_CONSUMER_STOP_GRACE_SEC = 5.0
-
-
-async def _stop_consumer(process: asyncio.subprocess.Process) -> None:
-    """Stop ``lark-cli event consume`` the way it asks: close its stdin, then SIGTERM; SIGKILL only if both fail
-    (it skips lark-cli's cleanup of the server-side subscription)."""
-    if process.returncode is not None:
-        return
-    for step in ("stdin", "term"):
-        try:
-            if step == "stdin":
-                if process.stdin is not None and not process.stdin.is_closing():
-                    process.stdin.close()
-            else:
-                process.terminate()
-        except ProcessLookupError:
-            return
-        try:
-            await asyncio.wait_for(process.wait(), timeout=_CONSUMER_STOP_GRACE_SEC)
-            return
-        except asyncio.TimeoutError:
-            continue
-    try:
-        process.kill()
-    except ProcessLookupError:
-        pass
 
 # Told the open_id of a sender the allowlist refused and the group chat they wrote in (None for a direct
 # message); never what they wrote.
@@ -107,12 +47,9 @@ def _check_lark_cli_available() -> bool:
 
 
 class LarkChannelAdapter(ChannelAdapter):
-    """Bridges Lark Bot with the agent message bus.
+    """Bridge a Lark transport and the agent message bus."""
 
-    Collects events with ``lark-cli event consume`` and sends with
-    ``lark-cli im +messages-send``; it translates between lark-cli's event
-    JSON and MessageEnvelope format.
-    """
+    _RESTART_SECONDS = 10.0
 
     def __init__(
         self,
@@ -122,19 +59,23 @@ class LarkChannelAdapter(ChannelAdapter):
         runtime_root: Path | None = None,
         on_rejected: RejectedListener | None = None,
         bot_open_id: str = "",
+        transport: LarkTransport | None = None,
+        channel_type: str = "lark",
     ) -> None:
+        self._channel_type = channel_type
+        self._transport = transport if transport is not None else CliTransport(profile)
         self._allowlist = allowlist  # open_ids
         self._profile = profile  # lark-cli's --profile; "" for its active one
         # The bot's own open_id: a group message is handled only when it @-mentions this; none, none is.
         self._bot_open_id = bot_open_id
         # One status message per message answered, edited in place (``status_line``), keyed by correlation id:
-        # it goes where the answer goes (``_answer_command``).
-        self._status = StatusLines(channel="channel-lark", send=self._send_status, edit=self._edit_status)
-        self._reactions = Reactions(channel="channel-lark", react=self._react)
+        # it goes where the answer goes (``_answer``).
+        self._status = StatusLines(channel=self.channel_id, send=self._send_status, edit=self._edit_status)
+        self._reactions = Reactions(channel=self.channel_id, react=self._react)
         self._on_rejected = on_rejected
         self._runtime_root = runtime_root or Path.cwd()
         self._bus: MessageBus | None = None
-        self._address = channel_address("lark", "channel-lark")
+        self._address = channel_address(self.channel_type, self.channel_id)
         self._outbound_task: asyncio.Task[Any] | None = None
         self._collector_task: asyncio.Task[Any] | None = None
         self._running = False
@@ -145,30 +86,27 @@ class LarkChannelAdapter(ChannelAdapter):
 
     @property
     def channel_type(self) -> str:
-        return "lark"
+        return self._channel_type
 
     @property
     def channel_id(self) -> str:
-        return "channel-lark"
+        return f"channel-{self.channel_type}"
 
     async def start(self, bus: MessageBus) -> None:
         if not self._allowlist.ids:
             # The Manager runs any command it is asked to: nobody may reach it unlisted.
-            logger.error("channel-lark not started: its sender allowlist is empty")
+            logger.error("%s not started: its sender allowlist is empty", self.channel_id)
             return
 
-        if not _check_lark_cli_available():
-            logger.warning(
-                "lark-cli not found, lark channel adapter disabled. "
-                "Install lark-cli to enable Lark integration."
-            )
+        if not self._transport.available():
+            logger.warning("%s not started: its transport is unavailable", self.channel_id)
             return
 
         self._bus = bus
         self._running = True
         self._outbound_task = asyncio.create_task(self._outbound_loop())
         self._collector_task = asyncio.create_task(self._event_collector_loop())
-        logger.info("lark channel adapter started (profile %s)", self._profile or "lark-cli's active one")
+        logger.info("%s adapter started", self.channel_id)
 
     async def stop(self) -> None:
         self._running = False
@@ -180,7 +118,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 except asyncio.CancelledError:
                     pass
         await self._reactions.stop()
-        logger.info("lark channel adapter stopped")
+        await self._transport.aclose()
+        logger.info("%s adapter stopped", self.channel_id)
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
@@ -189,13 +128,13 @@ class LarkChannelAdapter(ChannelAdapter):
             # A task's end, to who it recorded, in order behind its progress.
             notice = Notice.from_payload(envelope.payload)
             if notice is None:
-                return DeliveryReceipt(channel="lark", success=False, error="a notice without a Lark target")
+                return DeliveryReceipt(channel=self.channel_type, success=False, error="a notice without a Lark target")
             return await self._send_notice(notice.target, notice.text)
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:
             return DeliveryReceipt(
-                channel="lark",
+                channel=self.channel_type,
                 success=False,
                 error=f"no chat_id for correlation {corr_id}",
                 failure=DeliveryFailure.NO_CHAT,
@@ -208,11 +147,11 @@ class LarkChannelAdapter(ChannelAdapter):
                 case StatusKind.PROGRESS:
                     # Task progress leaves the status line alone.
                     return await self._send_message(chat_id, str(envelope.payload["text"]))
-            return DeliveryReceipt(channel="lark", success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=True)
 
         text = self._format_reply(envelope)
         if not text:
-            return DeliveryReceipt(channel="lark", success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=True)
 
         if corr_id in self._group_message:
             receipt = await self._send_reply(corr_id, text)
@@ -222,162 +161,130 @@ class LarkChannelAdapter(ChannelAdapter):
             await self._status.finish(corr_id, error=envelope.payload.get("error"))
         return receipt
 
-    def _answer_command(self, correlation_id: str, *, text: str | None = None,
-                        markdown: str | None = None) -> list[str]:
-        """The argv that answers the message ``correlation_id``: a reply to it in a group, else a message to its
-        direct chat."""
+    async def _answer(self, correlation_id: str, *, text: str | None = None,
+                      markdown: str | None = None) -> str | None:
+        """Answer the triggering group message, or send to its direct chat."""
         message_id = self._group_message.get(correlation_id)
         if message_id is not None:
-            return reply_command(message_id, text=text, markdown=markdown, profile=self._profile)
-        return send_command(chat_id=self._correlation_chat[correlation_id], text=text, markdown=markdown,
-                            profile=self._profile)
+            return await self._transport.reply(message_id, text=text, markdown=markdown)
+        return await self._transport.send(chat_id=self._correlation_chat[correlation_id], text=text, markdown=markdown)
 
     async def _send_reply(self, correlation_id: str, text: str) -> DeliveryReceipt:
         """Answer a group message with a Markdown reply to it."""
         try:
-            await run(self._answer_command(correlation_id, markdown=text))
+            await self._answer(correlation_id, markdown=text)
         except LarkCliError as exc:
-            logger.warning("lark: a reply in a group chat failed: %s", exc)
-            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
-        return DeliveryReceipt(channel="lark", success=True)
+            logger.warning("%s: a reply in a group chat failed: %s", self.channel_id, exc)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+        return DeliveryReceipt(channel=self.channel_type, success=True)
 
-    def _target_command(self, target: NotifyTarget, text: str, *, idempotency_key: str | None = None) -> list[str]:
-        """The argv that sends ``text`` as Markdown to ``target``: to a user in a direct message, or to a group chat
-        @-mentioning the requester."""
+    async def _send_target(self, target: NotifyTarget, text: str, *,
+                           idempotency_key: str | None = None) -> str | None:
+        """Send Markdown to a user or to a group mentioning the requester."""
         if target.kind is TargetKind.USER:
-            return send_command(user_id=target.id, markdown=text, profile=self._profile,
-                                idempotency_key=idempotency_key)
+            return await self._transport.send(user_id=target.id, markdown=text, idempotency_key=idempotency_key)
         body = f"{mention(target.mention)} {text}" if target.mention else text
-        return send_command(chat_id=target.id, markdown=body, profile=self._profile, idempotency_key=idempotency_key)
+        return await self._transport.send(chat_id=target.id, markdown=body, idempotency_key=idempotency_key)
 
     async def _send_notice(self, target: NotifyTarget, text: str) -> DeliveryReceipt:
         """Send a task's end notice as Markdown, like an answer: to a user in a direct message, or to a group chat
         @-mentioning the requester."""
         try:
-            await run(self._target_command(target, text))
+            await self._send_target(target, text)
         except LarkCliError as exc:
-            logger.warning("lark: a task's end notice to %s failed: %s", target.id, exc)
-            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
-        return DeliveryReceipt(channel="lark", success=True)
+            logger.warning("%s: a task's end notice to %s failed: %s", self.channel_id, target.id, exc)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+        return DeliveryReceipt(channel=self.channel_type, success=True)
 
     async def _send_message(self, chat_id: str, text: str) -> DeliveryReceipt:
         try:
             await self._send_lark_message(chat_id, text)
-            return DeliveryReceipt(channel="lark", success=True)
+            return DeliveryReceipt(channel=self.channel_type, success=True)
         except Exception as exc:
-            logger.warning("lark delivery failed: %s", exc)
-            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
+            logger.warning("%s delivery failed: %s", self.channel_id, exc)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
 
     async def _send_status(self, correlation_id: str, text: str) -> str | None:
-        return sent_message_id(await run_json(self._answer_command(correlation_id, text=text)))
+        return await self._answer(correlation_id, text=text)
 
     async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
-        await run(edit_command(message_id, text=text, profile=self._profile))
+        await self._transport.edit(message_id, text=text)
 
     async def _react(self, chat_id: str, message_id: str) -> None:
-        await run(reaction_command(message_id, profile=self._profile))
+        await self._transport.react(message_id)
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
         """Send ``text`` as the bot to Lark user ``chat`` (an open_id)."""
         try:
-            await run(send_command(user_id=chat, text=text, profile=self._profile))
+            await self._transport.send(user_id=chat, text=text)
         except LarkCliError as exc:
-            logger.warning("lark notification to %s failed: %s", chat, exc)
-            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
-        return DeliveryReceipt(channel="lark", success=True)
+            logger.warning("%s notification to %s failed: %s", self.channel_id, chat, exc)
+            return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+        return DeliveryReceipt(channel=self.channel_type, success=True)
 
     async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
                    idempotency_key: str | None = None) -> PostReceipt:
         """Send ``text`` as Markdown: a reply to the message ``reply_to`` (``om_...``) when given, which @-mentions
         nobody; else to ``target`` like an end notice (a user, or a group @-mentioning the requester). Lark sends one
         message per ``idempotency_key`` within an hour, so a post retried after a lost answer is not sent twice."""
-        if reply_to:
-            argv = reply_command(reply_to, markdown=text, profile=self._profile, idempotency_key=idempotency_key)
-        else:
-            argv = self._target_command(target, text, idempotency_key=idempotency_key)
         try:
-            message_id = sent_message_id(await run_json(argv))
+            if reply_to:
+                message_id = await self._transport.reply(reply_to, markdown=text, idempotency_key=idempotency_key)
+            else:
+                message_id = await self._send_target(target, text, idempotency_key=idempotency_key)
         except LarkCliError as exc:
-            logger.warning("lark: a post to %s failed: %s", target.id, exc)
+            logger.warning("%s: a post to %s failed: %s", self.channel_id, target.id, exc)
             return PostReceipt(False, error=str(exc),
                                parent_gone=bool(reply_to) and exc.code in MESSAGE_GONE_CODES)
         if message_id is None:
-            logger.warning("lark: a post to %s: lark-cli did not say which message it sent", target.id)
-            return PostReceipt(False, error="lark-cli did not say which message it sent")
+            problem = ("lark-cli" if isinstance(self._transport, CliTransport) else self.channel_type) + " did not say which message it sent"
+            logger.warning("%s: a post to %s: %s", self.channel_id, target.id, problem)
+            return PostReceipt(False, error=problem)
         return PostReceipt(True, external_ids=(message_id,))
 
     def healthcheck(self) -> dict[str, Any]:
-        return {
-            "channel": "lark",
+        info = {
+            "channel": self.channel_type,
             "healthy": self._running,
-            "lark_cli_available": _check_lark_cli_available(),
             "active_conversations": len(self._correlation_chat),
         }
 
-    # --- Inbound: lark-cli events → Bus ---
+        if isinstance(self._transport, CliTransport):
+            info["lark_cli_available"] = self._transport.available()
+        else:
+            info["transport"] = type(self._transport).__name__
+        return info
+
+    # --- Inbound: transport events → Bus ---
 
     async def _event_collector_loop(self) -> None:
-        """Run lark-cli event consume as a subprocess and process events; start it again 10 s after it stops
-        (a consumer that fails at once, such as one not signed in, is not restarted in a tight loop)."""
+        """Restart each ended or broken event stream after a delay."""
         while self._running:
             try:
                 await self._run_event_consumer()
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("lark event collector crashed, restarting in 10s")
+                logger.exception("%s event collector crashed, restarting in %ss", self.channel_id, self._RESTART_SECONDS)
             else:
                 if self._running:
-                    logger.warning("lark event consumer stopped; starting it again in 10s")
-            await asyncio.sleep(10)
+                    logger.warning("%s event consumer stopped; starting it again in %ss", self.channel_id, self._RESTART_SECONDS)
+            await asyncio.sleep(self._RESTART_SECONDS)
 
     async def _run_event_consumer(self) -> None:
-        """Run ``lark-cli event consume`` and handle the events it prints.
-
-        Its stdin is a pipe kept open for as long as it runs: lark-cli (1.0.97) treats stdin EOF as the signal to
-        stop, so a consumer started with the server's stdin (``/dev/null`` under launchd) stops at once. Closing
-        that pipe is also how it is stopped, so it can end its server-side subscription; SIGKILL is the last resort.
-        What it wrote to stderr last is logged when it stops while the channel runs.
-        """
-        process = await asyncio.create_subprocess_exec(
-            *consume_command(self._profile),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assert process.stdout is not None and process.stderr is not None
-        stderr_tail: deque[str] = deque(maxlen=_CONSUMER_STDERR_LINES)
-
-        async def _read_stderr() -> None:
-            assert process.stderr is not None
-            async for raw in process.stderr:
-                text = raw.decode("utf-8", errors="replace").strip()
-                if text:
-                    stderr_tail.append(text[:300])
-
-        stderr_task = asyncio.create_task(_read_stderr())
+        """Handle one event stream; a malformed event does not stop its connection."""
+        events = self._transport.events()
         try:
-            async for raw_line in process.stdout:
+            async for event in events:
                 if not self._running:
                     break
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
                 try:
-                    event = json.loads(line)
                     await self._handle_lark_event(event)
                 except Exception:
-                    logger.debug("skipping non-JSON lark event line")
+                    logger.debug("%s: skipping an invalid event", self.channel_id, exc_info=True)
         finally:
-            await _stop_consumer(process)
-            stderr_task.cancel()
-            try:
-                await stderr_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            if self._running and stderr_tail:
-                logger.warning("lark event consumer stopped (exit %s); its last output: %s",
-                               process.returncode, " | ".join(stderr_tail))
+            if close := getattr(events, "aclose", None):
+                await close()
 
     async def _handle_lark_event(self, event: dict[str, Any]) -> None:
         """Publish a received text message to the Bus. The event is lark-cli's flat one: ``chat_id``,
@@ -393,13 +300,13 @@ class LarkChannelAdapter(ChannelAdapter):
         sender_open_id = event.get("sender_id")
         group = event.get("chat_type") == "group"
         if not group and event.get("chat_type") != "p2p":
-            logger.info("channel-lark: ignored a message in a %s chat (%s)", event.get("chat_type") or "unknown",
+            logger.info("%s: ignored a message in a %s chat (%s)", self.channel_id, event.get("chat_type") or "unknown",
                         chat_id)
             return
         bot_mentions = self._bot_mentions(event)
         if group and not bot_mentions:
             # Not addressed to the bot: nothing at all happens, not even a record of who wrote.
-            logger.debug("channel-lark: ignored a group message that does not @-mention the bot (%s)", chat_id)
+            logger.debug("%s: ignored a group message that does not @-mention the bot (%s)", self.channel_id, chat_id)
             return
 
         # Before anything else: an unlisted sender is logged, recorded (who, where and when) and never answered.
@@ -408,7 +315,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 try:
                     await self._on_rejected(sender_open_id, chat_id if group else None)
                 except Exception:
-                    logger.warning("channel-lark: could not record a rejected sender", exc_info=True)
+                    logger.warning("%s: could not record a rejected sender", self.channel_id, exc_info=True)
             return
 
         if event.get("sender_type") == "bot" or event.get("message_type", "") != "text":
@@ -466,9 +373,8 @@ class LarkChannelAdapter(ChannelAdapter):
             pass
 
     async def _send_lark_message(self, chat_id: str, text: str) -> None:
-        """Send a reply to a Lark chat as Markdown (a rich-text post); raises ``LarkCliError`` with lark-cli's
-        reason when it fails."""
-        await run(send_command(chat_id=chat_id, markdown=text, profile=self._profile))
+        """Send a Markdown reply to a direct chat."""
+        await self._transport.send(chat_id=chat_id, markdown=text)
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:
@@ -500,7 +406,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _sender_name(self, open_id: str) -> str:
         """A group sender's name, as the allowlist resolves it; their open_id when it cannot be found in time."""
         try:
-            found = await asyncio.wait_for(lark_cli.names([open_id], self._profile or None), _NAME_LOOKUP_SECONDS)
+            found = await asyncio.wait_for(self._transport.names([open_id]), _NAME_LOOKUP_SECONDS)
         except (TimeoutError, LarkCliError):
             found = {}
         return found.get(open_id) or open_id

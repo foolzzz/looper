@@ -1211,6 +1211,15 @@ CREATE TABLE IF NOT EXISTS task_user_gate_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_message ON task_user_gate_posts (message_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_external ON task_user_gate_posts (channel, external_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_posts_lark_bot') THEN
+        ALTER TABLE task_user_gate_posts DROP CONSTRAINT IF EXISTS task_user_gate_posts_channel_check;
+        ALTER TABLE task_user_gate_posts ADD CONSTRAINT task_user_gate_posts_channel_check
+            CHECK (channel IN ('lark', 'lark_bot', 'telegram'));
+        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_posts_lark_bot');
+    END IF;
+END $$;
 
 -- A task's agent room (looper/agents/room.py): the messages its Planner and its steps' seats send each other, only
 -- ever added. A seat is '<role>@<step key>' (worker@s2, backend_rd@s2, reviewer@s2); the sender comes from the
@@ -1413,6 +1422,15 @@ ALTER TABLE schedules ADD COLUMN IF NOT EXISTS daily_budget_usd DOUBLE PRECISION
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify TEXT NOT NULL DEFAULT 'failures'
     CHECK (notify IN ('failures', 'always', 'never'));
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark'));
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_notify_channel_lark_bot') THEN
+        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_notify_channel_check;
+        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_channel_check
+            CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot'));
+        INSERT INTO schema_migrations (name) VALUES ('schedules_notify_channel_lark_bot');
+    END IF;
+END $$;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_chat TEXT;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failures_alert_at TIMESTAMPTZ;
