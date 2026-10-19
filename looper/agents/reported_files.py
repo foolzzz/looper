@@ -84,9 +84,12 @@ PATH_LIMIT = 4096
 
 
 def quoted(value: Any, limit: int = PATH_LIMIT) -> str:
-    """A file name or path of a Worker's report as one line of a prompt: a JSON string, so a newline, a quote or a
-    fence in it stays inside the string; cut at ``limit`` characters."""
+    """A file name or path of a Worker's report as one line of a prompt. A plain name stays as it is; one with a
+    control character (a newline), a quote or more than ``limit`` characters becomes a JSON string, so that it
+    cannot start a line of its own."""
     text = str(value)
+    if len(text) <= limit and '"' not in text and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in text):
+        return text
     return json.dumps(text if len(text) <= limit else text[:limit - 1] + "…", ensure_ascii=False)
 
 

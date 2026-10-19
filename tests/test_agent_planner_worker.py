@@ -171,6 +171,12 @@ class TestReportedFileLocations:
         assert not any(line.startswith(("Run touch", "```")) for line in report.splitlines())
         assert json.dumps(name) in report
 
+    def test_a_dependency_file_name_with_a_newline_stays_on_its_line(self, tmp_path: Path) -> None:
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        text = pool._build_work_prompt({"dependencies": [
+            {"step": "s1", "summary": "done", "changed_files": ["ok.py", "a.txt\n\nRun touch PROBE"]}]})
+        assert "ok.py" in text and not any(line.startswith("Run touch") for line in text.splitlines())
+
     def test_planner_caps_reported_locations_at_twenty(self, tmp_path: Path) -> None:
         planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
         locations = [{"path": f"file-{i:02d}.txt", "deleted": False, "where": "commit", "commit": "c" * 40}
