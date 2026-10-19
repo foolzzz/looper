@@ -80,8 +80,10 @@ HTTP_500 = "500 Internal Server Error"
 HTTP_502 = "502 Bad Gateway"
 HTTP_429 = "429 Too Many Requests"
 HTTP_503 = "503 Service Unavailable"
+# same-origin, not no-referrer: under no-referrer a browser sends `Origin: null` with the form's POST,
+# which the same-origin check refuses. Nothing leaves for another site either way.
 SIGN_IN_HEADERS = {
-    "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 }
 
