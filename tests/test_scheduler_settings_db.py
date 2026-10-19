@@ -410,8 +410,61 @@ def test_clearing_the_minimum_interval_is_refused_before_anything_changes_when_t
         monkeypatch.setenv(ENV, "soon")
         status, payload = await env.call("PUT", "/api/scheduler-settings", {"min_interval_seconds": None})
         assert status == 400 and ENV in payload["error"], payload
+        # The row itself, and what a restart would read, not only the cache.
+        assert await env.pool.fetchval("SELECT value FROM system_settings WHERE key = $1",
+                                       scheduler_settings.MIN_INTERVAL_KEY) == "90"
+        monkeypatch.delenv(ENV)
+        assert await scheduler_settings.load() == 90 and scheduler_settings._min_source == "setting"
         view = await env.ok("GET", "/api/scheduler-settings")
         assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (90, "setting")
-        assert scheduler_settings.min_interval_seconds(gated=False) == 90
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_launch_reads_the_default_timeout_without_a_second_pool_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The scheduler holds a connection (and the schedule's row lock) while it launches a run: a read of
+    system_settings through the pool then needs a second connection, which a busy pool never gives."""
+    from looper.db import connection
+
+    class GuardedPool:
+        def __init__(self, pool: Any) -> None:
+            self.pool, self.depth, self.violations = pool, 0, []
+
+        def acquire(self) -> Any:
+            guard, inner = self, self.pool.acquire()
+
+            class Held:
+                async def __aenter__(self) -> Any:
+                    guard.depth += 1
+                    return await inner.__aenter__()
+
+                async def __aexit__(self, *exc: Any) -> Any:
+                    guard.depth -= 1
+                    return await inner.__aexit__(*exc)
+
+            return Held()
+
+        async def fetch(self, query: str, *args: Any) -> Any:
+            if self.depth and "system_settings" in query:
+                self.violations.append(query)
+            return await self.pool.fetch(query, *args)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.pool, name)
+
+    async def test(env: _Env) -> None:
+        await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 120})
+        sid = (await env.enabled())["schedule_id"]  # follows the default
+        guarded = GuardedPool(env.pool)
+        monkeypatch.setattr(connection, "_pool", guarded)
+        await env.due(sid)
+        await env.scheduler.tick()
+        [run] = await env.runs(sid)
+        assert run["status"] == "running"
+        assert await env.pool.fetchval("SELECT run_timeout_seconds FROM schedule_runs WHERE id = $1",
+                                       run["run_id"]) == 120
+        assert guarded.violations == []
 
     _run(test, monkeypatch, tmp_path)
