@@ -1,3 +1,5 @@
+import { isSessionEnded, SessionEndedError } from "@/lib/session";
+
 const API_BASE = "/api";
 
 export interface SystemStatus {
@@ -7,6 +9,8 @@ export interface SystemStatus {
   uptime: number;
   /** The startup self-check, as `looper doctor` prints it. */
   checks?: SelfCheck[];
+  /** True for a password session, which can sign out; false for the local browser's auto-login. */
+  can_sign_out?: boolean;
 }
 
 /** One startup check; "skip" means not checked, with the reason in `detail`. */
@@ -468,7 +472,7 @@ export function watchChat(sessionId: string, onMessage: (message: DbChatMessage)
         if (event.kind === "chat.message") onMessage(event.payload as unknown as DbChatMessage);
       },
       () => {
-        if (!stopped) retry = setTimeout(connect, CHAT_WATCH_RETRY_MS);
+        if (!stopped && !isSessionEnded()) retry = setTimeout(connect, CHAT_WATCH_RETRY_MS);
       },
     );
   };
@@ -2030,6 +2034,7 @@ export function streamTaskActivity(
 ): () => void {
   const abortController = new AbortController();
 
+
   (async () => {
     try {
       const res = await fetch(
@@ -2045,13 +2050,14 @@ export function streamTaskActivity(
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || abortController.signal.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
         for (const line of lines) {
+          if (abortController.signal.aborted) break;
           if (line.startsWith("data: ")) {
             eventData = line.slice(6);
           } else if (line === "" && eventData) {
@@ -2066,7 +2072,7 @@ export function streamTaskActivity(
         }
       }
     } catch (e) {
-      if ((e as Error).name !== "AbortError") {
+      if ((e as Error).name !== "AbortError" && !(e instanceof SessionEndedError)) {
         console.error("Activity SSE error:", e);
       }
     } finally {
@@ -3408,7 +3414,7 @@ export function streamSSE(
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || abortController.signal.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
@@ -3418,6 +3424,7 @@ export function streamSSE(
         let eventData = "";
 
         for (const line of lines) {
+          if (abortController.signal.aborted) break;
           if (line.startsWith("event: ")) {
             eventType = line.slice(7).trim();
           } else if (line.startsWith("data: ")) {
@@ -3435,7 +3442,7 @@ export function streamSSE(
         }
       }
     } catch (e) {
-      if ((e as Error).name !== "AbortError") {
+      if ((e as Error).name !== "AbortError" && !(e instanceof SessionEndedError)) {
         console.error("SSE error:", e);
       }
     } finally {

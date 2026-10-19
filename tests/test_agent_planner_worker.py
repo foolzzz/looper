@@ -580,6 +580,21 @@ class TestWorkerSubprocess:
         if error:
             assert error in result["error"]
 
+    def test_nonzero_exit_without_a_result_names_the_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The exit-code failure is built before judge_result runs; it must still name the runtime that ran."""
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "label", "Codex")
+
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), "sys.exit(1)")
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        result = asyncio.run(_run())
+        assert result["status"] == "failed" and result["error"] == "Codex exited with code 1"
+
     @pytest.mark.parametrize(("row", "failure", "limits"), [
         (None, None, (86400, 0)),  # no row: 86400 s, no turn limit
         (None, RuntimeError("database pool not initialised"), (86400, 0)),
@@ -1107,6 +1122,16 @@ class TestJudgeResult:
         (tmp_path / "a.py").write_text("x")
         result = judge_result(event, work_dir=tmp_path, is_verify=False)
         assert result["status"] == "failed"
+        assert error in result["error"]
+
+    @pytest.mark.parametrize(("event", "error"), [
+        (None, "Codex ended without a result event"),
+        (_result("x", is_error=True), "Codex run did not succeed"),
+    ])
+    def test_failure_names_the_runtime_that_ran(self, tmp_path: Path, event: dict[str, Any] | None, error: str) -> None:
+        from looper.agents.tiers.worker import judge_result
+
+        result = judge_result(event, work_dir=tmp_path, is_verify=False, runtime_label="Codex")
         assert error in result["error"]
 
     def test_missing_report_keeps_the_final_message(self, tmp_path: Path) -> None:

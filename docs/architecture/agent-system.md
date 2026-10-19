@@ -1394,7 +1394,7 @@ its own), and while it can still run (any status but completed: ready or
 running, or failed, stopped or cancelled, which a restart runs again with
 the new choices) it changes or drops either choice per role with `PUT
 /api/tasks/:id/agents`, from the task page's Agents tab or the Manager's
-`looper_task_update` (`profiles`) and `looper_concurrency`. All of them check
+`looper_task_update` (`profiles`, `system_prompt_modes`) and `looper_concurrency`. All of them check
 and write through one path (`projects.set_task_agents`: a profile by id or
 name, registered and able to run its role; both kinds in one transaction). A
 Worker or Reviewer uses a new profile from its next step on, while a step that
@@ -2511,7 +2511,7 @@ contract 3.3 KB.
 | `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a running one; `restart` a stopped, failed or cancelled one, going on from its saved plan (`TASK_RESTART` `continue`); `start_over` one, planned anew with its steps, plan and Planner session deleted (`start_over`; the confirmation says how many accepted steps it deletes); `cancel` a running one | write; start_over and cancel are high |
 | `looper_task_instruct` | Add the user's words to a running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
 | `looper_task_gate_reply` | Add the user's message this turn answers to a user gate waiting for them (`task_id`, `gate`, `end` to end the discussion), as the task page does: Looper sends the message itself, or the `excerpt` of it the model names, which must be in it word for word; a turn that answers no message is refused. The channel message it is is kept, so the Planner's reply goes under it when it came from the gate's chat ([User gates](#user-gates)) | write |
-| `looper_task_update` | Change a task: its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it) | write |
+| `looper_task_update` | Change a task: its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it), and its `system_prompt_modes` (`append` or `replace` per role, `null` to drop the task's choice; the same write as `profiles`, in the same call) | write |
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
 | `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`), `delete` one without tasks or schedules (`projects.deletable_project` refuses before anything is asked; the confirmation says its settings, allowed list, installs, knowledge and own skills go with it, and its directory's files stay) | list and get read; write; delete is high |
 | `looper_agent_profiles` | `list` the profiles (runtime, provider, model, effort, agent teams, the roles it can run, where it is used), the runtimes and the providers with their models; `create` (`name`, `runtime` by id, name or type, `provider` by id or name, `model`, `effort`, `agent_teams`), `update` (a null `effort` clears it), `delete` one nothing selects (`profile_registry.deletable_profile` names where it is used, before anything is asked) | list reads; write; delete is high |
@@ -3396,7 +3396,7 @@ A dashboard page load signs the browser in when `Sec-Fetch-Mode: navigate` and
 `Sec-Fetch-Dest: document`, both the TCP peer and `Host` are loopback, and neither
 `Forwarded` nor `X-Forwarded-For` is present. This token cookie has `Path=/`,
 `HttpOnly` and `SameSite=Strict`, without `Max-Age`, `Expires` or `Secure`;
-pages use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, other
+pages use `Cache-Control: no-store` and `Referrer-Policy: same-origin` (the Sign out form's POST must carry an `Origin`), other
 files keep their public cache. Other browsers sign in with the user name and
 password set on the server's machine by
 `looper auth set-password [--user NAME] [--runtime-root DIR]`. The user defaults
@@ -3471,7 +3471,7 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | System health: `agents`, each supervisor component's `healthy`, `state` (`running`, `restarting`, `crash_looping`), `up`, `restart_count` (restarts in a row), `last_crash_at`, `next_restart_at` and `agent_type`; `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `completed` |
+| `/api/status` | GET | System health: `agents`, each supervisor component's `healthy`, `state` (`running`, `restarting`, `crash_looping`), `up`, `restart_count` (restarts in a row), `last_crash_at`, `next_restart_at` and `agent_type`; `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `completed`; `can_sign_out`: true for a browser signed in with the password and without a token cookie, which the dashboard's Sign out control (`POST /logout`) ends, false for the local browser's auto-login or a Bearer token |
 | `/login` | GET | Login form, or no-password instructions; 303 to `/` for a signed-in browser or local auto-login |
 | `/login` | POST | Same-origin password sign-in; 303 to `/` with a session cookie on success; 401 for wrong credentials or no password, 429 when locked, 503 for an unusable password file |
 | `/logout` | POST | Requires same-origin `Origin`; ends the session, clears both cookies and returns 303 to `/login` |
