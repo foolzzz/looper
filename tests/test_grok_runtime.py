@@ -635,7 +635,7 @@ def _resident_command(root: Path, executable: str, prompt: str) -> list[str]:
                                  launch=_launch(executable=executable))
 
 
-def test_a_resident_session_runs_each_turn_in_a_new_process_that_resumes_it_in_the_owners_home(
+def test_a_per_turn_session_runs_each_turn_in_a_new_process_that_resumes_it_in_the_owners_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     login = _operator(tmp_path, monkeypatch)
@@ -650,7 +650,7 @@ def test_a_resident_session_runs_each_turn_in_a_new_process_that_resumes_it_in_t
         async def on_event(event: dict[str, Any]) -> None:
             seen.append(event)
 
-        session = GROK.resident_session("planner-task-1")
+        session = ResidentGrok(label="planner-task-1")
         first = _resident_command(root, grok, "prompt A")
         await session.start(first, cwd=str(tmp_path), signature="a", env=_launch().environment())
         one = await session.run_turn("hello", on_event)
@@ -687,7 +687,7 @@ def test_a_new_session_removes_the_owners_earlier_ones(tmp_path: Path) -> None:
     grok = fake_claude(tmp_path / "grok", _FAKE_GROK)
 
     async def _run() -> None:
-        session = GROK.resident_session("manager")
+        session = ResidentGrok(label="manager")
         for message in ("one", "two"):
             await session.start(_resident_command(root, grok, "p"), cwd=str(tmp_path), signature="s",
                                 env=_launch().environment())
@@ -704,7 +704,7 @@ def test_a_session_grok_no_longer_has_starts_no_session(tmp_path: Path) -> None:
     grok = fake_claude(tmp_path / "grok", _FAKE_GROK)
 
     async def _run() -> Any:
-        session = GROK.resident_session("manager")
+        session = ResidentGrok(label="manager")
         command = _resident_command(root, grok, "prompt") + GROK.resume_args("0199a000-0000-7000-8000-00000000dead")
         await session.start(command, cwd=str(tmp_path), signature="s", env=_launch().environment())
 

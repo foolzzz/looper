@@ -5,7 +5,7 @@
   几项在第 12 节写明。
 - **依据：** [多运行时 agent 架构 RFC](multi-runtime-agents-v0.zh-CN.md)（适配器接口第 5 节、隔离第 10 节、P1 登录）；
   [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 M9 节。
-- **最近更新：** 2026-10-17
+- **最近更新：** 2026-10-18（第 14 节：ACP 常驻会话）
 
 ## 1. 背景与目标
 
@@ -31,7 +31,7 @@ Looper 已有三种运行时：Claude Code、Codex（含它自己的 ChatGPT 登
 
 - Grok 接 API key provider（xAI key、CPA 等）：Grok 的自定义模型支持 `chat_completions`、`responses`、`messages`
   三种接口（`[model.<id>]` 的 `api_backend`、`base_url`、`env_key`），以后可以照 OMP 的做法接，本期只做登录；
-- ACP（`grok agent stdio`）常驻进程：见第 5 节。
+- ACP 的运行中插话（TUI 的 `steer`）：见第 5 节；管家、规划者的常驻会话走 ACP，见第 14 节。
 
 ## 2. Grok CLI 的非交互接口（1.0.62）
 
@@ -78,7 +78,7 @@ env GROK_HOME=<家目录> HOME=<家目录> grok
 
 ### 3.2 常驻会话（管家、规划者）
 
-逐轮续接（`per_turn.PerTurnSession`，`ResidentGrok`）：每轮一个 3.1 的进程，第二轮起加 `--resume <id>`；会话 id
+管家、规划者默认走第 14 节的 ACP 常驻进程（`grok_acp.AcpGrok`）；ACP 用不了时回落到逐轮续接（`per_turn.PerTurnSession`，`ResidentGrok`）：每轮一个 3.1 的进程，第二轮起加 `--resume <id>`；会话 id
 取自 `init` 的 `session_id`。会话在 `GROK_HOME` 里，而一次运行的家目录随生成的配置变（第 7 节），所以每个常驻 owner
 有自己的家目录 `<runtime_root>/.local/grok/sessions/<label>`（同时是它的 `HOME`），每轮开始前从这一轮的运行家目录
 同步 `config.toml`、`rules/looper.md`、登录链接和共享目录的链接（同 `codex._sync_home`）。system prompt 改了（命令
@@ -125,7 +125,7 @@ headless 不能插话：Worker 跑起来以后规划者的 `forward`、`nudge` �
 差距（计划第 5.2 节）。Grok 自己有插话（TUI 的 `steer`、子 agent 的 `delivery: steer/interject`），对外只能走 ACP：
 `grok agent --always-approve stdio` 是 JSON-RPC 的常驻进程。实测它的 `initialize` 应答（不调用模型）声明了
 `loadSession`、`sessionCapabilities`（`list`、`resume`、`close`）、MCP 的 HTTP 和 SSE、`x.ai/hooks`、`x.ai/pluginDirs`，
-没有声明运行中追加输入的扩展；要不要改走 ACP（要写 JSON-RPC 客户端、权限回调和 `session/update` 的翻译）以后再定。
+没有声明运行中追加输入的扩展；管家、规划者改走 ACP 常驻会话见第 14 节；运行中追加输入仍未做。
 
 ## 6. MCP 注入
 
@@ -255,7 +255,7 @@ headless 不能插话：Worker 跑起来以后规划者的 `forward`、`nudge` �
 
 | 决定 | 备选与理由 |
 |---|---|
-| headless 每轮一个进程，不走 ACP | ACP 能常驻、可能能插话，但要新写 JSON-RPC 客户端和翻译层；headless 的事件流就是 Looper 的内部格式，逐轮续接的代码已被 Codex、OMP 验证 |
+| Worker、Reviewer 用 headless 一次一个进程；管家、规划者走 ACP 常驻（第 14 节），回落逐轮续接 | ACP 要 JSON-RPC 客户端和翻译层，只有常驻角色受益（省进程启动、MCP 初始化和 `--resume` 重放）；一次性运行用 headless，事件流就是 Looper 的内部格式 |
 | 事件流用 `streaming-messages-json`，不加 partial | `streaming-json` 要多一层翻译；partial 只多出 `stream_event`，每次响应的用量 `assistant` 已经带着 |
 | system prompt 放家目录的 `rules/looper.md` | `--rules` 只收文字，prompt 会进 argv 和运行记录；`--system-prompt-override` 会去掉 Grok 自己的工具说明 |
 | `HOME` 也指向家目录，shell 和 stdio MCP 服务器再拿回操作者的 | 只靠 `compat` 开关挡不住 `~/.agents/skills`、`~/.claude/plugins` 和 `~/.claude/settings.json`（第 7 节实测） |
@@ -264,3 +264,122 @@ headless 不能插话：Worker 跑起来以后规划者的 `forward`、`nudge` �
 | 本期只做登录，不做 API key | 维护者的要求是登录；API key 的路径（`[model.<id>]`）清楚，留作后续 |
 | 自动化运行关遥测和会话上传 | 隔离的家目录不带操作者的偏好，默认值会上传会话和轨迹 |
 | 抽出两种登录共用的链接代码 | 复制一份 `codex_login` 改名更快，但两份一样的分叉检查以后要改两处 |
+
+## 14. 管家和规划者的 ACP 常驻会话
+
+2026-10-18 起（维护者排进本版本）。`grok agent --always-approve … stdio` 是 JSON-RPC 2.0、每行一个 JSON 的常驻
+进程。实现在 `runtimes/grok_acp.py`（`AcpGrok`），接口与 `ResidentGrok`、`ResidentClaude` 相同
+（`runtimes.ResidentSession`）。下面的事实都来自本机 Grok 1.0.62、自己的登录、一次性家目录的实探（探针和线上日志
+在本地，不入库），📄 表示只有文档。
+
+### 14.1 哪些角色
+
+管家和规划者用 ACP；Worker、Reviewer 仍是 headless 一次运行。理由：Worker、Reviewer 一次提示跑完就退出，常驻进程
+省不下东西；办公台的咨询要 `--resume --fork-session` 和复制会话目录（3.3、第 9 节），ACP 没有对应的已验证做法。
+选择方式是适配器上的类型化字段 `RuntimeAdapter.resident_transport`（`ResidentTransport.ACP` / `PER_TURN`），不是字符串
+判断；Grok 是 `ACP`，Codex、OMP 是 `PER_TURN`。
+
+### 14.2 命令、prompt、MCP、家目录、模型
+
+`GrokRuntime.resident_command` 不变（仍是 3.1 的 headless 命令，同时是 `signature` 的一部分），`AcpGrok` 把它翻成
+ACP 命令（`parse_command`、`acp_argv`）：
+
+```
+env GROK_HOME=<owner 家目录> HOME=<owner 家目录> grok --trust --no-auto-update agent --always-approve
+    [--agent-profile <文件>] -m <模型> [--effort <强度>] stdio
+```
+
+| 项 | 实测 |
+|---|---|
+| 全局旗标位置 | ✅ `--trust` 在 `agent` 之前才生效（不带时项目的 `AGENTS.md` 读不到：问口令得 `NONE`；带了得到口令）。`--always-approve`、`-m`、`--effort`、`--agent-profile` 在 `agent` 之后 |
+| 规则文件 | ✅ 家目录的 `rules/looper.md` 每个 ACP 会话都读（口令测试：回复以规则里的口令结尾） |
+| 替换模式 | ✅ `--agent-profile <agent.md>`（`prompt_mode: full`）替换 Grok 的 prompt（回复只有 agent 里要求的那个词） |
+| MCP | ✅ `config.toml` 的 `[mcp_servers.*]` 在 ACP 里照常加载（真实管家会话 `search_tool` → `use_tool probe__ping` 拿到 `PONG-OSPREY`）。`session/new` 的 `mcpServers` 也能用（ACP 格式，`env` 是 `{name,value}` 数组），但 Looper 不用它：保持一份配置、同样的 `<server>__<tool>` 名字，`mcpServers` 传空 |
+| 家目录 | ✅ 与逐轮续接相同：owner 的家目录 `sessions/<label>`，每次启动进程前从运行家目录同步（`_sync_home`）；ACP 的会话也存在这个家目录的 `sessions/<编码后的工作目录>/<id>`，所以 `--resume` 能续接 ACP 建的会话（互通实测通过，回落依赖它） |
+| 模型、强度 | ✅ `-m`、`--effort` 在 `agent` 后；`session/new` 的响应和 `_x.ai/session_notification` 的 `model_changed` 报出 `grok-4.7`、`low` |
+| 只读（规划者） | ❌ **根级 `--tools` 对 `agent stdio` 无效**（实测写文件的 `write` 工具照样跑）。✅ 用 agent profile 的 `tools:` 行：`tools: read_file,grep,list_dir` 后模型的工具只剩 `read_file`、`list_dir`、`grep` 和 MCP 的 `search_tool`、`use_tool`（与 headless `--tools` 相同），要它写文件它说 `CANNOT`，文件没有。非替换模式的 profile 只有 `tools:`、没有正文，规则文件照读；替换模式在 `agent.md` 的前置字段里加一行 |
+| `--max-turns` | ❌ 只有 headless 有。`AcpGrok` 数模型响应（`response_completed`），超过就取消，结果是 `error_max_turns` |
+| 其他旗标 | 没有 ACP 写法的旗标（`parse_command` 不认的）→ 整个会话回落（14.7） |
+
+### 14.3 一轮怎样对应 `session/prompt`
+
+一轮是一次 `session/prompt`（`prompt: [{type: text, text}]`）。响应前流式来 `session/update` 通知（`agent_thought_chunk`、
+`agent_message_chunk`、`tool_call`、`tool_call_update`），以及 `_x.ai/session_notification` 的 `response_completed`
+（每次模型响应的用量，`input_tokens` 不含缓存）。`AcpTurn` 翻成 Claude Code 的 stream-json：
+
+- 开头一条 `system/init`（带 `session_id`；每轮一条，同逐轮续接，管家据此记会话 id）；
+- 每次模型响应一条 `assistant`（thinking、text、`tool_use`，`message.usage` 是这次响应的用量），后面跟内部 `usage`
+  事件。`tool_use` 的名字取 `_meta["x.ai/tool"].name`（`run_terminal_command`、`read_file`、`use_tool`…，与 headless 一致，
+  `tool_summary` 不变）。`response_completed` 在该响应的文字之后、工具调用之前到，所以 `assistant` 在响应的第一个
+  工具调用开始时发出（任务动态里长命令跑着时就看得到，比 headless 早）；
+- 工具调用结束（`tool_call_update` 的 `status` 为 `completed`、`failed`）一条 `user`（`tool_result`），命令输出的
+  字节数组照 headless 的办法解成文字；
+- 最后一条 `result`：`result` 是最后一次不调工具的响应的文字；`stopReason` 为 `end_turn` 是 `success`，其他
+  （`cancelled`、`max_tokens`、`max_turn_requests`、`refusal`）或 JSON-RPC error 是 `is_error` 的 `error_during_execution`。
+
+不翻译的：`available_commands_update`、`_x.ai/*` 的其余通知（排队、模型列表、公告、会话设置）。📄 `session/update` 的
+文字增量没有转成 `stream_event`（管家的实时回显不变，与 headless 一致），以后可以做。
+
+### 14.4 取消和结束
+
+- ✅ `session/cancel`（通知）：0.02 秒内 `session/prompt` 以 `stopReason: "cancelled"` 返回（`_meta.cancellationCategory:
+  MidTurnAbort`），**正在跑的工具命令随之被结束**（`sleep 117` 在取消 3 秒后已不在），会话还能继续用（下一轮正常）。
+  经 `AcpGrok`：任务被取消、花费软上限（`stop()`）、`--max-turns` 都发 `session/cancel`，等响应；`CANCEL_GRACE_SEC`
+  （5 秒）内没有响应就经 `proc_tree.end` 结束整个进程，并标记会话过期。软上限的轮以上限的结果结束（不报被取消轮自己的
+  `result`）。
+- `stop()`：经 `proc_tree.end`（SIGTERM，宽限后 SIGKILL，整个进程树）。
+- 进程中途退出：这一轮没有 `result`（`ResidentTurn(None, 退出码)`），会话标记为过期，owner 重启：新进程 `session/load`。
+- Grok 向客户端发的请求（`session/request_permission` 等）：`--always-approve` 下不该有；有则回 `cancelled`（权限）或
+  "不支持"，记警告，不会卡住。非 JSON 对象的行记警告后跳过。
+
+### 14.5 续接和重启
+
+📄 `initialize` 声明 `loadSession: true`（✅ 实测）。重启后 `session/load {sessionId, cwd, mcpServers: []}` 保持原 id
+（✅ 实测：新进程里问第一轮说过什么，答得出）。会话不在了：`session/load` 返回 JSON-RPC error `-32603`
+（`FS_NOT_FOUND`，"Path not found."）→ `ResidentTurn(None, 1, session_started=False)`，与逐轮续接"会话不存在"同一
+语义，owner 开新会话。没有 `loadSession` 而有已存会话 → 回落逐轮续接（14.7）。开新会话的那一轮删掉 owner 之前的
+会话（同 `prune_sessions`）。
+
+### 14.6 每轮用量和花费
+
+`session/prompt` 的响应 `_meta.usage` 是**这一轮**的合计（含这一轮的所有模型调用和子 agent）：`inputTokens`、
+`outputTokens`、`cachedReadTokens`、`cacheCreationTokens`、`costUsdTicks`、`modelUsage`、`numTurns`。⚠️ ACP 的
+`inputTokens` **包含缓存命中**（实测 14525 = `response_completed` 的 13373 + 1152；文档也这么写），headless 的
+`input_tokens` 不含。`AcpTurn.finish` 减掉缓存读写，写成 headless 的 `usage`/`modelUsage` 形状，所以 `run_usage`、
+记录和任务上限的口径不变。花费：`costUsdTicks / 1e10` 美元（xAI 的 tick 是 1e-10 美元）。核对：用三个数据点（ACP 一轮
+13373 未缓存输入 + 1152 缓存 + 46 输出 = 27598 万 ticks；ACP 第二轮 137 + 14464 + 41 = 7752 万；headless 一轮
+$0.013864 的 3179 + 14592 + 35）解出的单价吻合（未缓存输入约 $2/百万 token），tick 换算与 headless 的美元数一致。
+未知价格的规则不变：`costUsdTicks` 缺失或 0 就不写 `total_cost_usd`，这一轮只记 token。
+
+### 14.7 回落
+
+类型化的 `AcpUnavailable`（`grok_acp.py`）表示"这个会话不能走 ACP"：命令里有没有 ACP 写法的旗标（`start` 时）、
+`initialize` 失败、退出或 `INIT_TIMEOUT_SEC`（30 秒）没应答（没有 `agent stdio` 的旧 Grok）、已存会话但没有
+`loadSession`、`session/new` 没返回会话 id。回落后这个会话的其余轮由 `ResidentGrok` 逐轮续接，续接同一个会话、
+同一个家目录，记警告；`AcpGrok.transport` 报 `acp` 或 `per-turn`。`session/new`、`session/load`（非"会话不在"）出错或超时：
+这一轮没有结果、会话过期，不回落。
+
+### 14.8 实跑核实（2026-10-18，`grok-4.7`，`--effort low`，自己的登录）
+
+| # | 事实 | 结果 |
+|---|---|---|
+| 1 | `initialize` → `session/new` → 两轮 `session/prompt` | ✅ 第一轮 2.2 秒，第二轮 1.8 秒；`stopReason: end_turn` |
+| 2 | 真实管家会话（`AcpGrok`，MCP 经 `config.toml`）：新会话 + MCP 工具 + 同进程第二轮 | ✅ 38.1 秒（冷启动、MCP、3 次模型调用，$0.074），同进程第二轮 3.1 秒（$0.0093）；两轮 pid 相同 |
+| 3 | 重启后 `session/load` 再问 | ✅ 记得 `PONG-OSPREY`，会话 id 不变，3.4 秒；之后逐轮 `--resume` 同一会话也记得（互通） |
+| 4 | 规划者只读 | ✅ 工具列表 `read_file`、`list_dir`、`grep`、`search_tool`、`use_tool`、`probe__ping`；写文件失败，文件不存在 |
+| 5 | 取消正在跑的 `sleep 117` | ✅ 取消后命令已结束（无残留），同进程下一轮正常（1.7 秒） |
+| 6 | 根级 `--tools` | ❌ 对 `agent stdio` 无效（14.2） |
+| 7 | 压缩事件的通知形状 | ❓ 未触发；`COMPACTION_EVENTS` 在 ACP 下不翻译 `/compact`，没有 `compact_boundary` |
+| 8 | 并行工具调用的 `assistant`/`tool_result` 顺序 | ❓ 未触发；同一响应的后几个调用各成一条 `assistant`（无文字、无用量） |
+| 9 | 运行中追加输入、`stream_event` 文字增量 | 未做 |
+
+### 14.9 决定与备选
+
+| 决定 | 备选与理由 |
+|---|---|
+| 管家、规划者走 ACP，Worker、Reviewer 保持 headless | 全部角色走 ACP：一次性运行没有收益，咨询的分叉没有已验证的 ACP 做法 |
+| 适配器类型化字段 `resident_transport` + 会话内回落 | 探测期能力位：已注册运行时的能力存在数据库里，不会随 Looper 升级更新；回落在会话里判断，旧 Grok 自动退到逐轮续接 |
+| 保持 `resident_command` 不变，ACP 命令由它翻出 | 单独造一份 ACP 命令：`signature`、记录里的命令和回落要两套 |
+| MCP 仍走 `config.toml`，`mcpServers` 传空 | 用 `session/new` 的 `mcpServers`：令牌要经协议消息传，配置要两份；效果相同 |
+| 只读用 agent profile 的 `tools:` | 用权限回调拒绝写工具：模型仍看得到写工具，prompt 可见行为变；放弃 ACP 给规划者：规划者是常驻角色里最该受益的 |
+| 花费取 `costUsdTicks / 1e10` | 按 token 自己算：内置价目表没有 xAI 模型 |
