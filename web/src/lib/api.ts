@@ -2556,7 +2556,10 @@ export interface PromptPreview {
   profile: { id: string; name: string };
   role: AgentRole;
   runtime: string;
+  /** What the launch uses: the role's mode on Claude Code, append elsewhere. */
   system_prompt_mode: SystemPromptMode;
+  role_system_prompt_mode: SystemPromptMode;
+  system_prompt_mode_applies: boolean;
   custom_prompt_set: boolean;
   looper_prompt_sha256: string;
   prompt_layers: Record<string, unknown>;
@@ -2667,6 +2670,9 @@ export interface LayerValues {
   /** What every run of a role a task's Planner defines ends with; only the system layer sets it (null: the
    * built-in boundaries). */
   boundaries: string | null;
+  /** Whether the role replaces Claude Code's default system prompt or appends to it; only a role layer that sets it
+   * has one (absent: the role's built-in value, which `effective` shows). */
+  system_prompt_mode?: SystemPromptMode | null;
 }
 
 export interface Sourced<T> {
@@ -2699,6 +2705,8 @@ export interface EffectiveSettings {
   /** The Workers' and Reviewers' default limit per task (source "role" or "builtin"), in Settings → Roles only;
    * absent for the other roles, the system layer and in a project. */
   max_concurrency?: Sourced<number>;
+  /** The role's mode (its role layer's, else the built-in one); it applies only to runs on Claude Code. */
+  system_prompt_mode: SystemPromptMode;
 }
 
 export interface SettingLimits {

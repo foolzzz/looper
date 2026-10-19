@@ -16,13 +16,13 @@ const PROFILE: AgentProfile = {
   cost: { source: "runtime", equivalent: false, unpriced: [] },
 };
 const REGISTRY: Registry = {
-  runtime_types: ["claude-code", "stand-in"].map<Registry["runtime_types"][number]>((type) => ({
+  runtime_types: ["claude-code", "codex", "stand-in"].map<Registry["runtime_types"][number]>((type) => ({
     type, label: type === "stand-in" ? "Stand-in" : "Claude Code", default_executable: type,
     runtime_id: `rt-${type}`, protocols: ["anthropic"], capabilities: [], roles: ["worker"],
-    auth_kinds: ["api_key"], can_replace_system_prompt: type === "claude-code",
+    auth_kinds: ["api_key"], can_replace_system_prompt: type !== "stand-in",
     replace_system_prompt_refusal: type === "stand-in" ? REFUSAL : null,
   })),
-  runtimes: ["claude-code", "stand-in"].map<Registry["runtimes"][number]>((type) => ({
+  runtimes: ["claude-code", "codex", "stand-in"].map<Registry["runtimes"][number]>((type) => ({
     runtime_id: `rt-${type}`, name: type, type, type_label: type, executable: "", default_executable: type,
     path: null, protocols: ["anthropic"], version: null, capabilities: [], roles: ["worker"],
     probed_at: null, probe_error: null, builtin: true, profile_count: 0,
@@ -80,8 +80,17 @@ describe("Agent Profile prompts", () => {
     });
   };
 
-  it("renders the append and replace choices with append selected by default", async () => {
+  const CODEX: AgentProfile = { ...PROFILE, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
+
+  it("hides the choice on Claude Code, which sets it per role", async () => {
     await show();
+    expect([...container.querySelectorAll("label")].some((l) => l.textContent === "System prompt")).toBe(false);
+    expect(container.querySelector('[data-testid="prompt-mode-per-role"]')!.textContent)
+      .toContain("set per role in Settings → Agents");
+  });
+
+  it("renders the append and replace choices with append selected by default", async () => {
+    await show(CODEX);
     const field = select("System prompt");
     expect(field.value).toBe("append");
     expect(field.disabled).toBe(false);
@@ -98,7 +107,7 @@ describe("Agent Profile prompts", () => {
   });
 
   it("sends the selected system_prompt_mode in the profile save body", async () => {
-    await show();
+    await show(CODEX);
     await choose("System prompt", "replace");
     await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(requests).toEqual([expect.objectContaining({ url: "/api/agent-profiles/p", body: expect.objectContaining({ system_prompt_mode: "replace" }) })]);
