@@ -2062,8 +2062,8 @@ dashboard only). A new schedule is disabled.
   Scheduler, `GET`/`PUT /api/scheduler-settings`; default 300 s, a whole number
   from 1): it applies to the next save at once, and saved schedules are not
   checked again. With no saved value, the deprecated
-  `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` (or `LOOPX_…`) still applies for this
-  version and logs one warning that names the variable, never its value; once a
+  `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` (or `LOOPX_…`), read from the server's
+  environment and not from `.env`, still applies for this version and logs one warning that names the variable, never its value; once a
   value is saved the variable is ignored. The system setting
   `scheduler.run_timeout_seconds` (default: no limit; 1 second to 30 days) is the run
   timeout of a schedule whose `run_timeout_seconds` is `"default"`
