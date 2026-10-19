@@ -1,5 +1,5 @@
-"""The Manager's settings tool (Manager tools RFC, section 7): the layers every agent inherits, a role's timeout, and
-the Agent Profiles a project's Planners may choose.
+"""The Manager's settings tool (Manager tools RFC, section 7): the layers every agent inherits, a role's timeout,
+the Agent Profiles a project's Planners may choose, and the operator's knowledge vault.
 
 A layer changes as the dashboard changes it (``agent_settings.update_system``,
 ``update_role``, ``update_project``: the shared defaults, a role, a project, a
@@ -10,7 +10,8 @@ without those it removes), so each refuses with the dashboard's message. A chang
 defaults, a role's default concurrency limit (how many of each task's Workers or
 Reviewers run at once when the task sets none) or raises a spend cap (a run's
 cap any role would run with goes up, or away):
-the user is shown each value before and after, and confirms first. A limit
+the user is shown each value before and after, and confirms first. A knowledge vault change always asks first
+too: it lets a project's agents read the notes and write in its writable folders. A limit
 set lets what waits check again (``recheck_limits``), as the dashboard does.
 """
 
@@ -21,7 +22,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...db import agent_setting_layers as db_layers, profile_registry as db_profiles, role_configs as db_roles
-from .. import agent_settings, projects, schedules, scheduler_settings
+from .. import agent_settings, projects, schedules, scheduler_settings, vault
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, LayerValues, SettingsError
 from ..agent_settings import default_concurrency, index_layers, layer_update, resolve
 from ..project_execution import format_usd
@@ -198,10 +199,30 @@ async def _scheduler_set(call: Call) -> dict[str, Any]:
 
 
 async def _confirming(call: Call) -> str | None:
-    """What a change of the shared defaults, of a limit, or one raising a spend cap does, for the user to confirm;
+    """What a change of the vault, the shared defaults, a limit, or one raising a spend cap does, for the user to confirm;
     None for any other call (``write``), or another action."""
     if call.arguments["action"] == "scheduler":
         return await _scheduler_confirming(call)
+    if call.arguments["action"] == "knowledge_vault":
+        values = _vault_values(call.arguments)
+        try:
+            config = None if values == {"path": None} else vault.check_config(values)
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+        before = await vault.settings_view()
+        writable = before["writable"]
+        before_folders = (", ".join(str(item) for item in writable) if isinstance(writable, (list, tuple))
+                          else str(writable or "")) or "无"
+        after = {"path": str(config.path) if config else None,
+                 "writable": list(config.writable) if config else [],
+                 "rules_file": config.rules_file if config else None}
+        return "\n".join([
+            "要修改知识库设置吗？",
+            f"- 目录：{before['path'] or '未配置'} → {after['path'] or '未配置'}",
+            f"- 可写目录：{before_folders} → {', '.join(after['writable']) or '无'}",
+            f"- 规则文件：{before['rules_file'] or '无'} → {after['rules_file'] or '无'}",
+            "开着知识库的项目里，任务的 agent 可以读这个目录里的全部笔记，并直接写入可写目录（每次写入是一次 git 提交）。",
+        ])
     if call.arguments["action"] != "set":
         return None
     place = await _place(call.arguments)
@@ -236,6 +257,13 @@ def _values(arguments: Mapping[str, Any]) -> dict[str, Any]:
     values = arguments.get("values")
     if not values:
         raise OpError(ErrorCode.INVALID, "values: give at least one setting to change (null clears it)")
+    return dict(values)
+
+
+def _vault_values(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    values = arguments.get("knowledge_vault")
+    if not isinstance(values, Mapping) or not values:
+        raise OpError(ErrorCode.INVALID, "knowledge_vault: give a nonempty settings object ({\"path\": null} clears it)")
     return dict(values)
 
 
@@ -318,11 +346,14 @@ async def _view(call: Call) -> dict[str, Any]:
         view = await _read(_Place(Layer.SYSTEM, None, None))
         timeouts = {c["role"]: c["timeout_seconds"] for c in await db_roles.list_configs()}
         scheduler = await scheduler_settings.settings_view()
+        vault_view = await vault.settings_view()
         return {"scheduler": {name: _scheduler_shown(entry) for name, entry in scheduler.items()},
                 "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
                                  "effective": _effective(entry["effective"]), "timeout_seconds": timeouts.get(role)}
-                          for role, entry in view["roles"].items()}}
+                          for role, entry in view["roles"].items()},
+                "knowledge_vault": {key: vault_view[key] for key in
+                                    ("configured", "path", "writable", "rules_file", "problem")}}
     project = await project_named(call.arguments["project"])
     view = await _read(_Place(Layer.PROJECT, None, project))
     allowed = await answered(projects.allowed_profiles_view(project["id"]))
@@ -366,6 +397,8 @@ async def _settings(call: Call) -> dict[str, Any]:
         return await _allowed(call)
     if action == "scheduler":
         return await _scheduler_set(call)
+    if action == "knowledge_vault":
+        return {"knowledge_vault": await answered(vault.update_settings(_vault_values(call.arguments)))}
     return await _set(call)
 
 
@@ -376,12 +409,17 @@ TOOLS: tuple[Tool, ...] = (
                     "project. view (with project: its layers and allowed profiles); set values on one layer (no role "
                     "nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners "
                     "may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user "
-                    "confirms them first). The user confirms shared defaults, limits and higher spend caps first. Model and "
+                    "confirms them first). knowledge_vault: the notes folder agents read in projects that turn it on, and "
+                    "the folders they may write (the user confirms first). The user confirms shared defaults, limits and "
+                    "higher spend caps first. Model and "
                     "effort are the profile's.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "scheduler"]},
+                "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "scheduler",
+                                                      "knowledge_vault"]},
+                "knowledge_vault": {"type": "object", "description": "knowledge_vault: path (absolute), writable "
+                                    "(folders in it), rules_file; {\"path\": null} turns it off."},
                 "project": {"type": "string", "minLength": 1, "description": "The project's name."},
                 "role": {"type": "string", "enum": [role.value for role in AgentType]},
                 "values": {

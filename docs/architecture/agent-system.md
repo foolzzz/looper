@@ -1747,6 +1747,76 @@ Verified with Claude Code 2.1.285 under the isolation flags: the agent reads
 files in an `--add-dir` directory, a `CLAUDE.md` in that directory or above it
 is not loaded, and a directory that does not exist does not fail the run.
 
+### The knowledge vault: the operator's notes, read and written through Looper
+
+The operator's own Markdown vault (an Obsidian vault, say: a local directory,
+usually a git repository) can be the knowledge of the projects that turn it on
+(`looper/agents/vault.py`, the tools in `looper/agents/ops/vault.py`;
+[RFC](rfcs/obsidian-knowledge-v0.zh-CN.md)). Agents read the whole vault and
+write only in its writable folders; each write is a git commit in the vault.
+The tools are Looper's MCP tools, the same on every runtime.
+
+- **The setting** (`system_settings` key `knowledge_vault`, Settings →
+  Knowledge vault, `GET`/`PUT /api/knowledge-vault`, the Manager's
+  `looper_settings` action `knowledge_vault`, which the user confirms):
+  `path` (absolute, an existing directory, stored resolved), `writable`
+  (folders inside it, each an existing directory, neither a link nor below
+  one, so a link is refused when the setting is saved; empty: read only) and `rules_file` (a file inside it, optional).
+  It is checked again whenever it is read: a vault that no longer holds (its
+  directory removed, a folder turned into a link out of it) is `problem`, and
+  every tool refuses with it. It is a local path, so the configuration export
+  leaves it out; the project's `vault` goes with the project.
+- **Who gets the tools.** A task's Planner, Workers and Reviewers, when the
+  task's project has `vault` on and the setting holds; the Manager has only
+  the setting. A Worker's or Reviewer's run gets its run token when its project
+  has the room or the vault on (the token knows which); the Planner uses its
+  own. The list is fixed when a run starts (each Planner turn, each Worker or
+  Reviewer run); every call checks the project and the setting again, and is
+  `forbidden` once either is off. The Planner's tool guide and the runs' system
+  prompts (a `## Knowledge vault` section after the task and the room, its own
+  layer `vault`) say the tools exist in one line; with the vault off, or the
+  setting unset, the prompts are byte-for-byte as before.
+- **Reading.** `looper_vault_search` (`query`, `limit` 1 to 30, default 10):
+  Markdown files whose path or text holds every word of the query, in any
+  case, most hits first, with a snippet; it follows no link, skips names
+  starting with `.` (`.git`, `.obsidian`, Looper's temporary files) and files
+  over 512 KiB, and stops at 10,000 files, 32 MiB or 5 s (`truncated`).
+  `looper_vault_read` (`path`): a UTF-8 text file's first 64 KiB and the
+  sha256 of the whole file; absolute paths, `..`, names starting with `.`
+  (also in the path a link resolves to), links out of the vault and other
+  files are refused.
+- **Writing** (`looper_vault_write`: `path`, `content`, `expected_sha256`,
+  `reason`): a Markdown note in a writable folder, at most 64 KiB, and at most
+  256 KiB per run; any other path (the operator's `mine/`, say) is refused
+  with the writable folders named. Under one thread lock per vault, in one
+  worker thread: the folders are walked from directory descriptors without
+  following links (a link anywhere below the writable folder is refused), the
+  note's sha256 is compared with `expected_sha256` (null for a new note; a
+  mismatch is `conflict`: read it again), the text goes to a temporary file
+  that replaces the note, and `git --literal-pathspecs add` and `commit -m
+  "looper: <task id> <seat>: <reason>" -- <path>` commit that path only (the
+  operator's other staged changes stay staged), as the vault's repository
+  configures the author, with its own hooks, `commit.gpgsign=false`, a 30 s
+  timeout and three tries on `index.lock`. The seat is `planner` or the run's
+  (`worker@s2`). The task's activity notes each write with its commit
+  (`Vault: planner wrote codex-mem/x.md (commit 1a2b3c4d5e6f): <reason>`), or
+  a fixed reason it was not committed (not a git repository, commit failed
+  with git's exit status, timed out; never git's output), and each refused
+  write.
+- **The closeout.** When a task completes (after its lessons) or fails, and
+  its project has the vault on with a writable folder, its Planner gets one
+  `[VAULT]` turn before the task's final status: the vault's rules file (at
+  most 16,000 characters) and the task's journal (as the lessons turn has
+  it), asked to keep what later work should know through `looper_vault_write`,
+  or nothing. It replies `{"vault": "<one line>"}`, noted in the activity as
+  `Vault closeout: <line>`. It is skipped when the journal is empty or the
+  task has spent its cap, runs at most once per Planner, and a failure is a
+  warning that does not change the task's outcome.
+- **Limits.** Agents read the operator's personal notes when a project turns
+  the vault on; an agent with a shell can still edit the vault's files
+  directly (the tools are the supported way, not an enforced boundary); Looper
+  gives no isolation between processes of the same user.
+
 ### Project skills: skills a project writes
 
 A project can write its own Claude Code skills (`looper/agents/project_skills.py`,
@@ -1845,7 +1915,9 @@ for 300), `room_ping_pong_rounds` (2 to 50, null for 6) and
 `room_consult_budget_usd` (0.01 to 5, null for 0.50),
 `room_consult_timeout_seconds` (30 to 1,800, null for 300) and
 `room_consults_per_task` (0 to 100, null for 10) ([A task's agent
-room](#a-tasks-agent-room)).
+room](#a-tasks-agent-room)); and `vault` (`off`, also when null, or `on`),
+whether the project's agents get the knowledge vault's tools ([The knowledge
+vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -2595,8 +2667,10 @@ Each task's Planner has four MCP tools of its own, which act on its task
 only (`looper/agents/ops/planner.py`, [Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md)
 section 8.3, decisions 9 and 10), two more for its roles where its project
 lets it define them ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)),
-and four of its task's agent room where its project has the room on ([A task's
-agent room](#a-tasks-agent-room)).
+four of its task's agent room where its project has the room on ([A task's
+agent room](#a-tasks-agent-room)), and the knowledge vault's three where its
+project has the vault on ([The knowledge
+vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper)).
 
 - **Reaching Looper.** `looper serve` makes one `PlannerOps`. A Planner gets a
   token for its task when it starts (`planner.` and 43 random characters,
@@ -3704,6 +3778,7 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/agents/:id/usage?turns=N` | GET | One agent's (`manager`, `planner-<task_id>`, ...) spending and context: `total` (`cost_usd`, `runs`, `running`, `unpriced_runs`, `compactions`), `by_session` and `by_day` (UTC; each `cost_usd`, `runs`), its latest N turns (default 100, at most 1000) oldest first with `context_tokens`, `cost_usd` and `compactions`, and `latest_context_tokens`; 400 for a bad `turns` |
 | `/api/scheduler-settings` | GET/PUT | The scheduler's system settings: `{min_interval_seconds, run_timeout_seconds}`, each `{value, source, built_in, minimum, ...}` with `source` `setting`, `env` (the deprecated variable, for the minimum interval) or `built-in`; the first also has `gated_value`, the second `maximum`. PUT takes either or both as a whole number of seconds (the timeout at most 30 days), or `null` for the built-in; 400 with the reason for anything else, nothing changed. The configuration export carries the stored values as `settings.scheduler`, and the Manager's `looper_settings` has the action `scheduler` (the user confirms) |
+| `/api/knowledge-vault` | GET/PUT | The knowledge vault: `{configured, path, writable, rules_file, git, problem}`. PUT `{path, writable, rules_file}` (checked as [The knowledge vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper) says; 400 with the reason), or `{path: null}` to turn it off |
 | `/api/gate-settings` | GET/PUT | Where the user gates of a task asked for on the dashboard or in the web chat go besides the task page: `{dashboard_target: {channel, chat} \| null, targets}`, `targets` the chats a channel's sender allowlist lets in (as a schedule's notify target), and `dashboard_target_problem` when the saved chat no longer is one (the gates then go to the task page only). PUT `{dashboard_target}`; 400 for a chat that is not one of them, or on a channel that is off ([User gates](#user-gates)) |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |

@@ -6,6 +6,7 @@ import { ProvidersSection } from "@/components/provider-settings";
 import { RolesSection } from "@/components/role-settings";
 import { RuntimesSection } from "@/components/runtime-cards";
 import { SchedulerSection } from "@/components/scheduler-settings";
+import { VaultSettingsSection } from "@/components/vault-settings";
 import {
   AGENT_PROFILE,
   DEFAULT_SETTINGS_PAGE,
@@ -31,6 +32,9 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "changes take effect after the server restarts. Each channel passes on only the senders it lists.",
   scheduler:
     "System-wide limits of schedules: how close two fires may be, and the run timeout of schedules that follow the default.",
+  vault:
+    "A local folder of Markdown notes, such as an Obsidian vault. The agents of projects that turn it on read every " +
+    "note and write only in its writable folders; each write is a git commit in the vault.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
     "global installs, channels and the scheduler's settings.",
@@ -55,6 +59,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
       {page === "scheduler" && <SchedulerSection />}
+      {page === "vault" && <VaultSettingsSection />}
       {page === "transfer" && <ConfigTransferCard />}
     </div>
   );

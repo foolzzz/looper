@@ -43,6 +43,8 @@ logged.
 - **The room.** With its project's agent room on (the default), the room's
   tools are listed too (``ops.room``: the roster, posting, the inbox and the
   history), acting as the seat ``planner``; elsewhere they are refused.
+- **The knowledge vault.** With its project's knowledge vault on and configured,
+  its read and write tools are listed too (``ops.vault``); elsewhere they are refused.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ import json
 import logging
 import secrets
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,9 @@ import asyncpg
 from ...db import activity as db_activity, agent_setting_layers as db_layers, plans as db_plans
 from ...db import projects as db_projects, role_templates as db_templates, steps as db_steps
 from ...db import task_roles as db_roles, tasks as db_tasks
+from .. import vault
+from . import vault as vault_ops
+from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, PLANNER_CHOICE_ROLES, AgentType, Layer, index_layers
 from ..agent_settings import resolve
 from ..links import task_link
@@ -173,6 +178,7 @@ class _Grant:
 
     task_id: str
     in_turn: bool = False
+    vault: VaultUsage = field(default_factory=VaultUsage)
 
 
 @dataclass(frozen=True)
@@ -247,6 +253,10 @@ class PlannerOps:
         tools = [tool.listing() for tool in self._tools.values() if roles_on or tool.name not in _ROLE_TOOL_NAMES]
         if grant is not None and self.room is not None and await self.room.enabled(grant.task_id):
             tools += [tool.listing() for tool in room_tools_for(MemberKind.PLANNER)]
+        if grant is not None:
+            config, _ = await vault.for_task(grant.task_id)
+            if config is not None:
+                tools += [tool.listing() for tool in vault_ops.tools_for(config)]
         return tools
 
     async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
@@ -258,6 +268,8 @@ class PlannerOps:
         task_id = grant.task_id
         if name in ROOM_TOOL_NAMES and self.room is not None:
             return await self._room_call(grant, name, raw)
+        if name in VAULT_TOOL_NAMES:
+            return await self._vault_call(grant, name, raw)
         tool = self._tools.get(name)
         if tool is None:
             manager = name in {t.name for t in MANAGER_TOOLS}
@@ -315,6 +327,32 @@ class PlannerOps:
                                                  "again later")
         return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}
 
+    async def _vault_call(self, grant: _Grant, name: str, raw: Any) -> dict[str, Any]:
+        """A knowledge vault call, as the Planner of its token's task."""
+        task_id = grant.task_id
+        tool = next(t for t in vault_ops.TOOLS if t.name == name)
+        try:
+            arguments = check_arguments(tool.schema, raw)
+            config, why = await vault.for_task(task_id)
+            if config is None:
+                raise OpError(ErrorCode.FORBIDDEN, why)
+            if name not in {t.name for t in vault_ops.tools_for(config)}:
+                raise OpError(ErrorCode.FORBIDDEN, "the knowledge vault is read only: no folder is writable")
+            if name == vault_ops.WRITE and not grant.in_turn:
+                raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn it sent you, not in a "
+                                                         "turn you run on your own; do it in your next turn")
+            result = await vault_ops.run_tool(config, name, arguments, task_id=task_id, who="planner",
+                                              worker=db_tasks.planner_agent_id(task_id), usage=grant.vault)
+        except OpError as exc:
+            if name == vault_ops.WRITE:
+                await vault_ops.note_refusal(task_id, db_tasks.planner_agent_id(task_id), "planner", name, exc)
+            return _error(exc.code, str(exc))
+        except Exception as exc:
+            logger.exception("task %s: the Planner's call of %s failed", task_id, name)
+            return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); try "
+                                                 "again later")
+        return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}
+
     # --- The Planner's MCP entry ---
 
     @property
@@ -322,11 +360,13 @@ class PlannerOps:
         """How the Planner uses its tools, for its system prompt."""
         return TOOLS_GUIDE
 
-    def guide_for(self, *, roles: bool, room: bool = False) -> str:
+    def guide_for(self, *, roles: bool, room: bool = False, vault: str = "") -> str:
         """How the Planner uses its tools, with the role tools where its project lets it define roles, and the room's
-        where its project has the agent room on."""
+        where its project has the agent room on, followed by its knowledge vault guide."""
         guide = f"{TOOLS_GUIDE}\n{ROLES_GUIDE}" if roles else TOOLS_GUIDE
-        return f"{guide}\n{PLANNER_ROOM_GUIDE}" if room and self.room is not None else guide
+        if room and self.room is not None:
+            guide = f"{guide}\n{PLANNER_ROOM_GUIDE}"
+        return f"{guide}\n{vault}" if vault else guide
 
     async def library_with_server(self, library: Any, runtime_root: Path, token: str) -> Any:
         """``library`` with Looper's MCP server for the Planner holding ``token``."""

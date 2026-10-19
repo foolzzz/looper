@@ -288,3 +288,36 @@ def test_the_operators_notes_follow_the_knowledge_only_in_a_project_that_gives_t
     assert "operator_notes" not in without.layers["project"]
     assert without.layers == off.layers
     assert on.layers["project"]["operator_notes"] == {"sha256": notes.sha256, "files": ["MEMORY.md"], "omitted": []}
+
+
+@pytest.mark.parametrize("defined_role", [False, True], ids=["built-in", "task-role"])
+@pytest.mark.parametrize("room", ["", "## The task room\nYour colleagues."])
+def test_vault_section_follows_task_and_room_and_has_its_own_hash(defined_role: bool, room: str) -> None:
+    from looper.agents.agent_settings import Boundaries
+    from looper.agents.system_prompt import build_role_prompt, build_system_prompt
+    from looper.agents.task_roles import RoleKind, TaskRole
+
+    arguments = {"harness": HARNESS, "task": "## Task\nDo the work.", "room": room,
+                 "contract_name": "WORK_CONTRACT", "contract": WORK_CONTRACT}
+    if defined_role:
+        builder = build_role_prompt
+        arguments.update(boundaries=Boundaries("Keep boundaries.", Layer.SYSTEM),
+                         task_role=TaskRole("tester", RoleKind.WORK, 1, "Write tests."))
+    else:
+        builder = build_system_prompt
+        arguments.update(role_id="worker", role="Do work.", recommended=False)
+    original = builder(**arguments)
+    empty_vault = builder(**arguments, vault="")
+    assert empty_vault.text == original.text
+    assert empty_vault.layers == original.layers
+    assert "vault" not in original.layers
+    assert "vault" not in empty_vault.layers
+    section = "## Knowledge vault\nRead earlier notes."
+    prompt = builder(**arguments, vault=f" \n{section}\n ")
+    assert prompt.text.index("## Task") < prompt.text.index(section) < prompt.text.index(WORK_CONTRACT)
+    if room:
+        assert prompt.text.index(room) < prompt.text.index(section)
+    if defined_role:
+        assert prompt.text.index(section) < prompt.text.index("## Boundaries")
+    assert prompt.layers["vault"] == {"sha256": _sha(section)}
+    assert prompt.layers["task"] == original.layers["task"]
