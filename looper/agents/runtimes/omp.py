@@ -64,6 +64,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -78,8 +79,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    instructions, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -129,11 +130,12 @@ _PLUGIN_PARTS_LEFT_OUT = ("hooks", "output-styles")
 IDLE_SEC = 24 * 3600
 
 
-# A consult has only reading tools (--tools read,glob,grep, not verified on a real run), in a detached checkout
+# A consult has only reading tools (--tools read,glob,grep; the MCP tools stay, checked on a real run with omp 18.4.3), in a detached checkout
 # of the task directory's branch, removed afterwards. This keeps writes out of the task directory; wrote_files
 # catches changes inside the checkout. It is not a sandbox: OMP runs as the operator's user, so writes to another
 # path or the home directory are neither prevented nor detected.
 READ_ONLY_TOOLS = ("read", "glob", "grep")
+READ_TOOLS_MIN_VERSION = (18, 4, 3)
 
 
 class OmpRuntime(RuntimeAdapter):
@@ -145,13 +147,26 @@ class OmpRuntime(RuntimeAdapter):
     # tokens only, per request.
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME,
                               Capability.CLAUDE_PLUGINS, Capability.MCP, Capability.ADD_DIRS,
-                              Capability.COMPACTION_EVENTS})
+                              Capability.COMPACTION_EVENTS, Capability.READ_TOOLS})
     protocols = frozenset(protocol for protocol, _ in API_NAMES)
     # API keys only: omp's own logins are not used.
     auth_kinds = frozenset({AuthKind.API_KEY})
     isolation_id = HOME_LAYOUT_ID
+    # A read-only run (a Planner's, a consult) has the tools that read and its MCP tools (``launch_args``).
+    read_only = ReadOnly.TOOLS
     # Set by the binding and the isolation: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, SHELL_PREFIX_VAR, *DIRECTORY_VARS})
+
+    def capabilities_for(self, version: str | None) -> frozenset[Capability]:
+        """Every capability, but ``READ_TOOLS`` below ``READ_TOOLS_MIN_VERSION`` or when the version is not readable
+        (only 18.4.3 was verified with ``--tools``)."""
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", version or "")
+        if found and tuple(map(int, found.groups())) >= READ_TOOLS_MIN_VERSION:
+            return self.capabilities
+        return self.capabilities - {Capability.READ_TOOLS}
+
+    def read_only_for(self, capabilities: frozenset[Capability]) -> ReadOnly:
+        return ReadOnly.TOOLS if Capability.READ_TOOLS in capabilities else ReadOnly.CHECK
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``, with an empty ``HOME`` of its own so nothing of the operator's is read."""
@@ -160,14 +175,14 @@ class OmpRuntime(RuntimeAdapter):
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
                                   timeout=_PROBE_TIMEOUT_SEC, check=False, env={**_omp_env(os.environ), "HOME": home})
         except FileNotFoundError:
-            return Probe(None, self.capabilities, f"{executable!r} was not found")
+            return Probe(None, self.capabilities_for(None), f"{executable!r} was not found")
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return Probe(None, self.capabilities, f"{executable} --version did not run: {type(exc).__name__}: {exc}")
+            return Probe(None, self.capabilities_for(None), f"{executable} --version did not run: {type(exc).__name__}: {exc}")
         finally:
             shutil.rmtree(home, ignore_errors=True)
         first = next((line.strip() for line in (done.stdout or done.stderr).splitlines() if line.strip()), "")
         if done.returncode != 0 or not first:
-            return Probe(None, self.capabilities, f"{executable} --version failed (exit code {done.returncode})"
+            return Probe(None, self.capabilities_for(None), f"{executable} --version failed (exit code {done.returncode})"
                                                   + (f": {first}" if first else ""))
         return Probe(first[:200], self.capabilities_for(first))
 
@@ -197,7 +212,7 @@ class OmpRuntime(RuntimeAdapter):
         return [
             "-p", "--mode", "json", "--no-title",
             # A read-only run (an agent room consult) has only the tools that read.
-            *(["--tools", ",".join(READ_ONLY_TOOLS)] if launch.read_only else []),
+            *(["--tools", ",".join(READ_ONLY_TOOLS)] if launch.read_only and launch.read_only_mode is ReadOnly.TOOLS else []),
             *binding.args,
             *(arg for directory in launch.library.plugin_dirs for arg in ("--plugin-dir", directory)),
         ]
