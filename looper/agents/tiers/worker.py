@@ -941,10 +941,15 @@ class WorkerPool:
                 # Claude exited before reading; its output decides the outcome.
                 logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
 
+            input_ended = False
+
             def _end_input() -> None:
                 # Without this Claude would wait on stdin for another user turn.
-                if self._inputs.pop(worker_id, None) is not None:
+                nonlocal input_ended
+                self._inputs.pop(worker_id, None)
+                if not input_ended:
                     channel.end_input()
+                    input_ended = True
 
             result_event: dict[str, Any] | None = None
             finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
