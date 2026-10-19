@@ -1,0 +1,59 @@
+{
+  "activity": [
+    {
+      "created_at": "2018-01-01T01:00:00+00:00",
+      "input_tokens": 3,
+      "kind": "text",
+      "metadata": "{\"k\": \"v\"}",
+      "output_tokens": 4,
+      "seq": 1,
+      "summary": "hello",
+      "task_id": "task-rich00001",
+      "worker": "worker-rich0001"
+    },
+    {
+      "created_at": "2018-01-01T01:00:01+00:00",
+      "input_tokens": null,
+      "kind": "phase",
+      "metadata": null,
+      "output_tokens": null,
+      "seq": 2,
+      "summary": "planning",
+      "task_id": "task-rich00001",
+      "worker": "planner-task-rich00001"
+    },
+    {
+      "created_at": "2018-01-01T01:00:02+00:00",
+      "input_tokens": null,
+      "kind": "error",
+      "metadata": null,
+      "output_tokens": null,
+      "seq": 3,
+      "summary": "boom",
+      "task_id": "task-rich00001",
+      "worker": ""
+    },
+    {
+      "created_at": "2018-01-01T01:00:03+00:00",
+      "input_tokens": null,
+      "kind": "user_message",
+      "metadata": null,
+      "output_tokens": null,
+      "seq": 4,
+      "summary": "please",
+      "task_id": "task-rich00001",
+      "worker": "user"
+    },
+    {
+      "created_at": "2018-01-01T01:00:04+00:00",
+      "input_tokens": 1,
+      "kind": "tool",
+      "metadata": null,
+      "output_tokens": 1,
+      "seq": 5,
+      "summary": "ran ls",
+      "task_id": "task-rich00001",
+      "worker": "worker-rich0001"
+    }
+  ]
+}

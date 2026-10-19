@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"debug/elf"
+	"debug/macho"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +23,11 @@ import (
 
 	relversion "github.com/foolzzz/looper/go/internal/version"
 )
+
+// releaseVersionSymbol is the string variable the release workflow stamps.
+// The linker records it as a Go string header, not as the characters of the
+// ldflags text in the build info.
+const releaseVersionSymbol = "github.com/foolzzz/looper/go/internal/version.Version"
 
 func TestRun(t *testing.T) {
 	tests := []struct {
@@ -106,9 +114,128 @@ func TestReleaseLdflags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nm: %v", err)
 	}
-	if !strings.Contains(string(nm), "github.com/foolzzz/looper/go/internal/version.Version") {
+	if !strings.Contains(string(nm), releaseVersionSymbol) {
 		t.Fatal("internal/version.Version is not in the binary")
 	}
+	gotVersion, err := stampedString(bin, releaseVersionSymbol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotVersion != "7.7.7" {
+		t.Fatalf("stamped Version %q", gotVersion)
+	}
+}
+
+// stampedString reads a Go string variable out of a Mach-O or ELF binary.
+// A search of the file bytes is not enough: the ldflags text is also there.
+func stampedString(bin, symbol string) (string, error) {
+	machoValue, machoErr := machoString(bin, symbol)
+	if machoErr == nil {
+		return machoValue, nil
+	}
+	elfValue, elfErr := elfString(bin, symbol)
+	if elfErr == nil {
+		return elfValue, nil
+	}
+	return "", fmt.Errorf("mach-o: %v; elf: %v", machoErr, elfErr)
+}
+
+func machoString(bin, symbol string) (string, error) {
+	f, err := macho.Open(bin)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if f.Symtab == nil {
+		return "", errors.New("no symbol table")
+	}
+	var addr uint64
+	found := false
+	for _, sym := range f.Symtab.Syms {
+		if sym.Name == symbol {
+			addr = sym.Value
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("symbol %s not found", symbol)
+	}
+	return goString(f.ByteOrder, func(at uint64, n int) ([]byte, error) {
+		return readMacho(f, at, n)
+	}, addr)
+}
+
+func elfString(bin, symbol string) (string, error) {
+	f, err := elf.Open(bin)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	syms, err := f.Symbols()
+	if err != nil {
+		return "", err
+	}
+	var addr uint64
+	found := false
+	for _, sym := range syms {
+		if sym.Name == symbol {
+			addr = sym.Value
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("symbol %s not found", symbol)
+	}
+	return goString(f.ByteOrder, func(at uint64, n int) ([]byte, error) {
+		return readELF(f, at, n)
+	}, addr)
+}
+
+func goString(order binary.ByteOrder, read func(uint64, int) ([]byte, error), headerAddr uint64) (string, error) {
+	hdr, err := read(headerAddr, 16)
+	if err != nil {
+		return "", err
+	}
+	ptr := order.Uint64(hdr[:8])
+	n := order.Uint64(hdr[8:16])
+	if n > 128 {
+		return "", fmt.Errorf("string length %d", n)
+	}
+	buf, err := read(ptr, int(n))
+	if err != nil {
+		return "", err
+	}
+	return string(buf), nil
+}
+
+func readMacho(f *macho.File, addr uint64, n int) ([]byte, error) {
+	for _, sect := range f.Sections {
+		if sect == nil || addr < sect.Addr || addr+uint64(n) > sect.Addr+sect.Size {
+			continue
+		}
+		buf := make([]byte, n)
+		if _, err := sect.ReadAt(buf, int64(addr-sect.Addr)); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
+	return nil, fmt.Errorf("address %#x not in a mach-o section", addr)
+}
+
+func readELF(f *elf.File, addr uint64, n int) ([]byte, error) {
+	for _, prog := range f.Progs {
+		if prog.Type != elf.PT_LOAD || addr < prog.Vaddr || addr+uint64(n) > prog.Vaddr+prog.Filesz {
+			continue
+		}
+		buf := make([]byte, n)
+		if _, err := prog.ReadAt(buf, int64(addr-prog.Vaddr)); err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
+	return nil, fmt.Errorf("address %#x not in an ELF segment", addr)
 }
 
 func TestVersionFromBuild(t *testing.T) {

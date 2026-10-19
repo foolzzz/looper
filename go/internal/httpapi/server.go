@@ -22,10 +22,11 @@ type DBPinger interface {
 	Ping(ctx context.Context) error
 }
 
-// Reader is the read-only API. A nil Reads keeps the status task counts at zero.
-// Overview, projects, tasks, task detail, usage, one record, and its events
-// answer 500. The llm-records list answers 200 with an empty list, which is
-// what Python does when that query fails.
+// Reader is the read-only API. A nil Reads keeps the status task counts at zero
+// and the chat target list at the Manager. Overview, projects, tasks, task
+// detail, usage, one record, and its events answer 500. The llm-records list
+// answers 200 with an empty list. Chat messages, activity, and conversation
+// do too. Activity detail answers 404. Chat sessions answer 500.
 type Reader interface {
 	StatusTaskCounts(ctx context.Context) (total, running, completed int, err error)
 	Overview(ctx context.Context, since time.Time) (map[string]any, error)
@@ -37,6 +38,12 @@ type Reader interface {
 	ListRecords(ctx context.Context, q db.RecordQuery) ([]map[string]any, error)
 	GetRecord(ctx context.Context, id int64) (map[string]any, error)
 	ListEvents(ctx context.Context, id, after, limit int64) ([]map[string]any, error)
+	ChatTargets(ctx context.Context) ([]map[string]any, error)
+	ListChatSessions(ctx context.Context) ([]map[string]any, error)
+	ListChatMessages(ctx context.Context, sessionID string) ([]map[string]any, error)
+	ListActivity(ctx context.Context, taskID string, since, limit int64) ([]map[string]any, error)
+	ActivityDetail(ctx context.Context, seq int64) (map[string]any, error)
+	ListConversation(ctx context.Context, taskID string) ([]map[string]any, error)
 }
 
 // Server serves the read-only API and, when WebDir is set, the dashboard files.
@@ -60,7 +67,8 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 
 // Handler routes the read-only API and the optional static dashboard.
 // Data routes are registered without a method so a POST is 404, as in Python.
-// GET /api/status stays method-specific so POST and PUT fall through to 405.
+// GET /api/status stays method-specific. POST and PUT miss that pattern and
+// the /api/ handler answers 404, which is what Python's router does.
 // A pattern registered as GET also matches HEAD. The usage and llm-record
 // handlers reject that HEAD themselves; Python's method check returns 404.
 // The Host/Origin guard runs before routing, matching request_guard.refusal.
@@ -73,15 +81,25 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // served here, including when the collapse lands under /api/.
 //
 // This slice serves GET /api/status, GET /api/projects, GET /api/overview,
-// GET /api/tasks, GET /api/tasks/<id>, GET /api/agents/<id>/usage, and
-// GET /api/llm-records (the list, one record, and its events).
+// GET /api/tasks, GET /api/tasks/<id>, GET /api/agents/<id>/usage,
+// GET /api/llm-records (the list, one record, and its events),
+// GET /api/chat/targets, GET /api/chat/sessions, GET /api/chat/messages,
+// and a task's activity list, activity detail, and conversation.
+// GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
+// are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("/api/overview", s.handleOverview)
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("/api/tasks/{id}/activity/{seq}", s.handleActivityDetail)
+	mux.HandleFunc("/api/tasks/{id}/activity", s.handleActivity)
+	mux.HandleFunc("/api/tasks/{id}/conversation", s.handleConversation)
 	mux.HandleFunc("/api/tasks/{id}", s.handleTask)
+	mux.HandleFunc("/api/chat/targets", s.handleChatTargets)
+	mux.HandleFunc("/api/chat/sessions", s.handleChatSessions)
+	mux.HandleFunc("/api/chat/messages", s.handleChatMessages)
 	mux.HandleFunc("GET /api/agents/{id}/usage", s.handleAgentUsage)
 	mux.HandleFunc("GET /api/llm-records/{id}/events", s.handleRecordEvents)
 	mux.HandleFunc("GET /api/llm-records/{id}", s.handleGetRecord)
@@ -147,6 +165,12 @@ type errorBody struct {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	// ServeMux unescapes each segment, so /api/%73tatus matches this pattern.
+	// Python compares the path with the escapes left in place.
+	if r.URL.EscapedPath() != "/api/status" {
+		notFound(w)
+		return
+	}
 	// Probe the database for the log. Python's status body does not carry the result.
 	switch {
 	case s.DB == nil:
@@ -191,10 +215,6 @@ func (s *Server) now() time.Time {
 }
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/api/status" {
-		methodNotAllowed(w)
-		return
-	}
 	writeJSON(w, http.StatusNotFound, errorBody{Error: "not found"})
 }
 

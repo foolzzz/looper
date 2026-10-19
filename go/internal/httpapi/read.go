@@ -45,7 +45,7 @@ func rawTaskID(r *http.Request) (string, bool) {
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet || r.URL.EscapedPath() != "/api/overview" {
 		notFound(w)
 		return
 	}
@@ -64,7 +64,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet || r.URL.EscapedPath() != "/api/projects" {
 		notFound(w)
 		return
 	}
@@ -83,8 +83,10 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTasks is GET /api/tasks. Other methods are 404, as in Python.
+// ServeMux unescapes a segment, so /api/%74asks matches this pattern.
+// Python keeps the escape and matches no route.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet || r.URL.EscapedPath() != "/api/tasks" {
 		notFound(w)
 		return
 	}

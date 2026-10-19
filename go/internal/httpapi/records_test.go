@@ -34,6 +34,13 @@ func TestPythonInt(t *testing.T) {
 		{name: "fullwidth plus", in: "＋2", wantOK: false},
 		{name: "positive overflow", in: "1" + strings.Repeat("0", 30), overflow: 1, wantOK: true},
 		{name: "negative overflow", in: "-" + strings.Repeat("9", 30), overflow: -1, wantOK: true},
+		{name: "digit limit", in: strings.Repeat("9", pythonIntMaxStrDigits), overflow: 1, wantOK: true},
+		{name: "digit limit with sign and space", in: " -" + strings.Repeat("9", pythonIntMaxStrDigits) + " ", overflow: -1, wantOK: true},
+		{name: "digit limit ignores underscores", in: "1_" + strings.Repeat("0", pythonIntMaxStrDigits-1), overflow: 1, wantOK: true},
+		{name: "digit limit leading zeros", in: strings.Repeat("0", pythonIntMaxStrDigits), want: 0, wantOK: true},
+		{name: "one past digit limit", in: strings.Repeat("9", pythonIntMaxStrDigits+1), wantOK: false},
+		{name: "one past digit limit with sign", in: "-" + strings.Repeat("9", pythonIntMaxStrDigits+1), wantOK: false},
+		{name: "underscore does not hide an extra digit", in: "1_" + strings.Repeat("0", pythonIntMaxStrDigits), wantOK: false},
 		// str.isspace() is true for U+001C–U+001F. int() rejects them.
 		{name: "file separator", in: "\x1c2", wantOK: false},
 		{name: "group separator", in: "\x1d2\x1e", wantOK: false},
@@ -208,6 +215,78 @@ func TestRecordRoutes(t *testing.T) {
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/12/events?limit=-1"))
 	if rr.Code != http.StatusOK || reads.eventsLimit != -1 {
 		t.Fatalf("negative limit %d passed %d", rr.Code, reads.eventsLimit)
+	}
+}
+
+func TestRecordIntegerDigitLimit(t *testing.T) {
+	reads := &recordingReads{
+		usage:   map[string]any{"agent_id": "usage-agent01"},
+		record:  map[string]any{"id": int64(12)},
+		records: []map[string]any{{"id": int64(1)}},
+		events:  []map[string]any{{"seq": int64(2)}},
+	}
+	srv := New("dev", &fakeDB{}, "")
+	srv.Reads = reads
+	h := srv.Handler()
+	oversized := strings.Repeat("9", 40)
+	past := strings.Repeat("9", pythonIntMaxStrDigits+1)
+	atLimit := strings.Repeat("9", pythonIntMaxStrDigits)
+
+	before := len(reads.calls)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/agents/usage-agent01/usage?turns="+atLimit))
+	if rr.Code != http.StatusOK || reads.usageTurns != usageTurnsMax || len(reads.calls) != before+1 {
+		t.Fatalf("4300-digit turns %d turns %d calls %d body %s", rr.Code, reads.usageTurns, len(reads.calls)-before, rr.Body.String())
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/agents/usage-agent01/usage?turns="+past))
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"turns must be an integer"}` || len(reads.calls) != before {
+		t.Fatalf("4301-digit turns %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
+	}
+
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records?limit="+past))
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+		t.Fatalf("4301-digit records limit %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
+	}
+
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+oversized+"/events?after=nope"))
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"after and limit must be integers"}` || len(reads.calls) != before {
+		t.Fatalf("oversized id after=nope %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+oversized+"/events?after=1"))
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` || len(reads.calls) != before {
+		t.Fatalf("oversized id valid after %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/12/events?limit="+past))
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"after and limit must be integers"}` || len(reads.calls) != before {
+		t.Fatalf("4301-digit events limit %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/12/events?limit="+atLimit))
+	if rr.Code != http.StatusOK || reads.eventsLimit != eventsLimitMax || len(reads.calls) != before+1 {
+		t.Fatalf("4300-digit events limit %d limit %d calls %d", rr.Code, reads.eventsLimit, len(reads.calls)-before)
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+past+"/events?after=nope"))
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+		t.Fatalf("4301-digit id %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+past))
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+		t.Fatalf("4301-digit record %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 }
 

@@ -45,6 +45,24 @@ type recordingReads struct {
 	eventsID                  int64
 	eventsAfter               int64
 	eventsLimit               int64
+	chatTargets               []map[string]any
+	chatTargetsErr            error
+	sessions                  []map[string]any
+	sessionsErr               error
+	messages                  []map[string]any
+	messagesErr               error
+	messageSession            string
+	activity                  []map[string]any
+	activityErr               error
+	activityTask              string
+	activitySince             int64
+	activityLimit             int64
+	activityRow               map[string]any
+	activityRowErr            error
+	activitySeq               int64
+	conversation              []map[string]any
+	conversationErr           error
+	conversationTask          string
 	calls                     []string
 	since                     time.Time
 }
@@ -151,6 +169,75 @@ func (r *recordingReads) ListEvents(_ context.Context, id, after, limit int64) (
 	return r.events, nil
 }
 
+func (r *recordingReads) ChatTargets(context.Context) ([]map[string]any, error) {
+	r.calls = append(r.calls, "targets")
+	if r.chatTargetsErr != nil {
+		return nil, r.chatTargetsErr
+	}
+	if r.chatTargets == nil {
+		return []map[string]any{}, nil
+	}
+	return r.chatTargets, nil
+}
+
+func (r *recordingReads) ListChatSessions(context.Context) ([]map[string]any, error) {
+	r.calls = append(r.calls, "sessions")
+	if r.sessionsErr != nil {
+		return nil, r.sessionsErr
+	}
+	if r.sessions == nil {
+		return []map[string]any{}, nil
+	}
+	return r.sessions, nil
+}
+
+func (r *recordingReads) ListChatMessages(_ context.Context, sessionID string) ([]map[string]any, error) {
+	r.calls = append(r.calls, "messages")
+	r.messageSession = sessionID
+	if r.messagesErr != nil {
+		return nil, r.messagesErr
+	}
+	if r.messages == nil {
+		return []map[string]any{}, nil
+	}
+	return r.messages, nil
+}
+
+func (r *recordingReads) ListActivity(_ context.Context, taskID string, since, limit int64) ([]map[string]any, error) {
+	r.calls = append(r.calls, "activity")
+	r.activityTask = taskID
+	r.activitySince = since
+	r.activityLimit = limit
+	if r.activityErr != nil {
+		return nil, r.activityErr
+	}
+	if r.activity == nil {
+		return []map[string]any{}, nil
+	}
+	return r.activity, nil
+}
+
+func (r *recordingReads) ActivityDetail(_ context.Context, seq int64) (map[string]any, error) {
+	r.calls = append(r.calls, "activity-detail")
+	r.activitySeq = seq
+	if r.activityRowErr != nil {
+		return nil, r.activityRowErr
+	}
+	return r.activityRow, nil
+}
+
+func (r *recordingReads) ListConversation(_ context.Context, taskID string) ([]map[string]any, error) {
+	r.calls = append(r.calls, "conversation")
+	r.conversationTask = taskID
+	if r.conversationErr != nil {
+		return nil, r.conversationErr
+	}
+	if r.conversation == nil {
+		return []map[string]any{}, nil
+	}
+	return r.conversation, nil
+}
+
 func TestUnroutedAPI(t *testing.T) {
 	reads := &recordingReads{}
 	srv := New("dev", &fakeDB{}, "")
@@ -169,6 +256,11 @@ func TestUnroutedAPI(t *testing.T) {
 		{http.MethodGet, "/api/llm-records/nope", http.StatusNotFound, `{"error":"not found"}`},
 		{http.MethodGet, "/api/llm-records/12/nope", http.StatusNotFound, `{"error":"not found"}`},
 		{http.MethodGet, "/api/agents/bad.id/usage", http.StatusNotFound, `{"error":"not found"}`},
+		// Python's urlparse does not percent-decode. ServeMux unescapes the
+		// segment and would otherwise serve GET /api/tasks.
+		{http.MethodGet, "/api/%74asks", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodGet, "/api/%6fverview", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodGet, "/api/%73tatus", http.StatusNotFound, `{"error":"not found"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {

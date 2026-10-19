@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -12,11 +13,21 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+//go:generate cp ../../../looper/db/schema.sql schema.sql
+
+// schemaSQL is the generated copy of looper/db/schema.sql. A released binary
+// has no source tree, so EnsureSchema applies these bytes. The drift test
+// fails when the copy is not the source file.
+
+//go:embed schema.sql
+var schemaSQL string
+
 // schemaLock is the same advisory transaction lock Python takes in ensure_schema (0x6C6F6F70, "loop").
 const schemaLock int64 = 0x6C6F6F70 // 1819242352, Python's _SCHEMA_LOCK
 
 // FindSchema locates looper/db/schema.sql by walking up from the working
-// directory and from this source file. The Go module does not copy the schema.
+// directory and from this source file. The drift test uses it. EnsureSchema
+// applies the embedded copy and does not read this path.
 func FindSchema() (string, error) {
 	var roots []string
 	if wd, err := os.Getwd(); err == nil {
@@ -51,15 +62,10 @@ func EnsureSchema(ctx context.Context, databaseURL string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("ensure schema: %w", hide(err))
 	}
-	path, err := FindSchema()
-	if err != nil {
-		return fmt.Errorf("ensure schema: %w", err)
+	if strings.TrimSpace(schemaSQL) == "" {
+		return fmt.Errorf("ensure schema: embedded schema is empty")
 	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("ensure schema: read schema: %w", err)
-	}
-	script := fmt.Sprintf("BEGIN;\nSELECT pg_advisory_xact_lock(%d);\n%s\nCOMMIT;\n", schemaLock, body)
+	script := fmt.Sprintf("BEGIN;\nSELECT pg_advisory_xact_lock(%d);\n%s\nCOMMIT;\n", schemaLock, schemaSQL)
 	if err := execScript(ctx, databaseURL, script); err != nil {
 		return fmt.Errorf("ensure schema: %w", err)
 	}
