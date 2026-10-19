@@ -69,7 +69,7 @@ from .profile_registry import BUILTIN_PROFILE, AgentProfile
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
 from .runtimes import AuthKind, Capability, CostSource, ReadOnly
-from .system_prompt_mode import SystemPromptMode
+from .system_prompt_mode import SystemPromptMode, system_prompt_mode
 
 if TYPE_CHECKING:
     from .run_usage import Price
@@ -128,7 +128,8 @@ MODEL_MAX_CHARS = 200
 BUDGET_MAX_USD = 100_000
 CONCURRENCY_MAX = 64
 
-FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries")
+FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries",
+          "system_prompt_mode")
 
 
 class AgentType(str, Enum):
@@ -146,6 +147,12 @@ PLANNER_CHOICE_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
 # At most this many of a task's Workers, or of its Reviewers, run at once when neither the task nor the role's layer
 # sets a limit.
 BUILTIN_CONCURRENCY = {AgentType.WORKER: 16, AgentType.REVIEWER: 8}
+# Whether a role replaces Claude Code's default system prompt or appends to it, when its role layer sets none. It
+# applies only to runs on Claude Code (``Launch.system_prompt_mode``).
+BUILTIN_SYSTEM_PROMPT_MODE = {
+    AgentType.MANAGER: SystemPromptMode.REPLACE, AgentType.PLANNER: SystemPromptMode.REPLACE,
+    AgentType.WORKER: SystemPromptMode.APPEND, AgentType.REVIEWER: SystemPromptMode.APPEND,
+}
 
 
 class Layer(str, Enum):
@@ -321,6 +328,7 @@ class LayerValues:
     run_budget_usd: float | None = None
     max_concurrency: int | None = None
     boundaries: str | None = None  # the system layer's only
+    system_prompt_mode: SystemPromptMode | None = None  # a role layer's only
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any] | None) -> LayerValues:
@@ -336,6 +344,7 @@ class LayerValues:
             ("run_budget_usd", budget_usd),
             ("max_concurrency", concurrency),
             ("boundaries", lambda raw: boundaries_text(raw) or None),
+            ("system_prompt_mode", _stored_prompt_mode),
         ):
             raw = row.get(name)
             if raw is None:
@@ -354,10 +363,19 @@ class LayerValues:
             "run_budget_usd": self.run_budget_usd,
             "max_concurrency": self.max_concurrency,
             "boundaries": self.boundaries,
+            # Only a role layer that sets it has one; ``effective`` always shows the role's mode.
+            **({"system_prompt_mode": self.system_prompt_mode.value} if self.system_prompt_mode else {}),
         }
 
 
 EMPTY_LAYER = LayerValues()
+
+
+def _stored_prompt_mode(raw: Any) -> SystemPromptMode:
+    try:
+        return system_prompt_mode(raw)
+    except ValueError as exc:
+        raise SettingsError(str(exc)) from None
 
 
 def _stored_profile(raw: Any) -> AgentProfile:
@@ -414,6 +432,11 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
                     "once, and nothing limits how many tasks run. Set the default for every task on the worker or "
                     "reviewer role (Settings → Roles), or a task's own limit (its Agents tab)")
             values[name] = concurrency(raw)
+        elif name == "system_prompt_mode":
+            if scope is not Layer.ROLE:
+                raise SettingsError("system_prompt_mode is set per role: set it on the role's layer "
+                                    "(Settings → Agents), not on the shared defaults or in a project")
+            values[name] = _stored_prompt_mode(raw).value
         else:
             values[name] = budget_usd(raw)
     return values
@@ -469,6 +492,8 @@ class AgentSettings:
     max_budget_source: Layer = Layer.BUILTIN
     # Used only by a run of a role a task's Planner defined: the shared defaults' boundaries, else the built-in ones.
     boundaries: Boundaries = BUILTIN_BOUNDARIES
+    # The role's mode (``role_system_prompt_mode``), whatever the runtime: ``Launch.system_prompt_mode`` is what applies.
+    system_prompt_mode: SystemPromptMode = SystemPromptMode.APPEND
     error: str | None = field(default=None, compare=False)  # why the layers could not be read
     # Why the profile cannot run this role (its runtime and provider no longer pair, or the runtime lacks a
     # capability the role needs): the run fails with it rather than run another profile.
@@ -519,6 +544,7 @@ class AgentSettings:
             "effort": {"value": self.effort or None, "source": self.effort_source.value},
             "env": [{"key": key, "value": value, "source": sources[key].value} for key, value in self.env],
             "run_budget_usd": {"value": self.max_budget_usd, "source": self.max_budget_source.value},
+            "system_prompt_mode": self.system_prompt_mode.value,
         }
 
 
@@ -568,6 +594,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     budget, budget_source = None, Layer.BUILTIN
     env: dict[str, tuple[str, Layer]] = {}
     boundaries = layers.get((Layer.SYSTEM, None), EMPTY_LAYER).boundaries
+    mode = role_system_prompt_mode(agent, layers)
     for layer, layer_role in _chain(agent, project_id):
         values = layers.get((layer, layer_role), EMPTY_LAYER)
         text, from_role = values.harness_prompt, None
@@ -593,7 +620,16 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
         tuple((key, layer) for key, (_, layer) in env.items()),
         budget, budget_source,
         Boundaries(boundaries, Layer.SYSTEM) if boundaries is not None else BUILTIN_BOUNDARIES,
+        system_prompt_mode=mode,
     )
+
+
+def role_system_prompt_mode(role: AgentType | None, layers: Mapping[Place, LayerValues]) -> SystemPromptMode:
+    """Whether ``role`` replaces its runtime's default system prompt or appends to it: its role layer's, else the
+    built-in one. A launch applies it on Claude Code only; no role (the system layer alone) appends."""
+    if role is None:
+        return SystemPromptMode.APPEND
+    return layers.get((Layer.ROLE, role), EMPTY_LAYER).system_prompt_mode or BUILTIN_SYSTEM_PROMPT_MODE[role]
 
 
 @dataclass(frozen=True)
@@ -737,6 +773,10 @@ class Launch:
 
     @property
     def system_prompt_mode(self) -> SystemPromptMode:
+        """What the run uses: on Claude Code its role's mode (append for a launch with no role); on any other runtime
+        its profile's, as before the mode was a role's setting."""
+        if self.profile.runtime.type == "claude-code":
+            return self.settings.system_prompt_mode if self.role is not None else SystemPromptMode.APPEND
         return self.profile.system_prompt_mode
 
     @property

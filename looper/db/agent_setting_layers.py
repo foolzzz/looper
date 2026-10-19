@@ -25,7 +25,8 @@ import asyncpg
 from .profile_registry import PROFILE_JOIN, PROFILE_JSON
 from .connection import get_pool
 
-FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries")
+FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries",
+          "system_prompt_mode")
 
 # A task's Planner's choices that count: those whose profile its project allows now.
 _PLANNER_CHOICES = (
@@ -55,7 +56,7 @@ async def list_layers(
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
-        f"l.max_concurrency, l.boundaries, "
+        f"l.max_concurrency, l.boundaries, l.system_prompt_mode, "
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = l.profile_id) AS profile "
         "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1",
         project_id,
@@ -124,7 +125,7 @@ async def put_layer(
         await conn.execute(
             "DELETE FROM agent_setting_layers WHERE scope = $1 AND role IS NOT DISTINCT FROM $2 "
             "AND project_id IS NOT DISTINCT FROM $3 AND harness_prompt IS NULL AND profile_id IS NULL "
-            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL AND boundaries IS NULL",
+            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL AND boundaries IS NULL AND system_prompt_mode IS NULL",
             scope, role, project_id,
         )
 

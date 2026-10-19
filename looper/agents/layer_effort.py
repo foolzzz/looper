@@ -260,7 +260,7 @@ async def migrate(conn: Any) -> None:
         await conn.execute("ALTER TABLE agent_setting_layers DROP COLUMN effort")
         await conn.execute(
             "DELETE FROM agent_setting_layers WHERE harness_prompt IS NULL AND profile_id IS NULL "
-            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL")
+            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL AND system_prompt_mode IS NULL")
     await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", MIGRATION)
 
 
