@@ -1051,12 +1051,12 @@ class TestResidentClaude:
         assert "--append-system-prompt" not in argv
         assert _flag(argv, "--system-prompt-snapshot") == "off"
         (prompt,) = claude.prompts()
-        assert Path(_flag(argv, "--append-system-prompt-file") or "").name == f"{_sha(prompt)}.md"
+        assert Path(_flag(argv, "--system-prompt-file") or "").name == f"{_sha(prompt)}.md"
         _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", DEFAULT_CONTRACT)
         assert prompt.endswith(DEFAULT_CONTRACT)
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format",
-                       "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
+                       "--append-system-prompt-file", "--system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
                        "--settings", "--model", "--max-turns", "--disallowedTools", "--allowedTools",
                        "--permission-mode", "--permission-prompts"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
@@ -1289,8 +1289,8 @@ class TestSystemPrompt:
         assert expected in second_prompt
         assert second_prompt.endswith(DEFAULT_CONTRACT)
         # A changed prompt is a new file with a new hash; the restarted process resumes the session.
-        assert _flag(first, "--append-system-prompt-file") != _flag(second, "--append-system-prompt-file")
-        assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
+        assert _flag(first, "--system-prompt-file") != _flag(second, "--system-prompt-file")
+        assert Path(_flag(second, "--system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
         assert _flag(first, "--resume") is None
         assert _flag(second, "--resume") == "sess-p"
         assert [s["metadata"]["system_prompt_sha256"] for s in _starts(agent_db)] == [

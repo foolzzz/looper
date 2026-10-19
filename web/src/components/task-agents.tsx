@@ -13,6 +13,7 @@ import {
   type TaskAgentsUpdate,
   type TaskLimitRole,
   type TaskRole,
+  type SystemPromptMode,
   type TaskRoleConcurrency,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
@@ -189,6 +190,67 @@ function ProfileField({
   );
 }
 
+/** The role's system prompt mode on Claude Code, which the task may set for itself; shown only on Claude Code. */
+function PromptModeField({
+  taskId,
+  role,
+  mode,
+  editable,
+  onSaved,
+}: {
+  taskId: string;
+  role: TaskRole;
+  mode: Sourced<SystemPromptMode>;
+  editable: boolean;
+  onSaved: (agents: TaskAgents) => void;
+}) {
+  const id = useId();
+  const { busy, error, save } = useSave(taskId, onSaved);
+  const own = mode.source === "task";
+  const label = mode.value === "replace" ? "Replace Claude Code's prompt" : "Append to Claude Code's prompt";
+  if (!editable) {
+    return (
+      <div className="space-y-1">
+        <p className={LABEL}>System prompt</p>
+        <Now id={`${id}-now`}>
+          <Value>{label}</Value>
+        </Now>
+      </div>
+    );
+  }
+  return (
+    <div className="min-w-0 space-y-1">
+      <label htmlFor={`${id}-mode`} className={LABEL}>
+        System prompt
+      </label>
+      <select
+        id={`${id}-mode`}
+        value={mode.value}
+        disabled={busy}
+        onChange={(e) => save({ system_prompt_modes: { [role]: e.target.value as SystemPromptMode } })}
+        aria-describedby={error ? `${id}-error` : undefined}
+        className={cn(SELECT, "h-11 sm:h-9")}
+      >
+        <option value="append">Append to Claude Code&apos;s prompt</option>
+        <option value="replace">Replace Claude Code&apos;s prompt</option>
+      </select>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" aria-label="Saving" />}
+        {own && !busy && (
+          <button
+            type="button"
+            onClick={() => save({ system_prompt_modes: { [role]: null } })}
+            className={cn("min-h-11 text-xs sm:min-h-0", LINK)}
+          >
+            task setting · reset
+          </button>
+        )}
+      </div>
+      <ErrorLine id={`${id}-error`} error={error} />
+    </div>
+  );
+}
+
 /** A Worker's or Reviewer's limit in the task: what applies and why; a task that has not completed sets its own. */
 function LimitField({
   taskId,
@@ -302,6 +364,15 @@ export function TaskAgentsSection({
                 editable={editable}
                 onSaved={onSaved}
               />
+              {roles[role].runtime_type === "claude-code" && (
+                <PromptModeField
+                  taskId={taskId}
+                  role={role}
+                  mode={roles[role].system_prompt_mode}
+                  editable={editable}
+                  onSaved={onSaved}
+                />
+              )}
               {role !== "planner" && (
                 <LimitField
                   taskId={taskId}

@@ -1228,31 +1228,38 @@ the provider's own variables. The verified Claude Code behaviour is in the
 resident process whose binding changed (provider, key, endpoint) is started
 again.
 
-**System prompt mode.** Each profile chooses `append` (the existing commands
-and generated files are unchanged) or `replace`. The adapter's typed
-`can_replace_system_prompt` capability is exposed by `/api/registry`, with
-`replace_system_prompt_refusal` giving the reason when replacement is not
-supported. Creating, updating or importing a replacement profile is refused
-with that reason (400 through the profile API) on an unsupported or unknown
-runtime; changing the runtime checks the resulting profile, including a mode
-left unchanged. The server never falls back to append. Configuration export
-and import carry the field; older files without it import as append. Profiles
-derived for another effort keep the parent's mode.
+**System prompt mode.** The mode is `append` (Looper's prompt is added to the runtime's default one) or `replace`
+(it takes the default prompt's place). On **Claude Code** it is a role's setting, `system_prompt_mode` on the role layer
+(`PUT /api/agent-settings/roles/<role>`; a null or empty value unsets it). The built-in values are `replace` for the
+Manager and the Planner and `append` for every other launch: Workers, Reviewers, the seats of Planner-defined roles,
+consults and a launch with no role (`agent_settings.BUILTIN_SYSTEM_PROMPT_MODE`). The settings view shows the
+effective value of every role (`effective.system_prompt_mode`). A task may set its own per role (`task_system_prompt_modes`, `system_prompt_modes` of `PUT /api/tasks/:id/agents`): its choice wins over the role layer's, which wins over the built-in value; the task's `agents` view gives each role's effective value with its source (`task`, `role` or `builtin`) and the runtime type, so the task page shows the choice only where it applies. A Planner-defined role's runs and reviews follow the task's Worker or Reviewer choice, a consult appends, and the Manager has no task level. Only a role layer takes it: the shared defaults, a
+project and a role in a project refuse it (400). A Claude Code profile does not use its own `system_prompt_mode`: the
+registry refuses `replace` on it ("Claude Code's system prompt mode is set per role in Settings → Roles"), and the
+dashboard's profile editor shows that line in place of the choice. On **Codex, Grok and OMP** nothing changed: each
+profile chooses `append` or `replace`, the adapter's typed `can_replace_system_prompt` capability is exposed by
+`/api/registry` with `replace_system_prompt_refusal`, and creating, updating or importing a replacement profile is
+refused with that reason (400) on an unsupported or unknown runtime. `Launch.system_prompt_mode` is the role's value on
+a Claude Code runtime (append with no role) and the profile's on any other. Configuration export and import carry the
+role layers' value and the profiles' (a missing profile value imports as append); profiles derived for another effort
+keep the parent's mode. The schema adds the layer column once, and then sets the Worker's and the Reviewer's role
+layer to `replace` where their effective profile (the role layer's, else the shared defaults', else the built-in one)
+was a Claude Code profile that replaced, and sets every Claude Code profile to `append`.
 
 | Runtime | Append | Replace |
 | --- | --- | --- |
 | Claude Code | `--append-system-prompt-file` | `--system-prompt-file`; both modes keep `--system-prompt-snapshot off` |
-| Codex | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
-| Grok | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
-| OMP | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
+| Codex (profile) | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
+| Grok (profile) | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
+| OMP (profile) | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
 
 Codex and Grok include their runtime notes with Looper's prompt in either
 mode. Replacement keeps the runtime's tools and project instruction loading;
-it removes the runtime's default prompt. The dashboard editor disables the
+it removes the runtime's default prompt. The dashboard's profile editor disables the
 mode selector with the runtime's refusal reason when replacement is not
 supported, and resets only its unsaved draft to append when moving to such a
-runtime. Profile summaries mark replacement, and each run's System prompt
-section shows `replaced default` for a replacement record. The mode is
+runtime or to Claude Code. The role settings (Settings → Roles) show a two-way choice for every role. Profile summaries mark replacement, and each run's System prompt
+section shows `replaced default` for a replacement record. The profile's mode is
 available through the Manager's profile configuration tool on every channel.
 
 **Agent teams.** They are on by default for Claude Code profiles: a profile
@@ -1472,7 +1479,7 @@ sha256s of the environment and of the installed items.
 Every run records the prompt in `llm_records.metadata`:
 
 - `system_prompt`: the text Looper supplies;
-- `system_prompt_mode`: `append` or `replace`, from the launch profile; an old
+- `system_prompt_mode`: `append` or `replace`, what the launch used (`Launch.system_prompt_mode`); an old
   record without the field means append;
 - `system_prompt_sha256`: the hash of that text, which is also the file name;
 - `prompt_layers`: where each layer came from, built in
@@ -3245,12 +3252,13 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
-| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task); one row per layer and place |
+| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; Claude Code's mode; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
 | `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, `effort` (its runs'; null: the runtime's own), `agent_teams` (Claude Code's agent teams: on by default for Claude Code profiles, set by the registry and once by the upgrade; the column's default, false, is for other runtimes), `system_prompt_mode` (`append` by default or `replace`, enforced by a CHECK), `builtin`; a provider still used by one is not deleted |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
+| `task_system_prompt_modes` | A task's own system prompt mode per role (`planner`, `worker`, `reviewer`): `append` or `replace`, going with its task; Claude Code only |
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
 | `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; a profile on a list is not deleted |
@@ -3497,7 +3505,7 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 | `/api/tasks/:id/gates/:step/messages` | GET | A user gate's discussion, oldest first: `{task_id, gate, messages}` (each `{id, role, kind, text, author, via, agenda_item, option, created_at}`); 404 for no such gate |
 | `/api/tasks/:id/gates/:step/messages` | POST | The user writes `{text, agenda_item?, option?}` in the gate (an option of an agenda item, with the item's id), only while it waits for the user: an open gate becomes `discussing`, and the task's Planner is woken. Answers `{task_id, gate, message, delivered}`: `queued` (its Planner takes it next) or `kept` (the task is not running; going on from its plan gives it). 400 for an empty text or one over 8,000 characters, or an option the item does not have; 404 for no such task or gate; 409 for a gate that does not wait for the user or a completed task |
 | `/api/tasks/:id/gates/:step/end` | POST | The user ends the gate's discussion (`{text?}`): the next `[GATE]` turn closes it with the current conclusions. As the POST above |
-| `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`) and `concurrency` (how many of its Workers or Reviewers run at once, 1–64), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
+| `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`), `concurrency` (how many of its Workers or Reviewers run at once, 1–64) and `system_prompt_modes` (`append` or `replace` for its `planner`, `worker` or `reviewer`, on Claude Code; 400 for another role or value), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
 | `/api/tasks/:id/roles/:key` | PUT | The user's edit of a role of the task: `{role_prompt, harness, profile_id, items?}`, the whole definition (the kind stays; `items` left out keeps the current ones), written as a new version by the user with a supplement that tells the Planner (a running one gets it at once); afterwards the Planner cannot change that role. Answers `{task_id, id, kind, version, via, changed}`. 400 for a definition a task role would be refused or one that changes nothing, 404 for an unknown task or role, 409 for a completed task or a role that changed meanwhile |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it gets its Planner at once, like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/:id/workspaces/:wid/discard` | POST | Discard a step worktree the task keeps (`active`, `unmerged`, or `discarded` with its branch kept): its directory and branch are deleted, and the activity says so. Answers `{workspace}` (as in `GET /api/tasks/:id`'s `step_workspaces`); 404 for no such worktree in the task, 409 while the task is running or for one that is merging, merged or gone ([Step workspaces](#step-workspaces)) |

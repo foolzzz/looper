@@ -600,7 +600,7 @@ class TestWorkerSubprocess:
 # What the stand-in Claude saw: its argv, the system prompt its file held and its first user turn.
 _RECORD_RUN = (
     "first = json.loads(sys.stdin.readline())['message']['content']\n"
-    "prompt_file = sys.argv[sys.argv.index('--append-system-prompt-file') + 1]\n"
+    "prompt_file = sys.argv[sys.argv.index(next(f for f in ('--append-system-prompt-file', '--system-prompt-file') if f in sys.argv)) + 1]\n"
     "prompt = open(prompt_file, encoding='utf-8').read()\n"
     "json.dump({'argv': sys.argv[1:], 'stdin': first, 'prompt': prompt}, open('run.json', 'w'))\n"
 )

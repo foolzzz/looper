@@ -45,6 +45,15 @@ def test_runtime_modules_import_in_fresh_processes(module: str, isolated_operato
     assert done.returncode == 0, done.stdout + done.stderr
 
 
+class _ModeLaunch(Launch):
+    """A launch that applies its settings' mode on any runtime: the adapters' replace layouts are exercised
+    directly, though a real launch replaces only on Claude Code (``Launch.system_prompt_mode``)."""
+
+    @property
+    def system_prompt_mode(self) -> SystemPromptMode:
+        return self.settings.system_prompt_mode
+
+
 def _launch(runtime_type: str, mode: SystemPromptMode | None = None, *, oauth: bool = False) -> Launch:
     runtime = adapter(runtime_type)
     use_login = runtime_type == "grok" or oauth
@@ -53,9 +62,7 @@ def _launch(runtime_type: str, mode: SystemPromptMode | None = None, *, oauth: b
                             base_url="http://localhost.invalid/v1", api_key=None if use_login else "test-only")
     profile = AgentProfile("profile", "test", RuntimeSpec("runtime", "test", runtime_type,
                            capabilities=runtime.capabilities), provider, "test-model")
-    if mode is not None:
-        profile = replace(profile, system_prompt_mode=mode)
-    return Launch(AgentSettings(profile=profile))
+    return _ModeLaunch(AgentSettings(profile=profile, system_prompt_mode=mode or SystemPromptMode.APPEND))
 
 
 def _files(root: Path) -> dict[str, bytes | str]:

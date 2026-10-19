@@ -420,7 +420,7 @@ class TestPlanner:
 def _normalized(argv: list[str], prompt: str, root: str) -> tuple[list[str], str]:
     """The argv and the system prompt without the temporary directory (the prompt file is named by its hash)."""
     argv = [arg.replace(root, "<root>") for arg in argv]
-    argv[argv.index("--append-system-prompt-file") + 1] = "<prompt file>"
+    argv[argv.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in argv)) + 1] = "<prompt file>"
     return argv, prompt.replace(root, "<root>")
 
 

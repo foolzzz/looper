@@ -10,12 +10,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents.profile_registry import BUILTIN_PROFILE, RegistryError, RegistryNotFound
-from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, SystemPromptMode, adapter
+from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, adapter
 from tests.test_agent_settings import _row
 from tests.test_catalog_db import _Writer
 
 
-def _dependencies(monkeypatch, runtime="claude-code", mode="append"):
+def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worker"):
     from looper.agents import prompt_preview as module
     from looper.db import agent_setting_layers
 
@@ -24,14 +24,14 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append"):
                                       capabilities=adapter(runtime).capabilities),
                       provider=replace(BUILTIN_PROFILE.provider,
                                        auth=AuthKind.OAUTH if runtime == "grok" else AuthKind.API_KEY,
-                                       protocols=frozenset(ApiProtocol), oauth_runtime_type=runtime),
-                      system_prompt_mode=SystemPromptMode(mode))
-    row = {**_row(profile), "custom_prompt": profile.custom_prompt, "system_prompt_mode": mode}
+                                       protocols=frozenset(ApiProtocol), oauth_runtime_type=runtime))
+    row = {**_row(profile), "custom_prompt": profile.custom_prompt}
     monkeypatch.setattr(module.db_profiles, "get_profile", AsyncMock(return_value=row))
     # The selected launch profile is valid and independent of the profile being previewed.
     selected = replace(BUILTIN_PROFILE, provider=replace(BUILTIN_PROFILE.provider, auth=AuthKind.API_KEY))
     layers = AsyncMock(return_value=[
         {"scope": "system", "profile": _row(selected), "harness_prompt": "Shared harness"},
+        {"scope": "role", "role": role, "system_prompt_mode": mode},
         {"scope": "project", "project_id": "proj-demo", "harness_prompt": "Project harness"},
     ])
     monkeypatch.setattr(agent_setting_layers, "list_layers", layers)
@@ -46,12 +46,15 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append"):
 @pytest.mark.parametrize("role", ["planner", "worker", "reviewer", "manager"])
 def test_preview_uses_profile_harness_contract_and_runtime_blocks(monkeypatch, runtime, mode, role):
     from looper.agents.system_prompt import sha256_text
-    module, profile, loader = _dependencies(monkeypatch, runtime, mode)
+    module, profile, loader = _dependencies(monkeypatch, runtime, mode, role)
     result = asyncio.run(module.preview(profile.id, role))
     assert loader.await_args.args == (None,)
     assert result["profile"] == {"id": profile.id, "name": profile.name}
     assert result["role"] == role and result["runtime"] == runtime
-    assert result["system_prompt_mode"] == mode and result["custom_prompt_set"]
+    claude = runtime == "claude-code"
+    assert result["system_prompt_mode"] == (mode if claude else "append")
+    assert result["role_system_prompt_mode"] == mode and result["system_prompt_mode_applies"] is claude
+    assert result["custom_prompt_set"]
     assert result["prompt_layers"]["custom_prompt"] == {"sha256": sha256_text("My profile identity")}
     assert result["prompt_layers"]["harness"]["source"] == "system"
     assert result["prompt_layers"]["task"] is None

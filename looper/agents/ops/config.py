@@ -416,7 +416,8 @@ TOOLS: tuple[Tool, ...] = (
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
                 "system_prompt_mode": {"type": "string", "enum": ["append", "replace"],
                                        "description": "append adds to the runtime's default system prompt; replace "
-                                                      "replaces it and is refused on unsupported runtimes."},
+                                                      "replaces it and is refused on unsupported runtimes and on Claude "
+                                                      "Code, whose mode is set per role in Settings."},
                 "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
                                   "prompt, before the harness; empty adds nothing."},
             },

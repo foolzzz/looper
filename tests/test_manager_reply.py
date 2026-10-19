@@ -32,8 +32,8 @@ def _fake_claude(tmp: Path, body: str) -> str:
     return fake_claude(tmp / "fake-claude", (
         "import json, os, sys, time\n"
         "open('argv.json', 'w').write(json.dumps(sys.argv[1:]))\n"
-        "if '--append-system-prompt-file' in sys.argv:\n"
-        "    prompt = open(sys.argv[sys.argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read()\n"
+        "if any(f in sys.argv for f in ('--append-system-prompt-file', '--system-prompt-file')):\n"
+        "    prompt = open(sys.argv[sys.argv.index(next(f for f in ('--append-system-prompt-file', '--system-prompt-file') if f in sys.argv)) + 1], encoding='utf-8').read()\n"
         "    open('prompts.jsonl', 'a').write(json.dumps(prompt) + '\\n')\n"
         f"{body}\n"
     ))
@@ -113,7 +113,7 @@ class TestManagerReply:
         # The system prompt is a file named by its hash, not an argument.
         assert "--append-system-prompt" not in command
         (system_prompt,) = asked["prompts"]
-        assert Path(command[command.index("--append-system-prompt-file") + 1]).name == f"{_sha(system_prompt)}.md"
+        assert Path(command[command.index("--system-prompt-file") + 1]).name == f"{_sha(system_prompt)}.md"
         # The Manager has three layers (no project, no task): its harness, its role, then the placement rule.
         assert start["metadata"]["system_prompt"] == system_prompt
         assert system_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou are the Manager Agent")
@@ -438,7 +438,7 @@ class TestManagerResidentClaude:
         assert _flag(argv, "--output-format") == "stream-json"
         # Claude echoes each message, so the Manager can tell its turns from the ones Claude runs on its own.
         assert {"--print", "--verbose", "--include-partial-messages", "--replay-user-messages"} <= set(argv)
-        takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-snapshot",
+        takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-file", "--system-prompt-snapshot",
                        "--setting-sources", "--settings", "--resume", "--model", "--effort", "--allowedTools",
                        "--plugin-dir", "--teammate-mode"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
@@ -486,8 +486,8 @@ class TestManagerResidentClaude:
         assert first_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nprompt A")
         assert second_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nprompt B")
         # A new prompt is a new file named by its hash; each turn records the hash it ran with.
-        assert Path(_flag(first, "--append-system-prompt-file") or "").name == f"{_sha(first_prompt)}.md"
-        assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
+        assert Path(_flag(first, "--system-prompt-file") or "").name == f"{_sha(first_prompt)}.md"
+        assert Path(_flag(second, "--system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
         starts = [call.kwargs["metadata"] for call in agent_db.start_record.await_args_list]
         assert [m["system_prompt_sha256"] for m in starts] == [_sha(first_prompt), _sha(second_prompt),
                                                               _sha(second_prompt)]

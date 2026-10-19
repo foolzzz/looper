@@ -10,7 +10,7 @@ Looper 给每个 agent 一份自己的系统提示词（`SystemPrompt`），四�
 
 ## 2. 决定
 
-1. 设置放在 Agent Profile 上：`system_prompt_mode`，取值 `append`（默认，和今天逐字节一致）或 `replace`。
+1. 设置放在 Agent Profile 上：`system_prompt_mode`，取值 `append`（默认）或 `replace`。Claude Code 之后改为按角色放在 `agent_setting_layers` 的角色层（内置值：管家、规划者 `replace`，其余 `append`），Profile 的值对它不再生效；Codex、Grok、OMP 仍按 Profile。
 2. 运行时不能替换默认系统提示词时，保存 Profile 就被拒绝（HTTP 400，写明原因）；界面把选项置灰并显示原因。**不静默退回追加。** 已存的 `replace` Profile 被改到不能替换的运行时，同样被拒绝，不会被悄悄改回 `append`。
 3. 能不能替换是适配器的类型化属性（`RuntimeAdapter.can_replace_system_prompt`，与 `run_input` 一样放在适配器上，不进数据库）。一个运行时只有实跑探针通过才标为可替换。
 4. 每次运行的 prompt 记录里存它运行时用的模式，运行页显示。
@@ -35,10 +35,10 @@ Looper 给每个 agent 一份自己的系统提示词（`SystemPrompt`），四�
 
 ## 4. 数据与接口
 
-- `agent_profiles.system_prompt_mode TEXT NOT NULL DEFAULT 'append' CHECK (system_prompt_mode IN ('append', 'replace'))`，`ADD COLUMN IF NOT EXISTS`，已有行得到 `append`。
+- `agent_profiles.system_prompt_mode TEXT NOT NULL DEFAULT 'append' CHECK (system_prompt_mode IN ('append', 'replace'))`，`ADD COLUMN IF NOT EXISTS`，已有行得到 `append`。Claude Code 的按角色设置是 `agent_setting_layers.system_prompt_mode`（命名 CHECK，只在角色层；NULL 为角色内置值），加列时一次性迁移。
 - Profile 接口（`/api/agent-profiles`、`/api/registry`）读写该字段；保存时按运行时能力校验；配置导出/导入带上它，缺省为 `append`。
 - 管家的 Profile 配置工具加同名字段，工具的 schema 和描述对模型可见。
-- `Launch.system_prompt_mode` 由 Profile 给出，适配器的 `resident_command`、`run_command` 据此布置命令。
+- `Launch.system_prompt_mode` 在 Claude Code 上取角色的值（无角色为 `append`），其他运行时取 Profile 的；适配器的 `resident_command`、`run_command` 据此布置命令。
 
 ## 5. 待办与风险
 

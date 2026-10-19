@@ -107,7 +107,8 @@ _CHANNEL_PUBLIC_KEYS = {
 _CHANNEL_TOKEN_SECRET = {"telegram": "bot token (Settings → Channels)",
                          "lark_bot": "app secret (Settings → Channels)"}
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
-_LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency", "boundaries")
+_LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency", "boundaries",
+                 "system_prompt_mode")
 # The roles whose role layer takes a concurrency limit: the default for every task.
 _LIMIT_ROLES = ("worker", "reviewer")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
@@ -252,8 +253,8 @@ def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
         entry["role"] = row["role"]
     entry = {**entry, **{name: row.get(name) for name in _LAYER_FIELDS}, "env": list(row.get("env") or [])}
     # Only the shared defaults may hold boundaries, and only the Workers' and the Reviewers' role layers a
-    # concurrency limit; a file without one has none.
-    for name in ("boundaries", "max_concurrency"):
+    # concurrency limit, and only role layers a system prompt mode; a file without one has none.
+    for name in ("boundaries", "max_concurrency", "system_prompt_mode"):
         if entry[name] is None:
             del entry[name]
     return entry
@@ -1147,7 +1148,7 @@ class _Importer:
             current = _stored_layer(self.target.layers.get((scope, role, project_id)))
             profile_id, name = selected(choice)
             empty = {"harness_prompt": None, "env": [], "run_budget_usd": None, "max_concurrency": None,
-                     "boundaries": None}
+                     "boundaries": None, "system_prompt_mode": None}
             self._effort_note(section, label, None, name, current["profile"] if current else None)
             await self._write_layer(section, label, (scope, role, project_id), current,
                                     {**(current or empty), "profile": name}, profile_id)

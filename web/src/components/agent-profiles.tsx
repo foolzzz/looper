@@ -189,6 +189,7 @@ export function AgentProfileForm({
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
   // Agent teams are a Claude Code feature: the server refuses them on another runtime.
   const teams = type?.type === "claude-code";
+  const claudeCode = type?.type === "claude-code";
   const canReplace = type?.can_replace_system_prompt === true;
   const replaceRefusal = canReplace ? null : type?.replace_system_prompt_refusal
     ?? "This runtime cannot replace its default system prompt.";
@@ -202,7 +203,7 @@ export function AgentProfileForm({
     // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
-    const resetPrompt = draft.system_prompt_mode === "replace" && !nextRuntimeType?.can_replace_system_prompt;
+    const resetPrompt = draft.system_prompt_mode === "replace" && (nextType === "claude-code" || !nextRuntimeType?.can_replace_system_prompt);
     setPromptReset(resetPrompt);
     set({ runtime_id: runtimeId, provider_id: providerId,
           model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model),
@@ -309,25 +310,31 @@ export function AgentProfileForm({
             ))}
           </select>
         </div>
-        <div className="space-y-1 sm:col-span-2">
-          <label htmlFor={`${id}-system-prompt`} className={LABEL}>System prompt</label>
-          <select
-            id={`${id}-system-prompt`}
-            value={draft.system_prompt_mode}
-            onChange={(e) => set({ system_prompt_mode: e.target.value as SystemPromptMode })}
-            disabled={!canReplace}
-            aria-describedby={replaceRefusal ? `${id}-system-prompt-hint` : undefined}
-            className={SELECT}
-          >
-            <option value="append">Append to the runtime&apos;s default</option>
-            <option value="replace" disabled={!canReplace}>Replace the runtime&apos;s default</option>
-          </select>
-          {replaceRefusal && (
-            <p id={`${id}-system-prompt-hint`} className="text-[11px] text-muted-foreground" role={promptReset ? "status" : undefined}>
-              {replaceRefusal}{promptReset && " The editor changed this draft to append."}
-            </p>
-          )}
-        </div>
+        {claudeCode ? (
+          <p className="text-[11px] text-muted-foreground sm:col-span-2" data-testid="prompt-mode-per-role">
+            Claude Code&apos;s system prompt mode is set per role in Settings → Roles.
+          </p>
+        ) : (
+          <div className="space-y-1 sm:col-span-2">
+            <label htmlFor={`${id}-system-prompt`} className={LABEL}>System prompt</label>
+            <select
+              id={`${id}-system-prompt`}
+              value={draft.system_prompt_mode}
+              onChange={(e) => set({ system_prompt_mode: e.target.value as SystemPromptMode })}
+              disabled={!canReplace}
+              aria-describedby={replaceRefusal ? `${id}-system-prompt-hint` : undefined}
+              className={SELECT}
+            >
+              <option value="append">Append to the runtime&apos;s default</option>
+              <option value="replace" disabled={!canReplace}>Replace the runtime&apos;s default</option>
+            </select>
+            {replaceRefusal && (
+              <p id={`${id}-system-prompt-hint`} className="text-[11px] text-muted-foreground" role={promptReset ? "status" : undefined}>
+                {replaceRefusal}{promptReset && " The editor changed this draft to append."}
+              </p>
+            )}
+          </div>
+        )}
         {teams && (
           <div className="space-y-1 sm:col-span-2">
             <label className="flex items-center gap-1.5 text-xs">
