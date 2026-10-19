@@ -7,8 +7,8 @@ the ``looper`` MCP server from the ``--mcp-config`` it was launched with
 
 - ``profile``: the project allows ``claude-code/sonnet``; the Planner chooses
   it for the Workers, and the step its reply dispatches runs on it;
-- ``empty``: the project's list is empty; the Planner's choice is refused and
-  the Worker runs the default profile;
+- ``empty``: the project's list is empty, which allows any profile; the
+  Planner's choice is accepted and the Worker runs it;
 - ``concurrency``: the Planner lowers its task's Worker limit to 1 and plans
   two independent steps, which then run one after the other.
 
@@ -44,8 +44,8 @@ args = sys.argv[2:]
 if args[:1] in (["--version"], ["auth"]):  # the server's startup self-check, not an agent run
     sys.exit(0)
 prompt = ""
-if "--append-system-prompt-file" in args:
-    prompt = open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8").read()
+if any(f in args for f in ("--append-system-prompt-file", "--system-prompt-file")):
+    prompt = open(args[args.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in args)) + 1], encoding="utf-8").read()
 variant = re.search(r"variant=(\w+)", prompt).group(1)
 
 def log(name, value):
@@ -214,10 +214,11 @@ def test_a_profile_the_planner_chooses_in_its_plan_turn_runs_the_step_it_dispatc
     journal = [(e["kind"], e["summary"]) for e in ran["details"]["profile"]["journal"] if e["kind"] == "profile_choice"]
     assert journal == [("profile_choice", "Workers of the rest of the task: claude-code/sonnet. Reason: the step "
                                           "needs a stronger model")]
-    # With the project's list empty, the choice is refused and the Worker runs what the settings give.
-    refused = _calls(ran, "empty")["looper_task_profile_set"]
-    assert refused["status"] == "error" and refused["error"]["code"] == "forbidden"
-    assert [r["model"] for r in _log(ran["state"], "runs.jsonl", "empty")] == ["opus"]
+    # With the project's list empty, any profile is allowed: the choice is accepted and the Worker runs it.
+    unrestricted = _calls(ran, "empty")
+    assert unrestricted["looper_task_profiles"]["result"]["restricted"] is False
+    assert unrestricted["looper_task_profile_set"]["status"] == "ok"
+    assert [r["model"] for r in _log(ran["state"], "runs.jsonl", "empty")] == ["sonnet"]
 
 
 def test_a_task_limit_the_planner_lowers_in_its_plan_turn_holds_the_steps_it_dispatches(ran: dict[str, Any]) -> None:

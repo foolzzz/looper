@@ -92,6 +92,9 @@ func TestLegacyScheduleMinInterval(t *testing.T) {
 		{name: "current wins", looperSet: true, looper: "45", loopxSet: true, loopx: "30", wantPlain: 45, wantGated: 45},
 		{name: "empty current ignores legacy", looperSet: true, looper: "", loopxSet: true, loopx: "30", wantPlain: 300, wantGated: 60},
 		{name: "legacy invalid", loopxSet: true, loopx: "nope", wantErr: true},
+		{name: "underscore digits", looperSet: true, looper: "3_0", wantPlain: 30, wantGated: 30},
+		{name: "fullwidth digits", looperSet: true, looper: "３０", wantPlain: 30, wantGated: 30},
+		{name: "below one", looperSet: true, looper: "0", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

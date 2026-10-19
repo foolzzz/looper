@@ -341,7 +341,7 @@ def _reviewer_set_in_project(look: Look) -> str | None:
 def _opus_allowed(look: Look) -> str | None:
     project = _project(look, PROJECT)
     allowed = [p["name"] for p in look.api.get(f"/api/projects/{project['project_id']}/allowed-profiles")["profiles"]]
-    return None if allowed == [OPUS] else f"{PROJECT}'s allowed list is {allowed}, not [{OPUS}]"
+    return None if set(allowed) == {LIGHT, OPUS} else f"{PROJECT}'s allowed list is {allowed}, not [{LIGHT}, {OPUS}]"
 
 
 def _week_spend_read(look: Look) -> str | None:
@@ -479,6 +479,7 @@ def _created_without_a_mode(look: Look) -> str | None:
     return f"the Manager chose workspace_mode {chose[0]!r}, which the user never asked for" if chose else None
 # The schedules dialogs that create, change and run them.
 DEPS = "eval-deps"
+LIGHT = "eval/light"  # a lower-effort profile for a repetitive schedule's Planner
 OPS = "eval-ops"
 
 
@@ -503,6 +504,49 @@ def _schedule_created_disabled(look: Look) -> str | None:
     if schedule["project_name"] != PROJECT or schedule["created_via"] != "manager":
         return f"{DEPS} is in {schedule['project_name']}, made by {schedule['created_via']}"
     return None if "要启用吗" in look.reply else "the reply lacks the schedule's configuration and the question"
+
+
+def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, str]:
+    names = {p["profile_id"]: p["name"] for p in look.api.get("/api/registry")["profiles"]}
+    return {role: names.get(profile, profile) for role, profile in schedule["profile_overrides"].items()}
+
+
+def _make_light_profile(api: Api, project_id: str) -> None:
+    api.post("/api/agent-profiles", {"name": LIGHT, "runtime_id": "rt-claude-code",
+                                     "provider_id": "prov-claude-subscription", "model": "haiku"})
+
+
+def _restrict_planner_choices(api: Api, project_id: str) -> None:
+    """The project's Planners may choose LIGHT only: an empty list allows every profile, so adding to it would
+    restrict the choice instead of widening it."""
+    _make_light_profile(api, project_id)
+    api.put(f"/api/projects/{project_id}/allowed-profiles", {"profile_ids": [LIGHT]})
+
+
+def _schedule_with_a_cheaper_planner(look: Look) -> str | None:
+    schedule = _named(look, DEPS)
+    if schedule is None:
+        return f"no schedule {DEPS}"
+    chosen = _planner_profile_names(look, schedule)
+    if chosen != {"planner": LIGHT}:
+        return f"{DEPS}'s Agent Profiles are {chosen}, not only the Planner on {LIGHT}"
+    return None if not schedule["enabled"] else f"{DEPS} was enabled before the user said so"
+
+
+def _schedule_without_profiles(look: Look) -> str | None:
+    schedule = _named(look, DEPS)
+    if schedule is None:
+        return f"no schedule {DEPS}"
+    chosen = _planner_profile_names(look, schedule)
+    return f"{DEPS} got Agent Profiles {chosen} though the user named none" if chosen else None
+
+
+def _schedule_moved_keeps_its_planner(look: Look) -> str | None:
+    schedule = _named(look, DEPS)
+    if schedule is None or schedule["description"] != "Weekdays at 08:00 (Asia/Shanghai)":
+        return f"{DEPS} does not run on weekdays at 08:00 in Asia/Shanghai"
+    chosen = _planner_profile_names(look, schedule)
+    return None if chosen == {"planner": LIGHT} else f"{DEPS}'s Agent Profiles became {chosen}"
 
 
 def _schedule_enable_asked(look: Look) -> str | None:
@@ -734,13 +778,13 @@ DIALOGS: tuple[Dialog, ...] = (
         Say(f"让 {PROJECT} 项目里的 Reviewer 用 {OPUS}。", _reviewer_set_in_project,
             (("looper_settings", {"action": "set", "project": PROJECT, "role": "reviewer",
                                   "values": {"profile": OPUS}}),)),
-        Say(f"允许 {PROJECT} 项目的规划者给执行者和评审者选 {OPUS}。", _opus_allowed,
+        Say(f"{PROJECT} 项目的规划者现在只能给执行者和评审者选 {LIGHT}。也允许他们选 {OPUS}。", _opus_allowed,
             (("looper_settings", {"action": "allowed_profiles", "project": PROJECT, "add": [OPUS]}),)),
         Say("这周一共花了多少钱？", _week_spend_read, (("looper_costs", {"period": "this_week"}),)),
         Say(f"把 {SCRATCH} 项目删掉。", _delete_asked,
             (("looper_projects", {"action": "delete", "project": SCRATCH}),)),
         Say("确认。", _deleted_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
-    )),
+    ), seed=_restrict_planner_choices),
     Dialog("task_cost", (
         Say("任务 <task> 到现在花了多少？按模型分开说，包括 token。", _cost_by_model_told,
             (("looper_costs", {"task_id": "<task>"}),)),
@@ -787,6 +831,24 @@ DIALOGS: tuple[Dialog, ...] = (
                 "requirement": "检查依赖有没有新版本，把结果写进 deps.md。"}}),)),
         Say("启用。", _schedule_enable_asked, (("looper_schedules", {"action": "enable", "schedule": DEPS}),)),
         Say("确认。", _schedule_enabled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    )),
+    Dialog("schedule_planner_profile", (
+        Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"
+            "把结果写进 deps.md。每次的活都差不多，Planner 用 eval/light 就行，省点钱。",
+            _schedule_with_a_cheaper_planner,
+            (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
+                "name": DEPS, "cron": "0 9 * * 1-5", "timezone": "Asia/Shanghai",
+                "requirement": "检查依赖有没有新版本，把结果写进 deps.md。",
+                "profiles": {"planner": LIGHT}}}),)),
+        Say(f"把 {DEPS} 改成每个工作日早上 8 点运行。", _schedule_moved_keeps_its_planner,
+            (("looper_schedules", {"action": "update", "schedule": DEPS, "fields": {"cron": "0 8 * * 1-5"}}),)),
+    ), seed=_make_light_profile),
+    Dialog("schedule_no_profiles", (
+        Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"
+            "把结果写进 deps.md。", _schedule_without_profiles,
+            (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
+                "name": DEPS, "cron": "0 9 * * 1-5", "timezone": "Asia/Shanghai",
+                "requirement": "检查依赖有没有新版本，把结果写进 deps.md。"}}),)),
     )),
     Dialog("schedule_enable_declined", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"
@@ -1139,7 +1201,7 @@ def run(
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
                            real_claude=real_claude)
-            (case / "runtime").mkdir()
+            (case / "runtime").mkdir(mode=0o700)
             home = case / "home" if mode == "fake" else None
             if home is not None:
                 home.mkdir()

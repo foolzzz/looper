@@ -12,13 +12,13 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
+from .projects import profile_allowed_sql
 
 # A template with its profile's name, and whether its project allows that profile now.
 _TEMPLATE = (
     "SELECT t.project_id, t.template_key, t.kind, t.description, t.role_prompt, t.harness, t.profile_id, t.items, "
-    "t.updated_at, a.name AS profile_name, (l.profile_id IS NOT NULL) AS profile_allowed "
+    f"t.updated_at, a.name AS profile_name, {profile_allowed_sql('t.project_id', 't.profile_id')} AS profile_allowed "
     "FROM project_role_templates t LEFT JOIN agent_profiles a ON a.id = t.profile_id "
-    "LEFT JOIN project_allowed_profiles l ON l.project_id = t.project_id AND l.profile_id = t.profile_id "
 )
 
 

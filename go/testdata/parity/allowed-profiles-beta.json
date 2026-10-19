@@ -1,0 +1,202 @@
+{
+  "choosable": [
+    {
+      "effort": null,
+      "model": "opus",
+      "name": "claude-code/opus",
+      "profile_id": "agent-claude-code-opus",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": 4.0,
+        "output": 20.0
+      }
+    },
+    {
+      "effort": "medium",
+      "model": "layer-planner",
+      "name": "claude-code/layer-planner",
+      "profile_id": "agent-layer-planner",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "max",
+      "model": "layer-project",
+      "name": "claude-code/layer-project",
+      "profile_id": "agent-layer-project",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "max",
+      "model": "layer-pt-rev",
+      "name": "claude-code/layer-pt-rev",
+      "profile_id": "agent-layer-pt-rev",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "xhigh",
+      "model": "layer-pt-work",
+      "name": "claude-code/layer-pt-work",
+      "profile_id": "agent-layer-pt-work",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "xhigh",
+      "model": "layer-reviewer",
+      "name": "claude-code/layer-reviewer",
+      "profile_id": "agent-layer-reviewer",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": null,
+      "model": "layer-roledef",
+      "name": "claude-code/layer-roledef",
+      "profile_id": "agent-layer-roledef",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "low",
+      "model": "layer-rp-plan",
+      "name": "claude-code/layer-rp-plan",
+      "profile_id": "agent-layer-rp-plan",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "high",
+      "model": "layer-rp-rev",
+      "name": "claude-code/layer-rp-rev",
+      "profile_id": "agent-layer-rp-rev",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "medium",
+      "model": "layer-rp-work",
+      "name": "claude-code/layer-rp-work",
+      "profile_id": "agent-layer-rp-work",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "low",
+      "model": "layer-system",
+      "name": "claude-code/layer-system",
+      "profile_id": "agent-layer-system",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "low",
+      "model": "layer-task-work",
+      "name": "claude-code/layer-task-work",
+      "profile_id": "agent-layer-task-work",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "high",
+      "model": "layer-worker",
+      "name": "claude-code/layer-worker",
+      "profile_id": "agent-layer-worker",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    }
+  ],
+  "profiles": [],
+  "project_id": "proj-beta00002",
+  "restricted": false
+}

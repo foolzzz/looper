@@ -61,6 +61,7 @@ type Reader interface {
 	GateSettings(ctx context.Context) (map[string]any, error)
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	RoleTemplates(ctx context.Context, projectID string) (map[string]any, error)
+	AllowedProfiles(ctx context.Context, projectID string) (map[string]any, error)
 	ProjectRoleStats(ctx context.Context, projectID string, since *time.Time) (map[string]any, error)
 	GateMessages(ctx context.Context, taskID, label string) (map[string]any, error)
 	TaskRoom(ctx context.Context, taskID string, q db.RoomQuery) (map[string]any, error)
@@ -117,7 +118,7 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // and a task's activity list, activity detail, and conversation.
 // It also serves GET /api/roles, GET /api/roles/<role>, GET /api/channel-configs,
 // GET /api/channel-configs/<id>, GET /api/gate-settings, and a project's
-// role templates and role stats.
+// role templates, allowed profiles, and role stats.
 // It also serves GET /api/tasks/<id>/gates/<label>/messages and
 // GET /api/tasks/<id>/room.
 // It also serves GET /api/workspaces/check, GET /api/projects/<id>/schedules,
@@ -149,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/channel-configs/{id}", s.handleChannel)
 	mux.HandleFunc("/api/gate-settings", s.handleGateSettings)
 	mux.HandleFunc("/api/projects/{id}/role-templates", s.handleRoleTemplates)
+	mux.HandleFunc("/api/projects/{id}/allowed-profiles", s.handleAllowedProfiles)
 	mux.HandleFunc("/api/projects/{id}/role-stats", s.handleRoleStats)
 	mux.HandleFunc("/api/workspaces/check", s.handleWorkspaceCheck)
 	mux.HandleFunc("/api/projects/{id}/schedules", s.handleProjectSchedules)
@@ -444,7 +446,9 @@ func relativeInside(rel string) bool {
 // applied: deep -> assets/deep makes /deep/../out look at assets/out, not a
 // sibling of the URL name deep. Popping ".." off that name first hides the
 // link, and a path os.Root refuses is then served as the index page. An
-// absolute link, or a relative link whose ".." leaves the root, is an
+// absolute link is an escape only when its target leaves the root. One
+// whose target stays inside is followed, and ".." in the rest of the URL
+// applies to that target. A relative link whose ".." leaves the root is an
 // escape. A ".." in the URL that leaves the root is not a symlink escape;
 // openEscapedStatic decides whether that path names an existing file.
 // os.Root still opens every file that is served, so a refused path is never read.
@@ -460,7 +464,7 @@ func walkStatic(root *os.Root, stack, parts []string, inLink bool, depth int) ([
 	if depth > 8 {
 		return stack, true
 	}
-	for _, part := range parts {
+	for i, part := range parts {
 		if part == "" || part == "." {
 			continue
 		}
@@ -487,8 +491,15 @@ func walkStatic(root *os.Root, stack, parts []string, inLink bool, depth int) ([
 		if err != nil {
 			return stack, true
 		}
-		if strings.HasPrefix(target, "/") {
-			return stack, true
+		if filepath.IsAbs(target) {
+			inside, targetRel := absoluteLinkInside(root, target)
+			if !inside {
+				return stack, true
+			}
+			// The absolute target replaces this path. ".." later in the URL
+			// applies to that target, not to the name that pointed at it.
+			next := append(linkParts(targetRel), parts[i+1:]...)
+			return walkStatic(root, nil, next, true, depth+1)
 		}
 		parent := append([]string{}, stack[:len(stack)-1]...)
 		next, escaped := walkStatic(root, parent, linkParts(target), true, depth+1)
@@ -498,6 +509,44 @@ func walkStatic(root *os.Root, stack, parts []string, inLink bool, depth int) ([
 		stack = next
 	}
 	return stack, false
+}
+
+// absoluteLinkInside reports whether an absolute symlink target stays inside
+// the static root. rel is the slash-separated path of that target from the
+// root. A target that cannot be resolved is judged from its cleaned path: a
+// missing file inside the root is not an escape, and a missing file outside
+// is. The caller still opens a served file through os.Root.
+func absoluteLinkInside(root *os.Root, target string) (inside bool, rel string) {
+	rootResolved, err := filepath.EvalSymlinks(root.Name())
+	if err != nil {
+		return false, ""
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		cleaned := filepath.Clean(target)
+		if inside, rel = relativeLink(rootResolved, cleaned); inside {
+			return true, rel
+		}
+		if cleanRoot := filepath.Clean(root.Name()); cleanRoot != rootResolved {
+			return relativeLink(cleanRoot, cleaned)
+		}
+		return false, ""
+	}
+	return relativeLink(rootResolved, resolved)
+}
+
+func relativeLink(root, path string) (bool, string) {
+	if path == root {
+		return true, ""
+	}
+	if !pathInside(root, path) {
+		return false, ""
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || !relativeInside(rel) {
+		return false, ""
+	}
+	return true, filepath.ToSlash(rel)
 }
 
 func linkParts(target string) []string {

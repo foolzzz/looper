@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { LayerSettingsForm } from "@/components/layer-settings";
-import type { AgentRole, EffectiveSettings, LayerValues, SettingLayer, SettingLimits } from "@/lib/api";
+import type { AgentRole, EffectiveSettings, LayerValues, SettingLayer, SettingLimits, SystemPromptMode } from "@/lib/api";
 
 const VALUES: LayerValues = {
   harness_prompt: null,
@@ -23,12 +23,13 @@ const LIMITS: SettingLimits = {
   concurrency_max: 64,
 };
 
-const effective = (limit?: number): EffectiveSettings => ({
+const effective = (limit?: number, mode: SystemPromptMode = "append"): EffectiveSettings => ({
   harness_prompt: { value: "", source: "builtin" },
   profile: { value: { profile_id: "p", name: "p", model: "m", effort: null, runtime: "r", provider: "v" }, source: "builtin" },
   effort: { value: null, source: "builtin" },
   env: [],
   run_budget_usd: { value: null, source: "builtin" },
+  system_prompt_mode: mode,
   ...(limit == null ? {} : { max_concurrency: { value: limit, source: "builtin" as const } }),
 });
 
@@ -64,5 +65,26 @@ describe("LayerSettingsForm's per-task limit", () => {
     ["a Reviewer's layer in a project", "role_project", ["reviewer"]],
   ] as const)("is not on %s", (_, layer, roles) => {
     expect(render(layer, [...roles])).not.toContain("t-concurrency");
+  });
+});
+
+describe("LayerSettingsForm's system prompt mode", () => {
+  it.each(["manager", "planner", "worker", "reviewer"] as const)("is on the %s's role layer, saying where it applies", (role) => {
+    const html = renderToStaticMarkup(
+      <LayerSettingsForm idPrefix="t" layer="role" roles={[role]} values={VALUES} effective={effective(undefined, "replace")}
+        limits={LIMITS} onSave={async () => VALUES} />,
+    );
+    expect(html).toContain('id="t-prompt-mode"');
+    expect(html).toMatch(/<option value="replace"[^>]*>Replace Claude Code&#x27;s prompt/);
+    expect(text(html)).toContain("Only for runs on Claude Code.");
+    expect(html).not.toMatch(/<option value="auto"|<option value="default"/);
+  });
+
+  it.each([
+    ["the shared defaults", "system", ["manager", "planner", "worker", "reviewer"]],
+    ["a project's layer", "project", ["planner", "worker", "reviewer"]],
+    ["a role's layer in a project", "role_project", ["worker"]],
+  ] as const)("is not on %s", (_, layer, roles) => {
+    expect(render(layer, [...roles])).not.toContain("t-prompt-mode");
   });
 });

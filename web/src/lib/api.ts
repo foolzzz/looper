@@ -412,7 +412,7 @@ export interface DbChatMessage {
   message_id: string;
   role: string;
   content: string;
-  /** The channel the turn came in on: "web", "telegram" or "lark". */
+  /** The channel the turn came in on: "web", "telegram", "lark" or "lark_bot". */
   channel?: string;
   created_at: string;
   /** Set for a Lark or Telegram answer its channel did not deliver, with the channel's error. */
@@ -432,7 +432,7 @@ export async function fetchChatMessages(sessionId: string): Promise<DbChatMessag
  * not listed). */
 export interface ChatSession {
   session_id: string;
-  /** The channel the session belongs to: "web", "telegram" or "lark". */
+  /** The channel the session belongs to: "web", "telegram", "lark" or "lark_bot". */
   channel: string;
   message_count: number;
   first_message_at: string;
@@ -1384,7 +1384,7 @@ export interface Supplement {
 /** Something the Manager did to a task through its tools (its audit trail), or asked the user to confirm. */
 export interface ManagerAction {
   created_at: string;
-  /** The chat's channel: "web", "lark", "telegram". */
+  /** The chat's channel: "web", "lark", "lark_bot", "telegram". */
   channel: string;
   /** The tool, e.g. "looper_task_control". */
   tool: string;
@@ -1418,6 +1418,10 @@ export interface TaskRoleConcurrency extends Sourced<number> {
 /** One task role's Agent Profile (source "task": the task chose it). */
 export interface TaskRoleAgents {
   profile: Sourced<EffectiveProfile>;
+  /** The runtime type of the role's profile: the prompt mode below applies to "claude-code" only. */
+  runtime_type: string;
+  /** What the role's runs use on Claude Code; source "task" (the task chose it), "role" or "builtin". */
+  system_prompt_mode: Sourced<SystemPromptMode>;
 }
 
 /** A Worker's or Reviewer's: also how many run at once in the task. */
@@ -1445,6 +1449,8 @@ export interface TaskAgentsUpdate {
   profiles?: Partial<Record<TaskRole, string | null>>;
   /** A value that is not a number goes as typed, so the server's reason shows. */
   concurrency?: Partial<Record<TaskLimitRole, number | string | null>>;
+  /** Append or replace per role, on Claude Code; null drops the task's choice. */
+  system_prompt_modes?: Partial<Record<TaskRole, SystemPromptMode | null>>;
 }
 
 /** Change the task's own Agent Profiles or Worker and Reviewer limits. Resolves to its agents as saved, and, after a
@@ -1710,7 +1716,7 @@ export interface UserGate {
 }
 
 /** A channel gate messages can go to. */
-export type GateChannel = "lark" | "telegram";
+export type GateChannel = "lark" | "lark_bot" | "telegram";
 
 /** How the gate's own messages fared in its chat. */
 export interface GateChannelPosts {
@@ -1735,7 +1741,7 @@ export interface GateMessage {
   text: string;
   /** Who wrote it in a group chat; null otherwise. */
   author: string | null;
-  /** Where the user wrote it: "dashboard", "lark", "telegram" or "manager:<channel>". */
+  /** Where the user wrote it: "dashboard", "lark", "lark_bot", "telegram" or "manager:<channel>". */
   via: string | null;
   /** The agenda item and option the user picked with an option button. */
   agenda_item: string | null;
@@ -1862,7 +1868,7 @@ export interface PlannerRole {
 export interface TaskRoleEdit {
   role_prompt: string;
   harness: string | null;
-  /** One on the project's list of Agent Profiles that can run the kind. */
+  /** One the project allows its Planners (its list, or any while the list is empty) that can run the kind. */
   profile_id: string | null;
   /** Item ids, each installed for roles in the project; left out keeps the current ones. */
   items?: string[];
@@ -2481,6 +2487,7 @@ export interface AgentProfile {
   /** Claude Code's agent teams in its runs (Claude Code runtimes only). */
   agent_teams: boolean;
   system_prompt_mode: SystemPromptMode;
+  custom_prompt: string;
   runtime_id: string;
   runtime_name: string;
   runtime_type: string;
@@ -2541,6 +2548,29 @@ export interface ProfileFields {
   effort?: string | null;
   agent_teams?: boolean;
   system_prompt_mode?: SystemPromptMode;
+  custom_prompt?: string;
+}
+
+export interface PromptBlock {
+  name: string;
+  owner: "looper" | "runtime";
+  text: string | null;
+  note: string;
+}
+
+export interface PromptPreview {
+  profile: { id: string; name: string };
+  role: AgentRole;
+  runtime: string;
+  /** What the launch uses: the role's mode on Claude Code, append elsewhere. */
+  system_prompt_mode: SystemPromptMode;
+  role_system_prompt_mode: SystemPromptMode;
+  system_prompt_mode_applies: boolean;
+  custom_prompt_set: boolean;
+  looper_prompt_sha256: string;
+  prompt_layers: Record<string, unknown>;
+  blocks: PromptBlock[];
+  notes: string[];
 }
 
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */
@@ -2601,6 +2631,14 @@ export function updateAgentProfile(
   return registryCall("PUT", `/agent-profiles/${encodeURIComponent(profileId)}`, fields, "update Agent Profile");
 }
 
+export async function fetchPromptPreview(profileId: string, role: AgentRole, projectId?: string): Promise<PromptPreview> {
+  const query = new URLSearchParams({ role });
+  if (projectId !== undefined) query.set("project_id", projectId);
+  const res = await fetch(`${API_BASE}/agent-profiles/${encodeURIComponent(profileId)}/prompt-preview?${query}`);
+  if (!res.ok) await failed(res, "preview system prompt");
+  return res.json();
+}
+
 export function deleteAgentProfile(profileId: string): Promise<{ deleted: string }> {
   return registryCall("DELETE", `/agent-profiles/${encodeURIComponent(profileId)}`, undefined,
     "delete Agent Profile");
@@ -2638,6 +2676,9 @@ export interface LayerValues {
   /** What every run of a role a task's Planner defines ends with; only the system layer sets it (null: the
    * built-in boundaries). */
   boundaries: string | null;
+  /** Whether the role replaces Claude Code's default system prompt or appends to it; only a role layer that sets it
+   * has one (absent: the role's built-in value, which `effective` shows). */
+  system_prompt_mode?: SystemPromptMode | null;
 }
 
 export interface Sourced<T> {
@@ -2670,6 +2711,8 @@ export interface EffectiveSettings {
   /** The Workers' and Reviewers' default limit per task (source "role" or "builtin"), in Settings → Roles only;
    * absent for the other roles, the system layer and in a project. */
   max_concurrency?: Sourced<number>;
+  /** The role's mode (its role layer's, else the built-in one); it applies only to runs on Claude Code. */
+  system_prompt_mode: SystemPromptMode;
 }
 
 export interface SettingLimits {
@@ -2774,10 +2817,13 @@ export interface AllowedProfile {
   usd_per_million_tokens: { input: number | null; output: number | null };
 }
 
-/** The profiles a project's Planners may choose, by name; empty by default. */
+/** The profiles a project's Planners may choose: its list (`profiles`, empty by default, which lets them choose any
+ * profile) and what they may choose now (`choosable`: the list, or every profile that can run a Worker or Reviewer). */
 export interface AllowedProfiles {
   project_id: string;
+  restricted: boolean;
   profiles: AllowedProfile[];
+  choosable: AllowedProfile[];
 }
 
 export async function fetchAllowedProfiles(projectId: string): Promise<AllowedProfiles> {
@@ -2786,7 +2832,7 @@ export async function fetchAllowedProfiles(projectId: string): Promise<AllowedPr
   return res.json();
 }
 
-/** Make `profileIds` the whole list ([] empties it); a profile it drops takes the Planners' choices of it along.
+/** Make `profileIds` the whole list ([] lifts the restriction); a profile it drops takes the Planners' choices of it along.
  * Resolves to the list as saved. */
 export function setAllowedProfiles(projectId: string, profileIds: string[]): Promise<AllowedProfiles> {
   return putJson(
@@ -3247,15 +3293,15 @@ export interface ChannelConfig {
   updated_at: string;
 }
 
-/** The Lark (lark-cli) channel as lark-cli sees its saved settings (`GET /api/channels/lark/status`). */
+/** A Lark channel's saved settings (`GET /api/channels/{lark|lark_bot}/status`). */
 export interface LarkStatus {
-  /** The bot lark-cli acts as under the channel's profile; null when it cannot (see `problem`). */
+  /** The channel's bot; profile is empty for lark_bot, and bot is null when unavailable (see `problem`). */
   bot: { name: string; app_id: string; open_id: string; profile: string } | null;
-  /** Why the channel would not start (lark-cli, or the allowlist made for another app); null otherwise. */
+  /** Why the channel would not start (credentials, lark-cli, or an allowlist for another app); null otherwise. */
   problem: string | null;
   /** The app the sender allowlist was made for; open_ids differ per app. */
   allowlist_app_id: string | null;
-  /** Names of the allowlist's and the refused senders' open_ids, where lark-cli knows them. */
+  /** Names of the allowlist's and the refused senders' open_ids, where the channel knows them. */
   names: Record<string, string>;
   /** The latest senders the allowlist refused, newest first, not on the saved allowlist; `chat_id` is the group
    * chat they last @-mentioned the bot in, null for a direct message. */
@@ -3270,16 +3316,17 @@ export interface LarkPerson {
   department: string;
 }
 
-export async function fetchLarkStatus(): Promise<LarkStatus> {
-  const res = await fetch(`${API_BASE}/channels/lark/status`);
+export async function fetchLarkStatus(channelType = "lark"): Promise<LarkStatus> {
+  const res = await fetch(`${API_BASE}/channels/${channelType}/status`);
   if (!res.ok) await failed(res, "lark status");
   return res.json();
 }
 
-export async function searchLarkPeople(query: string): Promise<LarkPerson[]> {
-  const res = await fetch(`${API_BASE}/channels/lark/people?q=${encodeURIComponent(query)}`);
+export async function searchLarkPeople(query: string, channelType = "lark"): Promise<{ people: LarkPerson[]; complete: boolean }> {
+  const res = await fetch(`${API_BASE}/channels/${channelType}/people?q=${encodeURIComponent(query)}`);
   if (!res.ok) await failed(res, "lark people");
-  return (await res.json()).people ?? [];
+  const data = await res.json();
+  return { people: data.people ?? [], complete: data.complete ?? true };
 }
 
 export async function fetchChannelConfigs(): Promise<ChannelConfig[]> {

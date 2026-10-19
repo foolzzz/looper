@@ -8,3 +8,11 @@ class SystemPromptMode(str, Enum):
 
     APPEND = "append"
     REPLACE = "replace"
+
+
+def system_prompt_mode(raw: object) -> SystemPromptMode:
+    """A role's mode as stored or given: ``append`` or ``replace``."""
+    try:
+        return SystemPromptMode(raw)
+    except ValueError:
+        raise ValueError(f'system_prompt_mode must be "append" or "replace"; got {raw!r}') from None

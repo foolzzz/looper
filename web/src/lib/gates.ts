@@ -1,4 +1,5 @@
 import type { GateChannelPosts, GateState, UserGate } from "@/lib/api";
+import { channelLabel } from "@/lib/chat-channels";
 
 /** How a gate reads: a word (color is never the only signal), a badge tone and an icon tone. */
 export interface GateLook {
@@ -75,7 +76,7 @@ export function gatePostsText(
   if (!posts) return null;
   const where = `Also in ${posts.target}`;
   if (posts.failed <= 0) return { where, failure: null, error: "" };
-  const channel = posts.channel === "telegram" ? "Telegram" : "Lark";
+  const channel = channelLabel(posts.channel);
   const error = posts.last_error?.trim() ?? "";
   const shown = error.length > POST_ERROR_SHOWN_CHARS ? `${error.slice(0, POST_ERROR_SHOWN_CHARS)}…` : error;
   const count = posts.failed === 1 ? "1 message" : `${posts.failed} messages`;

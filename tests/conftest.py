@@ -353,8 +353,8 @@ if {forget_sessions!r} and '--resume' in sys.argv:
                                                       + sys.argv[sys.argv.index('--resume') + 1]]}}), flush=True)
     sys.exit(0)
 # Like Claude, read the appended system prompt's file when the process starts.
-if '--append-system-prompt-file' in sys.argv:
-    log('prompts.jsonl', open(sys.argv[sys.argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read())
+if any(f in sys.argv for f in ('--append-system-prompt-file', '--system-prompt-file')):
+    log('prompts.jsonl', open(sys.argv[sys.argv.index(next(f for f in ('--append-system-prompt-file', '--system-prompt-file') if f in sys.argv)) + 1], encoding='utf-8').read())
 counter = os.path.join(STATE, 'turns')
 # Like Claude, a process that resumes a session carries on from the session's running total.
 session_cost = os.path.join(STATE, 'session_cost')

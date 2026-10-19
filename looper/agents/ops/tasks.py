@@ -23,7 +23,7 @@ from ...db import user_gates as db_user_gates
 from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
 from ..agent_settings import resolve_task_concurrency
 from ..gate_service import origin_chat, post_message as post_gate_message
-from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
+from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, is_lark, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, TaskWorkspaces
 from ..project_execution import format_usd
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
@@ -604,7 +604,7 @@ async def _gate_reply(call: Call) -> dict[str, Any]:
     text = _relayed_text(turn, arguments.get("excerpt"))
     context = (turn.envelope.payload.get("channel_context") if turn.envelope is not None else None) or {}
     origin = None
-    if turn.channel in ("lark", "telegram"):
+    if is_lark(turn.channel) or turn.channel == "telegram":
         origin = {"author": (context.get("sender_name") or turn.sender) if turn.group else None,
                   "channel": turn.channel,
                   "chat": origin_chat(turn.channel, turn.chat or "", group=turn.group, sender=turn.sender or ""),

@@ -80,6 +80,8 @@ type recordingReads struct {
 	projectIDSeen             string
 	templates                 map[string]any
 	templatesErr              error
+	allowedProfiles           map[string]any
+	allowedProfilesErr        error
 	roleStatsBody             map[string]any
 	roleStatsErr              error
 	roleStatsProject          string
@@ -332,6 +334,18 @@ func (r *recordingReads) RoleTemplates(_ context.Context, id string) (map[string
 		return map[string]any{}, nil
 	}
 	return r.templates, nil
+}
+
+func (r *recordingReads) AllowedProfiles(_ context.Context, id string) (map[string]any, error) {
+	r.calls = append(r.calls, "allowed-profiles")
+	r.projectIDSeen = id
+	if r.allowedProfilesErr != nil {
+		return nil, r.allowedProfilesErr
+	}
+	if r.allowedProfiles == nil {
+		return map[string]any{}, nil
+	}
+	return r.allowedProfiles, nil
 }
 
 func (r *recordingReads) ProjectRoleStats(_ context.Context, id string, since *time.Time) (map[string]any, error) {

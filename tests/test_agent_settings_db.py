@@ -189,7 +189,12 @@ def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_set
         assert await _layers(pool) == []
         assert await pool.fetchval("SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers'")
         for role in ("manager", "planner", "worker", "reviewer"):
-            assert await load_agent_settings(role, "proj-x") == BUILTIN_SETTINGS
+            from dataclasses import replace
+
+            from looper.agents.agent_settings import BUILTIN_SYSTEM_PROMPT_MODE, AgentType
+
+            assert await load_agent_settings(role, "proj-x") == replace(
+                BUILTIN_SETTINGS, system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[AgentType(role)])
 
     _run(_test, monkeypatch)
 

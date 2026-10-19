@@ -58,7 +58,7 @@ function projectSummary(settings: ProjectAgentSettings) {
 
 /** The Planner list's line: what is on it, or that it is empty. */
 function choicesSummary(profiles: AllowedProfile[]) {
-  if (!profiles.length) return "empty: the Planner cannot change a profile";
+  if (!profiles.length) return "any profile (no restriction)";
   return profiles.map(profileName).join(", ");
 }
 
@@ -100,7 +100,7 @@ function PlannerChoices({
     if (await save([...ids, adding])) setAdding("");
   };
   const remove = (profile: AllowedProfile) => {
-    if (confirm(`Remove "${profileName(profile)}" from the list? What this project's Planners chose of it goes too.`)) {
+    if (confirm(`Remove "${profileName(profile)}" from the list? What this project's Planners chose of it goes too${ids.length === 1 ? ", and the project's Planners may choose any profile" : ""}.`)) {
       save(ids.filter((other) => other !== profile.profile_id));
     }
   };
@@ -108,14 +108,15 @@ function PlannerChoices({
   return (
     <>
       <p className="text-xs text-muted-foreground">
-        A task&apos;s Planner may choose any profile on this list for its own task&apos;s Workers or Reviewers, for the
-        rest of the task or for one step, without asking, a pricier one included. A profile you choose for a task
+        A task&apos;s Planner may choose a profile for its own task&apos;s Workers or Reviewers, for the rest of the
+        task or for one step, without asking, a pricier one included: any profile while this list is empty, else only
+        those on it. A profile you choose for a task
         wins over the Planner&apos;s choice.
       </p>
       {profiles.length === 0 ? (
         <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-          The list is empty, so a task&apos;s Planner cannot change its Workers&apos; or Reviewers&apos;{" "}
-          {AGENT_PROFILE.name}.
+          Any profile (no restriction): a task&apos;s Planner may choose any {AGENT_PROFILE.name} that can run its
+          Workers or Reviewers. Add one to restrict the choice to a list.
         </p>
       ) : (
         <ul aria-label="Profiles the Planner may choose" className="divide-y divide-border rounded-md border border-border">

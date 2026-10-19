@@ -18,6 +18,71 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-10-19
+
+### Highlights
+
+- **Claude Code's Manager and Planner replace Claude Code's default system prompt.** Worker, Reviewer, Planner-defined role runs and consults still append. Settings → Roles sets append or replace per role. A task can override its planner, worker or reviewer on the task's Agents tab. A Claude Code profile refuses `replace`. One migration copies a Claude Code profile's `replace` onto the Worker or Reviewer role layer that used it, then sets every Claude Code profile to `append`. Codex, Grok and OMP keep the profile-level mode. ([#219](https://github.com/foolzzz/looper/pull/219))
+- **An empty allowed-profiles list lets Planners choose any capable profile.** That list is empty by default. A Planner may pick any registered profile that can run the role, with no confirmation. Set a list to restrict the choice. Deleting a profile an open task's Planner or task role chose is refused. ([#220](https://github.com/foolzzz/looper/pull/220))
+- **A new gate may number its agenda items `q1`, `q2`, and so on.** Any other id is refused with a message that names the id Looper assigns. Leaving `id` out still works. ([#222](https://github.com/foolzzz/looper/pull/222))
+
+### Behavior changes
+
+These apply on upgrade. Each line says what the operator does.
+
+1. **Manager and Planner launches on Claude Code replace Claude Code's default system prompt.** They appended on v2.9.0. To keep appending, open Settings → Roles and set that role to Append. A task overrides its own planner, worker or reviewer on the task's Agents tab (`system_prompt_modes` of `PUT /api/tasks/:id/agents`; null clears the task's choice). The Manager has no task-level mode, and the Manager's task tools do not set one. Worker, Reviewer and Planner-defined role runs append unless you set otherwise. A consult on Claude Code appends even when its seat's role is replace. With haiku as the Planner, replace scored 31/40 against 50/60 for append on the Planner tier: run the Planner on opus or sonnet, or set the Planner role to append when it uses haiku. ([#219](https://github.com/foolzzz/looper/pull/219))
+2. **The first start migrates Claude Code profiles once.** When `agent_setting_layers.system_prompt_mode` is added, a Worker or Reviewer whose effective profile (the role layer's, else the shared defaults', else the built-in `claude-code/opus`) was a Claude Code profile set to `replace` gets `replace` on that role layer. Then every Claude Code profile is set to `append`. A later start does not run this again. Check Settings → Roles after the first start if a Claude Code profile was set to replace. ([#219](https://github.com/foolzzz/looper/pull/219))
+3. **`replace` on a Claude Code profile is refused.** Saving or updating one returns 400: `Claude Code's system prompt mode is set per role in Settings → Roles`. Import skips that profile and records the same reason. Set the mode on the role, or on the task. Codex, Grok and OMP profiles still save `append` or `replace`. ([#219](https://github.com/foolzzz/looper/pull/219))
+4. **An empty allowed-profiles list lets Planners choose any capable profile, without confirmation.** On v2.9.0 an empty list meant the Planner chose nothing. Every project that never filled the list changes. To restrict, set the list on the project's Agent Profiles tab ("Profiles the Planner may choose") or `PUT /api/projects/:id/allowed-profiles` with `profile_ids`. A non-empty list still drops Planner choices it leaves out. Setting it back to `[]` lifts the restriction and keeps choices. Spend stays bounded by the run budget caps. Deleting a profile an open task's Planner or task role chose is refused; the message names the task. Clear the choice, or wait until the task ends. Choices on ended tasks go with the profile. ([#220](https://github.com/foolzzz/looper/pull/220))
+5. **A Planner may send `id` on a new gate's agenda items only as `q1`, `q2`, ….** Any other id is refused. You do not turn this on. Replies that numbered items that way and were refused on v2.9.0 are accepted. ([#222](https://github.com/foolzzz/looper/pull/222))
+
+Codex, Grok and OMP keep the profile-level system prompt mode. Per-role mode for those runtimes is planned. A `vX.Y.Z` tag still publishes the Python release.
+
+### Fixes
+
+- **OMP can omit optional MCP arguments on openai-responses.** OMP CLI 18.4.x omitted `strict` for endpoints it did not recognize, such as a local OpenAI-compatible proxy. The Responses API treats a missing `strict` as strict, so the model filled every optional MCP argument; an OMP Planner could not define a custom role without inventing a template. Looper now marks openai-responses models in OMP's launch config with `compat: {supportsStrictMode: true}`, so OMP sends its MCP tools with explicit `strict: false`. Looper's tool schemas, Claude Code, and the openai-chat / anthropic-messages providers are unchanged. ([#223](https://github.com/foolzzz/looper/pull/223))
+- **New gate agenda items may carry the id Looper assigns.** A `[PLAN]` reply that set `"id": "q1"` on a new item was refused with `unknown keys: id`, and the repair turn did not fix it. The id is accepted when it is `qN` for that position. Any other id is refused with `<where>.id must be "qN" or left out: Looper numbers new items q1, q2, …`. OMP with deepseek-flash passed the five gate tasks 10/10 (`gate_parallel_branch` 0/2 → 2/2). ([#222](https://github.com/foolzzz/looper/pull/222))
+
+### Validation
+
+- [#224](https://github.com/foolzzz/looper/pull/224), eval-only: the `config_tools` dialog now starts its allowed-profiles step with a non-empty list, matching #220 (an empty list already allows any profile). The corrected dialog passed 1/1 on opus xhigh.
+
+## [2.9.0] - 2026-10-18
+
+### Highlights
+
+- **The operator's HTTP API asks who is calling.** Every `/api/` route except the agents' own tools needs the operator token in `<runtime root>/operator-token` (mode 0600). The CLI sends it. A local browser signs in automatically only on a direct loopback connection that meets the top-level navigation conditions; LAN or proxy access needs a password. Another machine signs in with `looper auth set-password`. Anonymous calls get 401. Password sign-in is new; query token/code sign-in is not supported. ([#207](https://github.com/foolzzz/looper/pull/207))
+- **A custom system prompt, with a preview.** An Agent Profile's `custom_prompt` prefixes Looper's composed prompt for Claude Code, Codex, Grok and OMP; the harness, role, context and contract follow. `system_prompt_mode` separately controls append/replace. Claude Code still sends a billing header and a fixed identity line before the main block. Empty adds no custom-prompt layer; clearing it removes only the prefix and retains other v2.9.0 changes. The preview shows Profile/role templates; task-specific contracts and other launch context are resolved later. ([#198](https://github.com/foolzzz/looper/pull/198))
+- **Codex and OMP Planners are read-only.** Codex uses its read-only sandbox and approves only Looper's MCP tools. OMP gets a read-only tool list when its version reports that capability. ([#203](https://github.com/foolzzz/looper/pull/203))
+- **Grok keeps the Manager and each task's Planner in separate resident processes and sessions.** `grok agent stdio` (ACP). Workers stay one-shot. Cost of a resident turn comes from `costUsdTicks` (1e10 ticks per USD). ([#205](https://github.com/foolzzz/looper/pull/205))
+- **Lark (bot token), off by default.** A second Lark channel talks to the open platform with an app id and an app secret. The lark-cli channel is unchanged. Not yet tried against a real tenant. ([#209](https://github.com/foolzzz/looper/pull/209))
+- **A running Codex or OMP Worker can be steered** when the installed CLI reports that capability. Older CLIs keep the previous one-shot run. ([#211](https://github.com/foolzzz/looper/pull/211))
+- **Where a file was written.** A Worker that writes in another worktree or a commit gives the Reviewer and the Planner a typed location and read-only git hints. Structured locations and Reviewer file lists use single-line ASCII JSON; other name fields use `prompt_name`. A schedule can already name a profile per role; the Manager and the schedule dialog now suggest a cheaper Planner. ([#210](https://github.com/foolzzz/looper/pull/210))
+
+### Behavior changes
+
+These apply on upgrade. Each line says what the operator does.
+
+1. **Anonymous `/api/` calls get 401**, including `/api/status` and unknown paths. Send `Authorization: Bearer` with the token, or open the dashboard through a direct loopback connection that meets the top-level navigation conditions for local auto-login. Agent routes under `/api/agent/v1/` still use agent credentials. `OPTIONS /api/*` no longer returns 204 unconditionally: missing the appropriate credential gives 401; an unimplemented method with a valid credential gives 404. ([#207](https://github.com/foolzzz/looper/pull/207))
+2. **Password sign-in is new.** Query token/code sign-in is not supported. ([#207](https://github.com/foolzzz/looper/pull/207))
+3. **`looper serve` refuses a runtime root that group or others can write**, and one the user does not own. It prints `chmod go-w <runtime root>` and does not change the mode itself. An invalid token file also prevents startup. An invalid password file makes password sign-in return 503; fix its permissions or run `looper auth set-password`. Deleting the password file does not recreate it on startup. ([#207](https://github.com/foolzzz/looper/pull/207))
+4. **Other machines need a password.** `looper auth set-password [--user NAME]` asks twice and never takes the password on the command line. It stores a scrypt hash. `looper auth clear-password` removes it. Until one is set, only a local browser on a direct loopback connection that meets the top-level navigation conditions signs in; LAN or proxy access needs a password. Sessions last 7 days and end when the password is changed or cleared, or when the server restarts. ([#207](https://github.com/foolzzz/looper/pull/207))
+5. **Behind an https reverse proxy, set `dashboard_url` to the https address** (`LOOPER_PUBLIC_URL` before start), or `POST /login` and `POST /logout` answer 403. For an installed service, set the variable and rerun `looper service install`, preserving its original label, port and runtime root; restart alone does not recapture `LOOPER_PUBLIC_URL`. Those two routes require an Origin whose scheme and host match. Sign-in is rate-limited with lockout. Login responses are `no-store`, and logs never contain the credentials. ([#207](https://github.com/foolzzz/looper/pull/207))
+6. **Reload a dashboard tab that was open before the upgrade.** The page is now `no-store`. After a session ends, the page does not yet handle 401 by itself; reload it. There is no logout button; `POST /logout` is the endpoint. ([#207](https://github.com/foolzzz/looper/pull/207))
+7. **An OMP Planner loses its shell when the probed OMP version reports a read-only tool list.** Re-detect an OMP runtime that was already registered (Settings → Agent Runtimes). An older or unreadable version keeps the previous directory comparison. Without `read_tools`, OMP does not run a consult and hands it to the Planner as `runtime_cannot`. Re-detect an existing OMP runtime to restore consult; older or unrecognized CLI versions do not support it. A Codex Planner retains its existing read-only sandbox and regains Looper MCP tool calls. ([#203](https://github.com/foolzzz/looper/pull/203))
+8. **The Grok Manager and each task's Planner keep separate resident ACP processes and sessions.** The first turn starts it; later turns reuse it. If `grok agent stdio` cannot serve, that session falls back to one process per turn. Workers and Reviewers stay one-shot. A resident turn's cost is `costUsdTicks` divided by 1e10. A missing or zero cost stays unknown. ([#205](https://github.com/foolzzz/looper/pull/205))
+9. **Re-detect Codex and OMP to steer a running Worker.** Steering starts when the stored probe reports the capability (Codex `app-server`, OMP `rpc`). An older CLI keeps the previous behavior. A steer that times out at 4 seconds may still arrive; the Planner keeps it as delivery not confirmed. ([#211](https://github.com/foolzzz/looper/pull/211))
+10. **A file found in another worktree or commit is named on the Reviewer's first turn and in the Planner's step report**, with read-only git hints. Structured locations and Reviewer file lists use single-line ASCII JSON, which can quote ordinary names too. Other name fields use `prompt_name`: a plain printable name stays as written; anything else is one line of ASCII-escaped JSON. A schedule's Planner does not change unless you set a profile. The dialog and the Manager tool only suggest a cheaper one. ([#210](https://github.com/foolzzz/looper/pull/210))
+11. **The dashboard renders over plain http from another host.** Reload that tab. `crypto.randomUUID` is only available in a secure context, so ids fall back to `crypto.getRandomValues`. https and localhost are unchanged. ([#213](https://github.com/foolzzz/looper/pull/213))
+
+`custom_prompt` stays empty until a profile sets it. The Lark (bot token) channel stays off until Settings enables it. A `vX.Y.Z` tag still publishes the Python release.
+
+### Fixes
+
+- **Grok Workers run again.** v2.8.0 passed `session_dir` into `run_command()`, which the Grok adapter did not accept, so every Grok Worker run failed. A test now checks that each runtime adapter accepts every parameter of the abstract commands. ([#208](https://github.com/foolzzz/looper/pull/208))
+- **Planner step decisions see the agent room again.** Since v2.8.0 every room summary failed with "cannot read the room for step ...", because the decision still read a single `review_role` after steps gained `review_roles`. ([#214](https://github.com/foolzzz/looper/pull/214))
+- **Tags `vX.Y.Z-go` do not start the Python release workflow.** A `vX.Y.Z` tag still does. ([#202](https://github.com/foolzzz/looper/pull/202))
+
 ## [2.8.0] - 2026-10-18
 
 ### Highlights

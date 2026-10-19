@@ -21,7 +21,7 @@ import (
 // (the handler keeps enabled, counts, by_step and consults only).
 
 const profileJSON = `json_build_object('id', a.id, 'name', a.name, 'model', a.model, 'effort', a.effort, 'builtin', a.builtin, ` +
-	`'agent_teams', a.agent_teams, 'system_prompt_mode', a.system_prompt_mode, ` +
+	`'agent_teams', a.agent_teams, 'system_prompt_mode', a.system_prompt_mode, 'custom_prompt', a.custom_prompt, ` +
 	`'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, ` +
 	`'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, 'provider_auth', p.auth, ` +
 	`'provider_protocols', p.protocols, 'provider_oauth_runtime_type', p.oauth_runtime_type, ` +
@@ -31,7 +31,7 @@ const profileJoin = `agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_
 
 // Copied from looper/db/agent_setting_layers.py list_layers.
 const layerSQL = `SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, ` +
-	`l.max_concurrency, l.boundaries, ` +
+	`l.max_concurrency, l.boundaries, l.system_prompt_mode, ` +
 	`(SELECT ` + profileJSON + ` FROM ` + profileJoin + ` WHERE a.id = l.profile_id) AS profile ` +
 	`FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1`
 
@@ -40,21 +40,31 @@ const taskLayerSQL = `SELECT COALESCE(t.role, c.role) AS role, t.profile_id, ` +
 	`FROM (SELECT * FROM task_profile_overrides WHERE task_id = $1) t ` +
 	`FULL JOIN (SELECT * FROM task_concurrency_limits WHERE task_id = $1) c ON c.role = t.role`
 
-const plannerLayerSQL = `SELECT CASE WHEN c.step_id IS NULL THEN 'planner_task' ELSE 'planner_step' END AS scope, c.role, ` +
+const taskPromptModeSQL = `SELECT role, system_prompt_mode FROM task_system_prompt_modes WHERE task_id = $1`
+
+// profileAllowedSQL is looper/db/projects.py profile_allowed_sql. projectCol and
+// profileCol are fixed column names from this package, not request text.
+// An empty allow-list, or no project, allows every profile.
+func profileAllowedSQL(projectCol, profileCol string) string {
+	return `(EXISTS (SELECT 1 FROM project_allowed_profiles al WHERE al.project_id = ` + projectCol +
+		` AND al.profile_id = ` + profileCol + `) OR NOT EXISTS (SELECT 1 FROM project_allowed_profiles al ` +
+		`WHERE al.project_id = ` + projectCol + `))`
+}
+
+var plannerLayerSQL = `SELECT CASE WHEN c.step_id IS NULL THEN 'planner_task' ELSE 'planner_step' END AS scope, c.role, ` +
 	`c.profile_id, (SELECT ` + profileJSON + ` FROM ` + profileJoin + ` WHERE a.id = c.profile_id) AS profile ` +
 	`FROM task_planner_profiles c JOIN tasks k ON k.id = c.task_id ` +
-	`JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = c.profile_id ` +
-	`WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2)`
+	`WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2) AND ` +
+	profileAllowedSQL("k.project_id", "c.profile_id")
 
 const profileOverridesSQL = `SELECT t.role, (SELECT ` + profileJSON + ` FROM ` + profileJoin + ` WHERE a.id = t.profile_id) AS profile ` +
 	`FROM task_profile_overrides t WHERE t.task_id = $1 ORDER BY t.role`
 
 // Copied from looper/db/task_roles.py versions.
-const roleVersionsSQL = `SELECT r.task_id, r.role_key, r.version, r.kind, r.profile_id, r.role_prompt, r.harness, r.reason, ` +
+var roleVersionsSQL = `SELECT r.task_id, r.role_key, r.version, r.kind, r.profile_id, r.role_prompt, r.harness, r.reason, ` +
 	`r.via, r.template_key, r.items, r.created_at, a.name AS profile_name, ` +
-	`(l.profile_id IS NOT NULL) AS profile_allowed ` +
+	profileAllowedSQL("k.project_id", "r.profile_id") + ` AS profile_allowed ` +
 	`FROM task_roles r JOIN tasks k ON k.id = r.task_id LEFT JOIN agent_profiles a ON a.id = r.profile_id ` +
-	`LEFT JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = r.profile_id ` +
 	`WHERE r.task_id = $1 ORDER BY ` +
 	`(SELECT min(f.created_at) FROM task_roles f WHERE f.task_id = r.task_id AND f.role_key = r.role_key), ` +
 	`r.role_key, r.version`
@@ -154,8 +164,10 @@ type layerKey struct {
 }
 
 type layerValues struct {
-	profile map[string]any
-	limit   *int
+	profile     map[string]any
+	runtimeType string
+	limit       *int
+	promptMode  string
 }
 
 // senderSpec is allowlist.SenderIdFormat for one channel type.
@@ -210,10 +222,31 @@ func (s *Store) taskAgents(ctx context.Context, projectID, taskID, status string
 	if err != nil {
 		return nil, err
 	}
+	modes, err := s.query(ctx, "task prompt modes", taskPromptModeSQL, taskID)
+	if err != nil {
+		return nil, err
+	}
+	byRole := map[string]map[string]any{}
+	var roleOrder []string
 	for _, row := range taskRows {
+		role := asString(row["role"])
 		row["scope"] = "task"
 		row["task_id"] = taskID
-		rows = append(rows, row)
+		byRole[role] = row
+		roleOrder = append(roleOrder, role)
+	}
+	for _, row := range modes {
+		role := asString(row["role"])
+		existing, ok := byRole[role]
+		if !ok {
+			existing = map[string]any{"scope": "task", "task_id": taskID, "role": role}
+			byRole[role] = existing
+			roleOrder = append(roleOrder, role)
+		}
+		existing["system_prompt_mode"] = row["system_prompt_mode"]
+	}
+	for _, role := range roleOrder {
+		rows = append(rows, byRole[role])
 	}
 	// step_id is NULL: list_layers keeps planner choices for the rest of the task only.
 	chosen, err := s.query(ctx, "planner profiles", plannerLayerSQL, taskID, nil)
@@ -1088,7 +1121,12 @@ func agentsViewFrom(rows []map[string]any, projectID, status string) map[string]
 	roles := map[string]any{}
 	for _, role := range []string{"planner", "worker", "reviewer"} {
 		value, source := resolveProfile(role, layers, projectID)
-		entry := map[string]any{"profile": map[string]any{"value": value, "source": source}}
+		mode, modeSource := systemPromptModeChoice(role, layers)
+		entry := map[string]any{
+			"profile":            map[string]any{"value": value, "source": source},
+			"runtime_type":       resolveRuntimeType(role, layers, projectID),
+			"system_prompt_mode": map[string]any{"value": mode, "source": modeSource},
+		}
 		if role == "worker" || role == "reviewer" {
 			entry["concurrency"] = concurrencyView(role, layers)
 		}
@@ -1147,13 +1185,22 @@ func layerFromRow(row map[string]any) layerValues {
 	place := layerPlace(row)
 	if row["profile"] != nil {
 		if profile, ok := asMap(row["profile"]); ok {
-			if choice, ok := profileChoice(profile); ok {
+			if choice, runtimeType, ok := profileChoice(profile); ok {
 				values.profile = choice
+				values.runtimeType = runtimeType
 			} else {
 				slog.Warn("ignoring stored agent profile", "place", place)
 			}
 		} else {
 			slog.Warn("ignoring stored agent profile", "place", place)
+		}
+	}
+	if row["system_prompt_mode"] != nil {
+		mode, ok := storedPromptMode(row["system_prompt_mode"])
+		if !ok {
+			slog.Warn("ignoring stored system_prompt_mode", "place", place)
+		} else {
+			values.promptMode = mode
 		}
 	}
 	if row["max_concurrency"] != nil {
@@ -1177,31 +1224,39 @@ func layerPlace(row map[string]any) string {
 	return strings.Join(parts, "/")
 }
 
-func profileChoice(raw map[string]any) (map[string]any, bool) {
+func storedPromptMode(raw any) (string, bool) {
+	text, ok := raw.(string)
+	if !ok || (text != "append" && text != "replace") {
+		return "", false
+	}
+	return text, true
+}
+
+func profileChoice(raw map[string]any) (map[string]any, string, bool) {
 	for _, key := range []string{"id", "name", "model", "runtime_id", "runtime_name", "runtime_type", "provider_id", "provider_name", "provider_auth"} {
 		text, ok := raw[key].(string)
 		if !ok || text == "" {
-			return nil, false
+			return nil, "", false
 		}
 	}
 	switch asString(raw["provider_auth"]) {
 	case "oauth", "api_key":
 	default:
-		return nil, false
+		return nil, "", false
 	}
 	if mode, ok := raw["system_prompt_mode"]; ok && mode != nil {
 		text, ok := mode.(string)
 		if !ok || (text != "append" && text != "replace") {
-			return nil, false
+			return nil, "", false
 		}
 	}
 	if _, ok := raw["agent_teams"].(bool); raw["agent_teams"] != nil && !ok {
-		return nil, false
+		return nil, "", false
 	}
 	var effort any
 	if raw["effort"] != nil {
 		if _, ok := raw["effort"].(string); !ok {
-			return nil, false
+			return nil, "", false
 		}
 		effort = raw["effort"]
 	}
@@ -1212,7 +1267,7 @@ func profileChoice(raw map[string]any) (map[string]any, bool) {
 		"effort":     effort,
 		"runtime":    raw["runtime_name"],
 		"provider":   raw["provider_name"],
-	}, true
+	}, asString(raw["runtime_type"]), true
 }
 
 func builtinProfile() map[string]any {
@@ -1236,6 +1291,36 @@ func resolveProfile(role string, layers map[layerKey]layerValues, projectID stri
 		}
 	}
 	return chosen, source
+}
+
+func resolveRuntimeType(role string, layers map[layerKey]layerValues, projectID string) string {
+	runtime := "claude-code"
+	for _, key := range chain(role, projectID) {
+		if values, ok := layers[key]; ok && values.profile != nil && values.runtimeType != "" {
+			runtime = values.runtimeType
+		}
+	}
+	return runtime
+}
+
+// systemPromptModeChoice is agent_settings.system_prompt_mode_choice.
+// The task's own mode wins, then the role layer, then the built-in mode.
+// No role appends. A task profile override does not set the mode.
+func systemPromptModeChoice(role string, layers map[layerKey]layerValues) (string, string) {
+	if role == "" {
+		return "append", "builtin"
+	}
+	for _, scope := range []string{"task", "role"} {
+		if row, ok := layers[layerKey{scope, role}]; ok && (row.promptMode == "append" || row.promptMode == "replace") {
+			return row.promptMode, scope
+		}
+	}
+	switch role {
+	case "manager", "planner":
+		return "replace", "builtin"
+	default:
+		return "append", "builtin"
+	}
 }
 
 func chain(role, projectID string) []layerKey {
@@ -1287,6 +1372,10 @@ func profileRecord(row map[string]any) map[string]any {
 	if text := asString(row["system_prompt_mode"]); text != "" {
 		mode = text
 	}
+	custom := ""
+	if row["custom_prompt"] != nil {
+		custom = asString(row["custom_prompt"])
+	}
 	return map[string]any{
 		"profile_id":         row["id"],
 		"name":               row["name"],
@@ -1300,6 +1389,7 @@ func profileRecord(row map[string]any) map[string]any {
 		"builtin":            asBool(row["builtin"]),
 		"agent_teams":        asBool(row["agent_teams"]),
 		"system_prompt_mode": mode,
+		"custom_prompt":      custom,
 		"roles":              servableRoles(textList(row["runtime_capabilities"])),
 		"used_by": map[string]any{
 			"layers":         []any{},
@@ -1401,6 +1491,18 @@ func unpricedModels(row map[string]any) []any {
 }
 
 func priceComplete(row map[string]any, models []map[string]any, model string) bool {
+	for _, price := range filledPrices(row, models, model) {
+		if price == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// filledPrices is model_price for one model: catalog fields override the
+// built-in table, and a missing field stays nil. Claude Code oauth aliases
+// the short model name before the built-in lookup.
+func filledPrices(row map[string]any, models []map[string]any, model string) [4]*float64 {
 	base := baseModel(model)
 	if asString(row["provider_auth"]) == "oauth" && asString(row["provider_oauth_runtime_type"]) == "claude-code" {
 		if alias, ok := claudeAliases[base]; ok {
@@ -1433,12 +1535,7 @@ func priceComplete(row map[string]any, models []map[string]any, model string) bo
 			}
 		}
 	}
-	for _, price := range prices {
-		if price == nil {
-			return false
-		}
-	}
-	return true
+	return prices
 }
 
 func catalogModels(raw any) []map[string]any {

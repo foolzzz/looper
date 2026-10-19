@@ -272,7 +272,16 @@ func readNoteFile(path, root string, budget int) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return string(raw), true
+	// Path.read_text translates newlines before the caller counts bytes.
+	// The stat() gate above stays on the raw size.
+	return pythonNewlines(string(raw)), true
+}
+
+// pythonNewlines is the universal-newline translation of Path.read_text.
+// "\r\n" is one break. A lone "\r" is a break too.
+func pythonNewlines(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
 }
 
 func pathInside(root, path string) bool {

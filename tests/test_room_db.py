@@ -497,7 +497,7 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
 _RUN_IN_A_ROOM = """
 import json, os, sys
 record = {"argv": sys.argv[1:]}
-record["prompt"] = open(sys.argv[sys.argv.index("--append-system-prompt-file") + 1]).read()
+record["prompt"] = open(sys.argv[sys.argv.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in sys.argv)) + 1]).read()
 record["first_turn"] = json.loads(sys.stdin.readline())["message"]["content"]
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}), flush=True)
 print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
@@ -582,7 +582,7 @@ def test_a_run_whose_projects_room_is_off_has_none_of_it(monkeypatch: pytest.Mon
 
     body = """
 import json, os, sys
-record = {"argv": sys.argv[1:], "prompt": open(sys.argv[sys.argv.index("--append-system-prompt-file") + 1]).read(),
+record = {"argv": sys.argv[1:], "prompt": open(sys.argv[sys.argv.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in sys.argv)) + 1]).read(),
           "first_turn": json.loads(sys.stdin.readline())["message"]["content"]}
 open(os.environ["SEEN"], "w").write(json.dumps(record))
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False,

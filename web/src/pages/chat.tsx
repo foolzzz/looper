@@ -37,6 +37,7 @@ import {
   type UserGate,
 } from "@/lib/api";
 import { isGateWaiting } from "@/lib/gates";
+import { randomId } from "@/lib/ids";
 import { RunCard, activityBelongsTo, historyHref, runRoleLabel } from "@/pages/agent-history";
 import { cn } from "@/lib/utils";
 
@@ -213,7 +214,7 @@ function getOrCreateSessionId(): string {
     localStorage.setItem(STORAGE_SESSION_KEY, existing);
     return existing;
   }
-  const id = `session-${crypto.randomUUID().slice(0, 8)}`;
+  const id = `session-${randomId().slice(0, 8)}`;
   localStorage.setItem(STORAGE_SESSION_KEY, id);
   return id;
 }
@@ -484,7 +485,7 @@ export function ChatPage() {
     setViewing(null);
     cleanupRef.current?.();
     cleanupRef.current = null;
-    const newId = `session-${crypto.randomUUID().slice(0, 8)}`;
+    const newId = `session-${randomId().slice(0, 8)}`;
     localStorage.setItem(STORAGE_SESSION_KEY, newId);
     setSessionId(newId);
     setMessages([]);
@@ -502,7 +503,7 @@ export function ChatPage() {
     setPhase("");
 
     const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: randomId(),
       role: "user",
       content: text,
       timestamp: Date.now(),

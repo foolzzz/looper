@@ -50,7 +50,6 @@ def test_a_template_is_checked_as_a_task_role_is_and_listed_by_key(monkeypatch: 
             ("security", {**SECURITY, "role_prompt": "  "}, "role_prompt is required"),
             ("security", {**SECURITY, "role_prompt": "x" * 501}, "this project allows at most 500"),
             ("security", {**SECURITY, "description": "x" * 301}, "at most 300 characters"),
-            ("security", {**SECURITY, "profile_id": "claude-code/sonnet"}, "its list is empty"),
         ]
         for key, body, message in refused:
             status, answer = await _put(project, key, body)

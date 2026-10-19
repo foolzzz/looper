@@ -15,6 +15,7 @@ import os
 import stat
 import time
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,13 +23,13 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
 from looper.agents.run_usage import Usage, run_usage
-from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, adapter
-from looper.agents.runtimes.codex import KEY_ENV, CodexRuntime, ResidentCodex
+from looper.agents.runtimes import ApiProtocol, AuthKind, ReadOnly, RuntimeUnsupported, adapter
+from looper.agents.runtimes.codex import KEY_ENV, CodexRuntime, ResidentCodex, config_toml
 from looper.agents.system_prompt import SystemPrompt
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_exec"
@@ -179,6 +180,65 @@ def _library(root: Path) -> AgentLibrary:
 
 def _prompt_file(root: Path, text: str = "LOOPER PROMPT: the contract comes last.") -> Path:
     return SystemPrompt(text).write_file(root)
+
+
+@pytest.mark.parametrize(("role", "consult", "approved"), [
+    (AgentType.PLANNER, False, True),
+    (None, False, False),
+    (AgentType.WORKER, False, False),
+    (None, True, False),
+    (AgentType.WORKER, True, False),
+])
+def test_only_a_planner_approves_every_mcp_server(
+    tmp_path: Path, role: AgentType | None, consult: bool, approved: bool,
+) -> None:
+    library = AgentLibrary(mcp_config=str(write_config(tmp_path, [
+        ("looper", {"type": "stdio", "command": "looper-mcp"}),
+        ("docs", {"type": "http", "url": "https://docs.example.test/mcp"}),
+    ])))
+    launch = replace(_launch(library=library), role=role, consult=consult)
+    servers = tomllib.loads(config_toml(launch))["mcp_servers"]
+    assert set(servers) == {"looper", "docs"}
+    for server in servers.values():
+        if approved:
+            assert server["default_tools_approval_mode"] == "approve"
+        else:
+            assert "default_tools_approval_mode" not in server
+
+
+@pytest.mark.parametrize("role", [AgentType.PLANNER, AgentType.WORKER, None])
+def test_only_a_planner_keeps_the_read_only_sandbox_when_resumed(
+    tmp_path: Path, role: AgentType | None,
+) -> None:
+    codex = fake_claude(tmp_path / "codex", _FAKE_CODEX)
+    launch = replace(_launch(executable=codex), role=role)
+    command = CODEX.resident_command(codex, cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)
+
+    async def resumed() -> list[str]:
+        session = CODEX.resident_session("x")
+        try:
+            await session.start(command + CODEX.resume_args("thread-1"), cwd=str(tmp_path), signature="s",
+                                env=launch.environment())
+            return session._turn_argv()
+        finally:
+            await session.stop()
+
+    turn = asyncio.run(resumed())
+    assert turn[-3:] == ["resume", "thread-1", "-"]
+    for argv in (command, turn):
+        settings = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-c"]
+        if role is AgentType.PLANNER:
+            assert {'sandbox_mode="read-only"', 'approval_policy="never"'} <= set(settings)
+            assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+        else:
+            assert "--dangerously-bypass-approvals-and-sandbox" in argv
+            assert not {'sandbox_mode="read-only"', 'approval_policy="never"'} & set(argv)
+
+
+def test_a_planner_records_its_sandbox() -> None:
+    assert CODEX.read_only is ReadOnly.SANDBOX
+    assert replace(_launch(), role=AgentType.PLANNER).record()["read_only"] == "sandbox"
+    assert "read_only" not in replace(_launch(), role=AgentType.WORKER).record()
 
 
 def test_a_run_gets_a_home_of_its_own_with_only_the_generated_config_and_agents_md(

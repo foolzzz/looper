@@ -58,6 +58,7 @@ from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
 from ..run_usage import Usage
+from ..reported_files import prompt_name
 from .. import session_switch
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
@@ -72,6 +73,7 @@ from ..message import (
     MessageEnvelope,
     MessageType,
     channel_address,
+    is_lark,
 )
 
 if TYPE_CHECKING:
@@ -217,7 +219,7 @@ def is_new_session_command(text: str) -> bool:
 # How the line before each message names the channel it came from (``AgentAddress.channel``); for Telegram and
 # Lark, whether it is a direct message or a group chat (``_message_origin``).
 CHANNEL_NAMES = {"web": "the Looper dashboard chat"}
-CHAT_CHANNEL_NAMES = {"telegram": "Telegram", "lark": "Lark"}
+CHAT_CHANNEL_NAMES = {"telegram": "Telegram", "lark": "Lark", "lark_bot": "Lark"}
 
 
 def channel_line(envelope: MessageEnvelope) -> str:
@@ -246,7 +248,7 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
     sender = context.get("sender_id") or context.get("user_id")
     chat = str(context.get("chat_id") or context.get("session_id") or "") or None
     match channel:
-        case "lark":
+        case channel if is_lark(channel):
             group = context.get("chat_type") == "group"
         case "telegram":
             group = (chat or "").startswith("-")
@@ -620,6 +622,7 @@ class ManagerAgent:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
         return build_system_prompt(
             harness=agent_settings.harness,
+            custom_prompt=agent_settings.profile.custom_prompt,
             role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
             contract_name="TOOLS_CONTRACT", contract=TOOLS_CONTRACT,
         )
@@ -1109,7 +1112,7 @@ class ManagerAgent:
             return ["Projects: (could not be read)", ""]
         lines = ["Projects:"]
         for project in projects:
-            directory = f"default directory {project['work_dir']}" if project["work_dir"] else "no default directory"
+            directory = f"default directory {prompt_name(project['work_dir'])}" if project["work_dir"] else "no default directory"
             line = f"  - {project['name']} ({directory})"
             description = " ".join(project["description"].split())
             if description:
@@ -1142,7 +1145,7 @@ class ManagerAgent:
         go to that chat (``gate_service.gate_chat``), so no other chat's gate shows in it; in the dashboard chat all,
         each with its chat. None, no section."""
         origin = _message_origin(envelope) if envelope is not None else {"channel": "web"}
-        here = origin["channel"] in ("lark", "telegram")
+        here = is_lark(origin["channel"]) or origin["channel"] == "telegram"
         if here:
             chat = origin_chat(origin["channel"], origin["chat"] or "", group=origin["group"],
                                sender=origin["sender"] or "")

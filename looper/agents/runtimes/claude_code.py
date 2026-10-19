@@ -72,8 +72,8 @@ from urllib.parse import urlsplit
 
 from .. import claude_cli
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
-    RuntimeUnsupported, instructions,
+    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
+    RuntimeAdapter, RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
 
@@ -103,6 +103,20 @@ def official_endpoint(base_url: str) -> bool:
     return not base_url or (urlsplit(base_url).hostname or "").lower() in ANTHROPIC_HOSTS
 
 
+def _prompt_input(launch: Launch, *, prompt_file: Path | None = None,
+                  looper_prompt: str = "") -> tuple[list[str], list[PromptBlock]]:
+    """Claude reads the supplied file verbatim; the flag also selects its fixed main-block prefix."""
+    args = claude_cli.system_prompt_args(prompt_file or Path("prompt.md"), launch.system_prompt_mode)
+    blocks = [
+        PromptBlock("Billing header", "runtime", None, "billing header (fixed)"),
+        PromptBlock("Identity", "runtime", None, "identity line (fixed; changes with append vs replace)"),
+    ]
+    if args[0] == "--append-system-prompt-file":
+        blocks.append(PromptBlock("Default prompt", "runtime", None, "Claude Code's default prompt (not shown)"))
+    return args, [*blocks, PromptBlock("Looper instructions", "looper", looper_prompt,
+                                       "main system prompt block")]
+
+
 class ClaudeCodeRuntime(RuntimeAdapter):
     can_replace_system_prompt = True
     type = "claude-code"
@@ -110,7 +124,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     default_executable = "claude"
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
-    capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT})
+    capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
     run_input = True  # stdin stays open until the run's first result
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     # Its own login (the Claude subscription), and an API key for Anthropic's API or an Anthropic-format endpoint.
@@ -203,6 +217,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             return None
         return {**{k: v for k, v in os.environ.items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
 
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        return _prompt_input(launch, looper_prompt=looper_prompt)[1]
+
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
         return [
@@ -221,7 +238,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # permissions every agent shares and the plugins and skills installed for it come with the launch
             # args.
             *claude_cli.isolation_args(cwd),
-            *claude_cli.system_prompt_args(prompt_file, launch.system_prompt_mode),
+            *_prompt_input(launch, prompt_file=prompt_file)[0],
             *self.launch_args(launch),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
@@ -249,7 +266,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # agent shares and the plugins and skills installed for this run
             # come with the launch args.
             *claude_cli.isolation_args(cwd),
-            *claude_cli.system_prompt_args(prompt_file, launch.system_prompt_mode),
+            *_prompt_input(launch, prompt_file=prompt_file)[0],
             *self.launch_args(launch),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]

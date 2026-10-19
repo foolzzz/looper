@@ -68,8 +68,8 @@ from typing import TYPE_CHECKING, Any
 from .profile_registry import BUILTIN_PROFILE, AgentProfile
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
-from .runtimes import AuthKind, CostSource
-from .system_prompt_mode import SystemPromptMode
+from .runtimes import AuthKind, Capability, CostSource, ReadOnly
+from .system_prompt_mode import SystemPromptMode, system_prompt_mode
 
 if TYPE_CHECKING:
     from .run_usage import Price
@@ -128,7 +128,8 @@ MODEL_MAX_CHARS = 200
 BUDGET_MAX_USD = 100_000
 CONCURRENCY_MAX = 64
 
-FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries")
+FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries",
+          "system_prompt_mode")
 
 
 class AgentType(str, Enum):
@@ -146,6 +147,12 @@ PLANNER_CHOICE_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
 # At most this many of a task's Workers, or of its Reviewers, run at once when neither the task nor the role's layer
 # sets a limit.
 BUILTIN_CONCURRENCY = {AgentType.WORKER: 16, AgentType.REVIEWER: 8}
+# Whether a role replaces Claude Code's default system prompt or appends to it, when its role layer sets none. It
+# applies only to runs on Claude Code (``Launch.system_prompt_mode``).
+BUILTIN_SYSTEM_PROMPT_MODE = {
+    AgentType.MANAGER: SystemPromptMode.REPLACE, AgentType.PLANNER: SystemPromptMode.REPLACE,
+    AgentType.WORKER: SystemPromptMode.APPEND, AgentType.REVIEWER: SystemPromptMode.APPEND,
+}
 
 
 class Layer(str, Enum):
@@ -321,6 +328,7 @@ class LayerValues:
     run_budget_usd: float | None = None
     max_concurrency: int | None = None
     boundaries: str | None = None  # the system layer's only
+    system_prompt_mode: SystemPromptMode | None = None  # a role layer's only
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any] | None) -> LayerValues:
@@ -336,6 +344,7 @@ class LayerValues:
             ("run_budget_usd", budget_usd),
             ("max_concurrency", concurrency),
             ("boundaries", lambda raw: boundaries_text(raw) or None),
+            ("system_prompt_mode", _stored_prompt_mode),
         ):
             raw = row.get(name)
             if raw is None:
@@ -354,10 +363,19 @@ class LayerValues:
             "run_budget_usd": self.run_budget_usd,
             "max_concurrency": self.max_concurrency,
             "boundaries": self.boundaries,
+            # Only a role layer that sets it has one; ``effective`` always shows the role's mode.
+            **({"system_prompt_mode": self.system_prompt_mode.value} if self.system_prompt_mode else {}),
         }
 
 
 EMPTY_LAYER = LayerValues()
+
+
+def _stored_prompt_mode(raw: Any) -> SystemPromptMode:
+    try:
+        return system_prompt_mode(raw)
+    except ValueError as exc:
+        raise SettingsError(str(exc)) from None
 
 
 def _stored_profile(raw: Any) -> AgentProfile:
@@ -414,6 +432,11 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
                     "once, and nothing limits how many tasks run. Set the default for every task on the worker or "
                     "reviewer role (Settings → Roles), or a task's own limit (its Agents tab)")
             values[name] = concurrency(raw)
+        elif name == "system_prompt_mode":
+            if scope is not Layer.ROLE:
+                raise SettingsError("system_prompt_mode is set per role: set it on the role's layer "
+                                    "(Settings → Roles), not on the shared defaults or in a project")
+            values[name] = _stored_prompt_mode(raw).value
         else:
             values[name] = budget_usd(raw)
     return values
@@ -469,6 +492,8 @@ class AgentSettings:
     max_budget_source: Layer = Layer.BUILTIN
     # Used only by a run of a role a task's Planner defined: the shared defaults' boundaries, else the built-in ones.
     boundaries: Boundaries = BUILTIN_BOUNDARIES
+    # The role's mode (``role_system_prompt_mode``), whatever the runtime: ``Launch.system_prompt_mode`` is what applies.
+    system_prompt_mode: SystemPromptMode = SystemPromptMode.APPEND
     error: str | None = field(default=None, compare=False)  # why the layers could not be read
     # Why the profile cannot run this role (its runtime and provider no longer pair, or the runtime lacks a
     # capability the role needs): the run fails with it rather than run another profile.
@@ -519,6 +544,7 @@ class AgentSettings:
             "effort": {"value": self.effort or None, "source": self.effort_source.value},
             "env": [{"key": key, "value": value, "source": sources[key].value} for key, value in self.env],
             "run_budget_usd": {"value": self.max_budget_usd, "source": self.max_budget_source.value},
+            "system_prompt_mode": self.system_prompt_mode.value,
         }
 
 
@@ -568,6 +594,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     budget, budget_source = None, Layer.BUILTIN
     env: dict[str, tuple[str, Layer]] = {}
     boundaries = layers.get((Layer.SYSTEM, None), EMPTY_LAYER).boundaries
+    mode = role_system_prompt_mode(agent, layers)
     for layer, layer_role in _chain(agent, project_id):
         values = layers.get((layer, layer_role), EMPTY_LAYER)
         text, from_role = values.harness_prompt, None
@@ -593,7 +620,27 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
         tuple((key, layer) for key, (_, layer) in env.items()),
         budget, budget_source,
         Boundaries(boundaries, Layer.SYSTEM) if boundaries is not None else BUILTIN_BOUNDARIES,
+        system_prompt_mode=mode,
     )
+
+
+def system_prompt_mode_choice(role: AgentType | None, layers: Mapping[Place, LayerValues],
+                              ) -> tuple[SystemPromptMode, Layer]:
+    """The mode of ``role`` and the layer it came from: the task's own choice (``Layer.TASK``, a Planner, Worker or
+    Reviewer), else its role layer's, else the built-in one. No role (the system layer alone) appends."""
+    if role is None:
+        return SystemPromptMode.APPEND, Layer.BUILTIN
+    for layer in (Layer.TASK, Layer.ROLE):
+        mode = layers.get((layer, role), EMPTY_LAYER).system_prompt_mode
+        if mode is not None:
+            return mode, layer
+    return BUILTIN_SYSTEM_PROMPT_MODE[role], Layer.BUILTIN
+
+
+def role_system_prompt_mode(role: AgentType | None, layers: Mapping[Place, LayerValues]) -> SystemPromptMode:
+    """Whether ``role`` replaces its runtime's default system prompt or appends to it (``system_prompt_mode_choice``).
+    A launch applies it on Claude Code only."""
+    return system_prompt_mode_choice(role, layers)[0]
 
 
 @dataclass(frozen=True)
@@ -627,7 +674,10 @@ def task_agents_view(layers: Mapping[Place, LayerValues], project_id: str | None
     to the task, with the task's own limit (``task``, None for none) and the ``default`` it has without one."""
     view: dict[str, Any] = {}
     for role in TASK_ROLES:
-        view[role.value] = {"profile": resolve(role, layers, project_id).view()["profile"]}
+        settings = resolve(role, layers, project_id)
+        mode, source = system_prompt_mode_choice(role, layers)
+        view[role.value] = {"profile": settings.view()["profile"], "runtime_type": settings.profile.runtime.type,
+                            "system_prompt_mode": {"value": mode.value, "source": source.value}}
         if role in TASK_LIMIT_ROLES:
             view[role.value]["concurrency"] = {
                 **resolve_task_concurrency(role, layers).view(),
@@ -665,7 +715,8 @@ async def load_agent_settings(
                                                       task_role=task_role)
     except Exception as exc:
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
-        return AgentSettings(error=f"cannot read the agent settings ({type(exc).__name__})")
+        # The built-in defaults of this role, including its built-in system prompt mode.
+        return replace(resolve(role, {}, project_id), error=f"cannot read the agent settings ({type(exc).__name__})")
     settings = resolve(role, index_layers(rows, project_id), project_id)
     problem = profile_problem(settings.profile, AgentType(role))
     if problem is None and settings.profile.provider.auth is AuthKind.API_KEY:
@@ -737,6 +788,13 @@ class Launch:
 
     @property
     def system_prompt_mode(self) -> SystemPromptMode:
+        """What the run uses: on Claude Code its role's mode (append for a launch with no role); on any other runtime
+        its profile's, as before the mode was a role's setting."""
+        if self.profile.runtime.type == "claude-code":
+            # A consult resumes a seat's session and is read-only: it appends, whatever the seat's role.
+            if self.role is None or self.consult:
+                return SystemPromptMode.APPEND
+            return self.settings.system_prompt_mode
         return self.profile.system_prompt_mode
 
     @property
@@ -753,6 +811,17 @@ class Launch:
         every change to a Worker; its runtime refuses the tools and commands that would change files where it can,
         and otherwise the Planner checks its task directory after each turn (``RuntimeAdapter.read_only``)."""
         return self.role is AgentType.PLANNER or self.consult
+
+    @property
+    def read_only_mode(self) -> ReadOnly:
+        """How a read-only run is kept read-only with this profile's runtime as probed (``ReadOnly``)."""
+        return self.runtime.read_only_for(self.profile.runtime.capabilities)
+
+    @property
+    def steers(self) -> bool:
+        """Whether the run is driven through its runtime's steering protocol (the probed capability of the
+        registered runtime), so the Planner's messages reach it while it works."""
+        return Capability.STEER in self.profile.runtime.capabilities
 
     @property
     def model(self) -> str:
@@ -839,7 +908,7 @@ class Launch:
             "settings_sources": self.settings.sources(),
         }
         if self.read_only:
-            record["read_only"] = self.runtime.read_only.value  # how it is kept from changing files
+            record["read_only"] = self.read_only_mode.value  # how it is kept from changing files
         if self.env:
             record["env"] = {
                 "sha256": self.env_sha256,

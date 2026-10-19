@@ -477,10 +477,10 @@ INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) VA
 INSERT INTO agent_setting_layers (scope, profile_id) VALUES
 ('system', 'agent-layer-system');
 
-INSERT INTO agent_setting_layers (scope, role, profile_id, max_concurrency) VALUES
-('role', 'planner', 'agent-layer-planner', NULL),
-('role', 'worker', 'agent-layer-worker', 4),
-('role', 'reviewer', 'agent-layer-reviewer', 5);
+INSERT INTO agent_setting_layers (scope, role, profile_id, max_concurrency, system_prompt_mode) VALUES
+('role', 'planner', 'agent-layer-planner', NULL, NULL),
+('role', 'worker', 'agent-layer-worker', 4, 'replace'),
+('role', 'reviewer', 'agent-layer-reviewer', 5, 'replace');
 
 INSERT INTO agent_setting_layers (scope, project_id, profile_id) VALUES
 ('project', 'proj-alpha0001', 'agent-layer-project');
@@ -517,6 +517,13 @@ INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES
 
 INSERT INTO task_concurrency_limits (task_id, role, max_concurrency) VALUES
 ('task-rich00001', 'worker', 3);
+
+-- The Worker and Reviewer role layers replace. task-rich's Worker sets append,
+-- so the task wins. task-rich's Reviewer and task-min's Worker have no task
+-- row: clearing an override leaves that absence, and the role layer applies.
+-- The Planner's role layer sets no mode, so the built-in replace applies.
+INSERT INTO task_system_prompt_modes (task_id, role, system_prompt_mode) VALUES
+('task-rich00001', 'worker', 'append');
 
 INSERT INTO task_planner_profiles (task_id, role, step_id, profile_id) VALUES
 ('task-rich00001', 'worker', NULL, 'agent-layer-pt-work'),

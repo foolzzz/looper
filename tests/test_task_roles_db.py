@@ -105,7 +105,7 @@ def test_each_change_is_a_new_version_with_a_journal_entry_and_a_refused_one_cha
             ({**TESTER, "role_prompt": "   "}, "invalid", "role_prompt"),
             ({**TESTER, "role_prompt": "x" * 501}, "invalid", "this project allows at most 500"),
             ({**TESTER, "harness": "x" * 501}, "invalid", "harness has 501 characters"),
-            ({**TESTER, "profile_id": "claude-code/sonnet"}, "forbidden", "its list is empty"),
+            ({**TESTER, "profile_id": "nope"}, "forbidden", "'nope' is not a registered profile"),
             ({**TESTER, "kind": "plan"}, "invalid", ""),
         ]
         for arguments, code, message in refused:
@@ -119,7 +119,28 @@ def test_each_change_is_a_new_version_with_a_journal_entry_and_a_refused_one_cha
         read = await planner("looper_task_roles", {})
         assert [(r["id"], r["kind"], r["version"], r["steps"]) for r in read["result"]["roles"]] == [
             ("tester", "work", 2, ["s1"])]
-        assert read["result"]["role_text_max_chars"] == 500 and read["result"]["allowed_profiles"] == []
+        assert read["result"]["role_text_max_chars"] == 500 and "claude-code/opus" in [
+            p["name"] for p in read["result"]["allowed_profiles"]]
+
+    _run(test, monkeypatch)
+
+
+def test_a_role_takes_any_profile_that_can_run_it_while_the_projects_list_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _profiles(pool)
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _roles_on(pool, project)
+        planner = _Planner(_ops(), "task-a")
+
+        assert (await planner("looper_task_role_set", {**TESTER, "profile_id": "claude-code/sonnet"}))["status"] == "ok"
+        assert await _versions(pool, "task-a") == [("tester", 1, "agent-sonnet", None)]
+        # The list set afterwards without it: the role runs what the built-in role would.
+        await _allow(project, "agent-one-off")
+        read = (await planner("looper_task_roles", {}))["result"]
+        assert read["roles"][0]["profile"] is None and read["roles"][0]["profile_not_allowed"] == "claude-code/sonnet"
 
     _run(test, monkeypatch)
 

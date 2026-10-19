@@ -525,11 +525,14 @@ func ConfigureScheduleMinInterval() error {
 		scheduleMinIntervalSeconds = defaultMinIntervalSeconds
 		return nil
 	}
-	value, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || value < 1 {
+	// int() accepts underscores between digits and Unicode decimal digits.
+	// A value that does not fit in int cannot be stored, so startup fails
+	// rather than keeping a truncated interval.
+	value, overflow, ok := parsePythonInt(raw)
+	if !ok || overflow != 0 || value < 1 || int64(int(value)) != value {
 		return fmt.Errorf("LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS must be a whole number of seconds from 1; got %q", raw)
 	}
-	scheduleMinIntervalSeconds = value
+	scheduleMinIntervalSeconds = int(value)
 	return nil
 }
 

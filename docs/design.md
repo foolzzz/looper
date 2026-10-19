@@ -246,7 +246,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 启动前用 `lark-cli whoami` 和机器人信息核对能否以机器人身份收发，不行就不启动，Settings → Channels 显示原因；能就显示「Bot: 名字（app_id，profile）」
 - Settings → Channels 可按姓名或邮箱搜索并添加发送者（以 lark-cli 登录的用户身份查），名单旁显示姓名，并列出最近被拒的发送者，可一键允许
 - 回复以 Markdown 富文本发送（`--markdown`）
-- 用机器人 token 直连开放平台、不经 lark-cli 的飞书渠道是以后的另一种渠道类型
+- 另有独立的 `lark_bot` 渠道（Lark (bot token)）：复用相同的消息适配器，通过开放平台收发；`app_id` 与 `domain` 存在配置，app_secret 存在 `channel_secrets.bot_token`，通过长连接接收消息。设置页有对应卡片。
 
 ---
 

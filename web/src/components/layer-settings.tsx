@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HarnessField } from "@/components/harness-field";
 import { AgentProfileSelect } from "@/components/agent-profiles";
+import { SELECT } from "@/components/registry-ui";
 import type {
   AgentRole,
   EffectiveProfile,
@@ -14,6 +15,7 @@ import type {
   SettingLimits,
   SettingSource,
   Sourced,
+  SystemPromptMode,
   TaskLimitRole,
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
@@ -68,6 +70,8 @@ interface Draft {
   concurrency: string;
   /** The system layer's only. */
   boundaries: string;
+  /** A role layer's explicit mode; "" while it follows the built-in one. */
+  promptMode: SystemPromptMode | "";
 }
 
 function draftOf(values: LayerValues): Draft {
@@ -78,6 +82,7 @@ function draftOf(values: LayerValues): Draft {
     budget: values.run_budget_usd == null ? "" : String(values.run_budget_usd),
     concurrency: values.max_concurrency == null ? "" : String(values.max_concurrency),
     boundaries: values.boundaries ?? "",
+    promptMode: values.system_prompt_mode ?? "",
   };
 }
 
@@ -100,6 +105,7 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
   const concurrency = draft.concurrency.trim();
   if (concurrency !== before.concurrency) changes.max_concurrency = numberOrTyped(concurrency);
   if (draft.boundaries !== before.boundaries) changes.boundaries = draft.boundaries.trim() ? draft.boundaries : null;
+  if (draft.promptMode !== before.promptMode) changes.system_prompt_mode = draft.promptMode || null;
   return changes;
 }
 
@@ -344,6 +350,26 @@ export function LayerSettingsForm({
           />
           <NowValue id={`${idPrefix}-budget-now`} setting={effective?.run_budget_usd} layer={layer} show={budgetText} />
         </div>
+        {layer === "role" && (
+          <div className="space-y-1 sm:col-span-2">
+            <label htmlFor={`${idPrefix}-prompt-mode`} className="text-xs font-medium text-muted-foreground">
+              System prompt
+            </label>
+            <select
+              id={`${idPrefix}-prompt-mode`}
+              value={draft.promptMode || effective?.system_prompt_mode || "append"}
+              onChange={(e) => set({ promptMode: e.target.value as SystemPromptMode })}
+              aria-describedby={`${idPrefix}-prompt-mode-hint`}
+              className={SELECT}
+            >
+              <option value="append">Append to Claude Code&apos;s prompt</option>
+              <option value="replace">Replace Claude Code&apos;s prompt</option>
+            </select>
+            <p id={`${idPrefix}-prompt-mode-hint`} className="text-[11px] text-muted-foreground">
+              Only for runs on Claude Code.
+            </p>
+          </div>
+        )}
         {concurrencyRole && (
           <div className="space-y-1">
             <label htmlFor={`${idPrefix}-concurrency`} className="text-xs font-medium text-muted-foreground">

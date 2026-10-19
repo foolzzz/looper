@@ -16,10 +16,11 @@ import (
 // 404 and does not read the database. GET /api/roles/<role>/reset-prompt is
 // not this route.
 var (
-	reRoleConfig    = regexp.MustCompile(`^/api/roles/([a-zA-Z0-9_-]+)$`)
-	reChannelConfig = regexp.MustCompile(`^/api/channel-configs/([a-zA-Z0-9_-]+)$`)
-	reRoleTemplates = regexp.MustCompile(`^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$`)
-	reRoleStats     = regexp.MustCompile(`^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$`)
+	reRoleConfig      = regexp.MustCompile(`^/api/roles/([a-zA-Z0-9_-]+)$`)
+	reChannelConfig   = regexp.MustCompile(`^/api/channel-configs/([a-zA-Z0-9_-]+)$`)
+	reRoleTemplates   = regexp.MustCompile(`^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$`)
+	reAllowedProfiles = regexp.MustCompile(`^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$`)
+	reRoleStats       = regexp.MustCompile(`^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$`)
 )
 
 func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +152,31 @@ func (s *Server) handleRoleTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		requestFailed(w, "role templates", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) handleAllowedProfiles(w http.ResponseWriter, r *http.Request) {
+	m := reAllowedProfiles.FindStringSubmatch(r.URL.EscapedPath())
+	if r.Method != http.MethodGet || m == nil {
+		notFound(w)
+		return
+	}
+	id := m[1]
+	if s.Reads == nil {
+		requestFailed(w, "allowed profiles", errNoDatabase)
+		return
+	}
+	ctx, cancel := readContext(r)
+	defer cancel()
+	body, err := s.Reads.AllowedProfiles(ctx, id)
+	if errors.Is(err, db.ErrProjectNotFound) {
+		missingProject(w, id)
+		return
+	}
+	if err != nil {
+		requestFailed(w, "allowed profiles", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, body)

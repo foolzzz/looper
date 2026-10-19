@@ -32,8 +32,8 @@ STATE = sys.argv[1]
 args = sys.argv[2:]
 LEARNINGS = json.loads(os.environ["FAKE_LEARNINGS"])
 prompt = ""
-if "--append-system-prompt-file" in args:
-    prompt = open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8").read()
+if any(f in args for f in ("--append-system-prompt-file", "--system-prompt-file")):
+    prompt = open(args[args.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in args)) + 1], encoding="utf-8").read()
 
 def log(name, value):
     with open(os.path.join(STATE, name), "a") as f:

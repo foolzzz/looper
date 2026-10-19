@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,6 +22,7 @@ import pytest
 from looper.agents import agent_settings
 from looper.agents.profile_registry import BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile
 from looper.agents.agent_settings import (
+    BUILTIN_SYSTEM_PROMPT_MODE,
     BUILTIN_SETTINGS,
     DEFAULT_HARNESS_PROMPT,
     AgentType,
@@ -110,7 +112,8 @@ class TestPrecedence:
 
     def test_nothing_set_is_the_builtin_default(self) -> None:
         for role in AgentType:
-            assert resolve(role, {}, "proj-a") == BUILTIN_SETTINGS
+            assert resolve(role, {}, "proj-a") == replace(BUILTIN_SETTINGS,
+                                                         system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[role])
         assert (BUILTIN_SETTINGS.harness.text, BUILTIN_SETTINGS.profile, BUILTIN_SETTINGS.model,
                 BUILTIN_SETTINGS.effort) == (DEFAULT_HARNESS_PROMPT, BUILTIN_PROFILE, "opus", "")
         assert (BUILTIN_SETTINGS.env, BUILTIN_SETTINGS.max_budget_usd) == ((), None)
@@ -237,6 +240,7 @@ class TestRecord:
         record = launch.record()
         assert record["model_choice"] == {"model": "sonnet", "source": "role", "effort": "high"}
         assert record["profile"] == {"id": "agent-sonnet", "name": "claude-code/sonnet", "model": "sonnet",
+                                     "custom_prompt": "",
                                      "runtime": {"id": "rt-claude-code", "name": "claude-code", "type": "claude-code"},
                                      "provider": {"id": "prov-claude-subscription", "name": "claude-subscription",
                                                   "auth": "oauth"}, "source": "role"}

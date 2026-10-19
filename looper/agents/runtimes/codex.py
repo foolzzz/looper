@@ -2,10 +2,10 @@
 
 Verified against Codex CLI 0.162.0 (the multi-runtime RFC, section 6):
 
-- **A run** is ``codex exec --json ... -``: the prompt comes on stdin, read to
-  its end, and the process runs one turn and exits. It cannot take another
-  user turn while it runs, so a Worker cannot be steered (``write_turn``
-  closes stdin after the prompt).
+- **A run** with the probed ``STEER`` capability uses ``codex app-server``
+  (``codex_steer``), so a running Worker can receive steering. Otherwise it
+  uses ``codex exec --json ... -``: the prompt comes on stdin, read to its
+  end, and the process runs one turn and exits (``write_turn`` closes stdin).
 - **A resident session** (the Manager, a Planner) is one such process per
   turn, resuming the session: ``codex exec ... resume <thread id> -``
   (``ResidentCodex``). ``thread.started`` names the thread on every turn; a
@@ -71,10 +71,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, reported_totals, run_usage
+from ..reported_files import prompt_name
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    codex_login, instructions,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    RuntimeUnsupported, codex_login, instructions, runtime_prompt_text,
 )
 from .instructions import InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -84,8 +85,10 @@ if TYPE_CHECKING:
     from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..library import AgentLibrary
+    from .channel import RunChannel
 
 _PROBE_TIMEOUT_SEC = 10.0
+STEER_MIN_VERSION = (0, 162, 0)
 # The provider's id in the generated config, and the variable that holds its key.
 PROVIDER_ID = "looper"
 KEY_ENV = "LOOPER_PROVIDER_API_KEY"
@@ -117,11 +120,13 @@ class CodexRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.API_KEY, AuthKind.OAUTH})
     login_models = codex_login.SUGGESTED_MODELS
     isolation_id = HOME_LAYOUT_ID
+    # A read-only run (a Planner's, a consult) has Codex's read-only sandbox, where a write fails (``launch_args``).
+    read_only = ReadOnly.SANDBOX
     # Set by the binding and the run's home: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"})
 
     def probe(self, executable: str) -> Probe:
-        """``<executable> --version``, with an empty ``CODEX_HOME`` of its own so nothing of the operator's is read."""
+        """The version and steering schema, with empty ``CODEX_HOME`` directories of their own."""
         home = tempfile.mkdtemp(prefix="looper-codex-probe-")
         try:
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
@@ -136,7 +141,26 @@ class CodexRuntime(RuntimeAdapter):
         if done.returncode != 0 or not first:
             return Probe(None, self.capabilities, f"{executable} --version failed (exit code {done.returncode})"
                                                   + (f": {first}" if first else ""))
-        return Probe(first[:200], self.capabilities_for(first))
+        capabilities = self.capabilities_for(first)
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", first)
+        if found and tuple(map(int, found.groups())) >= STEER_MIN_VERSION:
+            try:
+                with tempfile.TemporaryDirectory(prefix="looper-codex-schema-") as directory:
+                    root = Path(directory)
+                    home = root / "home"
+                    home.mkdir()
+                    schema = subprocess.run(
+                        [executable, "app-server", "generate-json-schema", "--out", str(root / "schema")],
+                        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SEC, check=False,
+                        env={**os.environ, "CODEX_HOME": str(home)},
+                    )
+                    if schema.returncode == 0 and '"turn/steer"' in (root / "schema" / "ClientRequest.json").read_text(
+                        encoding="utf-8",
+                    ):
+                        capabilities |= {Capability.STEER}
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+        return Probe(first[:200], capabilities)
 
     def isolation_args(self, cwd: str | Path) -> list[str]:
         """None: Codex's isolation is its own ``CODEX_HOME`` and the config Looper writes there (``config_toml``)."""
@@ -193,6 +217,17 @@ class CodexRuntime(RuntimeAdapter):
         home = write_home(local, config, agents, login=login)
         return ["env", f"CODEX_HOME={home}", executable, "exec", *self.launch_args(launch)]
 
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
+                             "base instructions file" if launch.system_prompt_mode is SystemPromptMode.REPLACE
+                             else "AGENTS.md")
+        runtime = PromptBlock("Runtime instructions", "runtime", None, "skills/permissions notes (not shown)")
+        environment = PromptBlock("Environment", "runtime", None, "environment (not shown)")
+        if launch.system_prompt_mode is SystemPromptMode.REPLACE:
+            return [looper, runtime, environment]
+        return [PromptBlock("Base instructions", "runtime", None, "base instructions (not shown)"),
+                runtime, looper, environment]
+
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
         """The command of the turns of a resident session, without the session to resume and the prompt
@@ -212,6 +247,28 @@ class CodexRuntime(RuntimeAdapter):
             return [*command, "--ephemeral", "-"]
         _sync_home(Path(command[1].removeprefix("CODEX_HOME=")), session_dir)
         return ["env", f"CODEX_HOME={session_dir}", *command[2:], "-"]
+
+    def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                      max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """An app-server run with the same home and instructions as ``run_command``. ``--add-dir`` mounts are
+        not passed: the run has no sandbox. The thread request carries the model and permissions."""
+        command = self._command(executable, prompt_file, launch)
+        home = Path(command[1].removeprefix("CODEX_HOME="))
+        if session_dir is not None:
+            _sync_home(home, session_dir)
+            home = session_dir
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
+        effort_args = list(binding.args[2:])
+        return ["env", f"CODEX_HOME={home}", executable, "app-server", *effort_args]
+
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None) -> RunChannel:
+        from .codex_steer import CodexChannel
+
+        if not launch.steers:
+            return super().run_channel(process, launch=launch, cwd=cwd, session_dir=session_dir)
+        return CodexChannel(process, model=launch.model, effort=launch.effort, cwd=str(cwd),
+                            keep_session=session_dir is not None)
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
@@ -445,7 +502,13 @@ def _instruction_lines() -> list[str]:
 
 
 def _with_mcp(lines: list[str], launch: Launch) -> str:
+    from ..agent_settings import AgentType
+
     for name, table in mcp_servers(launch.library)[0]:
+        if launch.role is AgentType.PLANNER:
+            # With approvals never asked, Codex refuses every MCP tool call unless its server is approved (seen
+            # with 0.162.0, in a run and in a resumed turn). The Planner's own tools are all it has to act with.
+            table = {**table, "default_tools_approval_mode": "approve"}
         lines += ["", f"[mcp_servers.{_toml_key(name)}]", *(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in table.items())]
     return "\n".join(lines) + "\n"
 
@@ -518,14 +581,18 @@ def runtime_notes(catalog: RuntimeCatalog) -> str:
             "",
             "## Available skills",
             "",
-            *(f"- {skill.name}: {skill.description or '(no description)'} ({skill.path})" for skill in catalog.skills),
+            *(f"- {prompt_name(skill.name)}: {skill.description or '(no description)'} ({prompt_name(skill.path)})" for skill in catalog.skills),
         ]
     return "\n".join(lines)
 
 
 def agents_md(prompt_file: Path, launch: Launch) -> str:
-    """A run's ``AGENTS.md``: the runtime notes, then Looper's system prompt as its file holds it."""
-    return runtime_notes(materialize(launch.library)) + "\n\n---\n\n" + Path(prompt_file).read_text(encoding="utf-8")
+    """A run's ``AGENTS.md``: custom text first when set, with adapter notes before the harness."""
+    return _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch)
+
+
+def _prompt_text(looper_prompt: str, launch: Launch) -> str:
+    return runtime_prompt_text(launch, looper_prompt, runtime_notes(materialize(launch.library)))
 
 
 def _codex_dir(local: Path) -> Path:
