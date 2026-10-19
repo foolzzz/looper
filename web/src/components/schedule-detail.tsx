@@ -250,7 +250,11 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             </span>
           </Field>
           <Field label="Run timeout">
-            {schedule.run_timeout_seconds != null ? seconds(schedule.run_timeout_seconds) : "None"}
+            {schedule.run_timeout_seconds === "default"
+              ? `The default (${seconds(schedule.run_timeout_effective_seconds ?? 0)})`
+              : schedule.run_timeout_seconds != null
+                ? seconds(schedule.run_timeout_seconds)
+                : "None"}
           </Field>
           <Field label="When a run is still going">
             {schedule.overlap === "queue"

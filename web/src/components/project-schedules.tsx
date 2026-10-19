@@ -164,7 +164,9 @@ interface Draft {
   /** With overlap "parallel". */
   maxParallel: string;
   catchUp: ScheduleCatchUp;
-  /** Minutes; "" = no limit. */
+  /** Whether runs follow the system default, have the limit below, or have none. */
+  timeoutMode: "default" | "limit" | "none";
+  /** Minutes, with timeoutMode "limit". */
   timeout: string;
   /** USD; "" = the project's task cap. */
   budget: string;
@@ -201,6 +203,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       overlap: "skip",
       maxParallel: "3",
       catchUp: "once",
+      timeoutMode: "default",
       timeout: "",
       budget: "",
       profiles: {},
@@ -220,7 +223,9 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     overlap: schedule.overlap,
     maxParallel: String(schedule.max_parallel_runs),
     catchUp: schedule.catch_up,
-    timeout: schedule.run_timeout_seconds == null ? "" : String(schedule.run_timeout_seconds / 60),
+    timeoutMode:
+      schedule.run_timeout_seconds === "default" ? "default" : schedule.run_timeout_seconds == null ? "none" : "limit",
+    timeout: typeof schedule.run_timeout_seconds === "number" ? String(schedule.run_timeout_seconds / 60) : "",
     budget: schedule.run_budget_usd == null ? "" : String(schedule.run_budget_usd),
     profiles: { ...schedule.profile_overrides },
     taskLimits: taskLimitsDraft(schedule.task_limits),
@@ -250,7 +255,8 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields
     overlap: draft.overlap,
     max_parallel_runs: Number(draft.maxParallel.trim() || NaN),
     catch_up: draft.catchUp,
-    run_timeout_seconds: minutes == null ? null : Math.round(minutes * 60),
+    run_timeout_seconds:
+      draft.timeoutMode === "default" ? "default" : draft.timeoutMode === "none" ? null : Math.round((minutes ?? NaN) * 60),
     run_budget_usd: numberOf(draft.budget),
     profile_overrides: Object.fromEntries(Object.entries(draft.profiles).filter(([, profile]) => profile)),
     task_limits: taskLimitsOf(draft.taskLimits),
@@ -293,7 +299,6 @@ function createFields(fields: Required<ScheduleFields>): ScheduleFields {
   const {
     work_dir,
     max_parallel_runs,
-    run_timeout_seconds,
     run_budget_usd,
     profile_overrides,
     task_limits,
@@ -307,7 +312,6 @@ function createFields(fields: Required<ScheduleFields>): ScheduleFields {
     ...rest,
     ...(work_dir ? { work_dir } : {}),
     ...(rest.overlap === "parallel" ? { max_parallel_runs } : {}),
-    ...(run_timeout_seconds != null ? { run_timeout_seconds } : {}),
     ...(run_budget_usd != null ? { run_budget_usd } : {}),
     ...(Object.keys(profile_overrides).length ? { profile_overrides } : {}),
     ...createTaskLimits(task_limits),
@@ -670,7 +674,7 @@ function ScheduleForm({
     !fields.work_dir && !project.work_dir && "a work directory",
   ].filter(Boolean);
   const tooLong = fields.requirement.length > limits.requirement_max_chars;
-  const badTimeout = Number.isNaN(fields.run_timeout_seconds);
+  const badTimeout = draft.timeoutMode === "limit" && !(Number(fields.run_timeout_seconds) >= 1);
   const badBudget = Number.isNaN(fields.run_budget_usd);
   const gateLength = (fields.gate_command ?? "").length;
   const gateTooLong = gateLength > limits.gate_command_max_chars;
@@ -872,23 +876,39 @@ function ScheduleForm({
       )}
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1">
-          <label htmlFor={id("timeout")} className={LABEL}>Run timeout (minutes)</label>
-          <Input
-            id={id("timeout")}
-            inputMode="decimal"
-            value={draft.timeout}
-            onChange={(e) => set("timeout", e.target.value)}
-            placeholder="No limit"
-            aria-invalid={badTimeout}
-            aria-describedby={id("timeout-hint")}
-            className="aria-invalid:border-destructive"
+        <div className="space-y-2">
+          <Choices
+            name={id("timeout-mode")}
+            legend="Run timeout"
+            value={draft.timeoutMode}
+            onChange={(value) => set("timeoutMode", value)}
+            options={[
+              {
+                value: "default",
+                label: `Use the default (${limits.run_timeout_default_seconds} s)`,
+                hint: "Follows Settings → Scheduler. A run keeps the timeout it started with.",
+              },
+              { value: "limit", label: "Set a limit", hint: "A run still going after the minutes below is stopped and counts as a failure." },
+              { value: "none", label: "No limit", hint: "A run lasts until its task ends." },
+            ]}
           />
-          <p id={id("timeout-hint")} className={cn("text-xs", badTimeout ? "text-destructive" : "text-muted-foreground")}>
-            {badTimeout
-              ? "Enter the minutes as a number, or leave it empty."
-              : "Empty: no limit. A run still going then is stopped and counts as a failure."}
-          </p>
+          {draft.timeoutMode === "limit" && (
+            <div className="space-y-1">
+              <label htmlFor={id("timeout")} className={LABEL}>Limit (minutes)</label>
+              <Input
+                id={id("timeout")}
+                inputMode="decimal"
+                value={draft.timeout}
+                onChange={(e) => set("timeout", e.target.value)}
+                aria-invalid={badTimeout}
+                aria-describedby={id("timeout-hint")}
+                className="aria-invalid:border-destructive"
+              />
+              <p id={id("timeout-hint")} className={cn("text-xs", badTimeout ? "text-destructive" : "text-muted-foreground")}>
+                {badTimeout ? "Enter the minutes as a number of at least 1/60." : "At most 30 days."}
+              </p>
+            </div>
+          )}
         </div>
         <div className="space-y-1">
           <label htmlFor={id("budget")} className={LABEL}>Spend cap per run (USD)</label>

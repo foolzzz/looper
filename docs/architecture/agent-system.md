@@ -1984,7 +1984,8 @@ a `cron` rule and an IANA `timezone` (default: the server's own zone), the
 `requirement` each run's task gets (at most 27,000 characters), a `work_dir` (`''`: the project's default
 when it fires), `overlap` (`skip`, `queue` or `parallel`, with
 `max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
-an optional `run_timeout_seconds` and `run_budget_usd`, `profile_overrides`
+a `run_timeout_seconds` (a number, `null` for no limit, or `"default"`, a new
+schedule's choice, which follows the system default below) and an optional `run_budget_usd`, `profile_overrides`
 for the Planner, Workers or Reviewers (by id or name, as a new task takes them;
 a role it does not name keeps the project's, and no change to a schedule alters
 its profiles unless the request carries them; a repetitive schedule such as
@@ -2009,8 +2010,19 @@ dashboard only). A new schedule is disabled.
   rule that fires closer is refused when the schedule is created or changed,
   and so is removing the gate of a schedule that fires every minute ("without
   its gate command, …"). The preview takes `gated` for the same check.
-  `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`, read when `looper serve` starts,
-  lowers both for tests and validation only. The dashboard shows each rule in words
+  Both follow the system setting `scheduler.min_interval_seconds` (Settings →
+  Scheduler, `GET`/`PUT /api/scheduler-settings`; default 300 s, a whole number
+  from 1): it applies to the next save at once, and saved schedules are not
+  checked again. With no saved value, the deprecated
+  `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` (or `LOOPX_…`) still applies for this
+  version and logs one warning that names the variable, never its value; once a
+  value is saved the variable is ignored. The system setting
+  `scheduler.run_timeout_seconds` (default 3600 s, 1 to 30 days) is the run
+  timeout of a schedule whose `run_timeout_seconds` is `"default"`
+  (`schedules.run_timeout_mode`: `inherit`, `seconds`, `none`; schedules from
+  before keep their number or no limit). A run records the timeout it starts
+  with (`schedule_runs.run_timeout_seconds`, null for none), so changing the
+  schedule or the default affects later runs only. The dashboard shows each rule in words
   ("Weekdays at 09:00 (America/Los_Angeles)", "Every 30 minutes"), or as
   written when no wording fits.
 - **The scheduler** (`looper/agents/scheduler.py`) runs inside `looper serve`,
@@ -2059,7 +2071,8 @@ dashboard only). A new schedule is disabled.
   directory, started through `proc_tree.spawn`, with no stdin and its run in
   its environment (`scheduler.gate_env`: `LOOPER_SCHEDULE_ID`,
   `LOOPER_SCHEDULE_RUN_ID`, `LOOPER_SCHEDULE_SCHEDULED_FOR` in ISO 8601 and
-  `LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS`, empty without a timeout), so a gate
+  `LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS`, the timeout the run started with,
+  empty without one), so a gate
   of a parallel schedule can claim what it hands to its run until the run
   times out; past its
   timeout, or when the server stops, its process tree is ended like an
@@ -2104,7 +2117,7 @@ dashboard only). A new schedule is disabled.
   found nothing to do) clears `consecutive_failures` and sets `last_ok_at`,
   and a completed one `last_success_at`; a failed or timed-out run, or a
   failed gate, adds a failure; a stopped or cancelled run, and a skip that ran
-  nothing (busy, over budget, missed), changes neither. A run past `run_timeout_seconds` (from when
+  nothing (busy, over budget, missed), changes neither. A run past its timeout (from when
   it fired) is recorded `timed_out` and its task stopped through the usual
   `TASK_STOP`. Each pass also settles what that report missed: a run whose task
   a server start stopped or that was deleted, and a task created but never
@@ -3275,12 +3288,12 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
 | `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; none allows every profile; a profile on a list is not deleted |
-| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
+| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_mode` (`inherit`, `seconds` or `none`) and `run_timeout_seconds` (with `seconds`), `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
-| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
+| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`; going with its schedule |
-| `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
+| `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report and the scheduler's `scheduler.min_interval_seconds` and `scheduler.run_timeout_seconds` |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
@@ -3497,7 +3510,7 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks or schedules |
 | `/api/projects/:id/schedules` | GET | The project's schedules by name, each with `project_name`, `description` (the rule in words), its fields, `enabled`, `next_fire_at`, `last_fired_at`, `last_success_at`, `consecutive_failures`, the S2 fields, `spent_today_usd`, `alerts` (`failures_since`, `stale_since`) and `last_run`; and `limits` (`name_max_chars`, `requirement_max_chars` 27000, `min_interval_seconds` (300) and `min_interval_gated_seconds` (60, with a gate command), `default_timezone`, `run_timeout_max_seconds`, `roles`, `gate_command_max_chars`, `gate_timeout_default_seconds`, `gate_timeout_max_seconds`, `max_parallel_runs_limit`, `concurrency_max` (the most a task limit may be), `notify_targets`: the chats the channels' sender allowlists allow, each with `channel_enabled`); 404 for an unknown project |
-| `/api/projects/:id/schedules` | POST | Create a schedule, disabled, from `name`, `cron`, `requirement` and optionally `timezone`, `work_dir`, `overlap`, `max_parallel_runs` (1–10, default 3), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `profile_overrides`, `task_limits` (`{worker?, reviewer?}`, each 1–64 or null; it replaces the schedule's, a role left out having none, and null clears both), `gate_command` (at most 2000 characters), `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_target` (`{channel, chat}` among `notify_targets`, or null); 201 with `schedule` (its `task_limits` always has both roles, null for none). 400 with the reason for a bad field (a `task_limits` role other than worker or reviewer, or a limit out of range, too) (an invalid rule or zone, a rule that never fires or fires closer than the minimum interval, no work directory here or on the project, a chat no allowlist allows, `enabled`, an unknown field), 409 for a name the project has, 404 for an unknown project |
+| `/api/projects/:id/schedules` | POST | Create a schedule, disabled, from `name`, `cron`, `requirement` and optionally `timezone`, `work_dir`, `overlap`, `max_parallel_runs` (1–10, default 3), `catch_up`, `run_timeout_seconds` (seconds, null for no limit, or `"default"`; `"default"` when left out), `run_budget_usd`, `profile_overrides`, `task_limits` (`{worker?, reviewer?}`, each 1–64 or null; it replaces the schedule's, a role left out having none, and null clears both), `gate_command` (at most 2000 characters), `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_target` (`{channel, chat}` among `notify_targets`, or null); 201 with `schedule` (its `task_limits` always has both roles, null for none). 400 with the reason for a bad field (a `task_limits` role other than worker or reviewer, or a limit out of range, too) (an invalid rule or zone, a rule that never fires or fires closer than the minimum interval, no work directory here or on the project, a chat no allowlist allows, `enabled`, an unknown field), 409 for a name the project has, 404 for an unknown project |
 | `/api/schedules` | GET | Every project's schedules, the disabled ones too, by project name and then name, ignoring case: `schedules`, each as a project's list gives it (with `project_id` and `project_name`); the Schedules page reads it |
 | `/api/schedules/:id` | GET/PUT/DELETE | Read one schedule; PUT changes the fields given and `enabled` (enabling, or a new rule or zone while enabled, sets `next_fire_at` from now; disabling clears it), answering with `schedule` as POST does, 400 and 409 as for POST; DELETE deletes it and its runs, keeping its tasks; 404 |
 | `/api/schedules/:id/run` | POST | Run now: fire it with `trigger` `manual` (also while disabled) through the same overlap check; answers with the `run` (`running`, `gating` while its gate runs, `queued`, `skipped_overlap`, `skipped_budget`, or `failed` with `error`); `next_fire_at` stays; 404 |
@@ -3558,6 +3571,7 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/agents/:id/usage?turns=N` | GET | One agent's (`manager`, `planner-<task_id>`, ...) spending and context: `total` (`cost_usd`, `runs`, `running`, `unpriced_runs`, `compactions`), `by_session` and `by_day` (UTC; each `cost_usd`, `runs`), its latest N turns (default 100, at most 1000) oldest first with `context_tokens`, `cost_usd` and `compactions`, and `latest_context_tokens`; 400 for a bad `turns` |
+| `/api/scheduler-settings` | GET/PUT | The scheduler's system settings: `{min_interval_seconds, run_timeout_seconds}`, each `{value, source, built_in, minimum, ...}` with `source` `setting`, `env` (the deprecated variable, for the minimum interval) or `built-in`; the first also has `gated_value`, the second `maximum`. PUT takes either or both as a whole number of seconds (the timeout at most 30 days), or `null` for the built-in; 400 with the reason for anything else, nothing changed. The configuration export carries the stored values as `settings.scheduler`, and the Manager's `looper_settings` has the action `scheduler` (the user confirms) |
 | `/api/gate-settings` | GET/PUT | Where the user gates of a task asked for on the dashboard or in the web chat go besides the task page: `{dashboard_target: {channel, chat} \| null, targets}`, `targets` the chats a channel's sender allowlist lets in (as a schedule's notify target), and `dashboard_target_problem` when the saved chat no longer is one (the gates then go to the task page only). PUT `{dashboard_target}`; 400 for a chat that is not one of them, or on a channel that is off ([User gates](#user-gates)) |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |

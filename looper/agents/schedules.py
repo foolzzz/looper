@@ -9,8 +9,7 @@ apart, checked over the next 24 hours when it is saved: 5 minutes, or 1 minute
 for a schedule with a gate command, whose run ends at its gate when there is
 nothing new (``skipped_gate``: no task, no cost). Removing the gate of a
 schedule that fires more often is refused.
-``LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS``, read when the server starts, lowers
-both for tests and validation only.
+The minimum interval is a system setting (``scheduler_settings``).
 
 S2 adds a gate command (run before each run), a daily spend cap, and whom to
 tell (``notify`` and a ``notify_target``: a chat that a channel's sender
@@ -32,7 +31,6 @@ from typing import Any
 
 import asyncpg
 
-from .. import env
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, schedules as db_schedules
 from . import cron
@@ -40,6 +38,9 @@ from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 from .projects import _profile_overrides
+from . import scheduler_settings as scheduler_settings_module
+from .scheduler_settings import DEFAULT_RUN_TIMEOUT_SECONDS, RUN_TIMEOUT_MAX_SECONDS, RunTimeoutMode
+from .scheduler_settings import default_run_timeout, min_interval_seconds
 from .scheduler import GATE_TIMEOUT_DEFAULT_SECONDS, GATE_TIMEOUT_MAX_SECONDS
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import resolve_work_dir
@@ -52,7 +53,6 @@ NAME_MAX_CHARS = 80
 # hundred more).
 RUN_CONTEXT_RESERVE_CHARS = 5000
 REQUIREMENT_MAX_CHARS = TASK_REQUIREMENT_LIMIT - RUN_CONTEXT_RESERVE_CHARS
-RUN_TIMEOUT_MAX_SECONDS = 30 * 86400
 PREVIEW_COUNT = 5
 PREVIEW_MAX = 20
 RUNS_DEFAULT = 50
@@ -60,11 +60,8 @@ RUNS_MAX = 200
 GATE_COMMAND_MAX_CHARS = 2000
 MAX_PARALLEL_RUNS_LIMIT = 10
 
-MIN_INTERVAL_ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
-DEFAULT_MIN_INTERVAL_SECONDS = 300
-# A gated schedule may fire every minute: a run with nothing new ends at its gate, without a task.
-MIN_INTERVAL_GATED_SECONDS = 60
-_min_interval = DEFAULT_MIN_INTERVAL_SECONDS
+# A schedule's run_timeout_seconds in a request and in its view, for the system default.
+TIMEOUT_DEFAULT = "default"
 
 NO_WORK_DIR = "a work directory is required: set one on the schedule or on its project"
 
@@ -96,30 +93,6 @@ class Notify(str, Enum):
     ALERTS = "alerts"  # the alerts and their recoveries only, no run's own message
     ALWAYS = "always"  # every run that ran something, the alerts and their recoveries
     NEVER = "never"  # nothing is sent; the dashboard still shows the alerts
-
-
-def configure_min_interval() -> int:
-    """Read ``LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`` (for tests and validation only) at startup; raises
-    ``ValueError`` for a value that is not a whole number of seconds from 1."""
-    global _min_interval
-    raw = env.get(MIN_INTERVAL_ENV)
-    if raw is None or raw.strip() == "":
-        _min_interval = DEFAULT_MIN_INTERVAL_SECONDS
-    else:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value < 1:
-            raise ValueError(f"{MIN_INTERVAL_ENV} must be a whole number of seconds from 1; got {raw!r}")
-        _min_interval = value
-    return _min_interval
-
-
-def min_interval_seconds(*, gated: bool) -> int:
-    """How close two fires of a schedule may be: a minute with a gate command, else ``DEFAULT_MIN_INTERVAL_SECONDS``
-    (both lowered by ``LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS``)."""
-    return min(MIN_INTERVAL_GATED_SECONDS, _min_interval) if gated else _min_interval
 
 
 def _utcnow() -> datetime:
@@ -188,8 +161,20 @@ async def _run_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [run_view(row, costs.get(row.get("task_id") or "")) for row in rows]
 
 
+def _timeout_view(row: Mapping[str, Any], default: int) -> tuple[Any, int | None]:
+    """A schedule's ``run_timeout_seconds`` as a request writes it (``"default"``, a number, or null for no limit)
+    and the timeout a run that starts now would get."""
+    mode = row["run_timeout_mode"]
+    if mode == RunTimeoutMode.INHERIT.value:
+        return TIMEOUT_DEFAULT, default
+    if mode == RunTimeoutMode.NONE.value:
+        return None, None
+    return row["run_timeout_seconds"], row["run_timeout_seconds"]
+
+
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
-                  spent_today: float = 0.0) -> dict[str, Any]:
+                  spent_today: float = 0.0, default_timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """``default_timeout``: the system default run timeout, for a schedule that follows it."""
     target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
     return {
         "schedule_id": row["id"], "project_id": row["project_id"], "project_name": row["project_name"],
@@ -197,7 +182,9 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
         "max_parallel_runs": row["max_parallel_runs"],
-        "catch_up": row["catch_up"], "run_timeout_seconds": row["run_timeout_seconds"],
+        "catch_up": row["catch_up"],
+        "run_timeout_seconds": _timeout_view(row, default_timeout)[0],
+        "run_timeout_effective_seconds": _timeout_view(row, default_timeout)[1],
         "run_budget_usd": row["run_budget_usd"], "profile_overrides": dict(row.get("profile_overrides") or {}),
         "task_limits": {role.value: (row.get("task_limits") or {}).get(role.value) for role in TASK_LIMIT_ROLES},
         "enabled": row["enabled"], "next_fire_at": row["next_fire_at"], "last_fired_at": row["last_fired_at"],
@@ -223,7 +210,7 @@ async def _schedule_answer(schedule_id: str) -> dict[str, Any]:
     latest = (await db_schedules.latest_runs([schedule_id])).get(schedule_id)
     last_run = (await _run_views([latest]))[0] if latest else None
     spent = await db_schedules.spent_since(db_connection.get_pool(), schedule_id, local_midnight())
-    return {"schedule": schedule_view(row, last_run, spent_today=spent)}
+    return {"schedule": schedule_view(row, last_run, spent_today=spent, default_timeout=await default_run_timeout())}
 
 
 async def notify_targets() -> list[dict[str, Any]]:
@@ -248,11 +235,26 @@ async def limits() -> dict[str, Any]:
         "name_max_chars": NAME_MAX_CHARS, "requirement_max_chars": REQUIREMENT_MAX_CHARS,
         "min_interval_seconds": min_interval_seconds(gated=False),
         "min_interval_gated_seconds": min_interval_seconds(gated=True), "default_timezone": cron.local_zone_name(),
-        "run_timeout_max_seconds": RUN_TIMEOUT_MAX_SECONDS, "roles": list(TASK_PROFILE_ROLES),
+        "run_timeout_max_seconds": RUN_TIMEOUT_MAX_SECONDS,
+        "run_timeout_default_seconds": await default_run_timeout(), "roles": list(TASK_PROFILE_ROLES),
         "gate_command_max_chars": GATE_COMMAND_MAX_CHARS, "gate_timeout_default_seconds": GATE_TIMEOUT_DEFAULT_SECONDS,
         "gate_timeout_max_seconds": GATE_TIMEOUT_MAX_SECONDS, "max_parallel_runs_limit": MAX_PARALLEL_RUNS_LIMIT,
         "concurrency_max": CONCURRENCY_MAX, "notify_targets": await notify_targets(),
     }
+
+
+async def scheduler_settings() -> dict[str, Any]:
+    """The scheduler's system settings with their effective values and sources (``scheduler_settings``)."""
+    return await scheduler_settings_module.settings_view()
+
+
+async def update_scheduler_settings(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Change the minimum interval and the default run timeout (a number, or null for the built-in); 400 for a bad
+    value, with nothing changed."""
+    try:
+        return await scheduler_settings_module.update(body)
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
 
 
 # --- Validation ---
@@ -291,13 +293,18 @@ def _choice(field: str, raw: Any, kind: type[Enum]) -> str:
         raise ValueError(f"{field} must be one of {', '.join(str(m.value) for m in kind)}") from None
 
 
-def _timeout(raw: Any) -> int | None:
+def _timeout(raw: Any) -> dict[str, Any]:
+    """``run_timeout_seconds`` as the stored columns: ``"default"`` follows the system default, a number is the
+    schedule's own, null is no limit."""
+    if raw == TIMEOUT_DEFAULT:
+        return {"run_timeout_mode": RunTimeoutMode.INHERIT.value, "run_timeout_seconds": None}
     if raw is None:
-        return None
+        return {"run_timeout_mode": RunTimeoutMode.NONE.value, "run_timeout_seconds": None}
     if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= RUN_TIMEOUT_MAX_SECONDS:
         raise ValueError(f"run_timeout_seconds must be a whole number of seconds from 1 to "
-                         f"{RUN_TIMEOUT_MAX_SECONDS}, or null for no limit")
-    return raw
+                         f"{RUN_TIMEOUT_MAX_SECONDS}, null for no limit, or \"{TIMEOUT_DEFAULT}\" for the system "
+                         "default")
+    return {"run_timeout_mode": RunTimeoutMode.SECONDS.value, "run_timeout_seconds": raw}
 
 
 def _max_parallel_runs(raw: Any) -> int:
@@ -335,11 +342,12 @@ _PARSERS = {
     "name": _name, "requirement": _requirement, "work_dir": _work_dir,
     "overlap": lambda raw: _choice("overlap", raw, Overlap), "max_parallel_runs": _max_parallel_runs,
     "catch_up": lambda raw: _choice("catch_up", raw, CatchUp),
-    "run_timeout_seconds": _timeout, "run_budget_usd": _budget("run_budget_usd"),
+    "run_budget_usd": _budget("run_budget_usd"),
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
     "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
 }
-_ACCEPTED = (*(name for name in db_schedules.FIELDS if name not in ("notify_channel", "notify_chat")),
+_ACCEPTED = (*(name for name in db_schedules.FIELDS
+                if name not in ("notify_channel", "notify_chat", "run_timeout_mode")),
              "notify_target", "profile_overrides", "task_limits")
 
 
@@ -381,6 +389,8 @@ async def _fields(data: Mapping[str, Any], *, update: bool,
         for name, parse in _PARSERS.items():
             if name in data or (not update and name in ("name", "requirement")):
                 fields[name] = parse(data.get(name))
+        if "run_timeout_seconds" in data or not update:
+            fields.update(_timeout(data.get("run_timeout_seconds", TIMEOUT_DEFAULT)))
         if "cron" in data or not update:
             fields["cron"] = data.get("cron")
         if "timezone" in data or not update:
@@ -431,7 +441,9 @@ async def _schedule_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     latest = await db_schedules.latest_runs(ids)
     views = dict(zip(latest, await _run_views(list(latest.values()))))
     spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
-    return [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]]) for row in rows]
+    default = await default_run_timeout()
+    return [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default)
+            for row in rows]
 
 
 async def list_schedules(project_id: str) -> dict[str, Any]:

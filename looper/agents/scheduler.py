@@ -6,8 +6,8 @@ server was down or the computer slept are handled), one pass:
 1. Runs whose task ended get their final status, summary and cost (the
    TaskRouter also reports each task end, ``task_ended``, so this pass only
    catches what that missed, such as a task a server start stopped). A run
-   past its schedule's ``run_timeout_seconds`` is recorded ``timed_out`` and
-   its task stopped. A queued run whose previous task has ended starts.
+   past the timeout it started with (``schedule_runs.run_timeout_seconds``) is
+   recorded ``timed_out`` and its task stopped. A queued run whose previous task has ended starts.
 2. Each enabled schedule whose ``next_fire_at`` has come is handled in a
    transaction that locks its row (``FOR NO KEY UPDATE SKIP LOCKED``), so two
    servers on one database fire it once; a foreign key check on the row (a
@@ -67,6 +67,7 @@ from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, Message
 from .project_execution import ProjectExecution
 from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender
+from .scheduler_settings import effective_run_timeout
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -153,11 +154,10 @@ def _local(moment: datetime, tz: Any) -> str:
     return moment.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
-def gate_env(schedule: Mapping[str, Any], run_id: str, firing: Firing) -> dict[str, str]:
+def gate_env(schedule: Mapping[str, Any], run_id: str, firing: Firing, timeout: int | None) -> dict[str, str]:
     """What a gate is told about its run, so it can claim the items it hands to this run (a ``parallel`` schedule's
-    runs overlap): the schedule, the run, its fire time (ISO 8601) and the run timeout in seconds ("" for none),
+    runs overlap): the schedule, the run, its fire time (ISO 8601) and the run's timeout in seconds ("" for none),
     after which a claim may be taken back."""
-    timeout = schedule.get("run_timeout_seconds")
     return {"LOOPER_SCHEDULE_ID": str(schedule["id"]), "LOOPER_SCHEDULE_RUN_ID": run_id,
             "LOOPER_SCHEDULE_SCHEDULED_FOR": firing.scheduled_for.isoformat(),
             "LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS": "" if timeout is None else str(timeout)}
@@ -508,17 +508,21 @@ class Scheduler:
                     return _Launched(await self._skip(conn, "skipped_budget", now, common, fired_at=now, error=error))
                 return _Launched(await self._put(conn, run_id, None, status="skipped_budget", fired_at=now,
                                                  finished_at=now, error=error))
+        # The run's timeout is fixed as it starts; changing the schedule or the default later leaves it be.
+        timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
+                                                                      schedule["run_timeout_seconds"])}
         if schedule["gate_command"]:
-            return _Launched(await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now),
-                             gate=firing)
-        return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
+            return _Launched(await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now,
+                                             **timeout), gate=firing)
+        return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
 
     async def _create_run(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
                           common: Mapping[str, Any] | None = None, run_id: str | None = None,
                           gate_output: str | None = None, carried: list[Carried] | None = None,
-                          fires_now: bool = True) -> _Launched:
+                          fires_now: bool = True, started: Mapping[str, Any] | None = None) -> _Launched:
         """Create the run's task (or fail the run, saying why) and record the run running; ``fires_now`` sets its
-        ``fired_at`` (a gating run's was set when its gate started)."""
+        ``fired_at`` (a gating run's was set when its gate started); ``started`` is what a run with no gate records
+        as it starts (its timeout)."""
         if carried is None:
             carried = await self._carried(conn, schedule["id"], before=run_id)
         task_id, error = await self._create_task(conn, schedule, firing, run_id=run_id, gate_output=gate_output,
@@ -530,7 +534,7 @@ class Scheduler:
             return _Launched(run_id, ended=True)
         # Every earlier run's unfinished input goes to this run, and to no later one; it names the latest of them.
         run_id = await self._put(conn, run_id, common, status=db_schedules.RUNNING, task_id=task_id,
-                                 carried_from=carried[-1].run_id if carried else None, **fired)
+                                 carried_from=carried[-1].run_id if carried else None, **fired, **(started or {}))
         await db_schedules.hand_on(conn, [one.run_id for one in carried])
         logger.info("schedule %s fired (%s): task %s", schedule["id"], firing.trigger.value, task_id)
         return _Launched(run_id, task_id=task_id)
@@ -582,12 +586,14 @@ class Scheduler:
                 return
             timeout = schedule["gate_timeout_seconds"] or GATE_TIMEOUT_DEFAULT_SECONDS
             work_dir = await self._work_dir(None, schedule)
+            started = await db_schedules.get_run(run_id)
             if not work_dir:
                 result = GateResult(None, "", "", error="a work directory is required: set one on the schedule or "
                                                         "on its project")
             else:
                 result = await run_gate(schedule["gate_command"], work_dir, timeout, label=f"gate of {run_id}",
-                                        env=gate_env(schedule, run_id, firing))
+                                        env=gate_env(schedule, run_id, firing,
+                                                     started and started["run_timeout_seconds"]))
             now = self._clock()
             launched: _Launched | None = None
             async with db_connection.transaction() as conn:

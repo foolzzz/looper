@@ -251,8 +251,9 @@ async def _state(pool: Any) -> dict[str, Any]:
 
 
 # A schedule's own settings, as its row has them.
-_SCHEDULE_COLUMNS = ("cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up", "run_timeout_seconds",
-                     "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify",
+_SCHEDULE_COLUMNS = ("cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
+                     "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command",
+                     "gate_timeout_seconds", "daily_budget_usd", "notify",
                      "notify_channel", "notify_chat")
 
 

@@ -22,8 +22,8 @@ from .llm_records import TASK_RUN, _TASK_ROLE
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
-          "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify",
-          "notify_channel", "notify_chat")
+          "run_timeout_mode", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
+          "daily_budget_usd", "notify", "notify_channel", "notify_chat")
 
 QUEUED = "queued"
 GATING = "gating"
@@ -204,22 +204,23 @@ async def open_runs(conn: Db, schedule_id: str) -> list[dict[str, Any]]:
 async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, trigger: str, status: str,
                      missed: int = 0, fired_at: datetime | None = None, task_id: str | None = None,
                      error: str | None = None, finished_at: datetime | None = None,
-                     created_at: datetime | None = None, carried_from: str | None = None) -> str:
+                     created_at: datetime | None = None, carried_from: str | None = None,
+                     run_timeout_seconds: int | None = None) -> str:
     run_id = new_run_id()
     await conn.execute(
         """
         INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id,
-                                   error, finished_at, created_at, carried_from)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12)
+                                   error, finished_at, created_at, carried_from, run_timeout_seconds)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13)
         """,
         run_id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id, error, finished_at,
-        created_at, carried_from,
+        created_at, carried_from, run_timeout_seconds,
     )
     return run_id
 
 
 _RUN_COLUMNS = ("status", "fired_at", "task_id", "summary", "cost_usd", "error", "finished_at", "gate_output",
-                "carried_from")
+                "carried_from", "run_timeout_seconds")
 
 
 async def count_skip(conn: Db, schedule_id: str, *, status: str, at: datetime, since: datetime,
@@ -350,13 +351,12 @@ async def running_run_of_task(task_id: str, *, pool: Db | None = None) -> dict[s
 
 
 async def running_runs(*, pool: Db | None = None) -> list[dict[str, Any]]:
-    """Every running run with its task's status (NULL when the task was deleted), ``run_timeout_seconds`` and
-    ``project_id``."""
+    """Every running run with its task's status (NULL when the task was deleted) and ``project_id``; its own
+    ``run_timeout_seconds`` is the timeout it started with."""
     db = pool or get_pool()
     rows = await db.fetch(
         """
-        SELECT r.*, t.status AS task_status, t.result_summary, t.error AS task_error, s.run_timeout_seconds,
-               s.project_id
+        SELECT r.*, t.status AS task_status, t.result_summary, t.error AS task_error, s.project_id
         FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
         WHERE r.status = 'running'
         """,
