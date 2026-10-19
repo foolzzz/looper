@@ -490,6 +490,64 @@ INSERT INTO agent_setting_layers (scope, role, project_id, profile_id) VALUES
 ('role_project', 'worker', 'proj-alpha0001', 'agent-layer-rp-work'),
 ('role_project', 'reviewer', 'proj-alpha0001', 'agent-layer-rp-rev');
 
+-- Harness, env, budget, and boundaries. Profile ids, max_concurrency, and
+-- system_prompt_mode on the rows above stay put, so task-rich still resolves
+-- the Worker through its task override. These GETs do not load that override.
+-- The system profile's effort is unset so the system and Manager effort come
+-- from the built-in default. Task roles still override that profile.
+UPDATE agent_profiles SET effort = NULL WHERE id = 'agent-layer-system';
+
+UPDATE agent_setting_layers SET
+    harness_prompt = 'System harness.',
+    env = '[{"key":"LAYER_ORIGIN","value":"system"},{"key":"SHARED","value":"from-system"},{"key":"DROP_ME","value":"system-drop"}]'::jsonb,
+    run_budget_usd = 1.25,
+    boundaries = 'Custom boundary line.'
+WHERE scope = 'system' AND role IS NULL AND project_id IS NULL;
+
+UPDATE agent_setting_layers SET
+    harness_prompt = 'Worker role harness.',
+    env = '[{"key":"LAYER_ORIGIN","value":"worker-role"},{"key":"WORKER_ONLY","value":"w"}]'::jsonb,
+    run_budget_usd = 2.5
+WHERE scope = 'role' AND role = 'worker' AND project_id IS NULL;
+
+UPDATE agent_setting_layers SET
+    env = '[{"key":"DROP_ME","value":null},{"key":"REVIEWER_ONLY","value":"r"}]'::jsonb
+WHERE scope = 'role' AND role = 'reviewer' AND project_id IS NULL;
+
+UPDATE agent_setting_layers SET harness_prompt = E' \n\t'
+WHERE scope = 'role' AND role = 'planner' AND project_id IS NULL;
+
+INSERT INTO agent_setting_layers (scope, role, harness_prompt, system_prompt_mode) VALUES
+('role', 'manager', '', 'append');
+
+UPDATE agent_setting_layers SET
+    harness_prompt = 'Alpha project harness.',
+    env = '[{"key":"LAYER_ORIGIN","value":"project"},{"key":"PROJECT_ONLY","value":"p"}]'::jsonb,
+    run_budget_usd = 3.5
+WHERE scope = 'project' AND project_id = 'proj-alpha0001';
+
+UPDATE agent_setting_layers SET
+    harness_prompt = 'Alpha worker harness.',
+    env = '[{"key":"LAYER_ORIGIN","value":"role-project"},{"key":"DROP_ME","value":null}]'::jsonb,
+    run_budget_usd = 4.75
+WHERE scope = 'role_project' AND role = 'worker' AND project_id = 'proj-alpha0001';
+
+UPDATE agent_setting_layers SET
+    env = '[{"key":"REVIEWER_PROJECT","value":""}]'::jsonb
+WHERE scope = 'role_project' AND role = 'reviewer' AND project_id = 'proj-alpha0001';
+
+UPDATE agent_setting_layers SET harness_prompt = E' \n'
+WHERE scope = 'role_project' AND role = 'planner' AND project_id = 'proj-alpha0001';
+
+INSERT INTO agent_setting_layers (scope, project_id) VALUES
+('project', 'proj-blank0001');
+
+INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt) VALUES
+('role_project', 'worker', 'proj-blank0001', '');
+
+INSERT INTO agent_setting_layers (scope, role, project_id, env) VALUES
+('role_project', 'reviewer', 'proj-blank0001', '[{"key":"SHARED","value":null}]'::jsonb);
+
 INSERT INTO project_allowed_profiles (project_id, profile_id) VALUES
 ('proj-alpha0001', 'agent-layer-pt-work'),
 ('proj-alpha0001', 'agent-layer-pt-rev'),

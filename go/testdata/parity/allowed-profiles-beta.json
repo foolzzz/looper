@@ -151,7 +151,7 @@
       }
     },
     {
-      "effort": "low",
+      "effort": null,
       "model": "layer-system",
       "name": "claude-code/layer-system",
       "profile_id": "agent-layer-system",

@@ -314,6 +314,16 @@ _NOTIFICATIONS = (
 _NOTIFICATIONS_500 = (
     ("schedule-notifications-superscript", "sched-nightly01", {"limit": "²"}, 500),
 )
+# Global settings, three projects with different layers, and an unknown id.
+# Alpha's Worker effective profile is the role-in-project row. The task
+# override is not loaded. Blank's empty harness and null env differ from Beta.
+_AGENT_SETTINGS = (
+    ("agent-settings", None, 200),
+    ("agent-settings-alpha", "proj-alpha0001", 200),
+    ("agent-settings-beta", "proj-beta00002", 200),
+    ("agent-settings-blank", "proj-blank0001", 200),
+    ("agent-settings-missing", "proj-missing01", 404),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -494,7 +504,7 @@ async def capture(dsn: str) -> dict[str, object]:
     import looper.db.connection as dbconn
     from looper.agents.bus import MessageBus
     from looper.agents.channels.web import WebChannelAdapter
-    from looper.agents import projects, role_api, schedules
+    from looper.agents import agent_settings, projects, role_api, schedules
     from looper.agents.gate_service import gate_settings, thread as gate_thread
     from looper.agents.http_server import HTTP_200, HTTP_500, AgentHTTPServer, _json_response
     from looper.agents.supervisor import AgentSupervisor
@@ -673,6 +683,19 @@ async def capture(dsn: str) -> dict[str, object]:
                     lambda schedule_id=schedule_id, query=query: schedules.list_notifications(
                         schedule_id, query),
                     expect)
+
+            async def answered_settings(call, expect: int):
+                cap = Capture()
+                await server._handle_agent_settings(cap, call)
+                return response_json(bytes(cap.buf), expect)
+
+            for name, project_id, expect in _AGENT_SETTINGS:
+                if project_id is None:
+                    out[name] = await answered_settings(agent_settings.settings_view, expect)
+                else:
+                    out[name] = await answered_settings(
+                        lambda project_id=project_id: agent_settings.project_settings_view(project_id),
+                        expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -711,6 +734,7 @@ def _names() -> list[str]:
         + [name for name, _, _, _ in _RUNS_500]
         + [name for name, _, _, _ in _NOTIFICATIONS]
         + [name for name, _, _, _ in _NOTIFICATIONS_500]
+        + [name for name, _, _ in _AGENT_SETTINGS]
     )
 
 

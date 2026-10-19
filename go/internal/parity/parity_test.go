@@ -194,6 +194,11 @@ var (
 		{"schedule-notifications-missing", "/api/schedules/sched-missing01/notifications", http.StatusNotFound},
 		{"schedule-notifications-bad-limit", "/api/schedules/sched-nightly01/notifications?limit=0", http.StatusBadRequest},
 		{"schedule-notifications-superscript", "/api/schedules/sched-nightly01/notifications?limit=%C2%B2", http.StatusInternalServerError},
+		{"agent-settings", "/api/agent-settings", http.StatusOK},
+		{"agent-settings-alpha", "/api/projects/proj-alpha0001/agent-settings", http.StatusOK},
+		{"agent-settings-beta", "/api/projects/proj-beta00002/agent-settings", http.StatusOK},
+		{"agent-settings-blank", "/api/projects/proj-blank0001/agent-settings", http.StatusOK},
+		{"agent-settings-missing", "/api/projects/proj-missing01/agent-settings", http.StatusNotFound},
 	}
 )
 

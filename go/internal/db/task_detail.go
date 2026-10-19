@@ -163,11 +163,21 @@ type layerKey struct {
 	role  string
 }
 
+// envBinding is one stored environment entry. A nil value unsets that key.
+type envBinding struct {
+	key   string
+	value *string
+}
+
 type layerValues struct {
 	profile     map[string]any
 	runtimeType string
 	limit       *int
 	promptMode  string
+	harness     *string
+	env         []envBinding
+	budget      *float64
+	boundaries  *string
 }
 
 // senderSpec is allowlist.SenderIdFormat for one channel type.
@@ -1211,6 +1221,38 @@ func layerFromRow(row map[string]any) layerValues {
 			slog.Warn("ignoring stored max_concurrency", "place", place)
 		}
 	}
+	if row["harness_prompt"] != nil {
+		text, err := parseStoredText(row["harness_prompt"], "harness prompt")
+		if err != nil {
+			slog.Warn("ignoring stored agent setting", "field", "harness_prompt", "place", place, "err", err)
+		} else {
+			values.harness = text
+		}
+	}
+	if row["boundaries"] != nil {
+		text, err := parseStoredText(row["boundaries"], "boundaries")
+		if err != nil {
+			slog.Warn("ignoring stored agent setting", "field", "boundaries", "place", place, "err", err)
+		} else {
+			values.boundaries = text
+		}
+	}
+	if row["env"] != nil {
+		env, err := parseEnv(row["env"], asString(row["scope"]) != "system")
+		if err != nil {
+			slog.Warn("ignoring stored agent setting", "field", "env", "place", place, "err", err)
+		} else {
+			values.env = env
+		}
+	}
+	if row["run_budget_usd"] != nil {
+		amount, err := parseBudget("run_budget_usd", row["run_budget_usd"])
+		if err != nil {
+			slog.Warn("ignoring stored agent setting", "field", "run_budget_usd", "place", place, "err", err)
+		} else {
+			values.budget = &amount
+		}
+	}
 	return values
 }
 
@@ -1338,12 +1380,10 @@ func chain(role, projectID string) []layerKey {
 }
 
 func concurrencyView(role string, layers map[layerKey]layerValues) map[string]any {
-	value, source := defaultConcurrency(role, layers)
+	value, source := resolveTaskConcurrency(role, layers)
 	var own any
-	if row, ok := layers[layerKey{"task", role}]; ok && row.limit != nil {
-		value = *row.limit
-		source = "task"
-		own = *row.limit
+	if source == "task" {
+		own = value
 	}
 	fallback, fallbackSource := defaultConcurrency(role, layers)
 	return map[string]any{
