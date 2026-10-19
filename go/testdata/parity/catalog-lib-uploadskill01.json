@@ -1,0 +1,36 @@
+{
+  "content": "plain body without frontmatter\n",
+  "files": [
+    {
+      "executable": false,
+      "path": "references/note.txt",
+      "size_bytes": 32
+    },
+    {
+      "executable": false,
+      "path": "SKILL.md",
+      "size_bytes": 31
+    }
+  ],
+  "item": {
+    "description": "upload skill fixture",
+    "file_count": 2,
+    "imported_at": "2020-01-01T00:00:00+00:00",
+    "installs": [],
+    "item_id": "lib-uploadskill01",
+    "kind": "skill",
+    "mcp": null,
+    "modified": false,
+    "name": "upload-guide",
+    "origin": "upload",
+    "owner_project_id": null,
+    "owner_project_name": null,
+    "qualified_name": "personal:upload-guide",
+    "sha256": "lib-uploadskill01-hash",
+    "size_bytes": 63,
+    "source": "fixture/upload/upload-guide",
+    "updated_at": "2020-01-02T03:04:05+00:00",
+    "version": "1.2.3"
+  },
+  "skill_md": "plain body without frontmatter\n"
+}

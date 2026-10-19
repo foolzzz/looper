@@ -28,6 +28,7 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: loopgo_ci
+          POSTGRES_INITDB_ARGS: --locale=en_US.utf8
         ports:
           - 54329:5432
         options: >-

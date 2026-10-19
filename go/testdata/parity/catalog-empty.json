@@ -1,0 +1,34 @@
+{
+  "caps": {
+    "file_max_bytes": 2097152,
+    "item_max_bytes": 33554432,
+    "item_max_files": 5000,
+    "library_max_bytes": 134217728,
+    "upload_max_bytes": 6000000
+  },
+  "installed_count": 0,
+  "items": [],
+  "last_import": null,
+  "last_mcp_import": null,
+  "mcp_caps": {
+    "args_max": 100,
+    "mask": "***",
+    "servers_max": 200,
+    "value_max": 8192,
+    "variables_max": 50
+  },
+  "roles": [
+    "manager",
+    "planner",
+    "worker",
+    "reviewer",
+    "task_role"
+  ],
+  "task_roles": [
+    "planner",
+    "worker",
+    "reviewer",
+    "task_role"
+  ],
+  "total_bytes": 0
+}

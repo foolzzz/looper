@@ -324,7 +324,7 @@ func TestRawPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := map[string]bool{}
-	for _, tc := range append(goldenCases, knowledgeCases...) {
+	for _, tc := range append(append(goldenCases, knowledgeCases...), catalogCases...) {
 		_, dup := seen[tc.name]
 		seen[tc.name] = true
 		if dup {

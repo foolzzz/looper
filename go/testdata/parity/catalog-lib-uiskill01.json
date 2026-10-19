@@ -1,0 +1,36 @@
+{
+  "content": "---\nname: ui-guide\n",
+  "files": [
+    {
+      "executable": false,
+      "path": "references/note.txt",
+      "size_bytes": 32
+    },
+    {
+      "executable": false,
+      "path": "SKILL.md",
+      "size_bytes": 19
+    }
+  ],
+  "item": {
+    "description": "ui skill fixture",
+    "file_count": 2,
+    "imported_at": "2020-01-01T00:00:00+00:00",
+    "installs": [],
+    "item_id": "lib-uiskill01",
+    "kind": "skill",
+    "mcp": null,
+    "modified": false,
+    "name": "ui-guide",
+    "origin": "ui",
+    "owner_project_id": null,
+    "owner_project_name": null,
+    "qualified_name": "personal:ui-guide",
+    "sha256": "lib-uiskill01-hash",
+    "size_bytes": 51,
+    "source": "fixture/ui/ui-guide",
+    "updated_at": "2020-01-02T03:04:05+00:00",
+    "version": "1.2.3"
+  },
+  "skill_md": "---\nname: ui-guide\n"
+}

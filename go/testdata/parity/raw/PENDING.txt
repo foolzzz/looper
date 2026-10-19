@@ -127,3 +127,26 @@ knowledge-drafts-empty
 project-skill
 project-skill-file-missing
 project-skill-raw-body
+
+# Catalog successful responses currently use semantic parity.
+catalog
+catalog-lib-machineplugin01
+catalog-lib-uploadplugin01
+catalog-lib-gitplugin01
+catalog-lib-machineskill01
+catalog-lib-uploadskill01
+catalog-lib-gitskill01
+catalog-lib-uiskill01
+catalog-skill-ownedalpha01
+catalog-skill-ownedbeta01
+catalog-skill-missingfile01
+catalog-mcp-machine01
+catalog-mcp-http01
+catalog-mcp-sse01
+catalog-installs01
+catalog-installs02
+catalog-installs03
+catalog-invalid-reports
+catalog-scalar-reports
+catalog-no-reports
+catalog-empty

@@ -1,0 +1,182 @@
+{
+  "installs": [
+    {
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "enabled": false,
+      "inherited": true,
+      "install_id": "inst-globaldisabled01",
+      "item": {
+        "description": "ui mcp fixture",
+        "file_count": 0,
+        "imported_at": "2020-01-01T00:00:00+00:00",
+        "installs": [],
+        "item_id": "mcp-http01",
+        "kind": "mcp",
+        "mcp": {
+          "args": [],
+          "command": "",
+          "env": {},
+          "headers": {
+            "Authorization": "***",
+            "X-Token": "***"
+          },
+          "transport": "http",
+          "url": "https://example.invalid/mcp"
+        },
+        "modified": false,
+        "name": "mcp_http",
+        "origin": "ui",
+        "owner_project_id": null,
+        "owner_project_name": null,
+        "qualified_name": "mcp_http",
+        "sha256": "mcp-http01-hash",
+        "size_bytes": 123,
+        "source": "fixture/ui/mcp_http",
+        "updated_at": "2020-01-02T03:04:05+00:00",
+        "version": "1.2.3"
+      },
+      "item_id": "mcp-http01",
+      "project_id": null,
+      "project_name": null,
+      "roles": [
+        "reviewer"
+      ],
+      "scope": "global",
+      "updated_at": "2020-01-02T03:04:05+00:00"
+    },
+    {
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "enabled": true,
+      "inherited": true,
+      "install_id": "inst-globalstdio01",
+      "item": {
+        "description": "machine mcp fixture",
+        "file_count": 0,
+        "imported_at": "2020-01-01T00:00:00+00:00",
+        "installs": [],
+        "item_id": "mcp-machine01",
+        "kind": "mcp",
+        "mcp": {
+          "args": [
+            "--unicode",
+            "中文",
+            "--flag=<fixture>"
+          ],
+          "command": "fixture-command",
+          "env": {
+            "A_EMPTY": "***",
+            "Z_TOKEN": "***"
+          },
+          "headers": {},
+          "transport": "stdio",
+          "url": ""
+        },
+        "modified": false,
+        "name": "mcp_stdio",
+        "origin": "machine",
+        "owner_project_id": null,
+        "owner_project_name": null,
+        "qualified_name": "mcp_stdio",
+        "sha256": "mcp-machine01-hash",
+        "size_bytes": 123,
+        "source": "fixture/machine/mcp_stdio",
+        "updated_at": "2020-01-02T03:04:05+00:00",
+        "version": "1.2.3"
+      },
+      "item_id": "mcp-machine01",
+      "project_id": null,
+      "project_name": null,
+      "roles": [
+        "worker"
+      ],
+      "scope": "global",
+      "updated_at": "2020-01-02T03:04:05+00:00"
+    },
+    {
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "enabled": true,
+      "inherited": true,
+      "install_id": "inst-globaltask01",
+      "item": {
+        "description": "upload plugin fixture",
+        "file_count": 1,
+        "imported_at": "2020-01-01T00:00:00+00:00",
+        "installs": [],
+        "item_id": "lib-uploadplugin01",
+        "kind": "plugin",
+        "mcp": null,
+        "modified": true,
+        "name": "Alpha",
+        "origin": "upload",
+        "owner_project_id": null,
+        "owner_project_name": null,
+        "qualified_name": "Alpha",
+        "sha256": "lib-uploadplugin01-hash",
+        "size_bytes": 33,
+        "source": "fixture/upload/Alpha",
+        "updated_at": "2020-01-02T03:04:05+00:00",
+        "version": "1.2.3"
+      },
+      "item_id": "lib-uploadplugin01",
+      "project_id": null,
+      "project_name": null,
+      "roles": [
+        "task_role"
+      ],
+      "scope": "global",
+      "updated_at": "2020-01-02T03:04:05+00:00"
+    },
+    {
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "enabled": true,
+      "inherited": true,
+      "install_id": "inst-globalmixed01",
+      "item": {
+        "description": "machine skill fixture",
+        "file_count": 2,
+        "imported_at": "2020-01-01T00:00:00+00:00",
+        "installs": [],
+        "item_id": "lib-machineskill01",
+        "kind": "skill",
+        "mcp": null,
+        "modified": false,
+        "name": "machine-guide",
+        "origin": "machine",
+        "owner_project_id": null,
+        "owner_project_name": null,
+        "qualified_name": "personal:machine-guide",
+        "sha256": "lib-machineskill01-hash",
+        "size_bytes": 106,
+        "source": "fixture/machine/machine-guide",
+        "updated_at": "2020-01-02T03:04:05+00:00",
+        "version": "1.2.3"
+      },
+      "item_id": "lib-machineskill01",
+      "project_id": null,
+      "project_name": null,
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer",
+        "task_role"
+      ],
+      "scope": "global",
+      "updated_at": "2020-01-02T03:04:05+00:00"
+    }
+  ],
+  "owned_count": 0,
+  "project_id": "proj-catalog03",
+  "skill_caps": {
+    "content_max_bytes": 65536,
+    "description_max_chars": 1024,
+    "name_max_chars": 64,
+    "project_max_skills": 20
+  },
+  "task_roles": [
+    "planner",
+    "worker",
+    "reviewer",
+    "task_role"
+  ]
+}

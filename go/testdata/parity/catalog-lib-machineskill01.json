@@ -1,0 +1,67 @@
+{
+  "content": "# Read\n你好 🌍\n",
+  "files": [
+    {
+      "executable": false,
+      "path": "references/note.txt",
+      "size_bytes": 32
+    },
+    {
+      "executable": false,
+      "path": "SKILL.md",
+      "size_bytes": 74
+    }
+  ],
+  "item": {
+    "description": "machine skill fixture",
+    "file_count": 2,
+    "imported_at": "2020-01-01T00:00:00+00:00",
+    "installs": [
+      {
+        "created_at": "2020-01-01T00:00:00+00:00",
+        "enabled": true,
+        "install_id": "inst-globalmixed01",
+        "item_id": "lib-machineskill01",
+        "project_id": null,
+        "project_name": null,
+        "roles": [
+          "manager",
+          "planner",
+          "worker",
+          "reviewer",
+          "task_role"
+        ],
+        "scope": "global",
+        "updated_at": "2020-01-02T03:04:05+00:00"
+      },
+      {
+        "created_at": "2020-01-01T00:00:00+00:00",
+        "enabled": false,
+        "install_id": "inst-localoverride01",
+        "item_id": "lib-machineskill01",
+        "project_id": "proj-catalog01",
+        "project_name": "Alpha catalog",
+        "roles": [
+          "task_role"
+        ],
+        "scope": "project",
+        "updated_at": "2020-01-02T03:04:05+00:00"
+      }
+    ],
+    "item_id": "lib-machineskill01",
+    "kind": "skill",
+    "mcp": null,
+    "modified": false,
+    "name": "machine-guide",
+    "origin": "machine",
+    "owner_project_id": null,
+    "owner_project_name": null,
+    "qualified_name": "personal:machine-guide",
+    "sha256": "lib-machineskill01-hash",
+    "size_bytes": 106,
+    "source": "fixture/machine/machine-guide",
+    "updated_at": "2020-01-02T03:04:05+00:00",
+    "version": "1.2.3"
+  },
+  "skill_md": "---\nname: machine-guide\ndescription: Read machine\n---\n\n# Read\n你好 🌍\n"
+}

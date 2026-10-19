@@ -1,0 +1,36 @@
+{
+  "content": "Git body\n",
+  "files": [
+    {
+      "executable": false,
+      "path": "references/note.txt",
+      "size_bytes": 32
+    },
+    {
+      "executable": false,
+      "path": "SKILL.md",
+      "size_bytes": 34
+    }
+  ],
+  "item": {
+    "description": "git skill fixture",
+    "file_count": 2,
+    "imported_at": "2020-01-01T00:00:00+00:00",
+    "installs": [],
+    "item_id": "lib-gitskill01",
+    "kind": "skill",
+    "mcp": null,
+    "modified": true,
+    "name": "git-guide",
+    "origin": "git",
+    "owner_project_id": null,
+    "owner_project_name": null,
+    "qualified_name": "personal:git-guide",
+    "sha256": "lib-gitskill01-hash",
+    "size_bytes": 66,
+    "source": "fixture/git/git-guide",
+    "updated_at": "2020-01-02T03:04:05+00:00",
+    "version": "1.2.3"
+  },
+  "skill_md": "---\nname: git-guide\n---\n\nGit body\n"
+}
