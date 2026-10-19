@@ -25,7 +25,6 @@ absolute paths matched by suffix omit it. Reviewer and Planner use these locatio
 from __future__ import annotations
 
 import json
-import os
 import posixpath
 import re
 import subprocess
@@ -35,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from .. import child_env
 
 GIT_TIMEOUT_SEC = 10
 MAX_WORKTREES = 64
@@ -304,7 +305,7 @@ def _commits(work_dir: Path, since: datetime) -> tuple[list[tuple[str, dict[str,
 
 def _git(cwd: Path, *args: str, input: str | None = None) -> subprocess.CompletedProcess[bytes] | None:
     """One read-only git command in ``cwd``, with the time limit; None when git cannot run or times out."""
-    env = {name: value for name, value in os.environ.items() if name not in _REDIRECTS}
+    env = {name: value for name, value in child_env.inherited().items() if name not in _REDIRECTS}
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
     try:
         return subprocess.run(["git", *args], cwd=str(cwd), env=env, capture_output=True, timeout=GIT_TIMEOUT_SEC,

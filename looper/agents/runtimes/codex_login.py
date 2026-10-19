@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ... import child_env
 from . import linked_login
 
 LOGIN_FILE = "auth.json"
@@ -203,7 +204,7 @@ def probe_login(executable: str = "codex", target: Path | None = None) -> LoginS
     home = Path(tempfile.mkdtemp(prefix="looper-codex-login-"))
     try:
         os.symlink(target or login_file(), home / LOGIN_FILE)
-        env = {k: v for k, v in os.environ.items() if k not in ENV_UNSET}
+        env = {k: v for k, v in child_env.inherited().items() if k not in ENV_UNSET}
         done = subprocess.run([executable, "-c", 'cli_auth_credentials_store="file"', "login", "status"],
                               capture_output=True, text=True, stdin=subprocess.DEVNULL,
                               timeout=_STATUS_TIMEOUT_SEC, check=False, env={**env, "CODEX_HOME": str(home)})

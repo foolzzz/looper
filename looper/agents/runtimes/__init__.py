@@ -287,8 +287,9 @@ class RuntimeAdapter(ABC):
         """The flags of an agent's settings, installed items, knowledge and provider binding."""
 
     @abstractmethod
-    def environment(self, launch: Launch) -> dict[str, str] | None:
-        """The subprocess environment; None to inherit the server's."""
+    def environment(self, launch: Launch) -> dict[str, str]:
+        """The subprocess environment: ``child_env.inherited()`` with the run's own variables; never the server's whole
+        environment."""
 
     @abstractmethod
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,

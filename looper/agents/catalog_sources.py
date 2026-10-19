@@ -71,6 +71,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .. import child_env
 from .catalog import CatalogConflict, CatalogError, CatalogNotFound, Origin, item_view
 from .library import (
     _LEFT_OUT,
@@ -656,8 +657,8 @@ def _git_args(git: str, scheme: str) -> list[str]:
 def _git_env() -> dict[str, str]:
     """No prompts, and none of the operator's git configuration: its credential helpers (a private repository
     is not reached with the operator's token), URL rewrites, hooks and filters."""
-    return {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
-            "GIT_LFS_SKIP_SMUDGE": "1", "GCM_INTERACTIVE": "never"}
+    return {**child_env.inherited(), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_LFS_SKIP_SMUDGE": "1", "GCM_INTERACTIVE": "never"}
 
 
 def _kill(process: asyncio.subprocess.Process) -> None:

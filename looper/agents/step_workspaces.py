@@ -43,6 +43,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .. import child_env
 from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)
@@ -223,7 +224,7 @@ async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool 
 
     Raises ``GitError`` when git is missing, times out or (with ``check``) fails.
     """
-    command_env = {name: value for name, value in os.environ.items() if name not in _REDIRECTS}
+    command_env = {name: value for name, value in child_env.inherited().items() if name not in _REDIRECTS}
     command_env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_MERGE_AUTOEDIT": "no", **(env or {})})
     if identity:
         command_env.update(_IDENTITY)
