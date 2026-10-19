@@ -22,6 +22,7 @@ from agent_fixtures import profile_json
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
 from looper.agents.project_execution import ProjectExecution
 from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.tiers.task import TaskRouter
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from looper.db import llm_records as db_llm_records
 from tests.test_agent_planner_worker import _fake_claude, _flag, _run_step, _step_envelope, _worker_row
@@ -39,7 +40,7 @@ from tests.test_planner_agent import (
     reply,
     step,
 )
-from tests.test_projects_api import _call, _Store, store  # noqa: F401  (the store fixture)
+from tests.test_projects_api import _call, _server, _Store, store  # noqa: F401  (the store fixture)
 
 UNSET = {"task_budget_usd": None, "task_budget_action": None,
          "supervise_interval_seconds": None, "review_policy": None}
@@ -84,6 +85,17 @@ def _spend_from_records(monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
 
 
 class TestProjectApi:
+    @pytest.mark.parametrize(("value", "enabled"), [("off", False), ("on", True), (None, False)])
+    def test_vault_is_off_unless_the_project_turns_it_on(
+        self, store: _Store, tmp_path: Path, value: str | None, enabled: bool,
+    ) -> None:
+        store.add_project("proj-a", "calc")
+        assert not ProjectExecution.from_row(store.projects["proj-a"]).vault_on
+        status, body = _call("PUT", "/api/projects/proj-a", {"vault": value},
+                             server=_server(TaskRouter(runtime_root=tmp_path)))
+        assert status == 200 and body["vault"] == value
+        assert ProjectExecution.from_row(store.projects["proj-a"]).vault_on is enabled
+
     def test_settings_are_stored_read_back_and_cleared(self, store: _Store) -> None:
         store.add_project("proj-a", "calc")
         assert {k: v for k, v in _call("GET", "/api/projects")[1]["projects"][0].items() if k in UNSET} == UNSET
@@ -107,6 +119,8 @@ class TestProjectApi:
         ("task_budget_usd", True, "number of US dollars"),
         ("task_budget_action", "pause", "wrap_up, fail"),
         ("review_policy", "some", "planner, all"),
+        ("vault", "sometimes", "off, on"),
+        ("vault", True, "off, on"),
         ("supervise_interval_seconds", -5, "from 0"),
         ("supervise_interval_seconds", 1.5, "whole number"),
         ("supervise_interval_seconds", 86_401, "86400"),
