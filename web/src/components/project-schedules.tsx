@@ -885,7 +885,7 @@ function ScheduleForm({
             options={[
               {
                 value: "default",
-                label: `Use the default (${limits.run_timeout_default_seconds} s)`,
+                label: `Use the default (${limits.run_timeout_default_seconds == null ? "no limit" : `${limits.run_timeout_default_seconds} s`})`,
                 hint: "Follows Settings → Scheduler. A run keeps the timeout it started with.",
               },
               { value: "limit", label: "Set a limit", hint: "A run still going after the minutes below is stopped and counts as a failure." },

@@ -46,7 +46,7 @@ def test_the_stored_minimum_interval_beats_the_deprecated_variable_which_beats_t
     async def test(env: _Env) -> None:
         view = await env.ok("GET", "/api/scheduler-settings")
         assert view["min_interval_seconds"]["value"] == 300 and view["min_interval_seconds"]["source"] == "built-in"
-        assert view["run_timeout_seconds"]["value"] == 3600 and view["run_timeout_seconds"]["source"] == "built-in"
+        assert view["run_timeout_seconds"]["value"] is None and view["run_timeout_seconds"]["source"] == "built-in"
 
         monkeypatch.setenv(ENV, "123")
         with caplog.at_level(logging.WARNING):
@@ -138,7 +138,7 @@ def test_a_schedule_follows_the_default_has_its_own_timeout_or_none(monkeypatch:
                                                                     tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         followed = await env.schedule()
-        assert (followed["run_timeout_seconds"], followed["run_timeout_effective_seconds"]) == ("default", 3600)
+        assert (followed["run_timeout_seconds"], followed["run_timeout_effective_seconds"]) == ("default", None)
         await env.ok("PUT", "/api/scheduler-settings", {"run_timeout_seconds": 900})
         sid = followed["schedule_id"]
         view = (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]
@@ -206,6 +206,24 @@ def test_a_run_keeps_the_timeout_it_started_with(monkeypatch: pytest.MonkeyPatch
         assert newest["status"] == "running"
         assert await env.pool.fetchval("SELECT run_timeout_seconds FROM schedule_runs WHERE id = $1",
                                        newest["run_id"]) is None
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_schedule_following_an_unset_default_runs_without_a_limit(monkeypatch: pytest.MonkeyPatch,
+                                                                   tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled())["schedule_id"]
+        await env.due(sid)
+        await env.scheduler.tick()
+        [run] = await env.runs(sid)
+        assert await env.pool.fetchval("SELECT run_timeout_seconds FROM schedule_runs WHERE id = $1",
+                                       run["run_id"]) is None
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
+        env.clock.now += timedelta(days=3)
+        await env.scheduler.tick()
+        started = next(r for r in await env.runs(sid) if r["run_id"] == run["run_id"])
+        assert started["status"] == "running" and env.bus.of("task_stop") == []
 
     _run(test, monkeypatch, tmp_path)
 
@@ -306,7 +324,7 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
         chat = _Chat(tmp_path)
         (view,) = await chat.say("定时任务的设置", ("looper_settings", {"action": "view"}))
         assert view["result"]["scheduler"] == {"min_interval_seconds": "300 秒（内置默认）",
-                                               "run_timeout_seconds": "3600 秒（内置默认）"}
+                                               "run_timeout_seconds": "不限（内置默认）"}
         (bad,) = await chat.say("改成 0", ("looper_settings", {"action": "scheduler",
                                                                "scheduler": {"min_interval_seconds": 0}}))
         assert _error(bad) == "invalid" and "min_interval_seconds must be a whole number" in bad["error"]["message"]
@@ -320,7 +338,7 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
         assert done["status"] == "ok", done
         assert done["result"]["changes"] == [
             {"setting": "min_interval_seconds", "before": "300 秒（内置默认）", "after": "60 秒（设置）"},
-            {"setting": "run_timeout_seconds", "before": "3600 秒（内置默认）", "after": "1800 秒（设置）"}]
+            {"setting": "run_timeout_seconds", "before": "不限（内置默认）", "after": "1800 秒（设置）"}]
         view = await _manager_ok("GET", "/api/scheduler-settings")
         assert (view["min_interval_seconds"]["value"], view["run_timeout_seconds"]["value"]) == (60, 1800)
         assert await _trail(pool) == [("looper_settings", "read", "ok"), ("looper_settings", "write", "error"),

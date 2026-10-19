@@ -28,7 +28,7 @@ MIN_INTERVAL_ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
 DEFAULT_MIN_INTERVAL_SECONDS = 300
 # A gated schedule may fire every minute: a run with nothing new ends at its gate, without a task.
 MIN_INTERVAL_GATED_SECONDS = 60
-DEFAULT_RUN_TIMEOUT_SECONDS = 3600
+DEFAULT_RUN_TIMEOUT_SECONDS: int | None = None  # no limit, as a schedule without a timeout always had
 RUN_TIMEOUT_MAX_SECONDS = 30 * 86400
 FIELDS = ("min_interval_seconds", "run_timeout_seconds")
 
@@ -103,14 +103,14 @@ async def _stored_run_timeout() -> int | None:
     try:
         return _seconds(int(stored), RUN_TIMEOUT_KEY, high=RUN_TIMEOUT_MAX_SECONDS)
     except ValueError:
-        logger.warning("the stored %s is not a whole number of seconds from 1 to %d; using the built-in %d",
-                       RUN_TIMEOUT_KEY, RUN_TIMEOUT_MAX_SECONDS, DEFAULT_RUN_TIMEOUT_SECONDS)
+        logger.warning("the stored %s is not a whole number of seconds from 1 to %d; using no limit",
+                       RUN_TIMEOUT_KEY, RUN_TIMEOUT_MAX_SECONDS)
         return None
 
 
-async def default_run_timeout() -> int:
-    """The run timeout of a schedule that follows the default."""
-    return await _stored_run_timeout() or DEFAULT_RUN_TIMEOUT_SECONDS
+async def default_run_timeout() -> int | None:
+    """The run timeout of a schedule that follows the default (None: no limit)."""
+    return await _stored_run_timeout()
 
 
 async def effective_run_timeout(mode: str, seconds: int | None) -> int | None:
@@ -130,7 +130,7 @@ async def settings_view() -> dict[str, Any]:
             "gated_value": min_interval_seconds(gated=True),
         },
         "run_timeout_seconds": {
-            "value": run_timeout or DEFAULT_RUN_TIMEOUT_SECONDS,
+            "value": run_timeout,
             "source": Source.SETTING.value if run_timeout else Source.DEFAULT.value,
             "built_in": DEFAULT_RUN_TIMEOUT_SECONDS, "minimum": 1, "maximum": RUN_TIMEOUT_MAX_SECONDS,
         },

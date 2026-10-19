@@ -934,7 +934,7 @@ export interface ScheduleLimits {
   min_interval_gated_seconds: number;
   default_timezone: string;
   /** The system default run timeout, for a schedule that follows it. */
-  run_timeout_default_seconds: number;
+  run_timeout_default_seconds: number | null;
   roles: TaskRole[];
   gate_command_max_chars: number;
   gate_timeout_default_seconds: number;
@@ -986,10 +986,11 @@ export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
 
 /** One of the scheduler's system settings and where its value comes from. */
 export interface SchedulerSetting {
-  value: number;
+  /** Null: no limit (the run timeout's built-in). */
+  value: number | null;
   /** "setting" (saved in Settings), "env" (the deprecated variable) or "built-in". */
   source: "setting" | "env" | "built-in";
-  built_in: number;
+  built_in: number | null;
   minimum: number;
   maximum?: number;
 }

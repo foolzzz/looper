@@ -2017,7 +2017,7 @@ dashboard only). A new schedule is disabled.
   `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` (or `LOOPX_…`) still applies for this
   version and logs one warning that names the variable, never its value; once a
   value is saved the variable is ignored. The system setting
-  `scheduler.run_timeout_seconds` (default 3600 s, 1 to 30 days) is the run
+  `scheduler.run_timeout_seconds` (default: no limit; 1 second to 30 days) is the run
   timeout of a schedule whose `run_timeout_seconds` is `"default"`
   (`schedules.run_timeout_mode`: `inherit`, `seconds`, `none`; schedules from
   before keep their number or no limit). A run records the timeout it starts

@@ -165,8 +165,12 @@ def _scheduler_values(arguments: Mapping[str, Any]) -> dict[str, Any]:
     return dict(values)
 
 
+def _seconds(value: int | None) -> str:
+    return "不限" if value is None else f"{value} 秒"
+
+
 def _scheduler_shown(entry: Mapping[str, Any]) -> str:
-    return f"{entry['value']} 秒（{_SOURCE_WORDS[entry['source']]}）"
+    return f"{_seconds(entry['value'])}（{_SOURCE_WORDS[entry['source']]}）"
 
 
 async def _scheduler_confirming(call: Call) -> str:
@@ -179,7 +183,7 @@ async def _scheduler_confirming(call: Call) -> str:
     before = await scheduler_settings.settings_view()
     lines = ["要修改定时任务的系统设置吗？"]
     for name, value in values.items():
-        after = f"{value} 秒" if value is not None else f"内置默认 {before[name]['built_in']} 秒"
+        after = f"{value} 秒" if value is not None else f"内置默认 {_seconds(before[name]['built_in'])}"
         lines.append(f"- {_SCHEDULER_WORDS[name]}：{_scheduler_shown(before[name])} → {after}")
     lines.append("最小间隔决定定时任务最频繁能多久触发一次（已保存的不会重新检查）；默认运行超时只影响之后开始的运行。")
     return "\n".join(lines)

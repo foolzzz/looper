@@ -39,7 +39,7 @@ from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _concurrency_limits
 from .projects import _profile_overrides
 from . import scheduler_settings as scheduler_settings_module
-from .scheduler_settings import DEFAULT_RUN_TIMEOUT_SECONDS, RUN_TIMEOUT_MAX_SECONDS, RunTimeoutMode
+from .scheduler_settings import RUN_TIMEOUT_MAX_SECONDS, RunTimeoutMode
 from .scheduler_settings import default_run_timeout, min_interval_seconds
 from .scheduler import GATE_TIMEOUT_DEFAULT_SECONDS, GATE_TIMEOUT_MAX_SECONDS
 from .system_prompt import TASK_REQUIREMENT_LIMIT
@@ -161,7 +161,7 @@ async def _run_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [run_view(row, costs.get(row.get("task_id") or "")) for row in rows]
 
 
-def _timeout_view(row: Mapping[str, Any], default: int) -> tuple[Any, int | None]:
+def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int | None]:
     """A schedule's ``run_timeout_seconds`` as a request writes it (``"default"``, a number, or null for no limit)
     and the timeout a run that starts now would get."""
     mode = row["run_timeout_mode"]
@@ -173,7 +173,7 @@ def _timeout_view(row: Mapping[str, Any], default: int) -> tuple[Any, int | None
 
 
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
-                  spent_today: float = 0.0, default_timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS) -> dict[str, Any]:
+                  spent_today: float = 0.0, default_timeout: int | None = None) -> dict[str, Any]:
     """``default_timeout``: the system default run timeout, for a schedule that follows it."""
     target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
     return {

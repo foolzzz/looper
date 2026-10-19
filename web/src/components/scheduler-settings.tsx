@@ -28,7 +28,7 @@ const FIELDS: { name: Name; label: string; help: string }[] = [
   },
   {
     name: "run_timeout_seconds",
-    label: "Default run timeout (seconds)",
+    label: "Default run timeout (seconds; no limit until you set one)",
     help: "For schedules set to use the default. A run keeps the timeout it started with, so a change affects later runs only.",
   },
 ];
@@ -46,7 +46,7 @@ export function SchedulerSection() {
     setSettings(next);
     setDrafts({
       min_interval_seconds: String(next.min_interval_seconds.value),
-      run_timeout_seconds: String(next.run_timeout_seconds.value),
+      run_timeout_seconds: next.run_timeout_seconds.value == null ? "" : String(next.run_timeout_seconds.value),
     });
   };
 
@@ -95,7 +95,7 @@ export function SchedulerSection() {
           const setting = settings[name];
           const id = `${idBase}-${name}`;
           const typed = drafts[name].trim();
-          const changed = typed !== String(setting.value);
+          const changed = typed !== (setting.value == null ? "" : String(setting.value));
           return (
             <form
               key={name}
@@ -118,7 +118,7 @@ export function SchedulerSection() {
                 <Button type="submit" size="sm" disabled={busy || !changed || !/^\d+$/.test(typed)}>Save</Button>
                 {setting.source === "setting" && (
                   <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void save(name, null)}>
-                    Use the built-in ({setting.built_in} s)
+                    Use the built-in ({setting.built_in == null ? "no limit" : `${setting.built_in} s`})
                   </Button>
                 )}
               </div>

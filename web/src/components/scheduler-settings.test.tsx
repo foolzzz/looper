@@ -6,9 +6,9 @@ import { SchedulerSection } from "@/components/scheduler-settings";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const view = (min: number, source: string, timeout = 3600) => ({
+const view = (min: number, source: string, timeout: number | null = null) => ({
   min_interval_seconds: { value: min, source, built_in: 300, minimum: 1, gated_value: Math.min(60, min) },
-  run_timeout_seconds: { value: timeout, source: "built-in", built_in: 3600, minimum: 1, maximum: 2592000 },
+  run_timeout_seconds: { value: timeout, source: "built-in", built_in: null, minimum: 1, maximum: 2592000 },
 });
 
 describe("Settings → Scheduler", () => {

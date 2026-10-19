@@ -291,7 +291,8 @@ def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
         return "补跑一次" if value == "once" else "跳过"
     if key == "run_timeout_seconds":
         if value == schedules.TIMEOUT_DEFAULT:
-            return f"系统默认（{view['run_timeout_effective_seconds']} 秒）"
+            effective = view["run_timeout_effective_seconds"]
+            return f"系统默认（{'不限' if effective is None else f'{effective} 秒'}）"
         return "不限" if value is None else f"{value} 秒"
     if key == "gate_timeout_seconds":
         return "不限" if value is None else f"{value} 秒"
