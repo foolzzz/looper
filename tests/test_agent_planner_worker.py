@@ -1569,6 +1569,7 @@ def test_no_prompt_that_names_a_file_or_branch_lets_the_name_start_a_line(
         "instructions": instructions.injected_section([
             instructions.InstructionFile(Path("/w") / name, instructions.Delivery.INJECTED)], "OMP"),
         "codex skill": runtime_notes(RuntimeCatalog((SkillDocument("skill", "description", name),))),
+        "codex skill name": runtime_notes(RuntimeCatalog((SkillDocument(name, "description", "SKILL.md"),))),
         "manager projects": "\n".join(asyncio.run(
             ManagerAgent(config=ManagerConfig(), runtime_root=tmp_path)._projects_section())),
         "missing files": missing["error"],

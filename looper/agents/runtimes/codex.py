@@ -538,7 +538,7 @@ def runtime_notes(catalog: RuntimeCatalog) -> str:
             "",
             "## Available skills",
             "",
-            *(f"- {skill.name}: {skill.description or '(no description)'} ({prompt_name(skill.path)})" for skill in catalog.skills),
+            *(f"- {prompt_name(skill.name)}: {skill.description or '(no description)'} ({prompt_name(skill.path)})" for skill in catalog.skills),
         ]
     return "\n".join(lines)
 
