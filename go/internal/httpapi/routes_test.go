@@ -94,6 +94,13 @@ type recordingReads struct {
 	roomQuery                 db.RoomQuery
 	calls                     []string
 	since                     time.Time
+	scheduleErr               error
+	scheduleQuery             db.ScheduleRunsQuery
+	scheduleLimit             int
+	workspaceProject          db.ProjectWorkspace
+	workspaceErr              error
+	active                    []db.ActiveWorkspace
+	activeErr                 error
 }
 
 func (r *recordingReads) StatusTaskCounts(context.Context) (int, int, int, error) {
@@ -379,6 +386,79 @@ func (r *recordingReads) ListConversation(_ context.Context, taskID string) ([]m
 		return []map[string]any{}, nil
 	}
 	return r.conversation, nil
+}
+
+func (r *recordingReads) ProjectWorkspace(_ context.Context, id string) (db.ProjectWorkspace, error) {
+	r.calls = append(r.calls, "project-workspace")
+	r.projectIDSeen = id
+	if r.workspaceErr != nil {
+		return db.ProjectWorkspace{}, r.workspaceErr
+	}
+	return r.workspaceProject, nil
+}
+
+func (r *recordingReads) ActiveWorkspaces(context.Context) ([]db.ActiveWorkspace, error) {
+	r.calls = append(r.calls, "active-workspaces")
+	if r.activeErr != nil {
+		return nil, r.activeErr
+	}
+	if r.active == nil {
+		return []db.ActiveWorkspace{}, nil
+	}
+	return r.active, nil
+}
+
+func (r *recordingReads) ListProjectSchedules(_ context.Context, id string) (map[string]any, error) {
+	r.calls = append(r.calls, "project-schedules")
+	r.projectIDSeen = id
+	if r.scheduleErr != nil {
+		return nil, r.scheduleErr
+	}
+	return map[string]any{"schedules": []any{}, "limits": map[string]any{}}, nil
+}
+
+func (r *recordingReads) ListSchedules(context.Context) (map[string]any, error) {
+	r.calls = append(r.calls, "schedules")
+	if r.scheduleErr != nil {
+		return nil, r.scheduleErr
+	}
+	return map[string]any{"schedules": []any{}}, nil
+}
+
+func (r *recordingReads) GetSchedule(_ context.Context, id string) (map[string]any, error) {
+	r.calls = append(r.calls, "schedule")
+	r.projectIDSeen = id
+	if r.scheduleErr != nil {
+		return nil, r.scheduleErr
+	}
+	return map[string]any{"schedule": map[string]any{}}, nil
+}
+
+func (r *recordingReads) ListScheduleRuns(_ context.Context, id string, q db.ScheduleRunsQuery) (map[string]any, error) {
+	r.calls = append(r.calls, "schedule-runs")
+	r.projectIDSeen = id
+	r.scheduleQuery = q
+	if r.scheduleErr != nil {
+		return nil, r.scheduleErr
+	}
+	return map[string]any{
+		"runs":        []any{},
+		"next_before": nil,
+		"routine_skips": map[string]any{
+			"skipped_gate":    0,
+			"skipped_overlap": 0,
+		},
+	}, nil
+}
+
+func (r *recordingReads) ListScheduleNotifications(_ context.Context, id string, limit int) (map[string]any, error) {
+	r.calls = append(r.calls, "schedule-notifications")
+	r.projectIDSeen = id
+	r.scheduleLimit = limit
+	if r.scheduleErr != nil {
+		return nil, r.scheduleErr
+	}
+	return map[string]any{"notifications": []any{}}, nil
 }
 
 func TestUnroutedAPI(t *testing.T) {

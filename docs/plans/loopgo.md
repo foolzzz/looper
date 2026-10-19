@@ -124,9 +124,18 @@ present, `/%61pp.js` is not that file. G1g serves
 digits. `int()` accepts only decimal digits, so ² and ② are 500 and do
 not read the database. A limit is clamped to 1..500. A value of
 4,301 digits is 500 and does not read the database. SSE stays unserved.
-`GET /api/workspaces/check` reads the workspace directory and git, so a
-golden for the seeded `/work/alpha` path is not stable on this machine.
-That route, and every route below it, stays for a later card.
+
+G1h serves `GET /api/workspaces/check` for an absolute directory. The golden
+uses a path that is not on this machine, so it does not read a real checkout.
+A static `..` is resolved by `os.Root` after symlinks: `deep -> assets/deep`
+makes `/deep/../app.js` the file `assets/app.js`. A `..` that leaves the web
+root, and `/missing/../app.js` when `missing/` is absent, still fall back to
+`index.html`. A symlink that leaves the root is 404. G1h also serves
+`GET /api/projects/<id>/schedules`, `GET /api/schedules`,
+`GET /api/schedules/<id>`, `GET /api/schedules/<id>/runs`, and
+`GET /api/schedules/<id>/notifications`. A run with no stored cost reports
+its task's cost. A task with no priced rows reports 0.0. Separate 0.1 and
+0.2 groups add to 0.3. SSE stays unserved.
 
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
@@ -135,12 +144,6 @@ is not in this list.
 
 - `GET /api/chat/events` (SSE)
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
-- `GET /api/workspaces/check`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/schedules`
-- `GET /api/schedules`
-- `GET /api/schedules/(sched-[a-zA-Z0-9]+)`
-- `GET /api/schedules/(sched-[a-zA-Z0-9]+)/runs`
-- `GET /api/schedules/(sched-[a-zA-Z0-9]+)/notifications`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts`

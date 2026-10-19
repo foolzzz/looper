@@ -35,6 +35,11 @@ func serveContext(ctx context.Context, args []string, logger *slog.Logger) error
 	if err != nil {
 		return err
 	}
+	// Python reads this once at startup. A bad value stops the process
+	// before it listens. Requests then use the stored number.
+	if err := db.ConfigureScheduleMinInterval(); err != nil {
+		return err
+	}
 	if err := checkWebDir(cfg.WebDir); err != nil {
 		return err
 	}

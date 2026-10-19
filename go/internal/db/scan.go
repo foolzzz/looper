@@ -11,8 +11,11 @@ import (
 )
 
 // Store reads the Looper tables. The HTTP layer turns these values into JSON.
+// Now is the clock for a schedule's spent_today. Nil uses time.Now. The
+// parity harness sets it to the same local noon Server.Now uses.
 type Store struct {
-	DB *sql.DB
+	DB  *sql.DB
+	Now func() time.Time
 }
 
 // NewStore wraps a pool opened with Open. A nil DB makes every read fail.
