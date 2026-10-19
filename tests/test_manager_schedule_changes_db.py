@@ -75,7 +75,8 @@ def test_a_schedule_is_created_disabled_with_its_configuration_and_enabled_only_
         assert lines[4:] == [
             f"- 目录：项目的默认目录（{tmp_path}）", "- 需求：33 字：Check the deps and write deps.md.",
             "- 上一次还在运行时：跳过这次触发；错过的触发：补跑一次", "- 前置检查：没有",
-            "- 花费上限：每次运行 项目的每任务上限，每天 不限", "- 通知：失败时 → 只在控制台", "",
+            "- 花费上限：每次运行 项目的每任务上限，每天 不限", "- 通知：失败时 → 只在控制台",
+            "- 运行超时：系统默认（不限）", "",
             "要启用吗？回复「启用」就启用，之后按规则无人值守地运行；也可以稍后在 Schedules 页打开它的开关。"]
 
         (asked,) = await chat.say("启用", (TOOL, {"action": "enable", "schedule": "deps"}))

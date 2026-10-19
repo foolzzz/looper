@@ -665,6 +665,11 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, self._lark_bot_status)
         elif path == "/api/channels/lark_bot/people" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: self._lark_bot_people(query.get("q", "")))
+        elif path == "/api/scheduler-settings" and method == "GET":
+            await self._answer(writer, HTTP_200, schedules.scheduler_settings)
+        elif path == "/api/scheduler-settings" and method == "PUT":
+            await self._answer(writer, HTTP_200,
+                               lambda: schedules.update_scheduler_settings(projects.json_object(body)))
         elif path == "/api/gate-settings" and method == "GET":
             await self._answer(writer, HTTP_200, gate_service.gate_settings)
         elif path == "/api/gate-settings" and method == "PUT":

@@ -26,6 +26,7 @@ const SECTION_LABELS: Record<string, string> = {
   profiles: AGENT_PROFILE.plural,
   "settings.layers": "Settings layers",
   "settings.roles": "Role settings",
+  "settings.scheduler": "Scheduler settings",
   channels: "Channels",
   catalog: "Catalog",
   installs: "Global installs",

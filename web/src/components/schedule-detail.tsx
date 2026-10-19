@@ -9,6 +9,7 @@ import { channelLabel } from "@/lib/chat-channels";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { NOTIFY_OPTIONS, TASK_LIMIT_ROLES, runNotice, useNotices } from "@/lib/schedules";
 import { errorText } from "@/lib/use-action";
+import { runTimeoutText, seconds } from "@/lib/schedule-text";
 import { profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -19,12 +20,6 @@ const ROLES: TaskRole[] = ["planner", "worker", "reviewer"];
 const linkClass =
   "inline-flex items-center gap-1 rounded-sm text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const CODE = "break-all rounded bg-muted/30 px-1.5 py-0.5 font-mono text-xs text-foreground/90";
-
-function seconds(value: number): string {
-  if (value % 3600 === 0) return `${value / 3600} h`;
-  if (value % 60 === 0) return `${value / 60} min`;
-  return `${value} s`;
-}
 
 /** A field of the schedule: its name, then what it is set to. */
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -250,7 +245,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             </span>
           </Field>
           <Field label="Run timeout">
-            {schedule.run_timeout_seconds != null ? seconds(schedule.run_timeout_seconds) : "None"}
+            {runTimeoutText(schedule)}
           </Field>
           <Field label="When a run is still going">
             {schedule.overlap === "queue"
