@@ -257,12 +257,21 @@ a clean checkout still fails when committed fixtures drift. `go vet ./...`
 and `go test ./...` passed from `go/` with `LOOPGO_TEST_DATABASE_URL` and
 `LOOPGO_CONFIG_EXPORT_PARITY_URL` set to disposable `loopgo_*` databases.
 
+G1p serves `POST /api/chat/messages` and `GET /api/chat/events`. A non-empty
+`cid` reads that message stream. A blank `cid` leaves `session` in effect,
+and that stream is the open chat. Headers and SSE frames match Python's
+bytes, including event order. Saving a message upserts `chat_messages` and
+keeps the original role, channel, and timestamp. Invalid UTF-8 in the body
+is 400. The body read gives up after 30 seconds and closes the socket with
+no status line. `http.Server` `Shutdown` and `Close` close a hijacked chat
+socket and cancel its stream context, which releases the session
+subscription. Task activity SSE stays on the list below.
+
 These are the read-only GET routes Python still serves and Go does not.
-Later cards pick them up. Two of them are SSE streams, not JSON documents.
+Later cards pick them up. One of them is an SSE stream, not a JSON document.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
 is not in this list.
 
-- `GET /api/chat/events` (SSE)
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
 - `GET /api/channels/lark/status`
 - `GET /api/channels/lark/people`

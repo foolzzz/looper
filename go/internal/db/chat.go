@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -78,6 +79,49 @@ func (s *Store) ListChatSessions(ctx context.Context) ([]map[string]any, error) 
 		JOIN chat_messages last ON last.id = s.last_id
 		ORDER BY s.last_message_at DESC, s.last_id DESC`,
 		chatSessionLimit, plannerThreadPrefix, chatLastMessageChars)
+}
+
+// ChatRecord is one chat_messages write. A nil delivery field is NULL.
+// A zero CreatedAt is the current UTC time, which is save_message's clock.
+type ChatRecord struct {
+	SessionID       string
+	MessageID       string
+	Role            string
+	Content         string
+	Channel         string
+	CreatedAt       time.Time
+	DeliveryFailure *string
+	DeliveryError   *string
+}
+
+// SaveChatMessage is save_message for a web turn: channel web, no delivery
+// failure. A second save of the same ids replaces content and the two
+// delivery columns. Role, channel, and created_at stay as first stored.
+func (s *Store) SaveChatMessage(ctx context.Context, sessionID, messageID, role, content string) error {
+	return s.SaveChatRecord(ctx, ChatRecord{
+		SessionID: sessionID,
+		MessageID: messageID,
+		Role:      role,
+		Content:   content,
+		Channel:   "web",
+	})
+}
+
+// SaveChatRecord is save_message with the channel and delivery columns.
+func (s *Store) SaveChatRecord(ctx context.Context, rec ChatRecord) error {
+	created := rec.CreatedAt
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	return s.exec(ctx, "save chat message", `
+		INSERT INTO chat_messages (session_id, message_id, role, content, channel, created_at, delivery_failure,
+		                           delivery_error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (session_id, message_id) DO UPDATE
+		SET content = EXCLUDED.content, delivery_failure = EXCLUDED.delivery_failure,
+		    delivery_error = EXCLUDED.delivery_error`,
+		rec.SessionID, rec.MessageID, rec.Role, rec.Content, rec.Channel, created,
+		rec.DeliveryFailure, rec.DeliveryError)
 }
 
 // ListChatMessages is chat.list_messages: the newest limit, then oldest first.

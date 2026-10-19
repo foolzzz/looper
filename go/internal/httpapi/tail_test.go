@@ -117,7 +117,6 @@ func TestChatAndActivityRoutes(t *testing.T) {
 		"/api/tasks/task-rich00001/activity/stream",
 		"/api/tasks/nope/activity",
 		"/api/tasks/task-rich00001/activity/1/extra",
-		"/api/chat/events",
 	} {
 		before = len(reads.calls)
 		rr = httptest.NewRecorder()
@@ -136,7 +135,6 @@ func TestChatAndActivityRoutes(t *testing.T) {
 	for _, path := range []string{
 		"/api/chat/targets",
 		"/api/chat/sessions",
-		"/api/chat/messages",
 		"/api/tasks/task-rich00001/activity",
 		"/api/tasks/task-rich00001/activity/4",
 		"/api/tasks/task-rich00001/conversation",
@@ -149,6 +147,26 @@ func TestChatAndActivityRoutes(t *testing.T) {
 				t.Fatalf("%s %s %d %s calls %d", method, path, rr.Code, rr.Body.String(), len(reads.calls)-before)
 			}
 		}
+	}
+	for _, method := range []string{http.MethodPut, http.MethodHead} {
+		before = len(reads.calls)
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, loopbackRequest(method, "/api/chat/messages"))
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` || len(reads.calls) != before {
+			t.Fatalf("%s messages %d %s calls %d", method, rr.Code, rr.Body.String(), len(reads.calls)-before)
+		}
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodPost, "/api/chat/messages"))
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "invalid JSON"}` || len(reads.calls) != before {
+		t.Fatalf("POST messages %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
+	}
+	before = len(reads.calls)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/chat/events"))
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "cid or session is required"}` || len(reads.calls) != before {
+		t.Fatalf("events %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 }
 

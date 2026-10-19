@@ -71,6 +71,32 @@ func (s *Store) query(ctx context.Context, label, sql string, args ...any) ([]ma
 	return out, nil
 }
 
+// exec runs one statement. A nil store fails the same way query does.
+// The context deadline is the statement deadline.
+func (s *Store) exec(ctx context.Context, label, sql string, args ...any) error {
+	if s == nil || s.DB == nil {
+		return &safeError{msg: errUnreachable}
+	}
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	defer conn.Close()
+
+	err = conn.Raw(func(driverConn any) error {
+		std, ok := driverConn.(*stdlib.Conn)
+		if !ok {
+			return fmt.Errorf("%s: unexpected driver connection", label)
+		}
+		_, err := std.Conn().Exec(ctx, sql, args...)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	return nil
+}
+
 // coerceColumn formats one cell. A date is YYYY-MM-DD, which is
 // datetime.date.isoformat(). pgx decodes that OID as midnight UTC, and the
 // generic time path would emit a timestamp. A numeric becomes millionths so
