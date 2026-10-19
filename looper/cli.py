@@ -8,8 +8,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .ops_config import OpsConfig
 
 LEGACY_COMMAND_NOTE = "loopx is now called looper; the loopx alias goes away in the next release"
 
@@ -27,10 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
             "them on the dashboard Settings page, then restart the server."
         ),
     )
-    serve.add_argument("--host", help="Bind host (default 127.0.0.1).")
-    serve.add_argument("--port", type=int, help="Port (default 8767).")
-    serve.add_argument("--verbose", action="store_true", help="Enable debug logging.")
-    serve.add_argument("--runtime-root", help="Override the default ~/.looper state directory.")
+    serve.add_argument("--host", help="Bind host (default: the ops file's server.host, else 127.0.0.1).")
+    serve.add_argument("--port", type=int, help="Port (default: the ops file's server.port, else 8767).")
+    serve.add_argument("--verbose", action="store_true", help="Enable debug logging (server.log_level = \"debug\").")
+    _add_location_flags(serve)
     serve.add_argument(
         "--skip-backup", action="store_true",
         help="Change the database schema without the pg_dump backup otherwise taken first into "
@@ -45,17 +49,18 @@ def build_parser() -> argparse.ArgumentParser:
                                              help="Remove the browser sign-in password.")
     for command in (set_password, clear_password):
         command.add_argument("--runtime-root", help="Override the default ~/.looper state directory.")
-    commands.add_parser(
+    doctor = commands.add_parser(
         "doctor",
         allow_abbrev=False,
         help="Check what Looper needs: PostgreSQL, the Claude Code CLI and its login, the enabled channels "
              "and pg_dump.",
         description=(
-            "Check PostgreSQL (LOOPER_DATABASE_URL), the Claude Code CLI and its login, the enabled channels, and "
-            "the pg_dump that backs the database up before a schema change; print each result with its fix. "
+            "Check PostgreSQL (the ops file's database.url), the Claude Code CLI and its login, the enabled channels, "
+            "and the pg_dump that backs the database up before a schema change; print each result with its fix. "
             "Exits 1 when a check failed. Makes no model call."
         ),
     )
+    _add_location_flags(doctor)
     config = commands.add_parser(
         "config",
         allow_abbrev=False,
@@ -63,7 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Move an installation's agent configuration to another machine: settings layers and role prompts, "
             "the catalog with its files and MCP servers, global installs, channels and, optionally, projects. "
-            "Both commands use the database directly (LOOPER_DATABASE_URL); the server need not run."
+            "Both commands use the database directly (the ops file's database.url); the server need not run. "
+            "init-ops writes the ops file itself."
         ),
     )
     config_commands = config.add_subparsers(dest="config_command", required=True)
@@ -89,6 +95,17 @@ def build_parser() -> argparse.ArgumentParser:
     import_.add_argument("file", help="The configuration file.")
     import_.add_argument("--apply", action="store_true", help="Write the changes the preview shows.")
     import_.add_argument("--json", action="store_true", help="Print the plan as JSON.")
+    init_ops = config_commands.add_parser(
+        "init-ops", allow_abbrev=False, help="Write the ops file from the settings in effect now (mode 0600).",
+        description=(
+            "Write the ops file, <runtime root>/ops/server.toml (or --config), from the settings in effect now: "
+            "LOOPER_DATABASE_URL, LOOPER_PUBLIC_URL, LOOPER_PG_DUMP, LOOPER_BACKUP_CMD and "
+            "LOOPER_OPERATOR_NOTES_ROOT (or their LOOPX_* names) from the environment or the checkout's .env, which "
+            "Looper reads for this release only. It refuses to replace an existing file, and shows no value."
+        ),
+    )
+    for command in (export, import_, init_ops):
+        _add_location_flags(command)
     _add_service_parser(commands)
     commands.add_parser(
         "mcp-server",
@@ -101,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     # serve prints no payload; --format stays accepted so existing invocations keep working.
     serve.add_argument("--format", choices=["markdown", "json"], help=argparse.SUPPRESS)
     return parser
+
+
+def _add_location_flags(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--runtime-root", help="The state directory (default ~/.looper).")
+    command.add_argument("--config", help="The ops file (default <runtime root>/ops/server.toml).")
 
 
 def _add_service_parser(commands: argparse._SubParsersAction) -> None:
@@ -118,17 +140,21 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
         "install", allow_abbrev=False, help="Install (or update) the service and start it.",
         description=(
             "Write the unit and (re)start the service, then wait until it serves. The unit runs this looper in the "
-            "current directory, with the variables it needs copied from this environment: PATH, locale and proxy "
-            "settings, CLAUDE_CONFIG_DIR, every LOOPER_*, ANTHROPIC_* and LARK_* variable (and, for one release, "
-            "LOOPX_*), and each --env NAME. The unit file is private (mode 0600) because LOOPER_DATABASE_URL can "
-            "hold a password. Running it again updates the unit and restarts the service. With the default "
+            "current directory with the ops file and the runtime root (absolute --config and --runtime-root; "
+            "--port only when given), and with the variables it needs copied from this environment: PATH, locale, "
+            "time zone, proxy and certificate settings, the runtimes' directories and logins (CLAUDE_CONFIG_DIR, "
+            "CODEX_HOME, GROK_HOME, ANTHROPIC_API_KEY and the others an agent gets), LOOPER_TELEGRAM_BOT_TOKEN, and "
+            "each --env NAME. No database URL is copied: the ops file names it, and install refuses while a setting "
+            "still comes from a variable (run `looper config init-ops` first). The unit file is private (mode 0600) "
+            "because it can hold API keys. Running it again updates the unit and restarts the service. With the "
+            "default "
             "--label it first stops and removes com.loopx.serve, the unit from before the rename, and moves "
             "~/.loopx to ~/.looper when the service uses the default runtime root."
         ),
     )
-    install.add_argument("--port", type=int, default=8767, help="Port for `looper serve` (default 8767).")
-    install.add_argument("--runtime-root",
-                         help="State directory for `looper serve` (default LOOPER_RUNTIME_ROOT, else ~/.looper).")
+    install.add_argument("--port", type=int,
+                         help="Port for `looper serve`, written into the unit (default: the ops file's, else 8767).")
+    _add_location_flags(install)
     install.add_argument("--env", action="append", default=[], metavar="NAME",
                          help="Also copy this environment variable into the unit (repeatable).")
     restart = service_commands.add_parser(
@@ -155,15 +181,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "auth":
         from .agents import auth_commands
-        from .paths import default_runtime_root
+        from .ops_config import runtime_root
 
-        root = Path(args.runtime_root) if args.runtime_root else default_runtime_root()
+        root, warning = runtime_root(args.runtime_root)
+        if warning:
+            print(f"warning: {warning}", file=sys.stderr)
         return (auth_commands.set_password(root, args.user) if args.auth_command == "set-password"
                 else auth_commands.clear_password(root))
     if args.command == "doctor":
         from .agents.self_check import doctor
 
-        return doctor()
+        ops = _load_ops(args)
+        return 1 if ops is None else doctor(ops)
     if args.command == "config":
         return _config(args)
     if args.command == "service":
@@ -174,12 +203,12 @@ def main(argv: list[str] | None = None) -> int:
         return mcp_server.main()
     # Imported here so that `looper version` and `--version` stay instant.
     from .agents.serve import serve_agent
-    from .paths import default_runtime_root
 
     serve_agent(
-        host=args.host or "127.0.0.1",
-        port=args.port or 8767,
-        runtime_root=Path(args.runtime_root) if args.runtime_root else default_runtime_root(),
+        host=args.host,
+        port=args.port,
+        runtime_root=Path(args.runtime_root) if args.runtime_root else None,
+        config=Path(args.config) if args.config else None,
         work_dir=Path.cwd(),
         verbose=args.verbose,
         skip_backup=args.skip_backup,
@@ -193,14 +222,49 @@ def legacy_main(argv: list[str] | None = None) -> int:
     return main(argv)
 
 
+def _load_ops(args: argparse.Namespace, port: int | None = None) -> OpsConfig | None:
+    """The ops settings for this command's --runtime-root, --config (and ``port``), with their warnings printed; None
+    (the error printed) when they cannot be used."""
+    from . import ops_config
+
+    try:
+        ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config, port=port))
+    except ops_config.OpsConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+    for warning in ops.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return ops
+
+
+def _init_ops(args: argparse.Namespace) -> int:
+    from . import ops_config
+
+    try:
+        ops, notes = ops_config.init_file(ops_config.Flags(runtime_root=args.runtime_root, config=args.config))
+    except (ops_config.OpsConfigError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    lines = [f"wrote {ops.path} (mode 0600); `looper serve` reads it at every start"]
+    lines += ["  values taken (not shown):", *(f"    {note}" for note in notes)] if notes else []
+    lines.append("then remove those variables from the environment and .env, and if `looper service` runs Looper, run "
+                 "`looper service install` again: its unit then names this file and carries no database URL")
+    print("\n".join(lines))
+    return 0
+
+
 def _config(args: argparse.Namespace) -> int:
     import asyncio
 
     import asyncpg
 
     from .agents import config_transfer
-    from .db.connection import configured_dsn
 
+    if args.config_command == "init-ops":
+        return _init_ops(args)
+    ops = _load_ops(args)
+    if ops is None:
+        return 1
     path = Path(args.file)
     try:
         if args.config_command == "export":
@@ -208,10 +272,10 @@ def _config(args: argparse.Namespace) -> int:
                 print(f"warning: {path} will hold secrets (LLM provider API keys, MCP environment and header values, "
                       "channel secrets) in plain text; keep it private and delete it once imported", file=sys.stderr)
             summary = asyncio.run(config_transfer.export_to_file(
-                configured_dsn(), path, include_projects=args.include_projects, include_secrets=args.include_secrets))
+                ops.database_url, path, include_projects=args.include_projects, include_secrets=args.include_secrets))
             print(config_transfer.format_export(summary, path, include_secrets=args.include_secrets))
             return 0
-        plan = asyncio.run(config_transfer.import_file(configured_dsn(), path, apply=args.apply))
+        plan = asyncio.run(config_transfer.import_file(ops.database_url, path, apply=args.apply))
     except (config_transfer.ConfigFileError, config_transfer.SchemaChangePending) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -225,14 +289,15 @@ def _config(args: argparse.Namespace) -> int:
 
 def _service(args: argparse.Namespace) -> int:
     from .agents import service
-    from .paths import default_runtime_root
 
     host = service.Host.current()
     try:
         if args.service_command == "install":
-            root = Path(args.runtime_root) if args.runtime_root else default_runtime_root()
-            print(service.install(host, label=args.label, port=args.port, runtime_root=root,
-                                  extra_env=args.env, timeout=args.timeout))
+            ops = _load_ops(args, port=args.port)
+            if ops is None:
+                return 1
+            print(service.install(host, ops, label=args.label, port=args.port, extra_env=args.env,
+                                  timeout=args.timeout))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout))
         elif args.service_command == "uninstall":

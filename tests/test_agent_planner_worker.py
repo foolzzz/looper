@@ -892,7 +892,7 @@ class TestWorkerHarnessAndLaunch:
         assert len(launched) == 2
         for kwargs in launched:
             assert kwargs["env"]["LOOPER_TEST_FLAVOUR"] == "mint"
-            assert kwargs["env"]["LOOPER_SERVER_SIDE"] == "kept"  # on top of the server's environment
+            assert "LOOPER_SERVER_SIDE" not in kwargs["env"]  # only the settings add server-owned variables
         recorded = [call.kwargs["metadata"]["env"] for call in agent_db.start_record.await_args_list]
         assert [r["keys"] for r in recorded] == [{"LOOPER_TEST_FLAVOUR": _sha("mint")}] * 2
         assert "mint" not in json.dumps(recorded)

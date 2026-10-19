@@ -6,11 +6,16 @@ way the service starts at login, is started again when it exits with a failure
 (a crash or a kill), and writes its output to ``<runtime_root>/logs/serve.log``.
 
 The unit runs the ``looper`` of the interpreter that ran ``install`` (a
-checkout's ``.venv/bin/looper``) in the directory ``install`` ran in, so a
-checkout's ``.env`` keeps working. launchd and systemd start services with an
-almost empty environment, so ``install`` copies the variables the service
-needs from its own environment into the unit, which is why the unit file is
-written with mode 0600: ``LOOPER_DATABASE_URL`` can hold a password.
+checkout's ``.venv/bin/looper``) in the directory ``install`` ran in, as
+``looper serve --config <ops file> --runtime-root <root>``, both absolute, and
+``--port`` only when ``install`` was given one: the ops file
+(``looper.ops_config``) holds the database URL and the other settings, so the
+unit holds none of them, and ``install`` refuses while one still comes from a
+variable it would not carry. launchd and systemd start services with an almost
+empty environment, so ``install`` copies the variables the service and its
+agents need (``CAPTURED_NAMES``, and each ``--env NAME``) from its own
+environment into the unit, which is why the unit file is written with mode
+0600: they can hold API keys.
 
 launchd: a job is reloaded with ``launchctl bootout`` then ``bootstrap``, never
 ``kickstart -k``, which can reuse the code-signing state of the binary it
@@ -43,6 +48,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import child_env, ops_config
+from ..ops_config import OpsConfig
 from ..paths import settle_runtime_root
 from . import operator_auth
 from .self_check import OK, SKIP, WARN, Check
@@ -53,15 +60,16 @@ DEFAULT_PORT = 8767
 DEFAULT_TIMEOUT_SECONDS = 120.0
 LOG_RELATIVE_PATH = Path("logs") / "serve.log"
 
-# Copied from the environment of `install` when set. Not CLAUDECODE or
-# CLAUDE_CODE_*: an install run from inside a Claude Code session would pass
-# that session's markers on to every agent the service starts.
+# Copied from the environment of `install` when set: what the server and the agents it starts read
+# (``child_env``) but launchd and systemd do not set, and the Telegram channel's token variable (``LOOPX_*`` for
+# one release). Not the session's own (HOME, SSH_AUTH_SOCK, TMPDIR: the service manager sets them), not CLAUDECODE
+# or a Claude Code session's other markers, and no ops setting: the ops file holds those.
 CAPTURED_NAMES = (
-    "PATH", "LANG", "LC_ALL", "LC_CTYPE", "CLAUDE_CONFIG_DIR",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "PATH", "TZ", *(name for name in child_env.SYSTEM if name.startswith(("LANG", "LC_"))),
+    *child_env.NETWORK, *child_env.RUNTIMES, "LOOPER_TELEGRAM_BOT_TOKEN", "LOOPX_TELEGRAM_BOT_TOKEN",
 )
-# LOOPX_*: the names from before the rename, still read as a fallback for one release (looper.env).
-CAPTURED_PREFIXES = ("LOOPER_", "LOOPX_", "ANTHROPIC_", "LARK_")
+# What `install` copied before the ops file, by prefix: a variable of these it no longer copies is named in its report.
+FORMER_PREFIXES = ("LOOPER_", "LOOPX_", "ANTHROPIC_", "LARK_")
 
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
@@ -148,21 +156,26 @@ def looper_command(executable: str) -> list[str]:
 
 
 def captured_env(environ: Mapping[str, str], extra: Sequence[str] = ()) -> dict[str, str]:
-    """The variables of ``environ`` the unit carries: the fixed names, the prefixes and ``extra``."""
+    """The variables of ``environ`` the unit carries: the fixed names and ``extra``."""
     wanted = set(CAPTURED_NAMES) | set(extra)
-    return {name: environ[name] for name in sorted(environ)
-            if name in wanted or name.startswith(CAPTURED_PREFIXES)}
+    return {name: environ[name] for name in sorted(environ) if name in wanted}
 
 
-def build_spec(host: Host, *, label: str, port: int, runtime_root: Path, extra_env: Sequence[str] = ()) -> ServiceSpec:
+def build_spec(host: Host, *, label: str, port: int | None, runtime_root: Path, config: Path,
+               extra_env: Sequence[str] = ()) -> ServiceSpec:
+    """The unit: ``looper serve`` with the ops file ``config`` and ``runtime_root``, and ``--port`` when given."""
     check_label(label)
-    if not 0 < port < 65536:
+    if port is not None and not 0 < port < 65536:
         raise ServiceError(f"--port {port} is not a TCP port")
     missing = [name for name in extra_env if name not in host.environ]
     if missing:
         raise ServiceError(f"--env {', '.join(missing)}: not set in this environment")
+    if settings := sorted(set(extra_env) & ops_config.VARIABLES):
+        raise ServiceError(f"--env {', '.join(settings)}: an ops setting, which the unit does not carry; set it in "
+                           f"{config} instead")
     root = _absolute_root(host, runtime_root)
-    argv = (*looper_command(host.executable), "serve", "--port", str(port), "--runtime-root", str(root))
+    argv = (*looper_command(host.executable), "serve", "--config", str(config), "--runtime-root", str(root),
+            *(("--port", str(port)) if port is not None else ()))
     return ServiceSpec(label=label, argv=argv, working_dir=host.cwd,
                        env=tuple(captured_env(host.environ, extra_env).items()), log_path=root / LOG_RELATIVE_PATH)
 
@@ -289,6 +302,10 @@ class _Manager:
         """The port, log path and runtime root the installed unit names."""
         raise NotImplementedError
 
+    def unit_argv(self) -> list[str]:
+        """The installed unit's command; [] when there is none to read."""
+        raise NotImplementedError
+
     def state(self) -> State:
         raise NotImplementedError
 
@@ -327,6 +344,12 @@ class Launchd(_Manager):
         log = unit.get("StandardOutPath")
         argv = unit.get("ProgramArguments") or []
         return _port_of(argv), Path(log) if log else None, _runtime_root_of(argv)
+
+    def unit_argv(self) -> list[str]:
+        try:
+            return list(plistlib.loads(self.unit_path.read_bytes()).get("ProgramArguments") or [])
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return []
 
     def _print(self) -> subprocess.CompletedProcess[str]:
         return self._call("launchctl", "print", self.target)
@@ -397,6 +420,13 @@ class Systemd(_Manager):
                 Path(log.removeprefix("append:").replace("%%", "%")) if log.startswith("append:") else None,
                 _runtime_root_of(argv))
 
+    def unit_argv(self) -> list[str]:
+        try:
+            lines = self.unit_path.read_text().splitlines()
+        except OSError:
+            return []
+        return _systemd_words(dict(line.split("=", 1) for line in lines if "=" in line).get("ExecStart", ""))
+
     def _systemctl(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = self._call("systemctl", "--user", *args)
         if check and result.returncode != 0:
@@ -433,10 +463,25 @@ class Systemd(_Manager):
             self._systemctl("daemon-reload")
 
 
-def _port_of(argv: Sequence[str]) -> int | None:
+def _given_port(argv: Sequence[str]) -> int | None:
+    """A unit's ``--port``; None without one."""
     argv = list(argv)
     if "--port" in argv[:-1] and argv[argv.index("--port") + 1].isdigit():
         return int(argv[argv.index("--port") + 1])
+    return None
+
+
+def _port_of(argv: Sequence[str]) -> int | None:
+    """The port a unit's ``looper serve`` listens on: its ``--port``, else its ops file's (``--config``); None when
+    neither can be read."""
+    argv = list(argv)
+    if (port := _given_port(argv)) is not None:
+        return port
+    if "--config" in argv[:-1]:
+        try:
+            return ops_config.read_file(Path(argv[argv.index("--config") + 1])).get("port", ops_config.DEFAULT_PORT)
+        except ops_config.OpsConfigError:
+            return None
     return None
 
 
@@ -505,41 +550,60 @@ def _describe(state: State) -> str:
     return f"{text}, last exit {state.last_exit}" if state.last_exit and state.last_exit != "(never exited)" else text
 
 
-def install(host: Host, *, label: str = DEFAULT_LABEL, port: int = DEFAULT_PORT, runtime_root: Path,
+def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int | None = None,
             extra_env: Sequence[str] = (), timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
-    """Write the unit (again), reload the service and wait until it serves; the report to print.
+    """Write the unit (again) for the ops settings ``ops`` (``ops_config.load`` with this command's flags), reload
+    the service and wait until it serves; the report to print. ``port``: the ``--port`` given, written into the unit;
+    without one, the ops file's port, or the port the unit installed before names when the file names none.
 
-    With the default label, the unit from before the rename (``LEGACY_LABEL``)
-    is stopped and removed first, then the runtime root is settled (``~/.loopx``
-    moved to ``~/.looper``) before anything is written under it.
+    It refuses before anything is written when there is no ops file, or when a setting still comes from a variable
+    of this environment, which the unit no longer carries. With the default label, the unit from before the rename
+    (``LEGACY_LABEL``) is stopped and removed first, then the runtime root is settled (``~/.loopx`` moved to
+    ``~/.looper``) before anything is written under it.
     """
     mgr = manager(host, label)
-    spec = build_spec(host, label=label, port=port, runtime_root=runtime_root, extra_env=extra_env)
+    if not os.path.lexists(ops.path):
+        raise ServiceError(f"no ops file at {ops.path}: run `looper config init-ops` first, which writes it from the "
+                           "settings in effect")
+    if from_variables := sorted(source.label for source in ops.sources.values()
+                                if source.origin is ops_config.Origin.ENVIRONMENT):
+        raise ServiceError(f"{', '.join(from_variables)} still sets what the ops file should: the unit does not "
+                           f"carry it. Set it in {ops.path} (or remove the file and run `looper config init-ops`), "
+                           "remove the variable, and install again")
+    if port is None and "port" not in ops.sources:
+        port = _given_port(mgr.unit_argv())  # keep a port the installed unit was given (every one before the ops file)
+    runtime_root = ops.runtime_root
+    spec = build_spec(host, label=label, port=port, runtime_root=runtime_root, config=ops.path, extra_env=extra_env)
     retired = _retire_legacy_unit(host) if label == DEFAULT_LABEL else ""
     settled = settle_runtime_root(_absolute_root(host, runtime_root), home=host.home)
     if settled.root != _absolute_root(host, runtime_root):
-        spec = build_spec(host, label=label, port=port, runtime_root=settled.root, extra_env=extra_env)
+        spec = build_spec(host, label=label, port=port, runtime_root=settled.root, config=ops.path,
+                          extra_env=extra_env)
     settled.root.mkdir(mode=0o700, parents=True, exist_ok=True)  # private before logs/ under it (operator_auth)
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     write_private(mgr.unit_path, mgr.render(spec))
     mgr.stop()
-    serving = _start_and_wait(mgr, port, spec.log_path, timeout, settled.root)
+    serving_port = port if port is not None else ops.port
+    serving = _start_and_wait(mgr, serving_port, spec.log_path, timeout, settled.root)
     names = [name for name, _ in spec.env]
+    dropped = sorted(name for name in host.environ if name.startswith(FORMER_PREFIXES) and name not in names
+                     and name not in ops_config.VARIABLES and name not in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"))
     lines = [
         f"installed {label} ({mgr.kind}); it starts at login and again after a crash",
         f"  unit       {mgr.unit_path}",
-        "             mode 0600: it holds the captured environment, and LOOPER_DATABASE_URL can hold a password",
+        "             mode 0600: it holds the captured environment, which can hold API keys",
         f"  command    {shlex.join(spec.argv)}",
         f"  directory  {spec.working_dir}",
+        f"  ops file   {ops.path} (the database URL and the other settings; no database URL is in the unit)",
         f"  env        {', '.join(names) if names else '(none)'}",
         f"  log        {spec.log_path}",
-        f"  serving    http://127.0.0.1:{port} (pid {serving.pid or 'unknown'})",
+        f"  serving    http://127.0.0.1:{serving_port} (pid {serving.pid or 'unknown'})",
     ]
+    lines += [f"  not copied {', '.join(dropped)}: install no longer copies every LOOPER_*, ANTHROPIC_* and LARK_* "
+              "variable; add --env NAME for one the service needs"] if dropped else []
     lines += [f"  replaced   {retired}"] if retired else []
     lines += [f"  {'warning' if settled.warning else 'runtime':<10} {settled.note}"] if settled.note else []
-    if "LOOPER_DATABASE_URL" not in names and "LOOPX_DATABASE_URL" not in names:
-        lines.append("  note       LOOPER_DATABASE_URL is not set here; the service reads it from the checkout's .env, "
-                     "else uses the default")
+    lines += [f"  warning    {warning}" for warning in ops.warnings]
     if host.system == "Linux":
         lines.append("  note       to run it without a login session too: loginctl enable-linger $USER")
     return "\n".join(lines)

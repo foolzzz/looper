@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from looper import child_env
 from looper.agents.consult import CONSULT_CONTRACT
 from looper.agents.room import FallbackReason, RoomService
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
@@ -35,6 +36,9 @@ def _isolated_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # The stand-in's controls reach it as children's variables do only when named (``child_env``).
+    monkeypatch.setattr(child_env, "_allowed",
+                        child_env._allowed | {"SEEN", "CONSULT_MODE", "CHILD_PID", "QUESTION_ID", "CONSULT_COST"})
 
 
 # A Claude Code that answers a consult: it records how it was started, then answers every question its prompt names

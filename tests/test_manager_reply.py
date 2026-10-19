@@ -757,8 +757,8 @@ class TestManagerHarnessAndLaunch:
         env = [[_system(env=[{"key": "LOOPER_TEST_FLAVOUR", "value": flavour}])] for flavour in ("mint", "mint", "lime")]
         chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], layers=env)
         assert chat["replies"] == ["turn 1: hello", "turn 2: again", "turn 1: third"]
-        assert [(k["env"]["LOOPER_TEST_FLAVOUR"], k["env"]["LOOPER_SERVER_SIDE"]) for k in chat["launched"]] == [
-            ("mint", "kept"), ("lime", "kept")]
+        assert [k["env"]["LOOPER_TEST_FLAVOUR"] for k in chat["launched"]] == ["mint", "lime"]
+        assert all("LOOPER_SERVER_SIDE" not in k["env"] for k in chat["launched"])
         (first, _), (second, _) = chat["spawned"]
         assert first == [arg for arg in second if arg not in ("--resume", "sess-1")]  # only the env changed
         recorded = [call.kwargs["metadata"]["env"]["keys"] for call in agent_db.start_record.await_args_list]
