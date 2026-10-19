@@ -9,16 +9,18 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   session id, its runtime and provider, its system prompt. Claude Code keeps every session itself; Codex and OMP only the
   sessions of runs in a room (``room.run_session_dir``); Grok in the home its recorded command names. The seat's Agent Profile must still run on that runtime and
   provider (a session belongs to both, as the Planner's does), else ``runtime_cannot``. A newer record of that run
-  makes the pin unusable (``no_session``), so an active session is never copied.
+  makes the pin unusable (``no_session``), checked before and again after the session is copied (a seat's run
+  writes its session only after its record exists), so a session being written is not consulted.
 - **A fork.** Claude Code ``--resume <id> --fork-session``; Codex and OMP a copy of the run's session directory;
   Grok a home of its own with a copy of that one session, resumed with ``--fork-session``. The run's own session
   stays as it was. Claude Code keeps the fork in its own session store, like every Claude Code session, and Looper
   leaves it there (it never changes anything in Claude Code's own directory); the other runtimes' forks are in the
   consult's ``fork_dir``, which is removed.
 - **Read only.** The consult's system prompt is the run's, with ``CONSULT_CONTRACT`` in place of its contract.
-  Claude Code has only Read, Glob and Grep, with Bash and writing tools refused (not verified on a real run yet);
+  Claude Code has only Read, Glob and Grep, with Bash and writing tools refused (its init tool list was Glob, Grep
+  and Read, checked on a real run with Claude Code and haiku);
   Codex has its read-only sandbox, Grok its reading tools. They run where the step ran. OMP has only its reading
-  tools (``--tools read,glob,grep``, not verified on a real run) in a detached checkout of the task directory's
+  tools (``--tools read,glob,grep``, checked on a real run with OMP 18.4.3) in a detached checkout of the task directory's
   branch, removed afterwards. The checkout keeps writes out of the task directory and ``wrote_files`` catches
   changes inside it. It is not a sandbox: OMP runs as the operator's user, so writes outside the checkout (another
   path or the home directory) are neither prevented nor detected.
@@ -30,7 +32,9 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   result's own figure. A cost over its cap or still unknown drops the answers on every runtime.
   A provider-priced model without a full price cannot run a consult (``runtime_cannot``).
   One deadline covers writing the prompt, reading the reply and waiting for exit; stderr is drained with a short
-  tail kept for errors, and the process tree is ended on success too.
+  tail kept for errors, and the process tree is ended on success too. The tree is read every ``TREE_WATCH_SEC`` and
+  again before the result is recorded, and the consult's own process group is signalled; a child that calls
+  ``setsid`` between two reads and whose parent then exits is not found (a known limit).
 - **Delivery.** Its end state, answers and unanswered questions for the Planner commit together, once. If its
   task's room was turned off, it ends ``failed`` (``room_off``), without messages or notifications.
 - **Restarts.** Shutdown leaves consults queued or running; killing a run gives its questions to the Planner.
@@ -53,6 +57,7 @@ from typing import Any
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from .agent_settings import AgentType, Launch, load_agent_settings
+from .runtimes import ReadOnly
 from .room import FallbackReason, Member, MemberKind, RoomService, _line, run_session_dir
 from .system_prompt import REVIEW_CONTRACT, WORK_CONTRACT, SystemPrompt
 
@@ -62,6 +67,7 @@ CONSULT_MAX_TURNS = 20
 # The question bodies share this many characters in a consult prompt.
 CONSULT_QUESTIONS_MAX_CHARS = 20_000
 GIT_TIMEOUT_SEC = 30
+TREE_WATCH_SEC = 0.2  # how often a running consult's process tree is read
 # The runtimes with their own read-only restriction, so a consult runs where its step ran; the others run in a
 # throwaway checkout.
 RUNTIME_READ_ONLY = ("claude-code", "codex", "grok")
@@ -284,9 +290,7 @@ class ConsultService:
         metadata = (record or {}).get("metadata") or {}
         if record is None or not record.get("session_id") or record["status"] == "running":
             raise _Failed(FallbackReason.NO_SESSION, "its last run kept no finished session")
-        latest = await db_room.latest_run(task_id, row["source_run"])
-        if latest is not None and latest["id"] > record["id"]:
-            raise _Failed(FallbackReason.NO_SESSION, "its seat started another run meanwhile")
+        await self._ensure_current(task_id, row, record, "its seat started another run meanwhile")
         # The seat's profile now, which must still run where the session is: its runtime and its provider.
         role_key = step.get("role_key") if kind is MemberKind.WORK else (
             step.get("review_role_key") if seat_name.split("@", 1)[0] != "reviewer" else None)
@@ -309,6 +313,9 @@ class ConsultService:
             raise _Failed(FallbackReason.RUNTIME_CANNOT, "its model has no full price with its provider, so "
                                                          "room_consult_budget_usd cannot hold")
         runtime = launch.runtime
+        if launch.read_only_mode is ReadOnly.CHECK:
+            raise _Failed(FallbackReason.RUNTIME_CANNOT, "its runtime, as probed, cannot be kept read-only "
+                                                         "(OMP before 18.4.3 has no verified --tools)")
         # Where it runs: where the step ran, its runtime keeping it from writing; else a throwaway checkout.
         cwd, snapshot = str(metadata.get("cwd") or task.get("work_dir") or ""), None
         if not cwd or not Path(cwd).is_dir():
@@ -346,6 +353,9 @@ class ConsultService:
                                                   max_turns=CONSULT_MAX_TURNS)
             except RuntimeUnsupported as exc:
                 raise _Failed(FallbackReason.RUNTIME_CANNOT, str(exc)) from None
+            # A run of the seat writes its session only after its record exists, so a record that is still missing
+            # now means the copy above (Codex, OMP, Grok) is of a finished session.
+            await self._ensure_current(task_id, row, record, "its seat started another run while its session was copied")
             asked = ", ".join(f"#{m['id']}" for m in questions)
             await self._note(task_id, run_id, f"Consulting {seat_name} for question(s) {asked} (read only: {read_only})")
             result, started, timed_out = await self._execute(
@@ -389,6 +399,14 @@ class ConsultService:
         finally:
             await asyncio.to_thread(_cleanup, snapshot, fork_dir)
 
+    @staticmethod
+    async def _ensure_current(task_id: str, row: Mapping[str, Any], record: Mapping[str, Any], why: str) -> None:
+        """Raise ``no_session`` when the seat's run has a newer record than the pinned ``record``: its session is
+        being written."""
+        latest = await db_room.latest_run(task_id, row["source_run"])
+        if latest is not None and latest["id"] > record["id"]:
+            raise _Failed(FallbackReason.NO_SESSION, why)
+
     async def _prompt(self, task_id: str, seat_name: str, step: Mapping[str, Any],
                       questions: Sequence[Mapping[str, Any]]) -> str:
         status = {"verified": "it was accepted", "failed": "it failed", "skipped": "it was dropped"}.get(
@@ -426,7 +444,7 @@ class ConsultService:
         assert process.stdin is not None and process.stdout is not None and process.stderr is not None
         result: dict[str, Any] | None = None
         started = False
-        known: proc_tree.Tree | None = None
+        known: proc_tree.Tree = {}
         stderr_tail = ""
 
         async def stderr() -> None:
@@ -436,9 +454,21 @@ class ConsultService:
 
         draining = asyncio.create_task(stderr())
 
+        async def watch_tree() -> None:
+            # A parent that exits re-parents its children and nothing then links them to it, so the tree is kept
+            # current while it runs.
+            while process.returncode is None:
+                known.update(await asyncio.to_thread(proc_tree.tree_of, process))
+                await asyncio.sleep(TREE_WATCH_SEC)
+
+        watching = asyncio.create_task(watch_tree())
+
         async def read() -> None:
             nonlocal result, started, known
             async for event in runtime.parse(process.stdout, model=launch.model):
+                if event.get("type") == "result":
+                    # Read before the record is awaited, which a stop may cut short.
+                    known.update(proc_tree.tree_of(process))
                 await recorder.record(event)
                 if (capped := recorder.cap_stop) is not None:
                     result = capped.result_event
@@ -448,7 +478,7 @@ class ConsultService:
                     started = True
                 if event.get("type") == "result":
                     result = event
-                    known = await proc_tree.begin_end(process)
+                    known.update(await proc_tree.begin_end(process))
                     if not process.stdin.is_closing():
                         process.stdin.close()
 
@@ -475,9 +505,10 @@ class ConsultService:
             try:
                 await proc_tree.end(process, label=f"consult {run_id}", known=known)
             finally:
-                if not draining.done():
-                    draining.cancel()
-                await asyncio.gather(draining, return_exceptions=True)
+                for background in (draining, watching):
+                    if not background.done():
+                        background.cancel()
+                await asyncio.gather(draining, watching, return_exceptions=True)
                 await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
                                       result_event=result, error=(error + "\n" + stderr_tail if stderr_tail else error)
                                       if error else None)
@@ -549,7 +580,12 @@ def _snapshot(work_dir: Path, target: Path) -> tuple[Path, Path, Path] | None:
         return None
     repo = Path(top.stdout.strip())
     target.parent.mkdir(parents=True, exist_ok=True)
-    if _git(repo, "worktree", "add", "--detach", str(target), "HEAD").returncode != 0:
+    try:
+        added = _git(repo, "worktree", "add", "--detach", str(target), "HEAD").returncode == 0
+    except subprocess.TimeoutExpired:
+        added = False  # git was killed part way: what it wrote stays until removed
+    if not added:
+        _remove_checkout(repo, target)
         return None
     try:
         inside = target / work_dir.resolve().relative_to(repo.resolve())
@@ -564,15 +600,23 @@ def _changed(directory: Path) -> list[str]:
     return [line[3:] for line in done.stdout.splitlines() if line.strip()] if done.returncode == 0 else []
 
 
+def _remove_checkout(repo: Path, target: Path) -> None:
+    """Remove a consult's checkout of ``repo`` at ``target``, whole or partial, and the repository's record of it."""
+    try:
+        _git(repo, "worktree", "remove", "--force", str(target))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    shutil.rmtree(target, ignore_errors=True)
+    try:
+        _git(repo, "worktree", "prune")
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _cleanup(snapshot: tuple[Path, Path, Path] | None, fork_dir: Path) -> None:
     """Remove a consult's checkout and its forked session."""
     if snapshot is not None:
-        repo, target, _ = snapshot
-        try:
-            _git(repo, "worktree", "remove", "--force", str(target))
-        except (OSError, subprocess.SubprocessError):
-            pass
-        shutil.rmtree(target, ignore_errors=True)
+        _remove_checkout(snapshot[0], snapshot[1])
     shutil.rmtree(fork_dir, ignore_errors=True)
 
 
