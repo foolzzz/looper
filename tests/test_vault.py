@@ -790,3 +790,35 @@ def test_an_ancestor_of_the_root_swapped_for_a_link_during_the_write_is_refused(
             moved.rename(ancestor)
     assert swapped and caught.value.code is ErrorCode.FORBIDDEN
     assert not (elsewhere / "vault/codex-mem/new.md").exists()
+
+
+_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+def test_a_vault_behind_a_folder_the_server_cannot_pass_is_a_400_when_saved(tmp_path: Path) -> None:
+    from looper.agents.projects import HTTP_400, RequestError
+
+    locked = tmp_path / "locked"
+    (locked / "vault/codex-mem").mkdir(parents=True)
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(RequestError) as caught:
+            asyncio.run(vault.update_settings({"path": str(locked / "vault"), "writable": ["codex-mem"]}))
+    finally:
+        locked.chmod(0o755)
+    assert caught.value.status == HTTP_400
+    assert "every folder above the vault must be readable by the server user" in str(caught.value)
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+def test_a_vault_behind_a_folder_the_server_may_pass_but_not_list_is_written(tmp_path: Path) -> None:
+    passable = tmp_path / "passable"
+    (passable / "vault/codex-mem").mkdir(parents=True)
+    passable.chmod(0o111)
+    try:
+        config = vault.check_config({"path": str(passable / "vault"), "writable": ["codex-mem"]})
+        result = write(config)
+    finally:
+        passable.chmod(0o755)
+    assert result["path"] == "codex-mem/new.md" and (passable / "vault/codex-mem/new.md").read_text() == "new note"

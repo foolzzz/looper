@@ -72,6 +72,26 @@ def _path_problem(raw: Any) -> str | None:
     return None
 
 
+# Opening a folder only to pass through it: search permission is enough where the system has a flag for it
+# (O_SEARCH on macOS, O_PATH on Linux); elsewhere it must be readable.
+_PASS = (getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0) or os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_real_path(path: Path) -> list[int]:
+    """Descriptors of ``path``'s folders, from / down to it, each opened without following a link; the caller
+    closes them. ``OSError``: ``ELOOP``/``ENOTDIR`` for a link or a file on the way, ``EACCES`` for a folder the
+    server cannot pass."""
+    fds = [os.open("/", _PASS)]
+    try:
+        for part in path.parts[1:]:
+            fds.append(os.open(part, _PASS, dir_fd=fds[-1]))
+    except BaseException:
+        for fd in reversed(fds):
+            os.close(fd)
+        raise
+    return fds
+
+
 def check_config(raw: Mapping) -> VaultConfig:
     """The stored setting checked against the directory as it is now; raises ``ValueError`` on a problem."""
     if not isinstance(raw, Mapping):
@@ -87,6 +107,14 @@ def check_config(raw: Mapping) -> VaultConfig:
     if "\0" in path:
         raise ValueError("path must not contain NUL")
     root = Path(path).resolve()
+    try:
+        for fd in reversed(_open_real_path(root)):
+            os.close(fd)
+    except PermissionError:
+        raise ValueError(f"the server cannot reach the vault path {path}: every folder above the vault must be "
+                         "readable by the server user (searchable at least)") from None
+    except OSError:
+        pass  # a path that is missing or not a directory is named below
     if not root.exists():
         raise ValueError(f"the vault path {path} does not exist")
     if not root.is_dir():
@@ -381,17 +409,14 @@ async def write(config: VaultConfig, path: str, content: str, expected_sha256: s
         try:
             # The saved path is a real path, with no link on it: walk it from / without following any, so a link
             # put anywhere on the way fails here rather than leading the write elsewhere.
-            fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-            fds.append(fd)
-            for part in config.path.parts[1:]:
-                try:
-                    fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                except OSError as exc:
-                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                        raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
-                                                           "(a symbolic link?)") from None
-                    raise
-                fds.append(fd)
+            try:
+                fds.extend(_open_real_path(config.path))
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
+                                                       "(a symbolic link?)") from None
+                raise
+            fd = fds[-1]
             for index, part in enumerate(rel.parts[:-1]):
                 try:
                     try:
