@@ -338,7 +338,6 @@
       "runtime_id": "rt-claude-code",
       "runtime_name": "claude-code",
       "runtime_type": "claude-code",
-      "system_prompt_mode": "append",
       "used_by": {
         "allowed_in": [],
         "layers": [],

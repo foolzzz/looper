@@ -82,23 +82,77 @@ func TestUpgradeSchemaKeepsRolePromptMode(t *testing.T) {
 	}
 	t.Cleanup(func() { sqlDB.Close() })
 	assertPromptModeSchema(t, ctx, sqlDB)
-	var worker, reviewer, profile string
+	worker, reviewer, planner, profileCols := promptModeUpgrade(t, ctx, sqlDB)
+	if worker != "replace" || reviewer != "replace" || planner != nil || profileCols != 0 {
+		t.Fatalf("worker %s reviewer %s planner %#v profile columns %d", worker, reviewer, planner, profileCols)
+	}
+}
+
+func TestUpgradeSchemaLeavesStoredRolePromptMode(t *testing.T) {
+	dsn := withDisposableDB(t, "loopgo_g1sync_keep")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	old, err := os.ReadFile(prePromptModeSchemaPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ExecScript(ctx, dsn, string(old)); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		`INSERT INTO agent_runtimes (id, name, type, executable, capabilities)
+		 VALUES ('rt-replace', 'replace-runtime', 'codex', '', ARRAY['run', 'resident_session', 'resume'])`,
+		`INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type)
+		 VALUES ('prov-replace', 'replace-provider', ARRAY['openai-responses'], 'oauth', 'codex')`,
+		`INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, system_prompt_mode)
+		 VALUES ('agent-replace', 'codex/replace', 'rt-replace', 'prov-replace', 'gpt', 'replace')`,
+		`INSERT INTO agent_setting_layers (scope, profile_id) VALUES ('system', 'agent-replace')`,
+		`ALTER TABLE agent_setting_layers ADD COLUMN system_prompt_mode TEXT`,
+		`INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) VALUES ('role', 'worker', 'append')`,
+		`INSERT INTO agent_setting_layers (scope, role) VALUES ('role', 'planner')`,
+	}
+	for _, stmt := range statements {
+		if _, err := sqlDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureSchema(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err = Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	worker, reviewer, planner, profileCols := promptModeUpgrade(t, ctx, sqlDB)
+	if worker != "append" || reviewer != "replace" || planner != nil || profileCols != 0 {
+		t.Fatalf("worker %s reviewer %s planner %#v profile columns %d", worker, reviewer, planner, profileCols)
+	}
+}
+
+func promptModeUpgrade(t *testing.T, ctx context.Context, sqlDB *sql.DB) (worker, reviewer string, planner *string, profileCols int) {
+	t.Helper()
+	assertPromptModeSchema(t, ctx, sqlDB)
 	if err := sqlDB.QueryRowContext(ctx, `SELECT system_prompt_mode FROM agent_setting_layers WHERE scope = 'role' AND role = 'worker'`).Scan(&worker); err != nil {
 		t.Fatal(err)
 	}
 	if err := sqlDB.QueryRowContext(ctx, `SELECT system_prompt_mode FROM agent_setting_layers WHERE scope = 'role' AND role = 'reviewer'`).Scan(&reviewer); err != nil {
 		t.Fatal(err)
 	}
-	var planner *string
 	if err := sqlDB.QueryRowContext(ctx, `SELECT system_prompt_mode FROM agent_setting_layers WHERE scope = 'role' AND role = 'planner'`).Scan(&planner); err != nil {
 		t.Fatal(err)
 	}
-	if err := sqlDB.QueryRowContext(ctx, `SELECT system_prompt_mode FROM agent_profiles WHERE id = 'agent-replace'`).Scan(&profile); err != nil {
+	if err := sqlDB.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'agent_profiles' AND column_name = 'system_prompt_mode'`).Scan(&profileCols); err != nil {
 		t.Fatal(err)
 	}
-	if worker != "replace" || reviewer != "replace" || planner != nil || profile != "append" {
-		t.Fatalf("worker %s reviewer %s planner %#v profile %s", worker, reviewer, planner, profile)
-	}
+	return worker, reviewer, planner, profileCols
 }
 
 func assertPromptModeSchema(t *testing.T, ctx context.Context, sqlDB *sql.DB) {
@@ -119,6 +173,13 @@ func assertPromptModeSchema(t *testing.T, ctx context.Context, sqlDB *sql.DB) {
 		if n != 1 {
 			t.Fatalf("%s count %d", check.name, n)
 		}
+	}
+	var profileMode int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'agent_profiles' AND column_name = 'system_prompt_mode'`).Scan(&profileMode); err != nil {
+		t.Fatal(err)
+	}
+	if profileMode != 0 {
+		t.Fatalf("agent_profiles.system_prompt_mode still present")
 	}
 	for _, check := range []struct {
 		name  string

@@ -42,7 +42,7 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 		IncludeProjects: queryValue(query, "projects") == "1",
 		IncludeSecrets:  queryValue(query, "secrets") == "1",
 		Now:             now,
-		Version:         "2.10.0",
+		Version:         db.PythonVersion,
 	})
 	if err == nil && !stream.started {
 		err = io.ErrUnexpectedEOF

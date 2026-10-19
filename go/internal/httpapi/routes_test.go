@@ -572,7 +572,7 @@ func TestReadEndpoints(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/status"))
-	const wantStatus = `{"status": "running", "agents": {}, "tasks": {"total": 5, "running": 2, "completed": 1}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": []}`
+	const wantStatus = `{"status": "running", "agents": {}, "tasks": {"total": 5, "running": 2, "completed": 1}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": [], "can_sign_out": false}`
 	if rr.Code != http.StatusOK || rr.Body.String() != wantStatus {
 		t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 	}

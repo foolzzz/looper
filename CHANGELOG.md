@@ -18,6 +18,39 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-10-19
+
+### Highlights
+
+- **Manager and Planner replace the runtime's default system prompt on Codex, Grok and OMP too.** On v2.10.0 that was Claude Code only; the other three runtimes took append or replace from the Agent Profile. The mode is the role's on every runtime: Manager and Planner replace, Worker, Reviewer, Planner-defined role runs and consults append. Settings → Roles changes a role. A task can override its planner, worker or reviewer. The profile-level mode is removed. An older configuration export still imports; the profile field is ignored and the import records a note. One migration carries a Worker or Reviewer profile `replace` onto the role layer, then drops the profile column. ([#226](https://github.com/foolzzz/looper/pull/226))
+- **The Manager can set a task's mode.** `looper_task_update` takes `system_prompt_modes` (`append`, `replace`, or null to return that role to the role setting), the same write as `PUT /api/tasks/:id/agents`. ([#229](https://github.com/foolzzz/looper/pull/229))
+- **The dashboard signs out, and a 401 is one screen.** A password session gets a Sign out control. When any `/api/` call returns 401, the dashboard shows only "Your session ended. Reload to sign in again." with a Reload button, and every poller and stream stops. ([#229](https://github.com/foolzzz/looper/pull/229))
+- **A failed Planner or Worker turn names the runtime that ran.** The text is "Codex turn did not succeed" or "OMP exited ...", not always "Claude Code". ([#229](https://github.com/foolzzz/looper/pull/229))
+
+### Behavior changes
+
+These apply on upgrade. Each line says what the operator does.
+
+1. **Manager and Planner launches on Codex, Grok and OMP replace that runtime's default system prompt.** On v2.10.0 they appended unless the Agent Profile was set to replace. To keep appending, open Settings → Roles and set that role to Append. A task overrides its own planner, worker or reviewer on the task's Agents tab, with `system_prompt_modes` on `PUT /api/tasks/:id/agents`, or with the Manager's `looper_task_update`. Null on a role returns that role to the role setting. The Manager has no task-level mode. Worker, Reviewer and Planner-defined role runs append unless you set otherwise. A consult appends even when its seat's role is replace. Claude Code already replaced for the Manager and the Planner on v2.10.0; that does not change. With haiku as the Planner, replace scored lower than append on v2.10.0: run the Planner on opus or sonnet, or set the Planner role to append when it uses haiku. ([#226](https://github.com/foolzzz/looper/pull/226))
+2. **The profile-level mode is removed.** `POST /api/agent-profiles` and `PUT /api/agent-profiles/<id>` refuse `system_prompt_mode` (HTTP 400, `unknown field 'system_prompt_mode'`). The Manager's profile tool rejects it as an unknown argument (`invalid`). Configuration export no longer writes it. An older export still imports: the profile is kept, the field is ignored, and the import notes `profiles NAME: its system_prompt_mode is ignored; the mode is set per role (Settings → Roles) and applies to every runtime`. Set the mode in Settings → Roles, or on the task. ([#226](https://github.com/foolzzz/looper/pull/226))
+3. **The first start migrates once, while `agent_profiles.system_prompt_mode` still exists.** A Worker or Reviewer whose effective profile (the role layer's, else the shared defaults', else the built-in `claude-code/opus`) replaced, and whose role layer has no mode yet, gets `replace` on that role layer. A mode already stored there, including one v2.10.0 wrote for a Claude Code profile, stays. Then the column is dropped. A later start does not run this again. Manager and Planner are not copied: they replace because that is the built-in value, so a Codex, Grok or OMP profile that appended does not keep append. After `looper serve` has migrated, open Settings → Roles. If Worker or Reviewer shows Replace and you wanted append, set it back to Append. ([#226](https://github.com/foolzzz/looper/pull/226))
+4. **A task mode stored on v2.10.0 now applies on every runtime.** On v2.10.0 `task_system_prompt_modes` affected Claude Code only. The next Planner, Worker or Reviewer launch on Codex, Grok or OMP uses it. Reset the role on the task's Agents tab, or send a null role value in `system_prompt_modes` through `looper_task_update`, if that override should not apply. ([#226](https://github.com/foolzzz/looper/pull/226))
+5. **On 401 the dashboard shows one session-ended screen.** The text is "Your session ended. Reload to sign in again." and the button is Reload. Every poller and stream stops, and the call is not retried. Reload to sign in again. You do not turn this on. A password session also gets Sign out in the sidebar (`POST /logout`, then `/login`). The local browser's automatic sign-in shows no Sign out. `GET /api/status` reports `can_sign_out` true only for a password session. Dashboard pages send `Referrer-Policy: same-origin` so that POST carries an Origin; you do not set the header. ([#229](https://github.com/foolzzz/looper/pull/229))
+6. **Planner and Worker failure text names the runtime that ran.** Examples: "Codex turn did not succeed", "OMP exited ...", and a Worker "Grok run did not succeed". On v2.10.0 the same failures said "Claude Code". Nothing to configure. A check that matched the old sentence matches the runtime's label instead. ([#229](https://github.com/foolzzz/looper/pull/229))
+
+A `vX.Y.Z` tag still publishes the Python release.
+
+### Fixes
+
+- **The dashboard handles a dead session.** On v2.10.0 a 401 left the page to be reloaded by hand, and there was no Sign out control. A password session can sign out. Any `/api/` 401 replaces the page with one session-ended screen and stops every poller and stream. ([#229](https://github.com/foolzzz/looper/pull/229))
+- **Failed turns name the runtime.** A Planner or Worker failure on Codex, Grok or OMP no longer reads as a Claude Code failure. ([#229](https://github.com/foolzzz/looper/pull/229))
+
+### Validation
+
+- [#229](https://github.com/foolzzz/looper/pull/229): `tests/test_operator_auth.py`, `tests/test_ops_tasks_db.py` and `tests/test_agent_planner_worker.py` on PostgreSQL, 373 passed. Vitest 214 passed (24 files). `npm run build` succeeded. A password session in a browser showed Sign out and reached `/login`. After the session ended, an API call showed the session-ended screen. Opus Manager dialogs passed 48/48. The light theme was not checked.
+- Release candidate `595b6f229`: opus Planner 60/60 and opus xhigh Manager dialogs 72/72, three reps each (v2.10.0: 60/60 and 69/72; its three dialog misses were the stale `config_tools` expectation fixed in [#224](https://github.com/foolzzz/looper/pull/224)). Codex, OMP and Grok passed the core tasks (`single_step`, `chat_correction`, `reviewed_step`) 6/6 each, two reps; Grok's `status` dialog passed 2/2. Committed baselines remain at v2.9.0. Haiku was not a release gate.
+- [#226](https://github.com/foolzzz/looper/pull/226#issuecomment-6265891409), paired runs, two reps, replace vs v2.10.0 append: Codex Planner 36/40 vs 36/40, Manager dialogs 46/48 vs 46/48; OMP Planner 35/38 vs 37/38 with 2 timeouts on each side, dialogs 46/48 vs 46/48; Grok Planner 38/38 plus 2 timeouts vs 40/40, dialogs 47/48 vs 47/48. Grok's timeouts were `interface_first` and `room_consult` (900 seconds) while several eval queues ran at once. OMP's extra misses were a runtime error in `room_interface` and `room_consult`, which also failed under append.
+
 ## [2.10.0] - 2026-10-19
 
 ### Highlights

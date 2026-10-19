@@ -68,8 +68,13 @@ jobs:
 
           asyncio.run(main())
           PY
+          # Drift is a regeneration that rewrites these files. Diffing against
+          # HEAD also fails while an intended golden update is still uncommitted,
+          # so compare with a copy of the worktree taken before the generator runs.
+          snapshot="$(mktemp -d)"
+          cp -a go/testdata/parity/config_export "$snapshot/config_export"
           python go/testdata/parity/make_config_export_goldens.py --db-url postgresql://postgres:postgres@127.0.0.1:54329/loopgo_config_export_ci
-          git diff --exit-code -- go/testdata/parity/config_export
+          diff -ru "$snapshot/config_export" go/testdata/parity/config_export
 
       - name: Test
         env:

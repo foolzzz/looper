@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/foolzzz/looper/go/internal/configtransfer"
+	"github.com/foolzzz/looper/go/internal/db"
 )
 
 type exportReads struct {
@@ -86,7 +87,7 @@ func TestConfigExportQueryAndHeaders(t *testing.T) {
 				t.Fatalf("export called %d times", len(reads.options))
 			}
 			options := reads.options[0]
-			if options.IncludeProjects != tt.projects || options.IncludeSecrets != tt.secrets || options.Now != now || options.Version != "2.10.0" {
+			if options.IncludeProjects != tt.projects || options.IncludeSecrets != tt.secrets || options.Now != now || options.Version != db.PythonVersion {
 				t.Fatalf("options %+v", options)
 			}
 		})

@@ -25,8 +25,10 @@ Go release tags are `vX.Y.Z-go`. The steps are under Releases.
   ValueError past 4,300 digits, outside the handler's check). Go answers
   400 `{"error":"limit must be a whole number from 1 to 200"}`. A 4,300-digit
   value still matches Python (400 when it is outside 1..200).
-- Python is the reference until switch-over. Read-only routes are checked by
-  golden JSON: same seeded database, both servers, compare bodies.
+- Python is the reference until switch-over. The parity target is the latest
+  `main` merged into this branch. G1sync moved that target from v2.10.0 to
+  v2.11.0. Read-only routes are checked by golden JSON: same seeded database,
+  both servers, compare bodies.
 - Defaults follow Python in the milestone that owns the flag. G0's flags are
   the ones named below.
 - Logs go through `log/slog`. A database URL, password, or token is not a log
@@ -138,8 +140,8 @@ its task's cost. A task with no priced rows reports 0.0. Separate 0.1 and
 0.2 groups add to 0.3. SSE stays unserved.
 
 G1i copies `looper/db/schema.sql` from the Python checkout at `v2.10.0`
-(`c7b3300a5c73d1f5f7a43e6e548c9a1dff166b8c`, tag `v2.10.0`). That commit is
-`main`. `codex/release-v2.10.0`
+(`c7b3300a5c73d1f5f7a43e6e548c9a1dff166b8c`, tag `v2.10.0`). That commit was
+`main` when G1i landed. `codex/release-v2.10.0`
 (`e329a963a39389acd35be47ac32493708e4a647a`) is an ancestor, and the two
 trees match. The version string there is 2.10.0. The worktree Python
 package is still 2.8.0, and the goldens already in the tree were produced
@@ -222,6 +224,38 @@ regeneration and export tests pass; database-backed regeneration, HTTP parity,
 and the full suite remain unverified because the sandbox refuses TCP
 connections and listeners. The dashboard uses the existing download API;
 Telegram, Lark, and CLI need no new entry point.
+
+G1sync aligns the port with the latest `main` (v2.11.0). The embedded schema
+is again a byte copy of `looper/db/schema.sql`. `agent_profiles.system_prompt_mode`
+is gone. Registry profiles, task profile overrides, and configuration-export
+profiles omit that field. The mode stays on each role layer
+(`agent_setting_layers.system_prompt_mode`) and on
+`task_system_prompt_modes`, for every runtime. An upgrade copies a Worker or
+Reviewer `replace` onto the role layer when that layer has no mode yet,
+including a runtime that is not Claude Code, and leaves a stored mode in
+place. A second init does not copy again. `GET /api/status` includes
+`can_sign_out`. This server has no password session, so the field is false
+and the dashboard hides Sign out. A configuration export writes
+`looper_version` `2.11.0`. Status, registry, `task-rich`, the raw status
+response, and the config-export goldens were regenerated from this tree's
+Python against a disposable `loopgo_*` database. Catalog and knowledge
+goldens were left as they were: those handlers did not change between
+v2.10.0 and v2.11.0. Runtime-named failure text, the dashboard
+`Referrer-Policy: same-origin` header, and `/logout` are not on the ported
+read surface.
+
+The external seed step regenerates `go/testdata/parity/config_export` from
+this tree's Python, then runs `git diff --exit-code` on that directory. That
+compares the worktree with the index. An unstaged v2.11.0 golden update
+exits 1 and stops the run before `go test`, which is what the first harness
+tail showed. The regenerated fixtures are staged and not committed, so a
+stable regeneration leaves that diff empty, and a generator that rewrites
+bytes still fails it. `looper_version` in those fixtures is
+`looper.__version__` (`2.11.0`); the generator does not patch it. CI copies
+the directory before regeneration and runs `diff -ru` against that copy, so
+a clean checkout still fails when committed fixtures drift. `go vet ./...`
+and `go test ./...` passed from `go/` with `LOOPGO_TEST_DATABASE_URL` and
+`LOOPGO_CONFIG_EXPORT_PARITY_URL` set to disposable `loopgo_*` databases.
 
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.

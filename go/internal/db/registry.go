@@ -300,31 +300,26 @@ func profileView(row map[string]any, used map[string]any) map[string]any {
 		textList(row["provider_protocols"]), asString(row["provider_oauth_runtime_type"]),
 		asString(row["provider_base_url"]),
 	)
-	mode := asString(row["system_prompt_mode"])
-	if mode == "" {
-		mode = "append"
-	}
 	custom := ""
 	if row["custom_prompt"] != nil {
 		custom = asString(row["custom_prompt"])
 	}
 	return map[string]any{
-		"profile_id":         row["id"],
-		"name":               row["name"],
-		"model":              row["model"],
-		"effort":             row["effort"],
-		"runtime_id":         row["runtime_id"],
-		"runtime_name":       spec.Name,
-		"runtime_type":       spec.Type,
-		"provider_id":        row["provider_id"],
-		"provider_name":      provider.Name,
-		"builtin":            asBool(row["builtin"]),
-		"agent_teams":        asBool(row["agent_teams"]),
-		"system_prompt_mode": mode,
-		"custom_prompt":      custom,
-		"roles":              servableRoles(spec.Capabilities),
-		"used_by":            used,
-		"cost":               costBasis(row),
+		"profile_id":    row["id"],
+		"name":          row["name"],
+		"model":         row["model"],
+		"effort":        row["effort"],
+		"runtime_id":    row["runtime_id"],
+		"runtime_name":  spec.Name,
+		"runtime_type":  spec.Type,
+		"provider_id":   row["provider_id"],
+		"provider_name": provider.Name,
+		"builtin":       asBool(row["builtin"]),
+		"agent_teams":   asBool(row["agent_teams"]),
+		"custom_prompt": custom,
+		"roles":         servableRoles(spec.Capabilities),
+		"used_by":       used,
+		"cost":          costBasis(row),
 	}
 }
 

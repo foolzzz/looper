@@ -190,7 +190,7 @@ function ProfileField({
   );
 }
 
-/** The role's system prompt mode on Claude Code, which the task may set for itself; shown only on Claude Code. */
+/** The role's system prompt mode for any runtime, which the task may set for itself. */
 function PromptModeField({
   taskId,
   role,
@@ -207,7 +207,7 @@ function PromptModeField({
   const id = useId();
   const { busy, error, save } = useSave(taskId, onSaved);
   const own = mode.source === "task";
-  const label = mode.value === "replace" ? "Replace Claude Code's prompt" : "Append to Claude Code's prompt";
+  const label = mode.value === "replace" ? "Replace the runtime's prompt" : "Append to the runtime's prompt";
   if (!editable) {
     return (
       <div className="space-y-1">
@@ -231,8 +231,8 @@ function PromptModeField({
         aria-describedby={error ? `${id}-error` : undefined}
         className={cn(SELECT, "h-11 sm:h-9")}
       >
-        <option value="append">Append to Claude Code&apos;s prompt</option>
-        <option value="replace">Replace Claude Code&apos;s prompt</option>
+        <option value="append">Append to the runtime&apos;s prompt</option>
+        <option value="replace">Replace the runtime&apos;s prompt</option>
       </select>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" aria-label="Saving" />}
@@ -364,15 +364,13 @@ export function TaskAgentsSection({
                 editable={editable}
                 onSaved={onSaved}
               />
-              {roles[role].runtime_type === "claude-code" && (
-                <PromptModeField
-                  taskId={taskId}
-                  role={role}
-                  mode={roles[role].system_prompt_mode}
-                  editable={editable}
-                  onSaved={onSaved}
-                />
-              )}
+              <PromptModeField
+                taskId={taskId}
+                role={role}
+                mode={roles[role].system_prompt_mode}
+                editable={editable}
+                onSaved={onSaved}
+              />
               {role !== "planner" && (
                 <LimitField
                   taskId={taskId}

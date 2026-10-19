@@ -182,7 +182,7 @@ func TestStatus(t *testing.T) {
 						t.Fatalf("status includes %s, which Python does not: %s", key, rr.Body.String())
 					}
 				}
-				if len(raw) != 5 {
+				if len(raw) != 6 || raw["can_sign_out"] != false {
 					t.Fatalf("keys %v", raw)
 				}
 			}
@@ -200,7 +200,7 @@ func TestStatus(t *testing.T) {
 }
 
 // pythonStatusZero is GET /api/status with no reader and no live agents.
-const pythonStatusZero = `{"status": "running", "agents": {}, "tasks": {"total": 0, "running": 0, "completed": 0}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": []}`
+const pythonStatusZero = `{"status": "running", "agents": {}, "tasks": {"total": 0, "running": 0, "completed": 0}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": [], "can_sign_out": false}`
 
 func TestStatusHidesDSNSecrets(t *testing.T) {
 	tests := []struct {

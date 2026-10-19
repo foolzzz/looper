@@ -48,6 +48,28 @@ func exportFixtureRead(t *testing.T) exportRead {
 		return out, nil
 	}
 }
+func TestPythonVersionIsReference(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "looper", "__init__.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = `__version__ = "`
+	text := string(raw)
+	i := strings.Index(text, marker)
+	if i < 0 {
+		t.Fatal("looper/__init__.py has no __version__ assignment")
+	}
+	rest := text[i+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 || rest[:end] != PythonVersion {
+		got := ""
+		if end >= 0 {
+			got = rest[:end]
+		}
+		t.Fatalf("PythonVersion %q != looper.__version__ %q", PythonVersion, got)
+	}
+}
+
 func TestConfigExportGolden(t *testing.T) {
 	for _, tt := range []struct {
 		name              string
@@ -57,7 +79,7 @@ func TestConfigExportGolden(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
-			opts := configtransfer.Options{IncludeProjects: tt.projects, IncludeSecrets: tt.secrets, Now: time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), Version: "2.10.0"}
+			opts := configtransfer.Options{IncludeProjects: tt.projects, IncludeSecrets: tt.secrets, Now: time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), Version: PythonVersion}
 			summary, err := exportConfig(context.Background(), &out, opts, exportFixtureRead(t))
 			if err != nil {
 				t.Fatal(err)

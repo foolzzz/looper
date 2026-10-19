@@ -68,6 +68,13 @@ _PROFILES_SCHEMA = {
 }
 
 
+_PROMPT_MODES_SCHEMA = {
+    "type": "object",
+    "description": "The task's own append or replace choice per role; null returns it to the role setting.",
+    "properties": {role: {"enum": ["append", "replace", None]} for role in TASK_PROFILE_ROLES},
+}
+
+
 def _via(turn: Turn) -> str:
     """How a change the Manager made came, as ``db.task_changes`` records it."""
     return f"manager:{turn.channel or 'unknown'}"
@@ -529,8 +536,10 @@ async def _update(call: Call) -> dict[str, Any]:
     arguments = call.arguments
     task_id = arguments["task_id"]
     requirement, work_dir = arguments.get("requirement"), arguments.get("work_dir")
-    if requirement is None and work_dir is None and not arguments.get("profiles"):
-        raise OpError(ErrorCode.INVALID, "give at least one of requirement, work_dir and profiles")
+    own_agents = {field: arguments[field] for field in ("profiles", "system_prompt_modes") if arguments.get(field)}
+    if requirement is None and work_dir is None and not own_agents:
+        raise OpError(ErrorCode.INVALID, "give at least one of requirement, work_dir, profiles and "
+                                         "system_prompt_modes")
     task = await _task(task_id)
     if _ended(task) and (requirement is not None or work_dir is not None):
         # Its profiles still change (set_task_agents says which tasks can), so that a restart runs with them.
@@ -545,13 +554,13 @@ async def _update(call: Call) -> dict[str, Any]:
         except ValueError as exc:
             raise OpError(ErrorCode.INVALID, f"work_dir: {exc}") from None
     changed: list[str] = []
-    if arguments.get("profiles"):
+    if own_agents:
         # As the task page sets them: one check and one write (projects.set_task_agents).
         try:
-            await set_task_agents(task_id, {"profiles": arguments["profiles"]})
+            await set_task_agents(task_id, own_agents)
         except RequestError as exc:
             raise _request_error(exc) from None
-        changed.append("profiles")
+        changed.extend(own_agents)
     if work_dir is not None:
         if not await db_tasks.update_task_config(task_id, work_dir=work_dir):
             raise OpError(ErrorCode.CONFLICT, f"task {task_id} started meanwhile: its directory stays")
@@ -752,6 +761,7 @@ TOOLS: tuple[Tool, ...] = (
                                 "description": "The whole new requirement."},
                 "work_dir": {"type": "string", "minLength": 1, "description": "The new absolute directory."},
                 "profiles": _PROFILES_SCHEMA,
+                "system_prompt_modes": _PROMPT_MODES_SCHEMA,
             },
         },
         risk=Risk.WRITE, run=_update, task_id=_task_argument,

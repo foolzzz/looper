@@ -62,7 +62,6 @@
       "model": "fixture-model",
       "effort": "low",
       "agent_teams": false,
-      "system_prompt_mode": "append",
       "custom_prompt": "Custom profile text 🌍",
       "builtin": false
     },
@@ -74,7 +73,6 @@
       "model": "fixture-model",
       "effort": "high",
       "agent_teams": false,
-      "system_prompt_mode": "append",
       "custom_prompt": "Custom profile text 🌍",
       "builtin": false
     },
@@ -86,7 +84,6 @@
       "model": "fixture-model",
       "effort": "low",
       "agent_teams": false,
-      "system_prompt_mode": "replace",
       "custom_prompt": "Replace profile text",
       "builtin": false
     },
@@ -98,7 +95,6 @@
       "model": "opus",
       "effort": null,
       "agent_teams": true,
-      "system_prompt_mode": "append",
       "custom_prompt": "",
       "builtin": true
     }

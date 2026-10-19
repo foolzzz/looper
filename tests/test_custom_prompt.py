@@ -131,7 +131,7 @@ def test_manager_profile_tool_exposes_and_returns_custom_prompt() -> None:
     tool = next(tool for tool in TOOLS if tool.name == "looper_agent_profiles")
     assert tool.schema["properties"]["custom_prompt"]["type"] == "string"
     view = {"profile_id": "profile", "name": "profile", "runtime_name": "Claude Code", "provider_name": "login",
-            "model": "sonnet", "effort": None, "agent_teams": False, "system_prompt_mode": "append",
+            "model": "sonnet", "effort": None, "agent_teams": False,
             "custom_prompt": "CUSTOM", "roles": [], "builtin": False,
             "used_by": {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}}
     assert _profile_listed(view)["custom_prompt"] == "CUSTOM"

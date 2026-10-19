@@ -2871,14 +2871,15 @@ class PlannerAgent:
             final_text = str((result_event or {}).get("result") or "")
             error: str | None = None
             over_cap = process.launch.runtime.budget_error(result_event)
+            label = process.launch.runtime.label  # the runtime that ran the turn, not always Claude Code
             if result_event is None:
-                error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
+                error = f"{label} exited before finishing the turn (exit code {turn.exit_code})"
             elif over_cap:
                 error = over_cap
             elif result_event.get("is_error") or result_event.get("subtype") != "success":
-                error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
+                error = f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})"
             elif not final_text.strip():
-                error = "Claude Code returned an empty reply"
+                error = f"{label} returned an empty reply"
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
             # keeps what it spent.
             await recorder.finish(

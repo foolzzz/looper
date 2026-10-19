@@ -23,7 +23,7 @@ import (
 // (the handler keeps enabled, counts, by_step and consults only).
 
 const profileJSON = `json_build_object('id', a.id, 'name', a.name, 'model', a.model, 'effort', a.effort, 'builtin', a.builtin, ` +
-	`'agent_teams', a.agent_teams, 'system_prompt_mode', a.system_prompt_mode, 'custom_prompt', a.custom_prompt, ` +
+	`'agent_teams', a.agent_teams, 'custom_prompt', a.custom_prompt, ` +
 	`'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, ` +
 	`'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, 'provider_auth', p.auth, ` +
 	`'provider_protocols', p.protocols, 'provider_oauth_runtime_type', p.oauth_runtime_type, ` +
@@ -1401,29 +1401,24 @@ func defaultConcurrency(role string, layers map[layerKey]layerValues) (int, stri
 }
 
 func profileRecord(row map[string]any) map[string]any {
-	mode := "append"
-	if text := asString(row["system_prompt_mode"]); text != "" {
-		mode = text
-	}
 	custom := ""
 	if row["custom_prompt"] != nil {
 		custom = asString(row["custom_prompt"])
 	}
 	return map[string]any{
-		"profile_id":         row["id"],
-		"name":               row["name"],
-		"model":              row["model"],
-		"effort":             row["effort"],
-		"runtime_id":         row["runtime_id"],
-		"runtime_name":       row["runtime_name"],
-		"runtime_type":       row["runtime_type"],
-		"provider_id":        row["provider_id"],
-		"provider_name":      row["provider_name"],
-		"builtin":            asBool(row["builtin"]),
-		"agent_teams":        asBool(row["agent_teams"]),
-		"system_prompt_mode": mode,
-		"custom_prompt":      custom,
-		"roles":              servableRoles(textList(row["runtime_capabilities"])),
+		"profile_id":    row["id"],
+		"name":          row["name"],
+		"model":         row["model"],
+		"effort":        row["effort"],
+		"runtime_id":    row["runtime_id"],
+		"runtime_name":  row["runtime_name"],
+		"runtime_type":  row["runtime_type"],
+		"provider_id":   row["provider_id"],
+		"provider_name": row["provider_name"],
+		"builtin":       asBool(row["builtin"]),
+		"agent_teams":   asBool(row["agent_teams"]),
+		"custom_prompt": custom,
+		"roles":         servableRoles(textList(row["runtime_capabilities"])),
 		"used_by": map[string]any{
 			"layers":         []any{},
 			"task_count":     0,
