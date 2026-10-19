@@ -175,14 +175,14 @@ class OmpRuntime(RuntimeAdapter):
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
                                   timeout=_PROBE_TIMEOUT_SEC, check=False, env={**_omp_env(os.environ), "HOME": home})
         except FileNotFoundError:
-            return Probe(None, self.capabilities, f"{executable!r} was not found")
+            return Probe(None, self.capabilities_for(None), f"{executable!r} was not found")
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return Probe(None, self.capabilities, f"{executable} --version did not run: {type(exc).__name__}: {exc}")
+            return Probe(None, self.capabilities_for(None), f"{executable} --version did not run: {type(exc).__name__}: {exc}")
         finally:
             shutil.rmtree(home, ignore_errors=True)
         first = next((line.strip() for line in (done.stdout or done.stderr).splitlines() if line.strip()), "")
         if done.returncode != 0 or not first:
-            return Probe(None, self.capabilities, f"{executable} --version failed (exit code {done.returncode})"
+            return Probe(None, self.capabilities_for(None), f"{executable} --version failed (exit code {done.returncode})"
                                                   + (f": {first}" if first else ""))
         return Probe(first[:200], self.capabilities_for(first))
 

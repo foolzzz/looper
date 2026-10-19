@@ -32,7 +32,9 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   result's own figure. A cost over its cap or still unknown drops the answers on every runtime.
   A provider-priced model without a full price cannot run a consult (``runtime_cannot``).
   One deadline covers writing the prompt, reading the reply and waiting for exit; stderr is drained with a short
-  tail kept for errors, and the process tree is ended on success too.
+  tail kept for errors, and the process tree is ended on success too. The tree is read every ``TREE_WATCH_SEC`` and
+  again before the result is recorded, and the consult's own process group is signalled; a child that calls
+  ``setsid`` between two reads and whose parent then exits is not found (a known limit).
 - **Delivery.** Its end state, answers and unanswered questions for the Planner commit together, once. If its
   task's room was turned off, it ends ``failed`` (``room_off``), without messages or notifications.
 - **Restarts.** Shutdown leaves consults queued or running; killing a run gives its questions to the Planner.

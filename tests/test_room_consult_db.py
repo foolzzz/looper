@@ -45,11 +45,10 @@ from pathlib import Path
 mode = os.environ.get("CONSULT_MODE", "answer")
 fork = "11111111-1111-4111-8111-111111111111"
 if mode in ("fast_exit_child", "cancel_in_record"):
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     Path(os.environ["CHILD_PID"]).write_text(str(child.pid))
     print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
-    time.sleep(1.0)
     text = json.dumps({"answers": [{"reply_to": int(os.environ["QUESTION_ID"]), "body": "the field is qty"}],
                        "unsure": ""})
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
@@ -1157,7 +1156,7 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
             nonlocal recording_result
             if event.get("type") == "result":
                 recording_result = True
-                # The CLI exits immediately after this event; its child is reparented while recording waits.
+                # The CLI exits immediately; its child stays in its process group while recording waits.
                 await asyncio.sleep(60 if mode == "cancel_in_record" else 0.5)
             await record(self, event)
 

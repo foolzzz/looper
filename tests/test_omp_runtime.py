@@ -618,7 +618,30 @@ def test_the_probe_reads_only_the_version_with_an_empty_home(tmp_path: Path, mon
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "operator"))
     probe = OMP.probe(omp)
     assert (probe.version, probe.error) == ("omp/18.4.3", None)
+    assert Capability.READ_TOOLS in probe.capabilities
+    assert OMP.read_only_for(probe.capabilities) is ReadOnly.TOOLS
     assert OMP.probe(str(tmp_path / "nothing")).error == f"{str(tmp_path / 'nothing')!r} was not found"
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "nonzero", "empty"])
+def test_a_failed_probe_cannot_restrict_the_tools(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    import subprocess
+
+    from looper.agents.runtimes import omp as omp_module
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if failure == "missing":
+            raise FileNotFoundError(command[0])
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 1 if failure == "nonzero" else 0,
+                                           stdout="omp/18.4.3" if failure == "nonzero" else "", stderr="")
+
+    monkeypatch.setattr(omp_module.subprocess, "run", run)
+    probe = OMP.probe("omp")
+    assert probe.version is None and probe.error
+    assert Capability.READ_TOOLS not in probe.capabilities
+    assert OMP.read_only_for(probe.capabilities) is ReadOnly.CHECK
 
 
 def test_its_capabilities_cover_every_role() -> None:
