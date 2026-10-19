@@ -22,7 +22,7 @@ from .connection import get_pool
 # The columns of an Agent Profile row joined with its runtime and provider, as one JSON object (also inside a layer).
 PROFILE_JSON = (
     "json_build_object('id', a.id, 'name', a.name, 'model', a.model, 'effort', a.effort, 'builtin', a.builtin, "
-    "'agent_teams', a.agent_teams, 'system_prompt_mode', a.system_prompt_mode, "
+    "'agent_teams', a.agent_teams, 'system_prompt_mode', a.system_prompt_mode, 'custom_prompt', a.custom_prompt, "
     "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
     "'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, 'provider_auth', p.auth, "
     "'provider_protocols', p.protocols, 'provider_oauth_runtime_type', p.oauth_runtime_type, "
@@ -211,17 +211,17 @@ async def insert_profile(fields: Mapping[str, Any], *, pool: asyncpg.Pool | None
     # Profile ids keep the agent- prefix they had before the rename, so stored ids and new ones read alike.
     profile_id = new_id("agent")
     await pool.execute(
-        "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, system_prompt_mode) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, system_prompt_mode, custom_prompt) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         profile_id, fields["name"], fields["runtime_id"], fields["provider_id"], fields["model"], fields["effort"],
-        fields["agent_teams"], fields.get("system_prompt_mode", "append"),
+        fields["agent_teams"], fields.get("system_prompt_mode", "append"), fields.get("custom_prompt", ""),
     )
     return profile_id
 
 
 async def update_profile(profile_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
     pool = pool or get_pool()
-    columns = [c for c in ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "system_prompt_mode")
+    columns = [c for c in ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "system_prompt_mode", "custom_prompt")
                if c in fields]
     sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
     await pool.execute(f"UPDATE agent_profiles SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
@@ -269,6 +269,23 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     for row in allowed:
         use(row["profile_id"])["allowed_in"].append(row["name"])
     return uses
+
+
+async def delete_profile_unchosen(profile_id: str, statuses: list[str], *, pool: asyncpg.Pool | None = None,
+                                  ) -> list[dict[str, Any]]:
+    """Delete ``profile_id`` unless a Planner of a task in one of ``statuses`` chose it: those tasks (``{id,
+    title}``), and nothing deleted. The profile row is locked first, so a choice being written waits (its foreign
+    key takes a share lock) and is seen, or fails once the profile is gone; it is never dropped by the cascade.
+    Raises ``asyncpg.ForeignKeyViolationError`` while a layer or a task selects it."""
+    from .agent_setting_layers import open_planner_choices
+
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.fetchval("SELECT id FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
+        if chosen := await open_planner_choices(profile_id, statuses, pool=conn):
+            return chosen
+        await conn.execute("DELETE FROM agent_profiles WHERE id = $1", profile_id)
+    return []
 
 
 async def delete_profile(profile_id: str, *, pool: asyncpg.Pool | None = None) -> bool:

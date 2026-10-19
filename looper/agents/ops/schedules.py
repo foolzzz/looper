@@ -27,6 +27,7 @@ from typing import Any
 
 from ...db import connection as db_connection, profile_registry as db_profiles, projects as db_projects, schedules as db_schedules
 from .. import cron, schedules
+from ..message import is_lark
 from ..project_execution import format_usd
 from ..tiers.journal import clip
 from . import Call, ErrorCode, OpError, Risk, Tool
@@ -156,7 +157,7 @@ async def _create(call: Call) -> dict[str, Any]:
     _required(arguments, "create", "project")
     project = await project_named(arguments["project"])
     data = _fields(arguments, "create")
-    if "notify_target" not in data and turn.channel in ("telegram", "lark") and turn.sender:
+    if "notify_target" not in data and (is_lark(turn.channel) or turn.channel == "telegram") and turn.sender:
         # Made from a Telegram or Lark chat: its messages go to whoever asked, when their channel's allowlist lets them.
         asked = {"channel": turn.channel, "chat": turn.sender}
         if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"]) for t in await schedules.notify_targets()):
@@ -371,7 +372,7 @@ _FIELDS = {
         "gate_timeout_seconds": {"type": "integer"},
         "notify": {"type": "string", "enum": [n.value for n in schedules.Notify]},
         "notify_target": {"type": "object", "description": "{channel, chat}; null: dashboard only."},
-        "profiles": {"type": "object", "description": "role: Agent Profile."},
+        "profiles": {"type": "object", "description": "{planner, worker, reviewer}: Agent Profile (id or name) per role; a role left out keeps the project's. Set only what the user asks for: a repetitive schedule's Planner may be a cheaper profile."},
         "task_limits": {"type": "object", "description": "{worker, reviewer}: each run's task's own limits."},
     },
 }

@@ -49,7 +49,8 @@ format translates it at launch (Codex: ``codex.materialize``,
 (``launch_record``).
 
 A runtime whose CLI runs one turn per process keeps the Manager's and a
-Planner's session by resuming it on every turn (``per_turn.PerTurnSession``).
+Planner's session by resuming it on every turn (``per_turn.PerTurnSession``);
+Grok keeps one process for it over ACP (``grok_acp``), per turn when it cannot.
 
 The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
 (``omp``) and ``grok`` (``grok``).
@@ -63,9 +64,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
+from .channel import RunChannel as RunChannel, StreamChannel as StreamChannel
 
 if TYPE_CHECKING:
     from ..profile_registry import ProviderSpec
@@ -94,6 +96,7 @@ class Capability(str, Enum):
     """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
 
     RUN = "run"  # one run of a prompt, which takes more user turns while it runs (a Worker, a Reviewer)
+    STEER = "steer"  # a Worker or Reviewer run takes the Planner's messages while it works, through the runtime's own protocol (RunChannel)
     RESIDENT_SESSION = "resident_session"  # a process that stays up between user turns (the Manager, a Planner)
     RESUME = "resume"  # a new process continues a saved session (the Manager, a Planner)
     STRUCTURED_OUTPUT = "structured_output"  # the runtime enforces a reply schema itself
@@ -102,6 +105,7 @@ class Capability(str, Enum):
     ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
     COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
+    READ_TOOLS = "read_tools"  # it can run with only the tools that read (OMP's --tools), keeping its MCP tools
     COST_REPORT = "cost_report"  # it reports what a run cost
 
 
@@ -109,8 +113,16 @@ class ReadOnly(str, Enum):
     """How a run that must not change files (``Launch.read_only``, a Planner's) is kept from changing them."""
 
     PERMISSIONS = "permissions"  # the runtime refuses the tools and commands that would, and reports each refusal
+    SANDBOX = "sandbox"  # its sandbox fails the commands and edits that would; nothing is reported as refused
     TOOLS = "tools"  # it runs with reading tools only (no shell, no write tool); nothing is refused, so nothing is reported
     CHECK = "check"  # it cannot: the Planner compares the task directory before and after each turn
+
+
+class ResidentTransport(str, Enum):
+    """How a runtime serves the Manager's and a Planner's session (``RuntimeAdapter.resident_transport``)."""
+
+    PER_TURN = "per_turn"  # one process per turn, resuming the session (``per_turn.PerTurnSession``)
+    ACP = "acp"  # one process for the session, speaking the Agent Client Protocol (``grok_acp.AcpGrok``)
 
 
 class CostSource(str, Enum):
@@ -161,8 +173,9 @@ class Probe:
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
-    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex, OMP and Grok one process per turn
-    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``, ``grok.ResidentGrok``)."""
+    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Grok one over ACP (``grok_acp.AcpGrok``),
+    Codex and OMP one process per turn (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``;
+    ``grok.ResidentGrok`` is Grok's fallback)."""
 
     @property
     def label(self) -> str: ...
@@ -185,6 +198,32 @@ class ResidentSession(Protocol):
 
 class RuntimeUnsupported(ValueError):
     """The runtime cannot do what was asked of it (yet)."""
+
+
+@dataclass(frozen=True)
+class PromptBlock:
+    """One ordered prompt input: Looper's full text, or a runtime-owned part's explanation."""
+
+    name: str
+    owner: Literal["looper", "runtime"]
+    text: str | None
+    note: str
+
+
+def runtime_prompt_text(launch: Launch, looper_prompt: str, *prefixes: str, keep_empty: bool = True) -> str:
+    """Keep adapter notes before the harness, while a profile's custom text stays first.
+
+    Empty custom text preserves the existing files byte for byte. A recorded
+    prompt which does not start with this profile's text is left intact (consults).
+    """
+    custom = launch.profile.custom_prompt.strip()
+    first = ""
+    if custom and (looper_prompt == custom or looper_prompt.startswith(custom + "\n\n")):
+        first, looper_prompt = custom + "\n\n", looper_prompt[len(custom):].removeprefix("\n\n")
+    parts = [part for part in prefixes if part]
+    if looper_prompt or keep_empty:
+        parts.append(looper_prompt)
+    return first + "\n\n---\n\n".join(parts)
 
 
 class RuntimeAdapter(ABC):
@@ -210,6 +249,8 @@ class RuntimeAdapter(ABC):
     # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
     runtime_cost_capped: ClassVar[bool] = True
     can_replace_system_prompt: ClassVar[bool] = False
+    # How its resident sessions run. A runtime with ACP falls back to a process per turn when it cannot serve one.
+    resident_transport: ClassVar[ResidentTransport] = ResidentTransport.PER_TURN
 
     # --- Registration ---
 
@@ -217,11 +258,20 @@ class RuntimeAdapter(ABC):
     def probe(self, executable: str) -> Probe:
         """The version and capabilities of ``executable``; never a model call."""
 
+    def read_only_for(self, capabilities: frozenset[Capability]) -> ReadOnly:
+        """How a read-only run is kept read-only with a runtime of these (probed) ``capabilities``."""
+        return self.read_only
+
     def capabilities_for(self, version: str | None) -> frozenset[Capability]:
         """What a probed version can do; every version of the type, unless the adapter says otherwise."""
         return self.capabilities
 
     # --- The launch ---
+
+    @abstractmethod
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        """The ordered system inputs, including injected project files when ``cwd`` is known, using the same
+        text layout as the real command's files."""
 
     @abstractmethod
     def isolation_args(self, cwd: str | Path) -> list[str]:
@@ -255,6 +305,17 @@ class RuntimeAdapter(ABC):
         """A one-off run's command; its prompt and later user turns come on stdin. With ``session_dir`` a runtime
         that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
         later (the agent room's consults); Claude Code keeps every run's session in its own place."""
+
+    def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                      max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """The command of a run that can be steered; arguments have the same meaning as ``run_command``."""
+        raise RuntimeUnsupported(f"a {self.label} run cannot be steered")
+
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None) -> RunChannel:
+        """How the Worker talks to ``process``, started from ``run_command`` (or ``steer_command`` when
+        ``launch.steers``)."""
+        return StreamChannel(self, process, model=launch.model)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:
         """Where a finished run started with ``command`` kept its session itself, for a runtime that keeps it in a

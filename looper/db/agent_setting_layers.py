@@ -6,9 +6,10 @@ or ``role_project`` (with both). A NULL field is not set at its layer;
 ``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (the Workers'
 or the Reviewers' role layer only) how many of them run at once in a task that sets none. A task may choose
 the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
-(``task_concurrency_limits``): together, its task layer. Its Planner may choose the profile of its Workers or
+(``task_concurrency_limits``) and append or replace (``task_system_prompt_modes``, Claude Code only): together, its task layer. Its Planner may choose the profile of its Workers or
 Reviewers, for the rest of the task or for one step (``task_planner_profiles``), under the task layer; a choice
-counts only while its profile is on the list of the task's project (``project_allowed_profiles``); so does the
+counts only while its profile is allowed by the task's project (on its list, ``project_allowed_profiles``, or any
+while the list is empty); so does the
 profile of a role its Planner defined (``task_roles``), for a run of that role. The system layer alone may hold
 ``boundaries``. Code owns the fields' types, validation and resolution (``looper.agents.agent_settings``); this module
 only stores rows.
@@ -24,14 +25,16 @@ import asyncpg
 
 from .profile_registry import PROFILE_JOIN, PROFILE_JSON
 from .connection import get_pool
+from .projects import profile_allowed_sql
 
-FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries")
+FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries",
+          "system_prompt_mode")
 
 # A task's Planner's choices that count: those whose profile its project allows now.
 _PLANNER_CHOICES = (
     "FROM task_planner_profiles c JOIN tasks k ON k.id = c.task_id "
-    "JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = c.profile_id "
 )
+_CHOICE_ALLOWED = profile_allowed_sql("k.project_id", "c.profile_id")
 
 
 def _row(row: asyncpg.Record) -> dict[str, Any]:
@@ -55,7 +58,7 @@ async def list_layers(
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
-        f"l.max_concurrency, l.boundaries, "
+        f"l.max_concurrency, l.boundaries, l.system_prompt_mode, "
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = l.profile_id) AS profile "
         "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1",
         project_id,
@@ -68,11 +71,17 @@ async def list_layers(
             "FROM (SELECT * FROM task_profile_overrides WHERE task_id = $1) t "
             "FULL JOIN (SELECT * FROM task_concurrency_limits WHERE task_id = $1) c ON c.role = t.role", task_id,
         )
-        layers += [{"scope": "task", "task_id": task_id, **_row(r)} for r in overrides]
+        task_rows = {r["role"]: {"scope": "task", "task_id": task_id, **_row(r)} for r in overrides}
+        for r in await pool.fetch("SELECT role, system_prompt_mode FROM task_system_prompt_modes WHERE task_id = $1",
+                                  task_id):
+            task_rows.setdefault(r["role"], {"scope": "task", "task_id": task_id, "role": r["role"]})[
+                "system_prompt_mode"] = r["system_prompt_mode"]
+        layers += list(task_rows.values())
         chosen = await pool.fetch(
             f"SELECT CASE WHEN c.step_id IS NULL THEN 'planner_task' ELSE 'planner_step' END AS scope, c.role, "
             f"c.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
-            f"{_PLANNER_CHOICES} WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2)",
+            f"{_PLANNER_CHOICES} WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2) "
+            f"AND {_CHOICE_ALLOWED}",
             task_id, step_id,
         )
         layers += [{"task_id": task_id, **_row(r)} for r in chosen]
@@ -81,8 +90,8 @@ async def list_layers(
                 f"SELECT 'task_role' AS scope, CASE tr.kind WHEN 'work' THEN 'worker' ELSE 'reviewer' END AS role, "
                 f"tr.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = tr.profile_id) AS profile "
                 "FROM task_roles tr JOIN tasks k ON k.id = tr.task_id "
-                "JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = tr.profile_id "
-                "WHERE tr.task_id = $1 AND tr.role_key = $2 AND tr.version = $3",
+                "WHERE tr.task_id = $1 AND tr.role_key = $2 AND tr.version = $3 "
+                f"AND {profile_allowed_sql('k.project_id', 'tr.profile_id')}",
                 task_id, task_role[0], task_role[1],
             )
             layers += [{"task_id": task_id, **_row(r)} for r in role]
@@ -124,7 +133,7 @@ async def put_layer(
         await conn.execute(
             "DELETE FROM agent_setting_layers WHERE scope = $1 AND role IS NOT DISTINCT FROM $2 "
             "AND project_id IS NOT DISTINCT FROM $3 AND harness_prompt IS NULL AND profile_id IS NULL "
-            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL AND boundaries IS NULL",
+            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL AND boundaries IS NULL AND system_prompt_mode IS NULL",
             scope, role, project_id,
         )
 
@@ -146,14 +155,16 @@ async def set_task_limits(conn: asyncpg.Connection, task_id: str, limits: Mappin
 
 
 async def set_task_layer(task_id: str, *, profiles: Mapping[str, str | None] | None = None,
-                         limits: Mapping[str, int | None] | None = None, pool: asyncpg.Pool | None = None) -> None:
+                         limits: Mapping[str, int | None] | None = None,
+                         modes: Mapping[str, str | None] | None = None, pool: asyncpg.Pool | None = None) -> None:
     """Change task ``task_id``'s own choices, in one transaction: its Agent Profile of each role in ``profiles``
-    (role -> profile id) and its concurrency limit of each role in ``limits`` (role -> limit); None drops the task's
+    (role -> profile id) and its concurrency limit of each role in ``limits`` (role -> limit) and its system prompt mode of each role in ``modes`` (role -> append or replace); None drops the task's
     choice of that role. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown task or profile."""
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
         for table, column, values in (("task_profile_overrides", "profile_id", profiles or {}),
-                                      ("task_concurrency_limits", "max_concurrency", limits or {})):
+                                      ("task_concurrency_limits", "max_concurrency", limits or {}),
+                                      ("task_system_prompt_modes", "system_prompt_mode", modes or {})):
             for role, value in values.items():
                 if value is None:
                     await conn.execute(f"DELETE FROM {table} WHERE task_id = $1 AND role = $2", task_id, role)
@@ -185,6 +196,20 @@ async def profile_overrides(task_id: str, *, pool: asyncpg.Pool | None = None) -
     return {r["role"]: _row(r)["profile"] for r in rows}
 
 
+async def open_planner_choices(profile_id: str, statuses: list[str], *,
+                               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """The tasks in one of ``statuses`` (not ended) whose Planner chose Agent Profile ``profile_id``, for its
+    Workers and Reviewers (``task_planner_profiles``) or for a role it defined (``task_roles``), each ``{id,
+    title}``, oldest first."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT DISTINCT k.id, COALESCE(NULLIF(k.title, ''), left(k.requirement, 40)) AS title, k.created_at "
+        "FROM tasks k WHERE k.status = ANY($2::text[]) AND (EXISTS (SELECT 1 FROM task_planner_profiles c "
+        "WHERE c.task_id = k.id AND c.profile_id = $1) OR EXISTS (SELECT 1 FROM task_roles r "
+        "WHERE r.task_id = k.id AND r.profile_id = $1)) ORDER BY k.created_at, k.id", profile_id, statuses)
+    return [{"id": r["id"], "title": r["title"]} for r in rows]
+
+
 async def selected_roles(profile_id: str, *, pool: asyncpg.Pool | None = None) -> list[tuple[str, str | None]]:
     """Where Agent Profile ``profile_id`` is selected: (scope, role) of each layer, ('task', role) of each task's
     or task's Planner's choice and ('schedule', role) of each schedule's."""
@@ -206,7 +231,7 @@ async def planner_profiles(task_id: str, *, pool: asyncpg.Pool | None = None) ->
         f"SELECT c.role, c.step_id, COALESCE(s.step_key, '') AS step_key, "
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
         f"{_PLANNER_CHOICES} LEFT JOIN task_steps s ON s.id = c.step_id WHERE c.task_id = $1 "
-        "ORDER BY c.step_id IS NOT NULL, s.step_index, c.role", task_id,
+        f"AND {_CHOICE_ALLOWED} ORDER BY c.step_id IS NOT NULL, s.step_index, c.role", task_id,
     )
     return [_row(r) for r in rows]
 

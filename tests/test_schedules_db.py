@@ -435,6 +435,30 @@ def test_a_due_schedule_fires_a_started_task_with_its_settings_and_run_context(m
     _run(test, monkeypatch, tmp_path)
 
 
+def test_a_schedules_planner_profile_reaches_its_tasks_and_no_other_change_touches_it(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        cheap = await env.enabled(name="Cheap planner", profile_overrides={"planner": "agent-claude-code-opus"})
+        plain = await env.enabled(name="Project planner")
+        assert plain["profile_overrides"] == {}
+        # Another change to the schedule leaves its Planner as it was.
+        changed = (await env.ok("PUT", f"/api/schedules/{cheap['schedule_id']}", {"cron": "*/10 * * * *"}))["schedule"]
+        assert changed["profile_overrides"] == {"planner": "agent-claude-code-opus"}
+
+        for schedule in (cheap, plain):
+            await env.due(schedule["schedule_id"])
+        await env.scheduler.tick()
+        planners = {}
+        for schedule in (cheap, plain):
+            [run] = await env.runs(schedule["schedule_id"])
+            planners[schedule["name"]] = await env.pool.fetch(
+                "SELECT role, profile_id FROM task_profile_overrides WHERE task_id = $1", run["task_id"])
+        assert [(r["role"], r["profile_id"]) for r in planners["Cheap planner"]] == [("planner", "agent-claude-code-opus")]
+        assert planners["Project planner"] == []  # no row: the project's layers decide
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_two_schedulers_ticking_together_fire_each_firing_once(monkeypatch: pytest.MonkeyPatch,
                                                               tmp_path: Path) -> None:
     from looper.agents.scheduler import Scheduler

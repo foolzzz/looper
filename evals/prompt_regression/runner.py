@@ -46,6 +46,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from looper.agents import operator_auth
 from looper.agents.project_execution import ProjectExecution
 
 from . import metrics
@@ -182,15 +183,18 @@ def free_port() -> int:
 class Api:
     """JSON over the server's HTTP API."""
 
-    def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 30.0) -> None:
         self.base_url = base_url
+        self.token = token
         self.timeout = timeout
 
     def request(self, method: str, path: str, body: Any = None, **query: Any) -> Any:
         url = self.base_url + path + (f"?{urllib.parse.urlencode(query)}" if query else "")
         data = None if body is None else json.dumps(body).encode("utf-8")
-        request = urllib.request.Request(url, data=data, method=method,
-                                         headers={"Content-Type": "application/json"} if data else {})
+        headers = {"Content-Type": "application/json"} if data else {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 return json.loads(response.read() or b"null")
@@ -262,6 +266,9 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
             if process.poll() is not None:
                 raise EvalError(f"the server exited ({process.returncode}) before it answered; see {log_path.name}")
             try:
+                api.token = operator_auth.read_token(runtime_root)
+                if api.token is None:
+                    raise EvalError("the server has not made its operator credential yet")
                 api.get("/api/status")
                 break
             except (OSError, EvalError):
@@ -407,8 +414,9 @@ def run_task(
     project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir),
                                "task_workspaces": "in_place"}
     step_workspaces = task.step_workspaces or step_workspaces
-    if step_workspaces:
+    if step_workspaces or task.init_git:
         init_repository(work_dir)
+    if step_workspaces:
         project["step_workspaces"] = step_workspaces
     if task.operator_notes:
         if notes_root is None:
@@ -821,7 +829,7 @@ def run(
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
                        real_claude=real_claude, real_reviewer=any(task.real_reviewer for task in tasks))
-        (root / "runtime").mkdir()
+        (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:
             home.mkdir()

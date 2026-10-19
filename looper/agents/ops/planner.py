@@ -18,14 +18,16 @@ logged.
 - **Turns.** ``read`` runs in any turn; ``write`` only in a turn Looper sent
   the Planner (``begin_turn``/``end_turn``), never in one its Claude runs on
   its own (after background work ends).
-- **Profiles.** ``looper_task_profile_set`` chooses, from the project's list
-  (``project_allowed_profiles``, empty by default), the profile of the task's
-  Workers or Reviewers for the rest of the task or for one step, and writes a
-  ``profile_choice`` journal entry with it (``task_planner_profiles``). The
-  WorkerPool reads it when the role's next run starts, under the user's choice
-  for the task (``agent_settings.Layer.PLANNER_TASK``, ``PLANNER_STEP``), and
-  only while the profile is on the task's project's list. No confirmation: the
-  list is the maintainer's consent in advance.
+- **Profiles.** ``looper_task_profile_set`` chooses, from the profiles the
+  project lets its Planners choose (``projects.choosable_profiles``: its list,
+  ``project_allowed_profiles``, or every registered profile while the list is
+  empty, the default), the profile of the task's Workers or Reviewers for the
+  rest of the task or for one step, and writes a ``profile_choice`` journal
+  entry with it (``task_planner_profiles``). The WorkerPool reads it when the
+  role's next run starts, under the user's choice for the task
+  (``agent_settings.Layer.PLANNER_TASK``, ``PLANNER_STEP``), and only while the
+  project still allows the profile. No confirmation: the project's setting
+  (an empty list included) is the maintainer's consent in advance.
 - **Concurrency.** ``looper_task_concurrency`` changes the task's own Worker
   and Reviewer limits, through the Manager's code
   (``concurrency.set_task_limits``), at once; each change is a
@@ -64,8 +66,9 @@ from ..agent_settings import resolve
 from ..links import task_link
 from ..message import MessageEnvelope, MessageType, channel_address, planner_address
 from ..project_execution import ProjectExecution
-from ..projects import EDITABLE_STATUSES, allowed_profile_view
-from ..task_roles import RoleError, RoleForbidden, RoleKind, TaskRole, Via, allowed_profile, check_definition
+from ..projects import EDITABLE_STATUSES, allowed_profile_view, choosable_profiles
+from ..task_roles import NOT_ALLOWED, RoleError, RoleForbidden, RoleKind, TaskRole, Via, allowed_profile
+from ..task_roles import check_definition
 from ..task_roles import ITEMS_MAX, check_items, review_role_keys, role_items, role_key
 from ..task_notice import Notice, NotifyTarget, link_line, notify_channel
 from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
@@ -83,6 +86,7 @@ logger = logging.getLogger(__name__)
 TOKEN_PREFIX = "planner."
 # A step that ended takes no choice.
 _ENDED_STEPS = ("verified", "skipped", "failed")
+
 REASON_MAX_CHARS = 500
 
 # How the Planner uses its tools: after its reply contract, in every Planner's system prompt that has them.
@@ -92,8 +96,8 @@ They change settings, never the plan: your replies' JSON still decides the
 steps.
 - looper_task_profiles: the Agent Profiles this task's project lets you choose
   for its Workers and Reviewers (model, price per million tokens), and what
-  each role runs now. The list may be empty; then you cannot choose one, and
-  the Workers and Reviewers run what the settings give them.
+  each role runs now. A project may restrict the choice to a list; without
+  one, any profile that can run the role is allowed.
 - looper_task_profile_set: run the Workers or the Reviewers ("role") on one
   of those profiles ("profile_id"): without "step" for the rest of the task,
   with "step" (a step's id in your plan) for that step and each of its
@@ -140,7 +144,7 @@ names a role not defined yet is refused); looper_task_roles reads them.
   review it one after another).
 - harness (optional): only how it works and communicates; Looper adds the
   boundaries, which you neither write nor change. profile_id (optional): one
-  from the project's list; without it the role runs what the built-in role
+  from the profiles the project allows; without it the role runs what the built-in role
   would. items (optional): skills or MCP servers its runs load besides the
   built-in role's, from role_items in looper_task_roles.
 - Setting a role again makes a new version: attempts that start afterwards
@@ -379,7 +383,7 @@ async def _journal(task_id: str, kind: JournalKind, summary: str, step_id: str =
 async def _profiles(call: PlannerCall) -> dict[str, Any]:
     task = await _task(call.task_id)
     project_id = task.get("project_id")
-    allowed = await db_projects.allowed_profiles(project_id) if project_id else []
+    allowed, restricted = await choosable_profiles(project_id)
     layers = index_layers(await db_layers.list_layers(project_id, task_id=call.task_id), project_id)
     chosen = await db_layers.planner_profiles(call.task_id)
     roles = {}
@@ -394,6 +398,7 @@ async def _profiles(call: PlannerCall) -> dict[str, Any]:
         }
     return {
         "allowed": [allowed_profile_view(row) for row in allowed],
+        "restricted": restricted,
         "roles": roles,
         "steps": [{"step": c["step_key"] or c["step_id"], "role": c["role"], "profile": c["profile"]["name"]}
                   for c in chosen if c["step_id"] is not None],
@@ -401,7 +406,8 @@ async def _profiles(call: PlannerCall) -> dict[str, Any]:
                  "(yours for the rest of the task) and planner_step (yours for one step) are yours; the others "
                  "are the settings. A step's choice wins over the rest of the task's.")
                 + " A price of null means Looper does not know it, not that it is free."
-                + ("" if allowed else " The project lets you choose no profile: its list is empty."),
+                + (" The project's list restricts the choice to the profiles listed." if restricted else
+                   " The project does not restrict the choice: any profile listed here can run the role."),
     }
 
 
@@ -437,10 +443,7 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
                                          "your choice")
     task = await _task(call.task_id)
     project_id = task.get("project_id")
-    allowed = await db_projects.allowed_profiles(project_id) if project_id else []
-    if not allowed:
-        raise OpError(ErrorCode.FORBIDDEN, "this task's project lets its Planner choose no Agent Profile (its list is "
-                                           f"empty): the {_label(role)} run what the settings give them")
+    allowed, restricted = await choosable_profiles(project_id)
     users = await db_layers.profile_overrides(call.task_id)
     if role.value in users:
         raise OpError(ErrorCode.FORBIDDEN, f"the user chose {users[role.value]['name']} for this task's "
@@ -452,8 +455,8 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
     if wanted is not None:
         profile = _match(allowed, wanted)
         if profile is None:
-            raise OpError(ErrorCode.FORBIDDEN, f"{wanted!r} is not on the project's list; you may choose: "
-                                               f"{', '.join(p['name'] for p in allowed)}")
+            raise OpError(ErrorCode.FORBIDDEN, f"{wanted!r} is {NOT_ALLOWED[restricted]}; "
+                                               f"you may choose: {', '.join(p['name'] for p in allowed) or 'none'}")
         try:
             await check_selection(profile["id"], [role.value])
         except RegistryError as exc:
@@ -581,7 +584,7 @@ def _template_view(row: Mapping[str, Any]) -> dict[str, Any]:
 async def _roles(call: PlannerCall) -> dict[str, Any]:
     task = await _task(call.task_id)
     project_id = task.get("project_id")
-    allowed = await db_projects.allowed_profiles(project_id) if project_id else []
+    allowed, _ = await choosable_profiles(project_id)
     steps = await db_steps.list_steps(call.task_id)
     users = await db_layers.profile_overrides(call.task_id)
     profiles = [allowed_profile_view(row) for row in allowed]
@@ -599,8 +602,8 @@ async def _roles(call: PlannerCall) -> dict[str, Any]:
                         for role in PLANNER_CHOICE_ROLES},
         "note": "A role without a profile runs what the step's built-in Worker or Reviewer would. A profile the user "
                 "chose for this task's Workers or Reviewers (user_choice) wins over a role's; prices are in "
-                "looper_task_profiles." + ("" if profiles else " The project's list is empty: define roles without "
-                                                               "profile_id."),
+                "looper_task_profiles." + ("" if profiles else " No profile can be chosen here: define roles "
+                                                               "without profile_id."),
     }
 
 
@@ -723,8 +726,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_task_profiles",
         description="The Agent Profiles this task's project lets you choose for its Workers and Reviewers (their "
-                    "model and price per million tokens; the list may be empty), what each role runs now and why, "
-                    "and your choices per step.",
+                    "model and price per million tokens; the project may restrict the choice to a list, else any "
+                    "profile that can run the role), what each role runs now and why, and your choices per step.",
         schema={"type": "object", "additionalProperties": False, "properties": {"task_id": _TASK_ID}},
         risk=Risk.READ, run=_profiles,
     ),
@@ -776,7 +779,7 @@ ROLE_TOOLS: tuple[Tool, ...] = (
         description="Define a role for this task's steps, or a new version of one: kind work (a step's Worker runs "
                     "as it) or review (it reviews a step after the built-in Reviewer, which still has to pass it), "
                     "its role prompt, optionally its harness (how it works and communicates; Looper adds the "
-                    "boundaries) and a profile from the project's list. Give the whole definition each time, or a "
+                    "boundaries) and a profile the project allows. Give the whole definition each time, or a "
                     "project role template to copy (the fields you give replace the template's). Name the role in "
                     "a step's role or review_roles.",
         schema={"type": "object", "required": [], "additionalProperties": False,

@@ -27,6 +27,7 @@ from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ISOLATION_ID, isolation_args
 from looper.agents.run_usage import Usage
+from looper.agents.runtimes import ReadOnly, adapter
 from looper.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -49,6 +50,17 @@ REVIEW_PASS = {"passed": True, "findings": [], "summary": "looks right"}
 REVIEW_FAIL = {"passed": False, "findings": ["no tests"], "summary": "missing tests"}
 
 Outcome = Callable[[MessageEnvelope], "dict[str, Any] | None"]
+
+
+@pytest.mark.parametrize(("runtime", "read_only"), [
+    ("claude-code", ReadOnly.PERMISSIONS),
+    ("codex", ReadOnly.SANDBOX),
+    ("omp", ReadOnly.TOOLS),
+    ("grok", ReadOnly.TOOLS),
+])
+def test_every_shipped_runtime_keeps_a_planner_read_only(runtime: str, read_only: ReadOnly) -> None:
+    assert adapter(runtime).read_only is read_only
+    assert adapter(runtime).read_only is not ReadOnly.CHECK
 
 
 # --- Scripted Planner replies ---
@@ -1039,12 +1051,12 @@ class TestResidentClaude:
         assert "--append-system-prompt" not in argv
         assert _flag(argv, "--system-prompt-snapshot") == "off"
         (prompt,) = claude.prompts()
-        assert Path(_flag(argv, "--append-system-prompt-file") or "").name == f"{_sha(prompt)}.md"
+        assert Path(_flag(argv, "--system-prompt-file") or "").name == f"{_sha(prompt)}.md"
         _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", DEFAULT_CONTRACT)
         assert prompt.endswith(DEFAULT_CONTRACT)
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format",
-                       "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
+                       "--append-system-prompt-file", "--system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
                        "--settings", "--model", "--max-turns", "--disallowedTools", "--allowedTools",
                        "--permission-mode", "--permission-prompts"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
@@ -1277,8 +1289,8 @@ class TestSystemPrompt:
         assert expected in second_prompt
         assert second_prompt.endswith(DEFAULT_CONTRACT)
         # A changed prompt is a new file with a new hash; the restarted process resumes the session.
-        assert _flag(first, "--append-system-prompt-file") != _flag(second, "--append-system-prompt-file")
-        assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
+        assert _flag(first, "--system-prompt-file") != _flag(second, "--system-prompt-file")
+        assert Path(_flag(second, "--system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
         assert _flag(first, "--resume") is None
         assert _flag(second, "--resume") == "sess-p"
         assert [s["metadata"]["system_prompt_sha256"] for s in _starts(agent_db)] == [

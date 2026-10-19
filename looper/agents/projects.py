@@ -447,7 +447,7 @@ async def edit_requirement(
 
 
 # What a task's own choices per role are (``set_task_agents``), and when a new profile applies.
-TASK_AGENT_FIELDS = ("profiles", "concurrency")
+TASK_AGENT_FIELDS = ("profiles", "concurrency", "system_prompt_modes")
 PROFILES_NOTE = ("a Worker or Reviewer uses its new profile from its next step on; the Planner moves to its new "
                  "profile at its next turn, after a handoff")
 
@@ -460,6 +460,23 @@ async def agents_view(task: dict[str, Any]) -> dict[str, Any]:
     layers = index_layers(await db_layers.list_layers(project_id, task_id=task["id"]), project_id)
     return {"roles": task_agents_view(layers, project_id), "concurrency_max": CONCURRENCY_MAX,
             "editable": task.get("status") in AGENTS_EDITABLE_STATUSES}
+
+
+def _prompt_modes(raw: Any) -> dict[str, str | None]:
+    """``system_prompt_modes``, a task's own append or replace per role (null drops it); it applies on Claude Code
+    only. 400 for another role or value."""
+    if not isinstance(raw, dict):
+        raise RequestError(HTTP_400, 'system_prompt_modes must be an object: {"planner" | "worker" | "reviewer": '
+                                     '"append" | "replace" | null}')
+    modes: dict[str, str | None] = {}
+    for role, value in raw.items():
+        if role not in TASK_PROFILE_ROLES:
+            raise RequestError(HTTP_400, f"system_prompt_modes: a task sets the mode of its "
+                                         f"{', '.join(TASK_PROFILE_ROLES)} only, not {role!r}")
+        if value is not None and value not in ("append", "replace"):
+            raise RequestError(HTTP_400, f'system_prompt_modes.{role} must be "append", "replace" or null; got {value!r}')
+        modes[role] = value
+    return modes
 
 
 async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") -> dict[str, str | None]:
@@ -501,8 +518,23 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") 
     return chosen
 
 
-# The roles whose Agent Profile a task's Planner may choose, from its project's list (``ops.planner``).
+# The roles whose Agent Profile a task's Planner may choose, from the profiles its project allows (``choosable_profiles``, ``ops.planner``).
 _CHOOSABLE = tuple(role.value for role in PLANNER_CHOICE_ROLES)
+
+
+async def choosable_profiles(project_id: str | None) -> tuple[list[dict[str, Any]], bool]:
+    """The Agent Profiles (``profile_registry.PROFILE_JSON``) project ``project_id``'s Planners may choose, and
+    whether the project restricts them: with a list, the list; with an empty list, or no project, every registered
+    profile that can run the Worker or the Reviewer. Whether one can run a given role is checked where it is
+    chosen. The one place that decides; every Planner choice goes through it."""
+    from ..db import profile_registry as db_profiles
+    from .profile_registry import AgentProfile, servable_roles
+
+    listed = await db_projects.allowed_profiles(project_id) if project_id else []
+    if listed:
+        return listed, True
+    return [row for row in await db_profiles.list_profiles()
+            if set(servable_roles(AgentProfile.from_row(row).runtime.capabilities)) & set(_CHOOSABLE)], False
 
 
 def allowed_profile_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -521,16 +553,20 @@ def allowed_profile_view(row: dict[str, Any]) -> dict[str, Any]:
 
 async def allowed_profiles_view(project_id: str) -> dict[str, Any]:
     """The Agent Profiles project ``project_id``'s Planners may choose for their tasks' Workers and Reviewers, by
-    name; empty by default. 404 for an unknown project."""
+    name (``profiles``; empty by default, which lets them choose any profile), and what they may choose
+    (``choosable``) under ``restricted``. 404 for an unknown project."""
     if await db_projects.get_project(project_id) is None:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
-    return {"project_id": project_id,
-            "profiles": [allowed_profile_view(row) for row in await db_projects.allowed_profiles(project_id)]}
+    choosable, restricted = await choosable_profiles(project_id)
+    return {"project_id": project_id, "restricted": restricted,
+            "profiles": [allowed_profile_view(row) for row in await db_projects.allowed_profiles(project_id)],
+            "choosable": [allowed_profile_view(row) for row in choosable]}
 
 
 async def set_allowed_profiles(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Make ``profile_ids`` (ids or names) the whole list of the Agent Profiles project ``project_id``'s Planners may
-    choose; ``[]`` empties it, and its tasks' Planners' choices of a profile it drops go with it. Each profile must
+    choose; ``[]`` lifts the restriction (they may choose any profile), and a non-empty list drops its tasks'
+    Planners' choices of a profile it leaves out. Each profile must
     be registered and able to run the Worker or the Reviewer. 400 otherwise, and nothing changes; 404 for an
     unknown project. Answers the list as it is then."""
     from ..db import profile_registry as db_profiles
@@ -586,7 +622,8 @@ def _concurrency_limits(raw: Any, *, field: str = "concurrency") -> dict[str, in
 
 async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Change the task's own choices per role, together: ``profiles`` (an Agent Profile, by id or name, for its
-    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once); null drops
+    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once) and ``system_prompt_modes`` (append or replace
+    on Claude Code); null drops
     the task's choice of that role, and its layers apply. 400 for a bad field, role or
     value, 404 for an unknown task, 409 for a completed one (a failed, stopped or cancelled task changes too, and its
     restart runs with them). Answers the task's agents as they are then (and when a new profile applies). The caller
@@ -594,9 +631,10 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     unknown = sorted(set(data) - set(TASK_AGENT_FIELDS))
     if unknown:
         raise RequestError(HTTP_400, f"unknown field {unknown[0]!r}; the fields are {', '.join(TASK_AGENT_FIELDS)}")
-    if not data.get("profiles") and not data.get("concurrency"):
-        raise RequestError(HTTP_400, "give at least one role's profiles or concurrency")
+    if not any(data.get(field) for field in TASK_AGENT_FIELDS):
+        raise RequestError(HTTP_400, f"give at least one role's {', '.join(TASK_AGENT_FIELDS)}")
     limits = _concurrency_limits(data["concurrency"]) if data.get("concurrency") else {}
+    modes = _prompt_modes(data["system_prompt_modes"]) if "system_prompt_modes" in data else {}
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")
@@ -605,7 +643,7 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
                                      "after a restart, can change its agents")
     profiles = await profile_choices(data.get("profiles"), clearing=True)
     try:
-        await db_layers.set_task_layer(task_id, profiles=profiles, limits=limits)
+        await db_layers.set_task_layer(task_id, profiles=profiles, limits=limits, modes=modes)
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_404, "the task, or an Agent Profile it chose, was removed meanwhile") from None
     return {"task_id": task_id, "agents": await agents_view(task), **({"note": PROFILES_NOTE} if profiles else {})}

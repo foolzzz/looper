@@ -84,7 +84,7 @@ _REVIEW_ROLE_KEYS = frozenset({"role", "required"})
 _SINGLE_REVIEW_ROLE_KEYS = ("review_role", "review_role_required")
 # A gate step's keys (``findings`` is optional), an agenda item's in a step and in a reply, and a gate change's.
 _GATE_STEP_KEYS = frozenset({"id", "kind", "topic", "agenda", "depends_on", "findings"})
-_NEW_ITEM_KEYS = frozenset({"question", "options"})
+_NEW_ITEM_KEYS = frozenset({"id", "question", "options"})
 _ITEM_KEYS = frozenset({"id", "question", "options", "status", "answer"})
 _GATE_CHANGE_KEYS = frozenset({"id", "action", "topic", "agenda", "findings", "note", "resolution"})
 GATE_KIND = "gate"
@@ -842,6 +842,10 @@ def _gate_step(value: Mapping[str, Any], where: str) -> StepSpec:
         if not isinstance(item, dict):
             raise ProtocolError(f"{at} must be an object with question and, optionally, options")
         _only_keys(item, _NEW_ITEM_KEYS, at)
+        expected_id = f"q{i + 1}"
+        if "id" in item and item["id"] != expected_id:
+            raise ProtocolError(f'{at}.id must be "{expected_id}" or left out: '
+                                "Looper numbers new items q1, q2, …")
         items.append(AgendaItem("", _limited_text(item, "question", QUESTION_MAX_CHARS, at, required=True),
                                 _options(item.get("options", []), at)))
     depends_on = value["depends_on"]

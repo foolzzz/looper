@@ -116,7 +116,7 @@ def test_a_planners_token_works_for_its_own_task_and_its_own_tools_only(
         status, answer = await _endpoint(server, token, "POST", "ops/looper_task_profiles", {"task_id": "task-b"})
         assert status == 200 and _error(answer) == "forbidden" and "not on task-b" in answer["error"]["message"]
         status, answer = await _endpoint(server, token, "POST", "ops/looper_task_profiles", {"task_id": "task-a"})
-        assert answer["status"] == "ok" and answer["result"]["allowed"] == []
+        assert answer["status"] == "ok" and answer["result"]["restricted"] is False
         status, answer = await _endpoint(server, token, "POST", "ops/looper_tasks", {"action": "list"})
         assert _error(answer) == "forbidden" and "is a tool of the Manager" in answer["error"]["message"]
         status, answer = await _endpoint(server, "manager-tok", "POST", "ops/looper_task_profile_set",
@@ -151,22 +151,31 @@ def test_a_planners_token_works_for_its_own_task_and_its_own_tools_only(
 # --- looper_task_profiles and looper_task_profile_set ---
 
 
-def test_with_the_projects_list_empty_the_planner_chooses_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_with_the_projects_list_empty_the_planner_chooses_any_profile_that_can_run_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
         await _profiles(pool)
+        await pool.execute("UPDATE agent_runtimes SET capabilities = ARRAY['resident_session'] WHERE id = 'rt-one-off'")
         planner = _Planner(_ops(), "task-a")
         listed = (await planner("looper_task_profiles", {}))["result"]
-        assert listed["allowed"] == [] and "its list is empty" in listed["note"]
+        # Every registered profile that can run a Worker or a Reviewer; none that is not: "one-off" runs one-off runs.
+        names = [p["name"] for p in listed["allowed"]]
+        assert listed["restricted"] is False and "claude-code/sonnet" in names and "claude-code/opus" in names
+        assert "one-off/opus" not in names and "does not restrict the choice" in listed["note"]
         assert listed["roles"]["worker"] == {"runs": {"name": "claude-code/opus", "source": "builtin"},
                                              "user_choice": None, "your_choice": None}
-        for arguments in ({"role": "worker", "profile_id": "claude-code/sonnet"},
-                          {"role": "reviewer", "profile_id": None}):
-            answer = await planner("looper_task_profile_set", arguments)
-            assert _error(answer) == "forbidden" and "(its list is empty)" in answer["error"]["message"]
-        assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 0
-        assert await _runs_on("task-a", project) == ("claude-code/opus", "builtin")
+        assert (await planner("looper_task_profile_set", {"role": "reviewer", "profile_id": "claude-code/sonnet"}))[
+            "status"] == "ok"
+        # One that cannot run the role is refused, as under a list (the list above leaves it out).
+        answer = await planner("looper_task_profile_set", {"role": "worker", "profile_id": "one-off/opus"})
+        assert _error(answer) == "forbidden" and "'one-off/opus' is not a registered profile that can run" in answer["error"]["message"]
+        answer = await planner("looper_task_profile_set", {"role": "worker", "profile_id": "nope"})
+        assert _error(answer) == "forbidden" and "you may choose: " in answer["error"]["message"]
+        assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 1
+        assert await _runs_on("task-a", project, role="reviewer") == ("claude-code/sonnet", "planner_task")
 
     _run(test, monkeypatch)
 
@@ -181,11 +190,15 @@ def test_the_projects_list_is_set_whole_by_id_or_name_and_read_back(monkeypatch:
         await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
                            "('agent-resident', 'resident/opus', 'rt-resident', 'prov-claude-subscription', 'opus')")
         path = f"/api/projects/{project['id']}/allowed-profiles"
-        assert await _call("GET", path) == (200, {"project_id": project["id"], "profiles": []})
+        empty = (await _call("GET", path))[1]
+        assert empty["profiles"] == [] and empty["restricted"] is False
+        assert "agent-sonnet" in [p["profile_id"] for p in empty["choosable"]]
+        assert "agent-resident" not in [p["profile_id"] for p in empty["choosable"]]
 
         answer = await _allow(project, "Claude-Code/Sonnet", "agent-haiku", "agent-sonnet")
         assert [(p["profile_id"], p["roles"]) for p in answer["profiles"]] == [
             ("agent-haiku", ["worker", "reviewer"]), ("agent-sonnet", ["worker", "reviewer"])]
+        assert answer["restricted"] is True and answer["choosable"] == answer["profiles"]
         assert set(answer["profiles"][0]) == {"profile_id", "name", "runtime", "model", "effort", "roles",
                                               "usd_per_million_tokens"}
         # Claude Code's own login runs an alias as Anthropic's model, at its price.
@@ -371,12 +384,20 @@ def test_the_planners_choice_counts_only_while_the_tasks_project_allows_it(monke
         choose = {"role": "worker", "profile_id": "agent-sonnet"}
         await planner("looper_task_profile_set", choose)
         assert await _runs_on("task-a", project) == ("claude-code/sonnet", "planner_task")
-        # Moved to a project that does not allow it, the task runs what its settings give.
+        # Moved to a project whose list does not hold it, the task runs what its settings give.
+        await _haiku(pool)
+        await _allow(other, "agent-haiku")
         await pool.execute("UPDATE tasks SET project_id = $1 WHERE id = 'task-a'", other["id"])
         assert await _runs_on("task-a", other) == ("claude-code/opus", "builtin")
+        # Moved to one with an empty list, which allows every profile, it counts.
+        await _allow(other)
+        assert await _runs_on("task-a", other) == ("claude-code/sonnet", "planner_task")
         await pool.execute("UPDATE tasks SET project_id = $1 WHERE id = 'task-a'", project["id"])
-        # Dropped from the list, the choice goes with it.
+        # The list emptied allows every profile: the choice stays. A list that leaves it out drops it.
         await _allow(project)
+        assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 1
+        assert await _runs_on("task-a", project) == ("claude-code/sonnet", "planner_task")
+        await _allow(project, "agent-haiku")
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 0
         await _allow(project, "agent-sonnet")
         assert await _runs_on("task-a", project) == ("claude-code/opus", "builtin")
@@ -387,6 +408,65 @@ def test_the_planners_choice_counts_only_while_the_tasks_project_allows_it(monke
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 2
         await tasks.reset_task_for_restart("task-a")
         assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 0
+
+    _run(test, monkeypatch)
+
+
+def test_a_profile_an_open_tasks_planner_chose_cannot_be_deleted_until_the_task_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _profiles(pool)
+        planner = _Planner(_ops(), "task-a")
+        assert (await planner("looper_task_profile_set", {"role": "worker", "profile_id": "agent-sonnet"}))[
+            "status"] == "ok"
+        status, refused = await _call("DELETE", "/api/agent-profiles/agent-sonnet")
+        assert status == 409 and "task-a" in refused["error"] and "have not ended" in refused["error"], refused
+        assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE id = 'agent-sonnet'") == 1
+        # Cleared, it can go; so can one chosen only in a task that has ended, with that choice.
+        assert (await planner("looper_task_profile_set", {"role": "worker", "profile_id": None}))["status"] == "ok"
+        assert (await planner("looper_task_profile_set", {"role": "worker", "profile_id": "agent-sonnet"}))[
+            "status"] == "ok"
+        await pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-a'")
+        assert (await _call("DELETE", "/api/agent-profiles/agent-sonnet"))[0] == 200
+        assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 0
+
+    _run(test, monkeypatch)
+
+
+def test_a_profile_an_open_tasks_role_chose_cannot_be_deleted_and_a_racing_choice_is_not_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _profiles(pool)
+        assert (await _call("PUT", f"/api/projects/{project['id']}", {"planner_roles": "on"}))[0] == 200
+        planner = _Planner(_ops(), "task-a")
+        role = {"id": "tester", "kind": "work", "role_prompt": "test it", "profile_id": "agent-sonnet"}
+        assert (await planner("looper_task_role_set", role))["status"] == "ok"
+        status, refused = await _call("DELETE", "/api/agent-profiles/agent-sonnet")
+        assert status == 409 and "task-a" in refused["error"], refused
+        assert await pool.fetchval("SELECT profile_id FROM task_roles") == "agent-sonnet"
+
+        # A choice still being written holds the profile: the delete waits for it, then refuses.
+        await pool.execute("DELETE FROM task_roles")
+        async with pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            await conn.execute("INSERT INTO task_planner_profiles (task_id, role, profile_id) "
+                               "VALUES ('task-a', 'worker', 'agent-sonnet')")
+            deleting = asyncio.ensure_future(_call("DELETE", "/api/agent-profiles/agent-sonnet"))
+            await asyncio.sleep(0.5)
+            assert not deleting.done()
+            await tx.commit()
+            status, refused = await deleting
+        assert status == 409 and "task-a" in refused["error"], refused
+        assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 1
 
     _run(test, monkeypatch)
 

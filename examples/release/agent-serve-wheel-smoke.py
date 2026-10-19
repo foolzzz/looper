@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -47,19 +48,30 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
     )
     try:
         base = f"http://127.0.0.1:{port}"
+        token_file = work / "rt" / "operator-token"
         for _ in range(120):
             try:
-                urllib.request.urlopen(f"{base}/api/status", timeout=2)
+                # /api/ needs the operator token, which serve writes into the runtime root on its first start.
+                auth = {"Authorization": f"Bearer {token_file.read_text().strip()}"}
+                urllib.request.urlopen(urllib.request.Request(f"{base}/api/status", headers=auth), timeout=2)
                 break
             except OSError:
                 time.sleep(0.5)
         else:
             raise SystemExit("installed looper serve did not come up")
-        page = urllib.request.urlopen(f"{base}/", timeout=5).read().decode()
+        try:
+            urllib.request.urlopen(f"{base}/api/projects", timeout=5)
+            raise SystemExit("installed looper serve answered /api/ without the operator token")
+        except urllib.error.HTTPError as error:
+            assert error.code == 401, error.code
+        # A local browser's top-level navigation signs in by itself.
+        navigation = {"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
+        page = urllib.request.urlopen(urllib.request.Request(f"{base}/", headers=navigation), timeout=5).read().decode()
         assert "<div id=\"root\">" in page, page[:200]
-        projects = urllib.request.urlopen(f"{base}/api/projects", timeout=5).read().decode()
+        projects = urllib.request.urlopen(urllib.request.Request(f"{base}/api/projects", headers=auth),
+                                          timeout=5).read().decode()
         assert projects.startswith('{"projects"'), projects[:200]
-        print("PASS installed looper serve answers the dashboard and the API")
+        print("PASS installed looper serve answers the dashboard and the API, and refuses /api/ without the token")
     finally:
         proc.terminate()
         proc.wait(timeout=30)

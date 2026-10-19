@@ -13,6 +13,7 @@ import pytest
 from looper.agents.http_server import REQUEST_BODY_MAX_BYTES, AgentHTTPServer
 from looper.agents.request_guard import refusal
 
+TOKEN = "operator-test-token"
 ATTACKER = "https://attacker.example"
 
 
@@ -68,7 +69,7 @@ def _serve(*requests: str) -> list[tuple[str, str]]:
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "index.html").write_text("<html>dashboard</html>")
             server = AgentHTTPServer(
-                port=0, web_adapter=SimpleNamespace(), task_router=SimpleNamespace(),
+                port=0, operator_token=TOKEN, web_adapter=SimpleNamespace(), task_router=SimpleNamespace(),
                 supervisor=SimpleNamespace(), static_dir=Path(tmp),
             )
             await server.start()
@@ -99,7 +100,8 @@ def test_server_refuses_cross_site_requests_and_sends_no_cors_headers() -> None:
 def test_a_body_over_the_cap_is_refused_before_it_is_read() -> None:
     """The cap fits the largest upload, a 2 MiB knowledge document as base64 in JSON, with room to spare."""
     assert REQUEST_BODY_MAX_BYTES == 8 * 1024 * 1024
-    head = "Host: 127.0.0.1:8767\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n"
+    head = (f"Authorization: Bearer {TOKEN}\r\nHost: 127.0.0.1:8767\r\n"
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n")
     (over, refusal), (at_cap, _) = _serve(
         # Only the headers: the answer comes without the server waiting for the body.
         "POST /api/projects/proj-0/knowledge HTTP/1.1\r\n" + head.format(REQUEST_BODY_MAX_BYTES + 1),

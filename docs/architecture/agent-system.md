@@ -641,8 +641,21 @@ answer to an edit on the task page goes.
     parallel counts as evidence too: the check catches misreports; it does
     not attribute work. The failure lists the files and where the check
     looked; files found outside the work directory are listed in the result's
-    `found_elsewhere` and in the task's activity. In a project with step
-    workspaces the work directory is the step's worktree.
+    `found_elsewhere`, a JSON list of typed locations: `path`, `deleted`,
+    `where` (`worktree` or `commit`), and the full `commit` SHA. Worktree
+    entries also include the absolute `worktree`, short `branch` (empty for
+    detached/unknown), and `repo_path` relative to the repository root;
+    commit entries include `repo_path` when known (omitted for absolute-path
+    suffix matches). The task's activity lists the locations. The Reviewer's
+    first turn and Planner's step report share a renderer: each location is
+    one JSON line in a fenced block labelled as untrusted Worker data, followed
+    by fixed read-only hints with placeholders. Git hints use repo-root-relative
+    `repo_path` with `-- ':(top,literal)<repo_path>'`; without a known path they
+    show the whole commit's stat. Readers ignore old free-string dictionaries,
+    malformed entries, commits other than full lowercase 40- or 64-digit hashes,
+    non-absolute worktrees, and path/worktree/branch fields containing ASCII
+    control characters or exceeding 512 characters (200 for branches). In a
+    project with step workspaces the work directory is the step's worktree.
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
 - `learnings` is optional in both the report and the verdict: up to 5 short
@@ -747,8 +760,26 @@ adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
   rules may let through Bash commands that write, an MCP server installed for
   the Planner may write files, and a skill's `allowed-tools` grants its tools
   while it runs.
-- **`check`** (Codex and OMP, whose read-only modes are not verified yet):
-  the command is unchanged, and the Planner compares its task directory's git
+- **`sandbox`** (Codex): `-c sandbox_mode="read-only" -c approval_policy="never"`
+  in place of `--dangerously-bypass-approvals-and-sandbox`, in a run and in
+  `exec resume`. Reads, `git status` and the like work; a write (a shell
+  redirect, `touch`, an edit) fails. Codex marks no refusal in its events, so
+  nothing is recorded as refused. With approvals never asked, Codex refuses
+  every MCP tool call, so a Planner's `config.toml` gives each of its MCP
+  servers `default_tools_approval_mode = "approve"` (the servers are the ones
+  Looper and the catalog give the Planner; one that writes files can still
+  write). Verified with Codex 0.162.0 through a local API-key provider, in
+  a run and a resumed turn: the MCP tool ran, `README.md` was read, and
+  writing `made.txt` failed with the working tree unchanged.
+- **`tools`** (OMP, Grok): the run starts with the tools that read and no
+  shell or write tool: OMP `--tools read,glob,grep`, Grok
+  `--tools read_file,grep,list_dir`. Nothing is refused, so nothing is
+  recorded. The MCP tools stay (OMP 18.4.3 through the home's MCP plugin,
+  verified with a stub server in a run and a resumed turn; Grok through
+  `use_tool`). Such a Planner cannot run `git diff`, tests or any other
+  command, and OMP's web search and sub-agent tools are not available to it.
+- **`check`** (a runtime that can do neither; none ships now): the command is
+  unchanged, and the Planner compares its task directory's git
   checkout before and after each turn (`step_workspaces.tree_state`: `HEAD`
   and each path `git status` lists with its status, size and modification
   time, read with `--no-optional-locks`). A change is recorded as the turn's
@@ -912,16 +943,20 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   are materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
   `OmpRuntime` and `GrokRuntime` (`codex`, `omp`, `grok`, below) translate
-  them at launch; all three keep the Manager's and a Planner's session with
-  one process per turn (`runtimes/per_turn.py`). Capabilities:
+  them at launch; Codex and OMP keep the Manager's and a Planner's session
+  with one process per turn (`runtimes/per_turn.py`), Grok with one process
+  over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
+  Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
-  `autonomous_turns`, `cost_report` (Claude Code has all but
-  `structured_output`; Codex has `run`, `resident_session`, `resume`,
+  `autonomous_turns`, `cost_report`, `steer` (Claude Code has all but
+  `structured_output` and `steer`; Codex has `run`, `resident_session`, `resume`,
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
   `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
   `compaction_events`; Grok has `run`, `resident_session`, `resume`, `mcp`,
-  `compaction_events` and `cost_report`).
+  `compaction_events` and `cost_report`). Codex and OMP list `steer` when
+  their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
+  Claude Code and Grok do not.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
@@ -938,7 +973,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `codex/instructions/<sha256>.md`, referenced by the top-level
   `model_instructions_file` key; the home's `AGENTS.md` is empty. The operator's `~/.codex` is
   never read. A Worker or Reviewer is one `--ephemeral` process with its
-  prompt on stdin, which then closes: it cannot be steered while it runs (in
+  prompt on stdin, which then closes, so it cannot be steered while it runs;
+  with the probed `steer` capability (`codex app-server` found to have `turn/steer`) the run is driven through
+  `app-server` instead (`codex_steer`, [RFC](rfcs/worker-steering-v0.zh-CN.md)) and the Planner's messages
+  reach it at once (in
   a task with an agent room, one that keeps its session in a home of its own:
   [A task's agent room](#a-tasks-agent-room)).
   The Manager and a Planner run one process per turn that resumes the
@@ -988,14 +1026,18 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   Its runs are priced at the built-in prices as a subscription equivalent;
   the form suggests the models a ChatGPT login offers (`suggested_models`).
 - **OMP** (`looper/agents/runtimes/omp.py`, oh-my-pi's `omp`, verified against
-  omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` with API key
+  omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` (a Worker or Reviewer with the probed `steer`
+  capability runs `omp --mode rpc` instead, `omp_steer`, with `interruptMode` `wait`) with API key
   providers that serve `openai-responses`, `openai-chat` or
   `anthropic-messages`. Each process runs with `HOME` set to a home of
   Looper's own, `omp/homes/<sha256>` (one per set of generated settings,
   shared by its runs), named on its command line (`env HOME=... omp ...
   --config <home>/looper.yml`): `.omp/agent/models.yml` (the provider
   `looper`: endpoint, API, the agent's model at no price; its `apiKey` names
-  the `LOOPER_PROVIDER_API_KEY` variable), the `--config` overlay (only the
+  the `LOOPER_PROVIDER_API_KEY` variable; with `openai-responses` the model is
+  marked as taking strict tools, so the MCP tools go as `strict: false`, since
+  the Responses API takes a tool that leaves strict out as strict, every
+  argument required), the `--config` overlay (only the
   agent's model for every model role, no fallback, no approvals, MCP tools as
   ordinary tools, no background jobs, no update check or issue reports), a
   link to the native library every home shares (`omp/natives`), the prompt
@@ -1056,9 +1098,18 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   instruction files are read by Grok itself, every name it knows in each
   directory from the repository's root down (`AGENTS.md` and `CLAUDE.md`
   both when both are there). A Worker or Reviewer is one process with its
-  prompt on stdin, which then closes; the Manager and a Planner run one
-  process per turn with `--resume <id>` in a home of their own
-  (`grok/sessions/<agent>`, refreshed from the run home before each turn).
+  prompt on stdin, which then closes. The Manager and a Planner run one
+  resident process over ACP (`grok --trust --no-auto-update agent
+  --always-approve -m <model> --effort <effort> stdio`, JSON-RPC lines on
+  stdio; `grok_acp.AcpGrok`) in a home of their own (`grok/sessions/<agent>`,
+  refreshed from the run home): `session/new` or, after a restart,
+  `session/load`; one `session/prompt` per turn, whose updates become the
+  stream-json events below and whose result carries the turn's tokens and
+  cost; `session/cancel` for a turn given up. A Planner's reading tools are
+  the `tools:` line of an agent profile. When Grok cannot serve a session over
+  ACP (no `agent stdio`, no `initialize` answer, no `loadSession` for a saved
+  session) it runs one process per turn with `--resume <id>` in the same home
+  (`ResidentGrok`).
   The stream is Claude Code's stream-json: each response's tokens become a
   `usage` event, a command's output (byte values) is decoded, and the run's
   cost is Grok's `total_cost_usd` (`runtime`; a 0 for tokens spent is
@@ -1180,31 +1231,38 @@ the provider's own variables. The verified Claude Code behaviour is in the
 resident process whose binding changed (provider, key, endpoint) is started
 again.
 
-**System prompt mode.** Each profile chooses `append` (the existing commands
-and generated files are unchanged) or `replace`. The adapter's typed
-`can_replace_system_prompt` capability is exposed by `/api/registry`, with
-`replace_system_prompt_refusal` giving the reason when replacement is not
-supported. Creating, updating or importing a replacement profile is refused
-with that reason (400 through the profile API) on an unsupported or unknown
-runtime; changing the runtime checks the resulting profile, including a mode
-left unchanged. The server never falls back to append. Configuration export
-and import carry the field; older files without it import as append. Profiles
-derived for another effort keep the parent's mode.
+**System prompt mode.** The mode is `append` (Looper's prompt is added to the runtime's default one) or `replace`
+(it takes the default prompt's place). On **Claude Code** it is a role's setting, `system_prompt_mode` on the role layer
+(`PUT /api/agent-settings/roles/<role>`; a null or empty value unsets it). The built-in values are `replace` for the
+Manager and the Planner and `append` for every other launch: Workers, Reviewers, the seats of Planner-defined roles,
+consults and a launch with no role (`agent_settings.BUILTIN_SYSTEM_PROMPT_MODE`). The settings view shows the
+effective value of every role (`effective.system_prompt_mode`). A task may set its own per role (`task_system_prompt_modes`, `system_prompt_modes` of `PUT /api/tasks/:id/agents`): its choice wins over the role layer's, which wins over the built-in value; the task's `agents` view gives each role's effective value with its source (`task`, `role` or `builtin`) and the runtime type, so the task page shows the choice only where it applies. A Planner-defined role's runs and reviews follow the task's Worker or Reviewer choice, a consult appends, and the Manager has no task level. Only a role layer takes it: the shared defaults, a
+project and a role in a project refuse it (400). A Claude Code profile does not use its own `system_prompt_mode`: the
+registry refuses `replace` on it ("Claude Code's system prompt mode is set per role in Settings → Roles"), and the
+dashboard's profile editor shows that line in place of the choice. On **Codex, Grok and OMP** nothing changed: each
+profile chooses `append` or `replace`, the adapter's typed `can_replace_system_prompt` capability is exposed by
+`/api/registry` with `replace_system_prompt_refusal`, and creating, updating or importing a replacement profile is
+refused with that reason (400) on an unsupported or unknown runtime. `Launch.system_prompt_mode` is the role's value on
+a Claude Code runtime (append with no role) and the profile's on any other. Configuration export and import carry the
+role layers' value and the profiles' (a missing profile value imports as append); profiles derived for another effort
+keep the parent's mode. The schema adds the layer column once, and then sets the Worker's and the Reviewer's role
+layer to `replace` where their effective profile (the role layer's, else the shared defaults', else the built-in one)
+was a Claude Code profile that replaced, and sets every Claude Code profile to `append`.
 
 | Runtime | Append | Replace |
 | --- | --- | --- |
 | Claude Code | `--append-system-prompt-file` | `--system-prompt-file`; both modes keep `--system-prompt-snapshot off` |
-| Codex | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
-| Grok | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
-| OMP | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
+| Codex (profile) | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
+| Grok (profile) | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
+| OMP (profile) | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
 
 Codex and Grok include their runtime notes with Looper's prompt in either
 mode. Replacement keeps the runtime's tools and project instruction loading;
-it removes the runtime's default prompt. The dashboard editor disables the
+it removes the runtime's default prompt. The dashboard's profile editor disables the
 mode selector with the runtime's refusal reason when replacement is not
 supported, and resets only its unsaved draft to append when moving to such a
-runtime. Profile summaries mark replacement, and each run's System prompt
-section shows `replaced default` for a replacement record. The mode is
+runtime or to Claude Code. The role settings (Settings → Roles) show a two-way choice for every role. Profile summaries mark replacement, and each run's System prompt
+section shows `replaced default` for a replacement record. The profile's mode is
 available through the Manager's profile configuration tool on every channel.
 
 **Agent teams.** They are on by default for Claude Code profiles: a profile
@@ -1424,7 +1482,7 @@ sha256s of the environment and of the installed items.
 Every run records the prompt in `llm_records.metadata`:
 
 - `system_prompt`: the text Looper supplies;
-- `system_prompt_mode`: `append` or `replace`, from the launch profile; an old
+- `system_prompt_mode`: `append` or `replace`, what the launch used (`Launch.system_prompt_mode`); an old
   record without the field means append;
 - `system_prompt_sha256`: the hash of that text, which is also the file name;
 - `prompt_layers`: where each layer came from, built in
@@ -1927,7 +1985,10 @@ when it fires), `overlap` (`skip`, `queue` or `parallel`, with
 `max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
 an optional `run_timeout_seconds` and `run_budget_usd`, `profile_overrides`
 for the Planner, Workers or Reviewers (by id or name, as a new task takes them;
-a profile a schedule chose cannot be deleted) and `task_limits`
+a role it does not name keeps the project's, and no change to a schedule alters
+its profiles unless the request carries them; a repetitive schedule such as
+alert triage can name a lower-effort Planner profile, since the Planner is
+often the largest share of a run's cost; a profile a schedule chose cannot be deleted) and `task_limits`
 (`{worker, reviewer}`, each 1–64 or null for the default: how many of each
 run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, from S2, an optional
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
@@ -2497,7 +2558,7 @@ agent room](#a-tasks-agent-room)).
 | Tool | Does | Tier |
 |---|---|---|
 | `looper_task_profiles` | The profiles its project allows (id, name, runtime, model, effort, which of the Worker and Reviewer each can run, the input and output price per million tokens, `null` where Looper does not know it), what the Workers and the Reviewers run now with its source, the user's choice for the task, and the Planner's own choices, per step too | read |
-| `looper_task_profile_set` | `{role: worker \| reviewer, profile_id: id or name \| null, step?, reason?}`: run that role on a profile from the project's list, for the rest of the task or for one step that has not ended (each attempt of it); `null` clears its choice. Refused with an empty list or a profile not on it (`forbidden`), when the user chose that role's profile for the task (`forbidden`: theirs stands), for the Planner role, an ended or unknown step, or a profile that cannot run the role, with the reason the dashboard gives (`invalid`). Each change is a `profile_choice` journal entry and an activity line | write |
+| `looper_task_profile_set` | `{role: worker \| reviewer, profile_id: id or name \| null, step?, reason?}`: run that role on a profile the project lets its Planners choose (its list, or any profile that can run the role while the list is empty), for the rest of the task or for one step that has not ended (each attempt of it); `null` clears its choice. Refused with a profile the project does not allow (not on its list, or not one that can run a Worker or Reviewer; `forbidden`), when the user chose that role's profile for the task (`forbidden`: theirs stands), for the Planner role, an ended or unknown step, or a profile that cannot run the role, with the reason the dashboard gives (`invalid`). Each change is a `profile_choice` journal entry and an activity line | write |
 | `looper_task_concurrency` | `{limits: {worker?, reviewer?}, reason?}`: the task's own Worker and Reviewer limits, as `PUT /api/tasks/:id/agents` sets them | write |
 
 The concurrency tool goes through the Manager's code (`set_task_limits`) and
@@ -2515,18 +2576,27 @@ that started keeps its profile, and one still waiting for room in its task
 uses the choice in effect when it starts. The precedence, highest
 first: the user's choice for the task, the Planner's for the step, the
 Planner's for the rest of the task, then the setting layers. A choice counts
-only while its profile is on the task's project's list: dropping a profile
-from the list drops the project's Planners' choices of it, and a task moved
-to another project runs what that project allows. Planning a task anew
+only while the task's project allows its profile (on its list, or any
+profile while the list is empty): a list set later that leaves a profile out
+drops the project's Planners' choices of it, and a task moved to another
+project runs what that project allows. Planning a task anew
 (`start_over`) drops its Planner's choices; going on from its plan keeps
 them.
 
-The list, `project_allowed_profiles`, is empty by default, so a Planner
-chooses nothing until the maintainer adds profiles to it on the project's
-Agent Profiles tab (row "Profiles the Planner may choose",
-`GET`/`PUT /api/projects/:id/allowed-profiles`). A pricier profile needs no
-confirmation: the list is the consent, and the task's spend cap still holds.
-A profile on a list cannot be deleted (its usage names the project).
+The list, `project_allowed_profiles`, is empty by default, and an empty list
+lets a project's Planners choose **any** registered profile that can run the
+role; a non-empty list restricts the choice to it. One function decides
+(`projects.choosable_profiles`, used by `looper_task_profiles`,
+`looper_task_profile_set`, `task_roles.allowed_profile` and the SQL that reads
+a stored choice, `projects.profile_allowed_sql`); a task without a project
+behaves like an empty list. The maintainer edits the list on the project's
+Agent Profiles tab (row "Profiles the Planner may choose", empty: "Any
+profile (no restriction)"; `GET`/`PUT /api/projects/:id/allowed-profiles`). A
+pricier profile needs no confirmation: the setting is the consent, and the run
+budget caps still hold. A profile on a list cannot be deleted (its usage names
+the project); a profile a Planner chose in a task that has not ended cannot
+be deleted either, whether it is a choice for the Workers and Reviewers or for a role the Planner defined (the refusal names the task: clear the choice or wait; checked and deleted under one lock on the profile row, so a choice being written is never dropped by the cascade),
+while the choices of ended tasks go with the profile.
 
 ### Roles a task's Planner defines
 
@@ -2558,7 +2628,7 @@ refused with that reason.
   dashboard) and reads again. Refused, with what to fix: a reserved or
   malformed id, a kind other than the role's own, an empty prompt, a prompt
   or harness over the project's limit, an unknown template or one of another
-  kind (`invalid`); a profile when the list is empty or does not hold it, or
+  kind (`invalid`); a profile the project does not allow, or
   when the user chose that kind's profile for the task, or a role whose
   current version the user wrote (`forbidden`); a profile that cannot run the
   kind (`invalid`). Writes only in a turn Looper sent the Planner, as for its
@@ -3194,15 +3264,16 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
-| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task); one row per layer and place |
+| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; Claude Code's mode; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
 | `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, `effort` (its runs'; null: the runtime's own), `agent_teams` (Claude Code's agent teams: on by default for Claude Code profiles, set by the registry and once by the upgrade; the column's default, false, is for other runtimes), `system_prompt_mode` (`append` by default or `replace`, enforced by a CHECK), `builtin`; a provider still used by one is not deleted |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
+| `task_system_prompt_modes` | A task's own system prompt mode per role (`planner`, `worker`, `reviewer`): `append` or `replace`, going with its task; Claude Code only |
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
-| `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; a profile on a list is not deleted |
+| `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; none allows every profile; a profile on a list is not deleted |
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
@@ -3302,24 +3373,114 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 
 ## HTTP API
 
-The API answers only the dashboard and local clients: every agent runs Claude
-with every permission, so a web page in your browser must not be able to drive it.
+The HTTP server has four route classes: the exact paths `/login` and `/logout`
+handle sign-in and sign-out; other paths outside `/api/` serve dashboard
+pages and public assets; `/api/agent/v1/`, including `OPTIONS`, requires each agent's own token; all other
+`/api/` paths, including unknown paths and `OPTIONS`, answer only the operator.
+Only dashboard `OPTIONS` requests return 204 without authentication.
+At startup it creates a missing runtime root with mode 0700 and checks that
+the directory is owned by the current user and not writable by group or others
+(an existing 0755 directory is allowed; `looper service install` creates the
+runtime root 0700). Before connecting to the database,
+it reads or creates `<runtime root>/operator-token`, a private file (mode 0600).
+It opens the file without following symlinks and without blocking (a FIFO in
+its place cannot hang the start), checks with `fstat` that it is a regular
+file of the current user with mode 0600, and reads through that same
+descriptor. An unsafe
+directory or file refuses startup with a repair message; permissions are never
+changed automatically. Operator requests send that
+token as `Authorization: Bearer <token>` or the cookie `looper_operator_<port>`,
+or send a valid password session cookie.
+A dashboard page load signs the browser in when `Sec-Fetch-Mode: navigate` and
+`Sec-Fetch-Dest: document`, both the TCP peer and `Host` are loopback, and neither
+`Forwarded` nor `X-Forwarded-For` is present. This token cookie has `Path=/`,
+`HttpOnly` and `SameSite=Strict`, without `Max-Age`, `Expires` or `Secure`;
+pages use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, other
+files keep their public cache. Other browsers sign in with the user name and
+password set on the server's machine by
+`looper auth set-password [--user NAME] [--runtime-root DIR]`. The user defaults
+to `admin` and accepts `[A-Za-z0-9._-]{1,64}`; the password needs at least
+8 characters and is read twice without echo, never from an argument.
+`looper auth clear-password [--runtime-root DIR]` removes it. Both commands
+use the same default runtime root as `looper serve`.
+
+`<runtime root>/operator-password` is a mode-0600 JSON file, checked and read
+with the same directory and descriptor safety rules as the token. It stores
+the user and a scrypt hash (`n=32768`, `r=8`, `p=1`, `maxmem=64 MiB`,
+`dklen=32`) with a fresh 16-byte salt per set, both URL-safe base64 encoded.
+Writes use a mode-0600 temporary file, `fsync` and atomic replacement. A malformed
+or unsafe file cannot authenticate a request. Verification computes scrypt even
+for a wrong user name and compares both user and hash with `hmac.compare_digest`.
+The server caches the record by the file's inode, size, `mtime_ns`, mode and uid,
+re-reading it safely only when those change.
+
+A dashboard page request without a token cookie, valid session or local
+auto-login gets a self-contained, script-free login page (200); assets stay
+public. `GET /login` shows the same form, or redirects signed-in and locally
+auto-signed-in browsers to `/` (303). Without a password it shows no form and
+asks the operator to run `looper auth set-password` on the server's machine
+or open the dashboard there. `POST /login` accepts at most 4096 bytes of
+`application/x-www-form-urlencoded` fields `username` and `password`; larger
+bodies get 413. It and `POST /logout` require an `Origin` whose netloc equals
+`Host` and whose scheme is `https` when `dashboard_url` starts with `https://`,
+`http` otherwise (403 if missing or different; behind an https proxy, set
+`dashboard_url` to the https address). A wrong user or password gets the same
+401 error; no password also gets 401, and an unusable password file gets 503
+with a server-log pointer. Success redirects to `/` (303) with
+`looper_session_<port>=<id>; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`;
+`Secure` is added only when `dashboard_url` starts with `https://`.
+The random session ID is not the token. Sessions last 7 days in memory, at most
+100 (expired first, then oldest removed); setting or clearing the password,
+or restarting the server, ends them. `POST /logout` ends the presented session,
+clears both cookies with `Max-Age=0`, and redirects to `/login` (303).
+Other methods on these paths get 405.
+
+Before any scrypt work, a limiter checks the TCP peer: 5 consecutive failures
+lock it for 60 seconds, doubling after further failures up to 900 seconds;
+a success resets it. More than 30 failures in a sliding 600-second window lock
+every peer until the count falls to 30 or fewer. Locked requests get 429 and
+`Retry-After` seconds, without adding another failure. All browsers behind a
+proxy share its peer address; `X-Forwarded-For` and `Forwarded` are ignored.
+Attempts are handled one at a time (check, scrypt, record), so parallel
+requests cannot pass the limiter before the first failure counts. Login logs contain only the peer and `failed`,
+`succeeded` or `locked`, never the request body, user name or password.
+Every login page and every `/login` or `/logout` response uses
+`Cache-Control: no-store`, `Referrer-Policy: same-origin` (under `no-referrer`
+a browser sends `Origin: null` with the form's POST, which the same-origin
+check refuses) and
+`Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`.
+There are no sign-in links or one-time codes; `code` and `token` query
+parameters are ignored. Without a password only local auto-login is available.
+
+`looper service` reads the file of the unit's `--runtime-root`, and the eval
+runner that of the server it starts; both send the Bearer token. A missing or
+wrong credential gets 401 with `WWW-Authenticate: Bearer realm="looper"` and a
+message saying how to sign in, which does not name the token file. The check
+precedes reading the body, including configuration uploads. A shell agent under the same system user can
+still deliberately read the file, imitate a browser or access the database;
+see [the RFC, section 5](rfcs/operator-api-auth-v0.zh-CN.md#5-agent-还能做到什么).
+
 A request whose `Origin` is not the server's own is refused with 403 and no
 response carries CORS headers. While the server listens on a loopback address,
 the `Host` must name a loopback address too, which defeats DNS rebinding.
-Clients without an `Origin` (curl, the CLI) are unaffected, and so is the Vite
-dev proxy, which keeps `Host` and `Origin` on its own port.
+Clients without an `Origin` (curl, the CLI) skip the Origin check except for
+`POST /login` and `POST /logout`. The Vite
+dev proxy keeps `Host` and `Origin` on its own port and forwards the browser
+cookie: open the dashboard on the server's port first, using the same hostname.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/status` | GET | System health: `agents`, each supervisor component's `healthy`, `state` (`running`, `restarting`, `crash_looping`), `up`, `restart_count` (restarts in a row), `last_crash_at`, `next_restart_at` and `agent_type`; `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `completed` |
+| `/login` | GET | Login form, or no-password instructions; 303 to `/` for a signed-in browser or local auto-login |
+| `/login` | POST | Same-origin password sign-in; 303 to `/` with a session cookie on success; 401 for wrong credentials or no password, 429 when locked, 503 for an unusable password file |
+| `/logout` | POST | Requires same-origin `Origin`; ends the session, clears both cookies and returns 303 to `/login` |
 | `/api/overview` | GET | The Dashboard's one read. `tasks`: the count per group (`in_progress`, `ready`, `attention`, `completed`, `cancelled`, `other`), `total` and `other_statuses` (each status no group knows, with its count); `agents`: `manager` (`state` `busy` or `idle`), `planners`, `workers` and `reviewers` (each with its task, project, `step`, `instruction`, `state` `running` or `waiting` and `elapsed_seconds`, and `task_role` when it runs as a role its task's Planner defined); `projects`: each project with a task in progress or ready, or an agent running, with `tasks` (`running`, `ready`), `workers` and `reviewers` (`running`, `waiting`: for room under their task's limit); `idle_projects`; `spend_today` (`since`, `provider_priced_usd`, `equivalent_usd`, `runs`, `running`, `unpriced_runs`); `schedules` (`total`, `enabled`, `next`: up to 5 with `next_fire_at` and `timezone`, `failing`: with `consecutive_failures`, `failures_since`, `stale_since`, `last_success_at`, `last_status`, and `skipped_today` by reason); `health.unhealthy`: each supervisor component not simply running, with `name`, `state` (`restarting`: down and waiting to start again; `crash_looping`: restarted 3 times in a row without staying up 5 minutes, up or down now), `up`, `restart_count`, `last_crash_at` and `next_restart_at`. 500 when the database cannot be read |
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count`, `active_count` and `schedule_count` |
 | `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters) and execution settings; 409 when the name exists ignoring case; 400 naming the agent-settings endpoint for `planner_harness_prompt`, `worker_harness_prompt`, `model` or `run_budget_usd` |
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears it) and the execution settings; 400 (as for POST), 404, 409 |
 | `/api/projects/:id/agent-settings` | GET/PUT | GET: `project.values` (the project layer), `roles` (`planner`, `worker`, `reviewer`, each with `values`, its role-in-project layer, and `effective`: every field's `value` and `source` layer, the harness with `from_role` when a Reviewer takes the Workers'), and `limits`. PUT sets the project layer; 404 for an unknown project |
 | `/api/projects/:id/agent-settings/roles/:role` | PUT | Set one role's layer in the project (`planner`, `worker` or `reviewer`; 400 for `manager`) |
-| `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}]}`, empty by default. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` empties it) and drops the project's Planners' choices of a profile it removes; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` sets it with the same code |
+| `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, restricted, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}], choosable: [same]}`: `profiles` is the list, empty by default, which lets the Planners choose any profile; `choosable` is what they may choose now. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` lifts the restriction and keeps their choices) and drops the project's Planners' choices of a profile a non-empty list leaves out; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` sets it with the same code |
 | `/api/projects/:id/role-templates` | GET | The project's role templates by key (each `{key, kind, description, role_prompt, harness, profile, items, updated_at}`, `profile` `{profile_id, name, allowed}` or null, `items` each `{id, kind, name}`), its `role_text_max_chars` and `role_items` (the catalog items installed for roles here, which a role or a template may name); 404 for an unknown project |
 | `/api/projects/:id/role-templates/:key` | PUT/DELETE | PUT creates the template or replaces it whole with `{kind, role_prompt, description?, harness?, profile_id?, items?}`, checked as a task role is (a profile from the project's list, items installed for roles); DELETE removes it (task roles copied from it keep their versions). Both answer the project's templates. 400 for a definition a task role would be refused or an unknown field, 404 for an unknown project or template |
 | `/api/projects/:id/knowledge` | GET | The project's knowledge: `documents` (`document_id`, `title`, `summary`, `source_kind`, `filename`, `path`, `read_path`, `missing`, `size_bytes`, `sha256`, timestamps; no content), `count`, `stored_bytes`, the `index` agents get and its `index_chars`, and `caps`; 404 for an unknown project |
@@ -3356,7 +3517,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks/:id/gates/:step/messages` | GET | A user gate's discussion, oldest first: `{task_id, gate, messages}` (each `{id, role, kind, text, author, via, agenda_item, option, created_at}`); 404 for no such gate |
 | `/api/tasks/:id/gates/:step/messages` | POST | The user writes `{text, agenda_item?, option?}` in the gate (an option of an agenda item, with the item's id), only while it waits for the user: an open gate becomes `discussing`, and the task's Planner is woken. Answers `{task_id, gate, message, delivered}`: `queued` (its Planner takes it next) or `kept` (the task is not running; going on from its plan gives it). 400 for an empty text or one over 8,000 characters, or an option the item does not have; 404 for no such task or gate; 409 for a gate that does not wait for the user or a completed task |
 | `/api/tasks/:id/gates/:step/end` | POST | The user ends the gate's discussion (`{text?}`): the next `[GATE]` turn closes it with the current conclusions. As the POST above |
-| `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`) and `concurrency` (how many of its Workers or Reviewers run at once, 1–64), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
+| `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`), `concurrency` (how many of its Workers or Reviewers run at once, 1–64) and `system_prompt_modes` (`append` or `replace` for its `planner`, `worker` or `reviewer`, on Claude Code; 400 for another role or value), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
 | `/api/tasks/:id/roles/:key` | PUT | The user's edit of a role of the task: `{role_prompt, harness, profile_id, items?}`, the whole definition (the kind stays; `items` left out keeps the current ones), written as a new version by the user with a supplement that tells the Planner (a running one gets it at once); afterwards the Planner cannot change that role. Answers `{task_id, id, kind, version, via, changed}`. 400 for a definition a task role would be refused or one that changes nothing, 404 for an unknown task or role, 409 for a completed task or a role that changed meanwhile |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it gets its Planner at once, like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/:id/workspaces/:wid/discard` | POST | Discard a step worktree the task keeps (`active`, `unmerged`, or `discarded` with its branch kept): its directory and branch are deleted, and the activity says so. Answers `{workspace}` (as in `GET /api/tasks/:id`'s `step_workspaces`); 404 for no such worktree in the task, 409 while the task is running or for one that is merging, merged or gone ([Step workspaces](#step-workspaces)) |
@@ -3400,6 +3561,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
+| `/api/channels/lark_bot/status` | GET | The Lark (bot token) channel as the platform sees its saved settings: the same fields as `/api/channels/lark/status` (`bot.profile` is empty); `problem` also says no `app_id` or no app secret is set |
+| `/api/channels/lark_bot/people` | GET | `?q=` a name or an email (1–50 characters): `people` as above and `complete` (false when the bounded directory scan, at most 40 requests, ended before reading every department); an email is looked up exactly; 400 for a bad query, 502 when the platform refuses |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
 ## Configuration
@@ -3505,6 +3668,20 @@ restart.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
   `/help` from an unlisted sender get no answer either.
+- **Lark (bot token)** (`lark_bot.py`, `lark_bot_settings.py`): an independent
+  `lark_bot` channel (`channel-lark_bot`), disabled by default, using the same
+  adapter as `lark` through `LarkTransport`. Its configuration holds `app_id`,
+  `domain` (`feishu` or `lark`), and its own app-bound `allowed_open_ids`;
+  `channel_secrets.bot_token` holds the app secret and APIs expose only
+  `has_bot_token`. It sends through the open platform and receives over its
+  long connection, reconnecting with exponential backoff capped at 300 s and
+  0.5–1.0 jitter; a stream that yields an event or lasts 60 s resets the backoff. Direct
+  messages, group @-mentions, replies, statuses, notices, schedules and gates
+  follow the Lark rules below. The backend exposes
+  `GET /api/channels/lark_bot/status` and `GET /api/channels/lark_bot/people?q=`,
+  including sender names and rejected senders, and Settings → Channels has its
+  card (app id, domain, app secret, allowlist, search, refused senders). No
+  lark-cli binary or login is required.
 - **Lark (lark-cli)** (`looper/agents/channels/lark.py`, `lark_cli.py`,
   `lark_settings.py`): the Manager in Lark direct messages and group chats,
   through `lark-cli`

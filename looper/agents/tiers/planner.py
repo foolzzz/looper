@@ -111,6 +111,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from .. import reported_files
 from .. import step_workspaces as workspaces
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..operator_notes import notes_note
@@ -691,7 +692,7 @@ def _prepare_work_dir(work_dir: str) -> str | None:
     try:
         Path(work_dir).mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return f"cannot create work directory {work_dir}: {exc}"
+        return f"cannot create work directory {reported_files.prompt_name(work_dir)}: {exc}"
     return None
 
 
@@ -1524,8 +1525,8 @@ class PlannerAgent:
     async def _merge_failed(self, plan: TaskPlan, step: PlanStep, outcome: MergeResult, *, decide: bool = True) -> None:
         failed = outcome.workspace
         assert failed.merge_error is not None
-        error = (f"Step {step.label} was accepted, but its branch could not be merged into {failed.target} "
-                 f"({failed.merge_error.value}): {failed.detail}")
+        error = (f"Step {step.label} was accepted, but its branch could not be merged into "
+                 f"{reported_files.prompt_name(failed.target)} ({failed.merge_error.value}): {failed.detail}")
         step.result = {**(step.result or {}), "status": "unmerged", "error": error,
                        "merge_error": failed.merge_error.value, "merge_files": list(outcome.files[:50]),
                        "branch": failed.branch}
@@ -1541,15 +1542,15 @@ class PlannerAgent:
     def _merge_report(step: PlanStep, failed: StepWorkspace, files: Sequence[str]) -> list[str]:
         assert failed.merge_error is not None
         lines = [
-            f"Step {step.label} was accepted, but Looper could not merge its branch {failed.branch} into "
-            f"{failed.target} in the task directory:",
+            f"Step {step.label} was accepted, but Looper could not merge its branch {reported_files.prompt_name(failed.branch)} into "
+            f"{reported_files.prompt_name(failed.target)} in the task directory:",
             f"- why: {_MERGE_REASONS[failed.merge_error]} ({failed.merge_error.value})",
             f"- detail: {_clip(failed.detail, 500)}",
         ]
         if files:
-            lines.append(f"- files: {', '.join(files[:20])}" + (f" (+{len(files) - 20} more)" if len(files) > 20 else ""))
-        lines.append(f"The task directory is as it was before the merge. A retry starts from {failed.target} as it is "
-                     f"now, and its Worker is told the previous attempt's branch {failed.branch} to bring the work over.")
+            lines.append(f"- files: {', '.join(reported_files.prompt_name(f) for f in files[:20])}" + (f" (+{len(files) - 20} more)" if len(files) > 20 else ""))
+        lines.append(f"The task directory is as it was before the merge. A retry starts from {reported_files.prompt_name(failed.target)} as it is "
+                     f"now, and its Worker is told the previous attempt's branch {reported_files.prompt_name(failed.branch)} to bring the work over.")
         return lines
 
     async def _finish_merge(self, plan: TaskPlan, step: PlanStep) -> None:
@@ -2368,12 +2369,11 @@ class PlannerAgent:
         return "\n".join(lines) + tail, shown
 
     def _step_seats(self, step: PlanStep) -> list[str]:
-        """The room seats of ``step``: its Worker's, its Reviewer's, its review role's."""
+        """The room seats of ``step``: its Worker's, its Reviewer's, its review roles'."""
         seats = [seat_key(step.role or "worker", step.label)]
-        if step.review or step.reviewer_id or step.review_role:
+        if step.review or step.reviewer_id or step.review_roles:
             seats.append(seat_key("reviewer", step.label))
-        if step.review_role:
-            seats.append(seat_key(step.review_role, step.label))
+        seats += [seat_key(item.role, step.label) for item in step.review_roles]
         return seats
 
     async def _room_lines(self, step: PlanStep) -> list[str]:
@@ -2400,8 +2400,8 @@ class PlannerAgent:
             step.missed_messages.append(reply.text)
             await self._save(plan, step)
             await self._activity("phase", f"User message for step {step.index + 1} ({step.label}) arrived after "
-                                          f"{step.worker_id} finished; kept for the Planner's decision")
-            return f"{reply.reply}\n\n（{step.worker_id} 在消息送达前已经结束；处理它的结果时我会考虑这条消息。）"
+                                          f"{step.worker_id} finished or was not confirmed; kept for the Planner's decision")
+            return f"{reply.reply}\n\n（消息送达未确认，{step.worker_id} 可能已经按它行动；处理它的结果时我会考虑这条消息。）"
         if reply.action is ChatAction.ADD_STEPS:
             steps = self._add_steps(plan, reply.steps)
             await self._save(plan, *steps, entries=[self._added_entry(plan, steps, reply, at)])
@@ -2573,7 +2573,7 @@ class PlannerAgent:
             await self._save(plan, step)
             await self._activity(
                 "phase", f"Planner steer for step {step.index + 1} ({step.label}) arrived after "
-                         f"{step.worker_id} finished; kept for its decision",
+                         f"{step.worker_id} finished or was not confirmed; kept for its decision",
             )
 
     async def _kill_and_decide(self, plan: TaskPlan, step: PlanStep, reason: str) -> None:
@@ -2738,7 +2738,8 @@ class PlannerAgent:
         if agent_settings.profile_error:
             # The task fails with the reason rather than run another agent.
             raise PlannerTurnError(agent_settings.profile_error)
-        system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness)
+        system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness,
+                                            custom_prompt=agent_settings.profile.custom_prompt)
         launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER)  # never with agent teams
         await self._note_background(plan.project_background)
         try:
@@ -2907,7 +2908,7 @@ class PlannerAgent:
     async def _watch_files(self, plan: TaskPlan, launch: Launch) -> _Watched | None:
         """How a read-only turn whose runtime cannot refuse what would change files (``ReadOnly.CHECK``) is checked,
         and the task directory's state as it starts; None for a turn that needs no check."""
-        if not launch.read_only or launch.runtime.read_only is not ReadOnly.CHECK:
+        if not launch.read_only or launch.read_only_mode is not ReadOnly.CHECK:
             return None
         if await self._shared(plan):
             return _Watched(None, FilesCheck.SHARED)
@@ -3081,7 +3082,7 @@ class PlannerAgent:
         return begin
 
     def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings, knowledge: AgentKnowledge,
-                       harness: Harness) -> SystemPrompt:
+                       harness: Harness, *, custom_prompt: str = "") -> SystemPrompt:
         """The harness, the role prompt, the project background and knowledge index, the task, then the reply
         contract."""
         project = None
@@ -3090,6 +3091,7 @@ class PlannerAgent:
                        "updated_at": plan.project_updated_at}
         return build_system_prompt(
             harness=harness,
+            custom_prompt=custom_prompt,
             role_id="planner",
             role=settings.system_prompt,
             recommended=settings.recommended,
@@ -3179,16 +3181,21 @@ class PlannerAgent:
             lines.append(f"- summary: {_clip(result['summary'], 1000)}")
         changed = result.get("changed_files")
         if isinstance(changed, dict) and changed:
-            files = [f"{path} ({_clip(note, 80)})" if note else str(path) for path, note in list(changed.items())[:20]]
+            files = [f"{reported_files.prompt_name(path)} ({_clip(note, 80)})" if note else reported_files.prompt_name(path)
+                     for path, note in list(changed.items())[:20]]
             more = f" (+{len(changed) - 20} more)" if len(changed) > 20 else ""
             lines.append(f"- changed files: {'; '.join(files)}{more}")
         deleted = result.get("deleted_files")
         if isinstance(deleted, list) and deleted:
-            lines.append(f"- deleted files: {', '.join(str(p) for p in deleted[:20])}")
+            lines.append(f"- deleted files: {', '.join(reported_files.prompt_name(p) for p in deleted[:20])}")
+        elsewhere = reported_files.render(result.get("found_elsewhere"), limit=20)
+        if elsewhere:
+            lines.append(elsewhere)
         if step.isolated and step.workspace is not None:
             # Outside the directories the read-only Planner reads; git still shows its committed changes.
             workspace = step.workspace
-            lines.append(f"- worktree: {workspace.path}, on branch {workspaces.short_branch(workspace.branch)} from "
+            lines.append(f"- worktree: {reported_files.prompt_name(workspace.path)}, on branch "
+                         f"{reported_files.prompt_name(workspaces.short_branch(workspace.branch))} from "
                          f"{workspace.base_commit[:12]}")
         if result.get("error") and result.get("error") != result.get("summary"):
             lines.append(f"- error: {_clip(result['error'], 500)}")
@@ -3280,7 +3287,7 @@ class PlannerAgent:
             *report,
         ]
         if step.missed_messages:
-            lines += ["", "The user sent this to the step's Worker through you, but it arrived after the Worker finished:"]
+            lines += ["", "The user sent this to the step's Worker through you; delivery not confirmed; the Worker may already have acted on it:"]
             lines += [f"- {_clip(m, 500)}" for m in step.missed_messages]
         if context.result is ResultKind.WORK and context.succeeded and context.review_required:
             lines += ["", "This step needs a passing review before it can be accepted."]

@@ -399,6 +399,28 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path) -> LarkChann
     return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id)
 
 
+async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: Path) -> LarkChannelAdapter | None:
+    """Start the bot-token channel only with a valid allowlist and matching app credentials."""
+    from ..db.channel_configs import record_rejected
+    from .channels import lark_bot_settings
+    from .channels.lark_bot import make_adapter
+
+    allowlist = _sender_allowlist("channel-lark_bot", "lark_bot", config)
+    if allowlist is None:
+        return None
+    problem, bot = await lark_bot_settings.check(config, secret, fresh=True)
+    if problem or bot is None:
+        logger.error("channel-lark_bot not started: %s", problem)
+        return None
+    logger.info("channel-lark_bot: bot %s (app %s)", bot.app_name, config.get("app_id"))
+
+    async def rejected(sender_id: str, chat_id: str | None) -> None:
+        await record_rejected("channel-lark_bot", sender_id, chat_id=chat_id)
+
+    return make_adapter(config, secret, runtime_root=runtime_root, allowlist=allowlist,
+                        on_rejected=rejected, bot_open_id=bot.open_id)
+
+
 async def seed_channel_configs(pool: Any = None) -> None:
     """Give Telegram and Lark their config rows, disabled and with empty sender allowlists; existing rows are kept."""
     from ..db.channel_configs import seed_defaults
@@ -423,6 +445,19 @@ async def seed_channel_configs(pool: Any = None) -> None:
                 "profile": "",
                 "allowed_open_ids": [],
                 "description": "The Manager in Lark direct messages and group @-mentions, through lark-cli",
+            },
+        },
+        {
+            "channel_id": "channel-lark_bot",
+            "channel_type": "lark_bot",
+            "display_name": "Lark (bot token)",
+            "enabled": False,
+            "config": {
+                "app_id": "",
+                "domain": "feishu",
+                "allowed_open_ids": [],
+                "description": "The Manager in Lark direct messages and group @-mentions, through the Lark open "
+                               "platform with an app id and secret",
             },
         },
     ], pool=pool)
@@ -647,6 +682,12 @@ async def _run_agent_system(
                        "validation only", schedules.MIN_INTERVAL_ENV, min_interval, min_interval,
                        schedules.DEFAULT_MIN_INTERVAL_SECONDS)
 
+    from . import operator_auth
+    try:
+        operator_token = operator_auth.ensure_token(runtime_root)
+    except operator_auth.OperatorTokenError as exc:
+        raise StartupCheckFailed(str(exc)) from None
+
     dsn = configured_dsn()
     database_check = await self_check.check_database(dsn)
     if database_check.status != self_check.OK:
@@ -772,6 +813,15 @@ async def _run_agent_system(
         if lark_adapter is not None:
             await _register_optional_channel(registry, lark_adapter)
 
+    lark_bot_cfg = await get_channel_config("channel-lark_bot")
+    if lark_bot_cfg and lark_bot_cfg.get("enabled"):
+        from ..db.channel_configs import get_bot_token
+
+        secret = await get_bot_token("channel-lark_bot") or ""
+        lark_bot_adapter = await _lark_bot_adapter(lark_bot_cfg.get("config") or {}, secret, runtime_root)
+        if lark_bot_adapter is not None:
+            await _register_optional_channel(registry, lark_bot_adapter)
+
     # --- Agent Tiers ---
 
     manager_config = ManagerConfig(
@@ -839,6 +889,8 @@ async def _run_agent_system(
         manager=manager,
         broadcaster=broadcaster,
         runtime_root=runtime_root,
+        operator_token=operator_token,
+        dashboard_url=dashboard_url,
         self_checks=[check.to_dict() for check in checks],
         claude_bin=claude_bin,
         scheduler=scheduler,

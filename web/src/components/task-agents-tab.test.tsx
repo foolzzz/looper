@@ -7,6 +7,7 @@ const profile = (name: string, effort: string | null = null) => ({
   value: { profile_id: name, name, model: "m", effort, runtime: "r", provider: "p" },
   source: "role" as const,
 });
+const mode = (value: "append" | "replace", source: "task" | "role" | "builtin" = "builtin") => ({ value, source });
 const limit = (value: number) => ({ value, source: "role" as const, task: null, default: { value, source: "role" as const } });
 
 function agents(editable: boolean): TaskAgents {
@@ -14,9 +15,11 @@ function agents(editable: boolean): TaskAgents {
     concurrency_max: 64,
     editable,
     roles: {
-      planner: { profile: profile("claude-code/opus") },
-      worker: { profile: profile("codex/gpt-5", "high"), concurrency: limit(2) },
-      reviewer: { profile: profile("claude-code/sonnet"), concurrency: limit(1) },
+      planner: { profile: profile("claude-code/opus"), runtime_type: "claude-code", system_prompt_mode: mode("replace") },
+      worker: { profile: profile("codex/gpt-5", "high"), runtime_type: "codex", system_prompt_mode: mode("append"),
+                concurrency: limit(2) },
+      reviewer: { profile: profile("claude-code/sonnet"), runtime_type: "claude-code",
+                  system_prompt_mode: mode("append", "task"), concurrency: limit(1) },
     },
   };
 }

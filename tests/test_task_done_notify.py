@@ -187,7 +187,9 @@ def test_the_notify_channels_are_the_adapters_that_implement_notify(tmp_path: Pa
 
     adapters = [WebChannelAdapter(),
                 TelegramChannelAdapter(bot_token="0:x", allowlist=SenderAllowlist("channel-telegram", frozenset())),
-                LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset()))]
+                LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset())),
+                LarkChannelAdapter(runtime_root=tmp_path, channel_type="lark_bot",
+                                   allowlist=SenderAllowlist("channel-lark_bot", frozenset()))]
     implementing = {adapter.channel_type for adapter in adapters if type(adapter).notify is not ChannelAdapter.notify}
     assert implementing == {channel.value for channel in NotifyChannel}
 

@@ -35,6 +35,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .reported_files import prompt_name
+
 logger = logging.getLogger(__name__)
 
 NOTES_ROOT_ENV = "LOOPER_OPERATOR_NOTES_ROOT"
@@ -167,7 +169,7 @@ def read_notes(work_dir: str) -> OperatorNotes:
     footer = f"\n\nNot included (past the {NOTES_MAX_BYTES // 1024} KiB limit, or not readable): "
     names = [name for name in dict.fromkeys(_LINK.findall(index)) if name != INDEX]
     # Reserve the whole possible footer before fitting the index and linked files.
-    reserved = len((footer + ", ".join(names)).encode("utf-8")) if names else 0
+    reserved = len((footer + ", ".join(prompt_name(name) for name in names)).encode("utf-8")) if names else 0
     index = index.encode("utf-8")[:max(0, budget - reserved)].decode("utf-8", "ignore").strip()
     if not index:
         return NO_NOTES
@@ -178,7 +180,7 @@ def read_notes(work_dir: str) -> OperatorNotes:
         if name == INDEX:
             continue
         text = _read(root / name, root, NOTES_MAX_BYTES - used - reserved)
-        block = f"\n\n### {name}\n{text.strip()}" if text is not None else ""
+        block = f"\n\n### {prompt_name(name)}\n{text.strip()}" if text is not None else ""
         if not block or used + len(block.encode("utf-8")) + reserved > NOTES_MAX_BYTES:
             omitted.append(name)
             continue
@@ -186,7 +188,7 @@ def read_notes(work_dir: str) -> OperatorNotes:
         used += len(block.encode("utf-8"))
         files.append(name)
     if omitted:
-        parts.append(footer + ", ".join(omitted))
+        parts.append(footer + ", ".join(prompt_name(name) for name in omitted))
     return OperatorNotes(text="".join(parts), files=tuple(files), omitted=tuple(omitted))
 
 

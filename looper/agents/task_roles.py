@@ -93,26 +93,27 @@ def check_definition(kind: Any, role_prompt: Any, harness: Any, limit: int) -> t
 
 
 async def allowed_profile(project_id: str | None, wanted: str, kind: RoleKind) -> Mapping[str, Any]:
-    """The Agent Profile ``wanted`` (an id or a name) for a role of ``kind`` in project ``project_id``: one on the
-    project's list (``RoleForbidden`` otherwise) that can run the kind (``RoleError`` otherwise)."""
-    from ..db import projects as db_projects
+    """The Agent Profile ``wanted`` (an id or a name) for a role of ``kind`` in project ``project_id``: one the
+    project lets its Planners choose (``RoleForbidden`` otherwise; ``projects.choosable_profiles``) that can run the
+    kind (``RoleError`` otherwise)."""
     from .profile_registry import RegistryError, check_selection
+    from .projects import choosable_profiles
 
-    allowed = await db_projects.allowed_profiles(project_id) if project_id else []
-    if not allowed:
-        raise RoleForbidden("the project lets no role choose an Agent Profile (its list is empty): leave profile_id "
-                            "out")
+    allowed, restricted = await choosable_profiles(project_id)
     profile = next((p for p in allowed if p["id"] == wanted), None) or next(
         (p for p in allowed if str(p["name"]).casefold() == str(wanted).strip().casefold()), None)
     if profile is None:
-        raise RoleForbidden(f"{wanted!r} is not on the project's list; you may choose: "
-                            f"{', '.join(p['name'] for p in allowed)}")
+        raise RoleForbidden(f"{wanted!r} is {NOT_ALLOWED[restricted]}; "
+                            f"you may choose: {', '.join(p['name'] for p in allowed) or 'none'}")
     try:
         await check_selection(profile["id"], [kind.agent.value])
     except RegistryError as exc:
         raise RoleError(str(exc)) from None
     return profile
 
+
+# How a profile that is not choosable is named, by whether the project restricts the choice to a list.
+NOT_ALLOWED = {True: "not on the project's list", False: "not a registered profile that can run a Worker or Reviewer"}
 
 # The most catalog items a role names.
 ITEMS_MAX = 20

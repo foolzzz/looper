@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from ..db import activity as db_activity, system_settings as db_settings, tasks as db_tasks
 from ..db import user_gates as db_user_gates
 from .bus import MessageBus
-from .message import AgentAddress, MessageEnvelope, MessageType, planner_address
+from .message import AgentAddress, MessageEnvelope, MessageType, is_lark, planner_address
 from .projects import RequestError
 from .task_notice import NotifyChannel, NotifyTarget, TargetKind, notify_channel
 from .user_gates import MESSAGE_MAX_CHARS, GateState, MessageKind, retry_at
@@ -42,7 +42,8 @@ VIA_DASHBOARD = "dashboard"
 REMINDER_CHECK_SEC = 300
 # The system setting naming the chat the gates of a task asked for on the dashboard go to: {"channel", "chat"}.
 DASHBOARD_TARGET_KEY = "user_gates.dashboard_target"
-_CHANNEL_WORDS = {NotifyChannel.LARK: "Lark", NotifyChannel.TELEGRAM: "Telegram"}
+_CHANNEL_WORDS = {NotifyChannel.LARK: "Lark", NotifyChannel.LARK_BOT: "Lark (bot token)",
+                  NotifyChannel.TELEGRAM: "Telegram"}
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ class GateChat:
     @property
     def lark_group(self) -> bool:
         """A Lark group: a reply there reaches the bot only when it @-mentions it, which the messages say."""
-        return self.channel is NotifyChannel.LARK and self.target.kind is TargetKind.CHAT
+        return self.channel.is_lark and self.target.kind is TargetKind.CHAT
 
     def label(self) -> str:
         """The chat in words: "Lark group oc_...", "Lark ou_..." (a direct message), "Telegram 123"."""
@@ -67,7 +68,7 @@ def origin_chat(channel: str, chat: str, *, group: bool, sender: str) -> str:
     """The chat a user's Lark or Telegram message is in, as a gate's chat names it (``GateChat.target.id``): a Lark
     direct message is its sender's open_id (Looper posts to the open_id; the message comes from their chat with the
     bot), anything else its chat id. A gate's Planner replies under the user's message only in the gate's chat."""
-    return sender if channel == NotifyChannel.LARK.value and not group and sender else chat
+    return sender if is_lark(channel) and not group and sender else chat
 
 
 def gate_chat(task: Mapping[str, Any], dashboard: GateChat | None) -> GateChat | None:
@@ -93,7 +94,7 @@ def _dashboard_chat(raw: Any) -> GateChat | None:
         return None
     if not (isinstance(chat, str) and chat):
         return None
-    kind = TargetKind.USER if channel is NotifyChannel.LARK else TargetKind.CHAT
+    kind = TargetKind.USER if channel.is_lark else TargetKind.CHAT
     return GateChat(channel, NotifyTarget(kind, chat))
 
 

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ..claude_cli import repository_root
+from ..reported_files import prompt_name
 
 CLAUDE_MD = "CLAUDE.md"
 AGENTS_MD = "AGENTS.md"
@@ -116,8 +117,8 @@ def injected_section(files: Sequence[InstructionFile], runtime_label: str) -> st
     for file in files:
         if file.delivery is not Delivery.INJECTED or (given := read_injected(file.path)).error is not None:
             continue
-        lines = [f"# Project instructions: {file.path.name}", "",
-                 f"The work directory's own {file.path.name} ({file.path}), which {runtime_label} does not load "
+        lines = [f"# Project instructions: {prompt_name(file.path.name)}", "",
+                 f"The work directory's own {prompt_name(file.path.name)} ({prompt_name(file.path)}), which {runtime_label} does not load "
                  "here, so Looper gives it to you:", "", given.text.strip()]
         if given.clipped:
             lines += ["", f"[clipped: {given.clipped} more bytes; read the file for the rest]"]

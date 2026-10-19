@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   EDIT_BOX,
@@ -16,10 +17,12 @@ import {
   createAgentProfile,
   deleteAgentProfile,
   fetchStatus,
+  fetchPromptPreview,
   updateAgentProfile,
   type AgentProfile,
   type AgentRole,
   type ProfileUsedBy,
+  type PromptPreview,
   type Provider,
   type ProviderLogin,
   type Registry,
@@ -169,6 +172,7 @@ export function AgentProfileForm({
       effort: profile?.effort ?? "",
       agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
       system_prompt_mode: profile?.system_prompt_mode ?? ("append" as SystemPromptMode),
+      custom_prompt: profile?.custom_prompt ?? "",
     };
   });
   const action = useAction();
@@ -185,6 +189,7 @@ export function AgentProfileForm({
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
   // Agent teams are a Claude Code feature: the server refuses them on another runtime.
   const teams = type?.type === "claude-code";
+  const claudeCode = type?.type === "claude-code";
   const canReplace = type?.can_replace_system_prompt === true;
   const replaceRefusal = canReplace ? null : type?.replace_system_prompt_refusal
     ?? "This runtime cannot replace its default system prompt.";
@@ -198,7 +203,7 @@ export function AgentProfileForm({
     // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
-    const resetPrompt = draft.system_prompt_mode === "replace" && !nextRuntimeType?.can_replace_system_prompt;
+    const resetPrompt = draft.system_prompt_mode === "replace" && (nextType === "claude-code" || !nextRuntimeType?.can_replace_system_prompt);
     setPromptReset(resetPrompt);
     set({ runtime_id: runtimeId, provider_id: providerId,
           model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model),
@@ -305,25 +310,31 @@ export function AgentProfileForm({
             ))}
           </select>
         </div>
-        <div className="space-y-1 sm:col-span-2">
-          <label htmlFor={`${id}-system-prompt`} className={LABEL}>System prompt</label>
-          <select
-            id={`${id}-system-prompt`}
-            value={draft.system_prompt_mode}
-            onChange={(e) => set({ system_prompt_mode: e.target.value as SystemPromptMode })}
-            disabled={!canReplace}
-            aria-describedby={replaceRefusal ? `${id}-system-prompt-hint` : undefined}
-            className={SELECT}
-          >
-            <option value="append">Append to the runtime&apos;s default</option>
-            <option value="replace" disabled={!canReplace}>Replace the runtime&apos;s default</option>
-          </select>
-          {replaceRefusal && (
-            <p id={`${id}-system-prompt-hint`} className="text-[11px] text-muted-foreground" role={promptReset ? "status" : undefined}>
-              {replaceRefusal}{promptReset && " The editor changed this draft to append."}
-            </p>
-          )}
-        </div>
+        {claudeCode ? (
+          <p className="text-[11px] text-muted-foreground sm:col-span-2" data-testid="prompt-mode-per-role">
+            Claude Code&apos;s system prompt mode is set per role in Settings → Roles.
+          </p>
+        ) : (
+          <div className="space-y-1 sm:col-span-2">
+            <label htmlFor={`${id}-system-prompt`} className={LABEL}>System prompt</label>
+            <select
+              id={`${id}-system-prompt`}
+              value={draft.system_prompt_mode}
+              onChange={(e) => set({ system_prompt_mode: e.target.value as SystemPromptMode })}
+              disabled={!canReplace}
+              aria-describedby={replaceRefusal ? `${id}-system-prompt-hint` : undefined}
+              className={SELECT}
+            >
+              <option value="append">Append to the runtime&apos;s default</option>
+              <option value="replace" disabled={!canReplace}>Replace the runtime&apos;s default</option>
+            </select>
+            {replaceRefusal && (
+              <p id={`${id}-system-prompt-hint`} className="text-[11px] text-muted-foreground" role={promptReset ? "status" : undefined}>
+                {replaceRefusal}{promptReset && " The editor changed this draft to append."}
+              </p>
+            )}
+          </div>
+        )}
         {teams && (
           <div className="space-y-1 sm:col-span-2">
             <label className="flex items-center gap-1.5 text-xs">
@@ -338,6 +349,20 @@ export function AgentProfileForm({
             </p>
           </div>
         )}
+        <div className="space-y-1 sm:col-span-2">
+          <label htmlFor={`${id}-custom-prompt`} className={LABEL}>Custom prompt</label>
+          <textarea
+            id={`${id}-custom-prompt`}
+            value={draft.custom_prompt}
+            onChange={(e) => set({ custom_prompt: e.target.value })}
+            rows={4}
+            aria-describedby={`${id}-custom-prompt-hint`}
+            className="w-full resize-y rounded-md border border-input bg-transparent p-3 font-mono text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          <p id={`${id}-custom-prompt-hint`} className="text-[11px] text-muted-foreground">
+            Text placed first in this profile&apos;s system prompt, before the harness. Empty adds nothing.
+          </p>
+        </div>
       </div>
       <div id={`${id}-provider-hint`} className="space-y-0.5 text-[11px] text-muted-foreground">
         {provider?.auth === "oauth" && (provider.login || type?.type === "claude-code") && (
@@ -437,6 +462,70 @@ function UsedBy({ used }: { used: ProfileUsedBy }) {
 
 // --- The list ---
 
+function SystemPromptPreview({ profile }: { profile: AgentProfile }) {
+  const id = useId();
+  const [role, setRole] = useState<AgentRole>(profile.roles[0] ?? "worker");
+  const [preview, setPreview] = useState<PromptPreview | null>(null);
+  const action = useAction();
+  useEffect(() => setPreview(null), [profile]);
+  const load = () => action.run(async () => {
+    setPreview(null);
+    setPreview(await fetchPromptPreview(profile.profile_id, role));
+  });
+  return (
+    <details className="pt-2 text-xs">
+      <summary className="cursor-pointer rounded-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+        Preview system prompt
+      </summary>
+      <div className="mt-3 space-y-3">
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="space-y-1">
+            <label htmlFor={`${id}-role`} className={LABEL}>Role</label>
+            <select
+              id={`${id}-role`}
+              value={role}
+              onChange={(e) => { setRole(e.target.value as AgentRole); setPreview(null); }}
+              disabled={action.busy || !profile.roles.length}
+              className={SELECT}
+            >
+              {profile.roles.map((item) => <option key={item} value={item}>{roleLabel(item)}</option>)}
+            </select>
+          </div>
+          <Button type="button" size="sm" variant="outline" onClick={load} disabled={action.busy || !profile.roles.length}>
+            {action.busy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}Load
+          </Button>
+        </div>
+        {action.error && <p role="alert" className="text-destructive">{action.error}</p>}
+        {preview && (
+          <>
+            <ol className="space-y-3" aria-label="System prompt blocks">
+              {preview.blocks.map((block, index) => (
+                <li key={`${index}-${block.name}`} className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{block.name}</span>
+                    <Badge variant="outline">{block.owner === "looper" ? "Looper" : "Runtime"}</Badge>
+                  </div>
+                  {block.note && <p className="text-muted-foreground">{block.note}</p>}
+                  {block.owner === "looper" && block.text !== null && (
+                    <textarea
+                      aria-label={block.name}
+                      readOnly
+                      value={block.text}
+                      rows={8}
+                      className="max-h-80 w-full resize-y overflow-auto rounded-md border border-input bg-transparent p-3 font-mono text-xs leading-relaxed text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    />
+                  )}
+                </li>
+              ))}
+            </ol>
+            {preview.notes.map((note, index) => <p key={index} className="text-muted-foreground">{note}</p>)}
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
+
 /** How a profile's runs are priced, in words. */
 function costBasisText(profile: AgentProfile): string {
   if (profile.cost.source === "runtime") {
@@ -473,6 +562,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
       below={
         <>
           {action.error && <p role="alert" className="text-xs text-destructive">{action.error}</p>}
+          <SystemPromptPreview profile={profile} />
           {editing && (
             <div className={EDIT_BOX}>
               <AgentProfileForm profile={profile} registry={registry} onDone={() => setEditing(false)} />

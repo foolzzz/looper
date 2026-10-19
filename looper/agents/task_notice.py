@@ -24,7 +24,7 @@ from typing import Any
 
 from ..db import tasks as db_tasks
 from .links import task_link
-from .message import channel_address
+from .message import channel_address, is_lark
 
 NAME_CHARS = 40
 LEAD_CHARS = 300
@@ -38,6 +38,11 @@ class NotifyChannel(str, Enum):
 
     TELEGRAM = "telegram"
     LARK = "lark"
+    LARK_BOT = "lark_bot"
+
+    @property
+    def is_lark(self) -> bool:
+        return is_lark(self.value)
 
 
 _BY_CHANNEL_ID = {channel_address(channel.value).agent_id: channel for channel in NotifyChannel}
@@ -116,9 +121,9 @@ def notify_target(origin_channel_id: str | None, *, sender: str | None, chat: st
     Telegram the chat; in Lark the sender in a direct message, else the group, @-mentioning the sender. None for a
     channel that cannot be told."""
     match notify_channel(origin_channel_id):
-        case NotifyChannel.LARK if group:
+        case channel if channel is not None and channel.is_lark and group:
             return NotifyTarget(TargetKind.CHAT, chat, mention=sender or None) if chat else None
-        case NotifyChannel.LARK:
+        case channel if channel is not None and channel.is_lark:
             return NotifyTarget(TargetKind.USER, sender) if sender else None
         case NotifyChannel.TELEGRAM:
             return NotifyTarget(TargetKind.CHAT, chat) if chat else None
@@ -157,4 +162,4 @@ def notice_text(task_id: str, name: str, status: str, summary: str | None, *, ch
 def link_line(link: str, channel: NotifyChannel) -> str:
     """``link`` as a line of a message to ``channel``: Lark's Markdown links only a link written as one; a Telegram
     client links a bare URL."""
-    return f"[{link}]({link})" if channel is NotifyChannel.LARK else link
+    return f"[{link}]({link})" if channel.is_lark else link
