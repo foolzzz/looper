@@ -18,6 +18,35 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-10-19
+
+### Highlights
+
+- **Claude Code's Manager and Planner replace Claude Code's default system prompt.** Worker, Reviewer, Planner-defined role runs and consults still append. Settings → Roles sets append or replace per role. A task can override its planner, worker or reviewer on the task's Agents tab. A Claude Code profile refuses `replace`. One migration copies a Claude Code profile's `replace` onto the Worker or Reviewer role layer that used it, then sets every Claude Code profile to `append`. Codex, Grok and OMP keep the profile-level mode. ([#219](https://github.com/foolzzz/looper/pull/219))
+- **An empty allowed-profiles list lets Planners choose any capable profile.** That list is empty by default. A Planner may pick any registered profile that can run the role, with no confirmation. Set a list to restrict the choice. Deleting a profile an open task's Planner or task role chose is refused. ([#220](https://github.com/foolzzz/looper/pull/220))
+- **A new gate may number its agenda items `q1`, `q2`, and so on.** Any other id is refused with a message that names the id Looper assigns. Leaving `id` out still works. ([#222](https://github.com/foolzzz/looper/pull/222))
+
+### Behavior changes
+
+These apply on upgrade. Each line says what the operator does.
+
+1. **Manager and Planner launches on Claude Code replace Claude Code's default system prompt.** They appended on v2.9.0. To keep appending, open Settings → Roles and set that role to Append. A task overrides its own planner, worker or reviewer on the task's Agents tab (`system_prompt_modes` of `PUT /api/tasks/:id/agents`; null clears the task's choice). The Manager has no task-level mode, and the Manager's task tools do not set one. Worker, Reviewer and Planner-defined role runs append unless you set otherwise. A consult on Claude Code appends even when its seat's role is replace. With haiku as the Planner, replace scored 31/40 against 50/60 for append on the Planner tier: run the Planner on opus or sonnet, or set the Planner role to append when it uses haiku. ([#219](https://github.com/foolzzz/looper/pull/219))
+2. **The first start migrates Claude Code profiles once.** When `agent_setting_layers.system_prompt_mode` is added, a Worker or Reviewer whose effective profile (the role layer's, else the shared defaults', else the built-in `claude-code/opus`) was a Claude Code profile set to `replace` gets `replace` on that role layer. Then every Claude Code profile is set to `append`. A later start does not run this again. Check Settings → Roles after the first start if a Claude Code profile was set to replace. ([#219](https://github.com/foolzzz/looper/pull/219))
+3. **`replace` on a Claude Code profile is refused.** Saving or updating one returns 400: `Claude Code's system prompt mode is set per role in Settings → Roles`. Import skips that profile and records the same reason. Set the mode on the role, or on the task. Codex, Grok and OMP profiles still save `append` or `replace`. ([#219](https://github.com/foolzzz/looper/pull/219))
+4. **An empty allowed-profiles list lets Planners choose any capable profile, without confirmation.** On v2.9.0 an empty list meant the Planner chose nothing. Every project that never filled the list changes. To restrict, set the list on the project's Agent Profiles tab ("Profiles the Planner may choose") or `PUT /api/projects/:id/allowed-profiles` with `profile_ids`. A non-empty list still drops Planner choices it leaves out. Setting it back to `[]` lifts the restriction and keeps choices. Spend stays bounded by the run budget caps. Deleting a profile an open task's Planner or task role chose is refused; the message names the task. Clear the choice, or wait until the task ends. Choices on ended tasks go with the profile. ([#220](https://github.com/foolzzz/looper/pull/220))
+5. **A Planner may send `id` on a new gate's agenda items only as `q1`, `q2`, ….** Any other id is refused. You do not turn this on. Replies that numbered items that way and were refused on v2.9.0 are accepted. ([#222](https://github.com/foolzzz/looper/pull/222))
+
+Codex, Grok and OMP keep the profile-level system prompt mode. Per-role mode for those runtimes is planned. A `vX.Y.Z` tag still publishes the Python release.
+
+### Fixes
+
+- **OMP can omit optional MCP arguments on openai-responses.** OMP CLI 18.4.x omitted `strict` for endpoints it did not recognize, such as a local OpenAI-compatible proxy. The Responses API treats a missing `strict` as strict, so the model filled every optional MCP argument; an OMP Planner could not define a custom role without inventing a template. Looper now marks openai-responses models in OMP's launch config with `compat: {supportsStrictMode: true}`, so OMP sends its MCP tools with explicit `strict: false`. Looper's tool schemas, Claude Code, and the openai-chat / anthropic-messages providers are unchanged. ([#223](https://github.com/foolzzz/looper/pull/223))
+- **New gate agenda items may carry the id Looper assigns.** A `[PLAN]` reply that set `"id": "q1"` on a new item was refused with `unknown keys: id`, and the repair turn did not fix it. The id is accepted when it is `qN` for that position. Any other id is refused with `<where>.id must be "qN" or left out: Looper numbers new items q1, q2, …`. OMP with deepseek-flash passed the five gate tasks 10/10 (`gate_parallel_branch` 0/2 → 2/2). ([#222](https://github.com/foolzzz/looper/pull/222))
+
+### Validation
+
+- [#224](https://github.com/foolzzz/looper/pull/224), eval-only: the `config_tools` dialog now starts its allowed-profiles step with a non-empty list, matching #220 (an empty list already allows any profile). The corrected dialog passed 1/1 on opus xhigh.
+
 ## [2.9.0] - 2026-10-18
 
 ### Highlights
