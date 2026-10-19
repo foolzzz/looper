@@ -26,7 +26,7 @@ from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
 from looper.agents.tiers.planner_protocol import TurnKind, parse_plan
-from looper.agents.tiers.worker import judge_result
+from looper.agents.tiers.worker import WorkerConfig, WorkerPool, judge_result
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
@@ -330,10 +330,34 @@ def test_fake_worker_reports_the_files_in_its_other_worktree(
         assert judged["changed_files"] == {"summary.txt": "written"}
         assert (task.check(work_dir) is None) is expected
         assert not (work_dir / "summary.txt").exists()
+        # Location guidance must cause the read: without it even the correct sibling file fails review.
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path / "runtime")
+        for guidance in (True, False):
+            result = dict(judged)
+            if not guidance:
+                result.pop("found_elsewhere", None)
+            review_prompt = pool._build_verify_prompt({"work_result": result})
+            stdin = SimpleNamespace(readline=lambda: json.dumps({"message": {"content": review_prompt}}))
+            fake_claude._reviewer(task.fake, "The step under review: s1", stdin)
+            assert json.loads(replies[-1])["passed"] is (expected and guidance)
     elsewhere = work_dir.with_name(work_dir.name + "-feat")
     assert runner._git_in(work_dir, "branch", "--show-current") == "main"
     assert runner._git_in(elsewhere, "branch", "--show-current") == "feat"
     assert int(runner._git_in(elsewhere, "rev-list", "--count", "main..HEAD")) == len(correct)
+
+@pytest.mark.parametrize(("contents", "passed"), [(None, False), ("north south", False), ("north south east", True)])
+def test_fake_reviewer_reads_the_file_in_its_cwd_without_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str | None, passed: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    if contents is not None:
+        (tmp_path / "summary.txt").write_text(contents)
+    replies: list[str] = []
+    monkeypatch.setattr(fake_claude, "_answer", lambda _session, text, _cost: replies.append(text))
+    script = {"review_reads": {"s1": {"file": "summary.txt", "contains": ["north", "south", "east"]}}}
+    stdin = SimpleNamespace(readline=lambda: json.dumps({"message": {"content": "Summary: step s1 attempt 99"}}))
+    fake_claude._reviewer(script, "The step under review: s1", stdin)
+    assert json.loads(replies[-1])["passed"] is passed
 
 
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:

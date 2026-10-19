@@ -3188,20 +3188,9 @@ class PlannerAgent:
         deleted = result.get("deleted_files")
         if isinstance(deleted, list) and deleted:
             lines.append(f"- deleted files: {', '.join(str(p) for p in deleted[:20])}")
-        elsewhere = reported_files.locations(result.get("found_elsewhere"))
+        elsewhere = reported_files.render(result.get("found_elsewhere"), limit=20)
         if elsewhere:
-            for kind in ("worktree", "commit"):
-                places = []
-                for item in elsewhere[:20]:
-                    if item["where"] != kind:
-                        continue
-                    where = (f"in worktree {item['worktree']} (branch {item['branch']}, HEAD {item['commit'][:12]})"
-                             if kind == "worktree" else f"in commit {item['commit'][:12]}")
-                    places.append(f"{item['path']} {'deleted ' if item['deleted'] else ''}{where}")
-                if places:
-                    lines.append(f"- found outside the working directory: {'; '.join(places)}")
-            more = f" (+{len(elsewhere) - 20} more)" if len(elsewhere) > 20 else ""
-            lines[-1] += more + "; you may inspect with read-only git diff/show/log on that worktree or commit."
+            lines.append(elsewhere)
         if step.isolated and step.workspace is not None:
             # Outside the directories the read-only Planner reads; git still shows its committed changes.
             workspace = step.workspace

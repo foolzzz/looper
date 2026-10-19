@@ -149,9 +149,15 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 
 A script may also give the Planner's retry notes (`retry_feedback`: a step's
 Nth retry gets its Nth note) and fail the review of some attempts
-(`failing_review_attempts`, read from the Worker's report). A script with
-`real_reviewer` plays its Planner and Workers in real mode too, and only its
-Reviewers are Claude Code: the stand-in hands Claude Code every other run of
+(`failing_review_attempts`, read from the Worker's report). The two
+`reviewer_elsewhere` tasks instead use `review_reads`: the fake Reviewer parses
+the first worktree location from the user turn's fenced JSON lines, reads
+`<worktree>/<repo_path>` (or the configured file in its working directory when
+there is no worktree location), and passes only when every required string is
+present. Omitting the location block makes even the correct sibling file fail
+review. A script with `real_reviewer` plays its Planner and Workers in real
+mode too, and only its Reviewers are Claude Code: the stand-in hands Claude
+Code every other run of
 every task, with its arguments, so the other tasks run as before.
 
 ### Real mode: the effect, on demand

@@ -35,7 +35,11 @@ agent system started it in:
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
   marker), or the attempt under review is one the script's
-  ``failing_review_attempts`` lists for its step: then it fails it;
+  ``failing_review_attempts`` lists for its step: then it fails it. With
+  ``review_reads`` (``{step: {"file": "summary.txt", "contains": [...]}}``), it
+  instead reads the first worktree location in the user turn's fenced JSON
+  lines (its ``worktree/repo_path``), else the named file in its working
+  directory, and passes only if the file contains every required string;
 - the Manager (its system prompt has Looper's tools contract) starts the
   ``looper`` MCP server of its ``--mcp-config`` and, for each user message,
   makes the calls ``scenarios.json``'s ``manager`` lists for that message's
@@ -329,10 +333,31 @@ def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None
     step = re.search(r"^The step under review: (\S+)$", system_prompt, re.MULTILINE)
     attempt = re.search(r"\battempt (\d+)\b", report)
     failing = (script.get("failing_review_attempts") or {}).get(step.group(1) if step else "") or []
-    if any(marker in system_prompt for marker in script.get("failing_reviews") or []) or (
-            attempt is not None and int(attempt.group(1)) in failing):
-        verdict = {"passed": False, "findings": ["the greeting is not what this role asks for"],
-                   "summary": "Not to this role's liking."}
+    failed = any(marker in system_prompt for marker in script.get("failing_reviews") or [])
+    read = (script.get("review_reads") or {}).get(step.group(1) if step else "")
+    if read:
+        path = os.path.join(os.getcwd(), read["file"])
+        block = re.search(r"^```json\n(.*?)\n```$", report, re.MULTILINE | re.DOTALL)
+        for line in block.group(1).splitlines() if block else []:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict) and item.get("where") == "worktree":
+                path = os.path.join(item["worktree"], item["repo_path"])
+                break
+        try:
+            with open(path, encoding="utf-8") as handle:
+                contents = handle.read()
+            failed = failed or not all(text in contents for text in read["contains"])
+        except OSError:
+            failed = True
+    else:
+        failed = failed or (attempt is not None and int(attempt.group(1)) in failing)
+    if failed:
+        verdict = {"passed": False, "findings": ["the reported file does not meet the criteria" if read else
+                                               "the greeting is not what this role asks for"],
+                   "summary": "The file is missing or incomplete." if read else "Not to this role's liking."}
     else:
         verdict = {"passed": True, "findings": [], "summary": "Meets the criteria."}
     _answer("fake-reviewer", json.dumps(verdict), REVIEWER_RUN_COST)

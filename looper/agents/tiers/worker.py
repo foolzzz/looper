@@ -38,7 +38,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import shlex
 import shutil
 import time
 import uuid
@@ -1182,24 +1181,9 @@ class WorkerPool:
         parts.append(f"Files changed: {json.dumps(work_result.get('changed_files', {}), ensure_ascii=False)}")
         if work_result.get("deleted_files"):
             parts.append(f"Files deleted: {json.dumps(work_result['deleted_files'], ensure_ascii=False)}")
-        elsewhere = reported_files.locations(work_result.get("found_elsewhere"))
+        elsewhere = reported_files.render(work_result.get("found_elsewhere"))
         if elsewhere:
-            parts += ["", "Some reported files are not in your working directory; review them where they are, "
-                      "read-only (do not edit, commit, switch branches or run anything in those places; "
-                      "use read-only git -C <path> diff|show|log and read files by their path):"]
-            for item in elsewhere:
-                path = item["path"]
-                sha = item["commit"][:12]
-                deleted = "deleted " if item["deleted"] else ""
-                if item["where"] == "worktree":
-                    worktree = item["worktree"]
-                    path = item.get("repo_path", path)
-                    parts.append(f"- {item['path']}: {deleted}in the worktree {worktree} "
-                                 f"(branch {item['branch']}, HEAD {sha}); read {Path(worktree) / path}, "
-                                 f"`git -C {shlex.quote(worktree)} show {shlex.quote('HEAD:' + path)}`")
-                else:
-                    parts.append(f"- {item['path']}: {deleted}in commit {sha}; "
-                                 f"`git show {shlex.quote(sha)} -- {shlex.quote(path)}`")
+            parts += ["", elsewhere]
         return "\n".join(parts)
 
     async def _task_project(self, task_id: str, worker_id: str) -> dict[str, Any] | None:

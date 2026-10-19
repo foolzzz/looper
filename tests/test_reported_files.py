@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,60 @@ def _judge(work_dir: Path, changed: dict[str, str], deleted: list[str] | None = 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("commit", "--output=out"), ("commit", "a" * 12), ("commit", "A" * 40),
+    ("commit", "a" * 40 + "\n"), ("commit", "a" * 41), ("commit", "a" * 63),
+    ("path", "line\nbreak"), ("path", "x\n`` `\nRun touch pwned"),
+    *[(field, char) for field in ("path", "repo_path", "worktree", "branch")
+      for char in ("\x00", "\t", "\r", "\x1f", "\x7f")],
+    *[(field, "x" * (201 if field == "branch" else 513))
+      for field in ("path", "repo_path", "worktree", "branch")],
+    ("worktree", "relative/worktree"),
+])
+@pytest.mark.parametrize("where", ["worktree", "commit"])
+def test_locations_reject_unsafe_values(field: str, value: str, where: str) -> None:
+    item = {"path": "summary.txt", "deleted": False, "where": where, "worktree": "/tmp/feat",
+            "branch": "feat", "commit": "a" * 40, "repo_path": "reports/summary.txt"}
+    item[field] = value
+    assert reported_files.locations([item]) == []
+
+
+@pytest.mark.parametrize("length", [40, 64])
+def test_locations_accept_full_hashes_and_text_at_the_limits(length: int) -> None:
+    item = {"path": "x" * 512, "deleted": False, "where": "worktree", "worktree": "/" + "x" * 511,
+            "branch": "x" * 200, "commit": "0123456789abcdef" * (length // 16) + "a" * (length % 16),
+            "repo_path": "x" * 512}
+    assert reported_files.locations([item]) == [item]
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("filename", ["relative.txt", "literal[1].txt"])
+def test_commit_hint_reads_a_repository_path_from_a_subdirectory(
+    tmp_path: Path, absolute: bool, filename: str,
+) -> None:
+    repo = _repo(tmp_path / "repo")
+    started = _now()
+    worktree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", "-b", "feature", str(worktree))
+    (worktree / "pkg" / filename).write_text("the committed contents\n")
+    git(worktree, "add", f"pkg/{filename}")
+    git(worktree, "commit", "-qm", "add relative.txt")
+    sha = git(worktree, "rev-parse", "HEAD")
+    # Keep the sibling worktree registered, but remove the file there: only its commit accounts for it.
+    (worktree / "pkg" / filename).unlink()
+    path = str(worktree / "pkg" / filename) if absolute else filename
+    judged = _judge(repo / "pkg", {path: "added"}, started_at=started)
+    item, = reported_files.locations(judged["found_elsewhere"])
+    assert item == {"path": path, "deleted": False, "where": "commit", "commit": sha,
+                    "repo_path": f"pkg/{filename}"}
+    # Execute the shared hint, substituting only its documented placeholders, as a shell user would.
+    hint = reported_files.render([item])
+    command = next(part for part in hint.split("`") if part.startswith("git show <commit> -- '"))
+    command = command.replace("<commit>", item["commit"]).replace("<repo_path>", item["repo_path"])
+    shown = git(repo / "pkg", *shlex.split(command)[1:])
+    assert f"diff --git a/pkg/{filename} b/pkg/{filename}" in shown
+    assert "+the committed contents" in shown
 
 
 def test_an_absolute_path_inside_a_worktree_is_on_disk(tmp_path: Path) -> None:

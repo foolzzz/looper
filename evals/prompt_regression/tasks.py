@@ -1277,6 +1277,7 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
         expect={"min_reviews": 1, "max_reviews": 1, "max_retries": 0},
         fake={
             "real_reviewer": True,
+            "review_reads": {"s1": {"file": "summary.txt", "contains": ["north", "south", "east", "west", "central"]}},
             "plan": [_step("s1", _SUMMARY_STEP,
                            ["summary.txt has all five regions' totals, in their first appearance order"], review=True)],
             "attempts": {"s1": [{"status": "completed", "elsewhere": {
@@ -1292,6 +1293,7 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
         expect={"min_reviews": 2, "max_reviews": 2, "min_retries": 1, "max_retries": 1},
         fake={
             "real_reviewer": True,
+            "review_reads": {"s1": {"file": "summary.txt", "contains": ["north", "south", "east", "west", "central"]}},
             "plan": [_step("s1", _SUMMARY_STEP,
                            ["summary.txt has all five regions' totals, in their first appearance order"], review=True)],
             "attempts": {"s1": [
@@ -1299,7 +1301,6 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
                     "summary.txt": "\n".join(_SUMMARY.splitlines()[:4]) + "\n"}}},
                 {"status": "completed", "elsewhere": {"branch": "feat", "files": {"summary.txt": _SUMMARY + "\n"}}},
             ]},
-            "failing_review_attempts": {"s1": [1]},
         },
     ),
 )

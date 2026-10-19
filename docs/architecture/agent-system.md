@@ -646,9 +646,15 @@ answer to an edit on the task page goes.
     entries also include the absolute `worktree`, short `branch` (empty for
     detached/unknown), and `repo_path` relative to the repository root;
     commit entries include `repo_path` when known (omitted for absolute-path
-    suffix matches). The task's activity, Reviewer's first turn and Planner's
-    step report render these locations for read-only file and git inspection;
-    readers ignore old free-string dictionaries and malformed entries. In a
+    suffix matches). The task's activity lists the locations. The Reviewer's
+    first turn and Planner's step report share a renderer: each location is
+    one JSON line in a fenced block labelled as untrusted Worker data, followed
+    by fixed read-only hints with placeholders. Git hints use repo-root-relative
+    `repo_path` with `-- ':(top,literal)<repo_path>'`; without a known path they
+    show the whole commit's stat. Readers ignore old free-string dictionaries,
+    malformed entries, commits other than full lowercase 40- or 64-digit hashes,
+    non-absolute worktrees, and path/worktree/branch fields containing ASCII
+    control characters or exceeding 512 characters (200 for branches). In a
     project with step workspaces the work directory is the step's worktree.
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
