@@ -934,12 +934,14 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   one process per turn (`runtimes/per_turn.py`). Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
-  `autonomous_turns`, `cost_report` (Claude Code has all but
-  `structured_output`; Codex has `run`, `resident_session`, `resume`,
+  `autonomous_turns`, `cost_report`, `steer` (Claude Code has all but
+  `structured_output` and `steer`; Codex has `run`, `resident_session`, `resume`,
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
   `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
   `compaction_events`; Grok has `run`, `resident_session`, `resume`, `mcp`,
-  `compaction_events` and `cost_report`).
+  `compaction_events` and `cost_report`). Codex and OMP list `steer` when
+  their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
+  Claude Code and Grok do not.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT

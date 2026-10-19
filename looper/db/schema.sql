@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
         CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
                                      'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
-                                     'read_tools']),
+                                     'read_tools', 'steer']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
@@ -619,18 +619,18 @@ BEGIN
     END IF;
 END $$;
 
--- read_tools: a runtime may list the capability to run with only the tools that read. The definition is read only
+-- steer: a runtime may list the capability to receive messages while it works. The definition is read only
 -- for this schema's table (see library_installs_roles_check below).
 DO $$
 DECLARE def TEXT;
 BEGIN
     SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
      WHERE c.conrelid = to_regclass('agent_runtimes') AND c.conname = 'agent_runtimes_capabilities_check';
-    IF def IS NULL OR def NOT LIKE '%read_tools%' THEN
+    IF def IS NULL OR def NOT LIKE '%steer%' THEN
         ALTER TABLE agent_runtimes DROP CONSTRAINT IF EXISTS agent_runtimes_capabilities_check;
         ALTER TABLE agent_runtimes ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY[
             'run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp', 'add_dirs',
-            'compaction_events', 'autonomous_turns', 'cost_report', 'read_tools']);
+            'compaction_events', 'autonomous_turns', 'cost_report', 'read_tools', 'steer']);
     END IF;
 END $$;
 

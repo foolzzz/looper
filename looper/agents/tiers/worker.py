@@ -57,7 +57,7 @@ from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
 from ..project_execution import ProjectExecution
 from ..library import items_label, load_installed
-from ..runtimes import RuntimeAdapter
+from ..runtimes import RunChannel
 from ..task_roles import TaskRole, run_role
 from ..project_execution import ProjectExecution
 from ..room import room_section, run_seat, run_session_dir
@@ -370,8 +370,8 @@ class WorkerPool:
         self._running = False
         self._workers_dir = runtime_root / ".local" / "workers"
         self._workers_dir.mkdir(parents=True, exist_ok=True)
-        # stdin of each running Claude, open until its result, and its runtime: more user turns go here.
-        self._inputs: dict[str, tuple[asyncio.StreamWriter, RuntimeAdapter]] = {}
+        # The channel of each running worker, open until its result: more user turns go here.
+        self._inputs: dict[str, RunChannel] = {}
         # The agent room's tools for the runs (``ops.room.RoomOps``); without them a run has no room.
         self.room_ops: Any = None
         # Each running Claude's room reminders: the one waiting for a tool call to run, the uuids written, when.
@@ -510,12 +510,11 @@ class WorkerPool:
 
     async def send_input(self, worker_id: str, text: str) -> bool:
         """Add a user turn to a running worker; Claude reads it at its next turn."""
-        running = self._inputs.get(worker_id)
-        if running is None or not text.strip():
+        channel = self._inputs.get(worker_id)
+        if channel is None or not text.strip():
             return False
-        stdin, runtime = running
         try:
-            await runtime.write_turn(stdin, text)
+            await channel.send(text)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             self._inputs.pop(worker_id, None)
             return False
@@ -541,15 +540,14 @@ class WorkerPool:
 
     async def _flush_reminder(self, worker_id: str) -> bool:
         state = self._reminders.get(worker_id)
-        running = self._inputs.get(worker_id)
-        if state is None or state.pending is None or running is None or not state.tools_running:
+        channel = self._inputs.get(worker_id)
+        if state is None or state.pending is None or channel is None or not state.tools_running:
             return False
         if time.monotonic() - state.last_at < REMINDER_INTERVAL_SEC:
             return False
-        stdin, runtime = running
         reminder = f"looper-reminder-{uuid.uuid4().hex[:12]}"
         try:
-            await runtime.write_turn(stdin, state.pending, uuid=reminder)
+            await channel.send(state.pending, uuid=reminder)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             return False
         state.uuids.add(reminder)
@@ -881,12 +879,14 @@ class WorkerPool:
         # A run in a room keeps its session, for a later consult (Codex and OMP keep none otherwise).
         session_dir = run_session_dir(self._runtime_root, runtime.type, parent_task_id, worker_id) \
             if seat is not None else None
-        command = runtime.run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
-                                      prompt_file=prompt_file, launch=launch, max_turns=max_turns,
-                                      session_dir=session_dir)
+        run_command = runtime.steer_command if launch.steers else runtime.run_command
+        command = run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
+                              prompt_file=prompt_file, launch=launch, max_turns=max_turns,
+                              session_dir=session_dir)
 
         if parent_task_id:
-            cmd_display = _display_command(command) + f"  (prompt on stdin, {len(prompt)} chars)"
+            prompt_input = "over the runtime's protocol" if launch.steers else "on stdin"
+            cmd_display = _display_command(command) + f"  (prompt {prompt_input}, {len(prompt)} chars)"
             try:
                 await db_activity.insert_activity(
                     task_id=parent_task_id,
@@ -931,10 +931,10 @@ class WorkerPool:
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error}
 
-            assert process.stdin is not None
+            channel = runtime.run_channel(process, launch=launch, cwd=work_dir, session_dir=session_dir)
             try:
-                await runtime.write_turn(process.stdin, prompt)
-                self._inputs[worker_id] = (process.stdin, runtime)
+                await channel.start(prompt)
+                self._inputs[worker_id] = channel
                 if seat is not None and runtime.run_input:
                     self._reminders[worker_id] = _Reminders()
             except (BrokenPipeError, ConnectionResetError):
@@ -943,8 +943,8 @@ class WorkerPool:
 
             def _end_input() -> None:
                 # Without this Claude would wait on stdin for another user turn.
-                if self._inputs.pop(worker_id, None) is not None and not process.stdin.is_closing():
-                    process.stdin.close()
+                if self._inputs.pop(worker_id, None) is not None:
+                    channel.end_input()
 
             result_event: dict[str, Any] | None = None
             finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
@@ -954,8 +954,7 @@ class WorkerPool:
 
             async def _read_stream() -> None:
                 nonlocal result_event, finished, last_result
-                assert process.stdout is not None
-                async for event in runtime.parse(process.stdout, model=launch.model):
+                async for event in channel.events():
                     await recorder.record(event)
                     if (capped := recorder.cap_stop) is not None:
                         # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.

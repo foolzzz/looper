@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
+from .channel import RunChannel as RunChannel, StreamChannel as StreamChannel
 
 if TYPE_CHECKING:
     from ..profile_registry import ProviderSpec
@@ -94,6 +95,7 @@ class Capability(str, Enum):
     """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
 
     RUN = "run"  # one run of a prompt, which takes more user turns while it runs (a Worker, a Reviewer)
+    STEER = "steer"  # a Worker or Reviewer run takes the Planner's messages while it works, through the runtime's own protocol (RunChannel)
     RESIDENT_SESSION = "resident_session"  # a process that stays up between user turns (the Manager, a Planner)
     RESUME = "resume"  # a new process continues a saved session (the Manager, a Planner)
     STRUCTURED_OUTPUT = "structured_output"  # the runtime enforces a reply schema itself
@@ -292,6 +294,17 @@ class RuntimeAdapter(ABC):
         """A one-off run's command; its prompt and later user turns come on stdin. With ``session_dir`` a runtime
         that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
         later (the agent room's consults); Claude Code keeps every run's session in its own place."""
+
+    def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                      max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """The command of a run that can be steered; arguments have the same meaning as ``run_command``."""
+        raise RuntimeUnsupported(f"a {self.label} run cannot be steered")
+
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None) -> RunChannel:
+        """How the Worker talks to ``process``, started from ``run_command`` (or ``steer_command`` when
+        ``launch.steers``)."""
+        return StreamChannel(self, process, model=launch.model)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:
         """Where a finished run started with ``command`` kept its session itself, for a runtime that keeps it in a
