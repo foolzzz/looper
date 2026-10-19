@@ -188,9 +188,9 @@ describe("Knowledge vault settings", () => {
     expect(container.textContent).not.toContain("Saved.");
   });
 
-  it("opens the settings page listed between channels and transfer", async () => {
+  it("opens the settings page listed between scheduler and transfer", async () => {
     const index = SETTINGS_PAGES.findIndex((page) => page.id === "vault");
-    expect(SETTINGS_PAGES.slice(index - 1, index + 2).map((page) => page.id)).toEqual(["channels", "vault", "transfer"]);
+    expect(SETTINGS_PAGES.slice(index - 1, index + 2).map((page) => page.id)).toEqual(["scheduler", "vault", "transfer"]);
     await act(async () => root.render(<SettingsPage sub={settingsHref("vault").split("/")[1]} />));
     expect(container.querySelector("h1")?.textContent).toBe("Knowledge vault");
     expect(container.textContent).toContain("A local folder of Markdown notes");

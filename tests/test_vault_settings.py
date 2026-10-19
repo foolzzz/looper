@@ -260,6 +260,7 @@ def test_the_global_settings_view_includes_the_vault_without_git(monkeypatch: py
     monkeypatch.setattr(settings.db_profiles, "list_profiles", AsyncMock(return_value=[]))
     monkeypatch.setattr(settings.db_roles, "list_configs", AsyncMock(return_value=[]))
     monkeypatch.setattr(settings, "_read", AsyncMock(return_value={"system": {"values": {}}, "roles": {}}))
+    monkeypatch.setattr(settings.scheduler_settings, "settings_view", AsyncMock(return_value={}))
     view = {**_view(), "problem": "folder vanished"}
     monkeypatch.setattr(vault, "settings_view", AsyncMock(return_value=view))
     call = Call({"action": "view"}, Turn("web", "A"), SimpleNamespace())

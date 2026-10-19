@@ -753,3 +753,36 @@ def test_a_saved_root_that_now_leads_elsewhere_no_longer_holds(
     config.path.symlink_to(real, target_is_directory=True)
     loaded, problem = asyncio.run(vault.load())
     assert loaded is None and "now leads to" in problem
+
+
+def test_an_ancestor_of_the_root_swapped_for_a_link_during_the_write_is_refused(
+    config: vault.VaultConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Between the setting's check and the write, an ancestor of the vault becomes a link to a copy elsewhere, just
+    # as the write's walk reaches it.
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-race"
+    (elsewhere / "vault/codex-mem").mkdir(parents=True)
+    moved = tmp_path.with_name(f"{tmp_path.name}-held")
+    ancestor = config.path.parent
+    real_open = os.open
+    swapped = False
+
+    def open_swapping(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and kwargs.get("dir_fd") is not None and path == ancestor.name:
+            swapped = True
+            ancestor.rename(moved)
+            ancestor.symlink_to(elsewhere, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(vault.os, "open", open_swapping)
+    try:
+        with pytest.raises(OpError) as caught:
+            write(config)
+    finally:
+        monkeypatch.setattr(vault.os, "open", real_open)
+        if swapped:
+            ancestor.unlink()
+            moved.rename(ancestor)
+    assert swapped and caught.value.code is ErrorCode.FORBIDDEN
+    assert not (elsewhere / "vault/codex-mem/new.md").exists()

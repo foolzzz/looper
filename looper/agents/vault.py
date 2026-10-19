@@ -379,19 +379,19 @@ async def write(config: VaultConfig, path: str, content: str, expected_sha256: s
     def replace_note() -> dict:
         fds: list[int] = []
         try:
-            try:
-                fd = os.open(config.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
-                                                       "(a symbolic link?)") from None
-                raise
+            # The saved path is a real path, with no link on it: walk it from / without following any, so a link
+            # put anywhere on the way fails here rather than leading the write elsewhere.
+            fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
             fds.append(fd)
-            opened_root, named_root = os.fstat(fd), os.stat(config.path)
-            if ((opened_root.st_dev, opened_root.st_ino) != (named_root.st_dev, named_root.st_ino)
-                    or os.path.realpath(config.path) != str(config.path)):
-                raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
-                                                   "(a symbolic link?)")
+            for part in config.path.parts[1:]:
+                try:
+                    fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
+                                                           "(a symbolic link?)") from None
+                    raise
+                fds.append(fd)
             for index, part in enumerate(rel.parts[:-1]):
                 try:
                     try:
