@@ -375,6 +375,11 @@ class TestIsolationArgs:
         assert f"{tmp_path / 'link'}/CLAUDE.md" in excludes
         assert f"{(tmp_path / 'real').resolve()}/CLAUDE.md" in excludes
 
+    def test_messages_from_the_operators_other_claude_code_sessions_are_refused(self, tmp_path: Path) -> None:
+        # Unset, Claude Code delivers another session's SendMessage when both bypass permissions, as every agent
+        # but a Planner does.
+        assert _settings(isolation_args(tmp_path))["crossSessionInbound"] == "refuse"
+
 
 # --- What every agent may do ---
 
@@ -399,7 +404,10 @@ class TestPermissionArgs:
             args = launch.args()
             assert args[:len(permission_args())] == permission_args()
             assert args.count("--dangerously-skip-permissions") == 1
-            assert not RESTRICTING_FLAGS & set(args)
+            # Only the tools that reach other Claude Code sessions are denied (TestOtherSessions).
+            at = args.index("--disallowedTools")
+            assert args[at + 1] == "ListAgents"
+            assert not RESTRICTING_FLAGS & set(args[:at] + args[at + 2:])
             assert "read_only" not in launch.record()
 
     def test_a_planner_runs_read_only_with_its_mcp_servers_skills_and_web_reads(self, tmp_path: Path) -> None:
@@ -445,6 +453,74 @@ class TestPermissionArgs:
         assert denials[1]["tool"] == "mcp__x__write" and len(denials[1]["input"]) == DENIAL_INPUT_CHARS
         assert len(denials) == 2
         assert permission_denials({"type": "result"}) == permission_denials(None) == []
+
+
+# --- The operator's other Claude Code sessions ---
+
+
+def _teams_launch(role: AgentType | None, *, teams: bool, consult: bool = False) -> Any:
+    from dataclasses import replace
+
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import BUILTIN_PROFILE
+
+    return Launch(AgentSettings(profile=replace(BUILTIN_PROFILE, agent_teams=teams)), role=role, consult=consult)
+
+
+def _denied(args: list[str]) -> list[str]:
+    return [tool for at, arg in enumerate(args) if arg == "--disallowedTools" for tool in args[at + 1].split(",")]
+
+
+class TestOtherSessions:
+    @pytest.mark.parametrize(("role", "teams", "consult", "peer_tools"), [
+        (None, False, False, ["ListAgents", "SendMessage"]),
+        (None, True, False, ["ListAgents"]),
+        (AgentType.MANAGER, False, False, ["ListAgents", "SendMessage"]),
+        (AgentType.MANAGER, True, False, ["ListAgents"]),
+        (AgentType.WORKER, False, False, ["ListAgents", "SendMessage"]),
+        (AgentType.WORKER, True, False, ["ListAgents"]),
+        (AgentType.REVIEWER, False, False, ["ListAgents", "SendMessage"]),
+        (AgentType.REVIEWER, True, False, ["ListAgents"]),
+        # A Planner and a consult never have agent teams, whatever the profile says.
+        (AgentType.PLANNER, True, False, ["ListAgents", "SendMessage"]),
+        (AgentType.WORKER, True, True, ["ListAgents", "SendMessage"]),
+    ])
+    def test_no_launch_lists_them_and_only_one_with_agent_teams_may_send_a_message(
+        self, role: AgentType | None, teams: bool, consult: bool, peer_tools: list[str],
+    ) -> None:
+        # ListAgents lists every Claude Code session on the machine; SendMessage reaches one by name or socket,
+        # and agent teams need it between teammates.
+        launch = _teams_launch(role, teams=teams, consult=consult)
+        assert launch.agent_teams is (peer_tools == ["ListAgents"])
+        assert [tool for tool in _denied(launch.args()) if tool in ("ListAgents", "SendMessage")] == peer_tools
+
+    def test_a_read_only_run_keeps_its_own_denials(self) -> None:
+        planner = _teams_launch(AgentType.PLANNER, teams=False)
+        consult = _teams_launch(AgentType.WORKER, teams=False, consult=True)
+        assert _denied(planner.args()) == ["Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
+        assert _denied(consult.args()) == ["Bash", "Edit", "Write", "NotebookEdit", "ListAgents", "SendMessage"]
+
+    @pytest.mark.parametrize("command", ["run", "resident", "consult"])
+    @pytest.mark.parametrize("teams", [False, True])
+    def test_every_command_refuses_their_messages_and_denies_their_tools(
+        self, tmp_path: Path, command: str, teams: bool,
+    ) -> None:
+        from looper.agents.runtimes import CLAUDE_CODE
+
+        prompt = tmp_path / "prompt.md"
+        launch = _teams_launch(AgentType.WORKER, teams=teams, consult=command == "consult")
+        if command == "run":
+            args = CLAUDE_CODE.run_command("claude", cwd=tmp_path, prompt_file=prompt, launch=launch)
+        elif command == "resident":
+            args = CLAUDE_CODE.resident_command("claude", cwd=tmp_path, prompt_file=prompt, launch=launch)
+        else:
+            args = CLAUDE_CODE.consult_command("claude", cwd=tmp_path, prompt_file=prompt, launch=launch,
+                                               session_id="s1", session_dir=None, fork_dir=tmp_path)
+        assert args.count("--settings") == 1
+        assert _settings(args)["crossSessionInbound"] == "refuse"
+        assert "ListAgents" in _denied(args)
+        assert ("SendMessage" in _denied(args)) is not (teams and command != "consult")
+
 
 def test_the_system_prompt_comes_from_its_file_and_is_read_again_on_resume(tmp_path: Path) -> None:
     path = tmp_path / "abc.md"
