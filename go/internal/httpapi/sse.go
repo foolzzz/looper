@@ -224,6 +224,10 @@ func (s *Server) attachSaver(adapter *web.Adapter) {
 }
 
 func hijackSSE(w http.ResponseWriter) (net.Conn, *bufio.ReadWriter, bool) {
+	return hijackStream(w, "chat events")
+}
+
+func hijackStream(w http.ResponseWriter, logLabel string) (net.Conn, *bufio.ReadWriter, bool) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		writePythonJSON(w, http.StatusInternalServerError, errorBody{Error: "internal server error"})
@@ -231,7 +235,7 @@ func hijackSSE(w http.ResponseWriter) (net.Conn, *bufio.ReadWriter, bool) {
 	}
 	conn, rw, err := hj.Hijack()
 	if err != nil {
-		slog.Error("chat events", "err", err)
+		slog.Error(logLabel, "err", err)
 		writePythonJSON(w, http.StatusInternalServerError, errorBody{Error: "internal server error"})
 		return nil, nil, false
 	}

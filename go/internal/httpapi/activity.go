@@ -75,8 +75,8 @@ func (s *Server) handleActivityDetail(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	// /activity/stream is not this route. Digits only; Python's stream route
-	// is separate and is not served here.
+	// /activity/stream is a different route. Digits only, matching Python's
+	// activity seq pattern. "stream" does not reach this handler on GET.
 	match := activitySeqPattern.FindStringSubmatch(r.URL.EscapedPath())
 	if match == nil {
 		notFound(w)

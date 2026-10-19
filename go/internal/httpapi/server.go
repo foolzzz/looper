@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/foolzzz/looper/go/internal/agents/broadcast"
 	"github.com/foolzzz/looper/go/internal/agents/web"
 	"github.com/foolzzz/looper/go/internal/db"
 	"github.com/foolzzz/looper/go/internal/pyjson"
@@ -119,6 +120,18 @@ type Server struct {
 	Web     *web.Adapter
 	webOnce sync.Once
 	webLazy *web.Adapter
+	// Activity is the task activity fan-out. Nil uses one broadcaster for
+	// this Server, created on the first activity stream. Publishers pass a
+	// pyjson.Object so the SSE data keeps Python's dict order.
+	Activity     *broadcast.Broadcaster
+	activityOnce sync.Once
+	activityLazy *broadcast.Broadcaster
+	// activityAfter replaces the 20 second idle clock. Nil uses time.NewTimer.
+	// Tests close over the returned channel and send on it.
+	activityAfter func(time.Duration) <-chan time.Time
+	// activityQueryLimit bounds one replay page when it is not zero.
+	// Tests set a short limit. Production uses activityReplayQuery.
+	activityQueryLimit time.Duration
 	// bodyReadTimeout bounds POST /api/chat/messages body reads. Zero uses
 	// Python's 30 second readexactly wait. Tests set a shorter deadline.
 	bodyReadTimeout time.Duration
@@ -164,13 +177,15 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // It also serves GET /api/registry, project knowledge, documents, drafts, and owned skills.
 // It also serves GET /api/catalog, GET /api/catalog/<id>, and project installs.
 // GET /api/chat/events is the chat SSE stream, by cid or by session.
-// GET /api/tasks/<id>/activity/stream is not served; that path is 404.
+// GET /api/tasks/<id>/activity/stream replays activity after since, then
+// forwards the task broadcaster. A since that is not an integer is 500.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("/api/overview", s.handleOverview)
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("GET /api/tasks/{id}/activity/stream", s.handleActivityStream)
 	mux.HandleFunc("/api/tasks/{id}/activity/{seq}", s.handleActivityDetail)
 	mux.HandleFunc("/api/tasks/{id}/activity", s.handleActivity)
 	mux.HandleFunc("/api/tasks/{id}/conversation", s.handleConversation)

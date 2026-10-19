@@ -1,6 +1,7 @@
 package broadcast
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -66,6 +67,49 @@ func TestFullSubscriberDropsAndDoesNotBlock(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestNextUntil(t *testing.T) {
+	t.Run("queued event beats a ready timeout", func(t *testing.T) {
+		b := New()
+		sub := b.Subscribe("t")
+		b.Publish("t", "e")
+		timeout := make(chan time.Time, 1)
+		timeout <- time.Unix(0, 0)
+		got, end, timedOut, ok := sub.NextUntil(context.Background(), timeout)
+		if !ok || end || timedOut || got != "e" {
+			t.Fatalf("event %v end %v timedOut %v ok %v", got, end, timedOut, ok)
+		}
+	})
+	t.Run("timeout", func(t *testing.T) {
+		b := New()
+		sub := b.Subscribe("t")
+		timeout := make(chan time.Time, 1)
+		timeout <- time.Unix(0, 0)
+		_, end, timedOut, ok := sub.NextUntil(context.Background(), timeout)
+		if !ok || end || !timedOut {
+			t.Fatalf("end %v timedOut %v ok %v", end, timedOut, ok)
+		}
+	})
+	t.Run("canceled", func(t *testing.T) {
+		b := New()
+		sub := b.Subscribe("t")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, end, timedOut, ok := sub.NextUntil(ctx, nil)
+		if ok || end || timedOut {
+			t.Fatalf("end %v timedOut %v ok %v", end, timedOut, ok)
+		}
+	})
+	t.Run("close", func(t *testing.T) {
+		b := New()
+		sub := b.Subscribe("t")
+		b.Close("t")
+		_, end, timedOut, ok := sub.NextUntil(context.Background(), nil)
+		if !ok || !end || timedOut {
+			t.Fatalf("end %v timedOut %v ok %v", end, timedOut, ok)
+		}
+	})
 }
 
 func TestUnsubscribeAndClose(t *testing.T) {
