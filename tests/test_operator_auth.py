@@ -172,12 +172,12 @@ except urllib.error.HTTPError as error:
     asyncio.run(run())
 
 
-def _assert_cookie(headers: dict[str, str], port: int) -> None:
+def _assert_cookie(headers: dict[str, str], port: int, *, referrer: str = "no-referrer") -> None:
     cookie, *attributes = headers["set-cookie"].split("; ")
     assert cookie == f"looper_operator_{port}={TOKEN}"
     assert set(attributes) == {"Path=/", "HttpOnly", "SameSite=Strict"}
     assert headers["cache-control"] == "no-store"
-    assert headers["referrer-policy"] == "no-referrer"
+    assert headers["referrer-policy"] == referrer
 
 
 @pytest.mark.parametrize("path", ["/", "/index.html", "/tasks/task-1"])
@@ -301,7 +301,7 @@ def test_query_does_not_sign_in(tmp_path: Path, transport: str, query_key: str) 
             assert status == 200 and "<html>dashboard</html>" not in body
             assert "set-cookie" not in headers
             assert headers["cache-control"] == "no-store"
-            assert headers["referrer-policy"] == "no-referrer"
+            assert headers["referrer-policy"] == "same-origin"
 
     asyncio.run(run())
 
@@ -704,7 +704,7 @@ def test_limiter_doubles_caps_resets_and_slides() -> None:
 
 def _policies(headers: dict[str, str]) -> None:
     assert headers["cache-control"] == "no-store"
-    assert headers["referrer-policy"] == "no-referrer"
+    assert headers["referrer-policy"] == "same-origin"  # no-referrer would send Origin: null
     assert headers["content-security-policy"] == (
         "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 
@@ -981,7 +981,7 @@ def test_local_navigation_and_token_cookie_still_open_pages(tmp_path: Path, tran
                 assert status == 200 and "dashboard" in body
             status, headers, _ = await _send(server, "GET /login", NAVIGATE)
             assert status == 303 and headers["location"] == "/"
-            _assert_cookie(headers, server._port)
+            _assert_cookie(headers, server._port, referrer="same-origin")
             _policies(headers)
     asyncio.run(run())
 
