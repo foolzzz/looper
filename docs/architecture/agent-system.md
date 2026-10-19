@@ -747,8 +747,26 @@ adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
   rules may let through Bash commands that write, an MCP server installed for
   the Planner may write files, and a skill's `allowed-tools` grants its tools
   while it runs.
-- **`check`** (Codex and OMP, whose read-only modes are not verified yet):
-  the command is unchanged, and the Planner compares its task directory's git
+- **`sandbox`** (Codex): `-c sandbox_mode="read-only" -c approval_policy="never"`
+  in place of `--dangerously-bypass-approvals-and-sandbox`, in a run and in
+  `exec resume`. Reads, `git status` and the like work; a write (a shell
+  redirect, `touch`, an edit) fails. Codex marks no refusal in its events, so
+  nothing is recorded as refused. With approvals never asked, Codex refuses
+  every MCP tool call, so a Planner's `config.toml` gives each of its MCP
+  servers `default_tools_approval_mode = "approve"` (the servers are the ones
+  Looper and the catalog give the Planner; one that writes files can still
+  write). Verified with Codex 0.162.0 through a local API-key provider, in
+  a run and a resumed turn: the MCP tool ran, `README.md` was read, and
+  writing `made.txt` failed with the working tree unchanged.
+- **`tools`** (OMP, Grok): the run starts with the tools that read and no
+  shell or write tool: OMP `--tools read,glob,grep`, Grok
+  `--tools read_file,grep,list_dir`. Nothing is refused, so nothing is
+  recorded. The MCP tools stay (OMP 18.4.3 through the home's MCP plugin,
+  verified with a stub server in a run and a resumed turn; Grok through
+  `use_tool`). Such a Planner cannot run `git diff`, tests or any other
+  command, and OMP's web search and sub-agent tools are not available to it.
+- **`check`** (a runtime that can do neither; none ships now): the command is
+  unchanged, and the Planner compares its task directory's git
   checkout before and after each turn (`step_workspaces.tree_state`: `HEAD`
   and each path `git status` lists with its status, size and modification
   time, read with `--no-optional-locks`). A change is recorded as the turn's

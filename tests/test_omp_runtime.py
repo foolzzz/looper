@@ -15,6 +15,7 @@ import os
 import shlex
 import stat
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,14 +23,14 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
 from looper.agents.run_usage import Usage, request_context, run_usage
-from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, adapter
+from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, ReadOnly, RuntimeUnsupported, adapter
 from looper.agents.runtimes.omp import (
-    KEY_ENV, OVERLAY, RESTORED_VARS, SHELL_PREFIX_VAR, OmpRuntime, ResidentOmp, edited_paths, write_prompt,
+    KEY_ENV, MCP_PLUGIN, OVERLAY, RESTORED_VARS, SHELL_PREFIX_VAR, OmpRuntime, ResidentOmp, edited_paths, write_prompt,
 )
 from looper.agents.system_prompt import SystemPrompt
 
@@ -631,6 +632,30 @@ def test_a_run_that_keeps_its_session_names_its_directory_instead_of_no_session(
     kept = OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path), launch=_launch(), session_dir=keep)
     assert plain[-1] == "--no-session" and "--no-session" not in kept
     assert kept[-2:] == ["--session-dir", str(keep)] and keep.is_dir() and kept[:-2] == plain[:-1]
+
+
+@pytest.mark.parametrize("role", [AgentType.PLANNER, None, AgentType.WORKER])
+def test_only_a_planner_launch_limits_its_tools(tmp_path: Path, role: AgentType | None) -> None:
+    launch = replace(_launch(), role=role)
+    command = OMP.resident_command("omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)
+    assert OMP.read_only is ReadOnly.TOOLS
+    if role is AgentType.PLANNER:
+        assert _flag(command, "--tools") == ["read,glob,grep"]
+        assert launch.record()["read_only"] == "tools"
+    else:
+        assert "--tools" not in command
+        assert "read_only" not in launch.record()
+
+
+def test_a_planner_keeps_its_mcp_plugin(tmp_path: Path) -> None:
+    launch = replace(_launch(library=_library(tmp_path)), role=AgentType.PLANNER)
+    command = OMP.resident_command("omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)
+    home = Path(command[1].removeprefix("HOME="))
+    plugin = home / "plugins" / MCP_PLUGIN
+    assert str(plugin) in _flag(command, "--plugin-dir")
+    assert _flag(command, "--tools") == ["read,glob,grep"]
+    servers = json.loads((plugin / ".mcp.json").read_text())["mcpServers"]
+    assert servers["notes"]["command"] == "notes-mcp"
 
 
 def test_a_consult_resumes_a_copy_of_the_runs_session_with_only_the_reading_tools(tmp_path: Path) -> None:

@@ -78,8 +78,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    instructions, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -129,7 +129,7 @@ _PLUGIN_PARTS_LEFT_OUT = ("hooks", "output-styles")
 IDLE_SEC = 24 * 3600
 
 
-# A consult has only reading tools (--tools read,glob,grep, not verified on a real run), in a detached checkout
+# A consult has only reading tools (--tools read,glob,grep; the MCP tools stay, checked on a real run with omp 18.4.3), in a detached checkout
 # of the task directory's branch, removed afterwards. This keeps writes out of the task directory; wrote_files
 # catches changes inside the checkout. It is not a sandbox: OMP runs as the operator's user, so writes to another
 # path or the home directory are neither prevented nor detected.
@@ -150,6 +150,8 @@ class OmpRuntime(RuntimeAdapter):
     # API keys only: omp's own logins are not used.
     auth_kinds = frozenset({AuthKind.API_KEY})
     isolation_id = HOME_LAYOUT_ID
+    # A read-only run (a Planner's, a consult) has the tools that read and its MCP tools (``launch_args``).
+    read_only = ReadOnly.TOOLS
     # Set by the binding and the isolation: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, SHELL_PREFIX_VAR, *DIRECTORY_VARS})
 

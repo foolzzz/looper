@@ -1,9 +1,9 @@
 # RFC：规划者只读，评审者看得到重试说明（v0）
 
-- **状态：** 提案。第 6 节的决定按建议写下，等维护者确认；标「需要验证」的几处在真实运行时上核实之前不改对应运行时的命令行。
+- **状态：** 提案。第 6 节的决定按建议写下，等维护者确认。Codex 和 OMP 的只读方式已在真实运行时上核实并接入命令行（4.1、D5）。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.2 节的两条：「规划者不改文件改由工具强制」（looper #168 的后续）和「Reviewer 看不到重试时补充的说明」。
 - **修订：** [长程 Agent 上下文 RFC](long-horizon-agent-context-v0.zh-CN.md) 的决策 8（四类 agent 一律开放全部工具，规划者也不例外）对规划者不再成立，见第 6 节 D1。
-- **最近更新：** 2026-10-17
+- **最近更新：** 2026-10-19
 
 ## 1. 背景与目标
 
@@ -58,9 +58,9 @@ agent-room 那一路已在 Claude Code 2.1.285 的 `--print` 模式（隔离参�
 
 | | Claude Code | Codex | OMP | Grok |
 |---|---|---|---|---|
-| 只读方式（`RuntimeAdapter.read_only`） | `permissions`：去掉 `--dangerously-skip-permissions`，钉住 `--permission-mode manual`（2.1.285 里默认模式的名字）和 `--permission-prompts none`（没有人回答确认，凡要确认的一律拒绝），加 `--disallowedTools Edit,Write,NotebookEdit` 和 `--allowedTools`（见 4.2） | 候选：`exec` 的 `--sandbox read-only` 加 `-c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`。沙箱只管模型生成的 shell 命令，MCP 调用不受影响。**需要验证**：`exec resume` 是否沿用这些参数，MCP 工具调用是否仍能执行，被拒的命令在 `--json` 事件里怎样表示。验证通过前保持现状，用回退检查（`check`） | 候选：`--approval-mode write`（print 模式下没有界面可批，行为未知）或 `--tools` 白名单（去掉 bash 就没有 git log/diff）。**需要验证**；验证前用回退检查（`check`） | `tools`：命令行加 `--tools read_file,grep,list_dir`，内置工具只剩读文件、搜索、列目录，没有写工具也没有 shell；`--always-approve` 照旧（工具被去掉，不是被拒绝）。MCP 工具仍可用，经 `use_tool` 调用。`--resume` 的后续轮同样带这条 |
+| 只读方式（`RuntimeAdapter.read_only`） | `permissions`：去掉 `--dangerously-skip-permissions`，钉住 `--permission-mode manual`（2.1.285 里默认模式的名字）和 `--permission-prompts none`（没有人回答确认，凡要确认的一律拒绝），加 `--disallowedTools Edit,Write,NotebookEdit` 和 `--allowedTools`（见 4.2） | `sandbox`：`-c sandbox_mode="read-only" -c approval_policy="never"` 代替 `--dangerously-bypass-approvals-and-sandbox`，`exec` 和 `exec resume` 都带；规划者的每个 MCP 服务器加 `default_tools_approval_mode="approve"`（见下一行）。沙箱只管模型生成的 shell 命令和补丁，MCP 调用不受影响 | `tools`：命令行加 `--tools read,glob,grep`，内置工具只剩读文件、匹配、搜索，没有写工具也没有 shell；MCP 工具仍可用（经主目录里的 MCP 插件）。`--resume` 的后续轮同样带这条 | `tools`：命令行加 `--tools read_file,grep,list_dir`，内置工具只剩读文件、搜索、列目录，没有写工具也没有 shell；`--always-approve` 照旧（工具被去掉，不是被拒绝）。MCP 工具仍可用，经 `use_tool` 调用。`--resume` 的后续轮同样带这条 |
 | 拒绝的记录 | `result.permission_denials`，每次拒绝一条 | 没有类型化的拒绝信号（被拒的命令只是失败） | 没有 | 没有（工具不在，模型无从调用，也就没有拒绝记录） |
-| 已核实 | Bash 的读命令放行、写命令拒绝并记录（第 2 节）；MCP 工具和技能在放行后可用、规划者照常完成任务：**需要验证**，由真实评测覆盖 | 一次探测（新会话加 `exec resume`，只读沙箱加 `approval_policy="never"`）：读命令照常，写文件、`touch`、`git commit` 被沙箱拒绝（命令失败，没有类型化的拒绝信号）；MCP 工具在默认的审批下被拒（「requires approval, but approval policy is never」），给该服务器加 `mcp_servers.<名字>.default_tools_approval_mode="approve"` 后在两轮里都能调用。命令行还没改，每个 MCP 服务器都要加这条配置，还要在真实规划任务里评测 | 未验证（`--approval-mode write` 和 `--tools` 白名单的探测没有得出结论） | 一次探测（grok 1.0.62，Looper 生成的家目录，`--disable-web-search`）：带 `--tools` 时 `init` 里的工具是 `read_file`、`list_dir`、`grep`、`search_tool`、`use_tool`；MCP 工具经 `use_tool` 被调用，`--resume` 的下一轮同样可调；模型找不到写工具，两轮都没有创建文件。对照（不带 `--tools`、同样的规则）：同一个提示用 `write` 创建了文件。**代价**：规划者没有 shell，不能 `git diff`、跑测试；装给规划者的 MCP 服务器如果自己会写文件，照样能写（与 Claude Code 相同） |
+| 已核实 | Bash 的读命令放行、写命令拒绝并记录（第 2 节）；MCP 工具和技能在放行后可用、规划者照常完成任务：**需要验证**，由真实评测覆盖 | 两次探测（Codex 0.162.0，本机 CPA，API key 供应方，桩 MCP 服务器；新会话加 `exec resume`）：只读沙箱加 `approval_policy="never"` 时读命令照常，写文件、`touch`、`git commit` 被沙箱拒绝（命令失败，没有类型化的拒绝信号）；MCP 工具在默认的审批下被拒（「requires approval, but approval policy is never」，两轮都是），给该服务器加 `default_tools_approval_mode="approve"` 后两轮都能调用，读文件照常，建文件失败，工作树不变。咨询（#188）合入后规划者的启动参数就带了这些沙箱参数，却没有这条配置，MCP 工具被拒；现已补上并由单测和这次探测覆盖 | 一次探测（OMP 18.4.3，本机 CPA，桩 MCP 服务器，新会话加 `--resume`）：带 `--tools read,glob,grep` 时 MCP 工具照常调用（两轮都调到），读文件照常，建文件没有工具可用（模型只找到 `read`，读不到不存在的文件），工作树不变。代价：没有 shell（不能 `git diff`、跑命令），也没有联网搜索和子 agent 工具；OMP 以操作者身份运行，装给规划者的会写文件的 MCP 服务器照样能写 | 一次探测（grok 1.0.62，Looper 生成的家目录，`--disable-web-search`）：带 `--tools` 时 `init` 里的工具是 `read_file`、`list_dir`、`grep`、`search_tool`、`use_tool`；MCP 工具经 `use_tool` 被调用，`--resume` 的下一轮同样可调；模型找不到写工具，两轮都没有创建文件。对照（不带 `--tools`、同样的规则）：同一个提示用 `write` 创建了文件。**代价**：规划者没有 shell，不能 `git diff`、跑测试；装给规划者的 MCP 服务器如果自己会写文件，照样能写（与 Claude Code 相同） |
 
 运行记录写明怎样保证只读：`metadata.read_only` 为 `permissions` 或 `check`（只有规划者的运行有这个字段）。
 
@@ -148,7 +148,7 @@ criterion that no note changes still holds.
 | D2 | Claude Code 用默认权限模式（钉住为 `manual`，确认交给 `none`）加 `--disallowedTools Edit,Write,NotebookEdit`，不用计划模式，也不用 `dontAsk` | 计划模式下读以外的工具一概不试，规划者连自己的 MCP 工具也不会调；默认模式只拒绝要问的；钉住是为了不让项目设置的 `defaultMode` 放宽它；`dontAsk` 是否仍放行只读的 Bash 命令见第 7 节的核实 |
 | D3 | 放行 `Skill`、`WebFetch`、`WebSearch` 和规划者的每个 MCP 服务器 | 规划者合法需要；都不改文件（装给规划者的 MCP 服务器是运维者的选择） |
 | D4 | 运行时拒绝不了的（`check`），每轮比较任务目录，只记录和告知，不回滚 | 回滚可能丢掉用户或 Worker 的改动；比较只在它能说明问题时做 |
-| D5 | Codex 和 OMP 的只读方式验证通过前不改它们的命令行，用 D4 的回退 | 不发布没核实过的命令行 |
+| D5 | Codex 用只读沙箱（`sandbox`），OMP 只给读取工具（`tools`），都由真实探测核实；D4 的回退（`check`）只留给两者都做不到的运行时，现在没有 | 沙箱和工具限制比事后比较强：改不了就是改不了；探测证实 MCP 工具在两者下都还能用 |
 | D6 | 拒绝记在运行记录的 `metadata.permission_denials`，不加新表 | 一轮一条记录，和这一轮的花费、事件放在一起；按任务、按角色统计时从记录里读 |
 | D7 | 评审者拿到全部重试说明（按先后），不只最后一条 | 第 N 次尝试的 Worker 按全部说明做；前面的说明（例如放宽的边界）仍然有效 |
 | D8 | 说明里写明「没被说明改到的标准照旧成立」 | 和问题相反的方向：一条无关的说明不能让评审放水 |

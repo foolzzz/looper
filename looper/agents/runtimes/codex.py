@@ -73,8 +73,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, reported_totals, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    codex_login, instructions, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    RuntimeUnsupported, codex_login, instructions, runtime_prompt_text,
 )
 from .instructions import InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -117,6 +117,8 @@ class CodexRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.API_KEY, AuthKind.OAUTH})
     login_models = codex_login.SUGGESTED_MODELS
     isolation_id = HOME_LAYOUT_ID
+    # A read-only run (a Planner's, a consult) has Codex's read-only sandbox, where a write fails (``launch_args``).
+    read_only = ReadOnly.SANDBOX
     # Set by the binding and the run's home: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"})
 
@@ -456,7 +458,13 @@ def _instruction_lines() -> list[str]:
 
 
 def _with_mcp(lines: list[str], launch: Launch) -> str:
+    from ..agent_settings import AgentType
+
     for name, table in mcp_servers(launch.library)[0]:
+        if launch.role is AgentType.PLANNER:
+            # With approvals never asked, Codex refuses every MCP tool call unless its server is approved (seen
+            # with 0.162.0, in a run and in a resumed turn). The Planner's own tools are all it has to act with.
+            table = {**table, "default_tools_approval_mode": "approve"}
         lines += ["", f"[mcp_servers.{_toml_key(name)}]", *(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in table.items())]
     return "\n".join(lines) + "\n"
 

@@ -109,6 +109,7 @@ class ReadOnly(str, Enum):
     """How a run that must not change files (``Launch.read_only``, a Planner's) is kept from changing them."""
 
     PERMISSIONS = "permissions"  # the runtime refuses the tools and commands that would, and reports each refusal
+    SANDBOX = "sandbox"  # its sandbox fails the commands and edits that would; nothing is reported as refused
     TOOLS = "tools"  # it runs with reading tools only (no shell, no write tool); nothing is refused, so nothing is reported
     CHECK = "check"  # it cannot: the Planner compares the task directory before and after each turn
 

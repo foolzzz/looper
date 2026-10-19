@@ -44,6 +44,16 @@ import json, os, re, sys, time, subprocess
 from pathlib import Path
 mode = os.environ.get("CONSULT_MODE", "answer")
 fork = "11111111-1111-4111-8111-111111111111"
+if mode == "fast_exit_child":
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    Path(os.environ["CHILD_PID"]).write_text(str(child.pid))
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
+    text = json.dumps({"answers": [{"reply_to": int(os.environ["QUESTION_ID"]), "body": "the field is qty"}],
+                       "unsure": ""})
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
+                      "total_cost_usd": 0.01}), flush=True)
+    os._exit(0)
 if mode == "no_stdin":
     print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
     time.sleep(60)
@@ -806,6 +816,59 @@ def test_a_consult_does_not_resume_its_seats_newer_run(monkeypatch: pytest.Monke
     _run(test, monkeypatch)
 
 
+def test_a_consult_stops_if_its_seat_restarts_during_the_session_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents import consult
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+    seen = tmp_path / "seen.jsonl"
+    monkeypatch.setenv("SEEN", str(seen))
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        start, held = service._start, []
+        service._start = held.append
+        command, forks = ClaudeCodeRuntime.consult_command, []
+
+        def copying(self: Any, *args: Any, **kwargs: Any) -> list[str]:
+            result = command(self, *args, **kwargs)
+            fork = kwargs["fork_dir"]
+            fork.mkdir(parents=True)
+            (fork / "session").write_text("fork")
+            forks.append(fork)
+            return result
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "consult_command", copying)
+        try:
+            await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            pinned = await pool.fetchval("SELECT source_record FROM room_consults")
+            record = await consult.db_room.run_record(pinned)
+            assert record is not None
+            calls = 0
+
+            async def latest(task_id: str, run: str) -> dict[str, Any]:
+                nonlocal calls
+                assert (task_id, run) == ("task-r", "worker-1")
+                calls += 1
+                return {**record, "id": pinned if calls == 1 else pinned + 1}
+
+            monkeypatch.setattr(consult.db_room, "latest_run", latest)
+            start(held[0])
+            row = await _settled(pool)
+            assert (row["state"], row["fallback_reason"]) == ("fallback", "no_session")
+            assert "while its session was copied" in row["detail"]
+            assert calls == 2 and len(forks) == 1
+            assert not forks[0].exists() and not seen.exists()
+        finally:
+            await service.stop()
+
+    _run(test, monkeypatch)
+
+
 @pytest.mark.parametrize("phase", ["prompt", "command", "note", "execute"])
 def test_a_failure_after_the_snapshot_cleans_the_checkout_and_session_fork(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase: str,
@@ -979,6 +1042,48 @@ def test_a_question_joining_a_queued_consult_as_it_ends_also_goes_to_the_planner
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("failure", ["timeout", "nonzero"])
+def test_a_failed_snapshot_removes_its_checkout_and_git_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str,
+) -> None:
+    from looper.agents import consult
+
+    repo, target = tmp_path / "repo", tmp_path / "checkout"
+    repo.mkdir()
+    (repo / "file").write_text("committed")
+    git = consult._git
+    for args in [("init",), ("add", "file"),
+                 ("-c", "user.name=Test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false",
+                  "commit", "-m", "init")]:
+        assert git(repo, *args).returncode == 0
+    if failure == "nonzero":
+        target.mkdir()
+        (target / "partial").write_text("leftover")
+    attempted = []
+
+    def adding(work: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        done = git(work, *args)
+        if args[:2] == ("worktree", "add"):
+            attempted.append(done.returncode)
+            if failure == "timeout":
+                assert done.returncode == 0 and target.is_dir()
+                assert list((repo / ".git" / "worktrees").iterdir())
+                raise subprocess.TimeoutExpired("git", consult.GIT_TIMEOUT_SEC)
+            assert done.returncode != 0
+        return done
+
+    monkeypatch.setattr(consult, "_git", adding)
+    assert consult._snapshot(repo, target) is None
+    assert len(attempted) == 1 and not target.exists()
+    listed = git(repo, "worktree", "list", "--porcelain")
+    assert listed.returncode == 0
+    checkouts = [Path(line.removeprefix("worktree ")).resolve() for line in listed.stdout.splitlines()
+                 if line.startswith("worktree ")]
+    assert checkouts == [repo.resolve()]
+    records = repo / ".git" / "worktrees"
+    assert not records.exists() or not list(records.iterdir())
+
+
 def test_cleanup_removes_the_checkout_and_fork_when_git_times_out(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
     from looper.agents import consult
@@ -1028,12 +1133,14 @@ def test_killing_a_consult_waiting_for_capacity_also_gives_its_question_to_the_p
     _run(test, monkeypatch)
 
 
-@pytest.mark.parametrize("mode", ["stderr", "no_result", "no_stdin", "wait_exit", "child", "over_budget"])
+@pytest.mark.parametrize("mode", ["stderr", "no_result", "no_stdin", "wait_exit", "child", "fast_exit_child",
+                                 "over_budget"])
 def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
 ) -> None:
     import time
 
+    from looper.agents.claude_cli import ClaudeRunRecorder
     from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
     from looper.agents import proc_tree
 
@@ -1042,8 +1149,9 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
     monkeypatch.setenv("CHILD_PID", str(tmp_path / "child.pid"))
     if mode == "over_budget":
         monkeypatch.setenv("CONSULT_COST", "0.05")
-    if mode == "child" and os.getpid() not in proc_tree._snapshot():
-        # The sandbox may deny ps. List only this test's processes, using their real groups and liveness.
+    recording_result = False
+    if mode == "fast_exit_child" or (mode == "child" and os.getpid() not in proc_tree._snapshot()):
+        # Fix the reparenting boundary for an immediate exit; a sandbox may also deny ps.
         roots: list[int] = []
         spawn = proc_tree.spawn
 
@@ -1060,13 +1168,28 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
                 try:
                     group = os.getpgid(pid)
                 except ProcessLookupError:
-                    continue
+                    if mode != "fast_exit_child" or recording_result or pid not in roots:
+                        continue
+                    group = pid
                 parent = roots[0] if pid in children and roots[0] in table else os.getpid() if pid in roots else 1
                 table[pid] = (parent, group)
             return table
 
         monkeypatch.setattr(proc_tree, "spawn", spawning)
         monkeypatch.setattr(proc_tree, "_snapshot", snapshot)
+    if mode == "fast_exit_child":
+        record = ClaudeRunRecorder.record
+
+        async def recording(self: Any, event: dict[str, Any]) -> None:
+            nonlocal recording_result
+            if event.get("type") == "result":
+                recording_result = True
+                await asyncio.sleep(0.5)
+                with pytest.raises(ProcessLookupError):
+                    os.kill(roots[0], 0)
+            await record(self, event)
+
+        monkeypatch.setattr(ClaudeRunRecorder, "record", recording)
     write_turn = ClaudeCodeRuntime.write_turn
 
     async def write(self: Any, stdin: Any, text: str, **kwargs: Any) -> None:
@@ -1087,10 +1210,16 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
         monkeypatch.setattr(service, "_execute", bounded)
         began = time.monotonic()
         try:
-            question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+            if mode == "fast_exit_child":
+                question = await _question(pool, "qty?")
+                monkeypatch.setenv("QUESTION_ID", str(question["id"]))
+                member = (await room._context("task-r")).member("backend_rd@s1")
+                assert await service.ask("task-r", member, question) is None
+            else:
+                question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
             row = await asyncio.wait_for(_settled(pool), timeout=8)
             await service.stop()
-            if mode in ("stderr", "child"):
+            if mode in ("stderr", "child", "fast_exit_child"):
                 assert row["state"] == "answered"
             else:
                 reason = {"over_budget": "budget", "no_result": "contract"}.get(mode, "timeout")
@@ -1105,12 +1234,14 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
             if mode == "no_result":
                 error = await pool.fetchval("SELECT error FROM llm_records WHERE agent_id LIKE 'consult-%'")
                 assert error.endswith("stderr tail") and len(error) < 2100
-            if mode == "child":
+            if mode in ("child", "fast_exit_child"):
                 pid = int((tmp_path / "child.pid").read_text())
-                for _ in range(50):
-                    if pid not in proc_tree._snapshot():
+                for _ in range(100):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
                         break
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.05)
                 with pytest.raises(ProcessLookupError):
                     os.kill(pid, 0)
         finally:
