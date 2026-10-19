@@ -742,6 +742,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **`test_fake_mode_runs_every_task_and_sees_misbehaviour` 在高负载下偶尔失败（2026-10-17 多条线并行时观察到）**：`tests/test_prompt_eval.py` 里替身模式的 `bad` 任务预期 `planner_changed_files == ["planner-notes.txt"]`，机器很忙时偶尔得到 `[]`。这个指标按文件的 mtime 和运行记录的时间窗把改动归给 Planner（`metrics.planner_changed_files`，计入本机与数据库的时钟差和 0.1 秒容差）；推测是负载高时写文件的时刻落到了记录的时间窗之外，未验证，也还没改。全量测试里遇到时先单独重跑这一项，通过即不是本次改动造成的。
 - **开 agent teams 的 agent 仍能给知道名字的会话发消息（looper #238 的已知差距）**：`SendMessage` 留给队友用，agent 若从 prompt 或文件里得知操作者某个 Claude Code 会话的名字或 socket 地址，仍能发过去；操作者的会话只有在自己的设置里写了 `"crossSessionInbound": "hold"` 或 `"refuse"` 才完全挡住，Looper 不改操作者的 `~/.claude`。有 shell 的 agent 还能直接连 `/tmp/cc-socks/` 下的 socket，或用 `codex queue` 给 Codex 会话排消息，Looper 不过滤这些命令。
 - **Manager 在回复里复述用户贴的 API key（looper #176 的基线里观察到）**：管家对话评测 `provider_key` 在 haiku 下 3 次有 2 次失败，Manager 把用户贴进来的 key 原样写进了回复；工具调用本身是干净的（登记的 provider 和 Manager 的记录里都没有这个 key），opus·xhigh 下 3 次都通过。维护者决定暂不在代码里给回复打码，先作为观察到的行为记在这里；之后可以改 Manager 的 prompt，或在回复发出前打码。
+- **管家读写知识库（looper #239 未做）**：知识库的读写工具只给任务的规划者、Worker 和 Reviewer；管家只能在设置工具里配置它。管家不属于项目，项目开关管不到它，它的工具列表也是固定的；要给它读工具，需要决定由什么同意（系统设置本身还是另一个开关），并跑管家对话评测。
+- **知识库笔记的删除和改名（looper #239 未做）**：v0 只能整篇写入一篇笔记，不能删除或改名；需要时加带 sha256 校验的工具。
 
 ### 5.3 非核心待办（M6 之后统一做）
 
