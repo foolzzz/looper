@@ -346,3 +346,72 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
                                       ("looper_settings", "high", "ok")]
 
     _manager_run(test, monkeypatch)
+
+
+# --- Review findings ---
+
+
+def test_the_default_run_timeout_is_read_on_the_connection_it_is_given(monkeypatch: pytest.MonkeyPatch,
+                                                                       tmp_path: Path) -> None:
+    """Inside the scheduler's transaction a second pool connection could wait forever for one."""
+    from looper.db import system_settings
+
+    async def test(env: _Env) -> None:
+        asked: list[Any] = []
+
+        class Conn:
+            async def fetch(self, query: str, keys: list[str]) -> list[dict[str, str]]:
+                asked.append(keys)
+                return [{"key": scheduler_settings.RUN_TIMEOUT_KEY, "value": "90"}]
+
+        def no_pool() -> Any:
+            raise AssertionError("a second connection was taken from the pool")
+
+        monkeypatch.setattr(system_settings, "get_pool", no_pool)
+        assert await scheduler_settings.effective_run_timeout("inherit", None, Conn()) == 90
+        assert await scheduler_settings.effective_run_timeout("seconds", 5, Conn()) == 5
+        assert asked == [[scheduler_settings.RUN_TIMEOUT_KEY]]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_an_import_checks_its_schedules_against_the_minimum_interval_it_brings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(env: _Env) -> None:
+        from looper.agents import config_transfer
+
+        await env.schedule(name="every-minute")
+        async with env.pool.acquire() as conn, conn.transaction(readonly=True):
+            data = json.loads("".join([c async for c in config_transfer.export_chunks(
+                conn, include_projects=True, include_secrets=False)]))
+        data["projects"][0]["schedules"][0]["cron"] = "* * * * *"
+
+        async def entry(file: dict[str, Any]) -> tuple[str, str]:
+            async with env.pool.acquire() as conn:
+                plan = await config_transfer.run_import(conn, file, apply=False)
+            [change] = [c for c in plan.changes if c.section == "project.schedules"]
+            return change.action.value, change.reason
+
+        action, reason = await entry(data)
+        assert action == "skipped" and "fires 1 minute apart" in reason
+        data["settings"] = {**data.get("settings", {}), "scheduler": {"min_interval_seconds": 60}}
+        assert (await entry(data))[0] in ("changed", "added", "unchanged")
+        assert scheduler_settings.min_interval_seconds(gated=False) == 300  # a preview changes nothing
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_clearing_the_minimum_interval_is_refused_before_anything_changes_when_the_variable_is_bad(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(env: _Env) -> None:
+        await env.ok("PUT", "/api/scheduler-settings", {"min_interval_seconds": 90})
+        monkeypatch.setenv(ENV, "soon")
+        status, payload = await env.call("PUT", "/api/scheduler-settings", {"min_interval_seconds": None})
+        assert status == 400 and ENV in payload["error"], payload
+        view = await env.ok("GET", "/api/scheduler-settings")
+        assert (view["min_interval_seconds"]["value"], view["min_interval_seconds"]["source"]) == (90, "setting")
+        assert scheduler_settings.min_interval_seconds(gated=False) == 90
+
+    _run(test, monkeypatch, tmp_path)

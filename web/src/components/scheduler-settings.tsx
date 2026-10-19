@@ -42,12 +42,14 @@ export function SchedulerSection() {
   const [saved, setSaved] = useState(false);
   const idBase = useId();
 
-  const show = (next: SchedulerSettings) => {
+  /** Show the settings as stored; `only` leaves the other field's draft alone (it may hold unsaved typing). */
+  const show = (next: SchedulerSettings, only?: Name) => {
     setSettings(next);
-    setDrafts({
+    const stored: Record<Name, string> = {
       min_interval_seconds: String(next.min_interval_seconds.value),
       run_timeout_seconds: next.run_timeout_seconds.value == null ? "" : String(next.run_timeout_seconds.value),
-    });
+    };
+    setDrafts((current) => (only ? { ...current, [only]: stored[only] } : stored));
   };
 
   useEffect(() => {
@@ -76,7 +78,7 @@ export function SchedulerSection() {
     setError(null);
     setSaved(false);
     try {
-      show(await updateSchedulerSettings({ [name]: value }));
+      show(await updateSchedulerSettings({ [name]: value }), name);
       setSaved(true);
     } catch (err) {
       setError(errorText(err));

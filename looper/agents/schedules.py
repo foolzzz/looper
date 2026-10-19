@@ -106,20 +106,22 @@ def _seconds_text(seconds: int) -> str:
     return f"{seconds} second{'s' if seconds != 1 else ''}"
 
 
-def checked_rule(rule_text: Any, zone_name: Any, *, now: datetime, gated: bool = False) -> tuple[cron.CronRule, Any]:
+def checked_rule(rule_text: Any, zone_name: Any, *, now: datetime, gated: bool = False,
+                 base_interval: int | None = None) -> tuple[cron.CronRule, Any]:
     """The rule and zone, checked: valid, firing at all, and never closer than the minimum interval of a schedule
-    with a gate command (``gated``) or without one over the next 24 hours. Raises ``ValueError`` saying why not."""
+    with a gate command (``gated``) or without one over the next 24 hours (``base_interval``: the minimum interval to
+    check against, instead of the one in effect). Raises ``ValueError`` saying why not."""
     if not isinstance(rule_text, str) or not rule_text.strip():
         raise ValueError("cron is required: a 5-field rule such as '0 9 * * 1-5'")
     rule = cron.parse(rule_text)
     tz = cron.zone(zone_name)
     if cron.next_fire(rule, tz, now) is None:
         raise ValueError(f"the rule {rule.text!r} never fires")
-    least = min_interval_seconds(gated=gated)
+    least = min_interval_seconds(gated=gated, base=base_interval)
     if close := cron.too_close(rule, tz, now, least):
         first, second = (moment.astimezone(tz).strftime("%Y-%m-%d %H:%M") for moment in close)
         gap = int((close[1] - close[0]).total_seconds())
-        gated_least = min_interval_seconds(gated=True)
+        gated_least = min_interval_seconds(gated=True, base=base_interval)
         hint = (f" (a schedule with a gate command may fire every {_seconds_text(gated_least)})"
                 if not gated and gated_least < least else "")
         raise ValueError(f"the rule {rule.text!r} fires {_seconds_text(gap)} apart ({first} and {second}, "

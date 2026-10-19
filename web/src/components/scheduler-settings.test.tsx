@@ -68,4 +68,17 @@ describe("Settings → Scheduler", () => {
     await flush();
     expect(container.querySelector("[role=alert]")?.textContent).toContain("bad value");
   });
+
+  it("keeps what is typed in the other field when one is saved", async () => {
+    await act(async () => root.render(<SchedulerSection />));
+    await flush();
+    await typeInto(container.querySelectorAll("input")[1] as HTMLInputElement, "45");
+    await typeInto(container.querySelectorAll("input")[0] as HTMLInputElement, "90");
+    await act(async () => { (container.querySelector("button[type=submit]:not(:disabled)") as HTMLButtonElement).click(); });
+    await flush();
+    expect(puts).toEqual([{ min_interval_seconds: 90 }]);
+    const inputs = container.querySelectorAll("input");
+    expect((inputs[0] as HTMLInputElement).value).toBe("90");
+    expect((inputs[1] as HTMLInputElement).value).toBe("45");
+  });
 });

@@ -510,7 +510,7 @@ class Scheduler:
                                                  finished_at=now, error=error))
         # The run's timeout is fixed as it starts; changing the schedule or the default later leaves it be.
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
-                                                                      schedule["run_timeout_seconds"])}
+                                                                      schedule["run_timeout_seconds"], conn)}
         if schedule["gate_command"]:
             return _Launched(await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now,
                                              **timeout), gate=firing)

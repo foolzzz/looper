@@ -58,14 +58,27 @@ def _seconds(raw: Any, name: str, *, high: int | None = None) -> int:
     return raw
 
 
-def min_interval_seconds(*, gated: bool) -> int:
-    """How close two fires of a schedule may be: a minute with a gate command, else the minimum interval."""
-    return min(MIN_INTERVAL_GATED_SECONDS, _min_interval) if gated else _min_interval
+def min_interval_seconds(*, gated: bool, base: int | None = None) -> int:
+    """How close two fires of a schedule may be: a minute with a gate command, else the minimum interval (``base``
+    stands in for the one in effect, to check against a value about to be saved)."""
+    least = _min_interval if base is None else base
+    return min(MIN_INTERVAL_GATED_SECONDS, least) if gated else least
 
 
 def _env_name() -> str:
     legacy = env.counterpart(MIN_INTERVAL_ENV)
     return MIN_INTERVAL_ENV if MIN_INTERVAL_ENV in os.environ or not legacy else legacy
+
+
+def _env_min_interval() -> int | None:
+    """The deprecated variable's value (None when unset); ``ValueError`` when it is not a whole number from 1."""
+    raw = env.get(MIN_INTERVAL_ENV)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return _seconds(int(raw), MIN_INTERVAL_ENV)
+    except ValueError:
+        raise ValueError(f"{MIN_INTERVAL_ENV} must be a whole number of seconds from 1; got {raw!r}") from None
 
 
 async def load() -> int:
@@ -80,14 +93,10 @@ async def load() -> int:
             return _min_interval
         except ValueError:
             logger.warning("the stored %s is not a whole number of seconds from 1; ignoring it", MIN_INTERVAL_KEY)
-    raw = env.get(MIN_INTERVAL_ENV)
-    if raw is None or raw.strip() == "":
+    value = _env_min_interval()
+    if value is None:
         _min_interval, _min_source = DEFAULT_MIN_INTERVAL_SECONDS, None
         return _min_interval
-    try:
-        value = _seconds(int(raw), MIN_INTERVAL_ENV)
-    except ValueError:
-        raise ValueError(f"{MIN_INTERVAL_ENV} must be a whole number of seconds from 1; got {raw!r}") from None
     if not _warned_env:
         _warned_env = True
         logger.warning("%s is deprecated and will be ignored in the next version: set the minimum interval in "
@@ -96,8 +105,8 @@ async def load() -> int:
     return _min_interval
 
 
-async def _stored_run_timeout() -> int | None:
-    stored = (await db_settings.get_settings([RUN_TIMEOUT_KEY])).get(RUN_TIMEOUT_KEY)
+async def _stored_run_timeout(conn: Any = None) -> int | None:
+    stored = (await db_settings.get_settings([RUN_TIMEOUT_KEY], pool=conn)).get(RUN_TIMEOUT_KEY)
     if stored is None:
         return None
     try:
@@ -108,15 +117,16 @@ async def _stored_run_timeout() -> int | None:
         return None
 
 
-async def default_run_timeout() -> int | None:
-    """The run timeout of a schedule that follows the default (None: no limit)."""
-    return await _stored_run_timeout()
+async def default_run_timeout(conn: Any = None) -> int | None:
+    """The run timeout of a schedule that follows the default (None: no limit). Inside a transaction, read on its
+    ``conn``: a second connection from the pool could wait forever for one."""
+    return await _stored_run_timeout(conn)
 
 
-async def effective_run_timeout(mode: str, seconds: int | None) -> int | None:
-    """A schedule's timeout for a run that starts now (None: no limit)."""
+async def effective_run_timeout(mode: str, seconds: int | None, conn: Any = None) -> int | None:
+    """A schedule's timeout for a run that starts now (None: no limit); ``conn`` as ``default_run_timeout``."""
     if mode == RunTimeoutMode.INHERIT.value:
-        return await default_run_timeout()
+        return await default_run_timeout(conn)
     return seconds if mode == RunTimeoutMode.SECONDS.value else None
 
 
@@ -164,6 +174,8 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     """Store the settings in ``body`` and apply them: a minimum interval to every later save, a run timeout to the
     runs that start after. A refused body changes nothing."""
     values = checked(body)
+    if "min_interval_seconds" in values and values["min_interval_seconds"] is None:
+        _env_min_interval()  # going back to the built-in hands over to the variable: refuse before storing
     await db_settings.put_settings({_KEYS[name]: None if value is None else str(value)
                                     for name, value in values.items()})
     if "min_interval_seconds" in values:

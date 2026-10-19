@@ -906,6 +906,7 @@ class _Importer:
         self.channel_configs = {kind: dict(row["config"] or {}) for kind, row in target.channels.items()}
         # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
         self.disabled_schedules: list[str] = []
+        self.min_interval: int | None = None  # the file's, once read
         self.repointed_schedules: list[str] = []
         self.role_text_limits: dict[str, int] = {}  # by project id: how long its roles' texts may be
         # Runtimes, providers and Agent Profiles by name, stored and from the file: their ids ("new:..." in a
@@ -1304,6 +1305,8 @@ class _Importer:
             except ValueError as exc:
                 self.record("settings.scheduler", name, Action.SKIPPED, reason=str(exc))
                 continue
+            if name == "min_interval_seconds":
+                self.min_interval = value  # the file's schedules are checked against it
             action = self.outcome("settings.scheduler", name, current.get(name),
                                   (name,) if current.get(name) != value else ())
             if self.apply and action in (Action.ADDED, Action.CHANGED):
@@ -1630,7 +1633,7 @@ class _Importer:
             values.update(schedules._timeout(entry.get("run_timeout_seconds", schedules.TIMEOUT_DEFAULT)))
             zone = entry.get("timezone") or cron.local_zone_name()
             rule, _ = schedules.checked_rule(entry.get("cron"), zone, now=datetime.now(UTC),
-                                             gated=bool(values["gate_command"]))
+                                             gated=bool(values["gate_command"]), base_interval=self.min_interval)
             values.update(cron=rule.text, timezone=zone)
             limits = _concurrency_limits(entry.get("task_limits") or {}, field="task_limits")
         except ValueError as exc:
