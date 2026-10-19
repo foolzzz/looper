@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from evals.prompt_regression.runner import fresh_database, free_port
+from looper import ops_config
 from looper.agents import db_backup, operator_auth
 from looper.agents.self_check import mask_dsn
 from looper.env import counterpart
@@ -86,7 +87,7 @@ def _install(bin_dir: Path, *, version: str | None = "99.1", mode: str = "dump",
 
 
 def _env(**extra: str) -> dict[str, str]:
-    dropped = {db_backup.PG_DUMP_ENV, db_backup.BACKUP_CMD_ENV, "LOOPER_RUNTIME_ROOT"}
+    dropped = {"LOOPER_PG_DUMP", "LOOPER_BACKUP_CMD", "LOOPER_RUNTIME_ROOT"}
     env = {key: value for key, value in os.environ.items() if key not in dropped and counterpart(key) not in dropped}
     return {**env, **extra}
 
@@ -234,7 +235,7 @@ def test_without_a_usable_pg_dump_serve_refuses(tmp_path: Path, version: str | N
     fail = next(line for line in log.splitlines() if line.startswith("fail  pg_dump"))
     assert reason in fail
     install = "brew install libpq" if sys.platform == "darwin" else "apt install postgresql-client-"
-    assert install in log and "LOOPER_BACKUP_CMD='docker exec" in log and "looper serve --skip-backup" in log
+    assert install in log and 'command = ["docker", "exec"' in log and "looper serve --skip-backup" in log
     assert _backups(tmp_path) == []
 
 
@@ -288,8 +289,6 @@ def test_the_newest_five_backups_of_the_database_are_kept(tmp_path: Path, monkey
     for path in old + others:
         path.write_bytes(b"PGDMP")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    for name in (db_backup.PG_DUMP_ENV, db_backup.BACKUP_CMD_ENV):
-        monkeypatch.delenv(name, raising=False)
 
     new, _ = db_backup.back_up(db_backup.find_dumper(16), "postgresql://u@127.0.0.1:1/loopx", backups)
 
@@ -301,8 +300,6 @@ def test_the_password_reaches_pg_dump_only_through_its_environment(
 ) -> None:
     calls = _install(tmp_path / "bin", mode="offline", restore_ok=None)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    for name in (db_backup.PG_DUMP_ENV, db_backup.BACKUP_CMD_ENV):
-        monkeypatch.delenv(name, raising=False)
 
     db_backup.back_up(db_backup.find_dumper(16), "postgresql://u:p%40ss@127.0.0.1:1/loopx", tmp_path / "backups")
 
@@ -314,12 +311,16 @@ def test_the_password_reaches_pg_dump_only_through_its_environment(
 def test_a_backup_command_runs_as_given_with_the_database_filled_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``LOOPER_BACKUP_CMD`` wins over any pg_dump: its version is not asked, its stdout is the backup."""
+    """``backup.command`` wins over any pg_dump: its version is not asked, its stdout is the backup."""
     calls = _install(tmp_path / "bin", version="9.6.24", mode="offline", restore_ok=False)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    monkeypatch.setenv(db_backup.BACKUP_CMD_ENV, f"{tmp_path / 'bin' / 'pg_dump'} --format=custom -U {{user}} {{dbname}}")
+    ops = ops_config.load(
+        ops_config.Flags(runtime_root=tmp_path),
+        environ={"LOOPER_BACKUP_CMD": f"{tmp_path / 'bin' / 'pg_dump'} --format=custom -U {{user}} {{dbname}}"},
+        dotenv=tmp_path / ".env", require_database=False,
+    )
 
-    dumper = db_backup.find_dumper(16)
+    dumper = db_backup.find_dumper(16, ops)
     path, checked = db_backup.back_up(dumper, "postgresql://alice:pw@127.0.0.1:1/loopx", tmp_path / "backups")
 
     assert [json.loads(line)["argv"] for line in calls.read_text().splitlines()] == [

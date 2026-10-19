@@ -1,7 +1,7 @@
 """The operator's notes for a directory: where Claude Code keeps them, what a run gets, and that Looper only reads.
 
 The notes root is a temporary directory standing in for ``~/.claude/projects``
-(``LOOPER_OPERATOR_NOTES_ROOT``); the directories are real git repositories.
+(``operator_notes._root``, the ops file's operator_notes.root); the directories are real git repositories.
 The directory names were checked against Claude Code 2.1.285, which reports
 the auto-memory path it uses in its init event (``memory_paths.auto``).
 """
@@ -28,7 +28,7 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     root = tmp_path / "claude-projects"
     root.mkdir()
-    monkeypatch.setenv(notes.NOTES_ROOT_ENV, str(root))
+    monkeypatch.setattr(notes, "_root", str(root))
     return root
 
 
