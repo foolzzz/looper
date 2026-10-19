@@ -930,7 +930,8 @@ function ScheduleForm({
         </div>
         <p className="text-xs text-muted-foreground">
           Optional. A chosen {AGENT_PROFILE.name} runs that role in this schedule&apos;s tasks, over the project&apos;s{" "}
-          {AGENT_PROFILE.plural} tab and Settings → Roles.
+          {AGENT_PROFILE.plural} tab and Settings → Roles. For a schedule whose runs are alike, a lower-effort Planner
+          costs less.
         </p>
       </fieldset>
 

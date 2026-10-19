@@ -19,6 +19,7 @@ import pytest
 from looper.agents import operator_notes as notes
 from looper.agents.knowledge import AgentKnowledge, load_knowledge
 from looper.agents.operator_notes import NOTES_MAX_BYTES, OperatorNotes, directory_name, notes_key, read_notes
+from looper.agents.reported_files import prompt_name
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +110,21 @@ def test_the_notes_stay_within_their_limit(tmp_path: Path, _env: Path) -> None:
     assert len(found.text.encode("utf-8")) <= NOTES_MAX_BYTES
     assert "[Note 199]" in found.text and "[Note 200]" not in found.text  # as much of the index as Claude Code loads
     assert found.files[0] == "MEMORY.md" and found.omitted and set(found.files[1:]).isdisjoint(found.omitted)
+
+
+@pytest.mark.parametrize("name", ['quoted".md', 'fence`example.md', '-option.md', 'control\x1b.md'])
+def test_note_headings_and_omitted_names_quote_file_names(tmp_path: Path, _env: Path, name: str) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    directory = memory(_env, os.path.realpath(plain), {"MEMORY.md": f"[Note]({name})", name: "content"})
+    found = read_notes(str(plain))
+    assert found.files == ("MEMORY.md", name)
+    assert f"### {prompt_name(name)}\ncontent" in found.text
+    (directory / name).unlink()
+    found = read_notes(str(plain))
+    assert found.omitted == (name,)
+    assert found.text.endswith("not readable): " + prompt_name(name))
+    assert len(found.text.encode("utf-8")) <= NOTES_MAX_BYTES
 
 
 def test_a_note_that_fits_only_without_its_heading_is_left_out(tmp_path: Path, _env: Path) -> None:

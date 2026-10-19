@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 from .operator_notes import OperatorNotes, load_notes
+from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +311,7 @@ class IndexEntry:
     missing: bool = False
 
     def line(self) -> str:
-        return f"- {self.title}: {self.summary} ({'missing: ' if self.missing else ''}{self.path})"
+        return f"- {self.title}: {self.summary} ({'missing: ' if self.missing else ''}{prompt_name(self.path)})"
 
     @property
     def read_path(self) -> str:
@@ -326,7 +327,7 @@ def compose_index(entries: Sequence[IndexEntry]) -> str:
         return ""
     lines = [INDEX_HEADING, INDEX_INTRO]
     for root in dict.fromkeys(entry.root for entry in entries):
-        lines.append(f"In {root or 'the project directory, which is not set'}:")
+        lines.append(f"In {prompt_name(root) if root else 'the project directory, which is not set'}:")
         lines.extend(entry.line() for entry in entries if entry.root == root)
     return "\n".join(lines)
 

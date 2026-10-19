@@ -111,6 +111,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from .. import reported_files
 from .. import step_workspaces as workspaces
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..operator_notes import notes_note
@@ -691,7 +692,7 @@ def _prepare_work_dir(work_dir: str) -> str | None:
     try:
         Path(work_dir).mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return f"cannot create work directory {work_dir}: {exc}"
+        return f"cannot create work directory {reported_files.prompt_name(work_dir)}: {exc}"
     return None
 
 
@@ -1524,8 +1525,8 @@ class PlannerAgent:
     async def _merge_failed(self, plan: TaskPlan, step: PlanStep, outcome: MergeResult, *, decide: bool = True) -> None:
         failed = outcome.workspace
         assert failed.merge_error is not None
-        error = (f"Step {step.label} was accepted, but its branch could not be merged into {failed.target} "
-                 f"({failed.merge_error.value}): {failed.detail}")
+        error = (f"Step {step.label} was accepted, but its branch could not be merged into "
+                 f"{reported_files.prompt_name(failed.target)} ({failed.merge_error.value}): {failed.detail}")
         step.result = {**(step.result or {}), "status": "unmerged", "error": error,
                        "merge_error": failed.merge_error.value, "merge_files": list(outcome.files[:50]),
                        "branch": failed.branch}
@@ -1541,15 +1542,15 @@ class PlannerAgent:
     def _merge_report(step: PlanStep, failed: StepWorkspace, files: Sequence[str]) -> list[str]:
         assert failed.merge_error is not None
         lines = [
-            f"Step {step.label} was accepted, but Looper could not merge its branch {failed.branch} into "
-            f"{failed.target} in the task directory:",
+            f"Step {step.label} was accepted, but Looper could not merge its branch {reported_files.prompt_name(failed.branch)} into "
+            f"{reported_files.prompt_name(failed.target)} in the task directory:",
             f"- why: {_MERGE_REASONS[failed.merge_error]} ({failed.merge_error.value})",
             f"- detail: {_clip(failed.detail, 500)}",
         ]
         if files:
-            lines.append(f"- files: {', '.join(files[:20])}" + (f" (+{len(files) - 20} more)" if len(files) > 20 else ""))
-        lines.append(f"The task directory is as it was before the merge. A retry starts from {failed.target} as it is "
-                     f"now, and its Worker is told the previous attempt's branch {failed.branch} to bring the work over.")
+            lines.append(f"- files: {', '.join(reported_files.prompt_name(f) for f in files[:20])}" + (f" (+{len(files) - 20} more)" if len(files) > 20 else ""))
+        lines.append(f"The task directory is as it was before the merge. A retry starts from {reported_files.prompt_name(failed.target)} as it is "
+                     f"now, and its Worker is told the previous attempt's branch {reported_files.prompt_name(failed.branch)} to bring the work over.")
         return lines
 
     async def _finish_merge(self, plan: TaskPlan, step: PlanStep) -> None:
@@ -3181,16 +3182,21 @@ class PlannerAgent:
             lines.append(f"- summary: {_clip(result['summary'], 1000)}")
         changed = result.get("changed_files")
         if isinstance(changed, dict) and changed:
-            files = [f"{path} ({_clip(note, 80)})" if note else str(path) for path, note in list(changed.items())[:20]]
+            files = [f"{reported_files.prompt_name(path)} ({_clip(note, 80)})" if note else reported_files.prompt_name(path)
+                     for path, note in list(changed.items())[:20]]
             more = f" (+{len(changed) - 20} more)" if len(changed) > 20 else ""
             lines.append(f"- changed files: {'; '.join(files)}{more}")
         deleted = result.get("deleted_files")
         if isinstance(deleted, list) and deleted:
-            lines.append(f"- deleted files: {', '.join(str(p) for p in deleted[:20])}")
+            lines.append(f"- deleted files: {', '.join(reported_files.prompt_name(p) for p in deleted[:20])}")
+        elsewhere = reported_files.render(result.get("found_elsewhere"), limit=20)
+        if elsewhere:
+            lines.append(elsewhere)
         if step.isolated and step.workspace is not None:
             # Outside the directories the read-only Planner reads; git still shows its committed changes.
             workspace = step.workspace
-            lines.append(f"- worktree: {workspace.path}, on branch {workspaces.short_branch(workspace.branch)} from "
+            lines.append(f"- worktree: {reported_files.prompt_name(workspace.path)}, on branch "
+                         f"{reported_files.prompt_name(workspaces.short_branch(workspace.branch))} from "
                          f"{workspace.base_commit[:12]}")
         if result.get("error") and result.get("error") != result.get("summary"):
             lines.append(f"- error: {_clip(result['error'], 500)}")

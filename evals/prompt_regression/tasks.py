@@ -56,6 +56,8 @@ class EvalTask:
     # Where its steps that run side by side work (``step_workspaces``), over the run's ``--step-workspaces``: with
     # ``worktree`` the working directory is a git repository and each such step has a checkout of its own.
     step_workspaces: str | None = None
+    # Seed a git repository without changing where the task's steps run.
+    init_git: bool = False
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
@@ -1191,6 +1193,10 @@ def _summary(work_dir: Path) -> str | None:
         f"summary.txt holds {lines!r}, expected the five regions' totals in order"
 
 
+def _elsewhere_summary(work_dir: Path) -> str | None:
+    return _summary(work_dir.with_name(work_dir.name + "-feat"))
+
+
 _SUMMARY_STEP = "Write summary.txt: one line `<region> <total>` per region of sales.csv, in the order the regions " \
                 "first appear."
 # Which regions the summary covers is the step's to say: the requirement leaves it open, so only the retry note can
@@ -1198,6 +1204,16 @@ _SUMMARY_STEP = "Write summary.txt: one line `<region> <total>` per region of sa
 _SUMMARY_REQUIREMENT = ("Write summary.txt in the working directory: one line `<region> <total>` for each region the "
                         "team reports on, from sales.csv, in the order the regions first appear there. An independent "
                         "Reviewer must check it.")
+
+# The team keeps this summary on its own branch, in a worktree beside the working directory: the work is not in the
+# working directory, and the Reviewer must look where the task put it.
+_ELSEWHERE_WHERE = ("on the branch `feat`, checked out in a git worktree named like the working directory with "
+                    "`-feat` added, beside it (not in the working directory itself)")
+_ELSEWHERE_REQUIREMENT = (f"Write summary.txt {_ELSEWHERE_WHERE}: one line `<region> <total>` for each region the team "
+                          "reports on, from sales.csv, in the order the regions first appear there. An independent "
+                          "Reviewer must check it.")
+_ELSEWHERE_STEP = (f"Write summary.txt {_ELSEWHERE_WHERE}: one line `<region> <total>` per region of sales.csv, in "
+                   "the order the regions first appear.")
 
 READ_ONLY_TASKS: tuple[EvalTask, ...] = (
     EvalTask(
@@ -1260,6 +1276,41 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
                                       "summary.txt lacks central: add its line, last."]},
             # In fake mode: the Reviewer of the second attempt, which lacks central, fails it.
             "failing_review_attempts": {"s1": [2]},
+        },
+    ),
+    EvalTask(
+        id="reviewer_elsewhere",
+        requirement=_ELSEWHERE_REQUIREMENT,
+        files={"sales.csv": _sales_csv(",")},
+        check=_elsewhere_summary,
+        init_git=True,
+        expect={"min_reviews": 1, "max_reviews": 1, "max_retries": 0},
+        fake={
+            "real_reviewer": True,
+            "review_reads": {"s1": {"file": "summary.txt", "contains": ["north", "south", "east", "west", "central"]}},
+            "plan": [_step("s1", _ELSEWHERE_STEP,
+                           ["summary.txt has all five regions' totals, in their first appearance order"], review=True)],
+            "attempts": {"s1": [{"status": "completed", "elsewhere": {
+                "branch": "feat", "files": {"summary.txt": _SUMMARY + "\n"}}}]},
+        },
+    ),
+    EvalTask(
+        id="reviewer_elsewhere_wrong",
+        requirement=_ELSEWHERE_REQUIREMENT,
+        files={"sales.csv": _sales_csv(",")},
+        check=_elsewhere_summary,
+        init_git=True,
+        expect={"min_reviews": 2, "max_reviews": 2, "min_retries": 1, "max_retries": 1},
+        fake={
+            "real_reviewer": True,
+            "review_reads": {"s1": {"file": "summary.txt", "contains": ["north", "south", "east", "west", "central"]}},
+            "plan": [_step("s1", _ELSEWHERE_STEP,
+                           ["summary.txt has all five regions' totals, in their first appearance order"], review=True)],
+            "attempts": {"s1": [
+                {"status": "completed", "elsewhere": {"branch": "feat", "files": {
+                    "summary.txt": "\n".join(_SUMMARY.splitlines()[:4]) + "\n"}}},
+                {"status": "completed", "elsewhere": {"branch": "feat", "files": {"summary.txt": _SUMMARY + "\n"}}},
+            ]},
         },
     ),
 )

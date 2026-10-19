@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs thirty-three small tasks through a disposable `looper serve` (a new
+It runs thirty-five small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -45,6 +45,8 @@ directories), one at a time over the HTTP API:
 | `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
 | `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work in its one review (the requirement leaves the regions to the step, so only the note can correct it) |
 | `reviewer_unrelated_note` | the same, the other way: the retry note is about the file's separator, and the work it leads to still lacks a region, so the Reviewer must not pass it; the next attempt has it and passes (exactly two reviews and two retries) |
+| `reviewer_elsewhere` | only the Reviewer is Claude Code: the correct summary lives only in another worktree and branch; its reported location lets the Reviewer inspect it and pass in one review, with no retry |
+| `reviewer_elsewhere_wrong` | the same location, but the first summary lacks a region; the Reviewer must fail it, then pass the corrected summary (exactly two reviews and one retry) |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -147,9 +149,15 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 
 A script may also give the Planner's retry notes (`retry_feedback`: a step's
 Nth retry gets its Nth note) and fail the review of some attempts
-(`failing_review_attempts`, read from the Worker's report). A script with
-`real_reviewer` plays its Planner and Workers in real mode too, and only its
-Reviewers are Claude Code: the stand-in hands Claude Code every other run of
+(`failing_review_attempts`, read from the Worker's report). The two
+`reviewer_elsewhere` tasks instead use `review_reads`: the fake Reviewer parses
+the first worktree location from the user turn's fenced JSON lines, reads
+`<worktree>/<repo_path>` (or the configured file in its working directory when
+there is no worktree location), and passes only when every required string is
+present. Omitting the location block makes even the correct sibling file fail
+review. A script with `real_reviewer` plays its Planner and Workers in real
+mode too, and only its Reviewers are Claude Code: the stand-in hands Claude
+Code every other run of
 every task, with its arguments, so the other tasks run as before.
 
 ### Real mode: the effect, on demand
@@ -330,6 +338,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `workspace_in_place` | the user asks for the task to change the project directory itself, no worktree or branch: it is created ready and runs in place (`workspace_mode` `in_place`) |
 | `workspace_default` | the user says nothing about how the task runs: it is created ready, and the Manager passes no `workspace_mode` |
 | `schedule_create` | a schedule asked for in the project is created at once, disabled, on the rule the user said (`looper_schedules` `create`), and the reply carries its configuration and the question whether to enable it; 「启用」 waits for the user's word in the next message (`needs_confirmation`, still disabled), and 「确认。」 enables it |
+| `schedule_planner_profile` | the user asks for a schedule whose Planner may be the cheaper `eval/light` profile (registered first): it is created disabled with only the Planner's profile set, and a later change of its time leaves the profile as it was |
+| `schedule_no_profiles` | the other direction: a schedule asked for with no word about profiles gets none (the project's apply) |
 | `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
 | `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |
 | `schedule_modify` | on an enabled schedule with a $1 daily cap: a new rule and a Worker limit change at once; raising the cap waits for the user's word in the next message, and a refusal leaves it |
