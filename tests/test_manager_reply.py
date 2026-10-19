@@ -402,13 +402,16 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 
 def _assert_unrestricted(argv: list[str]) -> None:
-    """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
+    """The shared permission flags, once, and nothing that narrows the tools or the permissions again but the denied
+    tools that reach other Claude Code sessions."""
     from looper.agents.claude_cli import permission_args
 
     flags = permission_args()
     assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
     assert argv.count("--dangerously-skip-permissions") == 1
-    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+    assert argv.count("--disallowedTools") == 1 and _flag(argv, "--disallowedTools") in (
+        "ListAgents", "ListAgents,SendMessage")
+    assert not {"--tools", "--allowedTools", "--permission-mode"} & set(argv)
 
 
 async def _first_claude_exits(spawned: list[tuple[list[str], Any]]) -> None:
@@ -440,7 +443,7 @@ class TestManagerResidentClaude:
         assert {"--print", "--verbose", "--include-partial-messages", "--replay-user-messages"} <= set(argv)
         takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-file", "--system-prompt-snapshot",
                        "--setting-sources", "--settings", "--resume", "--model", "--effort", "--allowedTools",
-                       "--plugin-dir", "--teammate-mode"}
+                       "--disallowedTools", "--plugin-dir", "--teammate-mode"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet

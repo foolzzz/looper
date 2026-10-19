@@ -325,7 +325,7 @@ class TestLaunch:
                               plugin_dirs=("/l/demo", "/l/personal"))
         launch = Launch(library=loaded)
         # One --plugin-dir per directory: the flag takes one value.
-        assert launch.args() == [*permission_args(), "--model", "opus",
+        assert launch.args() == [*permission_args(), "--disallowedTools", "ListAgents", "--model", "opus",
                                  "--plugin-dir", "/l/demo", "--plugin-dir", "/l/personal", *TEAMMATE_MODE_ARGS]
         assert launch.record()["library"] == loaded.record()
         assert launch.library.sha256 == loaded.sha256 != AgentLibrary().sha256
