@@ -162,6 +162,13 @@ text is normalized to LF before the byte budget. A legacy schedule
 interval accepts the integers Python's `int()` accepts, including `3_0`
 and fullwidth digits. SSE stays unserved.
 
+G1l serves `GET /api/registry`: runtime types, runtimes, providers, profiles,
+presets, prices, and limits. A profile's `schedule_count` is how many
+schedules choose it, counted once when more than one role on a schedule
+chooses it. A provider API key is `***` when a secret row exists. Codex and
+Grok login state is read from the server environment and cached for 30
+seconds.
+
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
@@ -174,7 +181,6 @@ is not in this list.
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/installs`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)`
-- `GET /api/registry`
 - `GET /api/agent-settings`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/agent-settings`
 - `GET /api/config/export`

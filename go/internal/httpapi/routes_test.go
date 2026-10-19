@@ -107,6 +107,10 @@ type recordingReads struct {
 	agentSettingsErr          error
 	projectAgentSettings      map[string]any
 	projectAgentSettingsErr   error
+	registry                  map[string]any
+	registryErr               error
+	registryClaude            string
+	registryEnv               []string
 }
 
 func (r *recordingReads) StatusTaskCounts(context.Context) (int, int, int, error) {
@@ -490,6 +494,19 @@ func (r *recordingReads) ProjectAgentSettings(_ context.Context, id string) (map
 		return map[string]any{}, nil
 	}
 	return r.projectAgentSettings, nil
+}
+
+func (r *recordingReads) Registry(_ context.Context, claudeBin string, environ []string) (map[string]any, error) {
+	r.calls = append(r.calls, "registry")
+	r.registryClaude = claudeBin
+	r.registryEnv = environ
+	if r.registryErr != nil {
+		return nil, r.registryErr
+	}
+	if r.registry == nil {
+		return map[string]any{}, nil
+	}
+	return r.registry, nil
 }
 
 func (r *recordingReads) ListScheduleNotifications(_ context.Context, id string, limit int) (map[string]any, error) {

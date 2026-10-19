@@ -19,6 +19,7 @@ import (
 
 	"github.com/foolzzz/looper/go/internal/db"
 	"github.com/foolzzz/looper/go/internal/httpapi"
+	"github.com/foolzzz/looper/go/internal/registry"
 )
 
 // Normalization, the same rule make_goldens.py applies before writing:
@@ -199,6 +200,7 @@ var (
 		{"agent-settings-beta", "/api/projects/proj-beta00002/agent-settings", http.StatusOK},
 		{"agent-settings-blank", "/api/projects/proj-blank0001/agent-settings", http.StatusOK},
 		{"agent-settings-missing", "/api/projects/proj-missing01/agent-settings", http.StatusNotFound},
+		{"registry", "/api/registry", http.StatusOK},
 	}
 )
 
@@ -237,7 +239,32 @@ func TestGoldenParity(t *testing.T) {
 	// A non-empty root. An empty value is falsy and would read ~/.claude.
 	t.Setenv("LOOPER_OPERATOR_NOTES_ROOT", t.TempDir())
 
+	if err := registry.PrepareParityLogin(); err != nil {
+		t.Fatalf("parity login: %v", err)
+	}
+	t.Cleanup(registry.CloseParityLogin)
+	// The seed stores the golden placeholder. The binaries live in the unique
+	// directory. The response is rewritten back to the placeholder before compare.
+	updated, err := sqlDB.ExecContext(ctx, `
+		UPDATE agent_runtimes
+		SET executable = replace(executable, $1, $2)
+		WHERE executable LIKE $1 || '/%'`,
+		registry.ParityBinPlaceholder, registry.ParityBin())
+	if err != nil {
+		t.Fatalf("parity executables: %v", err)
+	}
+	n, err := updated.RowsAffected()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("parity executables updated %d", n)
+	}
 	api := httpapi.New("parity-test", db.Probe{DB: sqlDB}, "")
+	// Login probes and runtime paths use this environment, not the process
+	// environment, so the suite does not stat ~/.codex or ~/.grok.
+	api.ClaudeBin = registry.ParityClaude()
+	api.LoginEnviron = registry.ParityEnviron
 	store := db.NewStore(sqlDB)
 	// One harness noon for overview spend and schedule spent_today.
 	noon := func() time.Time {
@@ -266,7 +293,7 @@ func TestGoldenParity(t *testing.T) {
 			if resp.StatusCode != tc.status {
 				t.Fatalf("status %d body %s, want %d", resp.StatusCode, body, tc.status)
 			}
-			got := canonical(t, body)
+			got := canonical(t, registry.RewriteParityPaths(body))
 			golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", "parity", tc.name+".json"))
 			if err != nil {
 				t.Fatal(err)
@@ -318,7 +345,7 @@ func TestGoldenParity(t *testing.T) {
 				}
 				return
 			}
-			got := canonical(t, body)
+			got := canonical(t, registry.RewriteParityPaths(body))
 			golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", "parity", tc.golden))
 			if err != nil {
 				t.Fatal(err)

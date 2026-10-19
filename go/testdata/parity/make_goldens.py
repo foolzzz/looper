@@ -45,6 +45,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import urllib.parse
@@ -324,6 +325,20 @@ _AGENT_SETTINGS = (
     ("agent-settings-blank", "proj-blank0001", 200),
     ("agent-settings-missing", "proj-missing01", 404),
 )
+# GET /api/registry. The login homes stay empty. The fake codex says it is
+# not logged in. The directories are unique. normalize rewrites them to the
+# placeholders the goldens and the Go harness share.
+_REGISTRY = (("registry", 200),)
+_PARITY_PLACEHOLDER_BIN = "/tmp/loopgo-parity-bin"
+_PARITY_PLACEHOLDERS = (
+    ("bin", _PARITY_PLACEHOLDER_BIN),
+    ("codex-home", "/tmp/loopgo-parity-codex-home"),
+    ("grok-home", "/tmp/loopgo-parity-grok-home"),
+    ("empty-home", "/tmp/loopgo-parity-empty-home"),
+)
+_parity_root: Path | None = None
+_parity_dirs: dict[str, Path] = {}
+_parity_rewrites: list[tuple[str, str]] = []
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -350,6 +365,8 @@ def normalize(value):
         return out
     if isinstance(value, list):
         return [normalize(item) for item in value]
+    if isinstance(value, str):
+        return _rewrite_parity_text(value)
     return value
 
 
@@ -696,6 +713,7 @@ async def capture(dsn: str) -> dict[str, object]:
                     out[name] = await answered_settings(
                         lambda project_id=project_id: agent_settings.project_settings_view(project_id),
                         expect)
+            out.update(await _capture_registry(server, take))
             return out
     finally:
         await dbconn.close_pool()
@@ -735,7 +753,172 @@ def _names() -> list[str]:
         + [name for name, _, _, _ in _NOTIFICATIONS]
         + [name for name, _, _, _ in _NOTIFICATIONS_500]
         + [name for name, _, _ in _AGENT_SETTINGS]
+        + [name for name, _ in _REGISTRY]
     )
+
+
+def _rewrite_parity_text(text: str) -> str:
+    """Put the unique parity directories back to the golden placeholders."""
+    for actual, placeholder in _parity_rewrites:
+        if actual:
+            text = text.replace(actual, placeholder)
+    return text
+
+
+def _open_dir(path: Path) -> int:
+    """A directory fd that does not follow a symlink at path."""
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(path, flags)
+
+
+def _discard_parity_root() -> None:
+    """Remove the unique login directory. A symlink is unlinked, not followed."""
+    global _parity_root
+    root = _parity_root
+    _parity_root = None
+    if root is None:
+        return
+    if root.is_symlink():
+        root.unlink(missing_ok=True)
+        return
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _prepare_registry_login() -> None:
+    """Fake executables and empty login homes in a new directory.
+
+    A fixed path under /tmp can already be a symlink. Writing the executable
+    would follow it, and unlinking home/auth.json would delete the target.
+    The directory is new. Writes use O_EXCL and O_NOFOLLOW. auth.json is
+    removed by dir_fd, which unlinks that name. Does not open auth.json.
+    """
+    global _parity_root, _parity_dirs, _parity_rewrites
+    _discard_parity_root()
+    root = Path(tempfile.mkdtemp(prefix="loopgo-parity-login-"))
+    if root.is_symlink() or not root.is_dir():
+        raise SystemExit("parity login root is not a directory")
+    _parity_root = root
+    dirs: dict[str, Path] = {}
+    rewrites: list[tuple[str, str]] = []
+    parent = _open_dir(root)
+    try:
+        os.mkdir("bin", 0o755, dir_fd=parent)
+    finally:
+        os.close(parent)
+    bin_dir = root / "bin"
+    if bin_dir.is_symlink():
+        raise SystemExit("parity bin is a symlink")
+    dirs["bin"] = bin_dir
+    rewrites.append((str(bin_dir), _PARITY_PLACEHOLDER_BIN))
+    for name in ("claude", "codex", "omp", "grok"):
+        if name == "codex":
+            body = "#!/bin/sh\necho 'Not logged in' >&2\nexit 1\n"
+        else:
+            body = "#!/bin/sh\nexit 0\n"
+        _write_exec(bin_dir, name, body)
+    for dirname, placeholder in _PARITY_PLACEHOLDERS:
+        if dirname == "bin":
+            continue
+        parent = _open_dir(root)
+        try:
+            os.mkdir(dirname, 0o755, dir_fd=parent)
+        finally:
+            os.close(parent)
+        home = root / dirname
+        if home.is_symlink():
+            raise SystemExit(f"parity home is a symlink: {dirname}")
+        _remove_auth(home)
+        dirs[dirname] = home
+        rewrites.append((str(home), placeholder))
+    rewrites.sort(key=lambda item: len(item[0]), reverse=True)
+    _parity_dirs = dirs
+    _parity_rewrites = rewrites
+
+
+def _write_exec(directory: Path, name: str, body: str) -> None:
+    """Create name. O_EXCL fails when it exists, so a symlink is not opened."""
+    dirfd = _open_dir(directory)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(name, flags, 0o755, dir_fd=dirfd)
+        try:
+            os.write(fd, body.encode("utf-8"))
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
+
+
+def _remove_auth(home: Path) -> None:
+    """Unlink auth.json in home. dir_fd does not follow a symlink home."""
+    dirfd = _open_dir(home)
+    try:
+        try:
+            os.unlink("auth.json", dir_fd=dirfd)
+        except FileNotFoundError:
+            return
+    finally:
+        os.close(dirfd)
+
+
+async def _capture_registry(server, take) -> dict[str, object]:
+    """GET /api/registry with the parity login environment, then restore it.
+
+    The process environment is changed only for this call. CODEX_HOME and
+    GROK_HOME are empty unique homes, so the probes do not use ~/.codex or
+    ~/.grok. forget_probe runs on both sides, so this capture is not a cached
+    probe. The bodies still contain the unique paths; normalize rewrites them.
+    """
+    from looper.agents import profile_registry
+    from looper.agents.http_server import HTTP_200
+    from looper.agents.runtimes import codex_login, grok_login
+    from looper.db.connection import get_pool
+
+    keys = ("PATH", "CODEX_HOME", "GROK_HOME", "HOME")
+    saved = {key: os.environ.get(key) for key in keys}
+    saved_bin = server._claude_bin
+    _prepare_registry_login()
+    bin_dir = _parity_dirs["bin"]
+    status = await get_pool().execute(
+        "UPDATE agent_runtimes SET executable = replace(executable, $1, $2) "
+        "WHERE executable LIKE $1 || '/%'",
+        _PARITY_PLACEHOLDER_BIN,
+        str(bin_dir),
+    )
+    if status != "UPDATE 2":
+        raise SystemExit(f"parity executables updated {status}")
+    os.environ["PATH"] = str(bin_dir) + os.pathsep + (saved["PATH"] or "")
+    os.environ["CODEX_HOME"] = str(_parity_dirs["codex-home"])
+    os.environ["GROK_HOME"] = str(_parity_dirs["grok-home"])
+    os.environ["HOME"] = str(_parity_dirs["empty-home"])
+    server._claude_bin = str(bin_dir / "claude")
+    codex_login.forget_probe()
+    grok_login.forget_probe()
+    try:
+        out = {}
+        for name, expect in _REGISTRY:
+            out[name] = await take(
+                lambda cap: server._handle_registry(
+                    cap, HTTP_200,
+                    lambda: profile_registry.registry_view(server_claude=server._claude_bin),
+                ),
+                expect,
+            )
+        return out
+    finally:
+        server._claude_bin = saved_bin
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        codex_login.forget_probe()
+        grok_login.forget_probe()
+        _discard_parity_root()
 
 
 def _status_code(raw: bytes) -> int:

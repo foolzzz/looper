@@ -775,3 +775,49 @@ VALUES (
     'inst-rich0001', 'lib-rich0001', 'project', 'proj-alpha0001', ARRAY['task_role'], true,
     '2020-03-01T00:00:00Z', '2020-03-01T00:00:00Z'
 );
+
+-- Nightly's Worker and its Reviewer choose the same profile. Two rows, one
+-- schedule: profile usage is count(DISTINCT schedule_id), so schedule_count
+-- is 1. count(*) would be 2.
+INSERT INTO schedule_profile_overrides (schedule_id, role, profile_id) VALUES
+('sched-nightly01', 'worker', 'agent-layer-task-work'),
+('sched-nightly01', 'reviewer', 'agent-layer-task-work');
+
+-- GET /api/registry. The schema inserts the built-in runtime and providers
+-- with now(); pin those clocks. codex-limited can run no role, so it is not
+-- choosable when a project's allow-list is empty. omp-managers can run the
+-- Manager and the Planner only. masked-key has a secret and a model with no
+-- price.
+INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin, created_at, updated_at) VALUES
+(
+    'rt-codex-limited', 'codex-limited', 'codex', '/tmp/loopgo-parity-bin/codex',
+    ARRAY['mcp'], false, '2020-01-15T00:00:00Z', '2020-01-15T00:00:00Z'
+),
+(
+    'rt-omp-managers', 'omp-managers', 'omp', '/tmp/loopgo-parity-bin/omp',
+    ARRAY['resident_session', 'resume'], false, '2020-01-15T00:00:00Z', '2020-01-15T00:00:00Z'
+);
+
+INSERT INTO llm_providers (
+    id, name, protocols, auth, oauth_runtime_type, base_url, models, env, builtin, created_at, updated_at
+) VALUES (
+    'prov-masked0001', 'masked-key', ARRAY['anthropic-messages'], 'api_key', NULL,
+    'https://example.invalid/v1',
+    '[{"name":"mystery-model","context_window":1000}]'::jsonb,
+    '[{"key":"EXAMPLE_FLAG","value":"1"}]'::jsonb,
+    false, '2020-01-15T00:00:00Z', '2020-01-15T00:00:00Z'
+);
+
+INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES
+('prov-masked0001', 'sentinel-not-a-real-key');
+
+INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES
+('agent-unpriced01', 'codex-unpriced', 'rt-codex-limited', 'prov-masked0001', 'mystery-model');
+
+UPDATE agent_runtimes
+SET created_at = timestamptz '2020-01-15 00:00:00+00',
+    updated_at = timestamptz '2020-01-15 00:00:00+00';
+
+UPDATE llm_providers
+SET created_at = timestamptz '2020-01-15 00:00:00+00',
+    updated_at = timestamptz '2020-01-15 00:00:00+00';

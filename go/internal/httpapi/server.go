@@ -76,6 +76,11 @@ type Reader interface {
 	GetSchedule(ctx context.Context, id string) (map[string]any, error)
 	ListScheduleRuns(ctx context.Context, id string, q db.ScheduleRunsQuery) (map[string]any, error)
 	ListScheduleNotifications(ctx context.Context, id string, limit int) (map[string]any, error)
+	// Registry is GET /api/registry. claudeBin is the Claude Code executable
+	// an empty runtime row resolves. environ nil tells the store to use the
+	// process environment. A test passes a temporary environment so the login
+	// probe does not read the operator's Codex or Grok login.
+	Registry(ctx context.Context, claudeBin string, environ []string) (map[string]any, error)
 }
 
 // Server serves the read-only API and, when WebDir is set, the dashboard files.
@@ -90,6 +95,12 @@ type Server struct {
 	Reads    Reader
 	BindHost string
 	Now      func() time.Time
+	// ClaudeBin is the Claude Code executable an empty claude-code runtime
+	// resolves. Empty means "claude", which is Python's default.
+	ClaudeBin string
+	// LoginEnviron, when set, is the environment login probes and executable
+	// lookups use. Nil uses the process environment.
+	LoginEnviron func() []string
 }
 
 // New builds a Server. A nil DB is reported as a database error, not a panic.
@@ -128,6 +139,7 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // It also serves GET /api/workspaces/check, GET /api/projects/<id>/schedules,
 // GET /api/schedules, GET /api/schedules/<id>, its runs, and its notifications.
 // It also serves GET /api/agent-settings and GET /api/projects/<id>/agent-settings.
+// It also serves GET /api/registry.
 // GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
 // are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
@@ -156,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/gate-settings", s.handleGateSettings)
 	mux.HandleFunc("/api/projects/{id}/role-templates", s.handleRoleTemplates)
 	mux.HandleFunc("/api/projects/{id}/allowed-profiles", s.handleAllowedProfiles)
+	mux.HandleFunc("/api/registry", s.handleRegistry)
 	mux.HandleFunc("/api/agent-settings", s.handleAgentSettings)
 	mux.HandleFunc("/api/projects/{id}/agent-settings", s.handleProjectAgentSettings)
 	mux.HandleFunc("/api/projects/{id}/role-stats", s.handleRoleStats)
