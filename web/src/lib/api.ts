@@ -1,3 +1,5 @@
+import { isSessionEnded, onSessionEnded, SessionEndedError } from "@/lib/session";
+
 const API_BASE = "/api";
 
 export interface SystemStatus {
@@ -470,7 +472,7 @@ export function watchChat(sessionId: string, onMessage: (message: DbChatMessage)
         if (event.kind === "chat.message") onMessage(event.payload as unknown as DbChatMessage);
       },
       () => {
-        if (!stopped) retry = setTimeout(connect, CHAT_WATCH_RETRY_MS);
+        if (!stopped && !isSessionEnded()) retry = setTimeout(connect, CHAT_WATCH_RETRY_MS);
       },
     );
   };
@@ -2032,6 +2034,8 @@ export function streamTaskActivity(
 ): () => void {
   const abortController = new AbortController();
 
+  const forget = onSessionEnded(() => abortController.abort());
+
   (async () => {
     try {
       const res = await fetch(
@@ -2047,7 +2051,7 @@ export function streamTaskActivity(
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || abortController.signal.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
@@ -2068,10 +2072,11 @@ export function streamTaskActivity(
         }
       }
     } catch (e) {
-      if ((e as Error).name !== "AbortError") {
+      if ((e as Error).name !== "AbortError" && !(e instanceof SessionEndedError)) {
         console.error("Activity SSE error:", e);
       }
     } finally {
+      forget();
       onDone?.();
     }
   })();
@@ -3398,6 +3403,7 @@ export function streamSSE(
   onDone?: () => void,
 ): () => void {
   const abortController = new AbortController();
+  const forget = onSessionEnded(() => abortController.abort());
 
   (async () => {
     try {
@@ -3410,7 +3416,7 @@ export function streamSSE(
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || abortController.signal.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
@@ -3437,10 +3443,11 @@ export function streamSSE(
         }
       }
     } catch (e) {
-      if ((e as Error).name !== "AbortError") {
+      if ((e as Error).name !== "AbortError" && !(e instanceof SessionEndedError)) {
         console.error("SSE error:", e);
       }
     } finally {
+      forget();
       onDone?.();
     }
   })();

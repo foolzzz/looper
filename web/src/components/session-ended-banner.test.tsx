@@ -4,23 +4,39 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionEndedBanner } from "@/components/session-ended-banner";
 import { SignOut } from "@/components/sign-out";
-import { watchChat } from "@/lib/api";
-import { installSessionGuard, resetSessionGuard } from "@/lib/session";
+import { streamSSE, watchChat } from "@/lib/api";
+import { installSessionGuard, isSessionEnded, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+type NodeProcess = { on(e: string, f: () => void): void; off(e: string, f: () => void): void };
 
 describe("session ended banner and sign out", () => {
   let container: HTMLDivElement;
   let root: Root;
   let status: Response;
   let seen: string[];
+  let push: (text: string) => void;
 
   beforeEach(() => {
     seen = [];
     resetSessionGuard();
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    push = () => {};
+    status = Response.json({});
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       seen.push(url);
+      if (url === "/api/stream") {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            push = (text) => {
+              try { controller.enqueue(new TextEncoder().encode(text)); } catch { /* closed by the abort */ }
+            };
+            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("x", "AbortError")));
+          },
+        });
+        return new Response(body, { status: 200 });
+      }
       if (url === "/api/status") return status.clone();
       if (url === "/api/overview" || url.startsWith("/api/chat/events") || url === "/login") return new Response("{}", { status: 401 });
       return new Response("{}", { status: 200 });
@@ -43,7 +59,7 @@ describe("session ended banner and sign out", () => {
     await act(async () => {
       void fetch("/api/overview");
       await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).not.toBeNull());
-      void fetch("/api/overview");
+      await expect(fetch("/api/overview")).rejects.toBeInstanceOf(SessionEndedError);
     });
     expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
     expect(container.textContent).toContain("Your session ended. Reload to sign in again.");
@@ -55,17 +71,50 @@ describe("session ended banner and sign out", () => {
     vi.useFakeTimers();
     try {
       installSessionGuard();
-      let settled = false;
       const stop = watchChat("s1", () => {});
       await vi.advanceTimersByTimeAsync(0);
       expect(seen.filter((u) => u.startsWith("/api/chat/events"))).toHaveLength(1);
-      void fetch("/api/overview").then(() => (settled = true), () => (settled = true));
       await vi.advanceTimersByTimeAsync(60_000);
+      await expect(fetch("/api/overview")).rejects.toBeInstanceOf(SessionEndedError);
       expect(seen.filter((u) => u.startsWith("/api/chat/events"))).toHaveLength(1);
       expect(seen).not.toContain("/api/status");
-      expect(settled).toBe(false);
       stop();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes an open stream, clears pollers and rejects later calls once another request gets 401", async () => {
+    vi.useFakeTimers();
+    const unhandled = vi.fn();
+    const proc = (globalThis as unknown as { process: NodeProcess }).process;
+    proc.on("unhandledRejection", unhandled);
+    try {
+      installSessionGuard();
+      const events: unknown[] = [];
+      streamSSE("/api/stream", (e) => events.push(e));
+      await vi.advanceTimersByTimeAsync(0);
+      push('data: {"kind":"a","payload":{}}\n\n');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events).toHaveLength(1);
+      let polls = 0;
+      window.setInterval(() => {
+        polls++;
+        void fetch("/api/status").catch((e) => expect(e).toBeInstanceOf(SessionEndedError));
+      }, 1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      const before = polls;
+      void fetch("/api/overview");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(isSessionEnded()).toBe(true);
+      push('data: {"kind":"b","payload":{}}\n\n');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(events).toHaveLength(1);
+      expect(polls).toBe(before);
+      await expect(fetch("/api/status")).rejects.toBeInstanceOf(SessionEndedError);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      proc.off("unhandledRejection", unhandled);
       vi.useRealTimers();
     }
   });
