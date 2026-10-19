@@ -187,6 +187,21 @@ func TestAgentsViewFrom(t *testing.T) {
 		if value["profile_id"] != "agent-claude-code-opus" || value["runtime"] != "claude-code" || value["effort"] != nil {
 			t.Fatalf("%s profile %#v", role, value)
 		}
+		if _, ok := value["runtime_type"]; ok {
+			t.Fatalf("%s profile value includes runtime_type %#v", role, value)
+		}
+		entry := roles[role].(map[string]any)
+		if entry["runtime_type"] != "claude-code" {
+			t.Fatalf("%s runtime %#v", role, entry["runtime_type"])
+		}
+		mode := entry["system_prompt_mode"].(map[string]any)
+		wantMode := "append"
+		if role == "planner" {
+			wantMode = "replace"
+		}
+		if mode["value"] != wantMode || mode["source"] != "builtin" {
+			t.Fatalf("%s mode %#v", role, mode)
+		}
 	}
 	worker := roles["worker"].(map[string]any)["concurrency"].(map[string]any)
 	reviewer := roles["reviewer"].(map[string]any)["concurrency"].(map[string]any)
@@ -291,6 +306,77 @@ func TestAgentsViewPrecedence(t *testing.T) {
 	assertProfile(t, bare, "planner", "role", "agent-layer-planner", "medium")
 	assertProfile(t, bare, "worker", "role", "agent-layer-worker", "high")
 	assertProfile(t, bare, "reviewer", "role", "agent-layer-reviewer", "xhigh")
+}
+
+func TestSystemPromptModeChoice(t *testing.T) {
+	profile := func(id, runtimeType string) map[string]any {
+		return map[string]any{
+			"id": id, "name": "named", "model": "opus",
+			"runtime_id": "rt", "runtime_name": "shown-name", "runtime_type": runtimeType,
+			"provider_id": "prov", "provider_name": "provider", "provider_auth": "oauth",
+		}
+	}
+	tests := []struct {
+		name       string
+		rows       []map[string]any
+		role       string
+		wantSource string
+		wantMode   string
+		wantRun    string
+		wantID     string
+	}{
+		{
+			name: "role layer",
+			rows: []map[string]any{
+				{"scope": "role", "role": "worker", "system_prompt_mode": "replace"},
+			},
+			role: "worker", wantSource: "role", wantMode: "replace", wantRun: "claude-code",
+		},
+		{
+			name: "task override",
+			rows: []map[string]any{
+				{"scope": "role", "role": "worker", "system_prompt_mode": "replace"},
+				{"scope": "task", "role": "worker", "system_prompt_mode": "append", "profile": profile("agent-task", "grok")},
+			},
+			role: "worker", wantSource: "task", wantMode: "append", wantRun: "grok", wantID: "agent-task",
+		},
+		{
+			name: "cleared task override falls back to the role",
+			rows: []map[string]any{
+				{"scope": "role", "role": "reviewer", "system_prompt_mode": "replace"},
+				{"scope": "task", "role": "reviewer", "profile": profile("agent-task", "grok")},
+			},
+			role: "reviewer", wantSource: "role", wantMode: "replace", wantRun: "grok", wantID: "agent-task",
+		},
+		{
+			name: "invalid stored mode is ignored",
+			rows: []map[string]any{
+				{"scope": "role", "role": "worker", "system_prompt_mode": "nope"},
+			},
+			role: "worker", wantSource: "builtin", wantMode: "append", wantRun: "claude-code",
+		},
+		{
+			name:       "planner builtin replaces",
+			role:       "planner",
+			wantSource: "builtin", wantMode: "replace", wantRun: "claude-code",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := agentsViewFrom(tt.rows, "proj-alpha0001", "executing")
+			entry := got["roles"].(map[string]any)[tt.role].(map[string]any)
+			mode := entry["system_prompt_mode"].(map[string]any)
+			if mode["value"] != tt.wantMode || mode["source"] != tt.wantSource || entry["runtime_type"] != tt.wantRun {
+				t.Fatalf("mode %#v runtime %#v", mode, entry["runtime_type"])
+			}
+			if tt.wantID != "" {
+				value := entry["profile"].(map[string]any)["value"].(map[string]any)
+				if value["profile_id"] != tt.wantID || value["runtime"] != "shown-name" {
+					t.Fatalf("profile %#v", value)
+				}
+			}
+		})
+	}
 }
 
 func assertProfile(t *testing.T, roles map[string]any, role, source, id, effort string) {

@@ -14,6 +14,11 @@
             "provider": "claude-subscription",
             "runtime": "claude-code"
           }
+        },
+        "runtime_type": "claude-code",
+        "system_prompt_mode": {
+          "source": "builtin",
+          "value": "replace"
         }
       },
       "reviewer": {
@@ -36,6 +41,11 @@
             "provider": "claude-subscription",
             "runtime": "claude-code"
           }
+        },
+        "runtime_type": "claude-code",
+        "system_prompt_mode": {
+          "source": "role",
+          "value": "replace"
         }
       },
       "worker": {
@@ -58,6 +68,11 @@
             "provider": "claude-subscription",
             "runtime": "claude-code"
           }
+        },
+        "runtime_type": "claude-code",
+        "system_prompt_mode": {
+          "source": "role",
+          "value": "replace"
         }
       }
     }

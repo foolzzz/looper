@@ -194,6 +194,14 @@ _TEMPLATES = (
     ("role-templates-beta", "proj-beta00002", 200),
     ("role-templates-missing", "proj-missing01", 404),
 )
+# Alpha's list is three profiles, so the project is restricted and choosable
+# is that list. Beta's list is empty, so every Worker or Reviewer profile is
+# choosable. A missing project is the handler's 404.
+_ALLOWED = (
+    ("allowed-profiles-alpha", "proj-alpha0001", 200),
+    ("allowed-profiles-beta", "proj-beta00002", 200),
+    ("allowed-profiles-missing", "proj-missing01", 404),
+)
 # 2010-01-01, 2010-W01-1, and 20100101 are all before the rich task, so those
 # stats match the unfiltered alpha body. 2099 includes no task. 2010-W53-1
 # is not a day. The missing project is 404.
@@ -611,6 +619,9 @@ async def capture(dsn: str) -> dict[str, object]:
             for name, project_id, expect in _TEMPLATES:
                 out[name] = await answered(
                     lambda project_id=project_id: role_api.templates_view(project_id), expect)
+            for name, project_id, expect in _ALLOWED:
+                out[name] = await answered(
+                    lambda project_id=project_id: projects.allowed_profiles_view(project_id), expect)
             for name, project_id, since, expect in _ROLE_STATS:
                 out[name] = await answered(
                     lambda project_id=project_id, since=since: role_api.role_stats(project_id, since),
@@ -684,6 +695,7 @@ def main() -> None:
         + [name for name, _, _ in _CHANNEL]
         + [name for name, _ in _GATE]
         + [name for name, _, _ in _TEMPLATES]
+        + [name for name, _, _ in _ALLOWED]
         + [name for name, _, _, _ in _ROLE_STATS]
         + [name for name, _, _, _ in _GATE_MESSAGES]
         + [name for name, _, _, _ in _ROOM]

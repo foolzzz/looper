@@ -354,6 +354,15 @@ func TestStaticAndSPA(t *testing.T) {
 	if err := os.Symlink(filepath.Join("assets", "app.js"), filepath.Join(root, "alias.js")); err != nil {
 		t.Fatal(err)
 	}
+	// An absolute symlink whose target stays inside the web root is the same
+	// file. os.Root refuses the absolute link text; the resolved path is what
+	// decides, and the file is still opened through os.Root.
+	if err := os.Symlink(filepath.Join(root, "assets", "app.js"), filepath.Join(root, "absalias.js")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "assets"), filepath.Join(root, "absdir")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
 		t.Fatal(err)
 	}
@@ -427,6 +436,10 @@ func TestStaticAndSPA(t *testing.T) {
 		{name: "index file", h: h, method: http.MethodGet, path: "/index.html", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "asset", h: h, method: http.MethodGet, path: "/assets/app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
 		{name: "alias symlink inside", h: h, method: http.MethodGet, path: "/alias.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
+		{name: "absolute symlink inside", h: h, method: http.MethodGet, path: "/absalias.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
+		{name: "absolute directory symlink inside", h: h, method: http.MethodGet, path: "/absdir/app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
+		{name: "parent through absolute directory symlink", h: h, method: http.MethodGet, path: "/absdir/../app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
+		{name: "parent through absolute directory symlink leaves", h: h, method: http.MethodGet, path: "/absdir/../leak.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
 		{name: "spa fallback", h: h, method: http.MethodGet, path: "/tasks/123", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "directory is not a listing", h: h, method: http.MethodGet, path: "/assets", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "head root", h: h, method: http.MethodHead, path: "/", wantStatus: http.StatusOK, emptyBody: true, wantType: "text/html"},

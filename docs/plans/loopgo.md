@@ -137,6 +137,31 @@ root, and `/missing/../app.js` when `missing/` is absent, still fall back to
 its task's cost. A task with no priced rows reports 0.0. Separate 0.1 and
 0.2 groups add to 0.3. SSE stays unserved.
 
+G1i copies `looper/db/schema.sql` from the Python checkout at `v2.10.0`
+(`c7b3300a5c73d1f5f7a43e6e548c9a1dff166b8c`, tag `v2.10.0`). That commit is
+`main`. `codex/release-v2.10.0`
+(`e329a963a39389acd35be47ac32493708e4a647a`) is an ancestor, and the two
+trees match. The version string there is 2.10.0. The worktree Python
+package is still 2.8.0, and the goldens already in the tree were produced
+from that package. This card regenerated every golden by importing the
+2.10.0 package against the synced schema and the current seed. 134 bodies
+matched the previous files. `task-rich` and `task-min` now include each
+role's `runtime_type` and `system_prompt_mode`. `task-rich`'s Worker
+override is `append` from the task. Its Reviewer, and `task-min`'s Worker,
+inherit `replace` from the role layer. The Planner's role layer sets no
+mode, so the built-in `replace` applies. Clearing an override is the
+absence of that task row. A profile override also includes
+`custom_prompt`. `GET /api/projects/<id>/allowed-profiles` returns
+`restricted`, `profiles`, and `choosable`. Alpha's list is non-empty, so
+the project is restricted and `choosable` is that list. Beta's list is
+empty, so every profile that can run the Worker or the Reviewer is
+choosable. Fresh schema, an upgrade from the schema before prompt modes,
+and a second init are covered. An absolute symlink whose target stays
+inside the web root is served through `os.Root`. Linked operator-note
+text is normalized to LF before the byte budget. A legacy schedule
+interval accepts the integers Python's `int()` accepts, including `3_0`
+and fullwidth digits. SSE stays unserved.
+
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
@@ -152,7 +177,6 @@ is not in this list.
 - `GET /api/registry`
 - `GET /api/agent-settings`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/agent-settings`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles`
 - `GET /api/config/export`
 - `GET /api/catalog`
 - `GET /api/catalog/([a-z]+-[a-zA-Z0-9]+)`

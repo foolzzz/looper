@@ -396,6 +396,39 @@ func TestOperatorNotesByteBudgetMatchesPython(t *testing.T) {
 	}
 }
 
+func TestOperatorNotesNormalizesNewlinesBeforeBudget(t *testing.T) {
+	// Path.read_text turns \r\n into \n before the byte budget is applied.
+	// "a\r\n" × 7000 is 21,000 raw bytes and 14,000 after that translation.
+	// Counting the raw size omits a 5,000-byte second file that still fits.
+	root := t.TempDir()
+	t.Setenv("LOOPER_OPERATOR_NOTES_ROOT", root)
+	work := t.TempDir()
+	mem := filepath.Join(root, directoryName(notesKey(t.Context(), work)), "memory")
+	if err := os.MkdirAll(mem, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := "[a](a.md)\n[b](b.md)\n"
+	if err := os.WriteFile(filepath.Join(mem, "MEMORY.md"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mem, "a.md"), []byte(strings.Repeat("a\r\n", 7000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mem, "b.md"), []byte(strings.Repeat("b", 5000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readOperatorNotes(t.Context(), work)
+	if strings.Join(got.files, ",") != "MEMORY.md,a.md,b.md" || len(got.omitted) != 0 {
+		t.Fatalf("files %v omitted %v", got.files, got.omitted)
+	}
+	if strings.Contains(got.text, "\r") {
+		t.Fatal("linked note kept a carriage return")
+	}
+	if !strings.Contains(got.text, strings.TrimSpace(strings.Repeat("a\n", 7000))) || !strings.Contains(got.text, strings.Repeat("b", 5000)) {
+		t.Fatal("normalized text lost a linked file")
+	}
+}
+
 func TestExpandUserNamedAccount(t *testing.T) {
 	account, err := user.Current()
 	if err != nil {

@@ -381,7 +381,8 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     version       TEXT,
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
         CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
-                                     'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report']),
+                                     'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
+                                     'read_tools', 'steer']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
@@ -431,7 +432,10 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 -- registry sets a new profile's (profile_registry.default_agent_teams) and a migration below turned them on once
 -- for the profiles before; the column's default is for the other runtimes, which have none.
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
--- Existing profiles append the Looper prompt; replacement must be selected explicitly.
+-- Existing profiles add no custom text and append the Looper prompt by default.
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS custom_prompt TEXT NOT NULL DEFAULT '';
+-- A profile's mode applies to the runtimes other than Claude Code, whose mode is its role's setting
+-- (agent_setting_layers.system_prompt_mode, below).
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS system_prompt_mode TEXT NOT NULL DEFAULT 'append'
     CHECK (system_prompt_mode IN ('append', 'replace'));
 -- A task's profile overrides: its own choice of Agent Profile for some of its
@@ -614,6 +618,21 @@ BEGIN
         DELETE FROM agent_runtimes r
         WHERE NOT r.builtin AND NOT EXISTS (SELECT 1 FROM agent_profiles a WHERE a.runtime_id = r.id);
         INSERT INTO schema_migrations (name) VALUES ('agent_runtimes_unused_custom_removed');
+    END IF;
+END $$;
+
+-- steer: a runtime may list the capability to receive messages while it works. The definition is read only
+-- for this schema's table (see library_installs_roles_check below).
+DO $$
+DECLARE def TEXT;
+BEGIN
+    SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
+     WHERE c.conrelid = to_regclass('agent_runtimes') AND c.conname = 'agent_runtimes_capabilities_check';
+    IF def IS NULL OR def NOT LIKE '%steer%' THEN
+        ALTER TABLE agent_runtimes DROP CONSTRAINT IF EXISTS agent_runtimes_capabilities_check;
+        ALTER TABLE agent_runtimes ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY[
+            'run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp', 'add_dirs',
+            'compaction_events', 'autonomous_turns', 'cost_report', 'read_tools', 'steer']);
     END IF;
 END $$;
 
@@ -990,6 +1009,34 @@ END $$;
 ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER
     CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
         OR (max_concurrency BETWEEN 1 AND 64 AND scope = 'role' AND role IN ('worker', 'reviewer')));
+-- Whether a role replaces Claude Code's default system prompt ('replace') or appends Looper's to it ('append'); set
+-- only on a role layer, and applied only to runs on Claude Code (agent_settings.role_system_prompt_mode). NULL: the
+-- role's built-in value (the Manager and the Planner replace, the Worker and the Reviewer append). Before, a profile
+-- chose it; it still does for the other runtimes. So once, when the column is added: a Worker or Reviewer whose
+-- profile (the role layer's, else the shared defaults', else the built-in one) is a Claude Code one that replaced
+-- keeps replacing, as its role layer's setting; then every Claude Code profile is 'append' (its mode is not used).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('agent_setting_layers')
+                      AND attname = 'system_prompt_mode' AND NOT attisdropped) THEN
+        ALTER TABLE agent_setting_layers ADD COLUMN system_prompt_mode TEXT
+            CONSTRAINT agent_setting_layers_system_prompt_mode_check CHECK (system_prompt_mode IS NULL
+                OR (system_prompt_mode IN ('append', 'replace') AND scope = 'role'));
+        INSERT INTO agent_setting_layers (scope, role, system_prompt_mode)
+        SELECT 'role', r.role, 'replace' FROM unnest(ARRAY['worker', 'reviewer']) AS r(role)
+        WHERE EXISTS (SELECT 1 FROM agent_profiles a JOIN agent_runtimes t ON t.id = a.runtime_id
+                       WHERE t.type = 'claude-code' AND a.system_prompt_mode = 'replace' AND a.id = COALESCE(
+                           (SELECT l.profile_id FROM agent_setting_layers l
+                             WHERE l.scope = 'role' AND l.role = r.role AND l.project_id IS NULL),
+                           (SELECT l.profile_id FROM agent_setting_layers l
+                             WHERE l.scope = 'system' AND l.role IS NULL AND l.project_id IS NULL),
+                           'agent-claude-code-opus'))
+        ON CONFLICT (scope, (COALESCE(role, '')), (COALESCE(project_id, '')))
+        DO UPDATE SET system_prompt_mode = 'replace', updated_at = now();
+        UPDATE agent_profiles a SET system_prompt_mode = 'append' FROM agent_runtimes t
+         WHERE t.id = a.runtime_id AND t.type = 'claude-code' AND a.system_prompt_mode <> 'append';
+    END IF;
+END $$;
 -- A task's own concurrency limit: at most this many of its Workers or Reviewers run at once
 -- (agent_settings.resolve_task_concurrency). One Planner runs a task, so the Planner has none. With the
 -- task's profile overrides it is the task layer (agent_setting_layers.list_layers).
@@ -999,10 +1046,19 @@ CREATE TABLE IF NOT EXISTS task_concurrency_limits (
     max_concurrency  INTEGER NOT NULL CHECK (max_concurrency BETWEEN 1 AND 64),
     PRIMARY KEY (task_id, role)
 );
+-- A task's own system prompt mode per role (append or replace; Claude Code only): the first choice of
+-- agent_settings.system_prompt_mode_choice, over the role layer's. A table of its own, because a task's profile
+-- override always names a profile and a task may change the mode without choosing one.
+CREATE TABLE IF NOT EXISTS task_system_prompt_modes (
+    task_id             TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role                TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
+    system_prompt_mode  TEXT NOT NULL CHECK (system_prompt_mode IN ('append', 'replace')),
+    PRIMARY KEY (task_id, role)
+);
 -- The Agent Profiles a project's Planners may choose for their tasks' Workers and Reviewers
--- (ops/planner.py, looper_task_profile_set); none by default, so a Planner chooses nothing. Whether a profile can
--- run the role is checked when it is chosen. A profile on a list cannot be deleted; dropping one from a list drops
--- what the project's Planners chose of it.
+-- (ops/planner.py, looper_task_profile_set); none by default, which lets a Planner choose any profile (a list
+-- restricts the choice to it). Whether a profile can run the role is checked when it is chosen. A profile on a list
+-- cannot be deleted; setting a list that leaves one out drops what the project's Planners chose of it.
 CREATE TABLE IF NOT EXISTS project_allowed_profiles (
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),
@@ -1210,6 +1266,23 @@ CREATE TABLE IF NOT EXISTS task_user_gate_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_message ON task_user_gate_posts (message_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_external ON task_user_gate_posts (channel, external_id);
+DO $$
+DECLARE
+    table_oid REGCLASS := to_regclass('task_user_gate_posts');
+    c RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_posts_lark_bot') THEN
+        FOR c IN SELECT conname FROM pg_constraint
+                 WHERE conrelid = table_oid AND contype = 'c'
+                   AND pg_get_constraintdef(oid) ~ '\mchannel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
+        LOOP
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'task_user_gate_posts', c.conname);
+        END LOOP;
+        ALTER TABLE task_user_gate_posts ADD CONSTRAINT task_user_gate_posts_channel_check
+            CHECK (channel IN ('lark', 'lark_bot', 'telegram'));
+        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_posts_lark_bot');
+    END IF;
+END $$;
 
 -- A task's agent room (looper/agents/room.py): the messages its Planner and its steps' seats send each other, only
 -- ever added. A seat is '<role>@<step key>' (worker@s2, backend_rd@s2, reviewer@s2); the sender comes from the
@@ -1412,6 +1485,23 @@ ALTER TABLE schedules ADD COLUMN IF NOT EXISTS daily_budget_usd DOUBLE PRECISION
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify TEXT NOT NULL DEFAULT 'failures'
     CHECK (notify IN ('failures', 'always', 'never'));
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark'));
+DO $$
+DECLARE
+    table_oid REGCLASS := to_regclass('schedules');
+    c RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_notify_channel_lark_bot') THEN
+        FOR c IN SELECT conname FROM pg_constraint
+                 WHERE conrelid = table_oid AND contype = 'c'
+                   AND pg_get_constraintdef(oid) ~ '\mnotify_channel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
+        LOOP
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'schedules', c.conname);
+        END LOOP;
+        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_channel_check
+            CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot'));
+        INSERT INTO schema_migrations (name) VALUES ('schedules_notify_channel_lark_bot');
+    END IF;
+END $$;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_chat TEXT;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failures_alert_at TIMESTAMPTZ;

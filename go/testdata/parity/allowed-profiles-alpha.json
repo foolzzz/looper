@@ -1,0 +1,98 @@
+{
+  "choosable": [
+    {
+      "effort": "max",
+      "model": "layer-pt-rev",
+      "name": "claude-code/layer-pt-rev",
+      "profile_id": "agent-layer-pt-rev",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "xhigh",
+      "model": "layer-pt-work",
+      "name": "claude-code/layer-pt-work",
+      "profile_id": "agent-layer-pt-work",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": null,
+      "model": "layer-roledef",
+      "name": "claude-code/layer-roledef",
+      "profile_id": "agent-layer-roledef",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    }
+  ],
+  "profiles": [
+    {
+      "effort": "max",
+      "model": "layer-pt-rev",
+      "name": "claude-code/layer-pt-rev",
+      "profile_id": "agent-layer-pt-rev",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": "xhigh",
+      "model": "layer-pt-work",
+      "name": "claude-code/layer-pt-work",
+      "profile_id": "agent-layer-pt-work",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    },
+    {
+      "effort": null,
+      "model": "layer-roledef",
+      "name": "claude-code/layer-roledef",
+      "profile_id": "agent-layer-roledef",
+      "roles": [
+        "worker",
+        "reviewer"
+      ],
+      "runtime": "claude-code",
+      "usd_per_million_tokens": {
+        "input": null,
+        "output": null
+      }
+    }
+  ],
+  "project_id": "proj-alpha0001",
+  "restricted": true
+}

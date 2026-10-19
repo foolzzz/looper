@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-const roleTemplateSQL = `SELECT t.project_id, t.template_key, t.kind, t.description, t.role_prompt, t.harness, ` +
-	`t.profile_id, t.items, t.updated_at, a.name AS profile_name, (l.profile_id IS NOT NULL) AS profile_allowed ` +
-	`FROM project_role_templates t LEFT JOIN agent_profiles a ON a.id = t.profile_id ` +
-	`LEFT JOIN project_allowed_profiles l ON l.project_id = t.project_id AND l.profile_id = t.profile_id `
+var roleTemplateSQL = `SELECT t.project_id, t.template_key, t.kind, t.description, t.role_prompt, t.harness, ` +
+	`t.profile_id, t.items, t.updated_at, a.name AS profile_name, ` +
+	profileAllowedSQL("t.project_id", "t.profile_id") + ` AS profile_allowed ` +
+	`FROM project_role_templates t LEFT JOIN agent_profiles a ON a.id = t.profile_id `
 
 const roleItemSQL = `SELECT i.id, i.kind, i.name, i.description ` +
 	`FROM library_installs s JOIN library_items i ON i.id = s.item_id ` +
