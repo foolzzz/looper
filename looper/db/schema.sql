@@ -1046,6 +1046,15 @@ CREATE TABLE IF NOT EXISTS task_concurrency_limits (
     max_concurrency  INTEGER NOT NULL CHECK (max_concurrency BETWEEN 1 AND 64),
     PRIMARY KEY (task_id, role)
 );
+-- A task's own system prompt mode per role (append or replace; Claude Code only): the first choice of
+-- agent_settings.system_prompt_mode_choice, over the role layer's. A table of its own, because a task's profile
+-- override always names a profile and a task may change the mode without choosing one.
+CREATE TABLE IF NOT EXISTS task_system_prompt_modes (
+    task_id             TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role                TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
+    system_prompt_mode  TEXT NOT NULL CHECK (system_prompt_mode IN ('append', 'replace')),
+    PRIMARY KEY (task_id, role)
+);
 -- The Agent Profiles a project's Planners may choose for their tasks' Workers and Reviewers
 -- (ops/planner.py, looper_task_profile_set); none by default, so a Planner chooses nothing. Whether a profile can
 -- run the role is checked when it is chosen. A profile on a list cannot be deleted; dropping one from a list drops

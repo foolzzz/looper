@@ -447,7 +447,7 @@ async def edit_requirement(
 
 
 # What a task's own choices per role are (``set_task_agents``), and when a new profile applies.
-TASK_AGENT_FIELDS = ("profiles", "concurrency")
+TASK_AGENT_FIELDS = ("profiles", "concurrency", "system_prompt_modes")
 PROFILES_NOTE = ("a Worker or Reviewer uses its new profile from its next step on; the Planner moves to its new "
                  "profile at its next turn, after a handoff")
 
@@ -460,6 +460,23 @@ async def agents_view(task: dict[str, Any]) -> dict[str, Any]:
     layers = index_layers(await db_layers.list_layers(project_id, task_id=task["id"]), project_id)
     return {"roles": task_agents_view(layers, project_id), "concurrency_max": CONCURRENCY_MAX,
             "editable": task.get("status") in AGENTS_EDITABLE_STATUSES}
+
+
+def _prompt_modes(raw: Any) -> dict[str, str | None]:
+    """``system_prompt_modes``, a task's own append or replace per role (null drops it); it applies on Claude Code
+    only. 400 for another role or value."""
+    if not isinstance(raw, dict):
+        raise RequestError(HTTP_400, 'system_prompt_modes must be an object: {"planner" | "worker" | "reviewer": '
+                                     '"append" | "replace" | null}')
+    modes: dict[str, str | None] = {}
+    for role, value in raw.items():
+        if role not in TASK_PROFILE_ROLES:
+            raise RequestError(HTTP_400, f"system_prompt_modes: a task sets the mode of its "
+                                         f"{', '.join(TASK_PROFILE_ROLES)} only, not {role!r}")
+        if value is not None and value not in ("append", "replace"):
+            raise RequestError(HTTP_400, f'system_prompt_modes.{role} must be "append", "replace" or null; got {value!r}')
+        modes[role] = value
+    return modes
 
 
 async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") -> dict[str, str | None]:
@@ -586,7 +603,8 @@ def _concurrency_limits(raw: Any, *, field: str = "concurrency") -> dict[str, in
 
 async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Change the task's own choices per role, together: ``profiles`` (an Agent Profile, by id or name, for its
-    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once); null drops
+    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once) and ``system_prompt_modes`` (append or replace
+    on Claude Code); null drops
     the task's choice of that role, and its layers apply. 400 for a bad field, role or
     value, 404 for an unknown task, 409 for a completed one (a failed, stopped or cancelled task changes too, and its
     restart runs with them). Answers the task's agents as they are then (and when a new profile applies). The caller
@@ -594,9 +612,10 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     unknown = sorted(set(data) - set(TASK_AGENT_FIELDS))
     if unknown:
         raise RequestError(HTTP_400, f"unknown field {unknown[0]!r}; the fields are {', '.join(TASK_AGENT_FIELDS)}")
-    if not data.get("profiles") and not data.get("concurrency"):
-        raise RequestError(HTTP_400, "give at least one role's profiles or concurrency")
+    if not any(data.get(field) for field in TASK_AGENT_FIELDS):
+        raise RequestError(HTTP_400, f"give at least one role's {', '.join(TASK_AGENT_FIELDS)}")
     limits = _concurrency_limits(data["concurrency"]) if data.get("concurrency") else {}
+    modes = _prompt_modes(data["system_prompt_modes"]) if data.get("system_prompt_modes") else {}
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")
@@ -605,7 +624,7 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
                                      "after a restart, can change its agents")
     profiles = await profile_choices(data.get("profiles"), clearing=True)
     try:
-        await db_layers.set_task_layer(task_id, profiles=profiles, limits=limits)
+        await db_layers.set_task_layer(task_id, profiles=profiles, limits=limits, modes=modes)
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_404, "the task, or an Agent Profile it chose, was removed meanwhile") from None
     return {"task_id": task_id, "agents": await agents_view(task), **({"note": PROFILES_NOTE} if profiles else {})}

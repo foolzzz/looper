@@ -6,7 +6,7 @@ or ``role_project`` (with both). A NULL field is not set at its layer;
 ``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (the Workers'
 or the Reviewers' role layer only) how many of them run at once in a task that sets none. A task may choose
 the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
-(``task_concurrency_limits``): together, its task layer. Its Planner may choose the profile of its Workers or
+(``task_concurrency_limits``) and append or replace (``task_system_prompt_modes``, Claude Code only): together, its task layer. Its Planner may choose the profile of its Workers or
 Reviewers, for the rest of the task or for one step (``task_planner_profiles``), under the task layer; a choice
 counts only while its profile is on the list of the task's project (``project_allowed_profiles``); so does the
 profile of a role its Planner defined (``task_roles``), for a run of that role. The system layer alone may hold
@@ -69,7 +69,12 @@ async def list_layers(
             "FROM (SELECT * FROM task_profile_overrides WHERE task_id = $1) t "
             "FULL JOIN (SELECT * FROM task_concurrency_limits WHERE task_id = $1) c ON c.role = t.role", task_id,
         )
-        layers += [{"scope": "task", "task_id": task_id, **_row(r)} for r in overrides]
+        task_rows = {r["role"]: {"scope": "task", "task_id": task_id, **_row(r)} for r in overrides}
+        for r in await pool.fetch("SELECT role, system_prompt_mode FROM task_system_prompt_modes WHERE task_id = $1",
+                                  task_id):
+            task_rows.setdefault(r["role"], {"scope": "task", "task_id": task_id, "role": r["role"]})[
+                "system_prompt_mode"] = r["system_prompt_mode"]
+        layers += list(task_rows.values())
         chosen = await pool.fetch(
             f"SELECT CASE WHEN c.step_id IS NULL THEN 'planner_task' ELSE 'planner_step' END AS scope, c.role, "
             f"c.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
@@ -147,14 +152,16 @@ async def set_task_limits(conn: asyncpg.Connection, task_id: str, limits: Mappin
 
 
 async def set_task_layer(task_id: str, *, profiles: Mapping[str, str | None] | None = None,
-                         limits: Mapping[str, int | None] | None = None, pool: asyncpg.Pool | None = None) -> None:
+                         limits: Mapping[str, int | None] | None = None,
+                         modes: Mapping[str, str | None] | None = None, pool: asyncpg.Pool | None = None) -> None:
     """Change task ``task_id``'s own choices, in one transaction: its Agent Profile of each role in ``profiles``
-    (role -> profile id) and its concurrency limit of each role in ``limits`` (role -> limit); None drops the task's
+    (role -> profile id) and its concurrency limit of each role in ``limits`` (role -> limit) and its system prompt mode of each role in ``modes`` (role -> append or replace); None drops the task's
     choice of that role. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown task or profile."""
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
         for table, column, values in (("task_profile_overrides", "profile_id", profiles or {}),
-                                      ("task_concurrency_limits", "max_concurrency", limits or {})):
+                                      ("task_concurrency_limits", "max_concurrency", limits or {}),
+                                      ("task_system_prompt_modes", "system_prompt_mode", modes or {})):
             for role, value in values.items():
                 if value is None:
                     await conn.execute(f"DELETE FROM {table} WHERE task_id = $1 AND role = $2", task_id, role)

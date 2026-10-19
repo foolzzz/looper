@@ -624,12 +624,23 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     )
 
 
-def role_system_prompt_mode(role: AgentType | None, layers: Mapping[Place, LayerValues]) -> SystemPromptMode:
-    """Whether ``role`` replaces its runtime's default system prompt or appends to it: its role layer's, else the
-    built-in one. A launch applies it on Claude Code only; no role (the system layer alone) appends."""
+def system_prompt_mode_choice(role: AgentType | None, layers: Mapping[Place, LayerValues],
+                              ) -> tuple[SystemPromptMode, Layer]:
+    """The mode of ``role`` and the layer it came from: the task's own choice (``Layer.TASK``, a Planner, Worker or
+    Reviewer), else its role layer's, else the built-in one. No role (the system layer alone) appends."""
     if role is None:
-        return SystemPromptMode.APPEND
-    return layers.get((Layer.ROLE, role), EMPTY_LAYER).system_prompt_mode or BUILTIN_SYSTEM_PROMPT_MODE[role]
+        return SystemPromptMode.APPEND, Layer.BUILTIN
+    for layer in (Layer.TASK, Layer.ROLE):
+        mode = layers.get((layer, role), EMPTY_LAYER).system_prompt_mode
+        if mode is not None:
+            return mode, layer
+    return BUILTIN_SYSTEM_PROMPT_MODE[role], Layer.BUILTIN
+
+
+def role_system_prompt_mode(role: AgentType | None, layers: Mapping[Place, LayerValues]) -> SystemPromptMode:
+    """Whether ``role`` replaces its runtime's default system prompt or appends to it (``system_prompt_mode_choice``).
+    A launch applies it on Claude Code only."""
+    return system_prompt_mode_choice(role, layers)[0]
 
 
 @dataclass(frozen=True)
@@ -663,7 +674,10 @@ def task_agents_view(layers: Mapping[Place, LayerValues], project_id: str | None
     to the task, with the task's own limit (``task``, None for none) and the ``default`` it has without one."""
     view: dict[str, Any] = {}
     for role in TASK_ROLES:
-        view[role.value] = {"profile": resolve(role, layers, project_id).view()["profile"]}
+        settings = resolve(role, layers, project_id)
+        mode, source = system_prompt_mode_choice(role, layers)
+        view[role.value] = {"profile": settings.view()["profile"], "runtime_type": settings.profile.runtime.type,
+                            "system_prompt_mode": {"value": mode.value, "source": source.value}}
         if role in TASK_LIMIT_ROLES:
             view[role.value]["concurrency"] = {
                 **resolve_task_concurrency(role, layers).view(),
@@ -776,7 +790,10 @@ class Launch:
         """What the run uses: on Claude Code its role's mode (append for a launch with no role); on any other runtime
         its profile's, as before the mode was a role's setting."""
         if self.profile.runtime.type == "claude-code":
-            return self.settings.system_prompt_mode if self.role is not None else SystemPromptMode.APPEND
+            # A consult resumes a seat's session and is read-only: it appends, whatever the seat's role.
+            if self.role is None or self.consult:
+                return SystemPromptMode.APPEND
+            return self.settings.system_prompt_mode
         return self.profile.system_prompt_mode
 
     @property

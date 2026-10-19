@@ -10,7 +10,7 @@ import pytest
 from looper.agents import claude_cli
 from looper.agents.agent_settings import (
     BUILTIN_SETTINGS, BUILTIN_SYSTEM_PROMPT_MODE, AgentSettings, AgentType, Launch, Layer, LayerValues, SettingsError,
-    layer_update, resolve, role_system_prompt_mode,
+    layer_update, resolve, role_system_prompt_mode, system_prompt_mode_choice,
 )
 from looper.agents.profile_registry import BUILTIN_PROFILE
 from looper.agents.system_prompt_mode import SystemPromptMode
@@ -129,3 +129,53 @@ def test_claude_code_argv_follows_the_role(role: AgentType, flag: str) -> None:
                                   launch=launch)
     assert flag in command
     assert claude_cli.system_prompt_args(Path("prompt.md"), launch.system_prompt_mode)[0] == flag
+
+
+@pytest.mark.parametrize("role", [AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER])
+@pytest.mark.parametrize("task, layer, expected", [
+    (None, None, BUILTIN_SYSTEM_PROMPT_MODE), (None, APPEND, APPEND), (None, REPLACE, REPLACE),
+    (APPEND, REPLACE, APPEND), (REPLACE, APPEND, REPLACE), (REPLACE, None, REPLACE), (APPEND, None, APPEND),
+])
+def test_task_choice_beats_the_role_layer_beats_the_builtin(
+    role: AgentType, task: SystemPromptMode | None, layer: SystemPromptMode | None, expected,
+) -> None:
+    layers = {(Layer.TASK, role): LayerValues(system_prompt_mode=task),
+              (Layer.ROLE, role): LayerValues(system_prompt_mode=layer)}
+    want = BUILTIN_SYSTEM_PROMPT_MODE[role] if expected is BUILTIN_SYSTEM_PROMPT_MODE else expected
+    assert resolve(role, layers).system_prompt_mode is want
+    assert system_prompt_mode_choice(role, layers)[1] is (
+        Layer.TASK if task else Layer.ROLE if layer else Layer.BUILTIN)
+
+
+def test_the_manager_has_no_task_level_and_other_roles_choices_do_not_leak() -> None:
+    # The Manager has no task rows (the table and the API refuse its role), so a task's choices never reach it.
+    layers = {(Layer.TASK, AgentType.WORKER): LayerValues(system_prompt_mode=REPLACE)}
+    assert resolve(AgentType.MANAGER, layers).system_prompt_mode is REPLACE
+    assert resolve(AgentType.REVIEWER, layers).system_prompt_mode is APPEND
+    assert resolve(AgentType.PLANNER, layers).system_prompt_mode is REPLACE
+
+
+def test_a_task_role_seat_follows_its_seat_kind() -> None:
+    # A Planner-defined role runs as a Worker (a work seat) or a Reviewer (a review seat): the task's choice for
+    # that seat kind applies, with the seat's own profile.
+    layers = {**_task_role_layers(AgentType.WORKER), (Layer.TASK, AgentType.WORKER): LayerValues(
+        system_prompt_mode=REPLACE), (Layer.TASK, AgentType.REVIEWER): LayerValues(system_prompt_mode=APPEND)}
+    assert resolve(AgentType.WORKER, layers).system_prompt_mode is REPLACE
+    assert resolve(AgentType.REVIEWER, layers).system_prompt_mode is APPEND
+
+
+@pytest.mark.parametrize("runtime_type", ["codex", "grok", "omp"])
+def test_other_runtimes_ignore_the_task_choice(runtime_type: str) -> None:
+    profile = replace(BUILTIN_PROFILE, system_prompt_mode=APPEND,
+                      runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
+    layers = {(Layer.TASK, AgentType.PLANNER): LayerValues(system_prompt_mode=REPLACE)}
+    settings = replace(resolve(AgentType.PLANNER, layers), profile=profile)
+    assert settings.system_prompt_mode is REPLACE
+    assert Launch(settings, role=AgentType.PLANNER).system_prompt_mode is APPEND
+
+
+def test_a_consult_appends_whatever_the_seats_mode() -> None:
+    layers = {(Layer.TASK, AgentType.WORKER): LayerValues(system_prompt_mode=REPLACE)}
+    settings = resolve(AgentType.WORKER, layers)
+    assert Launch(settings, role=AgentType.WORKER).system_prompt_mode is REPLACE
+    assert Launch(settings, role=AgentType.WORKER, consult=True).system_prompt_mode is APPEND
