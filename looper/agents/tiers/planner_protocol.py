@@ -104,6 +104,8 @@ class TurnKind(str, Enum):
     ROOM = "ROOM"
     # The extra turn of a completed task whose project distills lessons; its message gives its own shape.
     LESSONS = "LESSONS"
+    # The extra turn of a task that ended in a project with the knowledge vault on; its message gives its own shape.
+    VAULT = "VAULT"
     # The last turn of a session the next agent cannot resume: what it hands over; its message gives its shape.
     HANDOFF = "HANDOFF"
 
@@ -454,6 +456,13 @@ def parse_lessons(text: str) -> str:
     _only_keys(data, {"lessons"}, "the LESSONS reply")
     lessons = _required_text(data, "lessons")
     return lessons if len(lessons) <= LESSONS_MAX_CHARS else lessons[: LESSONS_MAX_CHARS - 1].rstrip() + "…"
+
+
+def parse_vault(text: str) -> str:
+    """The one-line summary of a VAULT reply, clipped to 300 characters."""
+    data = extract_reply(text)
+    _only_keys(data, {"vault"}, "the VAULT reply")
+    return " ".join(_required_text(data, "vault").split())[:300]
 
 
 def parse_handoff(text: str) -> str:
