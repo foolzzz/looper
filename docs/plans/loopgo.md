@@ -20,6 +20,11 @@ Go release tags are `vX.Y.Z-go`. The steps are under Releases.
   hand-written second schema.
 - HTTP: request and response shapes match `looper/agents/http_server.py`,
   including status codes and `{"error":...}` bodies, so `web/` stays as it is.
+- `GET /api/tasks?limit=` with 4,301 digits (leading zeros, then 1) is 500
+  `{"error":"internal server error"}` on Python (`isdigit` then `int()`
+  ValueError past 4,300 digits, outside the handler's check). Go answers
+  400 `{"error":"limit must be a whole number from 1 to 200"}`. A 4,300-digit
+  value still matches Python (400 when it is outside 1..200).
 - Python is the reference until switch-over. Read-only routes are checked by
   golden JSON: same seeded database, both servers, compare bodies.
 - Defaults follow Python in the milestone that owns the flag. G0's flags are
@@ -98,6 +103,16 @@ Integer parsing follows Python's 4,300-digit limit. POST and PUT on a
 GET-only route are 404, and a percent-encoded path such as `/api/%74asks`
 is 404. The two SSE routes below are not served yet.
 
+G1f keeps a valid 40-digit role version on a chat target, the way Python's
+`int()` does. A task list limit of 4,301 digits is 400 here and 500 on
+Python; see the compatibility contract. Each test creates a unique
+`loopgo_*` database and drops only that database. G1f serves
+`GET /api/roles`, `GET /api/roles/<role>`, `GET /api/channel-configs`,
+`GET /api/channel-configs/<id>` (including `start_problem` and
+`has_bot_token`), `GET /api/gate-settings`,
+`GET /api/projects/<id>/role-templates`, and
+`GET /api/projects/<id>/role-stats`.
+
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
@@ -118,22 +133,15 @@ is not in this list.
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/installs`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)`
-- `GET /api/roles`
-- `GET /api/roles/([a-zA-Z0-9_-]+)`
 - `GET /api/registry`
 - `GET /api/agent-settings`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/agent-settings`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/role-stats`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/role-templates`
 - `GET /api/config/export`
 - `GET /api/catalog`
 - `GET /api/catalog/([a-z]+-[a-zA-Z0-9]+)`
 - `GET /api/channels/lark/status`
 - `GET /api/channels/lark/people`
-- `GET /api/gate-settings`
-- `GET /api/channel-configs`
-- `GET /api/channel-configs/([a-zA-Z0-9_-]+)`
 - `GET /api/agent/v1/tools` (Manager, Planner, or room token)
 
 ### G2 — write API, no agents
@@ -147,7 +155,8 @@ starts no agent process.
 Claude Code as a subprocess: start, parse stream-json, kill the process
 tree on timeout or cancel, and write run records into the existing tables.
 Parser tests use a fixture stream. A stub binary covers process start and
-tree kill.
+tree kill. This milestone also includes Grok's resident ACP session, ported
+from Python PR #205 (`looper/agents/runtimes/grok_acp.py`).
 
 ### G4 — Planner, Worker, Reviewer
 

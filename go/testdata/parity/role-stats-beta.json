@@ -1,0 +1,39 @@
+{
+  "builtin": {
+    "reviewer": {
+      "accepted": 0,
+      "contract_violation_rate": null,
+      "contract_violations": 0,
+      "cost_usd": 0,
+      "failed": 0,
+      "retries": 0,
+      "review_pass_rate": null,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 0
+      },
+      "running": 0,
+      "runs": 0,
+      "steps": 0
+    },
+    "worker": {
+      "accepted": 0,
+      "contract_violation_rate": null,
+      "contract_violations": 0,
+      "cost_usd": 0,
+      "failed": 0,
+      "retries": 0,
+      "review_pass_rate": null,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 0
+      },
+      "running": 0,
+      "runs": 0,
+      "steps": 0
+    }
+  },
+  "project_id": "proj-beta00002",
+  "roles": [],
+  "tasks": 0
+}

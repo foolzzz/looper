@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // ProbeTimeout is the deadline for one SELECT 1 health check.
@@ -32,9 +33,26 @@ func Open(ctx context.Context, url string) (*sql.DB, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, &safeError{msg: errInvalidDatabaseURL}
 	}
-	sqlDB, err := sql.Open("pgx", url)
+	// A URL pgx cannot parse stays on the lazy driver path. Open itself must
+	// succeed: the status check classifies the failure later, without the URL.
+	cfg, err := pgx.ParseConfig(url)
+	var sqlDB *sql.DB
 	if err != nil {
-		return nil, hide(err)
+		sqlDB, err = sql.Open("pgx", url)
+		if err != nil {
+			return nil, hide(err)
+		}
+	} else {
+		// Each connection has its own type map. The default JSONB codec decodes
+		// every number as float64, which rounds integers past 2^53 and erases
+		// the difference between 123 and 123.0.
+		sqlDB = stdlib.OpenDB(*cfg, stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			registerPythonJSON(conn.TypeMap())
+			return nil
+		}))
 	}
 	sqlDB.SetMaxOpenConns(8)
 	sqlDB.SetMaxIdleConns(2)

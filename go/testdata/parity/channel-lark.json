@@ -1,0 +1,15 @@
+{
+  "channel_id": "lark",
+  "channel_type": "lark",
+  "config": {
+    "allowed_open_ids": [
+      "ou_abcdefgh"
+    ]
+  },
+  "created_at": "2020-02-01T00:00:00+00:00",
+  "display_name": "Lark",
+  "enabled": false,
+  "has_bot_token": true,
+  "start_problem": null,
+  "updated_at": "2020-02-01T00:00:00+00:00"
+}

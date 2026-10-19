@@ -1,0 +1,21 @@
+{
+  "dashboard_target": {
+    "channel": "telegram",
+    "chat": "123456789"
+  },
+  "dashboard_target_problem": null,
+  "targets": [
+    {
+      "channel": "lark",
+      "channel_enabled": false,
+      "chat": "ou_abcdefgh",
+      "label": "Lark · ou_abcdefgh"
+    },
+    {
+      "channel": "telegram",
+      "channel_enabled": true,
+      "chat": "123456789",
+      "label": "Telegram · 123456789"
+    }
+  ]
+}

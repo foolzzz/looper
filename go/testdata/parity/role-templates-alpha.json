@@ -1,0 +1,28 @@
+{
+  "project_id": "proj-alpha0001",
+  "role_items": [
+    {
+      "description": "",
+      "id": "lib-rich0001",
+      "kind": "skill",
+      "name": "rich-skill"
+    }
+  ],
+  "role_text_max_chars": 8000,
+  "templates": [
+    {
+      "description": "API work",
+      "harness": null,
+      "items": [],
+      "key": "backend",
+      "kind": "work",
+      "profile": {
+        "allowed": true,
+        "name": "claude-code/layer-roledef",
+        "profile_id": "agent-layer-roledef"
+      },
+      "role_prompt": "Write the API.",
+      "updated_at": "2020-02-01T00:00:00+00:00"
+    }
+  ]
+}

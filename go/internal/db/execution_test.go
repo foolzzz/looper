@@ -75,6 +75,38 @@ func TestExecutionViewIgnoresInvalid(t *testing.T) {
 	}
 }
 
+func TestRoleTextLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		row  map[string]any
+		want int
+		warn bool
+	}{
+		{name: "nil row", want: 8000},
+		{name: "unset", row: map[string]any{"id": "proj-x"}, want: 8000},
+		{name: "null", row: map[string]any{"role_text_max_chars": nil}, want: 8000},
+		{name: "empty", row: map[string]any{"role_text_max_chars": ""}, want: 8000},
+		{name: "default", row: map[string]any{"role_text_max_chars": 8000}, want: 8000},
+		{name: "floor", row: map[string]any{"role_text_max_chars": int32(500)}, want: 500},
+		{name: "ceiling", row: map[string]any{"role_text_max_chars": int32(20000)}, want: 20000},
+		{name: "below", row: map[string]any{"id": "proj-x", "role_text_max_chars": 499}, want: 8000, warn: true},
+		{name: "above", row: map[string]any{"id": "proj-x", "role_text_max_chars": 20001}, want: 8000, warn: true},
+		{name: "bool", row: map[string]any{"id": "proj-x", "role_text_max_chars": true}, want: 8000, warn: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := captureDBLogs(t)
+			if got := roleTextLimit(tt.row); got != tt.want {
+				t.Fatalf("got %d, want %d", got, tt.want)
+			}
+			warned := bytes.Contains(logs.Bytes(), []byte("ignoring project execution setting"))
+			if warned != tt.warn {
+				t.Fatalf("warning %v, log %s", warned, logs.String())
+			}
+		})
+	}
+}
+
 func TestProjectViewUsesExecutionRules(t *testing.T) {
 	row := map[string]any{
 		"id": "proj-x", "name": "X", "description": "", "work_dir": "", "background": "",

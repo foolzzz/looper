@@ -1,8 +1,10 @@
 package db
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -197,5 +199,14 @@ func assertRate(t *testing.T, name string, got any, want string) {
 	gotN, ok := got.(float64)
 	if !ok || gotN != wantN {
 		t.Fatalf("%s = %#v, want %s", name, got, want)
+	}
+}
+
+func TestRunRoleKeepsWideVersion(t *testing.T) {
+	version := strings.Repeat("9", 40)
+	role := runRole(map[string]any{"id": "backend", "kind": "work", "version": json.Number(version)})
+	number, ok := role["version"].(json.Number)
+	if role == nil || role["id"] != "backend" || role["kind"] != "work" || !ok || string(number) != version {
+		t.Fatalf("role %#v", role)
 	}
 }

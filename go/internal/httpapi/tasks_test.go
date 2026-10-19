@@ -85,6 +85,9 @@ func TestParseTaskQuery(t *testing.T) {
 		{name: "superscript", query: "limit=" + url.QueryEscape("²"), wantErr: errLimit},
 		{name: "digit superscript", query: "limit=" + url.QueryEscape("2²"), wantErr: errLimit},
 		{name: "overflow", query: "limit=" + strings.Repeat("9", 40), wantErr: errLimit},
+		{name: "digit limit value one", query: "limit=" + strings.Repeat("0", pythonIntMaxStrDigits-1) + "1", want: db.TaskQuery{Inside: true, Limit: 1}},
+		{name: "digit limit zero", query: "limit=" + strings.Repeat("0", pythonIntMaxStrDigits), wantErr: errLimit},
+		{name: "past digit limit", query: "limit=" + strings.Repeat("0", pythonIntMaxStrDigits) + "1", wantErr: errLimit},
 		// A raw semicolon or a bad % is part of the value. url.URL.Query drops
 		// the pair, which used to fall through to the default list.
 		{name: "limit semicolon", query: "limit=1;", wantErr: errLimit},
@@ -302,6 +305,7 @@ func TestTasksBadQuerySkipsDatabase(t *testing.T) {
 		{"/api/tasks?group=completed%", errGroup},
 		{"/api/tasks?limit=1;&group=needs_you", errLimit},
 		{"/api/tasks?group=ready&group=completed;x", errGroup},
+		{"/api/tasks?limit=" + strings.Repeat("0", pythonIntMaxStrDigits) + "1", errLimit},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {

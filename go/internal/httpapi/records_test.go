@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -79,6 +80,8 @@ func TestRunRole(t *testing.T) {
 		{name: "not a map", raw: "backend"},
 		{name: "string version", raw: map[string]any{"id": "backend", "kind": "work", "version": "2"},
 			want: map[string]any{"id": "backend", "kind": "work", "version": 2}},
+		{name: "json integer past int64", raw: map[string]any{"id": "backend", "kind": "work", "version": json.Number(strings.Repeat("9", 40))},
+			want: map[string]any{"id": "backend", "kind": "work", "version": json.Number(strings.Repeat("9", 40))}},
 		{name: "fraction string", raw: map[string]any{"id": "backend", "kind": "work", "version": "2.5"}},
 	}
 	for _, tt := range tests {

@@ -26,7 +26,9 @@ type DBPinger interface {
 // and the chat target list at the Manager. Overview, projects, tasks, task
 // detail, usage, one record, and its events answer 500. The llm-records list
 // answers 200 with an empty list. Chat messages, activity, and conversation
-// do too. Activity detail answers 404. Chat sessions answer 500.
+// do too. Activity detail answers 404. Chat sessions answer 500. Role and
+// channel lists answer 200 with an empty list. One role or channel answers
+// 404. Gate settings, role templates, and role stats answer 500.
 type Reader interface {
 	StatusTaskCounts(ctx context.Context) (total, running, completed int, err error)
 	Overview(ctx context.Context, since time.Time) (map[string]any, error)
@@ -44,6 +46,14 @@ type Reader interface {
 	ListActivity(ctx context.Context, taskID string, since, limit int64) ([]map[string]any, error)
 	ActivityDetail(ctx context.Context, seq int64) (map[string]any, error)
 	ListConversation(ctx context.Context, taskID string) ([]map[string]any, error)
+	ListRoleConfigs(ctx context.Context) ([]map[string]any, error)
+	GetRoleConfig(ctx context.Context, role string) (map[string]any, error)
+	ListChannelConfigs(ctx context.Context) ([]map[string]any, error)
+	GetChannelConfig(ctx context.Context, id string) (map[string]any, error)
+	GateSettings(ctx context.Context) (map[string]any, error)
+	ProjectExists(ctx context.Context, id string) (bool, error)
+	RoleTemplates(ctx context.Context, projectID string) (map[string]any, error)
+	ProjectRoleStats(ctx context.Context, projectID string, since *time.Time) (map[string]any, error)
 }
 
 // Server serves the read-only API and, when WebDir is set, the dashboard files.
@@ -85,6 +95,9 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // GET /api/llm-records (the list, one record, and its events),
 // GET /api/chat/targets, GET /api/chat/sessions, GET /api/chat/messages,
 // and a task's activity list, activity detail, and conversation.
+// It also serves GET /api/roles, GET /api/roles/<role>, GET /api/channel-configs,
+// GET /api/channel-configs/<id>, GET /api/gate-settings, and a project's
+// role templates and role stats.
 // GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
 // are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
@@ -104,6 +117,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm-records/{id}/events", s.handleRecordEvents)
 	mux.HandleFunc("GET /api/llm-records/{id}", s.handleGetRecord)
 	mux.HandleFunc("GET /api/llm-records", s.handleListRecords)
+	mux.HandleFunc("/api/roles", s.handleRoles)
+	mux.HandleFunc("/api/roles/{role}", s.handleRole)
+	mux.HandleFunc("/api/channel-configs", s.handleChannels)
+	mux.HandleFunc("/api/channel-configs/{id}", s.handleChannel)
+	mux.HandleFunc("/api/gate-settings", s.handleGateSettings)
+	mux.HandleFunc("/api/projects/{id}/role-templates", s.handleRoleTemplates)
+	mux.HandleFunc("/api/projects/{id}/role-stats", s.handleRoleStats)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/", s.handleRoot)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

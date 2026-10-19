@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"math"
 	"sort"
@@ -199,7 +198,7 @@ func chatRunRole(raw any) map[string]any {
 	if !ok || (kindName != "work" && kindName != "review") {
 		return nil
 	}
-	ver, ok := chatRoleVersion(version)
+	ver, ok := RoleVersion(version)
 	if !ok {
 		return nil
 	}
@@ -208,49 +207,6 @@ func chatRunRole(raw any) map[string]any {
 		return nil
 	}
 	return map[string]any{"id": text, "kind": kindName, "version": ver}
-}
-
-func chatRoleVersion(v any) (int, bool) {
-	switch t := v.(type) {
-	case bool:
-		if t {
-			return 1, true
-		}
-		return 0, true
-	case int:
-		return t, true
-	case int32:
-		return int(t), true
-	case int64:
-		if int64(int(t)) != t {
-			return 0, false
-		}
-		return int(t), true
-	case float64:
-		if math.IsNaN(t) || math.IsInf(t, 0) || t < math.MinInt || t > math.MaxInt {
-			return 0, false
-		}
-		return int(math.Trunc(t)), true
-	case json.Number:
-		if i, err := t.Int64(); err == nil {
-			return chatRoleVersion(i)
-		}
-		f, err := t.Float64()
-		if err != nil {
-			return 0, false
-		}
-		return chatRoleVersion(f)
-	case string:
-		// Python int() accepts "2". A value that does not fit in int is dropped,
-		// the same as an int64 that does not fit.
-		n, overflow, ok := parsePythonInt(t)
-		if !ok || overflow != 0 || int64(int(n)) != n {
-			return 0, false
-		}
-		return int(n), true
-	default:
-		return 0, false
-	}
 }
 
 func chatRoleID(v any) (string, bool) {

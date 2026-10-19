@@ -1,6 +1,8 @@
 package db
 
 import (
+	"encoding/json"
+	"math"
 	"math/big"
 	"strings"
 	"unicode"
@@ -18,41 +20,116 @@ const pythonIntMaxDigits = 4300
 // Unicode decimal digits are accepted. The whitespace int() strips is
 // Unicode White_Space. U+001C–U+001F are str.isspace and are not stripped.
 func parsePythonInt(s string) (n int64, overflow int, ok bool) {
+	mag, ok := parsePythonBigInt(s)
+	if !ok {
+		return 0, 0, false
+	}
+	if !mag.IsInt64() {
+		return 0, mag.Sign(), true
+	}
+	return mag.Int64(), 0, true
+}
+
+// parsePythonBigInt is parsePythonInt without the int64 cut. The result is the
+// canonical value: no leading zeros, and a leading minus when it is negative.
+func parsePythonBigInt(s string) (*big.Int, bool) {
 	s = strings.TrimFunc(s, unicode.IsSpace)
 	if s == "" {
-		return 0, 0, false
+		return nil, false
 	}
 	sign := 1
 	switch s[0] {
 	case '+':
 		s = s[1:]
 		if s == "" {
-			return 0, 0, false
+			return nil, false
 		}
 	case '-':
 		sign = -1
 		s = s[1:]
 		if s == "" {
-			return 0, 0, false
+			return nil, false
 		}
 	}
-	if !pythonIntDigits(s) {
-		return 0, 0, false
-	}
-	if pythonIntDigitCount(s) > pythonIntMaxDigits {
-		return 0, 0, false
+	if !pythonIntDigits(s) || pythonIntDigitCount(s) > pythonIntMaxDigits {
+		return nil, false
 	}
 	mag := new(big.Int)
 	if _, ok := mag.SetString(pythonIntASCII(strings.ReplaceAll(s, "_", "")), 10); !ok {
-		return 0, 0, false
+		return nil, false
 	}
 	if sign < 0 {
 		mag.Neg(mag)
 	}
-	if !mag.IsInt64() {
-		return 0, sign, true
+	return mag, true
+}
+
+// RoleVersion is Python int() for a role version (task_roles.run_role).
+// A value that fits in int is an int. A bigger integer, still within 4,300
+// digits, is a json.Number so encoding/json emits a bare number. Past that
+// digit limit, or a non-integer string, is dropped. An int64 that does not
+// fit in int is dropped. A JSON integer token uses the string rule, so a
+// bare 40-digit version read from JSONB is kept. A finite float, including a
+// JSON number with a fraction or an exponent, is truncated toward zero the
+// way int() truncates the float json.loads would produce. That integer is
+// kept when it does not fit in a machine int, so a 40-digit token with a
+// trailing ".0" keeps the role.
+func RoleVersion(v any) (any, bool) {
+	switch t := v.(type) {
+	case bool:
+		if t {
+			return 1, true
+		}
+		return 0, true
+	case int:
+		return t, true
+	case int32:
+		return int(t), true
+	case int64:
+		if int64(int(t)) != t {
+			return nil, false
+		}
+		return int(t), true
+	case float64:
+		return pythonIntFromFloat(t)
+	case json.Number:
+		if jsonIntegerLiteral(string(t)) {
+			return RoleVersion(string(t))
+		}
+		f, err := t.Float64()
+		if err != nil {
+			return nil, false
+		}
+		return pythonIntFromFloat(f)
+	case string:
+		mag, ok := parsePythonBigInt(t)
+		if !ok {
+			return nil, false
+		}
+		return pythonIntMagnitude(mag), true
+	default:
+		return nil, false
 	}
-	return mag.Int64(), 0, true
+}
+
+// pythonIntFromFloat is int() of a float. NaN and infinity are rejected.
+// The result is the exact integer of the truncated float.
+func pythonIntFromFloat(f float64) (any, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil, false
+	}
+	mag, _ := new(big.Float).SetPrec(64).SetMode(big.ToZero).SetFloat64(f).Int(nil)
+	return pythonIntMagnitude(mag), true
+}
+
+func pythonIntMagnitude(mag *big.Int) any {
+	if mag.IsInt64() {
+		n := mag.Int64()
+		if int64(int(n)) == n {
+			return int(n)
+		}
+	}
+	return json.Number(mag.Text(10))
 }
 
 func pythonIntDigitCount(s string) int {

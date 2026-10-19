@@ -1,0 +1,11 @@
+{
+  "channel_id": "web",
+  "channel_type": "web",
+  "config": {},
+  "created_at": "2020-02-04T00:00:00+00:00",
+  "display_name": "Web",
+  "enabled": true,
+  "has_bot_token": false,
+  "start_problem": null,
+  "updated_at": "2020-02-04T00:00:00+00:00"
+}

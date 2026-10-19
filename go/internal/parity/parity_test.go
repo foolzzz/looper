@@ -1,13 +1,16 @@
 package parity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +31,9 @@ import (
 //     not walked. A string version (a build id) becomes "<volatile>" too. A
 //     numeric version, such as a requirement or role version, is compared.
 //     implementation and db are compared as written.
-//   - Object key order is not significant. Numbers compare by value, so 0 and 0.0
-//     match. Comparison remarshals both documents with encoding/json, which sorts
-//     object keys and writes a whole number as itself.
+//   - Object key order is not significant. Numbers compare by exact value, so 0
+//     and 0.0 match, and two integers above 2^53 stay distinct. Comparison
+//     remarshals both documents with encoding/json, which sorts object keys.
 //
 // The overview clock is local noon on 2026-06-15, the same day make_goldens.py
 // freezes. Seed rows at 2026-06-15T12:00:00Z count as today. Rows in 2020 do not.
@@ -107,6 +110,27 @@ var (
 		{"activity-missing", "/api/tasks/task-rich00001/activity/99", http.StatusNotFound},
 		{"conversation", "/api/tasks/task-rich00001/conversation", http.StatusOK},
 		{"conversation-empty", "/api/tasks/task-min000001/conversation", http.StatusOK},
+		{"roles", "/api/roles", http.StatusOK},
+		{"role-planner", "/api/roles/planner", http.StatusOK},
+		{"role-missing", "/api/roles/missing", http.StatusNotFound},
+		{"channel-configs", "/api/channel-configs", http.StatusOK},
+		{"channel-lark", "/api/channel-configs/lark", http.StatusOK},
+		{"channel-telegram-empty", "/api/channel-configs/telegram-empty", http.StatusOK},
+		{"channel-web", "/api/channel-configs/web", http.StatusOK},
+		{"channel-missing", "/api/channel-configs/missing", http.StatusNotFound},
+		{"gate-settings", "/api/gate-settings", http.StatusOK},
+		{"role-templates-alpha", "/api/projects/proj-alpha0001/role-templates", http.StatusOK},
+		{"role-templates-beta", "/api/projects/proj-beta00002/role-templates", http.StatusOK},
+		{"role-templates-missing", "/api/projects/proj-missing01/role-templates", http.StatusNotFound},
+		{"role-stats-alpha", "/api/projects/proj-alpha0001/role-stats", http.StatusOK},
+		{"role-stats-since", "/api/projects/proj-alpha0001/role-stats?since=2010-01-01", http.StatusOK},
+		{"role-stats-future", "/api/projects/proj-alpha0001/role-stats?since=2099-01-01", http.StatusOK},
+		{"role-stats-week", "/api/projects/proj-alpha0001/role-stats?since=2010-W01-1", http.StatusOK},
+		{"role-stats-compact", "/api/projects/proj-alpha0001/role-stats?since=20100101", http.StatusOK},
+		{"role-stats-beta", "/api/projects/proj-beta00002/role-stats", http.StatusOK},
+		{"role-stats-missing", "/api/projects/proj-missing01/role-stats", http.StatusNotFound},
+		{"role-stats-bad-since", "/api/projects/proj-alpha0001/role-stats?since=nope", http.StatusBadRequest},
+		{"role-stats-bad-week", "/api/projects/proj-alpha0001/role-stats?since=2010-W53-1", http.StatusBadRequest},
 	}
 )
 
@@ -269,8 +293,10 @@ func TestNormalizeKeepsSeededTimes(t *testing.T) {
 
 func canonical(t *testing.T, raw []byte) []byte {
 	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := dec.Decode(&value); err != nil {
 		t.Fatalf("json: %v body %s", err, raw)
 	}
 	out, err := json.Marshal(normalize(value))
@@ -309,8 +335,111 @@ func normalize(value any) any {
 			out[i] = normalize(item)
 		}
 		return out
+	case json.Number:
+		return canonicalNumber(typed)
 	default:
 		return value
+	}
+}
+
+// canonicalNumber is the exact decimal of a JSON number. 0 and 0.0 and 1e2
+// share one encoding. Integers above 2^53 do not collapse to the same float.
+func canonicalNumber(n json.Number) json.Number {
+	r, ok := parseJSONRat(string(n))
+	if !ok {
+		return n
+	}
+	return json.Number(formatRat(r))
+}
+
+func parseJSONRat(s string) (*big.Rat, bool) {
+	if s == "" {
+		return nil, false
+	}
+	base := s
+	exp := 0
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		base = s[:i]
+		n, err := strconv.Atoi(s[i+1:])
+		if err != nil {
+			return nil, false
+		}
+		exp = n
+	}
+	r := new(big.Rat)
+	if _, ok := r.SetString(base); !ok {
+		return nil, false
+	}
+	if exp == 0 {
+		return r, true
+	}
+	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(absInt(exp))), nil)
+	scale := new(big.Rat).SetInt(pow)
+	if exp > 0 {
+		r.Mul(r, scale)
+	} else {
+		r.Quo(r, scale)
+	}
+	return r, true
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+func formatRat(r *big.Rat) string {
+	if r.Sign() == 0 {
+		return "0"
+	}
+	neg := r.Sign() < 0
+	abs := new(big.Rat).Abs(r)
+	if abs.IsInt() {
+		s := abs.Num().String()
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+	num := new(big.Int).Set(abs.Num())
+	den := new(big.Int).Set(abs.Denom())
+	intPart := new(big.Int).Quo(num, den)
+	rem := new(big.Int).Rem(num, den)
+	frac := make([]byte, 0, 8)
+	for rem.Sign() != 0 && len(frac) < 10000 {
+		rem.Mul(rem, big.NewInt(10))
+		digit := new(big.Int).Quo(rem, den)
+		rem.Rem(rem, den)
+		frac = append(frac, byte('0'+digit.Int64()))
+	}
+	s := intPart.String() + "." + string(frac)
+	if neg {
+		return "-" + s
+	}
+	return s
+}
+
+func TestCanonicalNumbers(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b string
+		same bool
+	}{
+		{name: "zero", a: `{"n":0}`, b: `{"n":0.0}`, same: true},
+		{name: "exponent", a: `{"n":1e2}`, b: `{"n":100}`, same: true},
+		{name: "fraction", a: `{"n":1.50}`, b: `{"n":1.5}`, same: true},
+		{name: "above 2^53", a: `{"n":9007199254740993}`, b: `{"n":9007199254740992}`, same: false},
+		{name: "forty digits", a: `{"n":` + strings.Repeat("9", 40) + `}`, b: `{"n":` + strings.Repeat("9", 39) + `}`, same: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(canonical(t, []byte(tt.a))) == string(canonical(t, []byte(tt.b)))
+			if got != tt.same {
+				t.Fatalf("same %v, want %v\n a %s\n b %s", got, tt.same, canonical(t, []byte(tt.a)), canonical(t, []byte(tt.b)))
+			}
+		})
 	}
 }
 

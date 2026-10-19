@@ -594,3 +594,46 @@ INSERT INTO activity (
 (5, 'task-rich00001', 'worker-rich0001', 'tool', 'ran ls', 'ls out', NULL, 1, 1, '2018-01-01T01:00:04Z');
 
 SELECT setval('activity_seq_seq', (SELECT MAX(seq) FROM activity));
+
+-- G1f reads. These rows are not on the tables the earlier goldens read,
+-- except task detail's gate chat: task-rich00001's origin is channel-lark,
+-- so the dashboard target below is not consulted. The worker timeout stays
+-- 600 because the schema migration runs before this seed.
+INSERT INTO role_configs (
+    role, display_name, enabled, system_prompt, max_turns, timeout_seconds,
+    extra_args, metadata, default_prompt, created_at, updated_at
+) VALUES
+(
+    'planner', 'Planner', true, 'plan it', 10, 1200,
+    '{"model":"opus"}'::jsonb, '{"note":"a"}'::jsonb, 'plan it',
+    '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z'
+),
+(
+    'worker', 'Worker', false, '', 0, 600,
+    NULL, NULL, '',
+    '2020-01-03T00:00:00Z', '2020-01-04T00:00:00Z'
+);
+
+INSERT INTO channel_configs (channel_id, channel_type, display_name, enabled, config, created_at, updated_at) VALUES
+('lark', 'lark', 'Lark', false, '{"allowed_open_ids":["ou_abcdefgh"]}'::jsonb, '2020-02-01T00:00:00Z', '2020-02-01T00:00:00Z'),
+('telegram', 'telegram', 'Telegram', true, '{"allowed_user_ids":["123456789"]}'::jsonb, '2020-02-02T00:00:00Z', '2020-02-02T00:00:00Z'),
+('telegram-empty', 'telegram', 'Empty', true, '{"allowed_user_ids":[]}'::jsonb, '2020-02-03T00:00:00Z', '2020-02-03T00:00:00Z'),
+('web', 'web', 'Web', true, '{}'::jsonb, '2020-02-04T00:00:00Z', '2020-02-04T00:00:00Z');
+
+INSERT INTO channel_secrets (channel_id, bot_token) VALUES ('lark', 'secret-token');
+
+INSERT INTO system_settings (key, value, updated_at) VALUES
+('user_gates.dashboard_target', '{"channel":"telegram","chat":"123456789"}', '2020-02-02T00:00:00Z');
+
+INSERT INTO project_role_templates (
+    project_id, template_key, kind, description, role_prompt, harness, profile_id, items, updated_at
+) VALUES (
+    'proj-alpha0001', 'backend', 'work', 'API work', 'Write the API.', NULL,
+    'agent-layer-roledef', '{}', '2020-02-01T00:00:00Z'
+);
+
+INSERT INTO library_installs (id, item_id, scope, project_id, roles, enabled, created_at, updated_at)
+VALUES (
+    'inst-rich0001', 'lib-rich0001', 'project', 'proj-alpha0001', ARRAY['task_role'], true,
+    '2020-03-01T00:00:00Z', '2020-03-01T00:00:00Z'
+);

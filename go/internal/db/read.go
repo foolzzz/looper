@@ -16,6 +16,10 @@ import (
 // ErrNotFound is a task id that is not in the database.
 var ErrNotFound = errors.New("task not found")
 
+// ErrProjectNotFound is a project id that is not in the database.
+// ErrNotFound stays the task miss: the two 404 texts differ.
+var ErrProjectNotFound = errors.New("project not found")
+
 // TaskQuery is the Tasks page filter. Empty strings are unset.
 // Statuses nil with Inside true is no group filter. Limit is the page size.
 type TaskQuery struct {
