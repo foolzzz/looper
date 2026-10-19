@@ -98,7 +98,7 @@ def test_the_token_stays_out_of_the_serve_log(
     verbose: bool, tmp_path: Path, serve_logging: None, telegram_calls: list[str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _configure_logging(verbose)
+    _configure_logging("debug" if verbose else "info")
     _run_adapter(tmp_path, telegram_calls)
 
     log = capsys.readouterr().err
@@ -116,7 +116,7 @@ def test_the_token_stays_out_of_the_serve_log(
 def test_the_configured_token_is_masked_outside_a_url(
     tmp_path: Path, serve_logging: None, telegram_calls: list[str], capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _configure_logging(False)
+    _configure_logging("info")
 
     async def log_the_bot(adapter: TelegramChannelAdapter) -> None:
         logging.getLogger("looper.test").warning("bot: %r", adapter._app.bot)  # python-telegram-bot's Bot[token=…]
@@ -144,7 +144,7 @@ def test_a_failed_send_does_not_return_the_token(
     assert "https://api.telegram.org/bot***/sendMessage" in receipt.error and SECRET not in receipt.error
 
 
-@pytest.mark.parametrize("configure", [lambda: _configure_logging(False), mcp_server.main], ids=["serve", "mcp-server"])
+@pytest.mark.parametrize("configure", [lambda: _configure_logging("info"), mcp_server.main], ids=["serve", "mcp-server"])
 def test_every_entry_point_masks_a_bot_url(
     configure: Callable[[], Any], serve_logging: None, capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

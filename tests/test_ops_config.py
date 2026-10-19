@@ -363,3 +363,32 @@ def test_render_escapes_strings_for_toml(tmp_path: Path) -> None:
     table = tomllib.loads(ops.render(config))
     assert table["server"]["host"] == table["backup"]["pg_dump"] == table["operator_notes"]["root"] == value
     assert table["backup"]["command"] == [value]
+
+
+def test_render_writes_characters_outside_the_bmp_that_load_reads_back(tmp_path: Path, dotenv: Path) -> None:
+    """A JSON escape of such a character is a surrogate pair, which TOML refuses: the file would not load."""
+    url = "postgresql://u:pw-\U0001F512-\x7f@h/db"
+    path = tmp_path / "runtime" / ops.FILE
+    ops.write_private(path, ops.render(ops.OpsConfig(runtime_root=tmp_path / "runtime", path=path, database_url=url,
+                                                     public_url="https://looper.example.com/é")))
+    loaded = _load(tmp_path / "runtime", dotenv)
+    assert loaded.database_url == url and loaded.public_url == "https://looper.example.com/é"
+
+
+def test_render_refuses_text_that_is_not_unicode(tmp_path: Path) -> None:
+    config = ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE, database_url="postgresql://u@h/\udcff")
+    with pytest.raises(OpsConfigError, match="not text"):
+        ops.render(config)
+
+
+def test_init_file_writes_a_new_config_path(tmp_path: Path, dotenv: Path) -> None:
+    """``init-ops --config <path that does not exist yet>`` writes that file."""
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    path = directory / "looper.toml"
+    written, notes = ops.init_file(Flags(runtime_root=tmp_path / "runtime", config=path),
+                                   environ={"LOOPER_DATABASE_URL": DATABASE_URL}, dotenv=dotenv)
+    assert written.path == path and written.database_url == DATABASE_URL
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not (tmp_path / "runtime" / ops.FILE).exists()
+    assert all(SECRET not in note for note in notes)

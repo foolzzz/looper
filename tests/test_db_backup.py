@@ -326,3 +326,21 @@ def test_a_backup_command_runs_as_given_with_the_database_filled_in(
     assert [json.loads(line)["argv"] for line in calls.read_text().splitlines()] == [
         ["--format=custom", "-U", "alice", "loopx"]]
     assert path.read_bytes() == b"PGDMP offline" and "header" in checked
+
+
+def test_a_backup_command_is_shown_by_its_program_only(tmp_path: Path) -> None:
+    """The command's arguments can hold a password: the detail the startup log and ``looper doctor`` show names the
+    source and the program, never the arguments."""
+    from looper.agents import self_check
+
+    ops = ops_config.load(
+        ops_config.Flags(runtime_root=tmp_path),
+        environ={"LOOPER_BACKUP_CMD": "docker exec -e PGPASSWORD=Sekr1t-pw pg pg_dump --format=custom {dbname}"},
+        dotenv=tmp_path / ".env", require_database=False,
+    )
+
+    dumper = db_backup.find_dumper(16, ops)
+    check, _ = self_check.check_pg_dump(160004, True, ops)
+
+    assert dumper.detail == "LOOPER_BACKUP_CMD: docker … (version not checked)"
+    assert "Sekr1t-pw" not in self_check.format_checks([check]) and "PGPASSWORD" not in check.detail
