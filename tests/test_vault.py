@@ -136,8 +136,10 @@ def test_search_all_words_order_limits_and_omissions(config: vault.VaultConfig) 
     (config.path / "linked-dir").symlink_to(config.path / "mine", target_is_directory=True)
     (config.path / "big.md").write_text("alpha beta" + "x" * vault.SEARCH_FILE_MAX_BYTES)
     result = asyncio.run(vault.search(config, "ALPHA beta", 2))
-    assert result["matches"] == 3
+    assert result["matches"] == 4  # only.md has one of the words
     assert [r["path"] for r in result["results"]] == ["alpha.md", "second.md"]
+    everything = asyncio.run(vault.search(config, "ALPHA beta"))["results"]
+    assert [r["path"] for r in everything][-1] == "only.md" and everything[-1]["words"] == 1
     assert result["results"][0]["hits"] == 60
     assert all(len(r["snippet"]) <= 200 for r in result["results"])
     assert not result["truncated"]
@@ -300,9 +302,10 @@ def test_tool_descriptions_and_guides_are_the_model_contract(config: vault.Vault
     from looper.agents.ops import vault as tools
 
     assert [t.description for t in tools.TOOLS] == [
-        "Search the operator's knowledge vault (Markdown notes): every word of query, in any case, in a note's "
-        "path or text. Up to limit paths (relative to the vault), most hits first, each with a snippet. "
-        "Each vault call re-checks that this task's project still has the vault on.",
+        "Search the operator's knowledge vault (Markdown notes) for the words of query, in any case, in a note's "
+        "path or text: the notes with the most of the words first, then the most hits. Up to limit paths (relative "
+        "to the vault), each with a snippet. Each vault call re-checks that this task's project still has the vault "
+        "on.",
         "Read a file of the knowledge vault by its path (relative to the vault): its text (the first 64 KiB) "
         "and the sha256 of the whole file, which looper_vault_write needs to change it.",
         "Write a Markdown note (its whole text) in a writable folder of the knowledge vault. expected_sha256: "
@@ -822,3 +825,14 @@ def test_a_vault_behind_a_folder_the_server_may_pass_but_not_list_is_written(tmp
     finally:
         passable.chmod(0o755)
     assert result["path"] == "codex-mem/new.md" and (passable / "vault/codex-mem/new.md").read_text() == "new note"
+
+
+
+def test_search_finds_a_note_that_lacks_some_of_the_words(config: vault.VaultConfig) -> None:
+    # A Planner's real query: the note says "Staging listens on port …", never "server".
+    (config.path / "codex-mem/projects").mkdir()
+    (config.path / "codex-mem/projects/calc.md").write_text("# calc\n\n- Staging listens on port 47613.\n")
+    (config.path / "mine/other.md").write_text("A port of call.\n")
+    result = asyncio.run(vault.search(config, "calc staging server port"))
+    assert [r["path"] for r in result["results"]] == ["codex-mem/projects/calc.md", "mine/other.md"]
+    assert result["results"][0]["words"] == 3

@@ -1779,8 +1779,8 @@ The tools are Looper's MCP tools, the same on every runtime.
   layer `vault`) say the tools exist in one line; with the vault off, or the
   setting unset, the prompts are byte-for-byte as before.
 - **Reading.** `looper_vault_search` (`query`, `limit` 1 to 30, default 10):
-  Markdown files whose path or text holds every word of the query, in any
-  case, most hits first, with a snippet; it follows no link, skips names
+  Markdown files whose path or text holds any word of the query, in any
+  case, those with the most of its words first, then the most hits, with a snippet; it follows no link, skips names
   starting with `.` (`.git`, `.obsidian`, Looper's temporary files) and files
   over 512 KiB, and stops at 10,000 files, 32 MiB or 5 s (`truncated`).
   `looper_vault_read` (`path`): a UTF-8 text file's first 64 KiB and the

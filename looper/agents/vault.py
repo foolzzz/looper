@@ -282,17 +282,20 @@ async def search(config: VaultConfig, query: str, limit: int | None = None) -> d
                     continue
                 path = target.relative_to(config.path).as_posix()
                 lower = text.lower()
-                if not all(word in path.lower() or word in lower for word in words):
+                # A note matches on any word: a query's other words (\"server\") need not be in the note's text.
+                found = sum(1 for word in words if word in path.lower() or word in lower)
+                if not found:
                     continue
                 first = min((lower.find(word) for word in words if word in lower), default=0)
                 snippet = re.sub(r"\s+", " ", text[max(0, first - 60):]).strip()[:SNIPPET_MAX_CHARS]
-                results.append({"path": path, "hits": sum(lower.count(word) for word in words), "snippet": snippet})
+                results.append({"path": path, "words": found, "hits": sum(lower.count(word) for word in words),
+                                "snippet": snippet})
             if (total_bytes >= SEARCH_MAX_BYTES or scanned >= SEARCH_MAX_FILES
                     or time.monotonic() - started >= SEARCH_MAX_SECONDS):
                 truncated = True
             if truncated:
                 break
-        results.sort(key=lambda r: (-r["hits"], r["path"]))
+        results.sort(key=lambda r: (-r["words"], -r["hits"], r["path"]))
         return {"results": results[:limit], "matches": len(results), "scanned": scanned, "truncated": truncated}
 
     return await asyncio.to_thread(scan)
