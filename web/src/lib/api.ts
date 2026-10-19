@@ -2057,6 +2057,7 @@ export function streamTaskActivity(
         buffer = lines.pop() || "";
 
         for (const line of lines) {
+          if (abortController.signal.aborted) break;
           if (line.startsWith("data: ")) {
             eventData = line.slice(6);
           } else if (line === "" && eventData) {
@@ -3423,6 +3424,7 @@ export function streamSSE(
         let eventData = "";
 
         for (const line of lines) {
+          if (abortController.signal.aborted) break;
           if (line.startsWith("event: ")) {
             eventType = line.slice(7).trim();
           } else if (line.startsWith("data: ")) {
