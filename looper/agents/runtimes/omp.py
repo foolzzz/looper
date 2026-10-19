@@ -64,6 +64,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -134,6 +135,7 @@ IDLE_SEC = 24 * 3600
 # catches changes inside the checkout. It is not a sandbox: OMP runs as the operator's user, so writes to another
 # path or the home directory are neither prevented nor detected.
 READ_ONLY_TOOLS = ("read", "glob", "grep")
+READ_TOOLS_MIN_VERSION = (18, 4, 3)
 
 
 class OmpRuntime(RuntimeAdapter):
@@ -145,7 +147,7 @@ class OmpRuntime(RuntimeAdapter):
     # tokens only, per request.
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME,
                               Capability.CLAUDE_PLUGINS, Capability.MCP, Capability.ADD_DIRS,
-                              Capability.COMPACTION_EVENTS})
+                              Capability.COMPACTION_EVENTS, Capability.READ_TOOLS})
     protocols = frozenset(protocol for protocol, _ in API_NAMES)
     # API keys only: omp's own logins are not used.
     auth_kinds = frozenset({AuthKind.API_KEY})
@@ -154,6 +156,17 @@ class OmpRuntime(RuntimeAdapter):
     read_only = ReadOnly.TOOLS
     # Set by the binding and the isolation: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, SHELL_PREFIX_VAR, *DIRECTORY_VARS})
+
+    def capabilities_for(self, version: str | None) -> frozenset[Capability]:
+        """Every capability, but ``READ_TOOLS`` below ``READ_TOOLS_MIN_VERSION`` or when the version is not readable
+        (only 18.4.3 was verified with ``--tools``)."""
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", version or "")
+        if found and tuple(map(int, found.groups())) >= READ_TOOLS_MIN_VERSION:
+            return self.capabilities
+        return self.capabilities - {Capability.READ_TOOLS}
+
+    def read_only_for(self, capabilities: frozenset[Capability]) -> ReadOnly:
+        return ReadOnly.TOOLS if Capability.READ_TOOLS in capabilities else ReadOnly.CHECK
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``, with an empty ``HOME`` of its own so nothing of the operator's is read."""
@@ -199,7 +212,7 @@ class OmpRuntime(RuntimeAdapter):
         return [
             "-p", "--mode", "json", "--no-title",
             # A read-only run (an agent room consult) has only the tools that read.
-            *(["--tools", ",".join(READ_ONLY_TOOLS)] if launch.read_only else []),
+            *(["--tools", ",".join(READ_ONLY_TOOLS)] if launch.read_only and launch.read_only_mode is ReadOnly.TOOLS else []),
             *binding.args,
             *(arg for directory in launch.library.plugin_dirs for arg in ("--plugin-dir", directory)),
         ]

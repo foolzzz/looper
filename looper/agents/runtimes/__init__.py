@@ -102,6 +102,7 @@ class Capability(str, Enum):
     ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
     COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
+    READ_TOOLS = "read_tools"  # it can run with only the tools that read (OMP's --tools), keeping its MCP tools
     COST_REPORT = "cost_report"  # it reports what a run cost
 
 
@@ -243,6 +244,10 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def probe(self, executable: str) -> Probe:
         """The version and capabilities of ``executable``; never a model call."""
+
+    def read_only_for(self, capabilities: frozenset[Capability]) -> ReadOnly:
+        """How a read-only run is kept read-only with a runtime of these (probed) ``capabilities``."""
+        return self.read_only
 
     def capabilities_for(self, version: str | None) -> frozenset[Capability]:
         """What a probed version can do; every version of the type, unless the adapter says otherwise."""

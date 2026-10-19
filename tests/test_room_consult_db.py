@@ -44,11 +44,12 @@ import json, os, re, sys, time, subprocess
 from pathlib import Path
 mode = os.environ.get("CONSULT_MODE", "answer")
 fork = "11111111-1111-4111-8111-111111111111"
-if mode == "fast_exit_child":
+if mode in ("fast_exit_child", "cancel_in_record"):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     Path(os.environ["CHILD_PID"]).write_text(str(child.pid))
     print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
+    time.sleep(1.0)
     text = json.dumps({"answers": [{"reply_to": int(os.environ["QUESTION_ID"]), "body": "the field is qty"}],
                        "unsure": ""})
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
@@ -1134,7 +1135,7 @@ def test_killing_a_consult_waiting_for_capacity_also_gives_its_question_to_the_p
 
 
 @pytest.mark.parametrize("mode", ["stderr", "no_result", "no_stdin", "wait_exit", "child", "fast_exit_child",
-                                 "over_budget"])
+                                 "cancel_in_record", "over_budget"])
 def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
 ) -> None:
@@ -1142,7 +1143,6 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
 
     from looper.agents.claude_cli import ClaudeRunRecorder
     from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
-    from looper.agents import proc_tree
 
     monkeypatch.setenv("SEEN", str(tmp_path / "seen.jsonl"))
     monkeypatch.setenv("CONSULT_MODE", mode)
@@ -1150,43 +1150,15 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
     if mode == "over_budget":
         monkeypatch.setenv("CONSULT_COST", "0.05")
     recording_result = False
-    if mode == "fast_exit_child" or (mode == "child" and os.getpid() not in proc_tree._snapshot()):
-        # Fix the reparenting boundary for an immediate exit; a sandbox may also deny ps.
-        roots: list[int] = []
-        spawn = proc_tree.spawn
-
-        async def spawning(*args: Any, **kwargs: Any) -> Any:
-            process = await spawn(*args, **kwargs)
-            roots.append(process.pid)
-            return process
-
-        def snapshot() -> Any:
-            table = {}
-            child_file = tmp_path / "child.pid"
-            children = [int(child_file.read_text())] if child_file.exists() else []
-            for pid in [*roots, *children]:
-                try:
-                    group = os.getpgid(pid)
-                except ProcessLookupError:
-                    if mode != "fast_exit_child" or recording_result or pid not in roots:
-                        continue
-                    group = pid
-                parent = roots[0] if pid in children and roots[0] in table else os.getpid() if pid in roots else 1
-                table[pid] = (parent, group)
-            return table
-
-        monkeypatch.setattr(proc_tree, "spawn", spawning)
-        monkeypatch.setattr(proc_tree, "_snapshot", snapshot)
-    if mode == "fast_exit_child":
+    if mode in ("fast_exit_child", "cancel_in_record"):
         record = ClaudeRunRecorder.record
 
         async def recording(self: Any, event: dict[str, Any]) -> None:
             nonlocal recording_result
             if event.get("type") == "result":
                 recording_result = True
-                await asyncio.sleep(0.5)
-                with pytest.raises(ProcessLookupError):
-                    os.kill(roots[0], 0)
+                # The CLI exits immediately after this event; its child is reparented while recording waits.
+                await asyncio.sleep(60 if mode == "cancel_in_record" else 0.5)
             await record(self, event)
 
         monkeypatch.setattr(ClaudeRunRecorder, "record", recording)
@@ -1210,7 +1182,7 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
         monkeypatch.setattr(service, "_execute", bounded)
         began = time.monotonic()
         try:
-            if mode == "fast_exit_child":
+            if mode in ("fast_exit_child", "cancel_in_record"):
                 question = await _question(pool, "qty?")
                 monkeypatch.setenv("QUESTION_ID", str(question["id"]))
                 member = (await room._context("task-r")).member("backend_rd@s1")
@@ -1219,6 +1191,8 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
                 question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
             row = await asyncio.wait_for(_settled(pool), timeout=8)
             await service.stop()
+            if mode in ("fast_exit_child", "cancel_in_record"):
+                assert recording_result
             if mode in ("stderr", "child", "fast_exit_child"):
                 assert row["state"] == "answered"
             else:
@@ -1229,12 +1203,12 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
                 assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
             if mode == "over_budget":
                 assert "0.0500 USD" in row["detail"] and "answers are dropped" in row["detail"]
-            if mode in ("no_stdin", "wait_exit"):
+            if mode in ("no_stdin", "wait_exit", "cancel_in_record"):
                 assert time.monotonic() - began < 7
             if mode == "no_result":
                 error = await pool.fetchval("SELECT error FROM llm_records WHERE agent_id LIKE 'consult-%'")
                 assert error.endswith("stderr tail") and len(error) < 2100
-            if mode in ("child", "fast_exit_child"):
+            if mode in ("child", "fast_exit_child", "cancel_in_record"):
                 pid = int((tmp_path / "child.pid").read_text())
                 for _ in range(100):
                     try:

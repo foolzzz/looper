@@ -2908,7 +2908,7 @@ class PlannerAgent:
     async def _watch_files(self, plan: TaskPlan, launch: Launch) -> _Watched | None:
         """How a read-only turn whose runtime cannot refuse what would change files (``ReadOnly.CHECK``) is checked,
         and the task directory's state as it starts; None for a turn that needs no check."""
-        if not launch.read_only or launch.runtime.read_only is not ReadOnly.CHECK:
+        if not launch.read_only or launch.read_only_mode is not ReadOnly.CHECK:
             return None
         if await self._shared(plan):
             return _Watched(None, FilesCheck.SHARED)

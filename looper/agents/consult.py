@@ -55,6 +55,7 @@ from typing import Any
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from .agent_settings import AgentType, Launch, load_agent_settings
+from .runtimes import ReadOnly
 from .room import FallbackReason, Member, MemberKind, RoomService, _line, run_session_dir
 from .system_prompt import REVIEW_CONTRACT, WORK_CONTRACT, SystemPrompt
 
@@ -64,6 +65,7 @@ CONSULT_MAX_TURNS = 20
 # The question bodies share this many characters in a consult prompt.
 CONSULT_QUESTIONS_MAX_CHARS = 20_000
 GIT_TIMEOUT_SEC = 30
+TREE_WATCH_SEC = 0.2  # how often a running consult's process tree is read
 # The runtimes with their own read-only restriction, so a consult runs where its step ran; the others run in a
 # throwaway checkout.
 RUNTIME_READ_ONLY = ("claude-code", "codex", "grok")
@@ -309,6 +311,9 @@ class ConsultService:
             raise _Failed(FallbackReason.RUNTIME_CANNOT, "its model has no full price with its provider, so "
                                                          "room_consult_budget_usd cannot hold")
         runtime = launch.runtime
+        if launch.read_only_mode is ReadOnly.CHECK:
+            raise _Failed(FallbackReason.RUNTIME_CANNOT, "its runtime, as probed, cannot be kept read-only "
+                                                         "(OMP before 18.4.3 has no verified --tools)")
         # Where it runs: where the step ran, its runtime keeping it from writing; else a throwaway checkout.
         cwd, snapshot = str(metadata.get("cwd") or task.get("work_dir") or ""), None
         if not cwd or not Path(cwd).is_dir():
@@ -437,7 +442,7 @@ class ConsultService:
         assert process.stdin is not None and process.stdout is not None and process.stderr is not None
         result: dict[str, Any] | None = None
         started = False
-        known: proc_tree.Tree | None = None
+        known: proc_tree.Tree = {}
         stderr_tail = ""
 
         async def stderr() -> None:
@@ -447,12 +452,21 @@ class ConsultService:
 
         draining = asyncio.create_task(stderr())
 
+        async def watch_tree() -> None:
+            # A parent that exits re-parents its children and nothing then links them to it, so the tree is kept
+            # current while it runs.
+            while process.returncode is None:
+                known.update(await asyncio.to_thread(proc_tree.tree_of, process))
+                await asyncio.sleep(TREE_WATCH_SEC)
+
+        watching = asyncio.create_task(watch_tree())
+
         async def read() -> None:
             nonlocal result, started, known
             async for event in runtime.parse(process.stdout, model=launch.model):
-                # A parent that exits as it reports its result re-parents its children, and nothing then links them
-                # to it: its tree is read before the record is awaited.
-                exiting = proc_tree.tree_of(process) if event.get("type") == "result" else {}
+                if event.get("type") == "result":
+                    # Read before the record is awaited, which a stop may cut short.
+                    known.update(proc_tree.tree_of(process))
                 await recorder.record(event)
                 if (capped := recorder.cap_stop) is not None:
                     result = capped.result_event
@@ -462,7 +476,7 @@ class ConsultService:
                     started = True
                 if event.get("type") == "result":
                     result = event
-                    known = {**exiting, **await proc_tree.begin_end(process)}
+                    known.update(await proc_tree.begin_end(process))
                     if not process.stdin.is_closing():
                         process.stdin.close()
 
@@ -489,9 +503,10 @@ class ConsultService:
             try:
                 await proc_tree.end(process, label=f"consult {run_id}", known=known)
             finally:
-                if not draining.done():
-                    draining.cancel()
-                await asyncio.gather(draining, return_exceptions=True)
+                for background in (draining, watching):
+                    if not background.done():
+                        background.cancel()
+                await asyncio.gather(draining, watching, return_exceptions=True)
                 await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
                                       result_event=result, error=(error + "\n" + stderr_tail if stderr_tail else error)
                                       if error else None)

@@ -28,7 +28,9 @@ from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
 from looper.agents.run_usage import Usage, request_context, run_usage
-from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, ReadOnly, RuntimeUnsupported, adapter
+from looper.agents.runtimes import (
+    ROLE_CAPABILITIES, ApiProtocol, AuthKind, Capability, ReadOnly, RuntimeUnsupported, adapter,
+)
 from looper.agents.runtimes.omp import (
     KEY_ENV, MCP_PLUGIN, OVERLAY, RESTORED_VARS, SHELL_PREFIX_VAR, OmpRuntime, ResidentOmp, edited_paths, write_prompt,
 )
@@ -624,6 +626,18 @@ def test_its_capabilities_cover_every_role() -> None:
     assert OMP.protocols == {ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT, ApiProtocol.ANTHROPIC_MESSAGES}
 
 
+@pytest.mark.parametrize(("version", "read_tools"), [
+    ("omp/18.4.3", True),
+    ("omp/19.0.0", True),
+    ("omp/18.4.2", False),
+    ("omp/17.9.9", False),
+    (None, False),
+    ("weird", False),
+])
+def test_only_verified_versions_can_restrict_the_tools(version: str | None, read_tools: bool) -> None:
+    assert (Capability.READ_TOOLS in OMP.capabilities_for(version)) is read_tools
+
+
 def test_a_run_that_keeps_its_session_names_its_directory_instead_of_no_session(tmp_path: Path) -> None:
     work = tmp_path / "work"
     (work / ".git").mkdir(parents=True)
@@ -645,6 +659,27 @@ def test_only_a_planner_launch_limits_its_tools(tmp_path: Path, role: AgentType 
     else:
         assert "--tools" not in command
         assert "read_only" not in launch.record()
+
+
+@pytest.mark.parametrize(("read_tools", "mode"), [(False, ReadOnly.CHECK), (True, ReadOnly.TOOLS)])
+def test_a_planners_read_only_mode_uses_its_probed_capabilities(
+    tmp_path: Path, read_tools: bool, mode: ReadOnly,
+) -> None:
+    launch = _launch()
+    capabilities = launch.profile.runtime.capabilities - {Capability.READ_TOOLS}
+    if read_tools:
+        capabilities |= {Capability.READ_TOOLS}
+    runtime = replace(launch.profile.runtime, capabilities=capabilities)
+    profile = replace(launch.profile, runtime=runtime)
+    launch = replace(launch, settings=replace(launch.settings, profile=profile), role=AgentType.PLANNER)
+    command = OMP.resident_command("omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)
+
+    assert launch.read_only_mode is mode
+    assert launch.record()["read_only"] == mode.value
+    if read_tools:
+        assert _flag(command, "--tools") == ["read,glob,grep"]
+    else:
+        assert "--tools" not in command
 
 
 def test_a_planner_keeps_its_mcp_plugin(tmp_path: Path) -> None:
