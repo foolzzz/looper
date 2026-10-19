@@ -193,14 +193,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     dashboard shows it, and a schedule notifies on its own terms.
 - **Links in chat messages** (`looper/agents/links.py`). A task's notice and
   a schedule's messages link to the dashboard with an absolute URL, which a
-  chat client opens. It is `LOOPER_PUBLIC_URL` when set (the address people
-  open the dashboard at, such as `https://looper.example.com` behind a
-  proxy, kept with a path and without a trailing slash), else the server's
-  own `http://<host>:<port>`, with `127.0.0.1` for a server bound to every
-  address. `looper serve` reads it at start and does not start when it is
-  not an http or https URL with a host, or has a user, a query or a
-  fragment. For the background service, pass it with
-  `looper service install --env LOOPER_PUBLIC_URL`.
+  chat client opens. It is `server.public_url` in the ops file when set (the
+  address people open the dashboard at, such as `https://looper.example.com`
+  behind a proxy, kept with a path and without a trailing slash), else the
+  server's own `http://<host>:<port>`, with `127.0.0.1` for a server bound to
+  every address. `looper serve` reads it at start and does not start when it
+  is not an http or https URL with a host, or has a user, a query or a
+  fragment.
 - A project may have a `background` (at most 10000 characters, `''` = none):
   what every task agent of the project should know. It goes into the system
   prompt of the project's Planner, Workers and Reviewers, never the
@@ -711,11 +710,13 @@ does; an excluded `CLAUDE.md` above the repository does not keep the
 repository's `AGENTS.md` out. `--bare` and a separate
 `CLAUDE_CONFIG_DIR` were rejected because both lose the operator's login;
 `--safe-mode` also drops the project's `CLAUDE.md`; `--disable-slash-commands`
-also drops built-in skills. Not covered: managed (admin policy) settings,
-built-in plugins, and the environment variables of the process that runs
-`looper serve`. With user settings gone, the model, the effort and any
-environment variables come from Looper (next section), not from the operator's
-Claude Code settings, and the plugins and skills come from the Looper catalog,
+also drops built-in skills. Not covered: managed (admin policy) settings and
+built-in plugins. The process does not receive the server's environment: it
+starts from the allowlist in `looper/child_env.py`
+([Ops file and child environment](#ops-file-and-child-environment)). With user
+settings gone, the model, the effort and any environment variables come from
+Looper (next section), not from the operator's Claude Code settings, and the
+plugins and skills come from the Looper catalog,
 where they are installed (below), never from `~/.claude` itself.
 
 ### The operator's other Claude Code sessions
@@ -1329,9 +1330,10 @@ turn that waited for a teammate would end without its decision, and the
 teammate's later turns are Claude's own, which the Planner only logs (#26); the
 Planner already runs work in parallel through Looper's Workers, whose steps
 Looper tracks and teammates would bypass. A Planner, and every role of a
-profile without them, starts with that variable removed, whatever the server's
-environment (a `looper serve` started from a Claude Code shell inherits it),
-the settings' or the provider's variables say. Entering the variable in a
+profile without them, starts with that variable removed, whatever a setting
+or a provider variable says. The server's environment is not passed to the
+child (`looper/child_env.py`), so a `looper serve` started from a Claude Code
+shell no longer hands the variable on. Entering the variable in a
 layer's or a provider's environment is refused (400, pointing at the profile's
 switch); a layer stored before keeps loading, and an import leaves the
 variable out of a layer with a note. Turning them on or off restarts
@@ -1474,11 +1476,12 @@ every field with the layer it came from (with `step_id`, a Worker's or
 Reviewer's run of that step, the Planner's choice for it); all four roles
 launch from it.
 Every launch passes `--model` and, when its profile has one, `--effort` and (Claude Code's own
-cost only) `--max-budget-usd`. The variables are added on top of the server's environment for
-every agent's `claude` process; names must match `[A-Z_][A-Z0-9_]*`, and a
-name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL` is
-refused because the values are shown on the dashboard. That word check guards
-against pasting a secret by habit; it is not a security boundary. A stored
+cost only) `--max-budget-usd`. The variables are added on top of the child's
+allowlist (`looper/child_env.py`) for every agent's process; names must match
+`[A-Z_][A-Z0-9_]*`, and a name containing `KEY`, `TOKEN`, `SECRET`,
+`PASSWORD` or `CREDENTIAL` is refused because the values are shown on the
+dashboard. That word check guards against pasting a secret by habit; it is
+not a security boundary. A stored
 value that no longer validates is ignored as unset. When the layers cannot be
 read, the Manager and a Planner keep what they last read, and a Worker or
 Reviewer run uses the built-in values with a warning in the task's activity.
@@ -2012,8 +2015,8 @@ the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
   subdirectory, a task worktree and a step worktree have the same notes), or
   the directory itself outside git, links resolved, every character but a
   letter or digit a `-`, and past 200 characters the first 200, `-` and the
-  key's djb2 hash in base 36 (`LOOPER_OPERATOR_NOTES_ROOT` stands in for
-  `<config>/projects`). Looper only reads them; an `autoMemoryDirectory`
+  key's djb2 hash in base 36 (`operator_notes.root` in the ops file stands in
+  for `<config>/projects`). Looper only reads them; an `autoMemoryDirectory`
   setting is not followed. The run records them in
   `prompt_layers.project.operator_notes` (hash, files, omitted) and the
   activity says which applied.
@@ -3376,23 +3379,107 @@ the one-time migration `profiles_roles_renamed`, which runs first in
 place (their foreign keys follow) and their constraints take the names a new
 database gives them, so a migrated database is shaped like a new one.
 
-Connection: `LOOPER_DATABASE_URL` environment variable or `.env` file, else
-`postgresql://localhost:5432/loopx`: the default database keeps its name from
-before the rename, because it holds the user's data.
+Connection: `[database] url` in the ops file (`<runtime root>/ops/server.toml`,
+or the file `--config` names; `looper/ops_config.py`). There is no default
+URL: without one, `looper serve`, `doctor` and `config import` or `export` do
+not start, and say to run `looper config init-ops` or edit the file. A
+database that already exists keeps the name it had (often `loopx`, from before
+the rename), because it holds the user's data.
 
 ### Renamed from LoopX
 
-The product was LoopX up to v2.5.0. `looper.env` reads every `LOOPER_*`
-variable's `LOOPX_*` name when the new one is unset, with a warning once per
-name, for one release; the `loopx` command is an alias that prints a
-deprecation note. `looper.paths.settle_runtime_root` moves `~/.loopx` to
-`~/.looper` the first time `looper serve` or `looper service install` uses the
-default runtime root (one `rename`, leaving `~/.loopx` as a link to it; both
-present: `~/.looper` is used, with a warning). `looper service install`
+The product was LoopX up to v2.5.0. `looper.ops_config` reads the old
+deployment variables for one release, both prefixes (`LOOPER_DATABASE_URL`,
+`LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
+`LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
+root), from the environment and then from the checkout's `.env`, each use
+warned about by name; the next release removes them. `looper.env` still reads
+any other `LOOPER_*` variable's `LOOPX_*` name when the new one is unset, with
+a warning once per name, for one release. The `loopx` command is an alias that
+prints a deprecation note. `looper.paths.settle_runtime_root` moves `~/.loopx`
+to `~/.looper` the first time `looper serve` or `looper service install` uses
+the default runtime root (one `rename`, leaving `~/.loopx` as a link to it;
+both present: `~/.looper` is used, with a warning). `looper service install`
 replaces a `com.loopx.serve` unit with `com.looper.serve`. Data in the database
 (an operator's harness text, a channel's `bot_token_env`) is not rewritten; a
 stored `LOOPX_*` variable name finds its `LOOPER_*` counterpart, and a system
 harness stored as the pre-rename built-in still follows the built-in.
+
+### Ops file and child environment
+
+Deployment settings are the ops file, `<runtime root>/ops/server.toml`
+(`looper/ops_config.py`). `--config` on `looper serve`, `doctor`, `config
+export`, `config import`, `config init-ops` and `service install` names
+another file. The keys are `[database] url`, `[server]` `host`, `port`,
+`public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
+`pg_dump` and `command` (an argv array; `{dbname}` and `{user}` are filled
+in), and `[operator_notes] root` (an absolute path). Nothing is expanded: no
+variable, no `~`, no include. An unknown key, a wrong type or a bad value
+stops the command; the message names the key and never shows the value. The
+file must be a regular file (not a symlink), owned by the user, mode 0600, in
+a directory of theirs with mode 0700. Looper writes it atomically. Edit it
+and restart the server to apply a change.
+
+Each setting comes from the first of: an explicit flag, the file, then for
+this release only the old variable from the environment (`LOOPER_DATABASE_URL`,
+`LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
+`LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
+root), then the same name in the checkout's `.env`, then the built-in
+default. Each use logs a deprecation warning that names the variable and never
+its value; the next release removes them. There is no default database URL:
+without one, `looper serve`, `doctor` and `config import` or `export` do not
+start. The runtime root is `--runtime-root`, else `LOOPER_RUNTIME_ROOT`
+(deprecated, and warned; `LOOPX_RUNTIME_ROOT` the same way), else `~/.looper`.
+The file never names it.
+
+`.env` is not put into Looper's environment. Only those old settings are read
+from it; any other key (for example a channel token variable) is ignored and
+named in a warning. A channel secret goes in its Settings field (stored in the
+database) or in the server's environment (`looper service install --env
+NAME`).
+
+`looper config init-ops` writes the file once from the values in effect, mode
+0600, and refuses to overwrite a file that exists. With nothing configured it
+writes `postgresql://localhost:5432/loopx` and says so. Remove the old
+variables from the shell and `.env`, then run `looper service install` again
+if the service is used. Until then `looper serve` keeps working from the
+variables, with the warnings.
+
+`looper service install` (`looper/agents/service.py`) writes a unit that runs
+`looper serve --config <absolute ops file> --runtime-root <absolute root>`,
+plus `--port` only when `--port` was given, or when the unit already installed
+had one and the file names no port. It refuses when there is no ops file, and
+while a setting still comes from an environment variable. It no longer copies
+every `LOOPER_*`, `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variable. It copies
+`PATH`, `TZ`, locale, proxy and CA-certificate variables, the runtimes'
+directories and logins (`child_env.RUNTIMES`, including `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `GROK_HOME`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_BASE_URL`, the Anthropic model variables, `CODEX_API_KEY` and
+`XAI_API_KEY`), `LOOPER_TELEGRAM_BOT_TOKEN` and, for one release,
+`LOOPX_TELEGRAM_BOT_TOKEN` (`CAPTURED_NAMES`), and each `--env NAME`. The
+report names the variables it no longer copies. `--env` with an ops variable
+is refused. Installing again replaces the old unit, so a
+database URL that unit carried is gone. The unit stays mode 0600, because it
+can hold API keys.
+
+Every process the server starts (an agent's runtime and the MCP servers that
+runtime starts, a schedule gate, a probe, and a git, ps or lark-cli helper)
+starts from an allowlist of the server's environment (`looper/child_env.py`:
+system paths, locale, XDG, the SSH agent, git identity and config, proxies
+and certificates, and the runtimes' login variables) plus what Looper sets for
+that child (a provider binding, the agent's settings variables, an MCP token,
+a gate's run variables). The database URL, under either name, `PGPASSWORD`,
+any `LOOPER_*` or `LOOPX_*` variable and every other variable are not passed.
+A database backup gets its own environment (`child_env.backup`): that
+allowlist, plus libpq's `PG*` variables and Docker's, and `PGPASSWORD` taken
+from the URL for `pg_dump`. An agent that needs another variable takes it from
+its settings (Settings, or a project layer).
+
+This keeps secrets out of the children's environments. It is not a sandbox.
+A child runs as the server's user, so an agent with a shell can still read
+every file that user can read: the ops file, the operator token, a `.env`,
+the service unit. Isolating that needs a separate OS user or a sandbox, which
+is not done.
 
 ## Web Dashboard
 

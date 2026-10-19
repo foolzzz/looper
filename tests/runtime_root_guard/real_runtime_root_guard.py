@@ -39,8 +39,9 @@ Not covered:
 
 Every refusal is appended to the session's report file together with the
 ``PYTEST_CURRENT_TEST`` value it happened under, which names the test to charge
-it to. This module is imported before pytest in child processes, so it must
-depend on the standard library only.
+it to. This module is imported before pytest in child processes. It works with the
+standard library alone and optionally registers its variables with Looper
+when that package is available.
 """
 
 from __future__ import annotations
@@ -168,6 +169,12 @@ def install_from_environment() -> None:
     roots = [root for root in os.environ.get(PROTECTED_ROOTS_ENV, "").split(os.pathsep) if root]
     report_path = os.environ.get(REPORT_PATH_ENV)
     if roots and report_path:
+        try:
+            from looper.child_env import allow
+        except ImportError:
+            pass
+        else:
+            allow(PROTECTED_ROOTS_ENV, REPORT_PATH_ENV)
         configure(roots, report_path)
         install()
 

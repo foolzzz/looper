@@ -42,6 +42,8 @@ import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 
+from .. import child_env
+
 logger = logging.getLogger(__name__)
 
 _HASHED = re.compile(r"[0-9a-f]{64}")
@@ -141,7 +143,7 @@ def command_lines() -> list[str]:
     """The command line of every running process; raises ``OSError`` when they cannot be listed."""
     try:
         listing = subprocess.run(["ps", "-A", "-ww", "-o", "args="], capture_output=True, text=True, check=True,
-                                 timeout=30)
+                                 timeout=30, env=child_env.inherited())
     except (subprocess.SubprocessError, OSError) as exc:
         raise OSError(f"cannot list the running processes: {exc}") from exc
     return listing.stdout.splitlines()

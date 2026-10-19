@@ -46,6 +46,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from looper import ops_config
 from looper.agents import operator_auth
 from looper.agents.project_execution import ProjectExecution
 
@@ -243,15 +244,19 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, notes_root: Path | None = None,
                    startup_timeout: float = 90.0) -> Iterator[Api]:
-    """``looper serve`` on a free port; stopped with SIGINT, as the operator would. ``notes_root`` stands in for the
-    operator's ``~/.claude/projects`` (the operator's notes)."""
+    """``looper serve`` on a free port, with an ops file of its own in ``runtime_root`` naming ``database_url``;
+    stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
+    (the operator's notes)."""
     port = free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "LOOPER_DATABASE_URL": database_url, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+    ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
+                               database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "")
+    ops_config.write_private(ops.path, ops_config.render(ops))
+    # None of the operator's ops variables: the file names the eval's database.
+    env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},
+           "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
            "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")]))}
-    if notes_root is not None:
-        env["LOOPER_OPERATOR_NOTES_ROOT"] = str(notes_root)
     if home is not None:
         env["HOME"] = str(home)
     log = log_path.open("w", encoding="utf-8")

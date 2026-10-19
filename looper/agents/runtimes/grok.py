@@ -70,6 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from ... import child_env
 from ..run_usage import Usage, request_tokens, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
@@ -147,7 +148,7 @@ class GrokRuntime(RuntimeAdapter):
         try:
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
                                   timeout=_PROBE_TIMEOUT_SEC, check=False,
-                                  env={**_grok_env(os.environ), "GROK_HOME": home, "HOME": home, **dict(FIXED_ENV)})
+                                  env={**_grok_env(child_env.inherited()), "GROK_HOME": home, "HOME": home, **dict(FIXED_ENV)})
         except FileNotFoundError:
             return Probe(None, self.capabilities, f"{executable!r} was not found")
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -186,11 +187,11 @@ class GrokRuntime(RuntimeAdapter):
         ]
 
     def environment(self, launch: Launch) -> dict[str, str]:
-        """The server's environment and the settings' variables, less what the binding removes, then the
+        """``child_env.inherited()`` and the settings' variables, less what the binding removes, then the
         provider's own variables and what every run sets (``FIXED_ENV``). ``GROK_HOME`` and ``HOME`` come with the
         command."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        visible = {**os.environ, **dict(launch.env)}
+        visible = {**child_env.inherited(), **dict(launch.env)}
         return {**_grok_env(visible), **dict(binding.env), **dict(FIXED_ENV)}
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch, max_turns: int) -> list[str]:
@@ -446,7 +447,7 @@ def _prompt_text(looper_prompt: str, launch: Launch) -> str:
 def config_toml(launch: Launch, *, shell_home: Path) -> str:
     """The ``config.toml`` of a run's home: isolation (the module's notes), the login, the agent's shell's
     ``GROK_HOME`` and ``RESTORED_VARS``, the installed skills and the MCP servers."""
-    visible = {**os.environ, **dict(launch.env)}
+    visible = {**child_env.inherited(), **dict(launch.env)}
     shell = {"GROK_HOME": str(shell_home), **{name: visible[name] for name in RESTORED_VARS if visible.get(name)}}
     lines = [
         "# Written by Looper for its Grok runs. Only this file, rules/looper.md and the auth.json link come from "

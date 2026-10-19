@@ -62,7 +62,6 @@ environment, the settings' or the provider's variables say.
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -70,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 
 from urllib.parse import urlsplit
 
+from ... import child_env
 from .. import claude_cli
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
@@ -139,7 +139,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         """``<executable> --version``: Claude Code prints its version and exits without calling a model."""
         try:
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                  timeout=_PROBE_TIMEOUT_SEC, check=False)
+                                  timeout=_PROBE_TIMEOUT_SEC, check=False, env=child_env.inherited())
         except FileNotFoundError:
             return Probe(None, self.capabilities, f"{executable!r} was not found")
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -209,17 +209,15 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             *(TEAMMATE_MODE_ARGS if launch.agent_teams else ()),
         ]
 
-    def environment(self, launch: Launch) -> dict[str, str] | None:
-        """The subprocess environment: the server's, then the settings' variables and the provider's binding,
-        less what the binding removes, with the agent teams variable set by the launch alone (``Launch.agent_teams``);
-        None without any of these."""
+    def environment(self, launch: Launch) -> dict[str, str]:
+        """The subprocess environment: ``child_env.inherited()``, then the settings' variables and the provider's
+        binding, less what the binding removes, with the agent teams variable set by the launch alone
+        (``Launch.agent_teams``)."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         added = {k: v for k, v in (*launch.env, *binding.env) if k != AGENT_TEAMS}
         if launch.agent_teams:
             added[AGENT_TEAMS] = "1"
-        if not added and not binding.unset and AGENT_TEAMS not in os.environ:
-            return None
-        return {**{k: v for k, v in os.environ.items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
+        return {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         return _prompt_input(launch, looper_prompt=looper_prompt)[1]

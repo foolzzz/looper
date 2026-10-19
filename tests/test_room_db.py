@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from looper import child_env
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.ops import ErrorCode, OpError
 from looper.agents.room import MemberKind, RoomService, Seat
@@ -524,6 +525,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
 
     seen = tmp_path / "seen.json"
     monkeypatch.setenv("SEEN", str(seen))
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"SEEN"})  # the stand-in's control
 
     async def test(pool: Any) -> None:
         await _room_task(pool)
@@ -590,6 +592,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
 """
     seen = tmp_path / "seen.json"
     monkeypatch.setenv("SEEN", str(seen))
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"SEEN"})  # the stand-in's control
 
     async def test(pool: Any) -> None:
         await _room_task(pool, room="off")

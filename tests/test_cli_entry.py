@@ -6,6 +6,7 @@ the alias kept for one release), as the installed script does. ``serve_agent``
 is replaced by a recorder, so nothing listens; the case then lists every
 ``looper`` module the interpreter loaded.
 ``doctor`` runs its checks against a stand-in ``claude`` on a minimal PATH.
+The ops-file cases run the actual entry point, in a temporary home and runtime root.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import re
 import socket
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -25,13 +27,15 @@ from looper import __version__
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The agent system's own packages and the one helper it borrows.
-ALLOWED_MODULE = re.compile(r"looper(\.cli|\.env|\.paths|\.agents(\.\w+)*|\.db(\.\w+)*)?")
+ALLOWED_MODULE = re.compile(r"looper(\.cli|\.env|\.paths|\.ops_config|\.child_env|\.agents(\.\w+)*|\.db(\.\w+)*)?")
 
 _DRIVER = r"""
-import json, sys, tomllib
+import json, subprocess, sys, tomllib
 from importlib import import_module
 from pathlib import Path
 
+# sitecustomize may preload the runtime-root guard's looper.child_env; measure this command's imports.
+baseline = set(sys.modules)
 pyproject, script, *argv = sys.argv[1:]
 target = tomllib.loads(Path(pyproject).read_text())["project"]["scripts"][script]
 module_name, _, function = target.partition(":")
@@ -39,22 +43,38 @@ calls = []
 if argv[:1] == ["serve"]:
     import looper.agents.serve as agents_serve
     agents_serve.serve_agent = lambda **kwargs: calls.append({k: str(v) for k, v in kwargs.items()})
+if argv[:1] in (["doctor"], ["service"]):
+    import looper.agents.service as service
+    service._run = lambda argv: subprocess.CompletedProcess(argv, 1, "", "not installed")
 try:
     code = getattr(import_module(module_name), function)(argv)
 except SystemExit as exit_:
     code = exit_.code
 sys.stdout.flush()
-modules = sorted(name for name in sys.modules if name == "looper" or name.startswith("looper."))
+modules = sorted(name for name in sys.modules
+                 if name == "looper" or (name.startswith("looper.") and name not in baseline))
 print("\n" + json.dumps({"code": code, "calls": calls, "modules": modules}))
 """
 
 
+def _clean_env(root: Path) -> dict[str, str]:
+    """Give children only test-owned state and the import/runtime-root guard settings."""
+    home = root / "home"
+    home.mkdir(exist_ok=True)
+    names = ("PATH", "PYTHONPATH", "PYTEST_LOOPER_PROTECTED_RUNTIME_ROOTS", "PYTEST_LOOPER_RUNTIME_ROOT_GUARD_REPORT")
+    env = {name: os.environ[name] for name in names if name in os.environ}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(REPO_ROOT), env.get("PYTHONPATH"))))
+    return {**env, "HOME": str(home)}
+
+
 def _run_looper(*argv: str, cwd: Path, env: dict[str, str] | None = None, script: str = "looper",
                 ) -> tuple[dict, str, str]:
+    if argv[:1] == ("doctor",) or argv[:2] in (("config", "import"), ("config", "export")):
+        argv = (*argv, "--runtime-root", str(cwd / "runtime"))
     proc = subprocess.run(
         [sys.executable, "-c", _DRIVER, str(REPO_ROOT / "pyproject.toml"), script, *argv],
         cwd=cwd,
-        env=env,
+        env=_clean_env(cwd) if env is None else env,
         capture_output=True,
         text=True,
         timeout=120,
@@ -64,28 +84,120 @@ def _run_looper(*argv: str, cwd: Path, env: dict[str, str] | None = None, script
     return json.loads(summary), output.strip(), proc.stderr
 
 
+def _run_cli(*argv: str, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the actual entry point without the serve recorder."""
+    return subprocess.run([sys.executable, "-m", "looper.cli", *argv], cwd=cwd, env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def _ops_file(root: Path, database_url: str) -> Path:
+    directory = root / "ops"
+    directory.mkdir(parents=True, mode=0o700)
+    directory.chmod(0o700)
+    path = directory / "server.toml"
+    path.write_text(f"[database]\nurl = {json.dumps(database_url)}\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def test_init_ops_cli_writes_the_effective_database_without_showing_its_password(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    database_url = "postgresql://looper:Sekr1t-init-pw@127.0.0.1:5432/loopx"
+    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": database_url}
+
+    proc = _run_cli("config", "init-ops", "--runtime-root", str(root), cwd=tmp_path, env=env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    path = root / "ops" / "server.toml"
+    assert tomllib.loads(path.read_text())["database"]["url"] == database_url
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert "LOOPER_DATABASE_URL" in proc.stdout
+    assert "Sekr1t-init-pw" not in proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("variable", ["LOOPER_DATABASE_URL", "LOOPX_DATABASE_URL"])
+def test_doctor_cli_warns_once_for_each_legacy_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], variable: str,
+) -> None:
+    """The CLI owns config warnings; the doctor report does not repeat them."""
+    from unittest.mock import AsyncMock
+
+    from looper import cli, ops_config
+    from looper.agents import self_check, service
+
+    database_url = "postgresql://looper:Sekr1t-warning-pw@127.0.0.1:5432/loopx"
+    load = ops_config.load
+    monkeypatch.setattr(ops_config, "load", lambda flags: load(
+        flags, environ={variable: database_url}, dotenv=tmp_path / ".env"))
+    checks = AsyncMock(return_value=[self_check.Check("database", "PostgreSQL", self_check.OK, "available")])
+    monkeypatch.setattr(self_check, "run_checks", checks)
+    monkeypatch.setattr(service, "doctor_check", lambda: self_check.Check("service", "Service", self_check.SKIP,
+                                                                       "not installed"))
+
+    code = cli.main(["doctor", "--runtime-root", str(tmp_path / "runtime")])
+
+    output = capsys.readouterr()
+    assert code == 0
+    assert output.err.count(f"{variable} in the environment is deprecated: set database.url") == 1
+    assert "Sekr1t-warning-pw" not in output.out + output.err
+    assert checks.await_args.args[0].database_url == database_url
+
+
+def test_serve_cli_without_a_database_exits_with_setup_instructions(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    port = _closed_port()
+    assert port != 8767
+
+    proc = _run_cli("serve", "--runtime-root", str(root), "--port", str(port),
+                    cwd=tmp_path, env=_clean_env(tmp_path))
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "looper config init-ops" in proc.stdout + proc.stderr
+    assert not (root / "ops" / "server.toml").exists()
+
+
+def test_doctor_cli_uses_the_ops_file_and_masks_the_database_password(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    port = _closed_port()
+    database_url = f"postgresql://looper:Sekr1t-doctor-pw@127.0.0.1:{port}/loopx"
+    _ops_file(root, database_url)
+    env = _doctor_env(tmp_path, claude="logged_in", database_url="")
+    del env["LOOPER_DATABASE_URL"]
+
+    proc = _run_cli("doctor", "--runtime-root", str(root), cwd=tmp_path, env=env)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    line = _check_lines(proc.stdout)["PostgreSQL"]
+    assert line.startswith("fail")
+    assert f"postgresql://looper:***@127.0.0.1:{port}/loopx" in line
+    assert "Sekr1t-doctor-pw" not in proc.stdout + proc.stderr
+
+
 def _upstream(modules: list[str]) -> list[str]:
     return [name for name in modules if not ALLOWED_MODULE.fullmatch(name)]
 
 
 @pytest.mark.parametrize("flags", [True, False], ids=["flags", "defaults"])
 def test_serve_starts_the_agent_system_without_upstream_modules(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: bool
+    tmp_path: Path, flags: bool
 ) -> None:
-    monkeypatch.setenv("LOOPER_RUNTIME_ROOT", str(tmp_path / "env-root"))
     argv = ["serve"]
     if flags:
         argv += ["--host", "0.0.0.0", "--port", "9999", "--verbose", "--runtime-root", str(tmp_path / "flag-root"),
-                 "--skip-backup"]
+                 "--config", str(tmp_path / "custom.toml"), "--skip-backup"]
 
-    result, _, stderr = _run_looper(*argv, cwd=tmp_path)
+    env = _clean_env(tmp_path)
+    env["LOOPER_RUNTIME_ROOT"] = str(tmp_path / "env-root")
+    result, _, stderr = _run_looper(*argv, cwd=tmp_path, env=env)
 
     assert result["code"] == 0, stderr
     assert result["calls"] == [
         {
-            "host": "0.0.0.0" if flags else "127.0.0.1",
-            "port": "9999" if flags else "8767",
-            "runtime_root": str(tmp_path / ("flag-root" if flags else "env-root")),
+            "host": "0.0.0.0" if flags else "None",
+            "port": "9999" if flags else "None",
+            "runtime_root": str(tmp_path / "flag-root") if flags else "None",
+            "config": str(tmp_path / "custom.toml") if flags else "None",
             "work_dir": str(tmp_path.resolve()),
             "verbose": str(flags),
             "skip_backup": str(flags),
@@ -127,11 +239,11 @@ def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str], script: str
 )
 def test_config_loads_no_upstream_modules(tmp_path: Path, argv: list[str]) -> None:
     """``looper config`` reports a missing file or an unreachable database as an error line and exits 1."""
-    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
+    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
 
     result, _, stderr = _run_looper(*argv, cwd=tmp_path, env=env)
 
-    assert result["code"] == 1 and stderr.startswith("error: "), stderr
+    assert result["code"] == 1 and any(line.startswith("error: ") for line in stderr.splitlines()), stderr
     assert not (tmp_path / "out.json").exists()
     assert not _upstream(result["modules"])
 
@@ -141,13 +253,14 @@ def test_config_export_with_secrets_names_every_kind_of_secret_it_writes(tmp_pat
 
     The warning comes before the database is read, so an unreachable one still shows it.
     """
-    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
+    env = {**_clean_env(tmp_path), "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
     kinds = ("LLM provider API keys", "MCP environment and header values", "channel secrets")
 
     result, _, stderr = _run_looper("config", "export", "out.json", "--include-secrets", cwd=tmp_path, env=env)
-    warning, _, rest = stderr.partition("\n")
-    assert result["code"] == 1 and rest.startswith("error: "), stderr
-    assert warning.startswith("warning: out.json will hold secrets") and all(k in warning for k in kinds), warning
+    lines = stderr.splitlines()
+    warning = next(line for line in lines if line.startswith("warning: out.json will hold secrets"))
+    assert result["code"] == 1 and lines[-1].startswith("error: "), stderr
+    assert all(k in warning for k in kinds), warning
 
     result, output, stderr = _run_looper("config", "export", "--help", cwd=tmp_path)
     assert result["code"] == 0, stderr
@@ -157,7 +270,7 @@ def test_config_export_with_secrets_names_every_kind_of_secret_it_writes(tmp_pat
 
 
 def test_service_status_loads_no_upstream_modules(tmp_path: Path) -> None:
-    """``looper service status`` asks the real service manager (read-only) about a label never installed."""
+    """The status CLI routes to a stand-in manager reporting a label never installed."""
     result, output, stderr = _run_looper("service", "status", "--label", "com.looper.serve.never-installed", cwd=tmp_path)
 
     assert result["code"] == 1, stderr
@@ -198,9 +311,13 @@ def _doctor_env(tmp_path: Path, *, claude: str | None, database_url: str) -> dic
         stub = bin_dir / "claude"
         stub.write_text(_STUB_CLAUDE.format(calls=tmp_path / "calls", state=claude))
         stub.chmod(0o755)
-    env = {key: value for key, value in os.environ.items()
-           if key.removeprefix("LOOPER_").removeprefix("LOOPX_") not in ("PG_DUMP", "BACKUP_CMD", "DATABASE_URL")}
-    return {**env, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin", "LOOPER_DATABASE_URL": database_url}
+    # doctor also checks the optional service; never invoke the actual service manager.
+    for name in ("launchctl", "systemctl"):
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\nexit 1\n")
+        stub.chmod(0o755)
+    return {**_clean_env(tmp_path), "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "LOOPER_DATABASE_URL": database_url}
 
 
 def _closed_port() -> int:
@@ -226,7 +343,7 @@ def test_the_database_url_from_before_the_rename_still_works_with_a_warning(tmp_
 
     assert result["code"] == 1, stderr
     assert f"cannot connect to postgresql://127.0.0.1:{port}/loopx" in _check_lines(output)["PostgreSQL"]
-    assert stderr.count("LOOPX_DATABASE_URL is deprecated: rename it to LOOPER_DATABASE_URL") == 1, stderr
+    assert stderr.count("LOOPX_DATABASE_URL in the environment is deprecated: set database.url") == 1, stderr
 
 
 def test_doctor_shows_an_unreachable_database_masked_with_its_fix(tmp_path: Path) -> None:
@@ -240,7 +357,7 @@ def test_doctor_shows_an_unreachable_database_masked_with_its_fix(tmp_path: Path
     assert lines["PostgreSQL"].startswith("fail")
     assert f"postgresql://looper:***@127.0.0.1:{port}/loopx" in lines["PostgreSQL"]
     assert "s3cret-pw" not in output + stderr
-    assert "docker run" in output and "export LOOPER_DATABASE_URL=" in output
+    assert "docker run" in output and "looper config init-ops" in output and "[database]" in output
     assert lines["Claude Code CLI"].startswith("ok") and lines["Claude login"].startswith("ok")
     # Whether Lark is enabled is in the database, so it is not checked.
     assert lines["Lark channel"].startswith("skip")
