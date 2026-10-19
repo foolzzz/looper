@@ -198,7 +198,7 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 
 ### HTTP API
 
-API 只响应操作者：在这台机器的浏览器中打开控制台会自动登录（其他地方的浏览器用 `looper login-link` 给出的链接登录），其他客户端需发送 `<runtime root>/operator-token` 中的令牌。主要的路由分组：
+API 只响应操作者：在这台机器的浏览器中打开控制台会自动登录（其他地方的浏览器用 `looper auth set-password` 设置的账号和密码登录），其他客户端需发送 `<runtime root>/operator-token` 中的令牌。主要的路由分组：
 
 | 分组 | 接口 | 用途 |
 |---|---|---|
