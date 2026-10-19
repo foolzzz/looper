@@ -80,6 +80,38 @@ def test_a_gate_step_parses_with_its_agenda_numbered_and_no_criteria_or_review()
     assert plan.steps[0].gate is None and plan.steps[2].depends_on == ("g1",)
 
 
+@pytest.mark.parametrize("explicit_ids", [(True, True), (True, False), (False, True)])
+def test_a_new_gate_accepts_only_its_assigned_item_ids_without_changing_the_agenda(
+    explicit_ids: tuple[bool, bool],
+) -> None:
+    step = _gate()
+    for i, explicit in enumerate(explicit_ids):
+        if explicit:
+            step["agenda"][i]["id"] = f"q{i + 1}"
+
+    plan = parse_plan(_reply({"steps": [step]}), gate_policy=GatePolicy.ALLOWED)
+    without_ids = parse_plan(_reply({"steps": [_gate()]}), gate_policy=GatePolicy.ALLOWED)
+
+    assert plan == without_ids
+    assert plan.steps[0].gate is not None and plan.steps[0].gate.agenda == AGENDA
+
+
+@pytest.mark.parametrize(("index", "item_id"), [
+    (0, "q2"), (0, "x"), (1, "q1"), (0, ""), (0, None), (0, 1),
+])
+def test_a_new_gate_refuses_item_ids_other_than_the_assigned_id(index: int, item_id: Any) -> None:
+    step = _gate()
+    step["agenda"][index]["id"] = item_id
+
+    with pytest.raises(ProtocolError) as refused:
+        parse_plan(_reply({"steps": [step]}), gate_policy=GatePolicy.ALLOWED)
+
+    assert str(refused.value) == (
+        f'steps[0].agenda[{index}].id must be "q{index + 1}" or left out: '
+        "Looper numbers new items q1, q2, …"
+    )
+
+
 @pytest.mark.parametrize(("policy", "reason"), [
     (GatePolicy.OFF, "this project does not let you open gates (user_gates is off)"),
     (GatePolicy.UNATTENDED, "this task runs unattended (a schedule started it), so it cannot wait for the user"),
