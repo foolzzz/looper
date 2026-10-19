@@ -109,6 +109,13 @@ describe("session ended screen and sign out", () => {
     vi.useFakeTimers();
     window.location.hash = "#dashboard";
     installSessionGuard();
+    // Count at the wrapper: a poller the guard rejects without a request would still show up here.
+    const guarded = window.fetch;
+    const wrapperCalls: string[] = [];
+    window.fetch = (input, init) => {
+      wrapperCalls.push(String(input instanceof Request ? input.url : input));
+      return guarded(input, init);
+    };
     await act(async () => root.render(<App />));
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
     expect(calls.length).toBeGreaterThan(0);
@@ -121,8 +128,10 @@ describe("session ended screen and sign out", () => {
     expect(container.querySelector("aside")).toBeNull();
 
     const before = calls.length;
+    const wrapperBefore = wrapperCalls.length;
     await act(async () => vi.advanceTimersByTimeAsync(60_000));
     expect(calls).toHaveLength(before);
+    expect(wrapperCalls).toHaveLength(wrapperBefore);
     expect(container.textContent).not.toContain("Connection failed");
   });
 
