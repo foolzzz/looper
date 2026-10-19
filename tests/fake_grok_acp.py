@@ -9,6 +9,7 @@ chosen by its text (the stand-in is told, not guessed):
 - ``ORPHAN``: starts a long ``sleep`` that inherits stdout, then dies;
 - ``HANG``: thinks, then waits for ``session/cancel`` and ends with ``cancelled``;
 - ``CRASH``: streams a chunk, then dies;
+- ``BADRESP``: responses to the prompt with neither ``result`` nor ``error``, or both, then the answer;
 - ``GARBAGE``: lines that are not JSON objects between the notifications;
 - ``ASK``: asks the client for a permission (a request of the agent's own) and answers with the outcome;
 - ``ERROR``: answers ``session/prompt`` with a JSON-RPC error;
@@ -72,6 +73,9 @@ def prompt(request, text):
     if 'ERROR' in text:
         out({'id': request, 'error': {'code': -32603, 'message': 'model unavailable'}})
         return
+    if 'BADRESP' in text:  # responses that are neither a result nor an error, or both, before the real one
+        print(json.dumps({'jsonrpc': '2.0', 'id': request}), flush=True)
+        print(json.dumps({'jsonrpc': '2.0', 'id': request, 'result': {'stopReason': 'end_turn'}, 'error': {'code': 1}}), flush=True)
     if 'GARBAGE' in text:
         print('this is not json', flush=True)
         print('[1, 2, 3]', flush=True)
@@ -143,7 +147,7 @@ for line in sys.stdin:
         if os.environ.get('FAKE_ACP_SILENT'):
             time.sleep(600)
         capabilities = {} if os.environ.get('FAKE_ACP_NO_LOAD') else {'loadSession': True}
-        out({'id': request, 'result': {'protocolVersion': int(os.environ.get('FAKE_ACP_PROTOCOL', 1)), 'agentCapabilities': capabilities}})
+        out({'id': request, 'result': {'protocolVersion': (True if os.environ.get('FAKE_ACP_PROTOCOL') == 'true' else int(os.environ.get('FAKE_ACP_PROTOCOL', 1))), 'agentCapabilities': capabilities}})
     elif method == 'session/new':
         os.makedirs(group, exist_ok=True)
         state['session'] = '0199a000-0000-7000-8000-%012d' % (len(os.listdir(group)) + 1)
@@ -153,7 +157,7 @@ for line in sys.stdin:
         session = message['params']['sessionId']
         path = os.path.join(group, session, 'summary.json')
         if os.environ.get('FAKE_ACP_LOAD_ERROR'):
-            out({'id': request, 'error': {'code': -32000, 'message': 'busy, try later'}})
+            out({'id': request, 'error': {'code': -32000, 'message': 'SECRET-LOAD-TEXT busy'}})
             continue
         if not os.path.exists(path):
             out({'id': request, 'error': {'code': -32603, 'message': 'Path not found.', 'data': {'code': 'FS_NOT_FOUND'}}})

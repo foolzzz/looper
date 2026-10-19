@@ -81,8 +81,9 @@ class AcpError(Exception):
     """A JSON-RPC error response."""
 
     def __init__(self, method: str, error: Any) -> None:
-        detail = error.get("message") if isinstance(error, Mapping) else error
-        super().__init__(f"{method}: {detail}")
+        # Only the code reaches a message or a log: Grok's text may hold paths and values.
+        code = error.get("code") if isinstance(error, Mapping) else None
+        super().__init__(f"{method} failed (code {code if isinstance(code, int) else 'unknown'})")
         self.error = error
 
 
@@ -551,7 +552,11 @@ class AcpGrok:
 
     async def _route(self, message: dict[str, Any]) -> None:
         method, ident = message.get("method"), message.get("id")
-        if method is None:  # a response
+        if method is None:  # a response: exactly one of result and error
+            if ("result" in message) == ("error" in message):
+                logger.warning("%s: Grok wrote a response with %s", self._label,
+                               "both result and error" if "result" in message else "neither")
+                return
             if self._prompt_id is not None and ident == self._prompt_id:
                 self._inbox.put_nowait(message)
             elif isinstance(ident, int) and (future := self._pending.get(ident)) is not None and not future.done():
@@ -585,7 +590,8 @@ class AcpGrok:
             except (AcpError, ConnectionError, TimeoutError) as exc:
                 raise AcpUnavailable(f"initialize failed: {exc or type(exc).__name__}{await self._stderr_note()}") \
                     from None
-            if not isinstance(init, Mapping) or init.get("protocolVersion") != PROTOCOL_VERSION:
+            if not isinstance(init, Mapping) or type(init.get("protocolVersion")) is not int \
+                    or init.get("protocolVersion") != PROTOCOL_VERSION:
                 raise AcpUnavailable("Grok does not speak ACP protocol version " + str(PROTOCOL_VERSION))
             capabilities = init.get("agentCapabilities") if isinstance(init, Mapping) else None
             self._can_load = bool(isinstance(capabilities, Mapping) and capabilities.get("loadSession"))

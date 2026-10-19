@@ -427,6 +427,22 @@ def test_lines_that_are_not_jsonrpc_messages_are_skipped(
     assert "this is not json" not in caplog.text
 
 
+def test_a_response_with_neither_or_both_of_result_and_error_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> Any:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        (turn,) = await _turns(session, "BADRESP")
+        await session.stop()
+        return turn
+
+    assert _go(_run()).result_event["result"].endswith("| BADRESP | turn 1")
+
+
 def test_a_permission_request_is_refused_and_the_turn_goes_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _operator(tmp_path, monkeypatch)
     root, grok = tmp_path / "runtime", _fake(tmp_path)
@@ -533,9 +549,10 @@ def test_a_saved_session_needs_loadsession_or_the_session_goes_on_per_turn(
     assert one.result_event["result"] == "prompt A | hello | turn 1"
 
 
-@pytest.mark.parametrize("variable", ["FAKE_ACP_LOAD_ERROR", "FAKE_ACP_PROTOCOL"])
+@pytest.mark.parametrize("variable,value", [("FAKE_ACP_LOAD_ERROR", "1"), ("FAKE_ACP_PROTOCOL", "2"),
+                                            ("FAKE_ACP_PROTOCOL", "true")])
 def test_a_load_error_that_is_not_a_missing_session_or_another_protocol_goes_on_per_turn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, variable: str, value: str,
 ) -> None:
     _operator(tmp_path, monkeypatch)
     root, grok = tmp_path / "runtime", _fake_with_headless(tmp_path)
@@ -546,7 +563,7 @@ def test_a_load_error_that_is_not_a_missing_session_or_another_protocol_goes_on_
         await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=_launch().environment())
         await _turns(session, "hello", events=events)
         await session.stop()
-        env = {**_launch().environment(), variable: "2" if variable == "FAKE_ACP_PROTOCOL" else "1"}
+        env = {**_launch().environment(), variable: value}
         command = _command(root, grok) + GROK.resume_args(events.seen[0]["session_id"])
         await session.start(command, cwd=str(tmp_path), signature="s", env=env)
         (two,) = await _turns(session, "again")
@@ -557,6 +574,7 @@ def test_a_load_error_that_is_not_a_missing_session_or_another_protocol_goes_on_
     two, transport = _go(_run())
     # The session is not discarded: the per-turn path resumes it.
     assert transport == "per-turn" and two.result_event["result"] == "prompt A | again | turn 2"
+    assert "SECRET-LOAD-TEXT" not in caplog.text  # Grok's error text is not logged, only its code
 
 
 def test_a_grok_that_does_not_answer_initialize_is_given_up_on(
