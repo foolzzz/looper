@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	relversion "github.com/foolzzz/looper/go/internal/version"
 )
 
 func TestRun(t *testing.T) {
@@ -70,6 +72,42 @@ func TestVersionLdflags(t *testing.T) {
 	}
 	if string(got) != "looper-go 0.0.1\n" {
 		t.Fatalf("stdout %q", got)
+	}
+}
+
+func TestReleaseConstantIsLinked(t *testing.T) {
+	if linkedReleaseVersion != relversion.Version {
+		t.Fatalf("linked %q, constant %q", linkedReleaseVersion, relversion.Version)
+	}
+	if linkedReleaseVersion == "" || linkedReleaseVersion == "dev" {
+		t.Fatalf("release version %q", linkedReleaseVersion)
+	}
+}
+
+func TestReleaseLdflags(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "looper")
+	// Same -ldflags the release workflow passes. The printed version is main.version.
+	// The internal symbol has to be linked or the linker ignores its -X flag.
+	const ldflags = "-X main.version=0.0.1 -X github.com/foolzzz/looper/go/internal/version.Version=7.7.7"
+	cmd := exec.Command("go", "build", "-o", bin, "-ldflags="+ldflags, ".")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOTOOLCHAIN=local")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	got, err := exec.Command(bin, "version").Output()
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	if string(got) != "looper-go 0.0.1\n" {
+		t.Fatalf("stdout %q", got)
+	}
+	nm, err := exec.Command("go", "tool", "nm", bin).Output()
+	if err != nil {
+		t.Fatalf("nm: %v", err)
+	}
+	if !strings.Contains(string(nm), "github.com/foolzzz/looper/go/internal/version.Version") {
+		t.Fatal("internal/version.Version is not in the binary")
 	}
 }
 
