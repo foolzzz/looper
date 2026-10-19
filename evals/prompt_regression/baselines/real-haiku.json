@@ -4,9 +4,9 @@
   "model": "haiku",
   "agent": "claude-code/haiku",
   "provider_preset": null,
-  "started_at": "20261018T160014Z",
+  "started_at": "20261019T045707Z",
   "git": {
-    "commit": "3ca041201d15ebbe54814a39e2d6aa784e4b6686",
+    "commit": "c9ac42d5c562306259203790cb23766d9abed34f",
     "dirty": false
   },
   "caps": {
@@ -18,7 +18,7 @@
   "reps": 3,
   "stopped_by_cap": false,
   "aborted": null,
-  "total_cost_usd": 12.323596,
+  "total_cost_usd": 12.295452,
   "tasks": [
     {
       "id": "single_step",
@@ -75,10 +75,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.04993,
+      "cost_usd": 0.049146,
       "cost_by_role": {
-        "planner": 0.028001,
-        "worker": 0.021929,
+        "planner": 0.026493,
+        "worker": 0.022653,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -93,9 +93,9 @@
       },
       "tokens": {
         "input": 46,
-        "output": 1756,
-        "cache_read": 88920,
-        "cache_creation": 16106
+        "output": 1669,
+        "cache_read": 88996,
+        "cache_creation": 15928
       },
       "cost_basis": {
         "equivalent": 3,
@@ -112,7 +112,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 33.2,
+      "duration_s": 23.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/single_step/1",
@@ -174,10 +174,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.090413,
+      "cost_usd": 0.086574,
       "cost_by_role": {
-        "planner": 0.038448,
-        "worker": 0.051965,
+        "planner": 0.039793,
+        "worker": 0.046781,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -191,10 +191,10 @@
         ]
       },
       "tokens": {
-        "input": 98,
-        "output": 3906,
-        "cache_read": 209875,
-        "cache_creation": 24899
+        "input": 90,
+        "output": 3646,
+        "cache_read": 189198,
+        "cache_creation": 24667
       },
       "cost_basis": {
         "equivalent": 5,
@@ -211,7 +211,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.8,
+      "duration_s": 43.7,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/dependent_steps/1",
@@ -273,10 +273,10 @@
         "plan": 1,
         "decision": 9
       },
-      "cost_usd": 0.330393,
+      "cost_usd": 0.291894,
       "cost_by_role": {
-        "planner": 0.102153,
-        "worker": 0.22824,
+        "planner": 0.085746,
+        "worker": 0.206148,
         "reviewer": 0.0
       },
       "runs": 19,
@@ -290,10 +290,10 @@
         ]
       },
       "tokens": {
-        "input": 366,
-        "output": 13619,
-        "cache_read": 847040,
-        "cache_creation": 88614
+        "input": 334,
+        "output": 10358,
+        "cache_read": 748745,
+        "cache_creation": 82448
       },
       "cost_basis": {
         "equivalent": 19,
@@ -310,7 +310,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 179.3,
+      "duration_s": 141.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/many_steps/1",
@@ -372,10 +372,10 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.140943,
+      "cost_usd": 0.13561,
       "cost_by_role": {
-        "planner": 0.049203,
-        "worker": 0.09174,
+        "planner": 0.048417,
+        "worker": 0.087193,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -389,10 +389,10 @@
         ]
       },
       "tokens": {
-        "input": 158,
-        "output": 6921,
-        "cache_read": 355896,
-        "cache_creation": 35295
+        "input": 142,
+        "output": 6753,
+        "cache_read": 313673,
+        "cache_creation": 35168
       },
       "cost_basis": {
         "equivalent": 7,
@@ -409,7 +409,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 74.3,
+      "duration_s": 62.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/parallel_parts/1",
@@ -425,7 +425,7 @@
         "bracketed_pairs 0 < 1",
         "parallel_workers 1 < 2"
       ],
-      "steps": 2,
+      "steps": 3,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
@@ -433,7 +433,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 3,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -472,15 +472,15 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 2
+        "decision": 3
       },
-      "cost_usd": 0.127697,
+      "cost_usd": 0.177683,
       "cost_by_role": {
-        "planner": 0.048023,
-        "worker": 0.079674,
+        "planner": 0.049623,
+        "worker": 0.12806,
         "reviewer": 0.0
       },
-      "runs": 5,
+      "runs": 7,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -491,13 +491,13 @@
         ]
       },
       "tokens": {
-        "input": 130,
-        "output": 7558,
-        "cache_read": 303477,
-        "cache_creation": 29715
+        "input": 222,
+        "output": 8750,
+        "cache_read": 536418,
+        "cache_creation": 40035
       },
       "cost_basis": {
-        "equivalent": 5,
+        "equivalent": 7,
         "provider_price": 0,
         "unpriced": 0
       },
@@ -511,7 +511,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 89.0,
+      "duration_s": 103.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/interface_first/1",
@@ -573,11 +573,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.082942,
+      "cost_usd": 0.076654,
       "cost_by_role": {
-        "planner": 0.039356,
-        "worker": 0.023485,
-        "reviewer": 0.020101
+        "planner": 0.036799,
+        "worker": 0.02037,
+        "reviewer": 0.019485
       },
       "runs": 5,
       "run_errors": 0,
@@ -593,10 +593,10 @@
         ]
       },
       "tokens": {
-        "input": 82,
-        "output": 3647,
-        "cache_read": 168674,
-        "cache_creation": 23879
+        "input": 74,
+        "output": 3032,
+        "cache_read": 147622,
+        "cache_creation": 23329
       },
       "cost_basis": {
         "equivalent": 5,
@@ -613,7 +613,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 47.8,
+      "duration_s": 41.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewed_step/1",
@@ -675,10 +675,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.104458,
+      "cost_usd": 0.108807,
       "cost_by_role": {
-        "planner": 0.046087,
-        "worker": 0.058371,
+        "planner": 0.049445,
+        "worker": 0.059362,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -692,10 +692,10 @@
         ]
       },
       "tokens": {
-        "input": 106,
-        "output": 5385,
-        "cache_read": 235427,
-        "cache_creation": 26942
+        "input": 122,
+        "output": 5337,
+        "cache_read": 278140,
+        "cache_creation": 27093
       },
       "cost_basis": {
         "equivalent": 5,
@@ -712,7 +712,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 68.5,
+      "duration_s": 66.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/retry_after_failure/1",
@@ -775,10 +775,10 @@
         "chat": 1,
         "decision": 1
       },
-      "cost_usd": 0.06196,
+      "cost_usd": 0.062698,
       "cost_by_role": {
-        "planner": 0.031919,
-        "worker": 0.030041,
+        "planner": 0.035874,
+        "worker": 0.026824,
         "reviewer": 0.0
       },
       "runs": 4,
@@ -793,9 +793,9 @@
       },
       "tokens": {
         "input": 72,
-        "output": 2379,
-        "cache_read": 153263,
-        "cache_creation": 17333
+        "output": 2435,
+        "cache_read": 154862,
+        "cache_creation": 17482
       },
       "cost_basis": {
         "equivalent": 4,
@@ -812,7 +812,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 27.1,
+      "duration_s": 29.2,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/chat_correction/1",
@@ -875,10 +875,10 @@
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.090585,
+      "cost_usd": 0.093749,
       "cost_by_role": {
-        "planner": 0.041758,
-        "worker": 0.048827,
+        "planner": 0.043977,
+        "worker": 0.049772,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -893,9 +893,9 @@
       },
       "tokens": {
         "input": 100,
-        "output": 3720,
-        "cache_read": 210771,
-        "cache_creation": 25404
+        "output": 4249,
+        "cache_read": 211037,
+        "cache_creation": 25650
       },
       "cost_basis": {
         "equivalent": 6,
@@ -912,7 +912,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 61.9,
+      "duration_s": 64.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/supplement_replan/1",
@@ -972,16 +972,17 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
+        "repair": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.109088,
+      "cost_usd": 0.12041,
       "cost_by_role": {
-        "planner": 0.060417,
-        "worker": 0.048671,
+        "planner": 0.071082,
+        "worker": 0.049328,
         "reviewer": 0.0
       },
-      "runs": 6,
+      "runs": 7,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -992,27 +993,29 @@
         ]
       },
       "tokens": {
-        "input": 100,
-        "output": 4079,
-        "cache_read": 202354,
-        "cache_creation": 34179
+        "input": 118,
+        "output": 4710,
+        "cache_read": 247737,
+        "cache_creation": 35984
       },
       "cost_basis": {
-        "equivalent": 6,
+        "equivalent": 7,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 64.0,
+      "duration_s": 72.4,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/requirement_edit/1",
@@ -1075,10 +1078,10 @@
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.088738,
+      "cost_usd": 0.088708,
       "cost_by_role": {
-        "planner": 0.039242,
-        "worker": 0.049496,
+        "planner": 0.040136,
+        "worker": 0.048572,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -1093,9 +1096,9 @@
       },
       "tokens": {
         "input": 100,
-        "output": 3528,
-        "cache_read": 210540,
-        "cache_creation": 24972
+        "output": 3560,
+        "cache_read": 210324,
+        "cache_creation": 24888
       },
       "cost_basis": {
         "equivalent": 6,
@@ -1112,7 +1115,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 65.6,
+      "duration_s": 66.4,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/supplement_no_change/1",
@@ -1123,10 +1126,8 @@
       "id": "profile_choice",
       "rep": 1,
       "status": "completed",
-      "success": false,
-      "problems": [
-        "planner_profile_runs 0 < 1"
-      ],
+      "success": true,
+      "problems": [],
       "steps": 1,
       "reviews": 0,
       "retries": 0,
@@ -1137,7 +1138,7 @@
       "parallel_workers": 1,
       "progress_notes": 1,
       "final_summary": 1,
-      "planner_profile_runs": 0,
+      "planner_profile_runs": 1,
       "roles_defined": 0,
       "role_runs": 0,
       "role_profile_runs": 0,
@@ -1176,10 +1177,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.063319,
+      "cost_usd": 0.076383,
       "cost_by_role": {
-        "planner": 0.04015,
-        "worker": 0.023169,
+        "planner": 0.053312,
+        "worker": 0.023071,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -1193,10 +1194,10 @@
         ]
       },
       "tokens": {
-        "input": 74,
-        "output": 2451,
-        "cache_read": 157635,
-        "cache_creation": 17613
+        "input": 98,
+        "output": 3133,
+        "cache_read": 228993,
+        "cache_creation": 18860
       },
       "cost_basis": {
         "equivalent": 3,
@@ -1213,11 +1214,11 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 37.1,
+      "duration_s": 43.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/profile_choice/1",
-      "outcome": "fail",
+      "outcome": "pass",
       "user_gates": "on"
     },
     {
@@ -1239,7 +1240,7 @@
       "planner_profile_runs": 0,
       "roles_defined": 2,
       "role_runs": 2,
-      "role_profile_runs": 2,
+      "role_profile_runs": 1,
       "role_reviews": 0,
       "template_roles": 0,
       "role_prompt_mismatches": 0,
@@ -1273,15 +1274,16 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
+        "repair": 1,
         "decision": 3
       },
-      "cost_usd": 0.166664,
+      "cost_usd": 0.183573,
       "cost_by_role": {
-        "planner": 0.069088,
-        "worker": 0.097576,
+        "planner": 0.086106,
+        "worker": 0.097467,
         "reviewer": 0.0
       },
-      "runs": 7,
+      "runs": 8,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -1292,27 +1294,29 @@
         ]
       },
       "tokens": {
-        "input": 184,
-        "output": 8498,
-        "cache_read": 439714,
-        "cache_creation": 40009
+        "input": 212,
+        "output": 9693,
+        "cache_read": 520159,
+        "cache_creation": 41440
       },
       "cost_basis": {
-        "equivalent": 7,
+        "equivalent": 8,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (step s2: role 'tester' is not a role of this task (defined: none); define it with looper_task_role_set first, or leave it out); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 78.3,
+      "duration_s": 90.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_tester_docs/1",
@@ -1333,7 +1337,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 1,
+      "progress_notes": 2,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 1,
@@ -1369,16 +1373,16 @@
       "room_tool_calls": 0,
       "room_consults": 0,
       "room_consults_answered": 0,
-      "planner_denials": 0,
+      "planner_denials": 2,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.160618,
+      "cost_usd": 0.173556,
       "cost_by_role": {
-        "planner": 0.059587,
-        "worker": 0.043363,
-        "reviewer": 0.057668
+        "planner": 0.067744,
+        "worker": 0.043389,
+        "reviewer": 0.062423
       },
       "runs": 6,
       "run_errors": 0,
@@ -1394,10 +1398,10 @@
         ]
       },
       "tokens": {
-        "input": 168,
-        "output": 8913,
-        "cache_read": 392264,
-        "cache_creation": 38329
+        "input": 198,
+        "output": 9291,
+        "cache_read": 484039,
+        "cache_creation": 39250
       },
       "cost_basis": {
         "equivalent": 6,
@@ -1414,7 +1418,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 101.0,
+      "duration_s": 107.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_security_review/1",
@@ -1425,10 +1429,8 @@
       "id": "roles_advisory_review",
       "rep": 1,
       "status": "completed",
-      "success": false,
-      "problems": [
-        "advisory_role_fails 0 < 1"
-      ],
+      "success": true,
+      "problems": [],
       "steps": 1,
       "reviews": 2,
       "retries": 0,
@@ -1437,7 +1439,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 1,
+      "progress_notes": 2,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 1,
@@ -1450,7 +1452,7 @@
       "most_review_roles": 1,
       "gate_breaches": 0,
       "advisory_role_reviews": 1,
-      "advisory_role_fails": 0,
+      "advisory_role_fails": 1,
       "discipline_roles": 0,
       "interface_dependents": 0,
       "gates_opened": 0,
@@ -1478,11 +1480,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.149262,
+      "cost_usd": 0.161081,
       "cost_by_role": {
-        "planner": 0.050041,
-        "worker": 0.034338,
-        "reviewer": 0.064883
+        "planner": 0.070481,
+        "worker": 0.026073,
+        "reviewer": 0.064527
       },
       "runs": 6,
       "run_errors": 0,
@@ -1498,10 +1500,10 @@
         ]
       },
       "tokens": {
-        "input": 174,
-        "output": 7534,
-        "cache_read": 402191,
-        "cache_creation": 35600
+        "input": 206,
+        "output": 7016,
+        "cache_read": 491520,
+        "cache_creation": 38322
       },
       "cost_basis": {
         "equivalent": 6,
@@ -1518,11 +1520,11 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 95.1,
+      "duration_s": 101.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_advisory_review/1",
-      "outcome": "fail",
+      "outcome": "pass",
       "user_gates": "on"
     },
     {
@@ -1539,7 +1541,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 2,
@@ -1580,11 +1582,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.239484,
+      "cost_usd": 0.255396,
       "cost_by_role": {
-        "planner": 0.06388,
-        "worker": 0.041142,
-        "reviewer": 0.134462
+        "planner": 0.064451,
+        "worker": 0.049856,
+        "reviewer": 0.141089
       },
       "runs": 7,
       "run_errors": 0,
@@ -1600,10 +1602,10 @@
         ]
       },
       "tokens": {
-        "input": 264,
-        "output": 14765,
-        "cache_read": 645227,
-        "cache_creation": 50436
+        "input": 282,
+        "output": 16097,
+        "cache_read": 697287,
+        "cache_creation": 52450
       },
       "cost_basis": {
         "equivalent": 7,
@@ -1620,7 +1622,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 173.5,
+      "duration_s": 203.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_two_reviews/1",
@@ -1633,8 +1635,7 @@
       "status": "completed",
       "success": false,
       "problems": [
-        "discipline_roles 3 < 4",
-        "contract_violations 1 > 0"
+        "handle(/tip?day=3) answered 200 with ['tip']"
       ],
       "steps": 5,
       "reviews": 0,
@@ -1644,7 +1645,7 @@
       "independent_pairs": 6,
       "bracketed_pairs": 0,
       "parallel_workers": 4,
-      "progress_notes": 5,
+      "progress_notes": 4,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 4,
@@ -1658,7 +1659,7 @@
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
-      "discipline_roles": 3,
+      "discipline_roles": 4,
       "interface_dependents": 4,
       "gates_opened": 0,
       "gate_turns": 0,
@@ -1670,29 +1671,28 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
-      "room_messages": 1,
+      "room_messages": 0,
       "room_questions": 0,
       "room_unanswered": 0,
-      "room_interface": 1,
+      "room_interface": 0,
       "room_escalations": 0,
       "room_reminders": 0,
       "room_refused": 0,
-      "room_tool_calls": 4,
+      "room_tool_calls": 0,
       "room_consults": 0,
       "room_consults_answered": 0,
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "decision": 5
       },
-      "cost_usd": 0.523733,
+      "cost_usd": 0.398216,
       "cost_by_role": {
-        "planner": 0.159082,
-        "worker": 0.364651,
+        "planner": 0.1335,
+        "worker": 0.264716,
         "reviewer": 0.0
       },
-      "runs": 12,
+      "runs": 11,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -1703,29 +1703,27 @@
         ]
       },
       "tokens": {
-        "input": 602,
-        "output": 33297,
-        "cache_read": 1684020,
-        "cache_creation": 94122
+        "input": 428,
+        "output": 25206,
+        "cache_read": 1142125,
+        "cache_creation": 78773
       },
       "cost_basis": {
-        "equivalent": 12,
+        "equivalent": 11,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (step s2: role 'backend_rd' is not a role of this task (defined: none); define it with looper_task_role_set first, or leave it out); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 203.7,
+      "duration_s": 175.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_multi_platform/1",
@@ -1746,7 +1744,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 0,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 1,
@@ -1785,16 +1783,15 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "decision": 2
       },
-      "cost_usd": 0.16348,
+      "cost_usd": 0.145896,
       "cost_by_role": {
-        "planner": 0.062419,
-        "worker": 0.034997,
-        "reviewer": 0.066064
+        "planner": 0.050169,
+        "worker": 0.034213,
+        "reviewer": 0.061514
       },
-      "runs": 7,
+      "runs": 6,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -1808,29 +1805,27 @@
         ]
       },
       "tokens": {
-        "input": 192,
-        "output": 8489,
-        "cache_read": 457232,
-        "cache_creation": 37560
+        "input": 142,
+        "output": 8169,
+        "cache_read": 317602,
+        "cache_creation": 36574
       },
       "cost_basis": {
-        "equivalent": 7,
+        "equivalent": 6,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (step s1: review_roles 'security-review' is not a role of this task (defined: none); define it with looper_task_role_set first, or leave it out); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 121.0,
+      "duration_s": 112.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_template_fits/1",
@@ -1843,7 +1838,7 @@
       "status": "completed",
       "success": true,
       "problems": [],
-      "steps": 1,
+      "steps": 2,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
@@ -1851,7 +1846,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 1,
+      "progress_notes": 2,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -1890,15 +1885,16 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 1
+        "repair": 1,
+        "decision": 2
       },
-      "cost_usd": 0.054396,
+      "cost_usd": 0.095827,
       "cost_by_role": {
-        "planner": 0.029422,
-        "worker": 0.024974,
+        "planner": 0.048283,
+        "worker": 0.047544,
         "reviewer": 0.0
       },
-      "runs": 3,
+      "runs": 6,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -1909,27 +1905,29 @@
         ]
       },
       "tokens": {
-        "input": 46,
-        "output": 2035,
-        "cache_read": 90333,
-        "cache_creation": 17571
+        "input": 100,
+        "output": 4257,
+        "cache_read": 217321,
+        "cache_creation": 26355
       },
       "cost_basis": {
-        "equivalent": 3,
+        "equivalent": 6,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 26.9,
+      "duration_s": 67.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_template_unfit/1",
@@ -1991,10 +1989,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.051309,
+      "cost_usd": 0.055197,
       "cost_by_role": {
-        "planner": 0.028714,
-        "worker": 0.022595,
+        "planner": 0.032756,
+        "worker": 0.022441,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2008,10 +2006,10 @@
         ]
       },
       "tokens": {
-        "input": 46,
-        "output": 1713,
-        "cache_read": 89826,
-        "cache_creation": 16858
+        "input": 54,
+        "output": 1904,
+        "cache_read": 112866,
+        "cache_creation": 17168
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2028,7 +2026,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 34.7,
+      "duration_s": 32.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_not_needed/1",
@@ -2085,19 +2083,20 @@
       "room_tool_calls": 0,
       "room_consults": 0,
       "room_consults_answered": 0,
-      "planner_denials": 1,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
         "gate": 1,
+        "repair": 1,
         "decision": 1
       },
-      "cost_usd": 0.069652,
+      "cost_usd": 0.07017,
       "cost_by_role": {
-        "planner": 0.045415,
-        "worker": 0.024237,
+        "planner": 0.045551,
+        "worker": 0.024619,
         "reviewer": 0.0
       },
-      "runs": 4,
+      "runs": 5,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -2108,27 +2107,29 @@
         ]
       },
       "tokens": {
-        "input": 72,
-        "output": 3212,
-        "cache_read": 158719,
-        "cache_creation": 18824
+        "input": 74,
+        "output": 3366,
+        "cache_read": 159036,
+        "cache_creation": 18681
       },
       "cost_basis": {
-        "equivalent": 4,
+        "equivalent": 5,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the GATE contract (closing the gate needs \"summary\": {\"decisions\": [...], \"assumptions\": [...], \"open\": [...]}); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 45.7,
+      "duration_s": 50.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_ambiguous/1",
@@ -2190,10 +2191,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.048808,
+      "cost_usd": 0.053487,
       "cost_by_role": {
-        "planner": 0.026806,
-        "worker": 0.022002,
+        "planner": 0.031062,
+        "worker": 0.022425,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2207,10 +2208,10 @@
         ]
       },
       "tokens": {
-        "input": 46,
-        "output": 1604,
-        "cache_read": 88975,
-        "cache_creation": 15922
+        "input": 54,
+        "output": 1910,
+        "cache_read": 111234,
+        "cache_creation": 16380
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2227,7 +2228,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 30.9,
+      "duration_s": 30.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_not_needed/1",
@@ -2291,10 +2292,10 @@
         "gate": 1,
         "decision": 1
       },
-      "cost_usd": 0.079702,
+      "cost_usd": 0.078507,
       "cost_by_role": {
-        "planner": 0.055206,
-        "worker": 0.024496,
+        "planner": 0.053228,
+        "worker": 0.025279,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -2309,9 +2310,9 @@
       },
       "tokens": {
         "input": 82,
-        "output": 4325,
-        "cache_read": 183509,
-        "cache_creation": 19822
+        "output": 4127,
+        "cache_read": 182776,
+        "cache_creation": 19756
       },
       "cost_basis": {
         "equivalent": 5,
@@ -2330,7 +2331,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 51.8,
+      "duration_s": 53.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_end_early/1",
@@ -2390,17 +2391,16 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "gate": 1,
         "decision": 2
       },
-      "cost_usd": 0.118846,
+      "cost_usd": 0.107681,
       "cost_by_role": {
-        "planner": 0.064958,
-        "worker": 0.053888,
+        "planner": 0.055892,
+        "worker": 0.051789,
         "reviewer": 0.0
       },
-      "runs": 7,
+      "runs": 6,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -2411,29 +2411,27 @@
         ]
       },
       "tokens": {
-        "input": 118,
-        "output": 6885,
-        "cache_read": 263073,
-        "cache_creation": 28998
+        "input": 108,
+        "output": 5660,
+        "cache_read": 237486,
+        "cache_creation": 27762
       },
       "cost_basis": {
-        "equivalent": 7,
+        "equivalent": 6,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (steps[0] is a gate and is missing depends_on); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 67.6,
+      "duration_s": 62.2,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_parallel_branch/1",
@@ -2495,10 +2493,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.05996,
+      "cost_usd": 0.06052,
       "cost_by_role": {
-        "planner": 0.033654,
-        "worker": 0.026306,
+        "planner": 0.034707,
+        "worker": 0.025813,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2513,9 +2511,9 @@
       },
       "tokens": {
         "input": 70,
-        "output": 2123,
-        "cache_read": 154428,
-        "cache_creation": 16916
+        "output": 2194,
+        "cache_read": 154357,
+        "cache_creation": 17022
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2532,7 +2530,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 30.9,
+      "duration_s": 31.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_discoverable/1",
@@ -2594,10 +2592,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.060391,
+      "cost_usd": 0.057804,
       "cost_by_role": {
-        "planner": 0.037087,
-        "worker": 0.023304,
+        "planner": 0.035607,
+        "worker": 0.022197,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2612,9 +2610,9 @@
       },
       "tokens": {
         "input": 62,
-        "output": 2413,
-        "cache_read": 135023,
-        "cache_creation": 17381
+        "output": 2115,
+        "cache_read": 134283,
+        "cache_creation": 16869
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2631,7 +2629,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 31.2,
+      "duration_s": 29.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/operator_notes/1",
@@ -2693,10 +2691,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.067337,
+      "cost_usd": 0.075466,
       "cost_by_role": {
-        "planner": 0.044219,
-        "worker": 0.023118,
+        "planner": 0.048149,
+        "worker": 0.027317,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -2710,10 +2708,10 @@
         ]
       },
       "tokens": {
-        "input": 78,
-        "output": 2677,
-        "cache_read": 181144,
-        "cache_creation": 17880
+        "input": 102,
+        "output": 2846,
+        "cache_read": 246995,
+        "cache_creation": 18217
       },
       "cost_basis": {
         "equivalent": 3,
@@ -2730,7 +2728,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 36.9,
+      "duration_s": 39.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/operator_notes_stale/1",
@@ -2743,7 +2741,7 @@
       "status": "completed",
       "success": true,
       "problems": [],
-      "steps": 3,
+      "steps": 2,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
@@ -2751,7 +2749,7 @@
       "independent_pairs": 1,
       "bracketed_pairs": 0,
       "parallel_workers": 2,
-      "progress_notes": 3,
+      "progress_notes": 2,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -2783,22 +2781,22 @@
       "room_interface": 1,
       "room_escalations": 0,
       "room_reminders": 1,
-      "room_refused": 0,
-      "room_tool_calls": 3,
+      "room_refused": 1,
+      "room_tool_calls": 6,
       "room_consults": 0,
       "room_consults_answered": 0,
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 3
+        "decision": 2
       },
-      "cost_usd": 0.330553,
+      "cost_usd": 0.19988,
       "cost_by_role": {
-        "planner": 0.057441,
-        "worker": 0.273112,
+        "planner": 0.050666,
+        "worker": 0.149214,
         "reviewer": 0.0
       },
-      "runs": 7,
+      "runs": 5,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -2809,13 +2807,13 @@
         ]
       },
       "tokens": {
-        "input": 442,
-        "output": 17047,
-        "cache_read": 1340958,
-        "cache_creation": 55390
+        "input": 264,
+        "output": 11153,
+        "cache_read": 690892,
+        "cache_creation": 37381
       },
       "cost_basis": {
-        "equivalent": 7,
+        "equivalent": 5,
         "provider_price": 0,
         "unpriced": 0
       },
@@ -2833,7 +2831,7 @@
         "merges": 2,
         "checkpoints": 0
       },
-      "duration_s": 163.0,
+      "duration_s": 90.9,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_interface/1",
@@ -2856,7 +2854,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -2882,14 +2880,14 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
-      "room_messages": 0,
+      "room_messages": 1,
       "room_questions": 0,
       "room_unanswered": 0,
       "room_interface": 0,
       "room_escalations": 0,
       "room_reminders": 0,
-      "room_refused": 0,
-      "room_tool_calls": 0,
+      "room_refused": 1,
+      "room_tool_calls": 2,
       "room_consults": 0,
       "room_consults_answered": 0,
       "planner_denials": 0,
@@ -2897,10 +2895,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.102345,
+      "cost_usd": 0.13437,
       "cost_by_role": {
-        "planner": 0.044536,
-        "worker": 0.057809,
+        "planner": 0.056295,
+        "worker": 0.078075,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -2914,10 +2912,10 @@
         ]
       },
       "tokens": {
-        "input": 98,
-        "output": 5362,
-        "cache_read": 212431,
-        "cache_creation": 27097
+        "input": 132,
+        "output": 8519,
+        "cache_read": 301392,
+        "cache_creation": 30752
       },
       "cost_basis": {
         "equivalent": 5,
@@ -2934,7 +2932,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 61.8,
+      "duration_s": 86.9,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_consult/1",
@@ -2996,10 +2994,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.052857,
+      "cost_usd": 0.052646,
       "cost_by_role": {
-        "planner": 0.03035,
-        "worker": 0.022507,
+        "planner": 0.030125,
+        "worker": 0.022521,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -3014,9 +3012,9 @@
       },
       "tokens": {
         "input": 54,
-        "output": 1830,
-        "cache_read": 111148,
-        "cache_creation": 16269
+        "output": 1803,
+        "cache_read": 111092,
+        "cache_creation": 16234
       },
       "cost_basis": {
         "equivalent": 3,
@@ -3033,7 +3031,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 26.9,
+      "duration_s": 25.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_quiet/1",
@@ -3095,10 +3093,10 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.117757,
+      "cost_usd": 0.120718,
       "cost_by_role": {
-        "planner": 0.045989,
-        "worker": 0.071768,
+        "planner": 0.049984,
+        "worker": 0.070734,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -3113,9 +3111,9 @@
       },
       "tokens": {
         "input": 118,
-        "output": 5354,
-        "cache_read": 246597,
-        "cache_creation": 33105
+        "output": 5743,
+        "cache_read": 247802,
+        "cache_creation": 33552
       },
       "cost_basis": {
         "equivalent": 7,
@@ -3132,7 +3130,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 49.3,
+      "duration_s": 55.9,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/planner_plan_file/1",
@@ -3194,11 +3192,11 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.034995,
+      "cost_usd": 0.031341,
       "cost_by_role": {
         "planner": 0.004,
         "worker": 0.004,
-        "reviewer": 0.026995
+        "reviewer": 0.023341
       },
       "runs": 7,
       "run_errors": 1,
@@ -3214,10 +3212,10 @@
         ]
       },
       "tokens": {
-        "input": 86,
-        "output": 1543,
-        "cache_read": 54258,
-        "cache_creation": 7064
+        "input": 78,
+        "output": 1417,
+        "cache_read": 33699,
+        "cache_creation": 6584
       },
       "cost_basis": {
         "equivalent": 7,
@@ -3234,7 +3232,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 18.5,
+      "duration_s": 16.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewer_retry_note/1",
@@ -3296,11 +3294,11 @@
         "plan": 1,
         "decision": 5
       },
-      "cost_usd": 0.066908,
+      "cost_usd": 0.07282,
       "cost_by_role": {
         "planner": 0.006,
         "worker": 0.006,
-        "reviewer": 0.054908
+        "reviewer": 0.06082
       },
       "runs": 11,
       "run_errors": 1,
@@ -3316,10 +3314,10 @@
         ]
       },
       "tokens": {
-        "input": 142,
-        "output": 3280,
-        "cache_read": 108418,
-        "cache_creation": 14032
+        "input": 158,
+        "output": 3361,
+        "cache_read": 149714,
+        "cache_creation": 14713
       },
       "cost_basis": {
         "equivalent": 11,
@@ -3336,10 +3334,214 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 39.0,
+      "duration_s": 41.4,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewer_unrelated_note/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "reviewer_elsewhere",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.039107,
+      "cost_by_role": {
+        "planner": 0.003,
+        "worker": 0.002,
+        "reviewer": 0.034107
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "fake"
+        ],
+        "worker": [
+          "fake"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 82,
+        "output": 1761,
+        "cache_read": 97403,
+        "cache_creation": 7860
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 22.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/reviewer_elsewhere/1",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "reviewer_elsewhere_wrong",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 1,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 4,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 4
+      },
+      "cost_usd": 0.067068,
+      "cost_by_role": {
+        "planner": 0.005,
+        "worker": 0.004,
+        "reviewer": 0.058068
+      },
+      "runs": 9,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "fake"
+        ],
+        "worker": [
+          "fake"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 130,
+        "output": 3048,
+        "cache_read": 131775,
+        "cache_creation": 14970
+      },
+      "cost_basis": {
+        "equivalent": 9,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 37.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/reviewer_elsewhere_wrong/1",
       "outcome": "pass",
       "user_gates": "on"
     },
@@ -3398,10 +3600,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.050238,
+      "cost_usd": 0.049631,
       "cost_by_role": {
-        "planner": 0.027435,
-        "worker": 0.022803,
+        "planner": 0.027277,
+        "worker": 0.022354,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -3416,9 +3618,9 @@
       },
       "tokens": {
         "input": 46,
-        "output": 1812,
-        "cache_read": 89066,
-        "cache_creation": 16113
+        "output": 1742,
+        "cache_read": 88972,
+        "cache_creation": 15989
       },
       "cost_basis": {
         "equivalent": 3,
@@ -3435,7 +3637,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 24.8,
+      "duration_s": 22.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/single_step/2",
@@ -3497,10 +3699,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.085514,
+      "cost_usd": 0.087027,
       "cost_by_role": {
-        "planner": 0.034248,
-        "worker": 0.051266,
+        "planner": 0.036622,
+        "worker": 0.050405,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -3514,10 +3716,10 @@
         ]
       },
       "tokens": {
-        "input": 90,
-        "output": 3554,
-        "cache_read": 187375,
-        "cache_creation": 24458
+        "input": 98,
+        "output": 3353,
+        "cache_read": 209412,
+        "cache_creation": 24611
       },
       "cost_basis": {
         "equivalent": 5,
@@ -3534,7 +3736,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 43.2,
+      "duration_s": 45.4,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/dependent_steps/2",
@@ -3594,15 +3796,16 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
+        "repair": 1,
         "decision": 9
       },
-      "cost_usd": 0.308193,
+      "cost_usd": 0.303321,
       "cost_by_role": {
-        "planner": 0.092333,
-        "worker": 0.21586,
+        "planner": 0.094969,
+        "worker": 0.208352,
         "reviewer": 0.0
       },
-      "runs": 19,
+      "runs": 20,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -3613,27 +3816,29 @@
         ]
       },
       "tokens": {
-        "input": 342,
-        "output": 11779,
-        "cache_read": 778937,
-        "cache_creation": 85531
+        "input": 352,
+        "output": 11567,
+        "cache_read": 798507,
+        "cache_creation": 82642
       },
       "cost_basis": {
-        "equivalent": 19,
+        "equivalent": 20,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 150.4,
+      "duration_s": 142.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/many_steps/2",
@@ -3693,16 +3898,15 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "decision": 3
       },
-      "cost_usd": 0.134598,
+      "cost_usd": 0.120287,
       "cost_by_role": {
-        "planner": 0.055139,
-        "worker": 0.079459,
+        "planner": 0.046855,
+        "worker": 0.073432,
         "reviewer": 0.0
       },
-      "runs": 8,
+      "runs": 7,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -3713,29 +3917,27 @@
         ]
       },
       "tokens": {
-        "input": 144,
-        "output": 6590,
-        "cache_read": 315821,
-        "cache_creation": 34961
+        "input": 126,
+        "output": 5220,
+        "cache_read": 269289,
+        "cache_creation": 33566
       },
       "cost_basis": {
-        "equivalent": 8,
+        "equivalent": 7,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 61.9,
+      "duration_s": 51.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/parallel_parts/2",
@@ -3800,10 +4002,10 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.190929,
+      "cost_usd": 0.16896,
       "cost_by_role": {
-        "planner": 0.055867,
-        "worker": 0.135062,
+        "planner": 0.052074,
+        "worker": 0.116886,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -3817,10 +4019,10 @@
         ]
       },
       "tokens": {
-        "input": 230,
-        "output": 10153,
-        "cache_read": 565438,
-        "cache_creation": 41695
+        "input": 198,
+        "output": 8888,
+        "cache_read": 470457,
+        "cache_creation": 38638
       },
       "cost_basis": {
         "equivalent": 7,
@@ -3837,7 +4039,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 109.6,
+      "duration_s": 96.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/interface_first/2",
@@ -3899,11 +4101,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.081324,
+      "cost_usd": 0.080695,
       "cost_by_role": {
-        "planner": 0.037811,
-        "worker": 0.023468,
-        "reviewer": 0.020045
+        "planner": 0.036866,
+        "worker": 0.0236,
+        "reviewer": 0.020229
       },
       "runs": 5,
       "run_errors": 0,
@@ -3920,9 +4122,9 @@
       },
       "tokens": {
         "input": 82,
-        "output": 3371,
-        "cache_read": 168509,
-        "cache_creation": 23768
+        "output": 3289,
+        "cache_read": 168338,
+        "cache_creation": 23667
       },
       "cost_basis": {
         "equivalent": 5,
@@ -3939,7 +4141,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 45.3,
+      "duration_s": 43.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewed_step/2",
@@ -4001,10 +4203,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.091329,
+      "cost_usd": 0.093414,
       "cost_by_role": {
-        "planner": 0.043559,
-        "worker": 0.04777,
+        "planner": 0.046897,
+        "worker": 0.046517,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -4019,9 +4221,9 @@
       },
       "tokens": {
         "input": 98,
-        "output": 3806,
-        "cache_read": 212972,
-        "cache_creation": 25452
+        "output": 4137,
+        "cache_read": 213186,
+        "cache_creation": 25656
       },
       "cost_basis": {
         "equivalent": 5,
@@ -4038,7 +4240,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 53.5,
+      "duration_s": 53.4,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/retry_after_failure/2",
@@ -4101,10 +4303,10 @@
         "chat": 1,
         "decision": 1
       },
-      "cost_usd": 0.062033,
+      "cost_usd": 0.056944,
       "cost_by_role": {
-        "planner": 0.035469,
-        "worker": 0.026564,
+        "planner": 0.032836,
+        "worker": 0.024108,
         "reviewer": 0.0
       },
       "runs": 4,
@@ -4118,10 +4320,10 @@
         ]
       },
       "tokens": {
-        "input": 72,
-        "output": 2331,
-        "cache_read": 154939,
-        "cache_creation": 17406
+        "input": 56,
+        "output": 2321,
+        "cache_read": 111474,
+        "cache_creation": 17068
       },
       "cost_basis": {
         "equivalent": 4,
@@ -4138,7 +4340,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 33.0,
+      "duration_s": 28.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/chat_correction/2",
@@ -4201,10 +4403,10 @@
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.089726,
+      "cost_usd": 0.093122,
       "cost_by_role": {
-        "planner": 0.040594,
-        "worker": 0.049132,
+        "planner": 0.044402,
+        "worker": 0.04872,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -4219,9 +4421,9 @@
       },
       "tokens": {
         "input": 100,
-        "output": 3640,
-        "cache_read": 210508,
-        "cache_creation": 25188
+        "output": 4111,
+        "cache_read": 211068,
+        "cache_creation": 25680
       },
       "cost_basis": {
         "equivalent": 6,
@@ -4238,7 +4440,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 61.5,
+      "duration_s": 64.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/supplement_replan/2",
@@ -4298,17 +4500,16 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.120892,
+      "cost_usd": 0.106082,
       "cost_by_role": {
-        "planner": 0.069363,
-        "worker": 0.051529,
+        "planner": 0.058952,
+        "worker": 0.04713,
         "reviewer": 0.0
       },
-      "runs": 7,
+      "runs": 6,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -4319,29 +4520,27 @@
         ]
       },
       "tokens": {
-        "input": 118,
-        "output": 4771,
-        "cache_read": 248011,
-        "cache_creation": 36059
+        "input": 92,
+        "output": 3949,
+        "cache_read": 181455,
+        "cache_creation": 34050
       },
       "cost_basis": {
-        "equivalent": 7,
+        "equivalent": 6,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 72.2,
+      "duration_s": 64.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/requirement_edit/2",
@@ -4404,10 +4603,10 @@
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.09118,
+      "cost_usd": 0.090771,
       "cost_by_role": {
-        "planner": 0.040343,
-        "worker": 0.050837,
+        "planner": 0.041413,
+        "worker": 0.049358,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -4421,10 +4620,10 @@
         ]
       },
       "tokens": {
-        "input": 100,
-        "output": 3913,
-        "cache_read": 210663,
-        "cache_creation": 25224
+        "input": 108,
+        "output": 3430,
+        "cache_read": 233150,
+        "cache_creation": 25099
       },
       "cost_basis": {
         "equivalent": 6,
@@ -4441,7 +4640,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 70.4,
+      "duration_s": 64.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/supplement_no_change/2",
@@ -4503,15 +4702,16 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
+        "repair": 1,
         "decision": 1
       },
-      "cost_usd": 0.059081,
+      "cost_usd": 0.06368,
       "cost_by_role": {
-        "planner": 0.03547,
-        "worker": 0.023611,
+        "planner": 0.040613,
+        "worker": 0.023067,
         "reviewer": 0.0
       },
-      "runs": 3,
+      "runs": 4,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -4522,27 +4722,29 @@
         ]
       },
       "tokens": {
-        "input": 64,
-        "output": 2283,
-        "cache_read": 134119,
-        "cache_creation": 17095
+        "input": 74,
+        "output": 2554,
+        "cache_read": 157580,
+        "cache_creation": 17539
       },
       "cost_basis": {
-        "equivalent": 3,
+        "equivalent": 4,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (the ```json block must end the reply; there is text after it); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 33.1,
+      "duration_s": 33.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/profile_choice/2",
@@ -4560,9 +4762,9 @@
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
-      "independent_pairs": 0,
+      "independent_pairs": 1,
       "bracketed_pairs": 0,
-      "parallel_workers": 1,
+      "parallel_workers": 2,
       "progress_notes": 3,
       "final_summary": 1,
       "planner_profile_runs": 0,
@@ -4602,16 +4804,15 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "decision": 3
       },
-      "cost_usd": 0.189339,
+      "cost_usd": 0.187164,
       "cost_by_role": {
-        "planner": 0.088955,
-        "worker": 0.100384,
+        "planner": 0.075682,
+        "worker": 0.111482,
         "reviewer": 0.0
       },
-      "runs": 8,
+      "runs": 7,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -4622,29 +4823,27 @@
         ]
       },
       "tokens": {
-        "input": 212,
-        "output": 10349,
-        "cache_read": 523261,
-        "cache_creation": 42528
+        "input": 200,
+        "output": 10520,
+        "cache_read": 490756,
+        "cache_creation": 42644
       },
       "cost_basis": {
-        "equivalent": 8,
+        "equivalent": 7,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 113.4,
+      "duration_s": 88.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_tester_docs/2",
@@ -4701,16 +4900,16 @@
       "room_tool_calls": 0,
       "room_consults": 0,
       "room_consults_answered": 0,
-      "planner_denials": 1,
+      "planner_denials": 2,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.229917,
+      "cost_usd": 0.169635,
       "cost_by_role": {
-        "planner": 0.078965,
-        "worker": 0.061699,
-        "reviewer": 0.089253
+        "planner": 0.067467,
+        "worker": 0.034574,
+        "reviewer": 0.067594
       },
       "runs": 6,
       "run_errors": 0,
@@ -4726,10 +4925,10 @@
         ]
       },
       "tokens": {
-        "input": 294,
-        "output": 12544,
-        "cache_read": 751577,
-        "cache_creation": 45873
+        "input": 190,
+        "output": 8841,
+        "cache_read": 464371,
+        "cache_creation": 39401
       },
       "cost_basis": {
         "equivalent": 6,
@@ -4746,7 +4945,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 142.5,
+      "duration_s": 103.2,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_security_review/2",
@@ -4757,8 +4956,10 @@
       "id": "roles_advisory_review",
       "rep": 2,
       "status": "completed",
-      "success": true,
-      "problems": [],
+      "success": false,
+      "problems": [
+        "advisory_role_fails 0 < 1"
+      ],
       "steps": 1,
       "reviews": 2,
       "retries": 0,
@@ -4767,7 +4968,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 1,
@@ -4780,7 +4981,7 @@
       "most_review_roles": 1,
       "gate_breaches": 0,
       "advisory_role_reviews": 1,
-      "advisory_role_fails": 1,
+      "advisory_role_fails": 0,
       "discipline_roles": 0,
       "interface_dependents": 0,
       "gates_opened": 0,
@@ -4808,11 +5009,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.168479,
+      "cost_usd": 0.187714,
       "cost_by_role": {
-        "planner": 0.084471,
-        "worker": 0.029024,
-        "reviewer": 0.054984
+        "planner": 0.095722,
+        "worker": 0.026402,
+        "reviewer": 0.06559
       },
       "runs": 6,
       "run_errors": 0,
@@ -4828,10 +5029,10 @@
         ]
       },
       "tokens": {
-        "input": 202,
-        "output": 7772,
-        "cache_read": 491208,
-        "cache_creation": 40148
+        "input": 220,
+        "output": 9913,
+        "cache_read": 546665,
+        "cache_creation": 41631
       },
       "cost_basis": {
         "equivalent": 6,
@@ -4848,11 +5049,11 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 97.0,
+      "duration_s": 113.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_advisory_review/2",
-      "outcome": "pass",
+      "outcome": "fail",
       "user_gates": "on"
     },
     {
@@ -4869,7 +5070,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 2,
@@ -4910,11 +5111,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.230942,
+      "cost_usd": 0.241017,
       "cost_by_role": {
-        "planner": 0.06479,
-        "worker": 0.037798,
-        "reviewer": 0.128354
+        "planner": 0.058298,
+        "worker": 0.048192,
+        "reviewer": 0.134527
       },
       "runs": 7,
       "run_errors": 0,
@@ -4930,10 +5131,10 @@
         ]
       },
       "tokens": {
-        "input": 232,
-        "output": 14424,
-        "cache_read": 560198,
-        "cache_creation": 51285
+        "input": 272,
+        "output": 14711,
+        "cache_read": 664970,
+        "cache_creation": 50346
       },
       "cost_basis": {
         "equivalent": 7,
@@ -4950,7 +5151,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 158.9,
+      "duration_s": 160.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_two_reviews/2",
@@ -4961,8 +5162,13 @@
       "id": "roles_multi_platform",
       "rep": 2,
       "status": "completed",
-      "success": true,
-      "problems": [],
+      "success": false,
+      "problems": [
+        "roles_defined 0 < 4",
+        "discipline_roles 0 < 4",
+        "interface_dependents 0 < 4",
+        "contract_violations 1 > 0"
+      ],
       "steps": 5,
       "reviews": 0,
       "retries": 0,
@@ -4974,8 +5180,8 @@
       "progress_notes": 5,
       "final_summary": 1,
       "planner_profile_runs": 0,
-      "roles_defined": 4,
-      "role_runs": 4,
+      "roles_defined": 0,
+      "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
       "template_roles": 0,
@@ -4985,8 +5191,8 @@
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
-      "discipline_roles": 4,
-      "interface_dependents": 4,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
       "gates_opened": 0,
       "gate_turns": 0,
       "gates_passed": 0,
@@ -4997,28 +5203,29 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
-      "room_messages": 1,
+      "room_messages": 0,
       "room_questions": 0,
       "room_unanswered": 0,
-      "room_interface": 1,
+      "room_interface": 0,
       "room_escalations": 0,
       "room_reminders": 0,
       "room_refused": 0,
-      "room_tool_calls": 3,
+      "room_tool_calls": 0,
       "room_consults": 0,
       "room_consults_answered": 0,
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
+        "repair": 1,
         "decision": 5
       },
-      "cost_usd": 0.589997,
+      "cost_usd": 0.356656,
       "cost_by_role": {
-        "planner": 0.172514,
-        "worker": 0.417483,
+        "planner": 0.111588,
+        "worker": 0.245068,
         "reviewer": 0.0
       },
-      "runs": 11,
+      "runs": 12,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -5029,31 +5236,33 @@
         ]
       },
       "tokens": {
-        "input": 724,
-        "output": 34861,
-        "cache_read": 2095411,
-        "cache_creation": 102713
+        "input": 384,
+        "output": 22075,
+        "cache_read": 995751,
+        "cache_creation": 73161
       },
       "cost_basis": {
-        "equivalent": 11,
+        "equivalent": 12,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 198.0,
+      "duration_s": 121.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_multi_platform/2",
-      "outcome": "pass",
+      "outcome": "fail",
       "user_gates": "on"
     },
     {
@@ -5070,7 +5279,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 1,
@@ -5111,11 +5320,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.214342,
+      "cost_usd": 0.160643,
       "cost_by_role": {
-        "planner": 0.091587,
-        "worker": 0.037787,
-        "reviewer": 0.084968
+        "planner": 0.050047,
+        "worker": 0.041099,
+        "reviewer": 0.069497
       },
       "runs": 6,
       "run_errors": 0,
@@ -5131,10 +5340,10 @@
         ]
       },
       "tokens": {
-        "input": 264,
-        "output": 11450,
-        "cache_read": 673740,
-        "cache_creation": 44727
+        "input": 174,
+        "output": 8944,
+        "cache_read": 404654,
+        "cache_creation": 37642
       },
       "cost_basis": {
         "equivalent": 6,
@@ -5151,7 +5360,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 132.1,
+      "duration_s": 97.2,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_template_fits/2",
@@ -5164,15 +5373,15 @@
       "status": "completed",
       "success": true,
       "problems": [],
-      "steps": 2,
+      "steps": 1,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
-      "independent_pairs": 1,
+      "independent_pairs": 0,
       "bracketed_pairs": 0,
-      "parallel_workers": 2,
-      "progress_notes": 2,
+      "parallel_workers": 1,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -5211,16 +5420,15 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
-        "decision": 2
+        "decision": 1
       },
-      "cost_usd": 0.101967,
+      "cost_usd": 0.057696,
       "cost_by_role": {
-        "planner": 0.04809,
-        "worker": 0.053877,
+        "planner": 0.032698,
+        "worker": 0.024998,
         "reviewer": 0.0
       },
-      "runs": 6,
+      "runs": 3,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -5231,29 +5439,27 @@
         ]
       },
       "tokens": {
-        "input": 116,
-        "output": 4498,
-        "cache_read": 258370,
-        "cache_creation": 26762
+        "input": 54,
+        "output": 2143,
+        "cache_read": 113250,
+        "cache_creation": 17801
       },
       "cost_basis": {
-        "equivalent": 6,
+        "equivalent": 3,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 39.7,
+      "duration_s": 26.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_template_unfit/2",
@@ -5315,10 +5521,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.05224,
+      "cost_usd": 0.052625,
       "cost_by_role": {
-        "planner": 0.028317,
-        "worker": 0.023923,
+        "planner": 0.027567,
+        "worker": 0.025058,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -5333,9 +5539,9 @@
       },
       "tokens": {
         "input": 46,
-        "output": 1872,
-        "cache_read": 89958,
-        "cache_creation": 16919
+        "output": 1915,
+        "cache_read": 90076,
+        "cache_creation": 16998
       },
       "cost_basis": {
         "equivalent": 3,
@@ -5352,7 +5558,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 24.7,
+      "duration_s": 24.9,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_not_needed/2",
@@ -5412,14 +5618,14 @@
       "planner_denials": 1,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "gate": 1,
+        "repair": 1,
         "decision": 1
       },
-      "cost_usd": 0.075477,
+      "cost_usd": 0.0817,
       "cost_by_role": {
-        "planner": 0.051966,
-        "worker": 0.023511,
+        "planner": 0.056863,
+        "worker": 0.024837,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -5433,10 +5639,10 @@
         ]
       },
       "tokens": {
-        "input": 82,
-        "output": 3691,
-        "cache_read": 183341,
-        "cache_creation": 19303
+        "input": 90,
+        "output": 4166,
+        "cache_read": 208937,
+        "cache_creation": 19943
       },
       "cost_basis": {
         "equivalent": 5,
@@ -5450,12 +5656,12 @@
         "total": 1
       },
       "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (steps[1] is missing review); asking again"
+        "Planner reply broke the GATE contract (closing the gate needs \"summary\": {\"decisions\": [...], \"assumptions\": [...], \"open\": [...]}); asking again"
       ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 47.4,
+      "duration_s": 47.9,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_ambiguous/2",
@@ -5517,10 +5723,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.052074,
+      "cost_usd": 0.055362,
       "cost_by_role": {
-        "planner": 0.0301,
-        "worker": 0.021974,
+        "planner": 0.031545,
+        "worker": 0.023817,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -5535,9 +5741,9 @@
       },
       "tokens": {
         "input": 54,
-        "output": 1707,
-        "cache_read": 111116,
-        "cache_creation": 16187
+        "output": 2160,
+        "cache_read": 111499,
+        "cache_creation": 16679
       },
       "cost_basis": {
         "equivalent": 3,
@@ -5554,7 +5760,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 24.7,
+      "duration_s": 28.9,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_not_needed/2",
@@ -5615,16 +5821,15 @@
       "planner_turns": {
         "plan": 1,
         "gate": 1,
-        "repair": 1,
         "decision": 1
       },
-      "cost_usd": 0.073719,
+      "cost_usd": 0.070438,
       "cost_by_role": {
-        "planner": 0.047844,
-        "worker": 0.025875,
+        "planner": 0.04169,
+        "worker": 0.028748,
         "reviewer": 0.0
       },
-      "runs": 5,
+      "runs": 4,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -5635,29 +5840,27 @@
         ]
       },
       "tokens": {
-        "input": 74,
-        "output": 3891,
-        "cache_read": 159815,
-        "cache_creation": 19104
+        "input": 72,
+        "output": 3409,
+        "cache_read": 156493,
+        "cache_creation": 18836
       },
       "cost_basis": {
-        "equivalent": 5,
+        "equivalent": 4,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the GATE contract (closing the gate needs \"summary\": {\"decisions\": [...], \"assumptions\": [...], \"open\": [...]}); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 45.5,
+      "duration_s": 43.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_end_early/2",
@@ -5717,16 +5920,17 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
+        "repair": 1,
         "gate": 1,
         "decision": 2
       },
-      "cost_usd": 0.118732,
+      "cost_usd": 0.115082,
       "cost_by_role": {
-        "planner": 0.047113,
-        "worker": 0.071619,
+        "planner": 0.06087,
+        "worker": 0.054212,
         "reviewer": 0.0
       },
-      "runs": 6,
+      "runs": 7,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -5737,27 +5941,29 @@
         ]
       },
       "tokens": {
-        "input": 140,
-        "output": 5878,
-        "cache_read": 319942,
-        "cache_creation": 28604
+        "input": 110,
+        "output": 6720,
+        "cache_read": 239600,
+        "cache_creation": 28706
       },
       "cost_basis": {
-        "equivalent": 6,
+        "equivalent": 7,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (the ```json block must end the reply; there is text after it); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 57.7,
+      "duration_s": 66.2,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_parallel_branch/2",
@@ -5778,7 +5984,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 0,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -5819,10 +6025,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.060179,
+      "cost_usd": 0.063627,
       "cost_by_role": {
-        "planner": 0.034151,
-        "worker": 0.026028,
+        "planner": 0.035586,
+        "worker": 0.028041,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -5837,9 +6043,9 @@
       },
       "tokens": {
         "input": 70,
-        "output": 2111,
-        "cache_read": 154398,
-        "cache_creation": 17057
+        "output": 2705,
+        "cache_read": 154659,
+        "cache_creation": 17283
       },
       "cost_basis": {
         "equivalent": 3,
@@ -5856,7 +6062,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 28.9,
+      "duration_s": 37.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_discoverable/2",
@@ -5918,10 +6124,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.062142,
+      "cost_usd": 0.062293,
       "cost_by_role": {
-        "planner": 0.039701,
-        "worker": 0.022441,
+        "planner": 0.039156,
+        "worker": 0.023137,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -5935,10 +6141,10 @@
         ]
       },
       "tokens": {
-        "input": 70,
-        "output": 2300,
-        "cache_read": 157596,
-        "cache_creation": 17406
+        "input": 62,
+        "output": 2670,
+        "cache_read": 135586,
+        "cache_creation": 17661
       },
       "cost_basis": {
         "equivalent": 3,
@@ -5955,7 +6161,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 35.1,
+      "duration_s": 35.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/operator_notes/2",
@@ -6017,10 +6223,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.083774,
+      "cost_usd": 0.073581,
       "cost_by_role": {
-        "planner": 0.045987,
-        "worker": 0.037787,
+        "planner": 0.04772,
+        "worker": 0.025861,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -6034,10 +6240,10 @@
         ]
       },
       "tokens": {
-        "input": 118,
-        "output": 3360,
-        "cache_read": 287998,
-        "cache_creation": 19028
+        "input": 86,
+        "output": 3228,
+        "cache_read": 202406,
+        "cache_creation": 18557
       },
       "cost_basis": {
         "equivalent": 3,
@@ -6054,7 +6260,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 45.4,
+      "duration_s": 39.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/operator_notes_stale/2",
@@ -6065,11 +6271,9 @@
       "id": "room_interface",
       "rep": 2,
       "status": "completed",
-      "success": false,
-      "problems": [
-        "room_messages 0 < 1"
-      ],
-      "steps": 2,
+      "success": true,
+      "problems": [],
+      "steps": 3,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
@@ -6077,7 +6281,7 @@
       "independent_pairs": 1,
       "bracketed_pairs": 0,
       "parallel_workers": 2,
-      "progress_notes": 2,
+      "progress_notes": 3,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -6103,28 +6307,29 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
-      "room_messages": 0,
+      "room_messages": 1,
       "room_questions": 0,
       "room_unanswered": 0,
-      "room_interface": 0,
+      "room_interface": 1,
       "room_escalations": 0,
-      "room_reminders": 0,
+      "room_reminders": 1,
       "room_refused": 0,
-      "room_tool_calls": 0,
+      "room_tool_calls": 5,
       "room_consults": 0,
       "room_consults_answered": 0,
-      "planner_denials": 1,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 2
+        "repair": 1,
+        "decision": 3
       },
-      "cost_usd": 0.197964,
+      "cost_usd": 0.308995,
       "cost_by_role": {
-        "planner": 0.071567,
-        "worker": 0.126397,
+        "planner": 0.078688,
+        "worker": 0.230307,
         "reviewer": 0.0
       },
-      "runs": 5,
+      "runs": 8,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -6135,23 +6340,25 @@
         ]
       },
       "tokens": {
-        "input": 210,
-        "output": 12815,
-        "cache_read": 568091,
-        "cache_creation": 38435
+        "input": 398,
+        "output": 17277,
+        "cache_read": 1144604,
+        "cache_creation": 53876
       },
       "cost_basis": {
-        "equivalent": 5,
+        "equivalent": 8,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
@@ -6159,11 +6366,11 @@
         "merges": 2,
         "checkpoints": 0
       },
-      "duration_s": 117.3,
+      "duration_s": 168.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_interface/2",
-      "outcome": "fail",
+      "outcome": "pass",
       "user_gates": "on"
     },
     {
@@ -6223,10 +6430,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.125864,
+      "cost_usd": 0.130031,
       "cost_by_role": {
-        "planner": 0.049582,
-        "worker": 0.076282,
+        "planner": 0.048438,
+        "worker": 0.081593,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -6240,10 +6447,10 @@
         ]
       },
       "tokens": {
-        "input": 142,
-        "output": 6817,
-        "cache_read": 322971,
-        "cache_creation": 29670
+        "input": 150,
+        "output": 7155,
+        "cache_read": 343505,
+        "cache_creation": 29878
       },
       "cost_basis": {
         "equivalent": 5,
@@ -6260,7 +6467,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 79.9,
+      "duration_s": 82.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_consult/2",
@@ -6322,10 +6529,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.048199,
+      "cost_usd": 0.052488,
       "cost_by_role": {
-        "planner": 0.026513,
-        "worker": 0.021686,
+        "planner": 0.029973,
+        "worker": 0.022515,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -6339,10 +6546,10 @@
         ]
       },
       "tokens": {
-        "input": 46,
-        "output": 1496,
-        "cache_read": 88904,
-        "cache_creation": 15891
+        "input": 54,
+        "output": 1792,
+        "cache_read": 111085,
+        "cache_creation": 16183
       },
       "cost_basis": {
         "equivalent": 3,
@@ -6359,7 +6566,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 22.7,
+      "duration_s": 24.7,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_quiet/2",
@@ -6377,9 +6584,9 @@
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
-      "independent_pairs": 3,
+      "independent_pairs": 1,
       "bracketed_pairs": 0,
-      "parallel_workers": 3,
+      "parallel_workers": 2,
       "progress_notes": 3,
       "final_summary": 1,
       "planner_profile_runs": 0,
@@ -6421,10 +6628,10 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.117165,
+      "cost_usd": 0.123834,
       "cost_by_role": {
-        "planner": 0.052865,
-        "worker": 0.0643,
+        "planner": 0.052403,
+        "worker": 0.071431,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -6439,9 +6646,9 @@
       },
       "tokens": {
         "input": 110,
-        "output": 5732,
-        "cache_read": 228554,
-        "cache_creation": 32770
+        "output": 6630,
+        "cache_read": 226637,
+        "cache_creation": 33955
       },
       "cost_basis": {
         "equivalent": 7,
@@ -6458,7 +6665,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 45.3,
+      "duration_s": 55.4,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/planner_plan_file/2",
@@ -6520,11 +6727,11 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.031006,
+      "cost_usd": 0.030452,
       "cost_by_role": {
         "planner": 0.004,
         "worker": 0.004,
-        "reviewer": 0.023006
+        "reviewer": 0.022452
       },
       "runs": 7,
       "run_errors": 1,
@@ -6541,9 +6748,9 @@
       },
       "tokens": {
         "input": 78,
-        "output": 1388,
-        "cache_read": 33662,
-        "cache_creation": 6491
+        "output": 1284,
+        "cache_read": 33699,
+        "cache_creation": 6472
       },
       "cost_basis": {
         "equivalent": 7,
@@ -6560,7 +6767,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 16.5,
+      "duration_s": 14.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewer_retry_note/2",
@@ -6622,11 +6829,11 @@
         "plan": 1,
         "decision": 5
       },
-      "cost_usd": 0.074649,
+      "cost_usd": 0.061741,
       "cost_by_role": {
         "planner": 0.006,
         "worker": 0.006,
-        "reviewer": 0.062649
+        "reviewer": 0.049741
       },
       "runs": 11,
       "run_errors": 1,
@@ -6642,10 +6849,10 @@
         ]
       },
       "tokens": {
-        "input": 166,
-        "output": 3311,
-        "cache_read": 170019,
-        "cache_creation": 14733
+        "input": 134,
+        "output": 2828,
+        "cache_read": 88025,
+        "cache_creation": 13602
       },
       "cost_basis": {
         "equivalent": 11,
@@ -6662,10 +6869,214 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 43.1,
+      "duration_s": 35.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewer_unrelated_note/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "reviewer_elsewhere",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.035105,
+      "cost_by_role": {
+        "planner": 0.003,
+        "worker": 0.002,
+        "reviewer": 0.030105
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "fake"
+        ],
+        "worker": [
+          "fake"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 74,
+        "output": 1552,
+        "cache_read": 75729,
+        "cache_creation": 7469
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 18.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/reviewer_elsewhere/2",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "reviewer_elsewhere_wrong",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 1,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 4,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 4
+      },
+      "cost_usd": 0.064178,
+      "cost_by_role": {
+        "planner": 0.005,
+        "worker": 0.004,
+        "reviewer": 0.055178
+      },
+      "runs": 9,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "fake"
+        ],
+        "worker": [
+          "fake"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 114,
+        "output": 3406,
+        "cache_read": 89195,
+        "cache_creation": 14767
+      },
+      "cost_basis": {
+        "equivalent": 9,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 35.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/reviewer_elsewhere_wrong/2",
       "outcome": "pass",
       "user_gates": "on"
     },
@@ -6724,10 +7135,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.049264,
+      "cost_usd": 0.049088,
       "cost_by_role": {
-        "planner": 0.026534,
-        "worker": 0.02273,
+        "planner": 0.027083,
+        "worker": 0.022005,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -6742,9 +7153,9 @@
       },
       "tokens": {
         "input": 46,
-        "output": 1685,
-        "cache_read": 88992,
-        "cache_creation": 15947
+        "output": 1626,
+        "cache_read": 88994,
+        "cache_creation": 16006
       },
       "cost_basis": {
         "equivalent": 3,
@@ -6761,7 +7172,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 22.6,
+      "duration_s": 22.7,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/single_step/3",
@@ -6823,10 +7234,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.081627,
+      "cost_usd": 0.090585,
       "cost_by_role": {
-        "planner": 0.034627,
-        "worker": 0.047,
+        "planner": 0.038976,
+        "worker": 0.051609,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -6840,10 +7251,10 @@
         ]
       },
       "tokens": {
-        "input": 82,
-        "output": 3300,
-        "cache_read": 166474,
-        "cache_creation": 24199
+        "input": 98,
+        "output": 3883,
+        "cache_read": 210182,
+        "cache_creation": 25027
       },
       "cost_basis": {
         "equivalent": 5,
@@ -6860,7 +7271,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 41.3,
+      "duration_s": 45.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/dependent_steps/3",
@@ -6922,10 +7333,10 @@
         "plan": 1,
         "decision": 9
       },
-      "cost_usd": 0.30449,
+      "cost_usd": 0.292468,
       "cost_by_role": {
-        "planner": 0.092925,
-        "worker": 0.211565,
+        "planner": 0.08462,
+        "worker": 0.207848,
         "reviewer": 0.0
       },
       "runs": 19,
@@ -6939,10 +7350,10 @@
         ]
       },
       "tokens": {
-        "input": 342,
-        "output": 11355,
-        "cache_read": 777888,
-        "cache_creation": 84792
+        "input": 334,
+        "output": 10722,
+        "cache_read": 747140,
+        "cache_creation": 81905
       },
       "cost_basis": {
         "equivalent": 19,
@@ -6959,7 +7370,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 137.8,
+      "duration_s": 135.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/many_steps/3",
@@ -7021,10 +7432,10 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.124779,
+      "cost_usd": 0.130967,
       "cost_by_role": {
-        "planner": 0.048937,
-        "worker": 0.075842,
+        "planner": 0.049794,
+        "worker": 0.081173,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -7038,10 +7449,10 @@
         ]
       },
       "tokens": {
-        "input": 126,
-        "output": 5904,
-        "cache_read": 270589,
-        "cache_creation": 34037
+        "input": 134,
+        "output": 6402,
+        "cache_read": 291689,
+        "cache_creation": 34827
       },
       "cost_basis": {
         "equivalent": 7,
@@ -7058,7 +7469,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 59.8,
+      "duration_s": 57.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/parallel_parts/3",
@@ -7123,10 +7534,10 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.20131,
+      "cost_usd": 0.191124,
       "cost_by_role": {
-        "planner": 0.049989,
-        "worker": 0.151321,
+        "planner": 0.049991,
+        "worker": 0.141133,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -7140,10 +7551,10 @@
         ]
       },
       "tokens": {
-        "input": 262,
-        "output": 10371,
-        "cache_read": 660854,
-        "cache_creation": 41554
+        "input": 238,
+        "output": 9890,
+        "cache_read": 585136,
+        "cache_creation": 41461
       },
       "cost_basis": {
         "equivalent": 7,
@@ -7160,7 +7571,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 117.1,
+      "duration_s": 109.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/interface_first/3",
@@ -7181,7 +7592,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -7222,11 +7633,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.079691,
+      "cost_usd": 0.078594,
       "cost_by_role": {
-        "planner": 0.037159,
-        "worker": 0.023705,
-        "reviewer": 0.018827
+        "planner": 0.035572,
+        "worker": 0.023254,
+        "reviewer": 0.019768
       },
       "runs": 5,
       "run_errors": 0,
@@ -7243,9 +7654,9 @@
       },
       "tokens": {
         "input": 82,
-        "output": 3136,
-        "cache_read": 168290,
-        "cache_creation": 23550
+        "output": 3020,
+        "cache_read": 167813,
+        "cache_creation": 23315
       },
       "cost_basis": {
         "equivalent": 5,
@@ -7262,7 +7673,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 41.1,
+      "duration_s": 39.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewed_step/3",
@@ -7324,10 +7735,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.095979,
+      "cost_usd": 0.095186,
       "cost_by_role": {
-        "planner": 0.046691,
-        "worker": 0.049288,
+        "planner": 0.04599,
+        "worker": 0.049196,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -7342,9 +7753,9 @@
       },
       "tokens": {
         "input": 98,
-        "output": 4540,
-        "cache_read": 213671,
-        "cache_creation": 25907
+        "output": 4389,
+        "cache_read": 213034,
+        "cache_creation": 25920
       },
       "cost_basis": {
         "equivalent": 5,
@@ -7361,7 +7772,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 55.3,
+      "duration_s": 57.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/retry_after_failure/3",
@@ -7382,7 +7793,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 1,
+      "progress_notes": 0,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -7424,10 +7835,10 @@
         "chat": 1,
         "decision": 1
       },
-      "cost_usd": 0.062889,
+      "cost_usd": 0.061053,
       "cost_by_role": {
-        "planner": 0.036136,
-        "worker": 0.026753,
+        "planner": 0.035584,
+        "worker": 0.025469,
         "reviewer": 0.0
       },
       "runs": 4,
@@ -7441,10 +7852,10 @@
         ]
       },
       "tokens": {
-        "input": 72,
-        "output": 2459,
-        "cache_read": 154911,
-        "cache_creation": 17515
+        "input": 64,
+        "output": 2495,
+        "cache_read": 134276,
+        "cache_creation": 17543
       },
       "cost_basis": {
         "equivalent": 4,
@@ -7461,7 +7872,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 28.7,
+      "duration_s": 31.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/chat_correction/3",
@@ -7524,10 +7935,10 @@
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.093024,
+      "cost_usd": 0.089004,
       "cost_by_role": {
-        "planner": 0.042567,
-        "worker": 0.050457,
+        "planner": 0.042378,
+        "worker": 0.046626,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -7541,10 +7952,10 @@
         ]
       },
       "tokens": {
-        "input": 100,
-        "output": 4105,
-        "cache_read": 211123,
-        "cache_creation": 25643
+        "input": 92,
+        "output": 3898,
+        "cache_read": 190160,
+        "cache_creation": 25203
       },
       "cost_basis": {
         "equivalent": 6,
@@ -7561,7 +7972,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 63.5,
+      "duration_s": 61.7,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/supplement_replan/3",
@@ -7624,10 +8035,10 @@
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.111407,
+      "cost_usd": 0.111578,
       "cost_by_role": {
-        "planner": 0.062483,
-        "worker": 0.048924,
+        "planner": 0.060992,
+        "worker": 0.050586,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -7641,10 +8052,10 @@
         ]
       },
       "tokens": {
-        "input": 108,
-        "output": 3916,
-        "cache_read": 224285,
-        "cache_creation": 34645
+        "input": 100,
+        "output": 4471,
+        "cache_read": 202662,
+        "cache_creation": 34428
       },
       "cost_basis": {
         "equivalent": 6,
@@ -7661,7 +8072,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 65.6,
+      "duration_s": 65.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/requirement_edit/3",
@@ -7724,10 +8135,10 @@
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.087002,
+      "cost_usd": 0.092081,
       "cost_by_role": {
-        "planner": 0.038594,
-        "worker": 0.048408,
+        "planner": 0.040096,
+        "worker": 0.051985,
         "reviewer": 0.0
       },
       "runs": 6,
@@ -7741,10 +8152,10 @@
         ]
       },
       "tokens": {
-        "input": 100,
-        "output": 3312,
-        "cache_read": 209900,
-        "cache_creation": 24676
+        "input": 108,
+        "output": 3706,
+        "cache_read": 231187,
+        "cache_creation": 25162
       },
       "cost_basis": {
         "equivalent": 6,
@@ -7761,7 +8172,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 59.7,
+      "duration_s": 63.7,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/supplement_no_change/3",
@@ -7825,10 +8236,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.071952,
+      "cost_usd": 0.059338,
       "cost_by_role": {
-        "planner": 0.049304,
-        "worker": 0.022648,
+        "planner": 0.035894,
+        "worker": 0.023444,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -7842,10 +8253,10 @@
         ]
       },
       "tokens": {
-        "input": 80,
-        "output": 3167,
-        "cache_read": 183568,
-        "cache_creation": 18840
+        "input": 64,
+        "output": 2317,
+        "cache_read": 134109,
+        "cache_creation": 17139
       },
       "cost_basis": {
         "equivalent": 3,
@@ -7862,7 +8273,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 43.0,
+      "duration_s": 32.9,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/profile_choice/3",
@@ -7875,15 +8286,15 @@
       "status": "completed",
       "success": true,
       "problems": [],
-      "steps": 2,
+      "steps": 3,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
-      "independent_pairs": 0,
+      "independent_pairs": 1,
       "bracketed_pairs": 0,
-      "parallel_workers": 1,
-      "progress_notes": 2,
+      "parallel_workers": 2,
+      "progress_notes": 3,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 2,
@@ -7898,7 +8309,7 @@
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
       "discipline_roles": 0,
-      "interface_dependents": 1,
+      "interface_dependents": 2,
       "gates_opened": 0,
       "gate_turns": 0,
       "gates_passed": 0,
@@ -7922,15 +8333,16 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 2
+        "repair": 1,
+        "decision": 3
       },
-      "cost_usd": 0.14305,
+      "cost_usd": 0.184944,
       "cost_by_role": {
-        "planner": 0.066876,
-        "worker": 0.076174,
+        "planner": 0.084246,
+        "worker": 0.100698,
         "reviewer": 0.0
       },
-      "runs": 5,
+      "runs": 8,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -7941,27 +8353,29 @@
         ]
       },
       "tokens": {
-        "input": 150,
-        "output": 8095,
-        "cache_read": 362632,
-        "cache_creation": 33081
+        "input": 212,
+        "output": 9857,
+        "cache_read": 517323,
+        "cache_creation": 41857
       },
       "cost_basis": {
-        "equivalent": 5,
+        "equivalent": 8,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 84.3,
+      "duration_s": 82.2,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_tester_docs/3",
@@ -8018,19 +8432,18 @@
       "room_tool_calls": 0,
       "room_consults": 0,
       "room_consults_answered": 0,
-      "planner_denials": 0,
+      "planner_denials": 2,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
         "decision": 2
       },
-      "cost_usd": 0.233102,
+      "cost_usd": 0.170829,
       "cost_by_role": {
-        "planner": 0.066435,
-        "worker": 0.068264,
-        "reviewer": 0.098403
+        "planner": 0.067978,
+        "worker": 0.032634,
+        "reviewer": 0.070217
       },
-      "runs": 7,
+      "runs": 6,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -8044,29 +8457,27 @@
         ]
       },
       "tokens": {
-        "input": 282,
-        "output": 13942,
-        "cache_read": 724074,
-        "cache_creation": 45351
+        "input": 198,
+        "output": 8992,
+        "cache_read": 482710,
+        "cache_creation": 38700
       },
       "cost_basis": {
-        "equivalent": 7,
+        "equivalent": 6,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
-      "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (step s1: review_roles 'security_review' is not a role of this task (defined: none); define it with looper_task_role_set first, or leave it out); asking again"
-      ],
+      "planner_violation_reasons": [],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 154.2,
+      "duration_s": 108.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_security_review/3",
@@ -8087,7 +8498,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 1,
+      "progress_notes": 2,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 1,
@@ -8128,11 +8539,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.153158,
+      "cost_usd": 0.147234,
       "cost_by_role": {
-        "planner": 0.054667,
-        "worker": 0.03091,
-        "reviewer": 0.067581
+        "planner": 0.057516,
+        "worker": 0.031509,
+        "reviewer": 0.058209
       },
       "runs": 6,
       "run_errors": 0,
@@ -8148,10 +8559,10 @@
         ]
       },
       "tokens": {
-        "input": 174,
-        "output": 8288,
-        "cache_read": 403422,
-        "cache_creation": 35601
+        "input": 176,
+        "output": 6731,
+        "cache_read": 408324,
+        "cache_creation": 36285
       },
       "cost_basis": {
         "equivalent": 6,
@@ -8168,7 +8579,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 100.8,
+      "duration_s": 84.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_advisory_review/3",
@@ -8189,7 +8600,7 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
-      "progress_notes": 2,
+      "progress_notes": 1,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 2,
@@ -8230,11 +8641,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.242505,
+      "cost_usd": 0.254279,
       "cost_by_role": {
-        "planner": 0.089178,
-        "worker": 0.041807,
-        "reviewer": 0.11152
+        "planner": 0.091837,
+        "worker": 0.037078,
+        "reviewer": 0.125364
       },
       "runs": 7,
       "run_errors": 0,
@@ -8250,10 +8661,10 @@
         ]
       },
       "tokens": {
-        "input": 268,
-        "output": 13927,
-        "cache_read": 662178,
-        "cache_creation": 53192
+        "input": 294,
+        "output": 14425,
+        "cache_read": 732654,
+        "cache_creation": 54297
       },
       "cost_basis": {
         "equivalent": 7,
@@ -8270,7 +8681,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 156.0,
+      "duration_s": 160.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_two_reviews/3",
@@ -8283,22 +8694,24 @@
       "status": "completed",
       "success": false,
       "problems": [
-        "discipline_roles 3 < 4",
+        "roles_defined 0 < 4",
+        "discipline_roles 0 < 4",
+        "interface_dependents 0 < 4",
         "contract_violations 1 > 0"
       ],
-      "steps": 5,
+      "steps": 6,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
       "independent_pairs": 6,
-      "bracketed_pairs": 0,
+      "bracketed_pairs": 6,
       "parallel_workers": 4,
       "progress_notes": 5,
       "final_summary": 1,
       "planner_profile_runs": 0,
-      "roles_defined": 4,
-      "role_runs": 4,
+      "roles_defined": 0,
+      "role_runs": 0,
       "role_profile_runs": 0,
       "role_reviews": 0,
       "template_roles": 0,
@@ -8308,8 +8721,8 @@
       "gate_breaches": 0,
       "advisory_role_reviews": 0,
       "advisory_role_fails": 0,
-      "discipline_roles": 3,
-      "interface_dependents": 4,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
       "gates_opened": 0,
       "gate_turns": 0,
       "gates_passed": 0,
@@ -8334,15 +8747,15 @@
       "planner_turns": {
         "plan": 1,
         "repair": 1,
-        "decision": 5
+        "decision": 6
       },
-      "cost_usd": 0.422105,
+      "cost_usd": 0.515334,
       "cost_by_role": {
-        "planner": 0.141721,
-        "worker": 0.280384,
+        "planner": 0.11756,
+        "worker": 0.397774,
         "reviewer": 0.0
       },
-      "runs": 12,
+      "runs": 14,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -8353,13 +8766,13 @@
         ]
       },
       "tokens": {
-        "input": 450,
-        "output": 27314,
-        "cache_read": 1239215,
-        "cache_creation": 80582
+        "input": 548,
+        "output": 32712,
+        "cache_read": 1528397,
+        "cache_creation": 99193
       },
       "cost_basis": {
-        "equivalent": 12,
+        "equivalent": 14,
         "provider_price": 0,
         "unpriced": 0
       },
@@ -8370,12 +8783,12 @@
         "total": 1
       },
       "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (step s2: role 'backend_impl' is not a role of this task (defined: none); define it with looper_task_role_set first, or leave it out); asking again"
+        "Planner reply broke the PLAN contract (steps[0] is missing review); asking again"
       ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 178.7,
+      "duration_s": 205.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_multi_platform/3",
@@ -8437,11 +8850,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.157634,
+      "cost_usd": 0.175702,
       "cost_by_role": {
-        "planner": 0.058854,
-        "worker": 0.028559,
-        "reviewer": 0.070221
+        "planner": 0.054817,
+        "worker": 0.044327,
+        "reviewer": 0.076558
       },
       "runs": 6,
       "run_errors": 0,
@@ -8457,10 +8870,10 @@
         ]
       },
       "tokens": {
-        "input": 158,
-        "output": 9103,
-        "cache_read": 364775,
-        "cache_creation": 37742
+        "input": 206,
+        "output": 9723,
+        "cache_read": 494853,
+        "cache_creation": 38698
       },
       "cost_basis": {
         "equivalent": 6,
@@ -8477,7 +8890,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 109.0,
+      "duration_s": 115.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_template_fits/3",
@@ -8539,10 +8952,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.061364,
+      "cost_usd": 0.060107,
       "cost_by_role": {
-        "planner": 0.036201,
-        "worker": 0.025163,
+        "planner": 0.034145,
+        "worker": 0.025962,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -8557,9 +8970,9 @@
       },
       "tokens": {
         "input": 54,
-        "output": 2743,
-        "cache_read": 113747,
-        "cache_creation": 18110
+        "output": 2527,
+        "cache_read": 113519,
+        "cache_creation": 18033
       },
       "cost_basis": {
         "equivalent": 3,
@@ -8576,7 +8989,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 33.1,
+      "duration_s": 30.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_template_unfit/3",
@@ -8638,10 +9051,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.051172,
+      "cost_usd": 0.054476,
       "cost_by_role": {
-        "planner": 0.031495,
-        "worker": 0.019677,
+        "planner": 0.028289,
+        "worker": 0.026187,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -8655,10 +9068,10 @@
         ]
       },
       "tokens": {
-        "input": 46,
-        "output": 1620,
-        "cache_read": 92395,
-        "cache_creation": 16893
+        "input": 54,
+        "output": 1818,
+        "cache_read": 110455,
+        "cache_creation": 17143
       },
       "cost_basis": {
         "equivalent": 3,
@@ -8675,7 +9088,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 22.7,
+      "duration_s": 26.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/roles_not_needed/3",
@@ -8685,19 +9098,25 @@
     {
       "id": "gate_ambiguous",
       "rep": 3,
-      "status": "completed",
-      "success": true,
-      "problems": [],
-      "steps": 2,
+      "status": "failed",
+      "success": false,
+      "problems": [
+        "task failed: ## Why it ended Planning failed: invalid reply after a repair turn: steps[1] is missing review ## Done - nothing ## Not done - nothing",
+        "settings.toml is missing (the user asked for TOML in settings.toml)",
+        "gates_opened 0 < 1",
+        "gates_passed 0 < 1",
+        "conclusion_reads 0 < 1"
+      ],
+      "steps": 0,
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
       "plan_changes": 0,
       "independent_pairs": 0,
       "bracketed_pairs": 0,
-      "parallel_workers": 1,
-      "progress_notes": 1,
-      "final_summary": 1,
+      "parallel_workers": 0,
+      "progress_notes": 0,
+      "final_summary": 0,
       "planner_profile_runs": 0,
       "roles_defined": 0,
       "role_runs": 0,
@@ -8712,15 +9131,15 @@
       "advisory_role_fails": 0,
       "discipline_roles": 0,
       "interface_dependents": 0,
-      "gates_opened": 1,
-      "gate_turns": 1,
-      "gates_passed": 1,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
       "gates_ended_by_user": 0,
       "gates_cancelled": 0,
       "assumptions_stated": 0,
       "gate_plan_changes": 0,
       "gate_parallel_runs": 0,
-      "conclusion_reads": 1,
+      "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
       "room_messages": 0,
       "room_questions": 0,
@@ -8735,54 +9154,50 @@
       "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "repair": 1,
-        "gate": 1,
-        "decision": 1
+        "repair": 1
       },
-      "cost_usd": 0.078569,
+      "cost_usd": 0.035287,
       "cost_by_role": {
-        "planner": 0.050226,
-        "worker": 0.028343,
+        "planner": 0.035287,
+        "worker": 0.0,
         "reviewer": 0.0
       },
-      "runs": 5,
+      "runs": 2,
       "run_errors": 0,
       "models": {
         "planner": [
           "claude-haiku-4-5-20251001"
-        ],
-        "worker": [
-          "claude-haiku-4-5-20251001"
         ]
       },
       "tokens": {
-        "input": 90,
-        "output": 3850,
-        "cache_read": 202751,
-        "cache_creation": 19477
+        "input": 28,
+        "output": 1785,
+        "cache_read": 57495,
+        "cache_creation": 10292
       },
       "cost_basis": {
-        "equivalent": 5,
+        "equivalent": 2,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 1,
+        "planner": 2,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 2
       },
       "planner_violation_reasons": [
-        "Planner reply broke the PLAN contract (steps[1] is missing review); asking again"
+        "Planner reply broke the PLAN contract (steps[0] is a gate and is missing depends_on); asking again",
+        "Task failed: Planning failed: invalid reply after a repair turn: steps[1] is missing review"
       ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 47.2,
+      "duration_s": 20.7,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_ambiguous/3",
-      "outcome": "pass",
+      "outcome": "fail",
       "user_gates": "on"
     },
     {
@@ -8840,10 +9255,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.052758,
+      "cost_usd": 0.053299,
       "cost_by_role": {
-        "planner": 0.030314,
-        "worker": 0.022444,
+        "planner": 0.030494,
+        "worker": 0.022805,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -8858,9 +9273,9 @@
       },
       "tokens": {
         "input": 54,
-        "output": 1824,
-        "cache_read": 111166,
-        "cache_creation": 16234
+        "output": 1892,
+        "cache_read": 111208,
+        "cache_creation": 16332
       },
       "cost_basis": {
         "equivalent": 3,
@@ -8934,19 +9349,20 @@
       "room_tool_calls": 0,
       "room_consults": 0,
       "room_consults_answered": 0,
-      "planner_denials": 1,
+      "planner_denials": 0,
       "planner_turns": {
         "plan": 1,
-        "gate": 1,
+        "gate": 2,
+        "repair": 2,
         "decision": 1
       },
-      "cost_usd": 0.074512,
+      "cost_usd": 0.095041,
       "cost_by_role": {
-        "planner": 0.049061,
-        "worker": 0.025451,
+        "planner": 0.070113,
+        "worker": 0.024928,
         "reviewer": 0.0
       },
-      "runs": 4,
+      "runs": 7,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -8957,27 +9373,31 @@
         ]
       },
       "tokens": {
-        "input": 80,
-        "output": 3531,
-        "cache_read": 181717,
-        "cache_creation": 19303
+        "input": 94,
+        "output": 6040,
+        "cache_read": 211005,
+        "cache_creation": 21823
       },
       "cost_basis": {
-        "equivalent": 4,
+        "equivalent": 7,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 3,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 3
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the GATE contract (closing the gate needs \"summary\": {\"decisions\": [...], \"assumptions\": [...], \"open\": [...]}); asking again",
+        "Planner could not take the messages in gate g1 (failure 1): invalid reply after a repair turn: steps[0] is missing review",
+        "Planner reply broke the GATE contract (steps[0] is missing review); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 43.3,
+      "duration_s": 152.3,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_end_early/3",
@@ -9038,15 +9458,16 @@
       "planner_turns": {
         "plan": 1,
         "gate": 1,
+        "repair": 1,
         "decision": 2
       },
-      "cost_usd": 0.103874,
+      "cost_usd": 0.116225,
       "cost_by_role": {
-        "planner": 0.051779,
-        "worker": 0.052095,
+        "planner": 0.05585,
+        "worker": 0.060375,
         "reviewer": 0.0
       },
-      "runs": 6,
+      "runs": 7,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -9057,27 +9478,29 @@
         ]
       },
       "tokens": {
-        "input": 108,
-        "output": 5093,
-        "cache_read": 236218,
-        "cache_creation": 27340
+        "input": 118,
+        "output": 6460,
+        "cache_read": 260688,
+        "cache_creation": 28869
       },
       "cost_basis": {
-        "equivalent": 6,
+        "equivalent": 7,
         "provider_price": 0,
         "unpriced": 0
       },
       "contract_violations": {
-        "planner": 0,
+        "planner": 1,
         "worker": 0,
         "reviewer": 0,
-        "total": 0
+        "total": 1
       },
-      "planner_violation_reasons": [],
+      "planner_violation_reasons": [
+        "Planner reply broke the GATE contract (closing the gate needs \"summary\": {\"decisions\": [...], \"assumptions\": [...], \"open\": [...]}); asking again"
+      ],
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 59.6,
+      "duration_s": 59.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_parallel_branch/3",
@@ -9139,10 +9562,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.059908,
+      "cost_usd": 0.063071,
       "cost_by_role": {
-        "planner": 0.034262,
-        "worker": 0.025646,
+        "planner": 0.035927,
+        "worker": 0.027144,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -9157,9 +9580,9 @@
       },
       "tokens": {
         "input": 70,
-        "output": 2113,
-        "cache_read": 154264,
-        "cache_creation": 16923
+        "output": 2568,
+        "cache_read": 154854,
+        "cache_creation": 17338
       },
       "cost_basis": {
         "equivalent": 3,
@@ -9176,7 +9599,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 30.7,
+      "duration_s": 37.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/gate_discoverable/3",
@@ -9238,10 +9661,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.059009,
+      "cost_usd": 0.05695,
       "cost_by_role": {
-        "planner": 0.039866,
-        "worker": 0.019143,
+        "planner": 0.034121,
+        "worker": 0.022829,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -9256,9 +9679,9 @@
       },
       "tokens": {
         "input": 62,
-        "output": 2169,
-        "cache_read": 137075,
-        "cache_creation": 17197
+        "output": 1924,
+        "cache_read": 134306,
+        "cache_creation": 16919
       },
       "cost_basis": {
         "equivalent": 3,
@@ -9275,7 +9698,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 28.9,
+      "duration_s": 26.8,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/operator_notes/3",
@@ -9337,10 +9760,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.080819,
+      "cost_usd": 0.069035,
       "cost_by_role": {
-        "planner": 0.053179,
-        "worker": 0.02764,
+        "planner": 0.046659,
+        "worker": 0.022376,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -9354,10 +9777,10 @@
         ]
       },
       "tokens": {
-        "input": 102,
-        "output": 3494,
-        "cache_read": 250646,
-        "cache_creation": 19091
+        "input": 86,
+        "output": 2568,
+        "cache_read": 204228,
+        "cache_creation": 17843
       },
       "cost_basis": {
         "equivalent": 3,
@@ -9374,7 +9797,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 43.2,
+      "duration_s": 39.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/operator_notes_stale/3",
@@ -9385,19 +9808,17 @@
       "id": "room_interface",
       "rep": 3,
       "status": "completed",
-      "success": false,
-      "problems": [
-        "room_messages 0 < 1"
-      ],
-      "steps": 4,
+      "success": true,
+      "problems": [],
+      "steps": 2,
       "reviews": 0,
-      "retries": 0,
+      "retries": 1,
       "chat_turns": 0,
       "plan_changes": 0,
       "independent_pairs": 1,
-      "bracketed_pairs": 1,
+      "bracketed_pairs": 0,
       "parallel_workers": 2,
-      "progress_notes": 4,
+      "progress_notes": 3,
       "final_summary": 1,
       "planner_profile_runs": 0,
       "roles_defined": 0,
@@ -9423,14 +9844,14 @@
       "gate_parallel_runs": 0,
       "conclusion_reads": 0,
       "gate_asks_beyond_script": 0,
-      "room_messages": 0,
+      "room_messages": 1,
       "room_questions": 0,
       "room_unanswered": 0,
-      "room_interface": 0,
+      "room_interface": 1,
       "room_escalations": 0,
-      "room_reminders": 0,
+      "room_reminders": 1,
       "room_refused": 0,
-      "room_tool_calls": 0,
+      "room_tool_calls": 4,
       "room_consults": 0,
       "room_consults_answered": 0,
       "planner_denials": 0,
@@ -9438,13 +9859,13 @@
         "plan": 1,
         "decision": 4
       },
-      "cost_usd": 0.267564,
+      "cost_usd": 0.31028,
       "cost_by_role": {
-        "planner": 0.09176,
-        "worker": 0.175804,
+        "planner": 0.066535,
+        "worker": 0.243745,
         "reviewer": 0.0
       },
-      "runs": 9,
+      "runs": 8,
       "run_errors": 0,
       "models": {
         "planner": [
@@ -9455,13 +9876,13 @@
         ]
       },
       "tokens": {
-        "input": 258,
-        "output": 17068,
-        "cache_read": 651060,
-        "cache_creation": 58430
+        "input": 428,
+        "output": 16261,
+        "cache_read": 1184626,
+        "cache_creation": 55042
       },
       "cost_basis": {
-        "equivalent": 9,
+        "equivalent": 8,
         "provider_price": 0,
         "unpriced": 0
       },
@@ -9479,11 +9900,11 @@
         "merges": 2,
         "checkpoints": 0
       },
-      "duration_s": 154.7,
+      "duration_s": 152.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_interface/3",
-      "outcome": "fail",
+      "outcome": "pass",
       "user_gates": "on"
     },
     {
@@ -9543,10 +9964,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.123634,
+      "cost_usd": 0.116876,
       "cost_by_role": {
-        "planner": 0.050611,
-        "worker": 0.073023,
+        "planner": 0.041108,
+        "worker": 0.075768,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -9561,9 +9982,9 @@
       },
       "tokens": {
         "input": 134,
-        "output": 6805,
-        "cache_read": 301890,
-        "cache_creation": 29643
+        "output": 5806,
+        "cache_read": 300502,
+        "cache_creation": 28831
       },
       "cost_basis": {
         "equivalent": 5,
@@ -9580,7 +10001,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 80.3,
+      "duration_s": 76.0,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_consult/3",
@@ -9642,10 +10063,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.049057,
+      "cost_usd": 0.052644,
       "cost_by_role": {
-        "planner": 0.026424,
-        "worker": 0.022633,
+        "planner": 0.030069,
+        "worker": 0.022575,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -9659,10 +10080,10 @@
         ]
       },
       "tokens": {
-        "input": 46,
-        "output": 1648,
-        "cache_read": 88990,
-        "cache_creation": 15936
+        "input": 54,
+        "output": 1779,
+        "cache_read": 111134,
+        "cache_creation": 16291
       },
       "cost_basis": {
         "equivalent": 3,
@@ -9679,7 +10100,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 24.8,
+      "duration_s": 24.6,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/room_quiet/3",
@@ -9741,10 +10162,10 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.12423,
+      "cost_usd": 0.118431,
       "cost_by_role": {
-        "planner": 0.050944,
-        "worker": 0.073286,
+        "planner": 0.050598,
+        "worker": 0.067833,
         "reviewer": 0.0
       },
       "runs": 7,
@@ -9758,10 +10179,10 @@
         ]
       },
       "tokens": {
-        "input": 118,
-        "output": 6310,
-        "cache_read": 247873,
-        "cache_creation": 33887
+        "input": 110,
+        "output": 5752,
+        "cache_read": 227390,
+        "cache_creation": 33411
       },
       "cost_basis": {
         "equivalent": 7,
@@ -9778,7 +10199,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 55.6,
+      "duration_s": 51.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/planner_plan_file/3",
@@ -9840,11 +10261,11 @@
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.033568,
+      "cost_usd": 0.030278,
       "cost_by_role": {
         "planner": 0.004,
         "worker": 0.004,
-        "reviewer": 0.025568
+        "reviewer": 0.022278
       },
       "runs": 7,
       "run_errors": 1,
@@ -9860,10 +10281,10 @@
         ]
       },
       "tokens": {
-        "input": 86,
-        "output": 1364,
-        "cache_read": 53998,
-        "cache_creation": 6811
+        "input": 78,
+        "output": 1264,
+        "cache_read": 33699,
+        "cache_creation": 6435
       },
       "cost_basis": {
         "equivalent": 7,
@@ -9880,7 +10301,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 18.5,
+      "duration_s": 16.5,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewer_retry_note/3",
@@ -9942,11 +10363,11 @@
         "plan": 1,
         "decision": 5
       },
-      "cost_usd": 0.065863,
+      "cost_usd": 0.069079,
       "cost_by_role": {
         "planner": 0.006,
         "worker": 0.006,
-        "reviewer": 0.053863
+        "reviewer": 0.057079
       },
       "runs": 11,
       "run_errors": 1,
@@ -9962,10 +10383,10 @@
         ]
       },
       "tokens": {
-        "input": 142,
-        "output": 3094,
-        "cache_read": 108525,
-        "cache_creation": 13969
+        "input": 150,
+        "output": 3277,
+        "cache_read": 128961,
+        "cache_creation": 14094
       },
       "cost_basis": {
         "equivalent": 11,
@@ -9982,10 +10403,214 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 37.0,
+      "duration_s": 39.1,
       "stopped_by_cap": false,
       "timed_out": false,
       "work_dir": "<eval-root>/work/reviewer_unrelated_note/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "reviewer_elsewhere",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.035118,
+      "cost_by_role": {
+        "planner": 0.003,
+        "worker": 0.002,
+        "reviewer": 0.030118
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "fake"
+        ],
+        "worker": [
+          "fake"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 66,
+        "output": 1871,
+        "cache_read": 54929,
+        "cache_creation": 7722
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 22.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/reviewer_elsewhere/3",
+      "outcome": "pass",
+      "user_gates": "on"
+    },
+    {
+      "id": "reviewer_elsewhere_wrong",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 1,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 4,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "template_roles": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "most_review_roles": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "room_messages": 0,
+      "room_questions": 0,
+      "room_unanswered": 0,
+      "room_interface": 0,
+      "room_escalations": 0,
+      "room_reminders": 0,
+      "room_refused": 0,
+      "room_tool_calls": 0,
+      "room_consults": 0,
+      "room_consults_answered": 0,
+      "planner_denials": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 4
+      },
+      "cost_usd": 0.055233,
+      "cost_by_role": {
+        "planner": 0.005,
+        "worker": 0.004,
+        "reviewer": 0.046233
+      },
+      "runs": 9,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "fake"
+        ],
+        "worker": [
+          "fake"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 106,
+        "output": 2448,
+        "cache_read": 68133,
+        "cache_creation": 13747
+      },
+      "cost_basis": {
+        "equivalent": 9,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_violation_reasons": [],
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 28.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "work_dir": "<eval-root>/work/reviewer_elsewhere_wrong/3",
       "outcome": "pass",
       "user_gates": "on"
     }
