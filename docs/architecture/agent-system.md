@@ -1253,18 +1253,18 @@ appended on Codex, Grok or OMP now replaces unless its role layer says `append`.
 | Runtime | Append | Replace |
 | --- | --- | --- |
 | Claude Code | `--append-system-prompt-file` | `--system-prompt-file`; both modes keep `--system-prompt-snapshot off` |
-| Codex (profile) | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
-| Grok (profile) | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
-| OMP (profile) | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
+| Codex | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
+| Grok | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
+| OMP | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
 
 Codex and Grok include their runtime notes with Looper's prompt in either
 mode. Replacement keeps the runtime's tools and project instruction loading;
-it removes the runtime's default prompt. The dashboard's profile editor disables the
-mode selector with the runtime's refusal reason when replacement is not
-supported, and resets only its unsaved draft to append when moving to such a
-runtime or to Claude Code. The role settings (Settings → Roles) show a two-way choice for every role. Profile summaries mark replacement, and each run's System prompt
-section shows `replaced default` for a replacement record. The profile's mode is
-available through the Manager's profile configuration tool on every channel.
+it removes the runtime's default prompt. The mode is not a profile setting:
+the role settings (Settings → Roles) show a two-way choice for every role, a
+task's Agents tab shows (and lets the task override) the role's choice for every
+runtime, and the profile editor only points to Settings → Roles. Each run's
+System prompt section shows `replaced default` for a replacement record. The
+Manager's profile configuration tool has no mode field.
 
 **Agent teams.** They are on by default for Claude Code profiles: a profile
 created without `agent_teams` gets them on a Claude Code runtime and not on
