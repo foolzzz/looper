@@ -295,24 +295,27 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 
 def _assert_unrestricted(argv: list[str]) -> None:
-    """The shared permission flags, once, and nothing that narrows the tools or the permissions again (every role but
-    the Planner)."""
+    """The shared permission flags, once, and nothing that narrows the tools or the permissions again but the denied
+    tools that reach other Claude Code sessions (every role but the Planner)."""
     from looper.agents.claude_cli import permission_args
 
     flags = permission_args()
     assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
     assert argv.count("--dangerously-skip-permissions") == 1
-    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+    assert argv.count("--disallowedTools") == 1 and _flag(argv, "--disallowedTools") in (
+        "ListAgents", "ListAgents,SendMessage")
+    assert not {"--tools", "--allowedTools", "--permission-mode"} & set(argv)
 
 
 def _assert_read_only(argv: list[str]) -> None:
     """A Planner's read-only flags, once: Claude Code's default permission mode, pinned and with no one to answer its
-    prompts, without the file-editing tools, with its skills and web reads (and its MCP servers) allowed; nothing
-    that skips the permissions."""
+    prompts, without the file-editing tools or the tools that reach other Claude Code sessions, with its skills and
+    web reads (and its MCP servers) allowed; nothing that skips the permissions."""
     assert "--dangerously-skip-permissions" not in argv and "--tools" not in argv
     assert argv.count("--permission-mode") == 1 and _flag(argv, "--permission-mode") == "manual"
     assert argv.count("--permission-prompts") == 1 and _flag(argv, "--permission-prompts") == "none"
-    assert argv.count("--disallowedTools") == 1 and _flag(argv, "--disallowedTools") == "Edit,Write,NotebookEdit"
+    assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--disallowedTools"] == [
+        "Edit,Write,NotebookEdit", "ListAgents,SendMessage"]
     assert argv.count("--allowedTools") == 1
     assert str(_flag(argv, "--allowedTools")).startswith("Skill,WebFetch,WebSearch")
 

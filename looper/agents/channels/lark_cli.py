@@ -17,11 +17,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from ... import child_env
 
 # The event the adapter consumes: a message sent to the bot.
 RECEIVE_EVENT = "im.message.receive_v1"
@@ -181,11 +184,17 @@ def failure_code(stderr: bytes | str) -> int | None:
     return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
+def environment() -> dict[str, str]:
+    """What lark-cli starts with: a child's variables (``child_env``) and the server's ``LARK_*``."""
+    return {**child_env.inherited(), **{k: v for k, v in os.environ.items() if k.startswith("LARK_")}}
+
+
 async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS) -> bytes:
     """Run a lark-cli call; its stdout, or ``LarkCliError`` with lark-cli's reason."""
     try:
         process = await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            *argv, env=environment(), stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
         raise LarkCliError(f"lark-cli could not start: {exc}") from None

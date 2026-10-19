@@ -1,4 +1,5 @@
-"""Where Looper keeps its runtime state: ``LOOPER_RUNTIME_ROOT``, else ``~/.looper``.
+"""Where Looper keeps its runtime state: ``--runtime-root``, else ``LOOPER_RUNTIME_ROOT`` for this release, else
+``~/.looper`` (``looper.ops_config.runtime_root``).
 
 Before the rename the default was ``~/.loopx``. The first ``looper serve`` or
 ``looper service install`` that uses ``~/.looper`` while only ``~/.loopx``
@@ -43,18 +44,6 @@ def configured_runtime_root() -> Path | None:
     if not value:
         return None
     return Path(os.path.abspath(os.path.expanduser(value)))
-
-
-def default_runtime_root() -> Path:
-    """Return the runtime root used when no explicit root is given.
-
-    ``LOOPER_RUNTIME_ROOT`` when it is set, otherwise ``~/.looper``. It is read at
-    call time, never cached at import, so HOME and the environment in effect
-    when the root is needed decide it. ``looper serve --runtime-root`` takes
-    precedence over this default.
-    """
-
-    return configured_runtime_root() or home_runtime_root()
 
 
 @dataclass(frozen=True)

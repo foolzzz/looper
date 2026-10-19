@@ -51,17 +51,29 @@ async def _installation(*, schema: bool = True) -> AsyncIterator[tuple[Any, str]
 
 
 async def _looper(monkeypatch: pytest.MonkeyPatch, url: str, *argv: str) -> tuple[int, str, str]:
-    """Run the ``looper`` command on the installation at ``url``: its exit code, stdout and stderr."""
-    from looper import cli
+    """Run the ``looper`` command on the installation at ``url`` (named by an ops file of its own): its exit code,
+    stdout and stderr."""
+    import shutil
+    import tempfile
+
+    from looper import cli, ops_config
+
+    ops = Path(tempfile.mkdtemp()) / "ops" / "server.toml"
+    ops_config.write_private(ops, ops_config.render(ops_config.OpsConfig(runtime_root=ops.parent.parent, path=ops,
+                                                                          database_url=url)))
 
     def run() -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(list(argv))
+            code = cli.main([*argv, "--config", str(ops)])
         return code, out.getvalue(), err.getvalue()
 
-    monkeypatch.setenv("LOOPER_DATABASE_URL", url)
-    return await asyncio.to_thread(run)
+    for name in ("LOOPER_DATABASE_URL", "LOOPX_DATABASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        return await asyncio.to_thread(run)
+    finally:
+        shutil.rmtree(ops.parent.parent)
 
 
 def _serve(monkeypatch: pytest.MonkeyPatch, pool: Any) -> None:

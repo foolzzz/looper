@@ -17,6 +17,7 @@ import asyncpg
 import pytest
 
 from looper.agents import task_workspaces as tw
+from looper.agents import operator_notes
 from looper.agents.operator_notes import directory_name
 from tests.test_continue_at_cap_db import _call, _setup
 from tests.test_ops_tasks_db import _Chat
@@ -30,7 +31,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     root = tmp_path / "notes"
-    monkeypatch.setenv("LOOPER_OPERATOR_NOTES_ROOT", str(root))
+    monkeypatch.setattr(operator_notes, "_root", str(root))
     return root
 
 

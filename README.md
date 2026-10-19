@@ -82,10 +82,19 @@ docker run -d --name agentbox-postgres \
   -p 54329:5432 \
   postgres:16
 
-# Set connection string
-export LOOPER_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"
-# Or put it in .env (gitignored)
+# Write the ops file (mode 0600, in a directory only you can enter)
+mkdir -m 700 -p ~/.looper/ops
+cat > ~/.looper/ops/server.toml <<'EOF'
+[database]
+url = "postgresql://postgres:postgres@localhost:54329/loopx"
+EOF
+chmod 600 ~/.looper/ops/server.toml
 ```
+
+An install that still sets the old variables (`LOOPER_DATABASE_URL`, or
+`LOOPX_DATABASE_URL`, in the shell or `.env`) can run `uv run looper config
+init-ops` once after `uv sync` instead. It writes that file from the values
+in effect, mode 0600, and refuses to overwrite a file that exists.
 
 ### 2. Install & Build
 
@@ -119,7 +128,7 @@ Settings does both too, under "Move to another machine".
 ### 4. Run as a service
 
 ```bash
-uv run looper service install     # --port, --runtime-root, --label, --env NAME
+uv run looper service install     # --port, --runtime-root, --config, --label, --env NAME
 uv run looper service status      # installed, running, PID, last exit, log, GET /api/status
 uv run looper service restart     # e.g. after pulling new code
 uv run looper service uninstall
@@ -128,11 +137,22 @@ uv run looper service uninstall
 `install` runs `looper serve` in the background: a launchd LaunchAgent on macOS,
 a systemd user unit on Linux. It starts at login, starts again after a crash,
 and logs to `<runtime root>/logs/serve.log`. The unit runs the `looper` that ran
-`install` (in a checkout, `.venv/bin/looper`) in the current directory, so the
-checkout's `.env` keeps working. It copies `PATH`, locale and proxy settings,
-`CLAUDE_CONFIG_DIR`, and every `LOOPER_*`, `ANTHROPIC_*` and `LARK_*` variable
-from your shell (add others with `--env NAME`), so the unit file is private
-(mode 0600). Run `install` again to apply changes. On Linux, `loginctl
+`install` (in a checkout, `.venv/bin/looper`) in the current directory, as
+`looper serve --config <ops file> --runtime-root <root>`, both absolute.
+`--port` is added only when you passed `--port`, or when the unit already
+installed had one and the file names no port. It refuses when there is no ops
+file, and while a setting still comes from an environment variable (run
+`looper config init-ops`, then remove the variable). It copies `PATH`, `TZ`,
+locale, proxy and CA-certificate variables, the runtimes' directories and
+logins (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, the Anthropic model variables,
+`CODEX_API_KEY`, `XAI_API_KEY` and the others in `child_env.RUNTIMES`),
+`LOOPER_TELEGRAM_BOT_TOKEN`, and each `--env NAME`. It no longer copies every
+`LOOPER_*`, `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variable, and the report
+names the ones it left out. `--env` with an ops variable is refused. Run
+`install` again to replace the unit: a database URL an old unit carried is
+then gone. The unit file stays mode 0600, because it can hold API keys. Edit
+the ops file and restart the server to apply a setting. On Linux, `loginctl
 enable-linger $USER` keeps it running without a login session.
 
 ### Backups when upgrading
@@ -141,26 +161,28 @@ enable-linger $USER` keeps it running without a login session.
 columns or tables. When the schema is about to change, serve first writes a
 `pg_dump` backup to `~/.looper/backups/` (the runtime root's `backups/`, newest
 5 per database kept) and logs how to restore it; a new, empty database needs
-none. It uses the `pg_dump` on PATH, or the one `LOOPER_PG_DUMP` names, which
-must be at least the server's major version (`looper doctor` checks it; on
-macOS, `brew install libpq` and put `$(brew --prefix libpq)/bin` on PATH).
-With PostgreSQL in Docker, dump inside the container instead:
+none. It uses the `pg_dump` on PATH, or the one `[backup] pg_dump` in the ops
+file names, which must be at least the server's major version (`looper doctor`
+checks it; on macOS, `brew install libpq` and put `$(brew --prefix libpq)/bin`
+on PATH). With PostgreSQL in Docker, set `[backup] command` to an argv array
+and dump inside the container (`{dbname}` and `{user}` are filled in):
 
-```bash
-export LOOPER_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
+```toml
+[backup]
+command = ["docker", "exec", "agentbox-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
 ```
 
 Without a usable `pg_dump`, or when the backup fails, serve exits before it
 changes anything; `looper serve --skip-backup` migrates without a backup and
 logs a warning. To roll back, stop Looper, recreate the database empty, restore
-the file with `pg_restore --no-owner --dbname "$LOOPER_DATABASE_URL" <file>`
+the file with `pg_restore --no-owner --dbname '<the database.url>' <file>`
 (in Docker: `docker exec -i agentbox-postgres pg_restore --no-owner -U postgres
--d loopx < <file>`), and run the previous Looper version. `looper service
-install` copies `PATH` and the `LOOPER_*` variables, so set these before it.
+-d loopx < <file>`), and run the previous Looper version. Set `[backup]` in
+the ops file and restart: `service install` does not copy these as variables.
 
 ### Upgrading from LoopX
 
-Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
+Looper was called LoopX up to v2.5.0. The rename itself needs no manual step:
 
 - **Command:** `looper`. `loopx` still works for one release: it prints a
   deprecation note, then runs `looper`. `install.sh` first removes an old
@@ -169,16 +191,22 @@ Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
   `looper service install` moves `~/.loopx` there (one rename; nothing is
   copied or deleted) and leaves `~/.loopx` as a link to it for one release.
   When both exist, Looper uses `~/.looper` and logs a warning.
-- **Environment variables:** `LOOPER_*`. A `LOOPX_*` name is still read when
-  its `LOOPER_*` name is unset, with a warning; rename them in your shell and
-  `.env`.
+- **Environment variables:** the old deployment variables are read for one
+  more release (`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
+  `LOOPER_BACKUP_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
+  except the notes root), from the environment and then from `.env`, each use
+  warned about by name. `looper config init-ops` moves them into the ops file.
+  `looper.env` still reads any other `LOOPX_*` name when its `LOOPER_*` name
+  is unset, with a warning, for one release.
 - **Service:** `com.looper.serve`. `looper service install` stops and removes
   the old `com.loopx.serve` unit first.
 - **Configuration files:** export writes `looper-config/v2`; files exported as
   `looper-config/v1` or `loopx-config/v1` still import.
-- **Unchanged:** the default database is still named `loopx`
-  (`postgresql://localhost:5432/loopx`), and the data in it, such as your own
-  harness text, is not rewritten; release tags and history keep their names;
+- **Unchanged:** an existing database keeps its name (often `loopx`) and the
+  data in it, such as your own harness text, is not rewritten. There is no
+  default database URL; `looper config init-ops` writes
+  `postgresql://localhost:5432/loopx` only when nothing names one, and says
+  so. Release tags and history keep their names;
   [NOTICE](NOTICE) keeps the attribution to upstream LoopX. The first start
   takes the usual pre-migration backup, because `schema.sql` changed.
 
@@ -258,22 +286,81 @@ the endpoints with their fields and errors.
 
 ## Configuration
 
-### Environment Variables
+### Ops file
 
-| Variable | Required | Description |
+Deployment settings live in `<runtime root>/ops/server.toml` (by default
+`~/.looper/ops/server.toml`). `--config /path` on `looper serve`, `doctor`,
+`config export`, `config import`, `config init-ops` and `service install`
+names another file. Edit the file and restart the server to apply a change.
+Looper writes it atomically. It must be a regular file (not a symlink), owned
+by you, mode 0600, in a directory of yours with mode 0700. Nothing is
+expanded: no variable, no `~`, no include. An unknown key, a value of the
+wrong type or a bad value stops the command; the message names the key and
+never shows the value.
+
+| Key | Required | Meaning |
 |---|---|---|
-| `LOOPER_DATABASE_URL` | Yes | PostgreSQL connection string |
-| `LOOPER_PUBLIC_URL` | No | The dashboard's address as people open it (for example `https://looper.example.com`), for the links that task-end notices and schedule messages send to Telegram and Lark; unset, the server's own `http://<host>:<port>`. An invalid value stops `looper serve` from starting |
-| `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` | No | For tests and validation only: the least time between two fires of a schedule (default 300), read at startup |
+| `database.url` | Yes | PostgreSQL connection string. Without one, `looper serve`, `doctor` and `config import` or `export` do not start, and say to run `looper config init-ops` or edit the file |
+| `server.host` | No | Address to bind (default `127.0.0.1`) |
+| `server.port` | No | Port (default 8767) |
+| `server.public_url` | No | The dashboard's address as people open it (for example `https://looper.example.com`), for the links that task-end notices and schedule messages send to Telegram and Lark; unset, the server's own `http://<host>:<port>`. An invalid value stops `looper serve` from starting |
+| `server.log_level` | No | `debug`, `info`, `warning` or `error` (default `info`) |
+| `backup.pg_dump` | No | `pg_dump` to use instead of the one on `PATH`; its major version must be at least the server's |
+| `backup.command` | No | An argv array whose stdout is the dump; `{dbname}` and `{user}` are filled in from the database URL |
+| `operator_notes.root` | No | Absolute path of the directory where the operator's Claude Code keeps project notes |
 
-The `claude` processes inherit the server's environment, so the Claude CLI
-authenticates as it does in your shell: signed in, or with an API key as its
-own documentation describes.
+Each setting comes from the first of these: an explicit flag (`--host`,
+`--port`, or `--verbose`, which sets `server.log_level` to `debug`), the
+file, then for this release only the old variable from the environment
+(`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
+`LOOPER_BACKUP_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
+except the notes root), then the same name in the checkout's `.env`, then the
+built-in default. There is no default database URL. Each use of an old
+variable logs a deprecation warning that names the variable and never its
+value; the next release removes them. The runtime root is `--runtime-root`,
+else `LOOPER_RUNTIME_ROOT` (deprecated, and warned; `LOOPX_RUNTIME_ROOT` the
+same way), else `~/.looper`. The file never names the runtime root. `.env` is
+not put into Looper's environment: only those old settings are read from it,
+and any other key in it (for example a channel token variable) is ignored and
+named in a warning.
 
-Channel credentials stay out of the source: the Telegram bot token is entered
-in Settings or kept in an environment variable, and Lark's credentials stay in
-`lark-cli` (see [Channels](#channels)). Store secrets in `.env` (gitignored,
-read from the repository root), never in source.
+To move an existing install, run `looper config init-ops` once. It writes the
+file from the values in effect, mode 0600, and refuses to overwrite a file
+that exists. With nothing configured it writes the old default
+`postgresql://localhost:5432/loopx` and says so. Remove the old variables from
+the shell and from `.env`, then run `looper service install` again if you use
+the service. Until then `looper serve` keeps working from the variables, with
+the warnings.
+
+`LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` is not an ops setting. For tests and
+validation only, it is the least time between two fires of a schedule
+(default 300), read when `looper serve` starts.
+
+**Child processes.** Every process the server starts (an agent's runtime and
+the MCP servers it starts, a schedule gate, a probe, and a git, ps or
+lark-cli helper) starts from an allowlist of the server's environment
+(`looper/child_env.py`: system paths, locale, XDG, the SSH agent, git
+identity and config, proxies and certificates, and the runtimes' login
+variables) plus what Looper sets for that child (a provider binding, the
+agent's settings variables, an MCP token, a gate's run variables). The
+database URL, under either name, `PGPASSWORD`, any `LOOPER_*` or `LOOPX_*`
+variable and every other variable are not passed. A database backup gets that
+set plus libpq's `PG*` variables, Docker's variables, and `PGPASSWORD` from
+the URL for `pg_dump`. An agent that needs another variable takes it from its
+settings (Settings, or a project layer). The login variables on the allowlist
+are why a CLI signed in on this machine, or given an API key that way, still
+authenticates.
+
+This keeps secrets out of the children's environments. It is not a sandbox.
+Agents run as the server's user, so an agent with a shell can still read the
+files that user can read: the ops file, the operator token, a `.env`, the
+service unit. Isolating that needs a separate OS user or a sandbox, which is
+not done.
+
+Channel credentials stay out of the source. The Telegram bot token goes in
+its Settings field (stored in the database) or in the server's environment
+(`looper service install --env NAME`), and Lark's credentials stay in
+`lark-cli` (see [Channels](#channels)).
 
 ### Channels
 
@@ -306,7 +393,7 @@ apart from the settings and never returned by the API or exported.
   replying to that message, and sends the task's progress and its end notice
   to the group, @-mentioning the requester. Other group messages are ignored.
 - A task asked for in Telegram or Lark tells that chat when it completes or
-  fails, with a link to the task (see `LOOPER_PUBLIC_URL`). Telegram private
+  fails, with a link to the task (see `server.public_url`). Telegram private
   chats and Lark conversations are stored, shown read-only on the Chat page and
   included in a new Manager session's resume brief.
 - Send `/new` (the whole message) in the web chat, Lark or Telegram to start a

@@ -49,9 +49,12 @@ class RedactingFormatter(logging.Formatter):
 
 
 def log_to_stderr(level: int, fmt: str) -> None:
-    """Send the root logger's records from ``level`` on to stderr as ``fmt``, masked."""
+    """Send the root logger's records from ``level`` on to stderr as ``fmt``, masked; in place of the handler an
+    earlier call added, so no line is written twice."""
     handler = logging.StreamHandler()
     handler.setFormatter(RedactingFormatter(fmt))
     root = logging.getLogger()
+    for earlier in [h for h in root.handlers if isinstance(h.formatter, RedactingFormatter)]:
+        root.removeHandler(earlier)
     root.addHandler(handler)
     root.setLevel(level)

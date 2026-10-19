@@ -101,7 +101,7 @@ class CliTransport:
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         """Keep stdin open until cancellation, then let lark-cli end its subscription."""
         process = await asyncio.create_subprocess_exec(
-            *lark_cli.consume_command(self._profile),
+            *lark_cli.consume_command(self._profile), env=lark_cli.environment(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from looper import child_env
 from looper.agents import agent_settings
 from looper.agents.profile_registry import BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile
 from looper.agents.agent_settings import (
@@ -184,24 +185,25 @@ class TestEnvironment:
         planner = resolve("planner", layers, "proj-a")
         assert planner.env == (("TZ", "UTC"), ("LANG", "C"), ("PROJ", "p"))
 
-    def test_the_variables_go_on_top_of_the_servers_and_the_record_holds_no_value(
+    def test_the_variables_go_on_top_of_child_environment_and_the_record_holds_no_value(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("LOOPER_SERVER_ONLY", "kept")
         monkeypatch.setenv("TZ", "Asia/Shanghai")
         launch = Launch(resolve("worker", {(Layer.SYSTEM, None): LayerValues(env=(("TZ", "UTC"), ("LANG", "C.UTF-8")))}))
         env = launch.environment()
-        assert env is not None and (env["LOOPER_SERVER_ONLY"], env["TZ"], env["LANG"]) == ("kept", "UTC", "C.UTF-8")
+        assert "LOOPER_SERVER_ONLY" not in env
+        assert (env["TZ"], env["LANG"]) == ("UTC", "C.UTF-8")
         assert os.environ["TZ"] == "Asia/Shanghai"
         record = launch.record()
         assert record["env"] == {"sha256": launch.env_sha256, "keys": {"TZ": _sha("UTC"), "LANG": _sha("C.UTF-8")}}
         assert "C.UTF-8" not in json.dumps(record)
-        # Nothing to change for a profile without agent teams, on a server without their variable; the built-in
-        # profile has them.
+        # A profile without agent teams still gets an explicit child environment; the built-in profile
+        # adds its agent teams variable.
         monkeypatch.delenv(AGENT_TEAMS, raising=False)
         plain = Launch(resolve("worker", {(Layer.SYSTEM, None): LayerValues(profile=_profile("opus"))}))
-        assert plain.environment() is None and plain.env_sha256 is None
-        assert Launch().environment() == {**os.environ, AGENT_TEAMS: "1"}
+        assert plain.environment() == child_env.inherited() and plain.env_sha256 is None
+        assert Launch().environment() == {**child_env.inherited(), AGENT_TEAMS: "1"}
 
 
 class TestReviewerHarness:
@@ -250,13 +252,15 @@ class TestRecord:
         assert record["max_budget_usd"] == 0.5
         assert settings.harness.record() == {"source": "role_project", "sha256": _sha("H"), "project_id": "proj-a"}
         from looper.agents.claude_cli import permission_args
-        assert launch.args() == [*permission_args(), "--model", "sonnet", "--effort", "high",
-                                 "--max-budget-usd", "0.5"]
+        assert launch.args() == [*permission_args(), "--disallowedTools", "ListAgents,SendMessage",
+                                 "--model", "sonnet", "--effort", "high", "--max-budget-usd", "0.5"]
 
     def test_the_builtin_launch(self) -> None:
         from looper.agents.claude_cli import permission_args
 
-        assert Launch().args() == [*permission_args(), "--model", "opus", *TEAMMATE_MODE_ARGS]  # it has agent teams
+        # It has agent teams, which keep SendMessage.
+        assert Launch().args() == [*permission_args(), "--disallowedTools", "ListAgents", "--model", "opus",
+                                   *TEAMMATE_MODE_ARGS]
         assert Launch().record() == {
             "system_prompt_mode": "append",
             "profile": {**BUILTIN_PROFILE.record(), "source": "builtin"},

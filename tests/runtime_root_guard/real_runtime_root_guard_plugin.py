@@ -79,6 +79,12 @@ def _start() -> None:
     atexit.register(Path(report_path).unlink, missing_ok=True)
     guard.configure(roots, report_path)
     guard.install()
+    try:
+        from looper.child_env import allow
+    except ImportError:
+        pass
+    else:
+        allow(guard.PROTECTED_ROOTS_ENV, guard.REPORT_PATH_ENV)
     # The guard's sitecustomize first, then the tree under test ahead of any
     # editable install of another checkout.
     os.environ["PYTHONPATH"] = python_path(GUARD_DIR, SOURCE_ROOT, existing=os.environ.get("PYTHONPATH"))

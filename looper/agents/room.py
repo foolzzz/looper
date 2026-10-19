@@ -50,6 +50,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .. import child_env
 from ..db import projects as db_projects, room as db_room, steps as db_steps, tasks as db_tasks
 from .message import AgentAddress, MessageEnvelope, MessageType, planner_address
 from .ops import ErrorCode, OpError
@@ -1124,7 +1125,8 @@ def _commit_exists(work_dir: str | None, commit: str) -> bool | None:
         return None
     try:
         done = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", work_dir, "cat-file", "-e",
-                               f"{commit}^{{commit}}"], capture_output=True, timeout=GIT_TIMEOUT_SEC, check=False)
+                               f"{commit}^{{commit}}"], capture_output=True, timeout=GIT_TIMEOUT_SEC, check=False,
+                              env=child_env.inherited())
     except (OSError, subprocess.SubprocessError):
         return None
     return done.returncode == 0
