@@ -381,7 +381,8 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     version       TEXT,
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
         CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
-                                     'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report']),
+                                     'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
+                                     'read_tools']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
@@ -615,6 +616,18 @@ BEGIN
         DELETE FROM agent_runtimes r
         WHERE NOT r.builtin AND NOT EXISTS (SELECT 1 FROM agent_profiles a WHERE a.runtime_id = r.id);
         INSERT INTO schema_migrations (name) VALUES ('agent_runtimes_unused_custom_removed');
+    END IF;
+END $$;
+
+-- Once (read_tools): a runtime may list the capability to run with only the tools that read.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_runtimes_read_tools') THEN
+        ALTER TABLE agent_runtimes DROP CONSTRAINT IF EXISTS agent_runtimes_capabilities_check;
+        ALTER TABLE agent_runtimes ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY[
+            'run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp', 'add_dirs',
+            'compaction_events', 'autonomous_turns', 'cost_report', 'read_tools']);
+        INSERT INTO schema_migrations (name) VALUES ('agent_runtimes_read_tools');
     END IF;
 END $$;
 
