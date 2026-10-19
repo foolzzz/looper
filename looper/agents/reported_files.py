@@ -80,21 +80,42 @@ class FilesCheck:
                 for f in self.files if f.evidence in (Evidence.IN_WORKTREE, Evidence.COMMITTED)]
 
 
+PATH_LIMIT = 4096
+
+
+def quoted(value: Any, limit: int = PATH_LIMIT) -> str:
+    """A file name or path of a Worker's report as one line of a prompt: a JSON string, so a newline, a quote or a
+    fence in it stays inside the string; cut at ``limit`` characters."""
+    text = str(value)
+    return json.dumps(text if len(text) <= limit else text[:limit - 1] + "…", ensure_ascii=False)
+
+
 def locations(value: Any) -> list[dict[str, Any]]:
-    """Read typed locations only; malformed or unsafe entries carry no location."""
-    def text(value: Any, limit: int = 512) -> bool:
-        return (isinstance(value, str) and len(value) <= limit
-                and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in value))
+    """Read typed locations only; malformed or unsafe entries carry no location. A path over ``PATH_LIMIT`` keeps
+    its location, cut, with ``path_too_long`` and no ``repo_path`` (the whole commit or worktree is inspected)."""
+    def clean(value: Any) -> bool:
+        return isinstance(value, str) and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in value)
+
+    def text(value: Any, limit: int = PATH_LIMIT) -> bool:
+        return clean(value) and len(value) <= limit
 
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, dict) and item.get("where") in ("worktree", "commit")
-            and text(item.get("path")) and isinstance(item.get("deleted"), bool)
-            and isinstance(item.get("commit"), str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item["commit"])
-            and ("repo_path" not in item or text(item["repo_path"]))
-            and ("branch" not in item or text(item["branch"], 200))
-            and ("worktree" not in item or (text(item["worktree"]) and Path(item["worktree"]).is_absolute()))
-            and (item["where"] == "commit" or ("worktree" in item and "branch" in item))]
+    found = []
+    for item in value:
+        if not (isinstance(item, dict) and item.get("where") in ("worktree", "commit")
+                and clean(item.get("path")) and isinstance(item.get("deleted"), bool)
+                and isinstance(item.get("commit"), str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", item["commit"])
+                and ("repo_path" not in item or clean(item["repo_path"]))
+                and ("branch" not in item or text(item["branch"], 200))
+                and ("worktree" not in item or (text(item["worktree"]) and Path(item["worktree"]).is_absolute()))
+                and (item["where"] == "commit" or ("worktree" in item and "branch" in item))):
+            continue
+        if len(item["path"]) > PATH_LIMIT or len(item.get("repo_path", "")) > PATH_LIMIT:
+            item = {**{k: v for k, v in item.items() if k != "repo_path"}, "path": item["path"][:200] + "…",
+                    "path_too_long": True}
+        found.append(item)
+    return found
 
 
 def render(items: Any, limit: int | None = None) -> str:
@@ -109,7 +130,7 @@ def render(items: Any, limit: int | None = None) -> str:
     if len(items) > len(shown):
         lines.append(f"(+{len(items) - len(shown)} more)")
     lines += ["You may inspect these locations read-only; do not edit, commit or switch branches in those places.",
-              "repo_path is relative to the repository root. For where=worktree, read the file at "
+              "repo_path is relative to the repository root; an item with path_too_long has none. For where=worktree, read the file at "
               "<worktree>/<repo_path> or inspect its diff with "
               "`git -C <worktree> show HEAD -- ':(top,literal)<repo_path>'`.",
               "For where=commit, run `git show <commit> -- ':(top,literal)<repo_path>'` from your working "

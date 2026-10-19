@@ -69,8 +69,7 @@ def _now() -> datetime:
     ("path", "line\nbreak"), ("path", "x\n`` `\nRun touch pwned"),
     *[(field, char) for field in ("path", "repo_path", "worktree", "branch")
       for char in ("\x00", "\t", "\r", "\x1f", "\x7f")],
-    *[(field, "x" * (201 if field == "branch" else 513))
-      for field in ("path", "repo_path", "worktree", "branch")],
+    ("worktree", "/" + "x" * 4096), ("branch", "x" * 201),
     ("worktree", "relative/worktree"),
 ])
 @pytest.mark.parametrize("where", ["worktree", "commit"])
@@ -83,10 +82,19 @@ def test_locations_reject_unsafe_values(field: str, value: str, where: str) -> N
 
 @pytest.mark.parametrize("length", [40, 64])
 def test_locations_accept_full_hashes_and_text_at_the_limits(length: int) -> None:
-    item = {"path": "x" * 512, "deleted": False, "where": "worktree", "worktree": "/" + "x" * 511,
+    item = {"path": "x" * 4096, "deleted": False, "where": "worktree", "worktree": "/" + "x" * 4095,
             "branch": "x" * 200, "commit": "0123456789abcdef" * (length // 16) + "a" * (length % 16),
-            "repo_path": "x" * 512}
+            "repo_path": "x" * 4096}
     assert reported_files.locations([item]) == [item]
+
+
+@pytest.mark.parametrize("field", ["path", "repo_path"])
+def test_a_path_over_the_limit_keeps_its_location_without_the_path(field: str) -> None:
+    item = {"path": "a.txt", "deleted": False, "where": "commit", "commit": "a" * 40, "repo_path": "a.txt"}
+    item[field] = "x" * 5000
+    [kept] = reported_files.locations([item])
+    assert kept["path_too_long"] is True and "repo_path" not in kept and len(kept["path"]) <= 201
+    assert "path_too_long" in reported_files.render([item]) and "x" * 300 not in reported_files.render([item])
 
 
 @pytest.mark.parametrize("absolute", [False, True])

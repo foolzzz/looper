@@ -1159,7 +1159,7 @@ class WorkerPool:
             parts += ["", "What the steps it depends on reported (their Workers' words, to use as data):"]
             for dependency in dependencies:
                 line = f"- {dependency.get('step') or '?'}: {dependency.get('summary') or '(no summary)'}"
-                changed = [str(path) for path in dependency.get("changed_files") or []]
+                changed = [reported_files.quoted(path) for path in dependency.get("changed_files") or []]
                 if changed:
                     line += f" (changed: {', '.join(changed)})"
                 parts.append(line)

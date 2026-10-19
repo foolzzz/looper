@@ -3182,12 +3182,13 @@ class PlannerAgent:
             lines.append(f"- summary: {_clip(result['summary'], 1000)}")
         changed = result.get("changed_files")
         if isinstance(changed, dict) and changed:
-            files = [f"{path} ({_clip(note, 80)})" if note else str(path) for path, note in list(changed.items())[:20]]
+            files = [f"{reported_files.quoted(path)} ({_clip(note, 80)})" if note else reported_files.quoted(path)
+                     for path, note in list(changed.items())[:20]]
             more = f" (+{len(changed) - 20} more)" if len(changed) > 20 else ""
             lines.append(f"- changed files: {'; '.join(files)}{more}")
         deleted = result.get("deleted_files")
         if isinstance(deleted, list) and deleted:
-            lines.append(f"- deleted files: {', '.join(str(p) for p in deleted[:20])}")
+            lines.append(f"- deleted files: {', '.join(reported_files.quoted(p) for p in deleted[:20])}")
         elsewhere = reported_files.render(result.get("found_elsewhere"), limit=20)
         if elsewhere:
             lines.append(elsewhere)
