@@ -1,4 +1,4 @@
-"""The Grok runtime: xAI's ``grok`` CLI (Grok Build) in headless mode, one process per turn (Grok runtime RFC).
+"""The Grok runtime: xAI's ``grok`` CLI (Grok Build), headless runs and ACP resident sessions (Grok runtime RFC).
 
 Verified against Grok 1.0.62 (the Grok runtime RFC, sections 2 and 12):
 
@@ -7,9 +7,11 @@ Verified against Grok 1.0.62 (the Grok runtime RFC, sections 2 and 12):
   the prompt is read as a file, the process's stdin to its end; it runs one turn
   and exits. It takes no user turn while it runs, so a Worker cannot be steered
   (``write_turn`` closes stdin after the prompt).
-- **A resident session** (the Manager, a Planner) is one such process per
-  turn, resuming the session (``--resume <id>``, ``ResidentGrok``) in a home of
-  the owner's own, since Grok keeps its sessions in its home.
+- **A resident session** (the Manager, a Planner) is one process over ACP
+  (``grok_acp.AcpGrok``); when Grok cannot serve it so, one such headless
+  process per turn, resuming the session (``--resume <id>``, ``ResidentGrok``).
+  Either way in a home of the owner's own, since Grok keeps its sessions in its
+  home.
 - **Isolation**: every process runs with ``GROK_HOME`` and ``HOME`` both set
   to a home of Looper's own under ``<runtime_root>/.local/grok``
   (``write_home``), holding the ``config.toml`` and the rules file Looper
@@ -71,8 +73,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, request_tokens, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
-    RuntimeAdapter, RuntimeUnsupported, grok_login, instructions, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly, ResidentTransport,
+    RunCost, RuntimeAdapter, RuntimeUnsupported, grok_login, instructions, runtime_prompt_text,
 )
 from .codex import _HASHED, _toml_key, _toml_value
 from .instructions import InstructionFile
@@ -80,6 +82,7 @@ from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
 if TYPE_CHECKING:
+    from . import ResidentSession
     from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..library import AgentLibrary
@@ -134,6 +137,9 @@ class GrokRuntime(RuntimeAdapter):
     runtime_cost_capped = False
     # A read-only run gets reading tools only (``READ_ONLY_TOOLS``).
     read_only = ReadOnly.TOOLS
+    # The Manager's and a Planner's session is one process over ACP (``grok_acp``); a Worker's or Reviewer's run
+    # stays headless.
+    resident_transport = ResidentTransport.ACP
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``, with an empty ``GROK_HOME`` of its own so nothing of the operator's is read."""
@@ -217,8 +223,9 @@ class GrokRuntime(RuntimeAdapter):
         return ["--resume", session_id]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """One run: the prompt read from stdin; its session stays in the run's home, removed with it."""
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """One run: the prompt read from stdin; its session stays in the run's home, removed with it. ``session_dir``
+        is not used: a consult finds a Grok run's session in the home its recorded command names."""
         return self._command(executable, prompt_file, launch, max_turns)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:
@@ -249,7 +256,12 @@ class GrokRuntime(RuntimeAdapter):
                 *([] if "--tools" in command else ["--tools", READ_ONLY_TOOLS]),
                 "--resume", session_id, "--fork-session", "--session-id", str(uuid.uuid4())]
 
-    def resident_session(self, label: str) -> ResidentGrok:
+    def resident_session(self, label: str) -> ResidentSession:
+        """The session over ACP, or one process per turn for a transport that says so."""
+        if self.resident_transport is ResidentTransport.ACP:
+            from .grok_acp import AcpGrok
+
+            return AcpGrok(label=label)
         return ResidentGrok(label=label)
 
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:

@@ -930,8 +930,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   are materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
   `OmpRuntime` and `GrokRuntime` (`codex`, `omp`, `grok`, below) translate
-  them at launch; all three keep the Manager's and a Planner's session with
-  one process per turn (`runtimes/per_turn.py`). Capabilities:
+  them at launch; Codex and OMP keep the Manager's and a Planner's session
+  with one process per turn (`runtimes/per_turn.py`), Grok with one process
+  over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
+  Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
   `autonomous_turns`, `cost_report`, `steer` (Claude Code has all but
@@ -1080,9 +1082,18 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   instruction files are read by Grok itself, every name it knows in each
   directory from the repository's root down (`AGENTS.md` and `CLAUDE.md`
   both when both are there). A Worker or Reviewer is one process with its
-  prompt on stdin, which then closes; the Manager and a Planner run one
-  process per turn with `--resume <id>` in a home of their own
-  (`grok/sessions/<agent>`, refreshed from the run home before each turn).
+  prompt on stdin, which then closes. The Manager and a Planner run one
+  resident process over ACP (`grok --trust --no-auto-update agent
+  --always-approve -m <model> --effort <effort> stdio`, JSON-RPC lines on
+  stdio; `grok_acp.AcpGrok`) in a home of their own (`grok/sessions/<agent>`,
+  refreshed from the run home): `session/new` or, after a restart,
+  `session/load`; one `session/prompt` per turn, whose updates become the
+  stream-json events below and whose result carries the turn's tokens and
+  cost; `session/cancel` for a turn given up. A Planner's reading tools are
+  the `tools:` line of an agent profile. When Grok cannot serve a session over
+  ACP (no `agent stdio`, no `initialize` answer, no `loadSession` for a saved
+  session) it runs one process per turn with `--resume <id>` in the same home
+  (`ResidentGrok`).
   The stream is Claude Code's stream-json: each response's tokens become a
   `usage` event, a command's output (byte values) is decoded, and the run's
   cost is Grok's `total_cost_usd` (`runtime`; a 0 for tokens spent is
@@ -3424,6 +3435,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
+| `/api/channels/lark_bot/status` | GET | The Lark (bot token) channel as the platform sees its saved settings: the same fields as `/api/channels/lark/status` (`bot.profile` is empty); `problem` also says no `app_id` or no app secret is set |
+| `/api/channels/lark_bot/people` | GET | `?q=` a name or an email (1–50 characters): `people` as above and `complete` (false when the bounded directory scan, at most 40 requests, ended before reading every department); an email is looked up exactly; 400 for a bad query, 502 when the platform refuses |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
 ## Configuration
@@ -3529,6 +3542,20 @@ restart.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
   `/help` from an unlisted sender get no answer either.
+- **Lark (bot token)** (`lark_bot.py`, `lark_bot_settings.py`): an independent
+  `lark_bot` channel (`channel-lark_bot`), disabled by default, using the same
+  adapter as `lark` through `LarkTransport`. Its configuration holds `app_id`,
+  `domain` (`feishu` or `lark`), and its own app-bound `allowed_open_ids`;
+  `channel_secrets.bot_token` holds the app secret and APIs expose only
+  `has_bot_token`. It sends through the open platform and receives over its
+  long connection, reconnecting with exponential backoff capped at 300 s and
+  0.5–1.0 jitter; a stream that yields an event or lasts 60 s resets the backoff. Direct
+  messages, group @-mentions, replies, statuses, notices, schedules and gates
+  follow the Lark rules below. The backend exposes
+  `GET /api/channels/lark_bot/status` and `GET /api/channels/lark_bot/people?q=`,
+  including sender names and rejected senders, and Settings → Channels has its
+  card (app id, domain, app secret, allowlist, search, refused senders). No
+  lark-cli binary or login is required.
 - **Lark (lark-cli)** (`looper/agents/channels/lark.py`, `lark_cli.py`,
   `lark_settings.py`): the Manager in Lark direct messages and group chats,
   through `lark-cli`

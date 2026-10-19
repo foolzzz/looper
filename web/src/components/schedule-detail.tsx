@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { DeleteSchedule, LastRun, NoticeText, RunHistory, ScheduleTime } from "@/components/project-schedules";
 import { fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo, type TaskRole } from "@/lib/api";
+import { channelLabel } from "@/lib/chat-channels";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { NOTIFY_OPTIONS, TASK_LIMIT_ROLES, runNotice, useNotices } from "@/lib/schedules";
 import { errorText } from "@/lib/use-action";
@@ -236,7 +237,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             {notifyOption?.label ?? schedule.notify}
             {schedule.notify !== "never" &&
               (schedule.notify_target
-                ? ` → ${schedule.notify_target.channel === "telegram" ? "Telegram" : "Lark"} · ${schedule.notify_target.chat}`
+                ? ` → ${channelLabel(schedule.notify_target.channel)} · ${schedule.notify_target.chat}`
                 : " → the dashboard only")}
             {notifyOption && <p className="text-xs text-muted-foreground">{notifyOption.hint}</p>}
           </Field>
