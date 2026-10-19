@@ -1,6 +1,6 @@
 # RFC：Obsidian 知识库作为 Looper 的本地知识（v0）
 
-- **状态：** 实现中（v2.13.0）。第 2 节的「维护者决定」已定；「实现选择」是本 RFC 按建议写下的，备选和理由在第 7 节。
+- **状态：** 实现中（v2.12.0）。第 2 节的「维护者决定」已定；「实现选择」是本 RFC 按建议写下的，备选和理由在第 7 节。
 - **相关：** [项目知识](../agent-system.md#project-knowledge-documents-read-on-demand)（M3，项目自己的文档）、
   [Manager 平台工具 RFC](manager-platform-tools-v0.zh-CN.md)（MCP 端点和令牌）、[任务的 agent 房间](agent-room-v0.zh-CN.md)
   （运行的令牌）、[规划者只读](planner-read-only-v0.zh-CN.md)。
