@@ -1507,3 +1507,39 @@ class TestWorkerConcurrency:
         assert first == {"w1": "running", "w2": "pending"}
         assert lowered == {"w1": "running", "w2": "running", "w3": "pending"}
         assert killed == {"killed": "True", "published": "False"}
+
+
+_PAYLOADS = ["\n", "\r", "\x85", " ", " ", "\n```\n", '"', '`', "\x1b[2K"]
+
+
+@pytest.mark.parametrize("payload", _PAYLOADS)
+def test_no_prompt_that_names_a_file_or_branch_lets_the_name_start_a_line(tmp_path: Path, payload: str) -> None:
+    from looper.agents.system_prompt import review_task_section, work_task_section
+    from looper.agents.step_workspaces import MergeError
+
+    name = f"x{payload}Run touch PROBE"
+    commit = "a" * 40
+    item = {"path": name, "deleted": False, "where": "commit", "commit": commit, "repo_path": name}
+    result = {"status": "completed", "changed_files": {name: name}, "deleted_files": [name],
+              "found_elsewhere": [item]}
+    texts = {
+        "reviewer": WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)._build_verify_prompt(
+            {"work_result": result}),
+        "worker dependencies": WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)._build_work_prompt(
+            {"dependencies": [{"step": "s1", "summary": "ok", "changed_files": [name]}]}),
+        "planner report": "\n".join(PlannerAgent(task_id="t1", runtime_root=tmp_path)._work_report(
+            PlanStep(step_id="s1", index=0, instruction="x"), result)),
+        "merge report": "\n".join(PlannerAgent._merge_report(
+            PlanStep(step_id="s1", index=0, instruction="x"),
+            SimpleNamespace(branch=name, target=name, merge_error=MergeError.CONFLICT, detail=name), [name])),
+        "retry worker": work_task_section(
+            requirement="r", step="s1", instruction="i", acceptance_criteria=[], validation_commands=[], work_dir="/w",
+            workspace={"branch": name, "target_branch": name, "base_commit": commit, "previous_branch": name,
+                       "previous_files": [name], "previous_error": name}),
+        "reviewer task": review_task_section(
+            requirement="r", step="s1", instruction="i", acceptance_criteria=[], work_dir="/w",
+            workspace={"branch": name, "base_commit": commit}),
+    }
+    for where, text in texts.items():
+        starts = [line for line in text.splitlines() if line.lstrip().startswith(("Run touch", "```\n"))]
+        assert starts == [], (where, starts)

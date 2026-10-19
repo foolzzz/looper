@@ -57,6 +57,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .reported_files import prompt_name
+
 from .agent_settings import WORKING_STYLE, Boundaries, Harness, Layer
 from .claude_cli import ISOLATION_ID
 from .knowledge import AgentKnowledge
@@ -215,7 +217,8 @@ def work_task_section(
 
 
 def _worktree_lines(workspace: Mapping[str, Any]) -> list[str]:
-    target, branch, base = workspace.get("target_branch"), workspace.get("branch"), str(workspace.get("base_commit"))
+    target, branch = (prompt_name(workspace.get(key)) for key in ("target_branch", "branch"))
+    base = str(workspace.get("base_commit"))
     lines = [
         f"This step runs in its own git worktree of the repository, on branch {branch}, created from {target} at "
         f"{base[:12]} when the step started. Steps running at the same time do not see your changes, and you do "
@@ -224,12 +227,12 @@ def _worktree_lines(workspace: Mapping[str, Any]) -> list[str]:
         f"this branch into {target}, keeping your commits. Do not push, do not switch branches, and do not rewrite "
         "the commits already on this branch.",
     ]
-    previous = workspace.get("previous_branch")
+    previous = prompt_name(workspace["previous_branch"]) if workspace.get("previous_branch") else ""
     if previous:
-        files = ", ".join(str(f) for f in workspace.get("previous_files") or [])
+        files = ", ".join(prompt_name(f) for f in workspace.get("previous_files") or [])
         lines.append(
             f"The previous attempt's commits are on branch {previous}; they could not be merged into {target} "
-            f"({workspace.get('previous_error')}{f': {files}' if files else ''}). This checkout starts from "
+            f"({' '.join(str(workspace.get('previous_error')).split())}{f': {files}' if files else ''}). This checkout starts from "
             f"{target} as it is now: bring that work over (for example with `git merge {previous}`) and resolve "
             "the conflicts.")
     return lines
@@ -262,7 +265,7 @@ def review_task_section(
         lines += [f"You review it as the role {review_role}: besides these criteria, what your role above asks you "
                   "to check decides your verdict too, so passed is false when the work fails either."]
     if workspace:
-        lines += ["", f"This step ran in its own git worktree, on branch {workspace.get('branch')}; your working "
+        lines += ["", f"This step ran in its own git worktree, on branch {prompt_name(workspace.get('branch'))}; your working "
                       "directory is that checkout. To see the step's changes, including the uncommitted ones: "
                       f"`git diff {workspace.get('base_commit')}`."]
     return "\n".join(lines)
