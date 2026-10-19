@@ -119,6 +119,36 @@ func (s *Sub) Next(ctxDone <-chan struct{}) (event any, end bool, ok bool) {
 	}
 }
 
+// NextUntil reads one event, an end mark, or a signal on timeout.
+// A value already queued wins over a timeout that is also ready, which is
+// what asyncio.wait_for does when Queue.get can return immediately.
+// ok is false when ctx is already done or becomes done. A nil timeout
+// waits until an event or ctx. timedOut is set when timeout is chosen.
+func (s *Sub) NextUntil(ctx context.Context, timeout <-chan time.Time) (event any, end, timedOut, ok bool) {
+	if s == nil {
+		return nil, true, false, true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, false, false
+	}
+	select {
+	case n := <-s.ch:
+		return n.event, n.end, false, true
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, false, false, false
+	case <-timeout:
+		return nil, false, true, true
+	case n := <-s.ch:
+		return n.event, n.end, false, true
+	}
+}
+
 // Wait reads one event, an end mark, or a timeout.
 // ok is false when ctx is done. timedOut is set when timeout elapses first.
 func (s *Sub) Wait(ctx context.Context, timeout time.Duration) (event any, end, timedOut, ok bool) {

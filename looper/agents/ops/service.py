@@ -33,7 +33,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import secrets
 import subprocess
 import sys
@@ -44,6 +43,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ... import child_env
 from ...db import manager_actions as db_actions
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
@@ -166,7 +166,7 @@ class ManagerOps:
                      "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "looper"}}},
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}]
         try:
-            done = subprocess.run([config["command"], *config["args"]], env={**os.environ, **config["env"]},
+            done = subprocess.run([config["command"], *config["args"]], env={**child_env.inherited(), **config["env"]},
                                   input="".join(json.dumps(r) + "\n" for r in requests), capture_output=True,
                                   text=True, timeout=PROBE_TIMEOUT_SECONDS, check=False)
         except (OSError, subprocess.SubprocessError) as exc:

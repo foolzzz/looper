@@ -114,7 +114,6 @@ func TestChatAndActivityRoutes(t *testing.T) {
 		t.Fatalf("4301-digit seq %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	for _, path := range []string{
-		"/api/tasks/task-rich00001/activity/stream",
 		"/api/tasks/nope/activity",
 		"/api/tasks/task-rich00001/activity/1/extra",
 	} {

@@ -399,7 +399,7 @@ def test_the_agents_shell_gets_the_operators_home_back_and_a_grok_home_without_t
     ("GROK_CURSOR_MCPS_ENABLED", "1", "false"),
     ("GROK_MEMORY", "1", "0"),
     ("GROK_DISABLE_AUTOUPDATER", "0", "1"),
-    ("RUST_LOG", "warn", "warn"),
+    ("RUST_LOG", "warn", None),  # not in the child environment allowlist
 ])
 def test_the_environment_drops_what_points_grok_elsewhere(variable: str, value: str, passed: str | None,
                                                           monkeypatch: pytest.MonkeyPatch) -> None:

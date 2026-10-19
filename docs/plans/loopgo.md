@@ -265,17 +265,35 @@ keeps the original role, channel, and timestamp. Invalid UTF-8 in the body
 is 400. The body read gives up after 30 seconds and closes the socket with
 no status line. `http.Server` `Shutdown` and `Close` close a hijacked chat
 socket and cancel its stream context, which releases the session
-subscription. Task activity SSE stays on the list below.
+subscription.
 
-These are the read-only GET routes Python still serves and Go does not.
-Later cards pick them up. One of them is an SSE stream, not a JSON document.
-`POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
-is not in this list.
+G1q serves `GET /api/tasks/<id>/activity/stream`. History after `since` is
+replayed from activity in pages of 500, oldest first. Each row is
+`id: <seq>`, `event: activity`, and Python's `json.dumps` of the
+list-activity row, in that SELECT's column order. The stream then
+subscribes to the task broadcaster. A published object uses the same frame;
+a missing `seq` leaves the id empty. Twenty seconds without an event writes
+`: ping`. Closing that task's broadcaster writes `event: done` and ends the
+stream. A `since` that `int()` rejects is 500 with
+`{"error": "internal server error"}` and no SSE header. A database error
+during replay is logged and the live stream still starts. The client
+closing the socket, or server `Shutdown` / `Close`, drops the subscription.
 
-- `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
+These GET routes are still Python's. This server answers them 404.
+An empty JSON list would claim they are finished, so they are not stubbed.
+
+G5 serves both Lark families, with the channels. `lark` is the lark-cli
+family. `lark_bot` is the bot-token family. Each has status and people:
+
 - `GET /api/channels/lark/status`
 - `GET /api/channels/lark/people`
-- `GET /api/agent/v1/tools` (Manager, Planner, or room token)
+- `GET /api/channels/lark_bot/status`
+- `GET /api/channels/lark_bot/people`
+
+G4 and G6 serve `GET /api/agent/v1/tools` from the real Manager, Planner, or
+room authorization service. The body is that service's tool list. An empty
+list is not a stand-in, and the route stays 404 until the service exists.
+`POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET.
 
 ### G2 — write API, no agents
 

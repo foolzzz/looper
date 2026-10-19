@@ -73,8 +73,10 @@ def telegram_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 def _run_adapter(
     tmp_path: Path, calls: list[str], then: Callable[[TelegramChannelAdapter], Awaitable[Any]] | None = None,
+    *, polls: int = 1,
 ) -> Any:
-    """Start the adapter, wait for its first poll, run ``then`` on it, stop it; ``then``'s result."""
+    """Start the adapter, wait until it has started ``polls`` polls, run ``then`` on it, stop it; ``then``'s result.
+    A poll starts only once the one before it was answered (and httpx logged it)."""
 
     async def main() -> Any:
         bus = MessageBus(runtime_root=tmp_path)
@@ -83,7 +85,7 @@ def _run_adapter(
         )
         await adapter.start(bus)
         async with asyncio.timeout(10):
-            while "getUpdates" not in calls:
+            while calls.count("getUpdates") < polls:
                 await asyncio.sleep(0.01)
         result = await then(adapter) if then else None
         await adapter.stop()
@@ -98,8 +100,8 @@ def test_the_token_stays_out_of_the_serve_log(
     verbose: bool, tmp_path: Path, serve_logging: None, telegram_calls: list[str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _configure_logging(verbose)
-    _run_adapter(tmp_path, telegram_calls)
+    _configure_logging("debug" if verbose else "info")
+    _run_adapter(tmp_path, telegram_calls, polls=2)  # the first poll answered, so its request line is logged
 
     log = capsys.readouterr().err
     assert "telegram channel adapter started" in log
@@ -116,7 +118,7 @@ def test_the_token_stays_out_of_the_serve_log(
 def test_the_configured_token_is_masked_outside_a_url(
     tmp_path: Path, serve_logging: None, telegram_calls: list[str], capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _configure_logging(False)
+    _configure_logging("info")
 
     async def log_the_bot(adapter: TelegramChannelAdapter) -> None:
         logging.getLogger("looper.test").warning("bot: %r", adapter._app.bot)  # python-telegram-bot's Bot[token=…]
@@ -144,7 +146,7 @@ def test_a_failed_send_does_not_return_the_token(
     assert "https://api.telegram.org/bot***/sendMessage" in receipt.error and SECRET not in receipt.error
 
 
-@pytest.mark.parametrize("configure", [lambda: _configure_logging(False), mcp_server.main], ids=["serve", "mcp-server"])
+@pytest.mark.parametrize("configure", [lambda: _configure_logging("info"), mcp_server.main], ids=["serve", "mcp-server"])
 def test_every_entry_point_masks_a_bot_url(
     configure: Callable[[], Any], serve_logging: None, capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -157,3 +159,18 @@ def test_every_entry_point_masks_a_bot_url(
 
     err = capsys.readouterr().err
     assert "POST https://api.telegram.org/bot***/getMe failed" in err and other.split(":")[1] not in err
+
+
+def test_a_second_logging_setup_replaces_the_first(serve_logging: None) -> None:
+    """``--verbose`` after an earlier setup at info (a refused start, another test) logs httpx's requests, through one
+    masked handler."""
+    _configure_logging("info")
+    _configure_logging("debug")
+
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.DEBUG
+    assert logging.getLogger("httpcore").getEffectiveLevel() == logging.DEBUG
+    assert len([h for h in logging.getLogger().handlers if isinstance(h.formatter, RedactingFormatter)]) == 1
+
+    _configure_logging("info")
+
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.WARNING

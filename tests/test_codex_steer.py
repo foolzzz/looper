@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fake_claude import fake_claude
+from looper import child_env
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
@@ -165,6 +166,12 @@ for line in sys.stdin:
 
 @pytest.fixture
 def app_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Path]:
+    # The stand-in has explicit controls; they are not part of the production allowlist.
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {
+        "FAKE_CODEX_LOG", "FAKE_CODEX_MODE", "FAKE_CODEX_VERSION", "FAKE_CODEX_VERSION_EXIT",
+        "FAKE_CODEX_SCHEMA_FAIL", "FAKE_CODEX_SCHEMA_MISSING", "FAKE_CODEX_NO_STEER",
+        "FAKE_CODEX_ACK_GATE", "FAKE_CODEX_FINISH_GATE",
+    })
     log = tmp_path / "requests.jsonl"
     monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
     return fake_claude(tmp_path / "codex", _APP_SERVER), log

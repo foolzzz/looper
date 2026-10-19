@@ -36,9 +36,11 @@ import signal
 import subprocess
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
+
+from .. import child_env
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +66,7 @@ def _snapshot() -> Table:
     """Every live process, from one ``ps``; empty when ``ps`` cannot run."""
     try:
         listed = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="], capture_output=True, text=True,
-                                timeout=_PS_TIMEOUT_SEC, check=False)
+                                timeout=_PS_TIMEOUT_SEC, check=False, env=child_env.inherited())
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("cannot list processes, so only the agent's own group is ended: %s", exc)
         return {}
@@ -253,7 +255,7 @@ def _start_time(pid: int) -> str | None:
     """When ``pid`` started, as ``ps -o lstart=`` prints it in UTC; None when no such process runs."""
     try:
         listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                                timeout=_PS_TIMEOUT_SEC, check=False, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+                                timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.SubprocessError):
         return None
     return " ".join(listed.stdout.split()) or None
@@ -266,7 +268,7 @@ def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
         return {}
     try:
         listed = subprocess.run(["ps", "-o", "pid=,lstart=", "-p", selected], capture_output=True, text=True,
-                                timeout=_PS_TIMEOUT_SEC, check=False, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+                                timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.SubprocessError):
         return None
     started: dict[int, str] = {}
@@ -293,10 +295,11 @@ def _write_record(
     return path
 
 
-async def spawn(*argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
+async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any) -> asyncio.subprocess.Process:
     """Start an agent process in a session of its own, so its children share its process group, and record it
-    until it is reaped (once ``sweep`` has run)."""
-    process = await asyncio.create_subprocess_exec(*argv, start_new_session=True, **kwargs)
+    until it is reaped (once ``sweep`` has run). Without ``env``, start with ``child_env.inherited()``."""
+    process = await asyncio.create_subprocess_exec(
+        *argv, env=child_env.inherited() if env is None else env, start_new_session=True, **kwargs)
     if _records is not None and _server is not None:
         if (started := _start_time(process.pid)) is None:
             logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",

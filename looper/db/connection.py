@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -12,45 +11,16 @@ from pathlib import Path
 
 import asyncpg
 
-from .. import env
-
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
 
-# The database keeps its name from before the rename (LoopX): it holds the user's data.
-DEFAULT_DSN = "postgresql://localhost:5432/loopx"
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
-_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-
-def _load_env() -> None:
-    """Load .env file from project root into os.environ (if present)."""
-    if not _ENV_FILE.is_file():
-        return
-    for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if not key:
-            continue
-        os.environ.setdefault(key, value)
-
-
-def configured_dsn() -> str:
-    """The database Looper uses: ``LOOPER_DATABASE_URL`` (from the environment or .env; ``LOOPX_DATABASE_URL`` for
-    one release), else the default."""
-    _load_env()
-    return env.get("LOOPER_DATABASE_URL", DEFAULT_DSN)
-
-
-async def init_pool(dsn: str | None = None, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
+async def init_pool(dsn: str, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
+    """The pool for ``dsn``, the ops file's ``database.url`` (``looper.ops_config``)."""
     global _pool
-    dsn = dsn or configured_dsn()
     _pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
     logger.info("database pool created (%s connections)", max_size)
     return _pool
