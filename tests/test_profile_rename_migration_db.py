@@ -47,7 +47,7 @@ DROPPED = {"agent_configs": {"role", "max_concurrency"}, "agent_setting_layers":
 # profiles, all on Claude Code runtimes), and built-in rows.
 ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None, "boundaries": None,
                                                       "system_prompt_mode": None},
-         "agents": {"agent_teams": True, "system_prompt_mode": "append", "custom_prompt": ""}}
+         "agents": {"agent_teams": True, "custom_prompt": ""}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login", "prov-grok-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 # Columns a later migration of main adds to those tables, empty (NULL or '') on the rows from before.

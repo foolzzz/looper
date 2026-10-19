@@ -15,7 +15,7 @@ import tomllib
 import pytest
 
 from looper.agents import claude_cli
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, SystemPromptMode, adapter, replace_refusal
 from looper.agents.runtimes import codex, grok, omp
@@ -45,15 +45,6 @@ def test_runtime_modules_import_in_fresh_processes(module: str, isolated_operato
     assert done.returncode == 0, done.stdout + done.stderr
 
 
-class _ModeLaunch(Launch):
-    """A launch that applies its settings' mode on any runtime: the adapters' replace layouts are exercised
-    directly, though a real launch replaces only on Claude Code (``Launch.system_prompt_mode``)."""
-
-    @property
-    def system_prompt_mode(self) -> SystemPromptMode:
-        return self.settings.system_prompt_mode
-
-
 def _launch(runtime_type: str, mode: SystemPromptMode | None = None, *, oauth: bool = False) -> Launch:
     runtime = adapter(runtime_type)
     use_login = runtime_type == "grok" or oauth
@@ -62,7 +53,8 @@ def _launch(runtime_type: str, mode: SystemPromptMode | None = None, *, oauth: b
                             base_url="http://localhost.invalid/v1", api_key=None if use_login else "test-only")
     profile = AgentProfile("profile", "test", RuntimeSpec("runtime", "test", runtime_type,
                            capabilities=runtime.capabilities), provider, "test-model")
-    return _ModeLaunch(AgentSettings(profile=profile, system_prompt_mode=mode or SystemPromptMode.APPEND))
+    return Launch(AgentSettings(profile=profile, system_prompt_mode=mode or SystemPromptMode.APPEND),
+                  role=AgentType.WORKER)
 
 
 def _files(root: Path) -> dict[str, bytes | str]:

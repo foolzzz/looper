@@ -2486,7 +2486,6 @@ export interface AgentProfile {
   effort: string | null;
   /** Claude Code's agent teams in its runs (Claude Code runtimes only). */
   agent_teams: boolean;
-  system_prompt_mode: SystemPromptMode;
   custom_prompt: string;
   runtime_id: string;
   runtime_name: string;
@@ -2547,7 +2546,6 @@ export interface ProfileFields {
   model?: string;
   effort?: string | null;
   agent_teams?: boolean;
-  system_prompt_mode?: SystemPromptMode;
   custom_prompt?: string;
 }
 
@@ -2565,7 +2563,6 @@ export interface PromptPreview {
   /** What the launch uses: the role's mode on Claude Code, append elsewhere. */
   system_prompt_mode: SystemPromptMode;
   role_system_prompt_mode: SystemPromptMode;
-  system_prompt_mode_applies: boolean;
   custom_prompt_set: boolean;
   looper_prompt_sha256: string;
   prompt_layers: Record<string, unknown>;
@@ -2711,7 +2708,7 @@ export interface EffectiveSettings {
   /** The Workers' and Reviewers' default limit per task (source "role" or "builtin"), in Settings → Roles only;
    * absent for the other roles, the system layer and in a project. */
   max_concurrency?: Sourced<number>;
-  /** The role's mode (its role layer's, else the built-in one); it applies only to runs on Claude Code. */
+  /** The role's mode (its role layer's, else the built-in one); it applies to every runtime. */
   system_prompt_mode: SystemPromptMode;
 }
 

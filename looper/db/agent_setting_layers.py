@@ -6,7 +6,7 @@ or ``role_project`` (with both). A NULL field is not set at its layer;
 ``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (the Workers'
 or the Reviewers' role layer only) how many of them run at once in a task that sets none. A task may choose
 the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
-(``task_concurrency_limits``) and append or replace (``task_system_prompt_modes``, Claude Code only): together, its task layer. Its Planner may choose the profile of its Workers or
+(``task_concurrency_limits``) and append or replace (``task_system_prompt_modes``): together, its task layer. Its Planner may choose the profile of its Workers or
 Reviewers, for the rest of the task or for one step (``task_planner_profiles``), under the task layer; a choice
 counts only while its profile is allowed by the task's project (on its list, ``project_allowed_profiles``, or any
 while the list is empty); so does the
