@@ -133,6 +133,8 @@ export interface ProjectExecution {
   /** Whether the agents of the project's tasks share a room they message each other in; null = "on" (unlike the
    * other switches). */
   agent_room: "off" | "on" | null;
+  /** Whether the project's agents may use the configured knowledge vault; null = "off". */
+  vault: "off" | "on" | null;
   /** The room's limits (`ROOM_LIMITS` in lib/room has each one's range and default); null = the default. */
   room_post_per_minute: number | null;
   room_broadcasts_per_run: number | null;
@@ -3393,6 +3395,35 @@ export async function updateGateSettings(dashboardTarget: GateTarget | null): Pr
     body: JSON.stringify({ dashboard_target: dashboardTarget }),
   });
   if (!res.ok) await failed(res, "save gate settings");
+  return res.json();
+}
+
+export interface VaultSettings {
+  configured: boolean;
+  path: string | null;
+  writable: string[];
+  rules_file: string | null;
+  git: boolean;
+  problem: string | null;
+}
+
+export async function fetchVaultSettings(): Promise<VaultSettings> {
+  const res = await fetch(`${API_BASE}/knowledge-vault`);
+  if (!res.ok) await failed(res, "knowledge vault settings");
+  return res.json();
+}
+
+export async function updateVaultSettings(body: {
+  path: string | null;
+  writable?: string[];
+  rules_file?: string | null;
+}): Promise<VaultSettings> {
+  const res = await fetch(`${API_BASE}/knowledge-vault`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, "save knowledge vault settings");
   return res.json();
 }
 

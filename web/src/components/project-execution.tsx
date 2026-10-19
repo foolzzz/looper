@@ -21,6 +21,7 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "task_workspaces",
   "operator_notes",
   "agent_room",
+  "vault",
   ...ROOM_LIMITS.map((limit) => limit.field),
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
@@ -309,6 +310,23 @@ export function ProjectExecutionFields({
           </select>
           <p id={`${idPrefix}-agent_room-help`} className="text-xs text-muted-foreground">
             Lets the task&apos;s agents message each other through Looper&apos;s room tools; on by default.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("vault", "Knowledge vault")}
+          <select
+            id={`${idPrefix}-vault`}
+            value={draft.vault || "off"}
+            onChange={set("vault")}
+            aria-describedby={`${idPrefix}-vault-help`}
+            className={SELECT}
+          >
+            <option value="off">Off</option>
+            <option value="on">On</option>
+          </select>
+          <p id={`${idPrefix}-vault-help`} className="text-xs text-muted-foreground">
+            Lets the task&apos;s agents read the knowledge vault set in Settings → Knowledge vault and write in its
+            writable folders; off by default.
           </p>
         </div>
         <fieldset className="rounded-md border border-border px-3 py-3 sm:col-span-2">
