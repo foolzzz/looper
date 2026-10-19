@@ -647,6 +647,12 @@ async def _run_agent_system(
                        "validation only", schedules.MIN_INTERVAL_ENV, min_interval, min_interval,
                        schedules.DEFAULT_MIN_INTERVAL_SECONDS)
 
+    from . import operator_auth
+    try:
+        operator_token = operator_auth.ensure_token(runtime_root)
+    except operator_auth.OperatorTokenError as exc:
+        raise StartupCheckFailed(str(exc)) from None
+
     dsn = configured_dsn()
     database_check = await self_check.check_database(dsn)
     if database_check.status != self_check.OK:
@@ -839,6 +845,7 @@ async def _run_agent_system(
         manager=manager,
         broadcaster=broadcaster,
         runtime_root=runtime_root,
+        operator_token=operator_token,
         self_checks=[check.to_dict() for check in checks],
         claude_bin=claude_bin,
         scheduler=scheduler,

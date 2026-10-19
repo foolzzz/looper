@@ -9,6 +9,7 @@ Pure stdlib asyncio — zero external dependencies. Serves:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import mimetypes
@@ -21,7 +22,8 @@ from typing import Any
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api, schedules, self_check,
+    operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
+    schedules, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -65,6 +67,7 @@ def _serialize(obj: Any) -> Any:
 
 HTTP_200 = "200 OK"
 HTTP_201 = "201 Created"
+HTTP_303 = "303 See Other"
 HTTP_400 = "400 Bad Request"
 HTTP_401 = "401 Unauthorized"
 HTTP_403 = "403 Forbidden"
@@ -92,15 +95,16 @@ TASKS_PAGE_MAX = 200
 CONFIG_IMPORTS_PATH = "/api/config/imports"
 
 
-def _json_response(status: str, body: Any) -> bytes:
+def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = (
+    head = (
         f"HTTP/1.1 {status}\r\n"
         f"Content-Type: application/json; charset=utf-8\r\n"
         f"Content-Length: {len(payload)}\r\n"
-        f"\r\n"
+        + "".join(f"{key}: {value}\r\n" for key, value in (headers or {}).items())
+        + "\r\n"
     )
-    return headers.encode("utf-8") + payload
+    return head.encode("utf-8") + payload
 
 
 def _no_content() -> bytes:
@@ -131,6 +135,7 @@ class AgentHTTPServer:
         broadcaster: Broadcaster | None = None,
         static_dir: Path | None = None,
         runtime_root: Path | None = None,
+        operator_token: str | None = None,
         self_checks: list[dict[str, str]] | None = None,
         claude_bin: str = "claude",
         scheduler: Scheduler | None = None,
@@ -151,6 +156,8 @@ class AgentHTTPServer:
         self._static_dir = static_dir or default_static_dir()
         # Where the agents' files live: project knowledge is materialized under it.
         self._runtime_root = runtime_root
+        # The operator's credential (operator_auth); without one every operator route answers 401.
+        self._operator_token = operator_token
         # The startup self-check (self_check.Check.to_dict), reported on /api/status.
         self._self_checks = self_checks or []
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
@@ -172,6 +179,8 @@ class AgentHTTPServer:
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
+        if self._port == 0:
+            self._port = self._server.sockets[0].getsockname()[1]
         logger.info("HTTP server listening on %s:%d", self._host, self._port)
 
     async def stop(self) -> None:
@@ -187,6 +196,8 @@ class AgentHTTPServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        peer = writer.get_extra_info("peername")
+        peer_host = peer[0] if peer else None
         try:
             request_line = await asyncio.wait_for(reader.readline(), timeout=30.0)
             if not request_line:
@@ -207,7 +218,6 @@ class AgentHTTPServer:
             headers = await self._read_headers(reader)
             parsed = urllib.parse.urlparse(raw_path)
             path = parsed.path
-            query = dict(urllib.parse.parse_qsl(parsed.query))
 
             # Refused before its body is read: another site's page cannot even upload.
             refused = request_guard.refusal(headers, bind_host=self._host)
@@ -218,6 +228,22 @@ class AgentHTTPServer:
                 writer.close()
                 return
 
+            area = operator_auth.access(path)
+            if area is operator_auth.Access.OPERATOR and not operator_auth.is_operator(
+                headers, token=self._operator_token, port=self._port,
+            ):
+                credential = operator_auth.presented(headers, port=self._port)
+                reason = operator_auth.WRONG if credential else operator_auth.REFUSAL
+                logger.warning("refused %s %s from %s: no operator credential%s", method, path, peer_host,
+                               " matched (one was presented)" if credential is not None else " was presented")
+                writer.write(_json_response(HTTP_401, {"error": reason},
+                                            headers={"WWW-Authenticate": 'Bearer realm="looper"'}))
+                await writer.drain()
+                writer.close()
+                return
+
+            query = dict(urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=area is operator_auth.Access.DASHBOARD))
             streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
             cap = config_imports.UPLOAD_MAX_BYTES if streamed else REQUEST_BODY_MAX_BYTES
             body = b""
@@ -255,12 +281,12 @@ class AgentHTTPServer:
                 writer.close()
                 return
 
-            if path.startswith(AGENT_API):
+            if area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
-            elif path.startswith("/api/"):
+            elif area is operator_auth.Access.OPERATOR:
                 await self._route_api(method, path, query, body, writer)
             else:
-                await self._serve_static(path, writer)
+                await self._serve_static(path, writer, headers=headers, query=query, peer_host=peer_host)
 
         except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError):
             pass
@@ -1998,17 +2024,17 @@ class AgentHTTPServer:
     # --- Static file serving ---
 
     async def _serve_static(
-        self, path: str, writer: asyncio.StreamWriter
+        self, path: str, writer: asyncio.StreamWriter, *, headers: Mapping[str, str] | None = None,
+        query: Mapping[str, str] | None = None, peer_host: str | None = None,
     ) -> None:
-        if path == "/":
-            path = "/index.html"
-
-        file_path = self._static_dir / path.lstrip("/")
+        page = path in ("/", "/index.html")
+        file_path = self._static_dir / ("index.html" if path == "/" else path.lstrip("/"))
 
         if not file_path.is_file():
             index_path = self._static_dir / "index.html"
             if index_path.is_file():
                 file_path = index_path
+                page = True
             else:
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()
@@ -2026,17 +2052,34 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        if page and query is not None and "token" in query:
+            token = self._operator_token
+            if token and hmac.compare_digest(query["token"].encode(), token.encode()):
+                remaining = urllib.parse.urlencode({key: value for key, value in query.items() if key != "token"})
+                location = urllib.parse.quote(path, safe="/") + (f"?{remaining}" if remaining else "")
+                writer.write((f"HTTP/1.1 {HTTP_303}\r\nLocation: {location}\r\n"
+                              f"Set-Cookie: {operator_auth.set_cookie(token, port=self._port)}\r\n"
+                              "Cache-Control: no-store\r\nContent-Length: 0\r\n\r\n").encode("utf-8"))
+            else:
+                writer.write(_json_response(HTTP_401, {"error": operator_auth.WRONG}))
+            await writer.drain()
+            return
+
         content_type, _ = mimetypes.guess_type(str(file_path))
         if content_type is None:
             content_type = "application/octet-stream"
 
         data = file_path.read_bytes()
-        headers = (
+        cookie = ""
+        if page and self._operator_token and operator_auth.signs_in(headers or {}, peer_host=peer_host):
+            cookie = f"Set-Cookie: {operator_auth.set_cookie(self._operator_token, port=self._port)}\r\n"
+        response_headers = (
             f"HTTP/1.1 {HTTP_200}\r\n"
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(data)}\r\n"
-            f"Cache-Control: public, max-age=3600\r\n"
+            f"Cache-Control: {'no-store' if page else 'public, max-age=3600'}\r\n"
+            f"{cookie}"
             f"\r\n"
         )
-        writer.write(headers.encode("utf-8") + data)
+        writer.write(response_headers.encode("utf-8") + data)
         await writer.drain()

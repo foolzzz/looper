@@ -37,12 +37,14 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..paths import settle_runtime_root
+from . import operator_auth
 from .self_check import OK, SKIP, WARN, Check
 
 DEFAULT_LABEL = "com.looper.serve"
@@ -82,12 +84,16 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         raise ServiceError(f"`{' '.join(argv)}` did not finish in {_COMMAND_TIMEOUT_SECONDS:.0f} s") from exc
 
 
-def _get_status(port: int) -> dict | None:
+def _get_status(port: int, token: str | None) -> dict | None:
     """``GET /api/status`` on 127.0.0.1, bypassing any proxy; None when nothing answers with JSON."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/status",
+                                    headers={"Authorization": f"Bearer {token}"} if token else {})
     try:
-        with opener.open(f"http://127.0.0.1:{port}/api/status", timeout=3) as response:
+        with opener.open(request, timeout=3) as response:
             payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return {"status": "unauthorized"} if exc.code == 401 else None
     except (OSError, ValueError, http.client.HTTPException):
         return None
     return payload if isinstance(payload, dict) else None
@@ -112,7 +118,7 @@ class Host:
     run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
-    get_status: Callable[[int], dict | None] = _get_status
+    get_status: Callable[[int, str | None], dict | None] = _get_status
     port_in_use: Callable[[int], bool] = _port_in_use
 
     @classmethod
@@ -262,6 +268,7 @@ class State:
     last_exit: str = ""
     port: int | None = None
     log_path: Path | None = None
+    runtime_root: Path | None = None
 
 
 class _Manager:
@@ -278,8 +285,8 @@ class _Manager:
     def render(self, spec: ServiceSpec) -> bytes:
         raise NotImplementedError
 
-    def unit_settings(self) -> tuple[int | None, Path | None]:
-        """The port and log path the installed unit names."""
+    def unit_settings(self) -> tuple[int | None, Path | None, Path | None]:
+        """The port, log path and runtime root the installed unit names."""
         raise NotImplementedError
 
     def state(self) -> State:
@@ -312,13 +319,14 @@ class Launchd(_Manager):
     def render(self, spec: ServiceSpec) -> bytes:
         return render_plist(spec)
 
-    def unit_settings(self) -> tuple[int | None, Path | None]:
+    def unit_settings(self) -> tuple[int | None, Path | None, Path | None]:
         try:
             unit = plistlib.loads(self.unit_path.read_bytes())
         except (OSError, plistlib.InvalidFileException, ValueError):
-            return None, None
+            return None, None, None
         log = unit.get("StandardOutPath")
-        return _port_of(unit.get("ProgramArguments") or []), Path(log) if log else None
+        argv = unit.get("ProgramArguments") or []
+        return _port_of(argv), Path(log) if log else None, _runtime_root_of(argv)
 
     def _print(self) -> subprocess.CompletedProcess[str]:
         return self._call("launchctl", "print", self.target)
@@ -330,10 +338,10 @@ class Launchd(_Manager):
         fields = dict(found)
         pid = int(fields["pid"]) if fields.get("pid", "").isdigit() else None
         last_exit = fields.get("last terminating signal") or fields.get("last exit code", "")
-        port, log = self.unit_settings()
+        port, log, runtime_root = self.unit_settings()
         return State(installed=self.unit_path.is_file(), loaded=printed.returncode == 0,
                      running=fields.get("state") == "running" and pid is not None, pid=pid,
-                     last_exit=last_exit, port=port, log_path=log)
+                     last_exit=last_exit, port=port, log_path=log, runtime_root=runtime_root)
 
     def stop(self) -> None:
         if self._print().returncode != 0:
@@ -377,15 +385,17 @@ class Systemd(_Manager):
     def render(self, spec: ServiceSpec) -> bytes:
         return render_systemd_unit(spec).encode()
 
-    def unit_settings(self) -> tuple[int | None, Path | None]:
+    def unit_settings(self) -> tuple[int | None, Path | None, Path | None]:
         try:
             lines = self.unit_path.read_text().splitlines()
         except OSError:
-            return None, None
+            return None, None, None
         values = dict(line.split("=", 1) for line in lines if "=" in line)
         log = values.get("StandardOutput", "")
-        return (_port_of(_systemd_words(values.get("ExecStart", ""))),
-                Path(log.removeprefix("append:").replace("%%", "%")) if log.startswith("append:") else None)
+        argv = _systemd_words(values.get("ExecStart", ""))
+        return (_port_of(argv),
+                Path(log.removeprefix("append:").replace("%%", "%")) if log.startswith("append:") else None,
+                _runtime_root_of(argv))
 
     def _systemctl(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = self._call("systemctl", "--user", *args)
@@ -396,9 +406,9 @@ class Systemd(_Manager):
 
     def state(self) -> State:
         installed = self.unit_path.is_file()
-        port, log = self.unit_settings()
+        port, log, runtime_root = self.unit_settings()
         if not installed:
-            return State(installed=False, loaded=False, running=False, port=port, log_path=log)
+            return State(installed=False, loaded=False, running=False, port=port, log_path=log, runtime_root=runtime_root)
         shown = self._systemctl("show", self.unit, "--property=LoadState,ActiveState,SubState,MainPID,"
                                 "ExecMainCode,ExecMainStatus", check=False)
         fields = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
@@ -406,7 +416,7 @@ class Systemd(_Manager):
         last_exit = f"status {fields['ExecMainStatus']}" if fields.get("ExecMainCode", "0") != "0" else ""
         return State(installed=True, loaded=fields.get("LoadState") == "loaded",
                      running=fields.get("ActiveState") == "active" and pid is not None, pid=pid,
-                     last_exit=last_exit, port=port, log_path=log)
+                     last_exit=last_exit, port=port, log_path=log, runtime_root=runtime_root)
 
     def stop(self) -> None:
         if self.unit_path.is_file():
@@ -430,6 +440,13 @@ def _port_of(argv: Sequence[str]) -> int | None:
     return None
 
 
+def _runtime_root_of(argv: Sequence[str]) -> Path | None:
+    argv = list(argv)
+    if "--runtime-root" in argv[:-1]:
+        return Path(argv[argv.index("--runtime-root") + 1])
+    return None
+
+
 def manager(host: Host, label: str) -> _Manager:
     if host.system == "Darwin":
         return Launchd(host, label)
@@ -448,7 +465,8 @@ class Serving:
     status: dict
 
 
-def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: float) -> Serving:
+def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: float,
+                    runtime_root: Path | None) -> Serving:
     """Start the stopped service on a free ``port`` and wait until it answers ``GET /api/status``."""
     host = mgr.host
     if host.port_in_use(port):
@@ -458,7 +476,8 @@ def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: fl
     mgr.start()
     deadline = host.clock() + timeout
     while True:
-        status = host.get_status(port)
+        token = operator_auth.read_token(runtime_root) if runtime_root is not None else None
+        status = host.get_status(port, token)
         if status is not None:
             return Serving(pid=mgr.state().pid, status=status)
         if host.clock() >= deadline:
@@ -503,7 +522,7 @@ def install(host: Host, *, label: str = DEFAULT_LABEL, port: int = DEFAULT_PORT,
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     write_private(mgr.unit_path, mgr.render(spec))
     mgr.stop()
-    serving = _start_and_wait(mgr, port, spec.log_path, timeout)
+    serving = _start_and_wait(mgr, port, spec.log_path, timeout, settled.root)
     names = [name for name, _ in spec.env]
     lines = [
         f"installed {label} ({mgr.kind}); it starts at login and again after a crash",
@@ -549,12 +568,12 @@ def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_
     mgr = manager(host, label)
     if not mgr.unit_path.is_file():
         raise ServiceError(f"{label} is not installed; run `looper service install`")
-    port, log_path = mgr.unit_settings()
+    port, log_path, runtime_root = mgr.unit_settings()
     if port is None:
         raise ServiceError(f"{mgr.unit_path} names no --port; run `looper service install` again")
     before = mgr.state().pid
     mgr.stop()
-    serving = _start_and_wait(mgr, port, log_path, timeout)
+    serving = _start_and_wait(mgr, port, log_path, timeout, runtime_root)
     return (f"restarted {label}: pid {before or 'none'} -> {serving.pid or 'unknown'}, "
             f"serving http://127.0.0.1:{port}")
 
@@ -583,11 +602,16 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
         f"state      {_describe(state)}",
         f"log        {state.log_path or 'unknown'}",
     ]
-    answer = host.get_status(state.port) if state.port else None
+    token = operator_auth.read_token(state.runtime_root) if state.runtime_root is not None else None
+    answer = host.get_status(state.port, token) if state.port else None
     if state.port is None:
         lines.append("api        unknown port")
     elif answer is None:
         lines.append(f"api        http://127.0.0.1:{state.port}/api/status: no answer")
+    elif answer.get("status") == "unauthorized":
+        path = operator_auth.token_path(state.runtime_root) if state.runtime_root is not None else "unknown"
+        lines.append(f"api        http://127.0.0.1:{state.port}/api/status: unauthorized "
+                     f"(the operator token in {path} was refused)")
     else:
         tasks = answer.get("tasks") or {}
         failing = [check.get("label", "?") for check in answer.get("checks") or []

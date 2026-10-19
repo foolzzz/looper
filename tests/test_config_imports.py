@@ -25,12 +25,13 @@ from looper.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTE
 from tests.test_catalog_db import DSN
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+TOKEN = "operator-test-token"
 UNKNOWN = "cfgimp-0123456789abcdef"
 
 
 @contextlib.asynccontextmanager
 async def _server(runtime_root: Path) -> AsyncIterator[int]:
-    server = AgentHTTPServer(port=0, web_adapter=SimpleNamespace(), task_router=SimpleNamespace(),
+    server = AgentHTTPServer(port=0, operator_token=TOKEN, web_adapter=SimpleNamespace(), task_router=SimpleNamespace(),
                              supervisor=SimpleNamespace(), static_dir=runtime_root, runtime_root=runtime_root)
     await server.start()
     try:
@@ -45,6 +46,7 @@ async def _request(port: int, method: str, path: str, body: bytes | Path = b"", 
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     size = body.stat().st_size if isinstance(body, Path) else len(body)
     writer.write(f"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+                 f"Authorization: Bearer {TOKEN}\r\n"
                  f"Content-Length: {size if length is None else length}\r\n{headers}\r\n".encode())
     if isinstance(body, Path):
         with body.open("rb") as handle:

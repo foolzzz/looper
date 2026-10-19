@@ -18,7 +18,7 @@ import urllib.parse
 _LOOPBACK_NAMES = frozenset({"localhost"})
 
 
-def _is_loopback(hostname: str) -> bool:
+def is_loopback(hostname: str) -> bool:
     if hostname in _LOOPBACK_NAMES:
         return True
     try:
@@ -27,7 +27,7 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
-def _hostname(authority: str) -> str:
+def hostname(authority: str) -> str:
     """The host of a ``Host`` header value such as ``localhost:8767`` or ``[::1]:8767``."""
     return (urllib.parse.urlsplit(f"//{authority}").hostname or "").lower()
 
@@ -39,7 +39,7 @@ def refusal(headers: dict[str, str], *, bind_host: str) -> str | None:
     is the address the server listens on.
     """
     host = headers.get("host", "")
-    if host and _is_loopback(bind_host) and not _is_loopback(_hostname(host)):
+    if host and is_loopback(bind_host) and not is_loopback(hostname(host)):
         return f"host {host!r} is not this server"
     origin = headers.get("origin")
     if origin is not None and urllib.parse.urlsplit(origin).netloc.lower() != host.lower():
