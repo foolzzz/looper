@@ -213,10 +213,15 @@ The response write deadline shares the export's 30-second context budget;
 and interrupted downloads. Export tests and `go vet ./...` pass locally.
 CI now seeds a separate database with Python's legacy effort migration and
 sets `LOOPGO_CONFIG_EXPORT_PARITY_URL`, checking generated fixtures for drift.
-The prior review accepted successful full-suite and disposable-database parity
-results; this fix round cannot repeat them because the sandbox refuses TCP
-connections and listeners. CI execution remains unverified here. The dashboard
-uses the existing download API; Telegram, Lark, and CLI need no new entry point.
+Database acceptance remains blocked: generation failed at the byte comparison
+between PostgreSQL and synthetic rows (`default.json`), before golden readback
+and Go HTTP parity. The seed now supplies `distill_lessons='off'`, uses the
+schema's existing legacy effort column, and orders the channel fixture IDs
+consistently with bytewise and punctuation-insensitive collation. Offline
+regeneration and export tests pass; database-backed regeneration, HTTP parity,
+and the full suite remain unverified because the sandbox refuses TCP
+connections and listeners. The dashboard uses the existing download API;
+Telegram, Lark, and CLI need no new entry point.
 
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.

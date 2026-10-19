@@ -108,8 +108,7 @@ def fixture_sql(rows):
     insert("channel_secrets", {"channel_id": "telegram-export", "bot_token": STORED_CHANNEL_SECRET})
     for row in rows["projects"]:
         insert("projects", {**row, "work_dir": "/synthetic/project/workdir"})
-    statements += ["ALTER TABLE agent_setting_layers ADD COLUMN effort TEXT;",
-                   "DELETE FROM schema_migrations WHERE name = 'layer_effort_on_profiles';"]
+    statements.append("DELETE FROM schema_migrations WHERE name = 'layer_effort_on_profiles';")
     for row in rows["layers"]:
         values = {k: v for k, v in row.items() if k != "profile"}
         if row["scope"] == "system":
@@ -292,7 +291,13 @@ async def main(args):
             outputs = await capture(pool)
             offline = await capture(OfflineRows(rows))
             for name, data in outputs.items():
-                assert data == offline[name], f"PostgreSQL differs from synthetic rows: {name}"
+                expected = offline[name]
+                if data != expected:
+                    first = next((i for i, (a, b) in enumerate(zip(data, expected)) if a != b),
+                                 min(len(data), len(expected)))
+                    raise AssertionError(
+                        f"PostgreSQL differs from synthetic rows: {name} at byte {first} "
+                        f"(database {len(data)} bytes, synthetic {len(expected)} bytes)")
         finally:
             await connection.close_pool()
         mode = "disposable PostgreSQL + Python legacy effort migration"

@@ -207,20 +207,7 @@
   ],
   "channels": [
     {
-      "channel_id": "lark-export",
-      "channel_type": "lark",
-      "display_name": "Synthetic Lark",
-      "enabled": false,
-      "config": {
-        "profile": "fixture",
-        "unexpected": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-lark",
-        "description": "No external sends",
-        "allowed_open_ids": "ou_abcdefgh, ou_abcdefgh, ou_ijklmnop",
-        "allowlist_app_id": "cli_synthetic"
-      }
-    },
-    {
-      "channel_id": "larkbot-export",
+      "channel_id": "lark-bot-export",
       "channel_type": "lark_bot",
       "display_name": "Synthetic Bot",
       "enabled": false,
@@ -232,6 +219,19 @@
         "allowed_open_ids": [
           "ou_abcdefgh"
         ],
+        "allowlist_app_id": "cli_synthetic"
+      }
+    },
+    {
+      "channel_id": "lark-export",
+      "channel_type": "lark",
+      "display_name": "Synthetic Lark",
+      "enabled": false,
+      "config": {
+        "profile": "fixture",
+        "unexpected": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-lark",
+        "description": "No external sends",
+        "allowed_open_ids": "ou_abcdefgh, ou_abcdefgh, ou_ijklmnop",
         "allowlist_app_id": "cli_synthetic"
       }
     },
@@ -267,7 +267,7 @@
       "task_budget_action": "wrap_up",
       "supervise_interval_seconds": null,
       "review_policy": null,
-      "distill_lessons": null,
+      "distill_lessons": "off",
       "step_workspaces": null,
       "workspace_links": [
         "cache",
@@ -300,7 +300,7 @@
       "task_budget_action": null,
       "supervise_interval_seconds": null,
       "review_policy": null,
-      "distill_lessons": null,
+      "distill_lessons": "off",
       "step_workspaces": null,
       "workspace_links": null,
       "max_step_retries": null,

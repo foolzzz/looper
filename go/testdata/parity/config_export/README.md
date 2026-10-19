@@ -23,6 +23,10 @@ paths. Unknown, blank, zero, whitespace and invalid boolean query values follow
 Python's exact `== "1"` behavior and remain default exports with status 200.
 Default config-export GETs contain no `SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE` marker.
 `channel_secrets` are never exported, even with `secrets=1`.
+Channel IDs use the same order with bytewise and punctuation-insensitive
+collation: `lark-bot-export` precedes `lark-export`. The Python channel read
+uses the database's default collation, so IDs whose order depends on punctuation
+would make these synthetic rows disagree with some PostgreSQL locales.
 
 Regenerate without PostgreSQL from the repository root:
 
