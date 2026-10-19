@@ -486,18 +486,18 @@ func TestUnroutedAPI(t *testing.T) {
 		want   int
 		body   string
 	}{
-		{http.MethodPost, "/api/tasks", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/tasks/create", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodPut, "/api/llm-records", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodPost, "/api/agents/worker-1/usage", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/llm-records/nope", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/llm-records/12/nope", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/agents/bad.id/usage", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodPost, "/api/tasks", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodGet, "/api/tasks/create", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodPut, "/api/llm-records", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodPost, "/api/agents/worker-1/usage", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodGet, "/api/llm-records/nope", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodGet, "/api/llm-records/12/nope", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodGet, "/api/agents/bad.id/usage", http.StatusNotFound, `{"error": "not found"}`},
 		// Python's urlparse does not percent-decode. ServeMux unescapes the
 		// segment and would otherwise serve GET /api/tasks.
-		{http.MethodGet, "/api/%74asks", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/%6fverview", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/%73tatus", http.StatusNotFound, `{"error":"not found"}`},
+		{http.MethodGet, "/api/%74asks", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodGet, "/api/%6fverview", http.StatusNotFound, `{"error": "not found"}`},
+		{http.MethodGet, "/api/%73tatus", http.StatusNotFound, `{"error": "not found"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
@@ -506,7 +506,7 @@ func TestUnroutedAPI(t *testing.T) {
 			if rr.Code != tt.want || rr.Body.String() != tt.body {
 				t.Fatalf("status %d body %s, want %d %s", rr.Code, rr.Body.String(), tt.want, tt.body)
 			}
-			if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+			if ct := rr.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 				t.Fatalf("content type %q", ct)
 			}
 		})
@@ -528,7 +528,7 @@ func TestReadEndpoints(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/status"))
-	const wantStatus = `{"status":"running","agents":{},"tasks":{"total":5,"running":2,"completed":1},"channels":{"web":{"channel":"web","healthy":false,"active_sse_streams":0}},"checks":[]}`
+	const wantStatus = `{"status": "running", "agents": {}, "tasks": {"total": 5, "running": 2, "completed": 1}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": []}`
 	if rr.Code != http.StatusOK || rr.Body.String() != wantStatus {
 		t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 	}
@@ -568,7 +568,7 @@ func TestReadEndpoints(t *testing.T) {
 	for _, path := range []string{"/api/overview", "/api/projects"} {
 		rr = httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodPost, path))
-		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 			t.Fatalf("%s post %d body %s", path, rr.Code, rr.Body.String())
 		}
 	}
@@ -588,7 +588,7 @@ func TestReadErrorsDoNotLeak(t *testing.T) {
 			logs := captureLogs(t)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
-			if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` {
+			if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "database unavailable"}` {
 				t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 			}
 			if strings.Contains(rr.Body.String(), "SECRET") || strings.Contains(logs.String(), "SECRET") {
@@ -657,7 +657,7 @@ func TestReadWithoutDatabase(t *testing.T) {
 	} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
-		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` {
+		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "database unavailable"}` {
 			t.Fatalf("%s %d body %s", path, rr.Code, rr.Body.String())
 		}
 	}

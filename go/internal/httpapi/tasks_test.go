@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/foolzzz/looper/go/internal/db"
+	"github.com/foolzzz/looper/go/internal/pyjson"
 )
 
 // Status lists are written out. A reorder in the group tables should fail here.
@@ -204,7 +204,7 @@ func TestTasksBefore(t *testing.T) {
 		req.URL.RawQuery = "before=%FF"
 		srv.Handler().ServeHTTP(rr, req)
 		id := "\uFFFD"
-		want, err := json.Marshal(errorBody{Error: "before must be a task id; " + pythonRepr(id) + " is not one"})
+		want, err := pyjson.Marshal(errorBody{Error: "before must be a task id; " + pythonRepr(id) + " is not one"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -227,7 +227,7 @@ func TestTasksBefore(t *testing.T) {
 		if reads.existsID != id {
 			t.Fatalf("exists id %q (%d runes)", reads.existsID, len([]rune(reads.existsID)))
 		}
-		want, err := json.Marshal(errorBody{Error: "before must be a task id; " + pythonRepr(id) + " is not one"})
+		want, err := pyjson.Marshal(errorBody{Error: "before must be a task id; " + pythonRepr(id) + " is not one"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -245,7 +245,7 @@ func TestTasksBefore(t *testing.T) {
 			req := loopbackRequest(http.MethodGet, "/api/tasks")
 			req.URL.RawQuery = "before=" + url.QueryEscape(id)
 			srv.Handler().ServeHTTP(rr, req)
-			want, err := json.Marshal(errorBody{Error: "before must be a task id; " + pythonRepr(id) + " is not one"})
+			want, err := pyjson.Marshal(errorBody{Error: "before must be a task id; " + pythonRepr(id) + " is not one"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -280,7 +280,7 @@ func TestTasksErrorsDoNotLeak(t *testing.T) {
 			logs := captureLogs(t)
 			rr := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rr, loopbackRequest(http.MethodGet, tt.path))
-			if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` {
+			if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "database unavailable"}` {
 				t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 			}
 			if strings.Contains(rr.Body.String(), "SECRET") || strings.Contains(logs.String(), "SECRET") {
@@ -311,7 +311,7 @@ func TestTasksBadQuerySkipsDatabase(t *testing.T) {
 		t.Run(tt.path, func(t *testing.T) {
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, loopbackRequest(http.MethodGet, tt.path))
-			want := `{"error":"` + tt.msg + `"}`
+			want := `{"error": "` + tt.msg + `"}`
 			if rr.Code != http.StatusBadRequest || rr.Body.String() != want {
 				t.Fatalf("status %d body %s, want %s", rr.Code, rr.Body.String(), want)
 			}
@@ -338,7 +338,7 @@ func TestMalformedTaskPathsAreJSON404(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
-			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` || rr.Header().Get("Location") != "" {
+			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` || rr.Header().Get("Location") != "" {
 				t.Fatalf("status %d body %s location %q", rr.Code, rr.Body.String(), rr.Header().Get("Location"))
 			}
 		})
@@ -382,7 +382,7 @@ func TestPythonPathOnServer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resp.StatusCode != http.StatusNotFound || string(body) != `{"error":"not found"}` || resp.Header.Get("Location") != "" {
+		if resp.StatusCode != http.StatusNotFound || string(body) != `{"error": "not found"}` || resp.Header.Get("Location") != "" {
 			t.Fatalf("%s status %d body %s location %q", path, resp.StatusCode, body, resp.Header.Get("Location"))
 		}
 	}
@@ -410,7 +410,7 @@ func TestPythonPathOnServer(t *testing.T) {
 	}
 	tripleBody, _ := io.ReadAll(triple.Body)
 	triple.Body.Close()
-	if triple.StatusCode != http.StatusNotFound || string(tripleBody) != `{"error":"not found"}` {
+	if triple.StatusCode != http.StatusNotFound || string(tripleBody) != `{"error": "not found"}` {
 		t.Fatalf("duplicate slash status %d body %s", triple.StatusCode, tripleBody)
 	}
 
@@ -432,7 +432,7 @@ func TestTasksOtherMethodsAreNotFound(t *testing.T) {
 	for _, method := range []string{http.MethodPost, http.MethodHead, http.MethodPut} {
 		rr := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rr, loopbackRequest(method, "/api/tasks?limit=0"))
-		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 			t.Fatalf("%s %d body %s", method, rr.Code, rr.Body.String())
 		}
 	}
@@ -455,20 +455,20 @@ func TestTaskDetail(t *testing.T) {
 		id       string
 	}{
 		{name: "ok", method: http.MethodGet, path: "/api/tasks/task-abc123", body: map[string]any{"task_id": "task-abc123", "note": "a < b"}, want: http.StatusOK, wantBody: `{"note":"a < b","task_id":"task-abc123"}`, called: true, id: "task-abc123"},
-		{name: "missing", method: http.MethodGet, path: "/api/tasks/task-missing01", err: db.ErrNotFound, want: http.StatusNotFound, wantBody: `{"error":"task not found"}`, called: true, id: "task-missing01"},
-		{name: "wrapped missing", method: http.MethodGet, path: "/api/tasks/task-missing01", err: fmt.Errorf("load: %w", db.ErrNotFound), want: http.StatusNotFound, wantBody: `{"error":"task not found"}`, called: true, id: "task-missing01"},
-		{name: "create", method: http.MethodGet, path: "/api/tasks/create", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "bare hyphen", method: http.MethodGet, path: "/api/tasks/task-", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "not a task id", method: http.MethodGet, path: "/api/tasks/not-a-task", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "percent encoded digit", method: http.MethodGet, path: "/api/tasks/task-rich0000%31", body: map[string]any{"task_id": "task-rich00001"}, want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "percent encoded digit and parameter", method: http.MethodGet, path: "/api/tasks/task-rich0000%31;foo", body: map[string]any{"task_id": "task-rich00001"}, want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "missing", method: http.MethodGet, path: "/api/tasks/task-missing01", err: db.ErrNotFound, want: http.StatusNotFound, wantBody: `{"error": "task not found"}`, called: true, id: "task-missing01"},
+		{name: "wrapped missing", method: http.MethodGet, path: "/api/tasks/task-missing01", err: fmt.Errorf("load: %w", db.ErrNotFound), want: http.StatusNotFound, wantBody: `{"error": "task not found"}`, called: true, id: "task-missing01"},
+		{name: "create", method: http.MethodGet, path: "/api/tasks/create", want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "bare hyphen", method: http.MethodGet, path: "/api/tasks/task-", want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "not a task id", method: http.MethodGet, path: "/api/tasks/not-a-task", want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "percent encoded digit", method: http.MethodGet, path: "/api/tasks/task-rich0000%31", body: map[string]any{"task_id": "task-rich00001"}, want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "percent encoded digit and parameter", method: http.MethodGet, path: "/api/tasks/task-rich0000%31;foo", body: map[string]any{"task_id": "task-rich00001"}, want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
 		{name: "semicolon parameter", method: http.MethodGet, path: "/api/tasks/task-abc123;foo", body: map[string]any{"task_id": "task-abc123"}, want: http.StatusOK, wantBody: `{"task_id":"task-abc123"}`, called: true, id: "task-abc123"},
-		{name: "semicolon before a slash", method: http.MethodGet, path: "/api/tasks/task-abc123;foo/bar", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "percent encoded letter", method: http.MethodGet, path: "/api/tasks/%74ask-abc123", body: map[string]any{"task_id": "task-abc123"}, want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "post", method: http.MethodPost, path: "/api/tasks/task-abc123", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "head", method: http.MethodHead, path: "/api/tasks/task-abc123", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "database", method: http.MethodGet, path: "/api/tasks/task-abc123", err: errors.New("dial SECRET"), want: http.StatusInternalServerError, wantBody: `{"error":"database unavailable"}`, called: true, id: "task-abc123"},
-		{name: "no reader", method: http.MethodGet, path: "/api/tasks/task-abc123", noReads: true, want: http.StatusInternalServerError, wantBody: `{"error":"database unavailable"}`},
+		{name: "semicolon before a slash", method: http.MethodGet, path: "/api/tasks/task-abc123;foo/bar", want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "percent encoded letter", method: http.MethodGet, path: "/api/tasks/%74ask-abc123", body: map[string]any{"task_id": "task-abc123"}, want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "post", method: http.MethodPost, path: "/api/tasks/task-abc123", want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "head", method: http.MethodHead, path: "/api/tasks/task-abc123", want: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "database", method: http.MethodGet, path: "/api/tasks/task-abc123", err: errors.New("dial SECRET"), want: http.StatusInternalServerError, wantBody: `{"error": "database unavailable"}`, called: true, id: "task-abc123"},
+		{name: "no reader", method: http.MethodGet, path: "/api/tasks/task-abc123", noReads: true, want: http.StatusInternalServerError, wantBody: `{"error": "database unavailable"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

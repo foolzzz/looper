@@ -53,12 +53,12 @@ func TestChatAndActivityRoutes(t *testing.T) {
 	before := len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/chat/messages"))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"session_id is required"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "session_id is required"}` || len(reads.calls) != before {
 		t.Fatalf("missing session %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/chat/messages?session_id="))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"session_id is required"}` {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "session_id is required"}` {
 		t.Fatalf("empty session %d %s", rr.Code, rr.Body.String())
 	}
 
@@ -75,13 +75,13 @@ func TestChatAndActivityRoutes(t *testing.T) {
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-rich00001/activity?since=nope"))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 		t.Fatalf("bad since %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-rich00001/activity?limit="+strings.Repeat("9", pythonIntMaxStrDigits+1)))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 		t.Fatalf("4301-digit limit %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	before = len(reads.calls)
@@ -104,13 +104,13 @@ func TestChatAndActivityRoutes(t *testing.T) {
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-rich00001/activity/"+strings.Repeat("9", 40)))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"activity not found"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "activity not found"}` || len(reads.calls) != before {
 		t.Fatalf("overflow seq %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-rich00001/activity/"+strings.Repeat("9", pythonIntMaxStrDigits+1)))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 		t.Fatalf("4301-digit seq %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	for _, path := range []string{
@@ -122,7 +122,7 @@ func TestChatAndActivityRoutes(t *testing.T) {
 		before = len(reads.calls)
 		rr = httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
-		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` || len(reads.calls) != before {
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` || len(reads.calls) != before {
 			t.Fatalf("%s %d %s calls %d", path, rr.Code, rr.Body.String(), len(reads.calls)-before)
 		}
 	}
@@ -145,7 +145,7 @@ func TestChatAndActivityRoutes(t *testing.T) {
 			before = len(reads.calls)
 			rr = httptest.NewRecorder()
 			h.ServeHTTP(rr, loopbackRequest(method, path))
-			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` || len(reads.calls) != before {
+			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` || len(reads.calls) != before {
 				t.Fatalf("%s %s %d %s calls %d", method, path, rr.Code, rr.Body.String(), len(reads.calls)-before)
 			}
 		}
@@ -178,7 +178,7 @@ func TestChatAndActivityErrors(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/chat/sessions"))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"the database could not be read (UndefinedTableError)"}` {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "the database could not be read (UndefinedTableError)"}` {
 		t.Fatalf("sessions %d %s", rr.Code, rr.Body.String())
 	}
 	rr = httptest.NewRecorder()
@@ -193,7 +193,7 @@ func TestChatAndActivityErrors(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-rich00001/activity/1"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"activity not found"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "activity not found"}` {
 		t.Fatalf("detail %d %s", rr.Code, rr.Body.String())
 	}
 	rr = httptest.NewRecorder()
@@ -214,10 +214,10 @@ func TestNilReadsForTailRoutes(t *testing.T) {
 		body string
 	}{
 		{"/api/chat/targets", http.StatusOK, `{"targets":[{"can_send":true,"id":"manager","kind":"manager"}]}`},
-		{"/api/chat/sessions", http.StatusInternalServerError, `{"error":"the database could not be read (RuntimeError)"}`},
+		{"/api/chat/sessions", http.StatusInternalServerError, `{"error": "the database could not be read (RuntimeError)"}`},
 		{"/api/chat/messages?session_id=s", http.StatusOK, `{"messages":[]}`},
 		{"/api/tasks/task-rich00001/activity", http.StatusOK, `{"activity":[]}`},
-		{"/api/tasks/task-rich00001/activity/1", http.StatusNotFound, `{"error":"activity not found"}`},
+		{"/api/tasks/task-rich00001/activity/1", http.StatusNotFound, `{"error": "activity not found"}`},
 		{"/api/tasks/task-rich00001/conversation", http.StatusOK, `{"conversation":[]}`},
 	}
 	for _, tt := range checks {
@@ -274,10 +274,10 @@ func TestEscapedTasksPathOnServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusNotFound || string(body) != `{"error":"not found"}` || resp.Header.Get("Location") != "" {
+	if resp.StatusCode != http.StatusNotFound || string(body) != `{"error": "not found"}` || resp.Header.Get("Location") != "" {
 		t.Fatalf("status %d location %q body %s", resp.StatusCode, resp.Header.Get("Location"), body)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json; charset=utf-8" {
 		t.Fatalf("content type %q", ct)
 	}
 	if len(reads.calls) != 0 {

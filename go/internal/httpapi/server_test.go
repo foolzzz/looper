@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -124,7 +125,7 @@ func TestStatus(t *testing.T) {
 			method:     http.MethodPost,
 			path:       "/api/status",
 			wantStatus: http.StatusNotFound,
-			wantBody:   `{"error":"not found"}`,
+			wantBody:   `{"error": "not found"}`,
 		},
 		{
 			name:       "put is not found",
@@ -133,7 +134,7 @@ func TestStatus(t *testing.T) {
 			method:     http.MethodPut,
 			path:       "/api/status",
 			wantStatus: http.StatusNotFound,
-			wantBody:   `{"error":"not found"}`,
+			wantBody:   `{"error": "not found"}`,
 		},
 		{
 			name:       "unknown api",
@@ -142,7 +143,7 @@ func TestStatus(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/api/nope",
 			wantStatus: http.StatusNotFound,
-			wantBody:   `{"error":"not found"}`,
+			wantBody:   `{"error": "not found"}`,
 		},
 	}
 	for _, tt := range tests {
@@ -159,7 +160,7 @@ func TestStatus(t *testing.T) {
 			if rr.Code != tt.wantStatus {
 				t.Fatalf("status %d, want %d, body %s", rr.Code, tt.wantStatus, rr.Body.String())
 			}
-			if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+			if ct := rr.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 				t.Fatalf("content type %q", ct)
 			}
 			if tt.wantAllow != "" && rr.Header().Get("Allow") != tt.wantAllow {
@@ -199,7 +200,7 @@ func TestStatus(t *testing.T) {
 }
 
 // pythonStatusZero is GET /api/status with no reader and no live agents.
-const pythonStatusZero = `{"status":"running","agents":{},"tasks":{"total":0,"running":0,"completed":0},"channels":{"web":{"channel":"web","healthy":false,"active_sse_streams":0}},"checks":[]}`
+const pythonStatusZero = `{"status": "running", "agents": {}, "tasks": {"total": 0, "running": 0, "completed": 0}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": []}`
 
 func TestStatusHidesDSNSecrets(t *testing.T) {
 	tests := []struct {
@@ -439,15 +440,15 @@ func TestStaticAndSPA(t *testing.T) {
 		{name: "absolute symlink inside", h: h, method: http.MethodGet, path: "/absalias.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
 		{name: "absolute directory symlink inside", h: h, method: http.MethodGet, path: "/absdir/app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
 		{name: "parent through absolute directory symlink", h: h, method: http.MethodGet, path: "/absdir/../app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
-		{name: "parent through absolute directory symlink leaves", h: h, method: http.MethodGet, path: "/absdir/../leak.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
+		{name: "parent through absolute directory symlink leaves", h: h, method: http.MethodGet, path: "/absdir/../leak.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
 		{name: "spa fallback", h: h, method: http.MethodGet, path: "/tasks/123", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "directory is not a listing", h: h, method: http.MethodGet, path: "/assets", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "head root", h: h, method: http.MethodHead, path: "/", wantStatus: http.StatusOK, emptyBody: true, wantType: "text/html"},
-		{name: "symlink escape", h: h, method: http.MethodGet, path: "/leak.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
-		{name: "directory symlink escape", h: h, method: http.MethodGet, path: "/link/secret.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
-		{name: "directory symlink missing child", h: h, method: http.MethodGet, path: "/link/no-such.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
-		{name: "relative directory symlink escape", h: h, method: http.MethodGet, path: "/rellink/secret.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
-		{name: "symlink directory itself", h: h, method: http.MethodGet, path: "/link", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
+		{name: "symlink escape", h: h, method: http.MethodGet, path: "/leak.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
+		{name: "directory symlink escape", h: h, method: http.MethodGet, path: "/link/secret.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
+		{name: "directory symlink missing child", h: h, method: http.MethodGet, path: "/link/no-such.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
+		{name: "relative directory symlink escape", h: h, method: http.MethodGet, path: "/rellink/secret.txt", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
+		{name: "symlink directory itself", h: h, method: http.MethodGet, path: "/link", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
 		{name: "directory symlink inside", h: h, method: http.MethodGet, path: "/inside/app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
 		{name: "dotdot is the cleaned static file", h: h, method: http.MethodGet, path: "/../secret.txt", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "dot segment is the same file", h: h, method: http.MethodGet, path: "/./index.html", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
@@ -459,20 +460,20 @@ func TestStaticAndSPA(t *testing.T) {
 		{name: "parent through inside symlink", h: h, method: http.MethodGet, path: "/inside/../app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
 		{name: "nested symlink file", h: h, method: http.MethodGet, path: "/deep/note.txt", wantStatus: http.StatusOK, wantBody: "NOTE", wantType: "text/plain"},
 		{name: "parent through nested symlink", h: h, method: http.MethodGet, path: "/deep/../app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
-		{name: "parent through nested symlink into outside link", h: h, method: http.MethodGet, path: "/deep/../out/app.js", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
+		{name: "parent through nested symlink into outside link", h: h, method: http.MethodGet, path: "/deep/../out/app.js", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
 		{name: "two parents through nested symlink", h: h, method: http.MethodGet, path: "/deep/../../app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
 		{name: "three parents through nested symlink", h: h, method: http.MethodGet, path: "/deep/../../../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "parent through missing dir falls back", h: h, method: http.MethodGet, path: "/missing/../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "parent through missing nested dir falls back", h: h, method: http.MethodGet, path: "/assets/foo/../../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "parent through a file falls back", h: h, method: http.MethodGet, path: "/notdir/../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
-		{name: "parent through escaping symlink", h: h, method: http.MethodGet, path: "/link/../app.js", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
+		{name: "parent through escaping symlink", h: h, method: http.MethodGet, path: "/link/../app.js", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
 		{name: "collapse into api is still static", h: h, method: http.MethodGet, path: "/foo/../api/status", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "cleaned missing path falls back", h: h, method: http.MethodGet, path: "/secret.txt", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
-		{name: "no index", h: emptyH, method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
-		{name: "existing file without index", h: emptyH, method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
-		{name: "post static", h: h, method: http.MethodPost, path: "/tasks/1", wantStatus: http.StatusMethodNotAllowed, jsonErr: `{"error":"method not allowed"}`, wantAllow: "GET, HEAD"},
-		{name: "put static", h: h, method: http.MethodPut, path: "/tasks/1", wantStatus: http.StatusMethodNotAllowed, jsonErr: `{"error":"method not allowed"}`, wantAllow: "GET, HEAD"},
-		{name: "no web dir", h: noWeb, method: http.MethodGet, path: "/", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
+		{name: "no index", h: emptyH, method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
+		{name: "existing file without index", h: emptyH, method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
+		{name: "post static", h: h, method: http.MethodPost, path: "/tasks/1", wantStatus: http.StatusMethodNotAllowed, jsonErr: `{"error": "method not allowed"}`, wantAllow: "GET, HEAD"},
+		{name: "put static", h: h, method: http.MethodPut, path: "/tasks/1", wantStatus: http.StatusMethodNotAllowed, jsonErr: `{"error": "method not allowed"}`, wantAllow: "GET, HEAD"},
+		{name: "no web dir", h: noWeb, method: http.MethodGet, path: "/", wantStatus: http.StatusNotFound, jsonErr: `{"error": "not found"}`},
 		{name: "plain file", h: h, method: http.MethodGet, path: "/plain", wantStatus: http.StatusOK, wantBody: "PLAIN"},
 		{name: "encoded app.js falls back", h: h, method: http.MethodGet, path: "/%61pp.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "encoded asset falls back", h: h, method: http.MethodGet, path: "/assets/%61pp.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
@@ -504,7 +505,7 @@ func TestStaticAndSPA(t *testing.T) {
 				if rr.Body.String() != tt.jsonErr {
 					t.Fatalf("body %s, want %s", rr.Body.String(), tt.jsonErr)
 				}
-				if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+				if ct := rr.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 					t.Fatalf("content type %q", ct)
 				}
 			}
@@ -543,7 +544,7 @@ func TestStaticEscapingIndexFallbackIsNotFound(t *testing.T) {
 	for _, path := range []string{"/missing", "/", "/tasks/1"} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
-		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 			t.Fatalf("%s status %d body %s", path, rr.Code, rr.Body.String())
 		}
 		if strings.Contains(rr.Body.String(), "SECRET") {
@@ -587,8 +588,8 @@ func TestStaticDotDotOutsideExistingFile(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{name: "parent file exists", path: "/../pyproject.toml", wantStatus: http.StatusNotFound, wantBody: `{"error":"not found"}`},
-		{name: "parent file through existing dir", path: "/assets/../../pyproject.toml", wantStatus: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "parent file exists", path: "/../pyproject.toml", wantStatus: http.StatusNotFound, wantBody: `{"error": "not found"}`},
+		{name: "parent file through existing dir", path: "/assets/../../pyproject.toml", wantStatus: http.StatusNotFound, wantBody: `{"error": "not found"}`},
 		{name: "parent file missing", path: "/../no-such-file", wantStatus: http.StatusOK, wantBody: "INDEX"},
 		{name: "dotdot walks back inside", path: "/../web/app.js", wantStatus: http.StatusOK, wantBody: "APP"},
 	}
@@ -603,5 +604,20 @@ func TestStaticDotDotOutsideExistingFile(t *testing.T) {
 				t.Fatalf("response disclosed an outside path or file: %q", rr.Body.String())
 			}
 		})
+	}
+}
+
+func TestCompactEncodeFailureUsesPythonJSON(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeJSON(rr, http.StatusOK, make(chan int))
+	const want = `{"error": "internal server error"}`
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != want {
+		t.Fatalf("status %d body %q", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Fatalf("content-type %q", ct)
+	}
+	if cl := rr.Header().Get("Content-Length"); cl != strconv.Itoa(len(want)) {
+		t.Fatalf("content-length %q", cl)
 	}
 }

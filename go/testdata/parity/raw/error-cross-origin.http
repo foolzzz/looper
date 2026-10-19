@@ -1,0 +1,5 @@
+HTTP/1.1 403 Forbidden
+Content-Type: application/json; charset=utf-8
+Content-Length: 73
+
+{"error": "cross-origin request from 'https://attacker.example' refused"}

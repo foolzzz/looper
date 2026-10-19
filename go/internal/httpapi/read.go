@@ -122,8 +122,8 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTask is GET /api/tasks/<id>. A task id that is not in the database is
-// 404 {"error":"task not found"}. Any other method, or a segment that is not
-// task-[A-Za-z0-9]+ on the raw path, is 404 {"error":"not found"} and does not
+// 404 {"error": "task not found"}. Any other method, or a segment that is not
+// task-[A-Za-z0-9]+ on the raw path, is 404 {"error": "not found"} and does not
 // read the database.
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	id, ok := rawTaskID(r)

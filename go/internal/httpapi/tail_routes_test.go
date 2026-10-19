@@ -25,13 +25,13 @@ func TestScheduleLimitDoesNotRead(t *testing.T) {
 		status int
 		body   string
 	}{
-		{name: "zero", path: "/api/schedules/sched-nightly01/runs?limit=0", status: http.StatusBadRequest, body: `{"error":"limit must be a whole number from 1 to 200"}`},
-		{name: "skips", path: "/api/schedules/sched-nightly01/runs?skips=nope", status: http.StatusBadRequest, body: `{"error":"skips must be one of show, hide"}`},
-		{name: "superscript", path: "/api/schedules/sched-nightly01/runs?limit=%C2%B2", status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
-		{name: "overflow", path: "/api/schedules/sched-nightly01/runs?limit=" + digits, status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
-		{name: "notes overflow", path: "/api/schedules/sched-nightly01/notifications?limit=" + digits, status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
-		{name: "preview", path: "/api/schedules/preview", status: http.StatusNotFound, body: `{"error":"not found"}`},
-		{name: "post", path: "/api/schedules/sched-nightly01/runs", status: http.StatusNotFound, body: `{"error":"not found"}`},
+		{name: "zero", path: "/api/schedules/sched-nightly01/runs?limit=0", status: http.StatusBadRequest, body: `{"error": "limit must be a whole number from 1 to 200"}`},
+		{name: "skips", path: "/api/schedules/sched-nightly01/runs?skips=nope", status: http.StatusBadRequest, body: `{"error": "skips must be one of show, hide"}`},
+		{name: "superscript", path: "/api/schedules/sched-nightly01/runs?limit=%C2%B2", status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
+		{name: "overflow", path: "/api/schedules/sched-nightly01/runs?limit=" + digits, status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
+		{name: "notes overflow", path: "/api/schedules/sched-nightly01/notifications?limit=" + digits, status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
+		{name: "preview", path: "/api/schedules/preview", status: http.StatusNotFound, body: `{"error": "not found"}`},
+		{name: "post", path: "/api/schedules/sched-nightly01/runs", status: http.StatusNotFound, body: `{"error": "not found"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,10 +98,10 @@ func TestWorkspaceCheckRefusesBeforeStore(t *testing.T) {
 		path string
 		body string
 	}{
-		{name: "no dir", path: "/api/workspaces/check", body: `{"error":"a work directory is required: set one on the task or on its project"}`},
-		{name: "relative", path: "/api/workspaces/check?dir=relative&mode=nope", body: `{"error":"work directory must be an absolute path, got 'relative'"}`},
-		{name: "bad mode", path: "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=nope", body: `{"error":"workspace_mode must be one of in_place, worktree"}`},
-		{name: "base", path: "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=in_place&base=main", body: `{"error":"base is where a task's worktree starts: give it with workspace_mode worktree"}`},
+		{name: "no dir", path: "/api/workspaces/check", body: `{"error": "a work directory is required: set one on the task or on its project"}`},
+		{name: "relative", path: "/api/workspaces/check?dir=relative&mode=nope", body: `{"error": "work directory must be an absolute path, got 'relative'"}`},
+		{name: "bad mode", path: "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=nope", body: `{"error": "workspace_mode must be one of in_place, worktree"}`},
+		{name: "base", path: "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=in_place&base=main", body: `{"error": "base is where a task's worktree starts: give it with workspace_mode worktree"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

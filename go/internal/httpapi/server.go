@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/foolzzz/looper/go/internal/db"
+	"github.com/foolzzz/looper/go/internal/pyjson"
 )
 
 // DBPinger checks the database. The production implementation runs SELECT 1.
@@ -206,6 +208,8 @@ type statusChannels struct {
 
 // statusBody is Python _handle_status. implementation, version, and db are not
 // in that object. The database probe is logged beside it and is not a field.
+// Agents stays an empty map until a supervisor is wired. pyjson refuses a
+// non-empty map; a later card has to build a pyjson.Object in Python's order.
 type statusBody struct {
 	Status   string         `json:"status"`
 	Agents   map[string]any `json:"agents"`
@@ -248,7 +252,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			tasks = statusTasks{Total: total, Running: running, Completed: completed}
 		}
 	}
-	writeJSON(w, http.StatusOK, statusBody{
+	writePythonJSON(w, http.StatusOK, statusBody{
 		Status: "running",
 		Agents: map[string]any{},
 		Tasks:  tasks,
@@ -311,18 +315,42 @@ func methodNotAllowed(w http.ResponseWriter) {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	// Error bodies use Python's spelling. Success bodies are still compact
+	// until each route keeps Python's key order; see raw/PENDING.txt.
+	if _, ok := v.(errorBody); ok {
+		writePythonJSON(w, code, v)
+		return
+	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	// Python json.dumps does not escape &, <, or >. The dashboard parses JSON.
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
 		slog.Error("encode json", "err", err)
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		// http.Error would send text/plain, compact JSON, and a trailing newline.
+		writePythonJSON(w, http.StatusInternalServerError, errorBody{Error: "internal server error"})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, _ = w.Write(bytes.TrimRight(buf.Bytes(), "\n"))
+}
+
+// writePythonJSON is Python _json_response: UTF-8, separator spaces, no
+// trailing newline, Content-Type with charset, and Content-Length of that
+// body. A value pyjson cannot encode becomes 500 with a fixed JSON body.
+func writePythonJSON(w http.ResponseWriter, code int, v any) {
+	payload, err := pyjson.Marshal(v)
+	if err != nil {
+		slog.Error("encode json", "err", err)
+		payload = []byte(`{"error": "internal server error"}`)
+		code = http.StatusInternalServerError
+	}
+	h := w.Header()
+	h.Set("Content-Type", pyjson.ContentType)
+	h.Set("Content-Length", strconv.Itoa(len(payload)))
+	w.WriteHeader(code)
+	_, _ = w.Write(payload)
 }
 
 var (
