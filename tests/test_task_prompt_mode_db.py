@@ -92,3 +92,17 @@ def test_a_real_claude_code_launch_follows_the_task_then_the_role_then_the_built
         assert flag in seen["argv"] and other not in seen["argv"]
 
     _run(run, monkeypatch)
+
+
+@pytest.mark.parametrize("falsy", [False, 0, "", [], None])
+def test_a_falsy_system_prompt_modes_is_refused_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, falsy: Any,
+) -> None:
+    async def run(pool: Any) -> None:
+        task = await _task(tmp_path)
+        status, body = await _call("PUT", f"/api/tasks/{task}/agents",
+                                   {"concurrency": {"worker": 3}, "system_prompt_modes": falsy})
+        assert status == 400 and "system_prompt_modes must be an object" in body["error"]
+        assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits WHERE task_id = $1", task) == 0
+
+    _run(run, monkeypatch)

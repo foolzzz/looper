@@ -615,7 +615,7 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     if not any(data.get(field) for field in TASK_AGENT_FIELDS):
         raise RequestError(HTTP_400, f"give at least one role's {', '.join(TASK_AGENT_FIELDS)}")
     limits = _concurrency_limits(data["concurrency"]) if data.get("concurrency") else {}
-    modes = _prompt_modes(data["system_prompt_modes"]) if data.get("system_prompt_modes") else {}
+    modes = _prompt_modes(data["system_prompt_modes"]) if "system_prompt_modes" in data else {}
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")

@@ -715,7 +715,8 @@ async def load_agent_settings(
                                                       task_role=task_role)
     except Exception as exc:
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
-        return AgentSettings(error=f"cannot read the agent settings ({type(exc).__name__})")
+        # The built-in defaults of this role, including its built-in system prompt mode.
+        return replace(resolve(role, {}, project_id), error=f"cannot read the agent settings ({type(exc).__name__})")
     settings = resolve(role, index_layers(rows, project_id), project_id)
     problem = profile_problem(settings.profile, AgentType(role))
     if problem is None and settings.profile.provider.auth is AuthKind.API_KEY:

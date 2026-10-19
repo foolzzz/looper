@@ -179,3 +179,18 @@ def test_a_consult_appends_whatever_the_seats_mode() -> None:
     settings = resolve(AgentType.WORKER, layers)
     assert Launch(settings, role=AgentType.WORKER).system_prompt_mode is REPLACE
     assert Launch(settings, role=AgentType.WORKER, consult=True).system_prompt_mode is APPEND
+
+
+@pytest.mark.parametrize("role", list(AgentType))
+def test_unreadable_settings_keep_the_roles_builtin_mode(role: AgentType, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from looper.agents.agent_settings import load_agent_settings
+    from looper.db import agent_setting_layers
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(agent_setting_layers, "list_layers", boom)
+    settings = asyncio.run(load_agent_settings(role))
+    assert settings.error and settings.system_prompt_mode is BUILTIN_SYSTEM_PROMPT_MODE[role]
