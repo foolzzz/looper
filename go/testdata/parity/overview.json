@@ -34,7 +34,7 @@
         "waiting": 0
       },
       "tasks": {
-        "ready": 1,
+        "ready": 2,
         "running": 0
       },
       "workers": {
@@ -89,13 +89,13 @@
     "attention": 4,
     "cancelled": 1,
     "completed": 41,
-    "in_progress": 7,
+    "in_progress": 8,
     "needs_you": 1,
     "other": 1,
     "other_statuses": {
       "archived": 1
     },
-    "ready": 2,
-    "total": 57
+    "ready": 3,
+    "total": 59
   }
 }

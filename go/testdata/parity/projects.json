@@ -29,7 +29,7 @@
       "supervise_interval_seconds": null,
       "task_budget_action": null,
       "task_budget_usd": null,
-      "task_count": 1,
+      "task_count": 2,
       "task_workspaces": null,
       "updated_at": "2020-02-15T00:00:00+00:00",
       "user_gates": null,
@@ -37,7 +37,7 @@
       "workspace_links": null
     },
     {
-      "active_count": 8,
+      "active_count": 9,
       "agent_room": null,
       "background": "alpha notes",
       "created_at": "2020-01-15T00:00:00+00:00",
@@ -65,7 +65,7 @@
       "supervise_interval_seconds": 30,
       "task_budget_action": null,
       "task_budget_usd": 1.5,
-      "task_count": 11,
+      "task_count": 12,
       "task_workspaces": null,
       "updated_at": "2020-01-16T00:00:00+00:00",
       "user_gates": null,

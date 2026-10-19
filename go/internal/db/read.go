@@ -262,7 +262,6 @@ func (s *Store) Tasks(ctx context.Context, q TaskQuery) (map[string]any, error) 
 
 // Task is GET /api/tasks/<id>. ErrNotFound when the id is unknown.
 // A room read that fails is omitted (room null). Other read failures are returned.
-// Setting layers, custom roles, gates, step workspaces and profile overrides are the empty path.
 func (s *Store) Task(ctx context.Context, id string) (map[string]any, error) {
 	row, err := s.one(ctx, "task", taskFrom+` WHERE t.id = $1`, id)
 	if err != nil {
@@ -323,12 +322,33 @@ func (s *Store) Task(ctx context.Context, id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	room, err := s.room(ctx, id)
+	overrides, err := s.profileOverrides(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	status := strOr(row["status"], "pending")
+	agents, err := s.taskAgents(ctx, asString(row["project_id"]), id, status)
+	if err != nil {
+		return nil, err
+	}
+	roles, err := s.taskRoles(ctx, id, steps, roleRows)
+	if err != nil {
+		return nil, err
+	}
+	gates, err := s.taskGates(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+	workspaces, err := s.stepWorkspaces(ctx, id, steps, worktree != nil)
+	if err != nil {
+		return nil, err
+	}
+	room, err := s.room(ctx, id, steps)
 	if err != nil {
 		slog.Warn("task room", "task_id", id, "err", LogText(err))
 		room = nil
 	}
-	return taskDetail(row, stepList, journal, journalList, versions, actions, worktree, costs[id], runRows, roleRows, steps, room), nil
+	return taskDetail(row, stepList, journal, journalList, versions, actions, worktree, costs[id], runRows, roleRows, steps, room, overrides, agents, roles, gates, workspaces), nil
 }
 
 func (s *Store) countByStatus(ctx context.Context, q TaskQuery) (map[string]any, error) {
@@ -393,7 +413,7 @@ func (s *Store) scheduleOverview(ctx context.Context, since time.Time) (map[stri
 	return scheduleView(counts, upcoming, failing, skipped), nil
 }
 
-func (s *Store) room(ctx context.Context, taskID string) (map[string]any, error) {
+func (s *Store) room(ctx context.Context, taskID string, steps []map[string]any) (map[string]any, error) {
 	project, err := s.one(ctx, "room project", `
 		SELECT p.agent_room FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1`, taskID)
 	if err != nil {
@@ -401,6 +421,12 @@ func (s *Store) room(ctx context.Context, taskID string) (map[string]any, error)
 	}
 	kinds, err := s.query(ctx, "room messages", `
 		SELECT kind, count(*) AS n FROM room_messages WHERE task_id = $1 GROUP BY kind`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	messages, err := s.query(ctx, "room by step", `
+		SELECT id, sender_seat, audience, kind, reply_to, answers_ids
+		FROM room_messages WHERE task_id = $1 ORDER BY id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +453,7 @@ func (s *Store) room(ctx context.Context, taskID string) (map[string]any, error)
 	if unanswered != nil {
 		pending = asInt(unanswered["n"])
 	}
-	return roomView(enabled, kinds, pending, consults), nil
+	return roomView(enabled, kinds, pending, consults, roomByStep(steps, messages)), nil
 }
 
 func (s *Store) one(ctx context.Context, label, query string, args ...any) (map[string]any, error) {
@@ -611,7 +637,7 @@ func scheduleView(counts map[string]any, upcoming, failing, skipped []map[string
 	}
 }
 
-func roomView(enabled bool, kinds []map[string]any, unanswered int, consults []map[string]any) map[string]any {
+func roomView(enabled bool, kinds []map[string]any, unanswered int, consults []map[string]any, byStep map[string]any) map[string]any {
 	byKind := map[string]int{}
 	messages, questions := 0, 0
 	for _, row := range kinds {
@@ -650,8 +676,9 @@ func roomView(enabled bool, kinds []map[string]any, unanswered int, consults []m
 	for _, name := range reasonNames {
 		byReason[name] = reasons[name]
 	}
-	// by_step stays empty: a task with no messages has zeros for every step, and the
-	// seat view that fills it once messages exist is not ported.
+	if byStep == nil {
+		byStep = map[string]any{}
+	}
 	return map[string]any{
 		"enabled": enabled,
 		"counts": map[string]any{
@@ -660,7 +687,7 @@ func roomView(enabled bool, kinds []map[string]any, unanswered int, consults []m
 			"questions":  questions,
 			"unanswered": unanswered,
 		},
-		"by_step": map[string]any{},
+		"by_step": byStep,
 		"consults": map[string]any{
 			"total":     len(consults),
 			"answered":  answered,
@@ -670,7 +697,7 @@ func roomView(enabled bool, kinds []map[string]any, unanswered int, consults []m
 	}
 }
 
-func taskDetail(row map[string]any, steps []any, journal []map[string]any, journalList []any, versions, actions []map[string]any, worktree map[string]any, cost map[string]any, runs, roleRows, stepMaps []map[string]any, room map[string]any) map[string]any {
+func taskDetail(row map[string]any, steps []any, journal []map[string]any, journalList []any, versions, actions []map[string]any, worktree map[string]any, cost map[string]any, runs, roleRows, stepMaps []map[string]any, room, overrides, agents map[string]any, roles, gates []any, workspaces any) map[string]any {
 	id := asString(row["id"])
 	status := strOr(row["status"], "pending")
 	versionList := make([]any, len(versions))
@@ -695,6 +722,15 @@ func taskDetail(row map[string]any, steps []any, journal []map[string]any, journ
 	if journalList == nil {
 		journalList = []any{}
 	}
+	if overrides == nil {
+		overrides = map[string]any{}
+	}
+	if roles == nil {
+		roles = []any{}
+	}
+	if gates == nil {
+		gates = []any{}
+	}
 	out := map[string]any{
 		"task_id":              id,
 		"requirement":          asString(row["requirement"]),
@@ -712,19 +748,19 @@ func taskDetail(row map[string]any, steps []any, journal []map[string]any, journ
 		"correlation_id":       asString(row["correlation_id"]),
 		"work_dir":             asString(row["work_dir"]),
 		"config":               readConfig(row["config"]),
-		"profile_overrides":    map[string]any{},
-		"agents":               agentsView(status),
-		"roles":                []any{},
+		"profile_overrides":    overrides,
+		"agents":               agents,
+		"roles":                roles,
 		"builtin_role_stats":   builtinStats(roleRows, stepMaps),
-		"gates":                []any{},
+		"gates":                gates,
 		"task_workspace":       taskWorkspace(row, worktree),
-		"step_workspaces":      nil,
+		"step_workspaces":      workspaces,
 		"room":                 room,
 		"origin_channel_id":    asString(row["origin_channel_id"]),
 		"result_summary":       row["result_summary"],
 		"error":                row["error"],
 		"fail_kind":            row["fail_kind"],
-		"task_budget_usd":      row["task_budget_usd"],
+		"task_budget_usd":      taskBudgetUSD(asString(row["project_id"]), row["task_budget_usd"]),
 		"own_budget_usd":       row["budget_usd"],
 		"schedule_id":          row["schedule_id"],
 		"schedule_name":        row["schedule_name"],

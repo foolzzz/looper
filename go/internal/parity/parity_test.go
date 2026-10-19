@@ -24,8 +24,10 @@ import (
 //   - The value of a key in volatileTimes (since) becomes "<time>" and is not
 //     walked. Those are generated when the request runs. Seeded timestamps
 //     stay as written. volatileTimes is _VOLATILE_TIMES in make_goldens.py.
-//   - The value of a key named uptime, pid, pids, or version becomes "<volatile>"
-//     and is not walked. implementation and db are compared as written.
+//   - The value of a key named uptime, pid, or pids becomes "<volatile>" and is
+//     not walked. A string version (a build id) becomes "<volatile>" too. A
+//     numeric version, such as a requirement or role version, is compared.
+//     implementation and db are compared as written.
 //   - Object key order is not significant. Numbers compare by value, so 0 and 0.0
 //     match. Comparison remarshals both documents with encoding/json, which sorts
 //     object keys and writes a whole number as itself.
@@ -36,7 +38,7 @@ import (
 // goldenCases is the same list make_goldens.py writes.
 var (
 	volatileTimes = map[string]bool{"since": true}
-	volatileKeys  = map[string]bool{"uptime": true, "pid": true, "pids": true, "version": true}
+	volatileKeys  = map[string]bool{"uptime": true, "pid": true, "pids": true}
 	goldenCases   = []struct {
 		name   string
 		path   string
@@ -61,6 +63,9 @@ var (
 		{"tasks-status", "/api/tasks?status=running", http.StatusOK},
 		{"tasks-schedule", "/api/tasks?schedule_id=sched-nightly01", http.StatusOK},
 		{"tasks-combined", "/api/tasks?project_id=proj-alpha0001&status=waiting_user&schedule_id=sched-nightly01", http.StatusOK},
+		{"task-rich", "/api/tasks/task-rich00001", http.StatusOK},
+		{"task-min", "/api/tasks/task-min000001", http.StatusOK},
+		{"task-missing", "/api/tasks/task-missing01", http.StatusNotFound},
 	}
 )
 
@@ -132,6 +137,56 @@ func TestGoldenParity(t *testing.T) {
 			}
 		})
 	}
+
+	// Python's urlparse drops a semicolon path parameter, so this is the rich
+	// task. A "." segment or a duplicate slash is not cleaned: Python returns
+	// JSON 404, and ServeMux would otherwise redirect with 301.
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	extra := []struct {
+		name   string
+		path   string
+		status int
+		golden string
+	}{
+		{"semicolon", "/api/tasks/task-rich00001;foo", http.StatusOK, "task-rich.json"},
+		{"dot segment", "/api/./tasks/task-rich00001", http.StatusNotFound, ""},
+		{"dot in id", "/api/tasks/./task-rich00001", http.StatusNotFound, ""},
+		{"duplicate slash", "/api//tasks/task-rich00001", http.StatusNotFound, ""},
+		{"parent segment", "/api/tasks/../tasks/task-rich00001", http.StatusNotFound, ""},
+	}
+	for _, tc := range extra {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.status || resp.Header.Get("Location") != "" {
+				t.Fatalf("status %d location %q body %s, want %d", resp.StatusCode, resp.Header.Get("Location"), body, tc.status)
+			}
+			if tc.golden == "" {
+				if string(body) != `{"error":"not found"}` {
+					t.Fatalf("body %s", body)
+				}
+				return
+			}
+			got := canonical(t, body)
+			golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", "parity", tc.golden))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := canonical(t, golden)
+			if string(got) != string(want) {
+				t.Fatalf("canonical JSON differs\n got %s\nwant %s", got, want)
+			}
+		})
+	}
 }
 
 func TestNormalizeKeepsSeededTimes(t *testing.T) {
@@ -142,6 +197,10 @@ func TestNormalizeKeepsSeededTimes(t *testing.T) {
 		"completed_at": "2020-03-04T12:00:00+00:00",
 		"note":         "not a time",
 		"uptime":       12,
+		"version":      "build-id",
+		"requirement_versions": []any{
+			map[string]any{"version": float64(2), "text": "a"},
+		},
 		"spend_today": map[string]any{
 			"since":          "2026-06-15T00:00:00+08:00",
 			"equivalent_usd": 1.25,
@@ -152,8 +211,13 @@ func TestNormalizeKeepsSeededTimes(t *testing.T) {
 			t.Fatalf("%s became %v", key, got[key])
 		}
 	}
-	if got["created_at"] != "2020-01-15T00:00:00+00:00" || got["note"] != "not a time" || got["uptime"] != "<volatile>" {
+	if got["created_at"] != "2020-01-15T00:00:00+00:00" || got["note"] != "not a time" || got["uptime"] != "<volatile>" || got["version"] != "<volatile>" {
 		t.Fatalf("normalize changed a seeded value: %#v", got)
+	}
+	versions := got["requirement_versions"].([]any)
+	row := versions[0].(map[string]any)
+	if row["version"] != float64(2) || row["text"] != "a" {
+		t.Fatalf("numeric version %#v", row)
 	}
 	spend := got["spend_today"].(map[string]any)
 	if spend["since"] != "<time>" || spend["equivalent_usd"] != 1.25 {
@@ -182,6 +246,13 @@ func normalize(value any) any {
 			if volatileKeys[key] {
 				out[key] = "<volatile>"
 				continue
+			}
+			// A build id is a string. Requirement and role versions are numbers.
+			if key == "version" {
+				if _, ok := item.(string); ok {
+					out[key] = "<volatile>"
+					continue
+				}
 			}
 			if volatileTimes[key] {
 				out[key] = "<time>"

@@ -57,11 +57,17 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // except the routes that answer 501 below.
 // GET /api/status stays method-specific so POST and PUT fall through to 405.
 // The Host/Origin guard runs before routing, matching request_guard.refusal.
+// The path is urllib.parse.urlparse(target).path before the mux sees it.
+// A semicolon after the last slash is a path parameter and is not part of
+// the path. An API path ServeMux would redirect (a "." or ".." segment, or
+// a duplicate slash) is JSON 404: Python keeps that path and matches no
+// route. A static path is not redirected either. Python's static handler
+// joins it and lets pathlib collapse "." and "..", so the collapsed path is
+// served here, including when the collapse lands under /api/.
 //
 // This slice serves GET /api/status, GET /api/projects, GET /api/overview,
-// and GET /api/tasks. The other read routes from the same milestone answer
-// 501 and do not read the database: /api/tasks/<id>, and the cost routes
-// /api/agents/<id>/usage and /api/llm-records.
+// GET /api/tasks, and GET /api/tasks/<id>. The cost routes answer 501 and do
+// not read the database: /api/agents/<id>/usage and /api/llm-records.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.handleStatus)
@@ -81,7 +87,17 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, http.StatusForbidden, errorBody{Error: reason})
 			return
 		}
-		mux.ServeHTTP(w, r)
+		escaped := pythonURLPath(requestTarget(r))
+		cleaned := canonicalPath(escaped)
+		if escaped != cleaned {
+			if strings.HasPrefix(escaped, "/api/") {
+				notFound(w)
+				return
+			}
+			s.handleRoot(w, withPythonPath(r, cleaned))
+			return
+		}
+		mux.ServeHTTP(w, withPythonPath(r, escaped))
 	})
 }
 
