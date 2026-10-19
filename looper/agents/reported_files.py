@@ -16,6 +16,10 @@ checked in this order, and the first check that holds is its evidence (``Evidenc
 A file none of these accounts for is ``missing``: the step fails, and the failure says where the check looked.
 Git is asked only when the disk does not account for every file: at most four commands, each with
 ``GIT_TIMEOUT_SEC``, over at most ``MAX_WORKTREES`` worktrees and ``MAX_COMMITS`` commits.
+``FilesCheck.elsewhere`` returns JSON-safe location dicts: ``path``, ``deleted``, ``where`` (worktree or
+commit), and the full ``commit`` SHA. Worktree entries also carry ``worktree`` (absolute), ``branch``
+(short, or empty when detached/unknown) and ``repo_path``. Commit entries carry ``repo_path`` when known;
+absolute paths matched by suffix omit it. Reviewer and Planner use these locations for read-only inspection.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 GIT_TIMEOUT_SEC = 10
 MAX_WORKTREES = 64
@@ -50,7 +55,10 @@ class FileCheck:
     path: str  # as reported
     deleted: bool  # reported in deleted_files (else in changed_files)
     evidence: Evidence
-    where: str = ""  # in_worktree: the worktree's path; committed: the commit's hash
+    worktree: str = ""
+    branch: str = ""
+    commit: str = ""
+    repo_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,17 +69,32 @@ class FilesCheck:
     def missing(self, *, deleted: bool) -> list[str]:
         return [f.path for f in self.files if f.evidence is Evidence.MISSING and f.deleted is deleted]
 
-    def elsewhere(self) -> dict[str, str]:
-        """The files found outside where the report says, and where: for the run's activity."""
-        return {f.path: ("deleted " if f.deleted else "")
-                + (f"in worktree {f.where}" if f.evidence is Evidence.IN_WORKTREE else f"in commit {f.where[:12]}")
-                for f in self.files if f.evidence in (Evidence.IN_WORKTREE, Evidence.COMMITTED)}
+    def elsewhere(self) -> list[dict[str, Any]]:
+        """The files found elsewhere, with locations the Reviewer and Planner can inspect."""
+        return [{"path": f.path, "deleted": f.deleted,
+                 "where": "worktree" if f.evidence is Evidence.IN_WORKTREE else "commit", "commit": f.commit,
+                 **({"worktree": f.worktree, "branch": f.branch} if f.evidence is Evidence.IN_WORKTREE else {}),
+                 **({"repo_path": f.repo_path} if f.repo_path is not None else {})}
+                for f in self.files if f.evidence in (Evidence.IN_WORKTREE, Evidence.COMMITTED)]
+
+
+def locations(value: Any) -> list[dict[str, Any]]:
+    """Read typed locations only; old free-string dicts and malformed entries carry no location."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict) and item.get("where") in ("worktree", "commit")
+            and isinstance(item.get("path"), str) and isinstance(item.get("deleted"), bool)
+            and isinstance(item.get("commit"), str)
+            and ("repo_path" not in item or isinstance(item["repo_path"], str))
+            and (item["where"] == "commit" or (isinstance(item.get("worktree"), str)
+                 and Path(item["worktree"]).is_absolute() and isinstance(item.get("branch"), str)))]
 
 
 @dataclass(frozen=True)
 class _Worktree:
     path: Path
     head: str  # '' on an unborn branch
+    branch: str
 
 
 def check(changed: Sequence[str], deleted: Sequence[str], *, work_dir: Path,
@@ -80,8 +103,9 @@ def check(changed: Sequence[str], deleted: Sequence[str], *, work_dir: Path,
     reported = list(dict.fromkeys([(str(p), False) for p in changed] + [(str(p), True) for p in deleted]))
     found: dict[tuple[str, bool], FileCheck] = {}
 
-    def settle(path: str, gone: bool, evidence: Evidence, where: str = "") -> None:
-        found[(path, gone)] = FileCheck(path, gone, evidence, where)
+    def settle(path: str, gone: bool, evidence: Evidence, *, worktree: str = "", branch: str = "",
+               commit: str = "", repo_path: str | None = None) -> None:
+        found[(path, gone)] = FileCheck(path, gone, evidence, worktree, branch, commit, repo_path)
 
     def result(looked: str = "") -> FilesCheck:
         return FilesCheck(tuple(found.get(item) or FileCheck(*item, Evidence.MISSING) for item in reported), looked)
@@ -109,7 +133,8 @@ def check(changed: Sequence[str], deleted: Sequence[str], *, work_dir: Path,
         for worktree in worktrees:
             there = (worktree.path / repo_path).exists()
             if (there and not gone) or (gone and not there and (worktree.head, repo_path) in in_head):
-                settle(path, gone, Evidence.IN_WORKTREE, str(worktree.path))
+                settle(path, gone, Evidence.IN_WORKTREE, worktree=str(worktree.path), branch=worktree.branch,
+                       commit=worktree.head, repo_path=repo_path)
                 break
 
     if since is not None and len(found) < len(reported):
@@ -121,8 +146,13 @@ def check(changed: Sequence[str], deleted: Sequence[str], *, work_dir: Path,
                 continue
             names = _commit_names(prefix, path, gone, roots)
             for sha, files in commits:
-                if any(files.get(name) is not None and (files[name] == "D") is gone for name in names):
-                    settle(path, gone, Evidence.COMMITTED, sha)
+                matched = next((name for name in names if files.get(name) is not None
+                                and (files[name] == "D") is gone), None)
+                if matched is not None:
+                    resolved = Path(path).parent.resolve() / Path(path).name
+                    known = not Path(path).is_absolute() or any(resolved.is_relative_to(root) for root in roots)
+                    settle(path, gone, Evidence.COMMITTED, commit=sha,
+                           repo_path=matched if known else None)
                     break
     return result("looked in " + "; ".join(looked))
 
@@ -170,7 +200,9 @@ def _worktrees(work_dir: Path, toplevel: Path) -> tuple[list[_Worktree], str]:
         # A bare repository has no checkout; a prunable worktree's directory is gone.
         if "worktree" in entry and "bare" not in entry and path != toplevel and path.is_dir():
             head = entry.get("HEAD", "")
-            worktrees.append(_Worktree(path, head if head.strip("0") else ""))
+            branch = entry.get("branch", "")
+            worktrees.append(_Worktree(path, head if head.strip("0") else "",
+                                       branch.removeprefix("refs/heads/") if branch.startswith("refs/heads/") else ""))
         entry = {}
     if not worktrees:
         return [], "in no other worktree of its repository"

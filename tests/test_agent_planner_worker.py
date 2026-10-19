@@ -29,7 +29,7 @@ from looper.agents.message import (
 )
 from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
-from looper.agents.tiers.planner import PlanStep, TaskPlan
+from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
 from looper.agents.tiers.worker import (
     DEFAULT_SYSTEM_PROMPT,
     REVIEWER_SYSTEM_PROMPT,
@@ -66,6 +66,92 @@ class TestTaskPlan:
         assert "1/3 完成" in summary
         assert "1 执行中" in summary
         assert "1 失败" in summary
+
+
+class TestReportedFileLocations:
+    @pytest.mark.parametrize("branch", ["feat", ""])
+    def test_reviewer_reads_reported_files_at_their_locations(self, tmp_path: Path, branch: str) -> None:
+        worktree = "/tmp/review worktree"
+        sha = "a" * 40
+        locations = [
+            {"path": "summary.txt", "deleted": False, "where": "worktree", "worktree": worktree,
+             "branch": branch, "commit": sha, "repo_path": "reports/summary.txt"},
+            {"path": "obsolete.txt", "deleted": True, "where": "worktree", "worktree": worktree,
+             "branch": branch, "commit": sha, "repo_path": "reports/obsolete.txt"},
+            {"path": "committed.txt", "deleted": False, "where": "commit", "commit": sha,
+             "repo_path": "reports/committed.txt"},
+            {"path": "removed.txt", "deleted": True, "where": "commit", "commit": sha,
+             "repo_path": "reports/removed.txt"},
+        ]
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        prompt = pool._build_verify_prompt({"work_result": {
+            "summary": "reported changes", "changed_files": {"summary.txt": "added"},
+            "deleted_files": ["obsolete.txt"], "found_elsewhere": locations,
+        }})
+
+        assert prompt.index("Files changed:") < prompt.index("Files deleted:") < prompt.index("read-only")
+        assert "do not edit, commit, switch branches or run anything in those places" in prompt
+        assert f"branch {branch}, HEAD {sha[:12]}" in prompt
+        assert f"read {worktree}/reports/summary.txt" in prompt
+        assert f"git -C '{worktree}' show HEAD:reports/summary.txt" in prompt
+        assert f"obsolete.txt: deleted in the worktree {worktree}" in prompt
+        assert f"committed.txt: in commit {sha[:12]}" in prompt
+        assert f"git show {sha[:12]} -- committed.txt" in prompt
+        assert f"removed.txt: deleted in commit {sha[:12]}" in prompt
+        assert f"git show {sha[:12]} -- removed.txt" in prompt
+
+    @pytest.mark.parametrize("result", [
+        {},
+        {"found_elsewhere": None},
+        {"found_elsewhere": []},
+        {"found_elsewhere": {"summary.txt": "in worktree /tmp/old"}},
+        {"found_elsewhere": "in worktree /tmp/old"},
+        {"found_elsewhere": [None, "summary.txt", {"where": "unknown"}, {"where": "worktree"}]},
+    ])
+    def test_location_readers_ignore_absent_and_old_or_malformed_shapes(
+        self, tmp_path: Path, result: dict[str, Any],
+    ) -> None:
+        result = {"status": "completed", "changed_files": {"summary.txt": "added"}, **result}
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        prompt = pool._build_verify_prompt({"work_result": result})
+        planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+        report = "\n".join(planner._work_report(PlanStep(step_id="s1", index=0, instruction="summarize"), result))
+
+        assert "summary.txt" in prompt and "summary.txt" in report
+        assert "not in your working directory" not in prompt
+        assert "found outside the working directory" not in report
+        assert "/tmp/old" not in prompt and "/tmp/old" not in report
+
+    def test_planner_reports_worktree_and_commit_locations(self, tmp_path: Path) -> None:
+        sha = "b" * 40
+        planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+        report = "\n".join(planner._work_report(PlanStep(step_id="s1", index=0, instruction="summarize"), {
+            "status": "completed", "found_elsewhere": [
+                {"path": "summary.txt", "deleted": False, "where": "worktree", "worktree": "/tmp/feat",
+                 "branch": "feat", "commit": sha, "repo_path": "reports/summary.txt"},
+                {"path": "obsolete.txt", "deleted": True, "where": "worktree", "worktree": "/tmp/feat",
+                 "branch": "feat", "commit": sha, "repo_path": "reports/obsolete.txt"},
+                {"path": "removed.txt", "deleted": True, "where": "commit", "commit": sha},
+            ],
+        }))
+
+        assert "found outside the working directory:" in report
+        assert f"summary.txt in worktree /tmp/feat (branch feat, HEAD {sha[:12]})" in report
+        assert "obsolete.txt deleted in worktree /tmp/feat" in report
+        assert f"removed.txt deleted in commit {sha[:12]}" in report
+        assert "read-only git" in report
+
+    def test_planner_caps_reported_locations_at_twenty(self, tmp_path: Path) -> None:
+        planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+        locations = [{"path": f"file-{i:02d}.txt", "deleted": False, "where": "commit", "commit": "c" * 40}
+                     for i in range(23)]
+        report = "\n".join(planner._work_report(PlanStep(step_id="s1", index=0, instruction="summarize"), {
+            "status": "completed", "found_elsewhere": locations,
+        }))
+
+        assert all(f"file-{i:02d}.txt" in report for i in range(20))
+        assert all(f"file-{i:02d}.txt" not in report for i in range(20, 23))
+        assert "(+3 more)" in report
 
 
 # --- Worker tests ---

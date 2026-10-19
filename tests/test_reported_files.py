@@ -75,17 +75,24 @@ def test_an_absolute_path_inside_a_worktree_is_on_disk(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("subdir", ["", "pkg"])
-def test_a_relative_path_from_a_worktree_is_found_there(tmp_path: Path, subdir: str) -> None:
+@pytest.mark.parametrize("detached", [False, True])
+def test_a_relative_path_from_a_worktree_is_found_there(tmp_path: Path, subdir: str, detached: bool) -> None:
     # The working directory stays on main; the Worker made the change in a worktree of its own, uncommitted.
     repo = _repo(tmp_path / "repo")
     started = _now()
     worktree = tmp_path / "wt"
     git(repo, "worktree", "add", "-q", "-b", "feature", str(worktree))
+    if detached:
+        git(worktree, "switch", "-q", "--detach")
     (worktree / subdir / "new.py").write_text("x\n")
 
     judged = _judge(repo / subdir, {"new.py": "added"}, started_at=started)
     assert judged["status"] == "completed"
-    assert judged["found_elsewhere"] == {"new.py": f"in worktree {worktree.resolve()}"}
+    assert judged["found_elsewhere"] == [{
+        "path": "new.py", "deleted": False, "where": "worktree", "worktree": str(worktree.resolve()),
+        "branch": "" if detached else "feature", "commit": git(worktree, "rev-parse", "HEAD"),
+        "repo_path": f"{subdir}/new.py" if subdir else "new.py",
+    }]
 
 
 def _commit_in_worktree_then_remove(repo: Path, tmp_path: Path) -> str:
@@ -137,7 +144,42 @@ def test_a_file_committed_during_the_run_counts_when_it_is_no_longer_on_disk(
 
     judged = _judge(repo, {reported: "added"}, started_at=started)
     assert judged["status"] == "completed"
-    assert judged["found_elsewhere"] == {reported: f"in commit {sha[:12]}"}
+    assert judged["found_elsewhere"] == [{
+        "path": reported, "deleted": False, "where": "commit", "commit": sha,
+        **({} if absolute else {"repo_path": "new.py"}),
+    }]
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_an_absolute_suffix_match_does_not_guess_a_repository_path(tmp_path: Path, symlink: bool) -> None:
+    repo = _repo(tmp_path / "repo")
+    started = _now()
+    sha = _commit_in_worktree_then_remove(repo, tmp_path)
+    if symlink:
+        (repo / "removed").symlink_to(tmp_path / "wt", target_is_directory=True)
+        reported = str(repo / "removed" / "pkg" / "new.py")
+    else:
+        reported = str(repo / ".." / "wt" / "pkg" / "new.py")
+
+    judged = _judge(repo, {reported: "added"}, started_at=started)
+    assert judged["status"] == "completed"
+    assert judged["found_elsewhere"] == [{
+        "path": reported, "deleted": False, "where": "commit", "commit": sha,
+    }]
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_a_committed_file_keeps_its_known_repository_path(tmp_path: Path, absolute: bool) -> None:
+    repo = _repo(tmp_path / "repo")
+    started = _now()
+    sha = _commit_in_worktree_then_remove(repo, tmp_path)
+    reported = str(repo / "pkg" / "new.py") if absolute else "new.py"
+
+    judged = _judge(repo / "pkg", {reported: "added"}, started_at=started)
+    assert judged["status"] == "completed"
+    assert judged["found_elsewhere"] == [{
+        "path": reported, "deleted": False, "where": "commit", "commit": sha, "repo_path": "pkg/new.py",
+    }]
 
 
 @pytest.mark.parametrize(("committed", "reported"), [
@@ -223,7 +265,12 @@ def test_a_deleted_file_still_in_the_working_directory(tmp_path: Path, make: Any
     judged = _judge(repo, {}, ["a.txt"], started_at=started)
     if accepted:
         assert judged["status"] == "completed"
-        assert judged["found_elsewhere"]["a.txt"].startswith("deleted in ")
+        worktree = tmp_path / "wt"
+        assert judged["found_elsewhere"] == [{
+            "path": "a.txt", "deleted": True, "where": "worktree" if worktree.exists() else "commit",
+            "commit": git(repo, "rev-parse", "feature"), "repo_path": "a.txt",
+            **({"worktree": str(worktree.resolve()), "branch": "feature"} if worktree.exists() else {}),
+        }]
     else:
         assert judged["status"] == "failed"
         assert judged["error"].startswith("Worker report does not match the files: deleted files still present: "
@@ -338,6 +385,8 @@ def test_a_worker_that_committed_in_a_worktree_it_removed_completes(tmp_path: Pa
     reply = asyncio.run(_run())
     assert reply["status"] == "completed", reply.get("error")
     sha = git(repo, "rev-parse", "notes")
-    assert reply["found_elsewhere"] == {"notes.txt": f"in commit {sha[:12]}"}
+    assert reply["found_elsewhere"] == [{
+        "path": "notes.txt", "deleted": False, "where": "commit", "commit": sha, "repo_path": "notes.txt",
+    }]
     summaries = [call.kwargs["summary"] for call in agent_db.insert_activity.await_args_list]
     assert f"Reported files found outside the working directory: notes.txt in commit {sha[:12]}" in summaries

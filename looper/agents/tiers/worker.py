@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import shlex
 import shutil
 import time
 import uuid
@@ -1104,10 +1105,15 @@ class WorkerPool:
 
             outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
                                               started_at=started_at)
-            if (elsewhere := outcome.get("found_elsewhere")) and parent_task_id:
+            if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
+                places = []
+                for item in elsewhere:
+                    where = (f"in worktree {item['worktree']} on {item['branch']}" if item["where"] == "worktree"
+                             else f"in commit {item['commit'][:12]}")
+                    places.append(f"{item['path']} {'deleted ' if item['deleted'] else ''}{where}")
                 await self._activity(parent_task_id, worker_id, "phase",
                                      ("Reported files found outside the working directory: "
-                                      + "; ".join(f"{path} {where}" for path, where in elsewhere.items()))[:500])
+                                      + "; ".join(places))[:500])
             # A review that says "not passed" is still a successful run; only work
             # failures are the run's error.
             error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
@@ -1176,6 +1182,24 @@ class WorkerPool:
         parts.append(f"Files changed: {json.dumps(work_result.get('changed_files', {}), ensure_ascii=False)}")
         if work_result.get("deleted_files"):
             parts.append(f"Files deleted: {json.dumps(work_result['deleted_files'], ensure_ascii=False)}")
+        elsewhere = reported_files.locations(work_result.get("found_elsewhere"))
+        if elsewhere:
+            parts += ["", "Some reported files are not in your working directory; review them where they are, "
+                      "read-only (do not edit, commit, switch branches or run anything in those places; "
+                      "use read-only git -C <path> diff|show|log and read files by their path):"]
+            for item in elsewhere:
+                path = item["path"]
+                sha = item["commit"][:12]
+                deleted = "deleted " if item["deleted"] else ""
+                if item["where"] == "worktree":
+                    worktree = item["worktree"]
+                    path = item.get("repo_path", path)
+                    parts.append(f"- {item['path']}: {deleted}in the worktree {worktree} "
+                                 f"(branch {item['branch']}, HEAD {sha}); read {Path(worktree) / path}, "
+                                 f"`git -C {shlex.quote(worktree)} show {shlex.quote('HEAD:' + path)}`")
+                else:
+                    parts.append(f"- {item['path']}: {deleted}in commit {sha}; "
+                                 f"`git show {shlex.quote(sha)} -- {shlex.quote(path)}`")
         return "\n".join(parts)
 
     async def _task_project(self, task_id: str, worker_id: str) -> dict[str, Any] | None:

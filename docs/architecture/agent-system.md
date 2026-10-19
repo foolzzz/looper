@@ -641,8 +641,15 @@ answer to an edit on the task page goes.
     parallel counts as evidence too: the check catches misreports; it does
     not attribute work. The failure lists the files and where the check
     looked; files found outside the work directory are listed in the result's
-    `found_elsewhere` and in the task's activity. In a project with step
-    workspaces the work directory is the step's worktree.
+    `found_elsewhere`, a JSON list of typed locations: `path`, `deleted`,
+    `where` (`worktree` or `commit`), and the full `commit` SHA. Worktree
+    entries also include the absolute `worktree`, short `branch` (empty for
+    detached/unknown), and `repo_path` relative to the repository root;
+    commit entries include `repo_path` when known (omitted for absolute-path
+    suffix matches). The task's activity, Reviewer's first turn and Planner's
+    step report render these locations for read-only file and git inspection;
+    readers ignore old free-string dictionaries and malformed entries. In a
+    project with step workspaces the work directory is the step's worktree.
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
 - `learnings` is optional in both the report and the verdict: up to 5 short

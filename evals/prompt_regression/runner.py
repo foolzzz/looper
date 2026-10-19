@@ -407,8 +407,9 @@ def run_task(
     project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir),
                                "task_workspaces": "in_place"}
     step_workspaces = task.step_workspaces or step_workspaces
-    if step_workspaces:
+    if step_workspaces or task.init_git:
         init_repository(work_dir)
+    if step_workspaces:
         project["step_workspaces"] = step_workspaces
     if task.operator_notes:
         if notes_root is None:

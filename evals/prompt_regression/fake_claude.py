@@ -30,6 +30,8 @@ agent system started it in:
   else the last answer's body, plus a newline (empty when neither came); it
   answers a [ROOM] turn of the Planner's with ``room_reply``, or "Noted."; a consult
   of a run's session answers its questions with ``consult_answer``;
+  with ``elsewhere`` (``{"branch": "feat", "files": {...}}``), it writes and commits those files in a sibling
+  worktree named after its working directory plus ``-feat``, and reports their relative paths;
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
   marker), or the attempt under review is one the script's
@@ -294,6 +296,20 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     time.sleep(float(attempt.get("seconds", 0)))
     work_dir = os.getcwd()
     _write(work_dir, files)
+    if elsewhere := attempt.get("elsewhere"):
+        branch = elsewhere["branch"]
+        destination = work_dir + "-" + branch
+
+        def git(directory: str, *arguments: str) -> None:
+            subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *arguments],
+                           cwd=directory, capture_output=True, text=True, check=True)
+
+        if not os.path.isdir(destination):
+            git(work_dir, "worktree", "add", "-b", branch, destination)
+        files.update(elsewhere["files"])
+        _write(destination, elsewhere["files"])
+        git(destination, "add", "--", *elsewhere["files"])
+        git(destination, "commit", "-q", "--allow-empty", "-m", f"eval: step {label} attempt {attempt_no}")
     report = {"status": attempt.get("status", "completed"),
               "changed_files": {name: "written" for name in files},
               "deleted_files": [], "summary": attempt.get("summary") or f"step {label} attempt {attempt_no}"}

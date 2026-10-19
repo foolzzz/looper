@@ -306,6 +306,36 @@ def test_fake_room_consumer_writes_only_the_delivered_answer(
     assert (task.check(tmp_path) is None) is (delivery != "empty" and code == task.fake["consult_answer"])
 
 
+@pytest.mark.parametrize(("task_id", "correct"), [
+    ("reviewer_elsewhere", [True]),
+    ("reviewer_elsewhere_wrong", [False, True]),
+])
+def test_fake_worker_reports_the_files_in_its_other_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task_id: str, correct: list[bool],
+) -> None:
+    task = task_list.select([task_id])[0]
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    for name, content in task.files.items():
+        (work_dir / name).write_text(content)
+    runner.init_repository(work_dir)
+    monkeypatch.chdir(work_dir)
+    replies: list[str] = []
+    monkeypatch.setattr(fake_claude, "_answer", lambda _session, text, _cost: replies.append(text))
+    for attempt, expected in enumerate(correct, 1):
+        prompt = "Your step: s1" + (f"\nbeing retried (attempt {attempt})" if attempt > 1 else "")
+        fake_claude._worker(task.fake, prompt, SimpleNamespace(readline=lambda: "start"), [])
+        judged = judge_result({"subtype": "success", "result": replies[-1]}, work_dir=work_dir, is_verify=False)
+        assert judged["status"] == "completed"
+        assert judged["changed_files"] == {"summary.txt": "written"}
+        assert (task.check(work_dir) is None) is expected
+        assert not (work_dir / "summary.txt").exists()
+    elsewhere = work_dir.with_name(work_dir.name + "-feat")
+    assert runner._git_in(work_dir, "branch", "--show-current") == "main"
+    assert runner._git_in(elsewhere, "branch", "--show-current") == "feat"
+    assert int(runner._git_in(elsewhere, "rev-list", "--count", "main..HEAD")) == len(correct)
+
+
 def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
     from evals.prompt_regression.tasks import TASKS
 
@@ -1090,6 +1120,15 @@ def test_with_a_real_reviewer_task_the_stand_in_hands_claude_code_every_run_but_
 # --- Fake mode: the task set through a real server -----------------------------------------------------
 
 
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_fake_mode_reviews_files_in_another_worktree(tmp_path: Path) -> None:
+    result, _ = runner.run(mode="fake", tasks=task_list.select(["reviewer_elsewhere", "reviewer_elsewhere_wrong"]),
+                           admin_url=str(DSN), out_dir=tmp_path, agent="claude-code/opus")
+    assert result["aborted"] is None
+    assert [(row["id"], row["success"], row["reviews"], row["retries"]) for row in result["tasks"]] == [
+        ("reviewer_elsewhere", True, 1, 0), ("reviewer_elsewhere_wrong", True, 2, 1)]
+
+
 _MISBEHAVING = EvalTask(
     id="misbehaving",
     requirement="Create done.txt holding done.",
@@ -1139,7 +1178,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "room_interface": (3, 0, 0, 0), "room_consult": (2, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
                     # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
                     "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
-                    "reviewer_unrelated_note": (1, 2, 2, 0)}
+                    "reviewer_unrelated_note": (1, 2, 2, 0), "reviewer_elsewhere": (1, 0, 1, 0),
+                    "reviewer_elsewhere_wrong": (1, 1, 2, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -1162,7 +1202,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                       "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
                      "room_interface": (1, 0, 2), "room_consult": (0, 0, 1), "room_quiet": (0, 0, 1),
                      "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
-                     "reviewer_unrelated_note": (0, 0, 1)}
+                     "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
+                     "reviewer_elsewhere_wrong": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {

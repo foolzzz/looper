@@ -111,6 +111,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from .. import reported_files
 from .. import step_workspaces as workspaces
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..operator_notes import notes_note
@@ -3187,6 +3188,20 @@ class PlannerAgent:
         deleted = result.get("deleted_files")
         if isinstance(deleted, list) and deleted:
             lines.append(f"- deleted files: {', '.join(str(p) for p in deleted[:20])}")
+        elsewhere = reported_files.locations(result.get("found_elsewhere"))
+        if elsewhere:
+            for kind in ("worktree", "commit"):
+                places = []
+                for item in elsewhere[:20]:
+                    if item["where"] != kind:
+                        continue
+                    where = (f"in worktree {item['worktree']} (branch {item['branch']}, HEAD {item['commit'][:12]})"
+                             if kind == "worktree" else f"in commit {item['commit'][:12]}")
+                    places.append(f"{item['path']} {'deleted ' if item['deleted'] else ''}{where}")
+                if places:
+                    lines.append(f"- found outside the working directory: {'; '.join(places)}")
+            more = f" (+{len(elsewhere) - 20} more)" if len(elsewhere) > 20 else ""
+            lines[-1] += more + "; you may inspect with read-only git diff/show/log on that worktree or commit."
         if step.isolated and step.workspace is not None:
             # Outside the directories the read-only Planner reads; git still shows its committed changes.
             workspace = step.workspace
