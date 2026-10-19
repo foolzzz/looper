@@ -1056,9 +1056,9 @@ CREATE TABLE IF NOT EXISTS task_system_prompt_modes (
     PRIMARY KEY (task_id, role)
 );
 -- The Agent Profiles a project's Planners may choose for their tasks' Workers and Reviewers
--- (ops/planner.py, looper_task_profile_set); none by default, so a Planner chooses nothing. Whether a profile can
--- run the role is checked when it is chosen. A profile on a list cannot be deleted; dropping one from a list drops
--- what the project's Planners chose of it.
+-- (ops/planner.py, looper_task_profile_set); none by default, which lets a Planner choose any profile (a list
+-- restricts the choice to it). Whether a profile can run the role is checked when it is chosen. A profile on a list
+-- cannot be deleted; setting a list that leaves one out drops what the project's Planners chose of it.
 CREATE TABLE IF NOT EXISTS project_allowed_profiles (
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),

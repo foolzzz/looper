@@ -1071,11 +1071,19 @@ async def deletable_profile(profile_id: str) -> dict[str, Any]:
 async def delete_profile(profile_id: str) -> dict[str, Any]:
     import asyncpg
 
-    from ..db import profile_registry as db
+    from ..db import profile_registry as db, tasks as db_tasks
 
     row = await deletable_profile(profile_id)
     try:
-        await db.delete_profile(profile_id)
+        # A Planner's choice under a project without a list is on no list; one of a task that has not ended blocks
+        # the deletion, one of an ended task goes with the profile. Checked and deleted under one lock.
+        chosen = await db.delete_profile_unchosen(profile_id, [db_tasks.READY, *db_tasks.ACTIVE_STATUSES])
+        if chosen:
+            named = ", ".join(f"{t['title']!r} ({t['id']})" for t in chosen[:5])
+            raise RegistryConflict(f"Agent Profile {row['name']!r} is chosen by the Planner of {len(chosen)} "
+                                   f"task(s) that have not ended: {named}; clear the choice (looper_task_profile_set "
+                                   "with a null profile_id, or define the role again without it) or wait for the "
+                                   "task to end")
     except asyncpg.ForeignKeyViolationError:  # selected since it was checked
         raise RegistryConflict(f"Agent Profile {row['name']!r} is still selected: select another profile there "
                                "first") from None

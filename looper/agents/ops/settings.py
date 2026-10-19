@@ -281,7 +281,8 @@ async def _view(call: Call) -> dict[str, Any]:
     return {"project": project["name"], "project_layer": _layer_set(view["project"]["values"], profiles),
             "roles": {role: {"set": _layer_set(entry["values"], profiles), "effective": _effective(entry["effective"])}
                       for role, entry in view["roles"].items()},
-            "allowed_profiles": [p["name"] for p in allowed["profiles"]]}
+            "allowed_profiles": [p["name"] for p in allowed["profiles"]],
+            "allowed_profiles_note": None if allowed["profiles"] else "empty: Planners may choose any profile"}
 
 
 def _on_list(entry: Mapping[str, Any], names: list[str]) -> bool:
@@ -305,7 +306,8 @@ async def _allowed(call: Call) -> dict[str, Any]:
     after = await answered(projects.set_allowed_profiles(project["id"], {"profile_ids": [*kept, *add]}))
     return {"project": project["name"], "before": [entry["name"] for entry in before],
             "allowed_profiles": after["profiles"],
-            "note": "the project's Planners may choose these for their tasks' Workers and Reviewers"}
+            "note": ("the project's Planners may choose these for their tasks' Workers and Reviewers" if after["profiles"]
+                     else "the list is empty: the project's Planners may choose any profile")}
 
 
 async def _settings(call: Call) -> dict[str, Any]:
@@ -323,7 +325,7 @@ TOOLS: tuple[Tool, ...] = (
         description="Settings agents inherit, a later layer winning: shared defaults → role → project → role in "
                     "project. view (with project: its layers and allowed profiles); set values on one layer (no role "
                     "nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners "
-                    "may choose. The user confirms shared defaults, limits and higher spend caps first. Model and "
+                    "may choose (an empty list: they may choose any profile). The user confirms shared defaults, limits and higher spend caps first. Model and "
                     "effort are the profile's.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,

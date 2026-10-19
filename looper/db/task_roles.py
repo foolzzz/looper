@@ -18,14 +18,14 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import get_pool
+from .projects import profile_allowed_sql
 
 # A role's version with its profile's name, and whether its task's project allows that profile now.
 _VERSION = (
     "SELECT r.task_id, r.role_key, r.version, r.kind, r.profile_id, r.role_prompt, r.harness, r.reason, "
     "r.via, r.template_key, r.items, r.created_at, a.name AS profile_name, "
-    "(l.profile_id IS NOT NULL) AS profile_allowed "
+    f"{profile_allowed_sql('k.project_id', 'r.profile_id')} AS profile_allowed "
     "FROM task_roles r JOIN tasks k ON k.id = r.task_id LEFT JOIN agent_profiles a ON a.id = r.profile_id "
-    "LEFT JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = r.profile_id "
 )
 
 

@@ -271,6 +271,23 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     return uses
 
 
+async def delete_profile_unchosen(profile_id: str, statuses: list[str], *, pool: asyncpg.Pool | None = None,
+                                  ) -> list[dict[str, Any]]:
+    """Delete ``profile_id`` unless a Planner of a task in one of ``statuses`` chose it: those tasks (``{id,
+    title}``), and nothing deleted. The profile row is locked first, so a choice being written waits (its foreign
+    key takes a share lock) and is seen, or fails once the profile is gone; it is never dropped by the cascade.
+    Raises ``asyncpg.ForeignKeyViolationError`` while a layer or a task selects it."""
+    from .agent_setting_layers import open_planner_choices
+
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.fetchval("SELECT id FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
+        if chosen := await open_planner_choices(profile_id, statuses, pool=conn):
+            return chosen
+        await conn.execute("DELETE FROM agent_profiles WHERE id = $1", profile_id)
+    return []
+
+
 async def delete_profile(profile_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
     """Raises ``asyncpg.ForeignKeyViolationError`` while a layer or a task selects it."""
     pool = pool or get_pool()
