@@ -9,6 +9,8 @@ on:
   push:
     tags:
       - "v*"
+      # The Go version on loopgo-main is tagged vX.Y.Z-go and released by its own workflow.
+      - "!v*-go"
   workflow_dispatch:
     inputs:
       tag:
