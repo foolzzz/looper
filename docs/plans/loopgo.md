@@ -204,6 +204,20 @@ the current sandbox refuses PostgreSQL connections, and `go test ./...` fails
 where existing tests need TCP connections or listeners. The dashboard consumes the existing HTTP shapes;
 Telegram, Lark, and CLI entry points need no changes for these read-only APIs.
 
+G1o implements `GET /api/config/export` using a read-only repeatable-read
+snapshot and Python v2.10.0's download headers and JSON bytes. Secrets are
+redacted by default; `secrets=1` includes portable secrets but never stored
+channel tokens, and `projects=1` includes documents, templates, and schedules.
+The response write deadline shares the export's 30-second context budget;
+`net.Pipe` regressions cover stalled writes and flushes as well as complete
+and interrupted downloads. Export tests and `go vet ./...` pass locally.
+CI now seeds a separate database with Python's legacy effort migration and
+sets `LOOPGO_CONFIG_EXPORT_PARITY_URL`, checking generated fixtures for drift.
+The prior review accepted successful full-suite and disposable-database parity
+results; this fix round cannot repeat them because the sandbox refuses TCP
+connections and listeners. CI execution remains unverified here. The dashboard
+uses the existing download API; Telegram, Lark, and CLI need no new entry point.
+
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
@@ -211,7 +225,6 @@ is not in this list.
 
 - `GET /api/chat/events` (SSE)
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
-- `GET /api/config/export`
 - `GET /api/channels/lark/status`
 - `GET /api/channels/lark/people`
 - `GET /api/agent/v1/tools` (Manager, Planner, or room token)

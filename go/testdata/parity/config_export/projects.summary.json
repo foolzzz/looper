@@ -1,0 +1,17 @@
+{
+  "counts": {
+    "runtimes": 2,
+    "providers": 1,
+    "profiles": 3,
+    "settings.layers": 3,
+    "settings.roles": 4,
+    "channels": 4,
+    "installs": 1,
+    "projects": 2,
+    "schedules": 2,
+    "catalog": 4
+  },
+  "secrets": 9,
+  "repoint": 1,
+  "bytes": 8726
+}

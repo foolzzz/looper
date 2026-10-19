@@ -180,6 +180,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/projects/{id}/role-templates", s.handleRoleTemplates)
 	mux.HandleFunc("/api/projects/{id}/allowed-profiles", s.handleAllowedProfiles)
 	mux.HandleFunc("/api/registry", s.handleRegistry)
+	mux.HandleFunc("/api/config/export", s.handleConfigExport)
 	mux.HandleFunc("/api/agent-settings", s.handleAgentSettings)
 	mux.HandleFunc("/api/projects/{id}/agent-settings", s.handleProjectAgentSettings)
 	mux.HandleFunc("/api/projects/{id}/role-stats", s.handleRoleStats)

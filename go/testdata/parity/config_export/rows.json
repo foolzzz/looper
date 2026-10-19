@@ -1,0 +1,637 @@
+{
+  "runtimes": [
+    {
+      "id": "rt-export",
+      "name": "Legacy Code",
+      "type": "claude-code",
+      "executable": "/synthetic/bin/claude",
+      "capabilities": [
+        "run"
+      ],
+      "builtin": false
+    },
+    {
+      "id": "rt-export-codex",
+      "name": "Portable Codex",
+      "type": "codex",
+      "executable": "codex",
+      "capabilities": [
+        "run"
+      ],
+      "builtin": false
+    }
+  ],
+  "providers": [
+    {
+      "id": "prov-export",
+      "name": "Synthetic API",
+      "protocols": [
+        "anthropic-messages",
+        "openai-responses"
+      ],
+      "auth": "api_key",
+      "oauth_runtime_type": null,
+      "base_url": "https://synthetic.invalid/v1",
+      "models": [
+        {
+          "name": "fixture-model",
+          "efforts": [
+            "low",
+            "high"
+          ],
+          "context_window": 128000
+        }
+      ],
+      "env": [
+        {
+          "key": "PUBLIC_LABEL",
+          "value": "fixture"
+        }
+      ],
+      "max_concurrency": 3,
+      "builtin": false,
+      "api_key": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-provider"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "agent-export",
+      "name": "Fixture Agent",
+      "runtime": "Legacy Code",
+      "provider": "Synthetic API",
+      "model": "fixture-model",
+      "effort": "low",
+      "agent_teams": false,
+      "system_prompt_mode": "append",
+      "custom_prompt": "Custom profile text 🌍",
+      "builtin": false
+    },
+    {
+      "id": "agent-export-high",
+      "name": "Fixture Agent · high",
+      "runtime": "Legacy Code",
+      "provider": "Synthetic API",
+      "model": "fixture-model",
+      "effort": "high",
+      "agent_teams": false,
+      "system_prompt_mode": "append",
+      "custom_prompt": "Custom profile text 🌍",
+      "builtin": false
+    },
+    {
+      "id": "agent-export-replace",
+      "name": "Replace Codex",
+      "runtime": "Portable Codex",
+      "provider": "Synthetic API",
+      "model": "fixture-model",
+      "effort": "low",
+      "agent_teams": false,
+      "system_prompt_mode": "replace",
+      "custom_prompt": "Replace profile text",
+      "builtin": false
+    },
+    {
+      "id": "agent-claude-code-opus",
+      "name": "claude-code/opus",
+      "runtime": "claude-code",
+      "provider": "claude-subscription",
+      "model": "opus",
+      "effort": null,
+      "agent_teams": true,
+      "system_prompt_mode": "append",
+      "custom_prompt": "",
+      "builtin": true
+    }
+  ],
+  "layers": [
+    {
+      "scope": "role",
+      "role": "reviewer",
+      "project_id": null,
+      "harness_prompt": null,
+      "profile_id": null,
+      "profile": null,
+      "env": [],
+      "run_budget_usd": null,
+      "max_concurrency": 2,
+      "boundaries": null,
+      "system_prompt_mode": "append"
+    },
+    {
+      "scope": "role",
+      "role": "worker",
+      "project_id": null,
+      "harness_prompt": null,
+      "profile_id": null,
+      "profile": null,
+      "env": [],
+      "run_budget_usd": null,
+      "max_concurrency": 4,
+      "boundaries": null,
+      "system_prompt_mode": "replace"
+    },
+    {
+      "scope": "system",
+      "role": null,
+      "project_id": null,
+      "harness_prompt": "Harness <fixture> & text",
+      "profile_id": "agent-export-high",
+      "profile": "Fixture Agent · high",
+      "env": [
+        {
+          "key": "LABEL",
+          "value": "synthetic"
+        }
+      ],
+      "run_budget_usd": 2.5,
+      "max_concurrency": null,
+      "boundaries": "Project boundaries",
+      "system_prompt_mode": null
+    },
+    {
+      "scope": "project",
+      "role": null,
+      "project_id": "proj-export-alpha",
+      "harness_prompt": null,
+      "profile_id": null,
+      "profile": null,
+      "env": [],
+      "run_budget_usd": 1.25,
+      "max_concurrency": null,
+      "boundaries": null,
+      "system_prompt_mode": null
+    },
+    {
+      "scope": "role_project",
+      "role": "worker",
+      "project_id": "proj-export-alpha",
+      "harness_prompt": "Project worker harness",
+      "profile_id": null,
+      "profile": null,
+      "env": [],
+      "run_budget_usd": null,
+      "max_concurrency": null,
+      "boundaries": null,
+      "system_prompt_mode": null
+    }
+  ],
+  "roles": [
+    {
+      "role": "manager",
+      "system_prompt": "Recommended manager",
+      "default_prompt": "Recommended manager",
+      "timeout_seconds": 1200,
+      "enabled": true
+    },
+    {
+      "role": "planner",
+      "system_prompt": "",
+      "default_prompt": "Recommended planner",
+      "timeout_seconds": 900,
+      "enabled": false
+    },
+    {
+      "role": "reviewer",
+      "system_prompt": "Edited reviewer prompt",
+      "default_prompt": "Recommended reviewer",
+      "timeout_seconds": 1800,
+      "enabled": true
+    },
+    {
+      "role": "worker",
+      "system_prompt": "Worker custom 🌍",
+      "default_prompt": "Recommended worker",
+      "timeout_seconds": 86400,
+      "enabled": true
+    }
+  ],
+  "channels": [
+    {
+      "channel_id": "lark-export",
+      "channel_type": "lark",
+      "display_name": "Synthetic Lark",
+      "enabled": false,
+      "config": {
+        "profile": "fixture",
+        "unexpected": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-lark",
+        "description": "No external sends",
+        "allowed_open_ids": "ou_abcdefgh, ou_abcdefgh, ou_ijklmnop",
+        "allowlist_app_id": "cli_synthetic"
+      }
+    },
+    {
+      "channel_id": "larkbot-export",
+      "channel_type": "lark_bot",
+      "display_name": "Synthetic Bot",
+      "enabled": false,
+      "config": {
+        "app_id": "cli_synthetic",
+        "domain": "feishu",
+        "app_secret": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-app",
+        "description": "Synthetic",
+        "allowed_open_ids": [
+          "ou_abcdefgh"
+        ],
+        "allowlist_app_id": "cli_synthetic"
+      }
+    },
+    {
+      "channel_id": "telegram-export",
+      "channel_type": "telegram",
+      "display_name": "Synthetic Telegram",
+      "enabled": false,
+      "config": {
+        "description": "No sends",
+        "legacy_token": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-telegram",
+        "bot_token_env": "SYNTHETIC_TOKEN_ENV",
+        "allowed_user_ids": "123, 456,123"
+      }
+    },
+    {
+      "channel_id": "unknown-export",
+      "channel_type": "future",
+      "display_name": "Unknown type",
+      "enabled": false,
+      "config": {
+        "description": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-unknown"
+      }
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj-export-alpha",
+      "name": "Alpha export",
+      "description": "Synthetic project",
+      "background": "Project context 🌍",
+      "task_budget_usd": 5.0,
+      "task_budget_action": "wrap_up",
+      "supervise_interval_seconds": null,
+      "review_policy": null,
+      "distill_lessons": null,
+      "step_workspaces": null,
+      "workspace_links": [
+        "cache",
+        "assets"
+      ],
+      "max_step_retries": 0,
+      "planner_roles": null,
+      "role_text_max_chars": null,
+      "user_gates": null,
+      "gate_reminder_hours": null,
+      "agent_room": "on",
+      "room_post_per_minute": null,
+      "room_broadcasts_per_run": null,
+      "room_message_max_chars": null,
+      "room_messages_per_task": null,
+      "room_ping_pong_rounds": null,
+      "room_wait_max_seconds": null,
+      "room_consult_budget_usd": null,
+      "room_consult_timeout_seconds": null,
+      "room_consults_per_task": null,
+      "task_workspaces": "worktree",
+      "operator_notes": "off"
+    },
+    {
+      "id": "proj-export-beta",
+      "name": "beta empty",
+      "description": "Synthetic project",
+      "background": "Project context 🌍",
+      "task_budget_usd": null,
+      "task_budget_action": null,
+      "supervise_interval_seconds": null,
+      "review_policy": null,
+      "distill_lessons": null,
+      "step_workspaces": null,
+      "workspace_links": null,
+      "max_step_retries": null,
+      "planner_roles": null,
+      "role_text_max_chars": null,
+      "user_gates": null,
+      "gate_reminder_hours": null,
+      "agent_room": null,
+      "room_post_per_minute": null,
+      "room_broadcasts_per_run": null,
+      "room_message_max_chars": null,
+      "room_messages_per_task": null,
+      "room_ping_pong_rounds": null,
+      "room_wait_max_seconds": null,
+      "room_consult_budget_usd": null,
+      "room_consult_timeout_seconds": null,
+      "room_consults_per_task": null,
+      "task_workspaces": null,
+      "operator_notes": null
+    }
+  ],
+  "items": [
+    {
+      "id": "mcp-http-export",
+      "kind": "mcp",
+      "name": "HTTP fixture",
+      "origin": "upload",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "description": "Synthetic mcp",
+      "source": "https://synthetic.invalid/mcp",
+      "version": "v1",
+      "sha256": "synthetic-sha",
+      "size_bytes": 20,
+      "file_count": 0,
+      "modified": false,
+      "transport": "http",
+      "command": "",
+      "args": [],
+      "env": {},
+      "url": "https://synthetic.invalid/mcp",
+      "headers": {
+        "X-Key": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-xkey",
+        "Authorization": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-header"
+      }
+    },
+    {
+      "id": "mcp-stdio-export",
+      "kind": "mcp",
+      "name": "stdio fixture",
+      "origin": "upload",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "description": "Synthetic mcp",
+      "source": "file:///synthetic/server",
+      "version": "v1",
+      "sha256": "synthetic-sha",
+      "size_bytes": 20,
+      "file_count": 0,
+      "modified": false,
+      "transport": "stdio",
+      "command": "synthetic-mcp",
+      "args": [
+        "--mode",
+        "fixture"
+      ],
+      "env": {
+        "A_TOKEN": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-env-a",
+        "Z_TOKEN": "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE-env-z"
+      },
+      "url": "",
+      "headers": {}
+    },
+    {
+      "id": "lib-plugin-export",
+      "kind": "plugin",
+      "name": "Plugin fixture",
+      "origin": "upload",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "description": "Synthetic plugin",
+      "source": "C:\\synthetic\\plugin",
+      "version": "v1",
+      "sha256": "synthetic-sha",
+      "size_bytes": 20,
+      "file_count": 2,
+      "modified": false,
+      "transport": null,
+      "command": null,
+      "args": null,
+      "env": null,
+      "url": null,
+      "headers": null
+    },
+    {
+      "id": "lib-skill-export",
+      "kind": "skill",
+      "name": "Skill fixture",
+      "origin": "upload",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "description": "Synthetic skill",
+      "source": "https://synthetic.invalid/repo",
+      "version": "v1",
+      "sha256": "synthetic-sha",
+      "size_bytes": 20,
+      "file_count": 2,
+      "modified": false,
+      "transport": null,
+      "command": null,
+      "args": null,
+      "env": null,
+      "url": null,
+      "headers": null
+    },
+    {
+      "id": "skill-project-export",
+      "kind": "skill",
+      "name": "Owned skill",
+      "origin": "project",
+      "owner_project_id": "proj-export-alpha",
+      "owner_project_name": "Alpha export",
+      "description": "Synthetic skill",
+      "source": "/synthetic/project/skill",
+      "version": "v1",
+      "sha256": "synthetic-sha",
+      "size_bytes": 20,
+      "file_count": 2,
+      "modified": false,
+      "transport": null,
+      "command": null,
+      "args": null,
+      "env": null,
+      "url": null,
+      "headers": null
+    }
+  ],
+  "files": {
+    "lib-plugin-export": [
+      {
+        "path": "A.md",
+        "content": "Fixture text <tag> & 🌍\n",
+        "sha256": "sha-a",
+        "executable": false
+      },
+      {
+        "path": "z/run.sh",
+        "content": "#!/bin/sh\nexit 0\n",
+        "sha256": "sha-z",
+        "executable": true
+      }
+    ],
+    "lib-skill-export": [
+      {
+        "path": "A.md",
+        "content": "Fixture text <tag> & 🌍\n",
+        "sha256": "sha-a",
+        "executable": false
+      },
+      {
+        "path": "z/run.sh",
+        "content": "#!/bin/sh\nexit 0\n",
+        "sha256": "sha-z",
+        "executable": true
+      }
+    ],
+    "skill-project-export": [
+      {
+        "path": "A.md",
+        "content": "Fixture text <tag> & 🌍\n",
+        "sha256": "sha-a",
+        "executable": false
+      },
+      {
+        "path": "z/run.sh",
+        "content": "#!/bin/sh\nexit 0\n",
+        "sha256": "sha-z",
+        "executable": true
+      }
+    ]
+  },
+  "installs": [
+    {
+      "id": "install-global-export",
+      "item_id": "lib-skill-export",
+      "scope": "global",
+      "project_id": null,
+      "project_name": null,
+      "roles": [
+        "manager",
+        "worker"
+      ],
+      "enabled": true,
+      "kind": "skill",
+      "name": "Skill fixture",
+      "owner_project_name": null
+    },
+    {
+      "id": "install-project-export",
+      "item_id": "skill-project-export",
+      "scope": "project",
+      "project_id": "proj-export-alpha",
+      "project_name": "Alpha export",
+      "roles": [
+        "worker",
+        "task_role"
+      ],
+      "enabled": false,
+      "kind": "skill",
+      "name": "Owned skill",
+      "owner_project_name": "Alpha export"
+    }
+  ],
+  "documents": [
+    {
+      "id": "doc-text-export",
+      "project_id": "proj-export-alpha",
+      "title": "Text document",
+      "summary": "Stored text",
+      "source_kind": "text",
+      "filename": "notes.md",
+      "path": null,
+      "size_bytes": 12,
+      "sha256": "doc-text-sha",
+      "content": "Knowledge 🌍\n"
+    },
+    {
+      "id": "doc-upload-export",
+      "project_id": "proj-export-alpha",
+      "title": "Uploaded document",
+      "summary": "Uploaded text",
+      "source_kind": "upload",
+      "filename": "upload.txt",
+      "path": null,
+      "size_bytes": 7,
+      "sha256": "doc-upload-sha",
+      "content": "Upload\n"
+    },
+    {
+      "id": "doc-path-export",
+      "project_id": "proj-export-alpha",
+      "title": "Path document",
+      "summary": "Repoint only",
+      "source_kind": "path",
+      "filename": "",
+      "path": "docs/live.md",
+      "size_bytes": 77,
+      "sha256": "doc-path-sha",
+      "content": null
+    }
+  ],
+  "templates": [
+    {
+      "project_id": "proj-export-alpha",
+      "template_key": "audit",
+      "kind": "review",
+      "description": "Audit template",
+      "role_prompt": "Inspect carefully",
+      "harness": "Template harness",
+      "profile_id": "agent-export",
+      "profile": "Fixture Agent",
+      "items": [
+        "lib-skill-export",
+        "skill-project-export",
+        "missing-id"
+      ]
+    },
+    {
+      "project_id": "proj-export-alpha",
+      "template_key": "minimal",
+      "kind": "work",
+      "description": "",
+      "role_prompt": "Do work",
+      "harness": null,
+      "profile_id": null,
+      "profile": null,
+      "items": []
+    }
+  ],
+  "schedules": [
+    {
+      "id": "sched-export-a",
+      "project_id": "proj-export-alpha",
+      "project_name": "Alpha export",
+      "name": "Alpha schedule",
+      "cron": "0 9 * * *",
+      "timezone": "UTC",
+      "requirement": "Synthetic scheduled task",
+      "overlap": "queue",
+      "max_parallel_runs": 2,
+      "catch_up": "skip",
+      "run_timeout_seconds": 900,
+      "run_budget_usd": 1.5,
+      "gate_command": "printf fixture",
+      "gate_timeout_seconds": 15,
+      "daily_budget_usd": 4.5,
+      "notify": "alerts",
+      "notify_channel": "telegram",
+      "notify_chat": "123",
+      "work_dir": "/synthetic/schedule/workdir",
+      "profile_overrides": {
+        "worker": "agent-export",
+        "reviewer": "agent-claude-code-opus"
+      },
+      "task_limits": {
+        "worker": 3,
+        "reviewer": 2
+      }
+    },
+    {
+      "id": "sched-export-z",
+      "project_id": "proj-export-alpha",
+      "project_name": "Alpha export",
+      "name": "zeta schedule",
+      "cron": "0 10 * * *",
+      "timezone": "UTC",
+      "requirement": "No overrides",
+      "overlap": "skip",
+      "max_parallel_runs": 1,
+      "catch_up": "once",
+      "run_timeout_seconds": null,
+      "run_budget_usd": null,
+      "gate_command": null,
+      "gate_timeout_seconds": null,
+      "daily_budget_usd": null,
+      "notify": "never",
+      "notify_channel": null,
+      "notify_chat": null,
+      "work_dir": "",
+      "profile_overrides": {},
+      "task_limits": {}
+    }
+  ]
+}
