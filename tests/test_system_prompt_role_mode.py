@@ -1,4 +1,4 @@
-"""The system prompt mode is a per-role setting that applies on Claude Code only."""
+"""The system prompt mode is a per-role setting that applies on every runtime."""
 
 from __future__ import annotations
 
@@ -81,21 +81,38 @@ def test_launch_mode_on_claude_code(role: AgentType, mode: SystemPromptMode | No
     assert launch.record()["system_prompt_mode"] == expected.value
 
 
-@pytest.mark.parametrize("runtime_type", ["codex", "grok", "omp"])
+RUNTIMES = ["claude-code", "codex", "grok", "omp"]
+
+
+@pytest.mark.parametrize("runtime_type", RUNTIMES)
 @pytest.mark.parametrize("role", list(AgentType))
-@pytest.mark.parametrize("mode", [APPEND, REPLACE])
-def test_other_runtimes_keep_their_profiles_mode(role: AgentType, runtime_type: str, mode: SystemPromptMode) -> None:
-    profile = replace(BUILTIN_PROFILE, system_prompt_mode=mode,
-                      runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
-    for layers in ({}, _layers(role, REPLACE), _layers(role, APPEND)):  # the role's setting is Claude Code's only
-        settings = replace(resolve(role, layers), profile=profile)
-        assert Launch(settings, role=role).system_prompt_mode is mode
-    assert Launch(AgentSettings(profile=profile)).system_prompt_mode is mode
+@pytest.mark.parametrize("task, layer", [(None, None), (None, APPEND), (None, REPLACE), (APPEND, REPLACE),
+                                         (REPLACE, APPEND), (REPLACE, None), (APPEND, None)])
+def test_launch_mode_is_the_same_on_every_runtime(role: AgentType, runtime_type: str, task: SystemPromptMode | None,
+                                                  layer: SystemPromptMode | None) -> None:
+    layers = {(Layer.TASK, role): LayerValues(system_prompt_mode=task),
+              (Layer.ROLE, role): LayerValues(system_prompt_mode=layer)}
+    profile = replace(BUILTIN_PROFILE, runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
+    settings = replace(resolve(role, layers), profile=profile)
+    expected = task or layer or BUILTIN_SYSTEM_PROMPT_MODE[role]
+    assert Launch(settings, role=role).system_prompt_mode is expected
+    assert Launch(settings, role=role).record()["system_prompt_mode"] == expected.value
 
 
-def test_a_launch_without_a_role_appends_on_claude_code() -> None:
-    launch = Launch(AgentSettings(system_prompt_mode=REPLACE))
-    assert launch.role is None and launch.system_prompt_mode is APPEND
+@pytest.mark.parametrize("runtime_type", RUNTIMES)
+def test_a_launch_without_a_role_appends_on_every_runtime(runtime_type: str) -> None:
+    profile = replace(BUILTIN_PROFILE, runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
+    assert Launch(AgentSettings(profile=profile, system_prompt_mode=REPLACE)).system_prompt_mode is APPEND
+
+
+def test_a_runtime_that_cannot_replace_appends(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.runtimes import ADAPTERS
+
+    monkeypatch.setattr(ADAPTERS["codex"], "can_replace_system_prompt", False)
+    profile = replace(BUILTIN_PROFILE, runtime=replace(BUILTIN_PROFILE.runtime, type="codex"))
+    settings = replace(resolve(AgentType.PLANNER, {}), profile=profile)
+    assert settings.system_prompt_mode is REPLACE
+    assert Launch(settings, role=AgentType.PLANNER).system_prompt_mode is APPEND
 
 
 def _task_role_layers(role: AgentType) -> dict:
@@ -162,16 +179,6 @@ def test_a_task_role_seat_follows_its_seat_kind() -> None:
         system_prompt_mode=REPLACE), (Layer.TASK, AgentType.REVIEWER): LayerValues(system_prompt_mode=APPEND)}
     assert resolve(AgentType.WORKER, layers).system_prompt_mode is REPLACE
     assert resolve(AgentType.REVIEWER, layers).system_prompt_mode is APPEND
-
-
-@pytest.mark.parametrize("runtime_type", ["codex", "grok", "omp"])
-def test_other_runtimes_ignore_the_task_choice(runtime_type: str) -> None:
-    profile = replace(BUILTIN_PROFILE, system_prompt_mode=APPEND,
-                      runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
-    layers = {(Layer.TASK, AgentType.PLANNER): LayerValues(system_prompt_mode=REPLACE)}
-    settings = replace(resolve(AgentType.PLANNER, layers), profile=profile)
-    assert settings.system_prompt_mode is REPLACE
-    assert Launch(settings, role=AgentType.PLANNER).system_prompt_mode is APPEND
 
 
 def test_a_consult_appends_whatever_the_seats_mode() -> None:

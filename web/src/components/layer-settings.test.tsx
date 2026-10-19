@@ -69,14 +69,14 @@ describe("LayerSettingsForm's per-task limit", () => {
 });
 
 describe("LayerSettingsForm's system prompt mode", () => {
-  it.each(["manager", "planner", "worker", "reviewer"] as const)("is on the %s's role layer, saying where it applies", (role) => {
+  it.each(["manager", "planner", "worker", "reviewer"] as const)("is on the %s's role layer, for every runtime", (role) => {
     const html = renderToStaticMarkup(
       <LayerSettingsForm idPrefix="t" layer="role" roles={[role]} values={VALUES} effective={effective(undefined, "replace")}
         limits={LIMITS} onSave={async () => VALUES} />,
     );
     expect(html).toContain('id="t-prompt-mode"');
-    expect(html).toMatch(/<option value="replace"[^>]*>Replace Claude Code&#x27;s prompt/);
-    expect(text(html)).toContain("Only for runs on Claude Code.");
+    expect(html).toMatch(/<option value="replace"[^>]*>Replace the runtime&#x27;s prompt/);
+    expect(text(html)).not.toContain("Claude Code");
     expect(html).not.toMatch(/<option value="auto"|<option value="default"/);
   });
 
