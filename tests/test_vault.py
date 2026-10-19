@@ -7,6 +7,7 @@ import hashlib
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -689,7 +690,10 @@ def test_a_git_timeout_ends_the_hooks_it_started(config: vault.VaultConfig, monk
     hook.write_text(f"#!/bin/sh\nsleep {marker} &\nsleep {marker}\n")
     hook.chmod(0o755)
     monkeypatch.setattr(vault, "GIT_TIMEOUT_SECONDS", 1)
+    started = time.monotonic()
     result = write(config)
+    # Killing git alone leaves the hook's sleeps holding its pipes, and the write waits them out (31 s).
+    assert time.monotonic() - started < 15
     assert result["commit"] is None and result["git_status"] == "timed_out"
     assert (config.path / "codex-mem/new.md").read_text() == "new note"
     left = subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True, text=True, timeout=10).stdout
