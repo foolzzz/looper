@@ -9,7 +9,6 @@ Pure stdlib asyncio — zero external dependencies. Serves:
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import mimetypes
@@ -136,6 +135,7 @@ class AgentHTTPServer:
         static_dir: Path | None = None,
         runtime_root: Path | None = None,
         operator_token: str | None = None,
+        dashboard_url: str | None = None,
         self_checks: list[dict[str, str]] | None = None,
         claude_bin: str = "claude",
         scheduler: Scheduler | None = None,
@@ -158,6 +158,8 @@ class AgentHTTPServer:
         self._runtime_root = runtime_root
         # The operator's credential (operator_auth); without one every operator route answers 401.
         self._operator_token = operator_token
+        self._dashboard_url = dashboard_url
+        self._login_codes = operator_auth.LoginCodes()
         # The startup self-check (self_check.Check.to_dict), reported on /api/status.
         self._self_checks = self_checks or []
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
@@ -275,7 +277,7 @@ class AgentHTTPServer:
                     reader.readexactly(content_length), timeout=30.0
                 )
 
-            if method == "OPTIONS":
+            if method == "OPTIONS" and area is operator_auth.Access.DASHBOARD:
                 writer.write(_no_content())
                 await writer.drain()
                 writer.close()
@@ -384,7 +386,14 @@ class AgentHTTPServer:
         body: bytes,
         writer: asyncio.StreamWriter,
     ) -> None:
-        if path == "/api/status" and method == "GET":
+        if path == "/api/auth/login-codes" and method == "POST":
+            url = self._dashboard_url or f"http://127.0.0.1:{self._port}"
+            writer.write(_json_response(HTTP_201, {
+                "url": f"{url}/?code={self._login_codes.issue()}",
+                "expires_in_seconds": operator_auth.LOGIN_CODE_TTL_SECONDS,
+            }, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}))
+            await writer.drain()
+        elif path == "/api/status" and method == "GET":
             await self._handle_status(writer)
         elif path == "/api/overview" and method == "GET":
             await self._handle_overview(writer)
@@ -2052,16 +2061,20 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
-        if page and query is not None and "token" in query:
+        if page and query is not None and "code" in query:
             token = self._operator_token
-            if token and hmac.compare_digest(query["token"].encode(), token.encode()):
-                remaining = urllib.parse.urlencode({key: value for key, value in query.items() if key != "token"})
-                location = urllib.parse.quote(path, safe="/") + (f"?{remaining}" if remaining else "")
+            if token and self._login_codes.redeem(query["code"]):
+                remaining = urllib.parse.urlencode({key: value for key, value in query.items() if key != "code"})
+                local_path = path if re.fullmatch(r"/(?![/\\])[^\\]*", path) else "/"
+                location = urllib.parse.quote(local_path, safe="/") + (f"?{remaining}" if remaining else "")
                 writer.write((f"HTTP/1.1 {HTTP_303}\r\nLocation: {location}\r\n"
                               f"Set-Cookie: {operator_auth.set_cookie(token, port=self._port)}\r\n"
-                              "Cache-Control: no-store\r\nContent-Length: 0\r\n\r\n").encode("utf-8"))
+                              "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n"
+                              "Content-Length: 0\r\n\r\n").encode("utf-8"))
             else:
-                writer.write(_json_response(HTTP_401, {"error": operator_auth.WRONG}))
+                writer.write(_json_response(HTTP_401, {"error": operator_auth.LOGIN_CODE_REFUSAL}, headers={
+                    "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                }))
             await writer.drain()
             return
 
@@ -2073,12 +2086,13 @@ class AgentHTTPServer:
         cookie = ""
         if page and self._operator_token and operator_auth.signs_in(headers or {}, peer_host=peer_host):
             cookie = f"Set-Cookie: {operator_auth.set_cookie(self._operator_token, port=self._port)}\r\n"
+        policy = "Referrer-Policy: no-referrer\r\n" if page else ""
         response_headers = (
             f"HTTP/1.1 {HTTP_200}\r\n"
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(data)}\r\n"
             f"Cache-Control: {'no-store' if page else 'public, max-age=3600'}\r\n"
-            f"{cookie}"
+            f"{policy}{cookie}"
             f"\r\n"
         )
         writer.write(response_headers.encode("utf-8") + data)

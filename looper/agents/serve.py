@@ -846,6 +846,7 @@ async def _run_agent_system(
         broadcaster=broadcaster,
         runtime_root=runtime_root,
         operator_token=operator_token,
+        dashboard_url=dashboard_url,
         self_checks=[check.to_dict() for check in checks],
         claude_bin=claude_bin,
         scheduler=scheduler,

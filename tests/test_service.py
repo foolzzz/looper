@@ -549,3 +549,50 @@ def test_install_replaces_the_unit_from_before_the_rename_and_moves_its_runtime_
     out = capsys.readouterr().out
     assert "replaced   com.loopx.serve" in out and f"runtime    moved the runtime root {home / '.loopx'}" in out
     assert service.doctor_check(host).status == service.OK
+
+
+@pytest.mark.parametrize("failure", ["missing", "refused", "no_answer"])
+def test_login_link_failure_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                     capsys: pytest.CaptureFixture[str], failure: str) -> None:
+    path = operator_auth.token_path(tmp_path)
+    if failure != "missing":
+        path.write_text("operator_" + "a" * 32)
+
+    def open_request(request: object, **kwargs: object) -> None:
+        if failure == "missing":
+            pytest.fail("a missing token must not make a request")
+        if failure == "refused":
+            raise urllib.error.HTTPError(request.full_url, 401, "refused", {}, None)
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request))
+    assert cli.main(["login-link", "--port", "18834", "--runtime-root", str(tmp_path)]) == 1
+    output = capsys.readouterr()
+    expected = {
+        "missing": f"no operator token in {path}: is looper serve running with this runtime root?",
+        "refused": f"the server refused the operator token in {path}",
+        "no_answer": "no answer on port 18834",
+    }
+    assert expected[failure] in output.err
+    assert output.out == ""
+
+
+def test_login_link_sends_bearer_without_a_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                capsys: pytest.CaptureFixture[str]) -> None:
+    token = "operator_" + "a" * 32
+    operator_auth.token_path(tmp_path).write_text(token)
+    url = "http://127.0.0.1:18834/?code=one-time"
+
+    def open_request(request: object, **kwargs: object) -> io.BytesIO:
+        assert request.full_url == "http://127.0.0.1:18834/api/auth/login-codes"
+        assert request.get_method() == "POST"
+        assert request.get_header("Authorization") == f"Bearer {token}"
+        return io.BytesIO(service.json.dumps({"url": url, "expires_in_seconds": 300}).encode())
+
+    def build_opener(proxy: object) -> SimpleNamespace:
+        assert proxy.proxies == {}
+        return SimpleNamespace(open=open_request)
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", build_opener)
+    assert cli.main(["login-link", "--port", "18834", "--runtime-root", str(tmp_path)]) == 0
+    assert capsys.readouterr().out == url + "\nvalid once, for 5 minutes\n"

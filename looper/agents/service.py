@@ -99,6 +99,27 @@ def _get_status(port: int, token: str | None) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def login_link(*, port: int = DEFAULT_PORT, runtime_root: Path) -> str:
+    """Exchange the local operator credential for a short-lived browser sign-in."""
+    token = operator_auth.read_token(runtime_root)
+    path = operator_auth.token_path(runtime_root)
+    if not token:
+        raise ServiceError(f"no operator token in {path}: is looper serve running with this runtime root?")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/auth/login-codes", method="POST",
+                                     headers={"Authorization": f"Bearer {token}"})
+    try:
+        with opener.open(request, timeout=3) as response:
+            url = json.loads(response.read())["url"]
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise ServiceError(f"the server refused the operator token in {path}") from None
+        raise ServiceError(f"no answer on port {port}") from None
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
+        raise ServiceError(f"no answer on port {port}") from None
+    return f"{url}\nvalid once, for 5 minutes"
+
+
 def _port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(1.0)
