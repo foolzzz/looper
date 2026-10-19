@@ -2161,9 +2161,10 @@ class AgentHTTPServer:
         if method != "POST":
             await self._sign_in_response(writer, HTTP_405)
             return
-        origin = headers.get("origin")
+        origin = urllib.parse.urlsplit(headers.get("origin") or "")
         host = headers.get("host", "").lower()
-        if not host or origin is None or urllib.parse.urlsplit(origin).netloc.lower() != host:
+        scheme = "https" if (self._dashboard_url or "").startswith("https://") else "http"
+        if not host or origin.scheme != scheme or origin.netloc.lower() != host:
             await self._sign_in_response(writer, HTTP_403)
             return
         if path == "/logout":

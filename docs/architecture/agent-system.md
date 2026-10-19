@@ -3386,7 +3386,9 @@ asks the operator to run `looper auth set-password` on the server's machine
 or open the dashboard there. `POST /login` accepts at most 4096 bytes of
 `application/x-www-form-urlencoded` fields `username` and `password`; larger
 bodies get 413. It and `POST /logout` require an `Origin` whose netloc equals
-`Host` (403 if missing or different). A wrong user or password gets the same
+`Host` and whose scheme is `https` when `dashboard_url` starts with `https://`,
+`http` otherwise (403 if missing or different; behind an https proxy, set
+`dashboard_url` to the https address). A wrong user or password gets the same
 401 error; no password also gets 401, and an unusable password file gets 503
 with a server-log pointer. Success redirects to `/` (303) with
 `looper_session_<port>=<id>; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`;

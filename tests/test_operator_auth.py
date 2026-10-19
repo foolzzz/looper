@@ -752,7 +752,8 @@ def test_password_login_session_opens_api_and_spa(tmp_path: Path, transport: str
         async with _login_server(tmp_path, transport) as server:
             if secure:
                 server._dashboard_url = "https://dashboard.example/prefix"
-            status, headers, _ = await _password_login(server)
+            scheme = "https" if secure else "http"
+            status, headers, _ = await _password_login(server, Origin=f"{scheme}://127.0.0.1:{server._port}")
             assert status == 303 and headers["location"] == "/"
             _policies(headers)
             cookie, *attributes = headers["set-cookie"].split("; ")
@@ -768,14 +769,15 @@ def test_password_login_session_opens_api_and_spa(tmp_path: Path, transport: str
             status, headers, _ = await _send(server, "GET /login", credential)
             assert status == 303 and headers["location"] == "/"
             _policies(headers)
-            assert (await _password_login(server, password="wrong"))[0] == 401
+            assert (await _password_login(server, password="wrong",
+                                          Origin=f"{scheme}://127.0.0.1:{server._port}"))[0] == 401
     asyncio.run(run())
     assert "sign-in from 127.0.0.1 succeeded" in caplog.text
     assert "sign-in from 127.0.0.1 failed" in caplog.text
     assert PASSWORD not in caplog.text and USER not in caplog.text
 
 
-@pytest.mark.parametrize("kind", ["wrong_password", "wrong_user", "no_origin", "foreign_origin", "null_origin_no_host",
+@pytest.mark.parametrize("kind", ["wrong_password", "wrong_user", "no_origin", "foreign_origin", "other_scheme", "null_origin_no_host",
                                   "too_large", "no_password", "unsafe", "content_type"])
 def test_login_rejections(tmp_path: Path, transport: str, kind: str) -> None:
     if kind != "no_password":
@@ -798,6 +800,9 @@ def test_login_rejections(tmp_path: Path, transport: str, kind: str) -> None:
                 expected = 403
             elif kind == "foreign_origin":
                 headers["Origin"] = "http://foreign.example"
+                expected = 403
+            elif kind == "other_scheme":
+                headers["Origin"] = f"https://127.0.0.1:{server._port}"
                 expected = 403
             elif kind == "null_origin_no_host":
                 headers.update(Origin="null", Host="")
