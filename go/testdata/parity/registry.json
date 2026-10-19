@@ -1,0 +1,1435 @@
+{
+  "limits": {
+    "auth_kinds": [
+      "oauth",
+      "api_key"
+    ],
+    "effort_levels": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "model_fields": [
+      "name",
+      "context_window",
+      "input_usd_per_mtok",
+      "output_usd_per_mtok",
+      "cache_read_usd_per_mtok",
+      "cache_write_usd_per_mtok",
+      "efforts",
+      "background_model"
+    ],
+    "models_max": 100,
+    "name_max_chars": 240,
+    "price_fields": [
+      "input_usd_per_mtok",
+      "output_usd_per_mtok",
+      "cache_read_usd_per_mtok",
+      "cache_write_usd_per_mtok"
+    ],
+    "protocols": [
+      "anthropic-messages",
+      "openai-responses",
+      "openai-chat"
+    ],
+    "provider_env_owned": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_CODE_SUBAGENT_MODEL",
+      "CLAUDE_CONFIG_DIR",
+      "CODEX_HOME",
+      "GROK_AGENT",
+      "GROK_AUTH",
+      "GROK_CLAUDE_AGENTS_ENABLED",
+      "GROK_CLAUDE_HOOKS_ENABLED",
+      "GROK_CLAUDE_MCPS_ENABLED",
+      "GROK_CLAUDE_RULES_ENABLED",
+      "GROK_CLAUDE_SKILLS_ENABLED",
+      "GROK_CODE_XAI_API_KEY",
+      "GROK_CONFIG",
+      "GROK_CONFIG_PATH",
+      "GROK_CURSOR_AGENTS_ENABLED",
+      "GROK_CURSOR_HOOKS_ENABLED",
+      "GROK_CURSOR_MCPS_ENABLED",
+      "GROK_CURSOR_RULES_ENABLED",
+      "GROK_CURSOR_SKILLS_ENABLED",
+      "GROK_DISABLE_AUTOUPDATER",
+      "GROK_HOME",
+      "GROK_MEMORY",
+      "GROK_SANDBOX",
+      "HOME",
+      "LOOPER_PROVIDER_API_KEY",
+      "OMP_PROFILE",
+      "PI_CODING_AGENT_DIR",
+      "PI_CODING_AGENT_SESSION_DIR",
+      "PI_CONFIG_DIR",
+      "PI_CONFIG_FILES",
+      "PI_PROFILE",
+      "PI_SHELL_PREFIX",
+      "XAI_API_KEY",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME"
+    ],
+    "role_capabilities": {
+      "manager": [
+        "resident_session",
+        "resume"
+      ],
+      "planner": [
+        "resident_session",
+        "resume"
+      ],
+      "reviewer": [
+        "run"
+      ],
+      "worker": [
+        "run"
+      ]
+    },
+    "secret_mask": "***"
+  },
+  "prices": {
+    "as_of": "2026-10-14",
+    "models": {
+      "claude-fable-5-1": {
+        "cache_read_usd_per_mtok": 0.25,
+        "cache_write_usd_per_mtok": 12.5,
+        "input_usd_per_mtok": 10.0,
+        "output_usd_per_mtok": 50.0
+      },
+      "claude-haiku-4-5": {
+        "cache_read_usd_per_mtok": 0.1,
+        "cache_write_usd_per_mtok": 1.25,
+        "input_usd_per_mtok": 1.0,
+        "output_usd_per_mtok": 5.0
+      },
+      "claude-opus-5-5": {
+        "cache_read_usd_per_mtok": 0.2,
+        "cache_write_usd_per_mtok": 5.0,
+        "input_usd_per_mtok": 4.0,
+        "output_usd_per_mtok": 20.0
+      },
+      "claude-sonnet-5-5": {
+        "cache_read_usd_per_mtok": 0.2,
+        "cache_write_usd_per_mtok": 2.5,
+        "input_usd_per_mtok": 2.0,
+        "output_usd_per_mtok": 10.0
+      },
+      "deepseek-flash": {
+        "cache_read_usd_per_mtok": 0.006,
+        "cache_write_usd_per_mtok": 0.3,
+        "input_usd_per_mtok": 0.3,
+        "output_usd_per_mtok": 1.2
+      },
+      "deepseek-v4-pro": {
+        "cache_read_usd_per_mtok": 0.044,
+        "cache_write_usd_per_mtok": 1.32,
+        "input_usd_per_mtok": 1.32,
+        "output_usd_per_mtok": 3.96
+      },
+      "glm-4.5-air": {
+        "cache_read_usd_per_mtok": 0.03,
+        "cache_write_usd_per_mtok": 0.2,
+        "input_usd_per_mtok": 0.2,
+        "output_usd_per_mtok": 1.1
+      },
+      "glm-4.6": {
+        "cache_read_usd_per_mtok": 0.11,
+        "cache_write_usd_per_mtok": 0.6,
+        "input_usd_per_mtok": 0.6,
+        "output_usd_per_mtok": 2.2
+      },
+      "glm-4.7": {
+        "cache_read_usd_per_mtok": 0.11,
+        "cache_write_usd_per_mtok": 0.6,
+        "input_usd_per_mtok": 0.6,
+        "output_usd_per_mtok": 2.2
+      },
+      "glm-5": {
+        "cache_read_usd_per_mtok": 0.2,
+        "cache_write_usd_per_mtok": 1.0,
+        "input_usd_per_mtok": 1.0,
+        "output_usd_per_mtok": 3.2
+      },
+      "glm-5.1": {
+        "cache_read_usd_per_mtok": 0.26,
+        "cache_write_usd_per_mtok": 1.4,
+        "input_usd_per_mtok": 1.4,
+        "output_usd_per_mtok": 4.4
+      },
+      "glm-5.2": {
+        "cache_read_usd_per_mtok": 0.26,
+        "cache_write_usd_per_mtok": 1.4,
+        "input_usd_per_mtok": 1.4,
+        "output_usd_per_mtok": 4.4
+      },
+      "glm-5.3": {
+        "cache_read_usd_per_mtok": 0.26,
+        "cache_write_usd_per_mtok": 1.4,
+        "input_usd_per_mtok": 1.4,
+        "output_usd_per_mtok": 4.4
+      },
+      "glm-5.3-flash": {
+        "cache_read_usd_per_mtok": 0.03,
+        "cache_write_usd_per_mtok": 0.15,
+        "input_usd_per_mtok": 0.15,
+        "output_usd_per_mtok": 0.5
+      },
+      "glm-5.3-flashx": {
+        "cache_read_usd_per_mtok": 0.075,
+        "cache_write_usd_per_mtok": 0.37,
+        "input_usd_per_mtok": 0.37,
+        "output_usd_per_mtok": 1.25
+      },
+      "gpt-5.4-mini": {
+        "cache_read_usd_per_mtok": 0.075,
+        "cache_write_usd_per_mtok": 0.75,
+        "input_usd_per_mtok": 0.75,
+        "output_usd_per_mtok": 4.5
+      },
+      "gpt-5.5": {
+        "cache_read_usd_per_mtok": 0.5,
+        "cache_write_usd_per_mtok": 5.0,
+        "input_usd_per_mtok": 5.0,
+        "output_usd_per_mtok": 30.0
+      },
+      "gpt-5.6-luna": {
+        "cache_read_usd_per_mtok": 0.02,
+        "cache_write_usd_per_mtok": 0.25,
+        "input_usd_per_mtok": 0.2,
+        "output_usd_per_mtok": 1.2
+      },
+      "gpt-5.6-sol": {
+        "cache_read_usd_per_mtok": 0.4,
+        "cache_write_usd_per_mtok": 5.0,
+        "input_usd_per_mtok": 4.0,
+        "output_usd_per_mtok": 20.0
+      },
+      "gpt-5.6-terra": {
+        "cache_read_usd_per_mtok": 0.2,
+        "cache_write_usd_per_mtok": 2.5,
+        "input_usd_per_mtok": 2.0,
+        "output_usd_per_mtok": 12.0
+      },
+      "gpt-6-astra": {
+        "cache_read_usd_per_mtok": 1.0,
+        "cache_write_usd_per_mtok": 12.5,
+        "input_usd_per_mtok": 10.0,
+        "output_usd_per_mtok": 50.0
+      },
+      "gpt-6-luna": {
+        "cache_read_usd_per_mtok": 0.01,
+        "cache_write_usd_per_mtok": 0.125,
+        "input_usd_per_mtok": 0.1,
+        "output_usd_per_mtok": 0.5
+      },
+      "gpt-6-sol": {
+        "cache_read_usd_per_mtok": 0.2,
+        "cache_write_usd_per_mtok": 2.5,
+        "input_usd_per_mtok": 2.0,
+        "output_usd_per_mtok": 10.0
+      },
+      "gpt-6.1-sol": {
+        "cache_read_usd_per_mtok": 0.1,
+        "cache_write_usd_per_mtok": 2.5,
+        "input_usd_per_mtok": 2.0,
+        "output_usd_per_mtok": 10.0
+      },
+      "kimi-k2.6": {
+        "cache_read_usd_per_mtok": 0.16,
+        "cache_write_usd_per_mtok": 0.95,
+        "input_usd_per_mtok": 0.95,
+        "output_usd_per_mtok": 4.0
+      },
+      "kimi-k2.7-code": {
+        "cache_read_usd_per_mtok": 0.19,
+        "cache_write_usd_per_mtok": 0.95,
+        "input_usd_per_mtok": 0.95,
+        "output_usd_per_mtok": 4.0
+      },
+      "kimi-k2.7-code-highspeed": {
+        "cache_read_usd_per_mtok": 0.38,
+        "cache_write_usd_per_mtok": 1.9,
+        "input_usd_per_mtok": 1.9,
+        "output_usd_per_mtok": 8.0
+      },
+      "kimi-k3": {
+        "cache_read_usd_per_mtok": 0.3,
+        "cache_write_usd_per_mtok": 3.0,
+        "input_usd_per_mtok": 3.0,
+        "output_usd_per_mtok": 15.0
+      }
+    },
+    "sources": [
+      "https://platform.claude.com/docs/en/about-claude/pricing",
+      "https://developers.openai.com/api/docs/pricing",
+      "https://docs.z.ai/guides/overview/pricing",
+      "https://api-docs.deepseek.com/quick_start/pricing",
+      "https://platform.kimi.ai/docs/pricing/chat.md"
+    ]
+  },
+  "profiles": [
+    {
+      "agent_teams": true,
+      "builtin": true,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": null,
+      "model": "opus",
+      "name": "claude-code/opus",
+      "profile_id": "agent-claude-code-opus",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "medium",
+      "model": "layer-planner",
+      "name": "claude-code/layer-planner",
+      "profile_id": "agent-layer-planner",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": null,
+            "project_name": null,
+            "role": "planner",
+            "scope": "role"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "max",
+      "model": "layer-project",
+      "name": "claude-code/layer-project",
+      "profile_id": "agent-layer-project",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": "proj-alpha0001",
+            "project_name": "Alpha",
+            "role": null,
+            "scope": "project"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "max",
+      "model": "layer-pt-rev",
+      "name": "claude-code/layer-pt-rev",
+      "profile_id": "agent-layer-pt-rev",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [
+          "Alpha"
+        ],
+        "layers": [],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "xhigh",
+      "model": "layer-pt-work",
+      "name": "claude-code/layer-pt-work",
+      "profile_id": "agent-layer-pt-work",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [
+          "Alpha"
+        ],
+        "layers": [],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "xhigh",
+      "model": "layer-reviewer",
+      "name": "claude-code/layer-reviewer",
+      "profile_id": "agent-layer-reviewer",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": null,
+            "project_name": null,
+            "role": "reviewer",
+            "scope": "role"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": null,
+      "model": "layer-roledef",
+      "name": "claude-code/layer-roledef",
+      "profile_id": "agent-layer-roledef",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [
+          "Alpha"
+        ],
+        "layers": [],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "low",
+      "model": "layer-rp-plan",
+      "name": "claude-code/layer-rp-plan",
+      "profile_id": "agent-layer-rp-plan",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": "proj-alpha0001",
+            "project_name": "Alpha",
+            "role": "planner",
+            "scope": "role_project"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "high",
+      "model": "layer-rp-rev",
+      "name": "claude-code/layer-rp-rev",
+      "profile_id": "agent-layer-rp-rev",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": "proj-alpha0001",
+            "project_name": "Alpha",
+            "role": "reviewer",
+            "scope": "role_project"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "medium",
+      "model": "layer-rp-work",
+      "name": "claude-code/layer-rp-work",
+      "profile_id": "agent-layer-rp-work",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": "proj-alpha0001",
+            "project_name": "Alpha",
+            "role": "worker",
+            "scope": "role_project"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": null,
+      "model": "layer-system",
+      "name": "claude-code/layer-system",
+      "profile_id": "agent-layer-system",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": null,
+            "project_name": null,
+            "role": null,
+            "scope": "system"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "low",
+      "model": "layer-task-work",
+      "name": "claude-code/layer-task-work",
+      "profile_id": "agent-layer-task-work",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [],
+        "schedule_count": 1,
+        "task_count": 1
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "custom_prompt": "",
+      "effort": "high",
+      "model": "layer-worker",
+      "name": "claude-code/layer-worker",
+      "profile_id": "agent-layer-worker",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [
+          {
+            "project_id": null,
+            "project_name": null,
+            "role": "worker",
+            "scope": "role"
+          }
+        ],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    },
+    {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": false,
+        "source": "provider_price",
+        "unpriced": [
+          "mystery-model"
+        ]
+      },
+      "custom_prompt": "",
+      "effort": null,
+      "model": "mystery-model",
+      "name": "codex-unpriced",
+      "profile_id": "agent-unpriced01",
+      "provider_id": "prov-masked0001",
+      "provider_name": "masked-key",
+      "roles": [],
+      "runtime_id": "rt-codex-limited",
+      "runtime_name": "codex-limited",
+      "runtime_type": "codex",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    }
+  ],
+  "provider_presets": [
+    {
+      "apis": [
+        {
+          "base_url": "https://open.bigmodel.cn/api/anthropic",
+          "protocols": [
+            "anthropic-messages"
+          ]
+        },
+        {
+          "base_url": "https://open.bigmodel.cn/api/paas/v4",
+          "protocols": [
+            "openai-chat"
+          ]
+        },
+        {
+          "base_url": "https://open.bigmodel.cn/api/v1",
+          "protocols": [
+            "openai-responses"
+          ]
+        }
+      ],
+      "docs": [
+        "https://docs.bigmodel.cn/cn/coding-plan/tool/claude",
+        "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+        "https://docs.bigmodel.cn/cn/guide/start/model-overview"
+      ],
+      "env": [
+        {
+          "key": "API_TIMEOUT_MS",
+          "value": "3000000"
+        },
+        {
+          "key": "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+          "value": "1000000"
+        },
+        {
+          "key": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+          "value": "1"
+        }
+      ],
+      "label": "GLM (BigModel, China)",
+      "models": [
+        {
+          "background_model": "glm-5.3-flash[1m]",
+          "context_window": 1000000,
+          "name": "glm-5.3[1m]"
+        },
+        {
+          "background_model": "glm-5.3-flash[1m]",
+          "context_window": 1000000,
+          "name": "glm-5.3-flash[1m]"
+        },
+        {
+          "background_model": "glm-5.3-flash[1m]",
+          "context_window": 1000000,
+          "name": "glm-5.2[1m]"
+        },
+        {
+          "background_model": "glm-4.5-air",
+          "context_window": 200000,
+          "name": "glm-4.7"
+        }
+      ],
+      "name": "glm",
+      "note": "BigModel bills in CNY; Looper prices these models at Z.ai's USD list prices unless the catalog says otherwise",
+      "preset_id": "glm-bigmodel"
+    },
+    {
+      "apis": [
+        {
+          "base_url": "https://api.z.ai/api/anthropic",
+          "protocols": [
+            "anthropic-messages"
+          ]
+        },
+        {
+          "base_url": "https://api.z.ai/api/paas/v4",
+          "protocols": [
+            "openai-chat"
+          ]
+        },
+        {
+          "base_url": "https://api.z.ai/api/v1",
+          "protocols": [
+            "openai-responses"
+          ]
+        }
+      ],
+      "docs": [
+        "https://docs.z.ai/devpack/tool/claude",
+        "https://docs.z.ai/guides/overview/quick-start",
+        "https://docs.z.ai/guides/llm/glm-5.3"
+      ],
+      "env": [
+        {
+          "key": "API_TIMEOUT_MS",
+          "value": "3000000"
+        },
+        {
+          "key": "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+          "value": "1000000"
+        },
+        {
+          "key": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+          "value": "1"
+        }
+      ],
+      "label": "GLM (Z.ai, international)",
+      "models": [
+        {
+          "background_model": "glm-5.3-flash[1m]",
+          "context_window": 1000000,
+          "name": "glm-5.3[1m]"
+        },
+        {
+          "background_model": "glm-5.3-flash[1m]",
+          "context_window": 1000000,
+          "name": "glm-5.3-flash[1m]"
+        },
+        {
+          "background_model": "glm-5.3-flash[1m]",
+          "context_window": 1000000,
+          "name": "glm-5.2[1m]"
+        },
+        {
+          "background_model": "glm-4.5-air",
+          "context_window": 200000,
+          "name": "glm-4.7"
+        }
+      ],
+      "name": "glm-zai",
+      "note": "",
+      "preset_id": "glm-zai"
+    },
+    {
+      "apis": [
+        {
+          "base_url": "https://api.deepseek.com/anthropic",
+          "protocols": [
+            "anthropic-messages"
+          ]
+        },
+        {
+          "base_url": "https://api.deepseek.com",
+          "protocols": [
+            "openai-chat"
+          ]
+        }
+      ],
+      "docs": [
+        "https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code/",
+        "https://api-docs.deepseek.com/guides/anthropic_api",
+        "https://api-docs.deepseek.com/"
+      ],
+      "env": [
+        {
+          "key": "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+          "value": "786432"
+        }
+      ],
+      "label": "DeepSeek",
+      "models": [
+        {
+          "background_model": "deepseek-flash",
+          "context_window": 1000000,
+          "name": "deepseek-flash[1m]"
+        },
+        {
+          "background_model": "deepseek-flash",
+          "context_window": 1000000,
+          "name": "deepseek-v4-pro[1m]"
+        }
+      ],
+      "name": "deepseek",
+      "note": "",
+      "preset_id": "deepseek"
+    },
+    {
+      "apis": [
+        {
+          "base_url": "https://api.moonshot.cn/anthropic",
+          "protocols": [
+            "anthropic-messages"
+          ]
+        },
+        {
+          "base_url": "https://api.moonshot.cn/v1",
+          "protocols": [
+            "openai-responses",
+            "openai-chat"
+          ]
+        }
+      ],
+      "docs": [
+        "https://platform.kimi.com/docs/guide/claude-code-kimi.md",
+        "https://platform.kimi.com/docs/api/overview"
+      ],
+      "env": [
+        {
+          "key": "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+          "value": "1000000"
+        }
+      ],
+      "label": "Kimi (Moonshot, China)",
+      "models": [
+        {
+          "background_model": "kimi-k2.7-code",
+          "context_window": 1048576,
+          "name": "kimi-k3[1m]"
+        },
+        {
+          "background_model": "kimi-k2.7-code",
+          "context_window": 262144,
+          "name": "kimi-k2.7-code"
+        },
+        {
+          "background_model": "kimi-k2.6",
+          "context_window": 262144,
+          "name": "kimi-k2.6"
+        }
+      ],
+      "name": "kimi",
+      "note": "kimi-k2.7-code always thinks; Moonshot's Claude Code guide uses it as the background model, and asks for thinking to be on; Moonshot China bills in CNY, and Looper prices these models at the international USD list prices unless the catalog says otherwise",
+      "preset_id": "kimi-moonshot-cn"
+    },
+    {
+      "apis": [
+        {
+          "base_url": "https://api.moonshot.ai/anthropic",
+          "protocols": [
+            "anthropic-messages"
+          ]
+        },
+        {
+          "base_url": "https://api.moonshot.ai/v1",
+          "protocols": [
+            "openai-responses",
+            "openai-chat"
+          ]
+        }
+      ],
+      "docs": [
+        "https://platform.kimi.ai/docs/guide/claude-code-kimi.md",
+        "https://platform.kimi.ai/docs/api/overview.md"
+      ],
+      "env": [
+        {
+          "key": "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+          "value": "1000000"
+        }
+      ],
+      "label": "Kimi (Moonshot, international)",
+      "models": [
+        {
+          "background_model": "kimi-k2.7-code",
+          "context_window": 1048576,
+          "name": "kimi-k3[1m]"
+        },
+        {
+          "background_model": "kimi-k2.7-code",
+          "context_window": 262144,
+          "name": "kimi-k2.7-code"
+        },
+        {
+          "background_model": "kimi-k2.6",
+          "context_window": 262144,
+          "name": "kimi-k2.6"
+        }
+      ],
+      "name": "kimi-intl",
+      "note": "kimi-k2.7-code always thinks; Moonshot's Claude Code guide uses it as the background model, and asks for thinking to be on",
+      "preset_id": "kimi-moonshot"
+    },
+    {
+      "apis": [
+        {
+          "base_url": "http://127.0.0.1:8317/v1",
+          "protocols": [
+            "openai-responses",
+            "openai-chat"
+          ]
+        },
+        {
+          "base_url": "http://127.0.0.1:8317",
+          "protocols": [
+            "anthropic-messages"
+          ]
+        }
+      ],
+      "docs": [],
+      "env": [],
+      "label": "CLIProxyAPI on this machine",
+      "models": [
+        {
+          "background_model": "gpt-6-luna",
+          "context_window": 1050000,
+          "name": "gpt-6.1-sol"
+        },
+        {
+          "background_model": "gpt-5.6-luna",
+          "context_window": 1050000,
+          "name": "gpt-5.6-sol"
+        },
+        {
+          "background_model": "gpt-5.6-luna",
+          "context_window": 1050000,
+          "name": "gpt-5.6-luna"
+        }
+      ],
+      "name": "cpa",
+      "note": "a local proxy for development: its key is one of the api-keys in its config file, and its models are those it serves",
+      "preset_id": "cpa"
+    }
+  ],
+  "providers": [
+    {
+      "api_key": null,
+      "auth": "oauth",
+      "base_url": "",
+      "builtin": true,
+      "created_at": "2020-01-15T00:00:00+00:00",
+      "env": [],
+      "login": null,
+      "max_concurrency": null,
+      "models": [],
+      "name": "claude-subscription",
+      "oauth_runtime_type": "claude-code",
+      "profile_count": 13,
+      "protocols": [
+        "anthropic-messages"
+      ],
+      "provider_id": "prov-claude-subscription",
+      "suggested_models": [],
+      "updated_at": "2020-01-15T00:00:00+00:00"
+    },
+    {
+      "api_key": null,
+      "auth": "oauth",
+      "base_url": "",
+      "builtin": true,
+      "created_at": "2020-01-15T00:00:00+00:00",
+      "env": [],
+      "login": {
+        "detail": "not logged in",
+        "state": "not_logged_in"
+      },
+      "max_concurrency": null,
+      "models": [],
+      "name": "codex-login",
+      "oauth_runtime_type": "codex",
+      "profile_count": 0,
+      "protocols": [
+        "openai-responses"
+      ],
+      "provider_id": "prov-codex-login",
+      "suggested_models": [
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna"
+      ],
+      "updated_at": "2020-01-15T00:00:00+00:00"
+    },
+    {
+      "api_key": null,
+      "auth": "oauth",
+      "base_url": "",
+      "builtin": true,
+      "created_at": "2020-01-15T00:00:00+00:00",
+      "env": [],
+      "login": {
+        "detail": "no /tmp/loopgo-parity-grok-home/auth.json",
+        "state": "not_logged_in"
+      },
+      "max_concurrency": null,
+      "models": [],
+      "name": "grok-login",
+      "oauth_runtime_type": "grok",
+      "profile_count": 0,
+      "protocols": [
+        "openai-responses"
+      ],
+      "provider_id": "prov-grok-login",
+      "suggested_models": [
+        "grok-4.7",
+        "grok-4.7-build-fast",
+        "grok-4.6",
+        "grok-4.5"
+      ],
+      "updated_at": "2020-01-15T00:00:00+00:00"
+    },
+    {
+      "api_key": "***",
+      "auth": "api_key",
+      "base_url": "https://example.invalid/v1",
+      "builtin": false,
+      "created_at": "2020-01-15T00:00:00+00:00",
+      "env": [
+        {
+          "key": "EXAMPLE_FLAG",
+          "value": "1"
+        }
+      ],
+      "login": null,
+      "max_concurrency": null,
+      "models": [
+        {
+          "background_model": null,
+          "cache_read_usd_per_mtok": null,
+          "cache_write_usd_per_mtok": null,
+          "context_window": 1000,
+          "efforts": null,
+          "input_usd_per_mtok": null,
+          "name": "mystery-model",
+          "output_usd_per_mtok": null
+        }
+      ],
+      "name": "masked-key",
+      "oauth_runtime_type": null,
+      "profile_count": 1,
+      "protocols": [
+        "anthropic-messages"
+      ],
+      "provider_id": "prov-masked0001",
+      "suggested_models": [],
+      "updated_at": "2020-01-15T00:00:00+00:00"
+    }
+  ],
+  "runtime_types": [
+    {
+      "auth_kinds": [
+        "api_key",
+        "oauth"
+      ],
+      "can_replace_system_prompt": true,
+      "capabilities": [
+        "add_dirs",
+        "autonomous_turns",
+        "claude_plugins",
+        "compaction_events",
+        "cost_report",
+        "mcp",
+        "resident_session",
+        "resume",
+        "run"
+      ],
+      "default_executable": "claude",
+      "label": "Claude Code",
+      "protocols": [
+        "anthropic-messages"
+      ],
+      "replace_system_prompt_refusal": null,
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "type": "claude-code"
+    },
+    {
+      "auth_kinds": [
+        "api_key",
+        "oauth"
+      ],
+      "can_replace_system_prompt": true,
+      "capabilities": [
+        "add_dirs",
+        "mcp",
+        "resident_session",
+        "resume",
+        "run",
+        "structured_output"
+      ],
+      "default_executable": "codex",
+      "label": "Codex",
+      "protocols": [
+        "openai-responses"
+      ],
+      "replace_system_prompt_refusal": null,
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-codex",
+      "type": "codex"
+    },
+    {
+      "auth_kinds": [
+        "api_key"
+      ],
+      "can_replace_system_prompt": true,
+      "capabilities": [
+        "add_dirs",
+        "claude_plugins",
+        "compaction_events",
+        "mcp",
+        "read_tools",
+        "resident_session",
+        "resume",
+        "run"
+      ],
+      "default_executable": "omp",
+      "label": "OMP",
+      "protocols": [
+        "anthropic-messages",
+        "openai-chat",
+        "openai-responses"
+      ],
+      "replace_system_prompt_refusal": null,
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-omp",
+      "type": "omp"
+    },
+    {
+      "auth_kinds": [
+        "oauth"
+      ],
+      "can_replace_system_prompt": true,
+      "capabilities": [
+        "compaction_events",
+        "cost_report",
+        "mcp",
+        "resident_session",
+        "resume",
+        "run"
+      ],
+      "default_executable": "grok",
+      "label": "Grok",
+      "protocols": [
+        "openai-responses"
+      ],
+      "replace_system_prompt_refusal": null,
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-grok",
+      "type": "grok"
+    }
+  ],
+  "runtimes": [
+    {
+      "builtin": true,
+      "capabilities": [
+        "add_dirs",
+        "autonomous_turns",
+        "claude_plugins",
+        "compaction_events",
+        "cost_report",
+        "mcp",
+        "resident_session",
+        "resume",
+        "run"
+      ],
+      "created_at": "2020-01-15T00:00:00+00:00",
+      "default_executable": "claude",
+      "executable": "",
+      "name": "claude-code",
+      "path": "/tmp/loopgo-parity-bin/claude",
+      "probe_error": null,
+      "probed_at": null,
+      "profile_count": 13,
+      "protocols": [
+        "anthropic-messages"
+      ],
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "type": "claude-code",
+      "type_label": "Claude Code",
+      "updated_at": "2020-01-15T00:00:00+00:00",
+      "version": null
+    },
+    {
+      "builtin": false,
+      "capabilities": [
+        "mcp"
+      ],
+      "created_at": "2020-01-15T00:00:00+00:00",
+      "default_executable": "codex",
+      "executable": "/tmp/loopgo-parity-bin/codex",
+      "name": "codex-limited",
+      "path": "/tmp/loopgo-parity-bin/codex",
+      "probe_error": null,
+      "probed_at": null,
+      "profile_count": 1,
+      "protocols": [
+        "openai-responses"
+      ],
+      "roles": [],
+      "runtime_id": "rt-codex-limited",
+      "type": "codex",
+      "type_label": "Codex",
+      "updated_at": "2020-01-15T00:00:00+00:00",
+      "version": null
+    },
+    {
+      "builtin": false,
+      "capabilities": [
+        "resident_session",
+        "resume"
+      ],
+      "created_at": "2020-01-15T00:00:00+00:00",
+      "default_executable": "omp",
+      "executable": "/tmp/loopgo-parity-bin/omp",
+      "name": "omp-managers",
+      "path": "/tmp/loopgo-parity-bin/omp",
+      "probe_error": null,
+      "probed_at": null,
+      "profile_count": 0,
+      "protocols": [
+        "anthropic-messages",
+        "openai-chat",
+        "openai-responses"
+      ],
+      "roles": [
+        "manager",
+        "planner"
+      ],
+      "runtime_id": "rt-omp-managers",
+      "type": "omp",
+      "type_label": "OMP",
+      "updated_at": "2020-01-15T00:00:00+00:00",
+      "version": null
+    }
+  ]
+}

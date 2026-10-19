@@ -106,3 +106,4 @@ agent-settings
 agent-settings-alpha
 agent-settings-beta
 agent-settings-blank
+registry

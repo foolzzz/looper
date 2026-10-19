@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/foolzzz/looper/go/internal/registry"
 )
 
 // Task detail follows the Python GET /api/tasks/<id> handler: the same SQL,
@@ -110,15 +112,6 @@ var (
 			hint:  "use the sender's open_id for this app, which starts with ou_ (a union_id starts with on_, and a user_id has no prefix)",
 			re:    regexp.MustCompile(`^ou_[0-9A-Za-z]{8,64}$`),
 		},
-	}
-	roleNeeds = []struct {
-		role  string
-		needs []string
-	}{
-		{"manager", []string{"resident_session", "resume"}},
-		{"planner", []string{"resident_session", "resume"}},
-		{"worker", []string{"run"}},
-		{"reviewer", []string{"run"}},
 	}
 	claudeAliases = map[string]string{
 		"opus":   "claude-opus-5-5",
@@ -1442,22 +1435,10 @@ func profileRecord(row map[string]any) map[string]any {
 }
 
 func servableRoles(capabilities []string) []any {
-	have := map[string]bool{}
-	for _, cap := range capabilities {
-		have[cap] = true
-	}
-	out := []any{}
-	for _, role := range roleNeeds {
-		ok := true
-		for _, need := range role.needs {
-			if !have[need] {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			out = append(out, role.role)
-		}
+	roles := registry.ServableRoles(capabilities)
+	out := make([]any, 0, len(roles))
+	for _, role := range roles {
+		out = append(out, role)
 	}
 	return out
 }

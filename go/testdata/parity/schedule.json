@@ -41,7 +41,10 @@
     "notify": "failures",
     "notify_target": null,
     "overlap": "skip",
-    "profile_overrides": {},
+    "profile_overrides": {
+      "reviewer": "agent-layer-task-work",
+      "worker": "agent-layer-task-work"
+    },
     "project_id": "proj-alpha0001",
     "project_name": "Alpha",
     "requirement": "run the nightly check",
