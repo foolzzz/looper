@@ -814,17 +814,65 @@ def test_a_vault_behind_a_folder_the_server_cannot_pass_is_a_400_when_saved(tmp_
     assert "every folder above the vault must be readable by the server user" in str(caught.value)
 
 
+# Whether this system opens a folder with search permission alone (O_SEARCH on macOS, O_PATH on Linux).
+_PASS_ONLY = bool(getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0))
+
+
 @pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
-def test_a_vault_behind_a_folder_the_server_may_pass_but_not_list_is_written(tmp_path: Path) -> None:
+def test_a_vault_behind_a_folder_the_server_may_pass_but_not_list(tmp_path: Path) -> None:
     passable = tmp_path / "passable"
     (passable / "vault/codex-mem").mkdir(parents=True)
     passable.chmod(0o111)
     try:
+        if not _PASS_ONLY:  # the folder must be readable as well: refused when saved
+            with pytest.raises(ValueError, match="every folder above the vault must be readable"):
+                vault.check_config({"path": str(passable / "vault"), "writable": ["codex-mem"]})
+            return
         config = vault.check_config({"path": str(passable / "vault"), "writable": ["codex-mem"]})
         result = write(config)
     finally:
         passable.chmod(0o755)
     assert result["path"] == "codex-mem/new.md" and (passable / "vault/codex-mem/new.md").read_text() == "new note"
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+@pytest.mark.parametrize("mode", [0o600, 0o300], ids=["not searchable", "not readable"])
+def test_a_vault_the_server_cannot_search_or_list_is_a_400_when_saved(tmp_path: Path, mode: int) -> None:
+    from looper.agents.projects import HTTP_400, RequestError
+
+    root = tmp_path / "vault"
+    (root / "codex-mem").mkdir(parents=True)
+    root.chmod(mode)
+    try:
+        with pytest.raises(RequestError) as caught:
+            asyncio.run(vault.update_settings({"path": str(root), "writable": ["codex-mem"]}))
+    finally:
+        root.chmod(0o755)
+    assert caught.value.status == HTTP_400
+    assert "the vault itself readable and searchable" in str(caught.value)
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+def test_a_writable_folder_the_server_cannot_pass_is_a_400_when_saved(tmp_path: Path) -> None:
+    from looper.agents.projects import HTTP_400, RequestError
+
+    root = tmp_path / "vault"
+    (root / "notes/agents").mkdir(parents=True)
+    (root / "notes").chmod(0o600)
+    try:
+        with pytest.raises(RequestError) as caught:
+            asyncio.run(vault.update_settings({"path": str(root), "writable": ["notes/agents"]}))
+    finally:
+        (root / "notes").chmod(0o755)
+    assert caught.value.status == HTTP_400
+
+
+def test_search_ranks_more_distinct_words_above_more_hits(config: vault.VaultConfig) -> None:
+    (config.path / "mine/repeats.md").write_text("alpha " * 50)
+    (config.path / "mine/both.md").write_text("alpha beta")
+    result = asyncio.run(vault.search(config, "alpha beta"))
+    assert [r["path"] for r in result["results"]][:2] == ["mine/both.md", "mine/repeats.md"]
+    assert [(r["words"], r["hits"]) for r in result["results"]][:2] == [(2, 2), (1, 50)]
 
 
 

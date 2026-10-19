@@ -138,7 +138,7 @@
   Looper 不提供同一 UID 下的隔离。
 - 只有 Looper 这个进程持锁：运维者同时在 Obsidian 里改同一篇笔记，靠 sha256 比对发现冲突，Looper 不会覆盖它不知道的版本，
   但运维者那边的编辑器可能覆盖 Looper 的写入。
-- 写入从 `/` 起逐级打开知识库路径上的目录（macOS 用 `O_SEARCH`、Linux 用 `O_PATH`，只需进入权限），所以路径上每一级目录都必须让服务的用户能进入；保存设置时就按同样的方式检查，进不去是 400（「every folder above the vault must be readable by the server user」），不会等到写入时才失败。
+- 写入从 `/` 起逐级打开知识库路径上的目录（macOS 用 `O_SEARCH`、Linux 用 `O_PATH`，只需进入权限），所以路径上每一级目录都必须让服务的用户能进入，知识库目录本身还要可读、可进入（Linux 的 `O_PATH` 不检查这一层，另外查）；保存设置时就按同样的方式检查，进不去是 400（「every folder above the vault must be readable by the server user」），不会等到写入时才失败。
 - 搜索是纯文本匹配，没有索引；很大的知识库只看前 10,000 个文件。
 
 ## 7. 备选与理由

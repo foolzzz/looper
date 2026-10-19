@@ -77,6 +77,10 @@ def _path_problem(raw: Any) -> str | None:
 _PASS = (getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0) or os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
+_UNREACHABLE = ("every folder above the vault must be readable by the server user (searchable at least), "
+                "and the vault itself readable and searchable")
+
+
 def _open_real_path(path: Path) -> list[int]:
     """Descriptors of ``path``'s folders, from / down to it, each opened without following a link; the caller
     closes them. ``OSError``: ``ELOOP``/``ENOTDIR`` for a link or a file on the way, ``EACCES`` for a folder the
@@ -110,11 +114,15 @@ def check_config(raw: Mapping) -> VaultConfig:
     try:
         for fd in reversed(_open_real_path(root)):
             os.close(fd)
+        # O_PATH (Linux) opens the vault itself without checking that it may be searched; reads and searches need
+        # it listed too.
+        reachable = not root.is_dir() or os.access(root, os.R_OK | os.X_OK)
     except PermissionError:
-        raise ValueError(f"the server cannot reach the vault path {path}: every folder above the vault must be "
-                         "readable by the server user (searchable at least)") from None
+        reachable = False
     except OSError:
-        pass  # a path that is missing or not a directory is named below
+        reachable = True  # a path that is missing or not a directory is named below
+    if not reachable:
+        raise ValueError(f"the server cannot reach the vault path {path}: {_UNREACHABLE}")
     if not root.exists():
         raise ValueError(f"the vault path {path} does not exist")
     if not root.is_dir():
@@ -224,6 +232,10 @@ async def update_settings(body: Mapping) -> dict:
                 "path": str(config.path), "writable": list(config.writable), "rules_file": config.rules_file})})
     except ValueError as exc:
         raise projects.RequestError(projects.HTTP_400, str(exc)) from None
+    except PermissionError as exc:
+        # A folder inside the vault the server cannot pass (a writable folder's, the rules file's).
+        raise projects.RequestError(projects.HTTP_400, f"the server user cannot read {exc.filename}: "
+                                                       f"{_UNREACHABLE}") from None
     return await settings_view()
 
 

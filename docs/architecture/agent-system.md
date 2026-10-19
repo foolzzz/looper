@@ -1761,7 +1761,8 @@ The tools are Looper's MCP tools, the same on every runtime.
   `looper_settings` action `knowledge_vault`, which the user confirms):
   `path` (absolute, an existing directory, stored resolved; every folder on
   the way to it must be one the server's user may pass, as the writes walk
-  it from `/`, which is checked when the setting is saved), `writable`
+  it from `/`, and the vault itself readable and searchable, which is
+  checked when the setting is saved), `writable`
   (folders inside it, each an existing directory, neither a link nor below
   one, so a link is refused when the setting is saved; empty: read only) and `rules_file` (a file inside it, optional).
   It is checked again whenever it is read: a vault that no longer holds (its
