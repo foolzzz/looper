@@ -41,7 +41,11 @@ Verified against omp 18.4.3 (the multi-runtime RFC, section 6):
 - **The provider** is ``models.yml``'s provider ``looper``: its endpoint, its
   API (``API_NAMES``) and the agent's model at no price (Looper prices the
   tokens); its ``apiKey`` names the variable that holds the key (``KEY_ENV``),
-  which omp reads first, so the key is only in the environment.
+  which omp reads first, so the key is only in the environment. With
+  ``openai-responses`` the model is marked as taking strict tools
+  (``supportsStrictMode``), so the MCP tools go as ``strict: false``: the
+  Responses API takes a tool that leaves strict out as strict, with every
+  argument required.
 - **The catalog** (RFC P9): the plugin directories load natively
   (``--plugin-dir``: their skills, commands and agents). Their hooks and output
   styles do not load, and their own MCP servers are turned off
@@ -394,6 +398,12 @@ def models_yml(launch: Launch) -> dict[str, Any]:
     }
     if entry is not None and entry.context_window:
         model["contextWindow"] = entry.context_window
+    if api == "openai-responses":
+        # omp leaves strict out of a tool unless it knows the endpoint (api.openai.com, a few others) takes strict
+        # tools, and the Responses API takes a tool without it as strict: every argument required, so the model
+        # makes up a value for each optional one. Saying the endpoint takes them makes omp send the MCP tools as
+        # strict: false, and its own tools strict, converted by omp as for api.openai.com.
+        model["compat"] = {"supportsStrictMode": True}
     return {"providers": {PROVIDER_ID: {"baseUrl": provider.base_url or DEFAULT_BASE_URLS[api], "apiKey": KEY_ENV,
                                         "api": api, "models": [model]}}}
 
