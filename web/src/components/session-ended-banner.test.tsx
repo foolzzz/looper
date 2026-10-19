@@ -2,44 +2,43 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App from "@/App";
 import { SessionEndedBanner } from "@/components/session-ended-banner";
 import { SignOut } from "@/components/sign-out";
-import { streamSSE, watchChat } from "@/lib/api";
-import { installSessionGuard, isSessionEnded, resetSessionGuard, SessionEndedError } from "@/lib/session";
+import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-type NodeProcess = { on(e: string, f: () => void): void; off(e: string, f: () => void): void };
+const OVERVIEW = {
+  tasks: { total: 0, other_statuses: {} },
+  agents: { manager: null, planners: [], workers: [], reviewers: [] },
+  projects: [],
+  idle_projects: 0,
+  spend_today: { since: "", provider_priced_usd: 0, equivalent_usd: 0, runs: 0, running: 0, unpriced_runs: 0 },
+  health: { unhealthy: [] },
+  schedules: { total: 0, enabled: 0, next: [], failing: [], skipped_today: {} },
+};
 
-describe("session ended banner and sign out", () => {
+describe("session ended screen and sign out", () => {
   let container: HTMLDivElement;
   let root: Root;
   let status: Response;
-  let seen: string[];
-  let push: (text: string) => void;
+  let calls: string[];
+  let unauthorized: boolean;
 
   beforeEach(() => {
-    seen = [];
-    resetSessionGuard();
-    push = () => {};
+    calls = [];
+    unauthorized = false;
     status = Response.json({});
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    resetSessionGuard();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      seen.push(url);
-      if (url === "/api/stream") {
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            push = (text) => {
-              try { controller.enqueue(new TextEncoder().encode(text)); } catch { /* closed by the abort */ }
-            };
-            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("x", "AbortError")));
-          },
-        });
-        return new Response(body, { status: 200 });
-      }
+      calls.push(url);
+      if (unauthorized && url.startsWith("/api/")) return new Response("{}", { status: 401 });
       if (url === "/api/status") return status.clone();
-      if (url === "/api/overview" || url.startsWith("/api/chat/events") || url === "/login") return new Response("{}", { status: 401 });
-      return new Response("{}", { status: 200 });
+      if (url === "/login") return new Response("{}", { status: 401 });
+      if (url === "/api/overview") return Response.json(OVERVIEW);
+      return Response.json({});
     }));
     container = document.createElement("div");
     document.body.append(container);
@@ -49,74 +48,51 @@ describe("session ended banner and sign out", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
-  it("shows one banner with a Reload button after an API call gets 401, and retries nothing", async () => {
+  it("shows one banner with a Reload button after an API call gets 401", async () => {
     installSessionGuard();
     await act(async () => root.render(<SessionEndedBanner />));
     expect(container.textContent).toBe("");
+    unauthorized = true;
     await act(async () => {
-      void fetch("/api/overview");
-      await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).not.toBeNull());
       await expect(fetch("/api/overview")).rejects.toBeInstanceOf(SessionEndedError);
     });
     expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
     expect(container.textContent).toContain("Your session ended. Reload to sign in again.");
     expect(container.querySelector("button")?.textContent).toBe("Reload");
-    expect(seen).toEqual(["/api/overview"]);
+    await expect(fetch("/api/overview")).rejects.toBeInstanceOf(SessionEndedError);
+    expect(calls).toEqual(["/api/overview"]); // the call after the end sent no request
   });
 
-  it("settles no call after the session ended, so a retry loop stops and no widget shows an error", async () => {
-    vi.useFakeTimers();
-    try {
-      installSessionGuard();
-      const stop = watchChat("s1", () => {});
-      await vi.advanceTimersByTimeAsync(0);
-      expect(seen.filter((u) => u.startsWith("/api/chat/events"))).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(60_000);
-      await expect(fetch("/api/overview")).rejects.toBeInstanceOf(SessionEndedError);
-      expect(seen.filter((u) => u.startsWith("/api/chat/events"))).toHaveLength(1);
-      expect(seen).not.toContain("/api/status");
-      stop();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("settles every concurrent call that gets 401", async () => {
+    installSessionGuard();
+    unauthorized = true;
+    const results = await Promise.allSettled(Array.from({ length: 20 }, () => fetch("/api/overview")));
+    expect(results.every((r) => r.status === "rejected" && r.reason instanceof SessionEndedError)).toBe(true);
   });
 
-  it("closes an open stream, clears pollers and rejects later calls once another request gets 401", async () => {
+  it("unmounts the routed app when the session ends: no more calls, no widget error", async () => {
     vi.useFakeTimers();
-    const unhandled = vi.fn();
-    const proc = (globalThis as unknown as { process: NodeProcess }).process;
-    proc.on("unhandledRejection", unhandled);
-    try {
-      installSessionGuard();
-      const events: unknown[] = [];
-      streamSSE("/api/stream", (e) => events.push(e));
-      await vi.advanceTimersByTimeAsync(0);
-      push('data: {"kind":"a","payload":{}}\n\n');
-      await vi.advanceTimersByTimeAsync(0);
-      expect(events).toHaveLength(1);
-      let polls = 0;
-      window.setInterval(() => {
-        polls++;
-        void fetch("/api/status").catch((e) => expect(e).toBeInstanceOf(SessionEndedError));
-      }, 1000);
-      await vi.advanceTimersByTimeAsync(2000);
-      const before = polls;
-      void fetch("/api/overview");
-      await vi.advanceTimersByTimeAsync(0);
-      expect(isSessionEnded()).toBe(true);
-      push('data: {"kind":"b","payload":{}}\n\n');
-      await vi.advanceTimersByTimeAsync(60_000);
-      expect(events).toHaveLength(1);
-      expect(polls).toBe(before);
-      await expect(fetch("/api/status")).rejects.toBeInstanceOf(SessionEndedError);
-      expect(unhandled).not.toHaveBeenCalled();
-    } finally {
-      proc.off("unhandledRejection", unhandled);
-      vi.useRealTimers();
-    }
+    window.location.hash = "#dashboard";
+    installSessionGuard();
+    await act(async () => root.render(<App />));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(calls.length).toBeGreaterThan(0);
+    expect(container.textContent).toContain("Dashboard");
+
+    unauthorized = true;
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(container.textContent).toContain("Your session ended. Reload to sign in again.");
+    expect(container.textContent).not.toContain("Connection failed");
+    expect(container.querySelector("aside")).toBeNull();
+
+    const before = calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(calls).toHaveLength(before);
+    expect(container.textContent).not.toContain("Connection failed");
   });
 
   it("ignores a 401 that is not an API call", async () => {
@@ -136,7 +112,8 @@ describe("session ended banner and sign out", () => {
   });
 
   it("shows no control when the status call fails", async () => {
-    status = new Response("{}", { status: 401 });
+    installSessionGuard();
+    unauthorized = true;
     await act(async () => root.render(<SignOut />));
     expect(container.textContent).toBe("");
   });

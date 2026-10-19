@@ -12,52 +12,27 @@ export class SessionEndedError extends Error {
   }
 }
 
-const onEnd = new Set<() => void>();
-const intervals = new Set<ReturnType<typeof setInterval>>();
-
 export function isSessionEnded(): boolean {
   return ended;
 }
 
-/** Runs `stop` when the session ends (an open stream closes itself); returns a function that forgets it. */
-export function onSessionEnded(stop: () => void): () => void {
-  onEnd.add(stop);
-  return () => onEnd.delete(stop);
-}
-
-function endSession(): void {
-  if (ended) return;
-  ended = true;
-  intervals.forEach((id) => clearInterval(id));
-  intervals.clear();
-  [...onEnd].forEach((stop) => stop());
-  onEnd.clear();
-  listeners.forEach((notify) => notify());
-}
-
-/** Remembers the first 401 any /api call gets, so the page says once that the session ended instead of every widget
- * showing its own error. Then every polling interval is cleared, every open stream closed, and an /api call makes no
- * request: it rejects with SessionEndedError. The calls already in flight when the 401 landed never settle, so
- * their widgets show no error of their own. */
+/** Remembers the first 401 any /api call gets. `App` then shows only the session-ended screen, which unmounts every
+ * poller and stream. Every /api call settles: one that gets 401, and any made after, rejects with SessionEndedError
+ * and (after the end) sends no request. */
 export function installSessionGuard(): void {
   if (installed) return;
   installed = true;
   const original = window.fetch.bind(window);
-  const setIntervalOriginal = window.setInterval.bind(window);
-  window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-    const id = setIntervalOriginal(handler, timeout, ...args);
-    if (!ended) intervals.add(id);
-    return id;
-  }) as typeof window.setInterval;
   window.fetch = async (input, init) => {
     if (!isApi(input)) return original(input, init);
     if (ended) throw new SessionEndedError();
     const res = await original(input, init);
     if (res.status !== 401) return res;
-    endSession();
-    return new Promise<Response>((_, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
-    });
+    if (!ended) {
+      ended = true;
+      listeners.forEach((notify) => notify());
+    }
+    throw new SessionEndedError();
   };
 }
 
@@ -80,6 +55,4 @@ export function resetSessionGuard(): void {
   ended = false;
   installed = false;
   listeners.clear();
-  onEnd.clear();
-  intervals.clear();
 }

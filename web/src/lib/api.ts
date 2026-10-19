@@ -1,4 +1,4 @@
-import { isSessionEnded, onSessionEnded, SessionEndedError } from "@/lib/session";
+import { isSessionEnded, SessionEndedError } from "@/lib/session";
 
 const API_BASE = "/api";
 
@@ -2034,7 +2034,6 @@ export function streamTaskActivity(
 ): () => void {
   const abortController = new AbortController();
 
-  const forget = onSessionEnded(() => abortController.abort());
 
   (async () => {
     try {
@@ -2076,7 +2075,6 @@ export function streamTaskActivity(
         console.error("Activity SSE error:", e);
       }
     } finally {
-      forget();
       onDone?.();
     }
   })();
@@ -3403,7 +3401,6 @@ export function streamSSE(
   onDone?: () => void,
 ): () => void {
   const abortController = new AbortController();
-  const forget = onSessionEnded(() => abortController.abort());
 
   (async () => {
     try {
@@ -3447,7 +3444,6 @@ export function streamSSE(
         console.error("SSE error:", e);
       }
     } finally {
-      forget();
       onDone?.();
     }
   })();

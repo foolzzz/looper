@@ -3,6 +3,7 @@ import { Menu } from "lucide-react";
 import { Sidebar, SIDEBAR_ID, type Page } from "@/components/sidebar";
 import { ClaudeCheckBanner } from "@/components/claude-check-banner";
 import { SessionEndedBanner } from "@/components/session-ended-banner";
+import { useSessionEnded } from "@/lib/session";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
@@ -78,6 +79,15 @@ function App() {
     window.location.hash = (sub ? `${p}/${sub}` : p) + (query ? `?${query}` : "");
   }, []);
 
+  // Once the session ended nothing else renders: unmounting the pages stops every poller and stream.
+  if (useSessionEnded()) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background p-4">
+        <SessionEndedBanner />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
       <Sidebar
@@ -122,7 +132,6 @@ function App() {
           </button>
           <span className="text-sm font-semibold tracking-tight">Looper</span>
         </header>
-        <SessionEndedBanner />
         <ClaudeCheckBanner />
         <main className="min-h-0 flex-1 overflow-hidden">
           <div className={route.page === "chat" ? "h-full" : "hidden"}>
