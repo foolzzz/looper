@@ -436,6 +436,41 @@ def test_a_profile_an_open_tasks_planner_chose_cannot_be_deleted_until_the_task_
     _run(test, monkeypatch)
 
 
+def test_a_profile_an_open_tasks_role_chose_cannot_be_deleted_and_a_racing_choice_is_not_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _profiles(pool)
+        assert (await _call("PUT", f"/api/projects/{project['id']}", {"planner_roles": "on"}))[0] == 200
+        planner = _Planner(_ops(), "task-a")
+        role = {"id": "tester", "kind": "work", "role_prompt": "test it", "profile_id": "agent-sonnet"}
+        assert (await planner("looper_task_role_set", role))["status"] == "ok"
+        status, refused = await _call("DELETE", "/api/agent-profiles/agent-sonnet")
+        assert status == 409 and "task-a" in refused["error"], refused
+        assert await pool.fetchval("SELECT profile_id FROM task_roles") == "agent-sonnet"
+
+        # A choice still being written holds the profile: the delete waits for it, then refuses.
+        await pool.execute("DELETE FROM task_roles")
+        async with pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            await conn.execute("INSERT INTO task_planner_profiles (task_id, role, profile_id) "
+                               "VALUES ('task-a', 'worker', 'agent-sonnet')")
+            deleting = asyncio.ensure_future(_call("DELETE", "/api/agent-profiles/agent-sonnet"))
+            await asyncio.sleep(0.5)
+            assert not deleting.done()
+            await tx.commit()
+            status, refused = await deleting
+        assert status == 409 and "task-a" in refused["error"], refused
+        assert await pool.fetchval("SELECT count(*) FROM task_planner_profiles") == 1
+
+    _run(test, monkeypatch)
+
+
 # --- looper_task_concurrency ---
 
 

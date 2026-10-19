@@ -125,7 +125,7 @@ task_roles                      一个任务角色的一个版本
 
 - `id` 的格式和保留名；`kind` 只能是 `work`、`review`，已有的编号不能换类型（「tester 是工作角色；要评审角色请用新编号」）；
 - `role_prompt` 非空；`role_prompt`、`harness` 各自不超过项目的 `role_text_max_chars`，超了返回上限和在哪里改；
-- `profile_id`：在项目的可选列表里（列表为空、或不在列表里，`forbidden`），能跑该类型对应的角色（和界面选 Profile 用同一个检查，`invalid`）；用户给本任务选过该类角色的 Profile 时 `forbidden`（「用户为本任务的 Worker 选了 X；请不带 profile_id 定义」）；不给 `profile_id` 总是可以的；
+- `profile_id`：在项目允许规划者选的范围内（列表非空时须在列表里，不在则 `forbidden`；列表为空则任何已登记的 Profile 都允许），能跑该类型对应的角色（和界面选 Profile 用同一个检查，`invalid`）；用户给本任务选过该类角色的 Profile 时 `forbidden`（「用户为本任务的 Worker 选了 X；请不带 profile_id 定义」）；不给 `profile_id` 总是可以的；
 - 项目没有开启（`planner_roles` 为 `off`）：两个工具不在这个规划者的 `tools/list` 里（`PlannerOps.listing` 按令牌的任务给列表），直接调用返回 `forbidden`；
 - 写操作只在 Looper 发起的回合里，规划者自己发起的一轮返回 `needs_user_turn`；任务结束后令牌失效（同 #155）。
 

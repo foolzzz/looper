@@ -189,13 +189,16 @@ async def profile_overrides(task_id: str, *, pool: asyncpg.Pool | None = None) -
 
 
 async def open_planner_choices(profile_id: str, statuses: list[str], *,
-                               pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """The tasks in one of ``statuses`` (not ended) whose Planner chose Agent Profile ``profile_id``, each
-    ``{id, title}``, oldest first."""
+                               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """The tasks in one of ``statuses`` (not ended) whose Planner chose Agent Profile ``profile_id``, for its
+    Workers and Reviewers (``task_planner_profiles``) or for a role it defined (``task_roles``), each ``{id,
+    title}``, oldest first."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT DISTINCT k.id, COALESCE(NULLIF(k.title, ''), left(k.requirement, 40)) AS title, k.created_at FROM task_planner_profiles c JOIN tasks k ON k.id = c.task_id "
-        "WHERE c.profile_id = $1 AND k.status = ANY($2::text[]) ORDER BY k.created_at, k.id", profile_id, statuses)
+        "SELECT DISTINCT k.id, COALESCE(NULLIF(k.title, ''), left(k.requirement, 40)) AS title, k.created_at "
+        "FROM tasks k WHERE k.status = ANY($2::text[]) AND (EXISTS (SELECT 1 FROM task_planner_profiles c "
+        "WHERE c.task_id = k.id AND c.profile_id = $1) OR EXISTS (SELECT 1 FROM task_roles r "
+        "WHERE r.task_id = k.id AND r.profile_id = $1)) ORDER BY k.created_at, k.id", profile_id, statuses)
     return [{"id": r["id"], "title": r["title"]} for r in rows]
 
 

@@ -2585,7 +2585,7 @@ profile (no restriction)"; `GET`/`PUT /api/projects/:id/allowed-profiles`). A
 pricier profile needs no confirmation: the setting is the consent, and the run
 budget caps still hold. A profile on a list cannot be deleted (its usage names
 the project); a profile a Planner chose in a task that has not ended cannot
-be deleted either (the refusal names the task: clear the choice or wait),
+be deleted either, whether it is a choice for the Workers and Reviewers or for a role the Planner defined (the refusal names the task: clear the choice or wait; checked and deleted under one lock on the profile row, so a choice being written is never dropped by the cascade),
 while the choices of ended tasks go with the profile.
 
 ### Roles a task's Planner defines
