@@ -8,14 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/foolzzz/looper/go/internal/agents/web"
 	"github.com/foolzzz/looper/go/internal/db"
 	"github.com/foolzzz/looper/go/internal/pyjson"
 )
@@ -111,6 +114,15 @@ type Server struct {
 	// LoginEnviron, when set, is the environment login probes and executable
 	// lookups use. Nil uses the process environment.
 	LoginEnviron func() []string
+	// Web is the chat stream adapter. Nil uses one adapter for this Server,
+	// created on the first chat save or event request. Status does not read it.
+	Web     *web.Adapter
+	webOnce sync.Once
+	webLazy *web.Adapter
+	// bodyReadTimeout bounds POST /api/chat/messages body reads. Zero uses
+	// Python's 30 second readexactly wait. Tests set a shorter deadline.
+	bodyReadTimeout time.Duration
+	chatStreams     chatStreams
 }
 
 // New builds a Server. A nil DB is reported as a database error, not a panic.
@@ -151,8 +163,8 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // It also serves GET /api/agent-settings and GET /api/projects/<id>/agent-settings.
 // It also serves GET /api/registry, project knowledge, documents, drafts, and owned skills.
 // It also serves GET /api/catalog, GET /api/catalog/<id>, and project installs.
-// GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
-// are not served here; /activity/stream is 404 until that route exists.
+// GET /api/chat/events is the chat SSE stream, by cid or by session.
+// GET /api/tasks/<id>/activity/stream is not served; that path is 404.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.handleStatus)
@@ -168,6 +180,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/chat/targets", s.handleChatTargets)
 	mux.HandleFunc("/api/chat/sessions", s.handleChatSessions)
 	mux.HandleFunc("/api/chat/messages", s.handleChatMessages)
+	mux.HandleFunc("GET /api/chat/events", s.handleChatEvents)
 	mux.HandleFunc("GET /api/agents/{id}/usage", s.handleAgentUsage)
 	mux.HandleFunc("GET /api/llm-records/{id}/events", s.handleRecordEvents)
 	mux.HandleFunc("GET /api/llm-records/{id}", s.handleGetRecord)
@@ -198,7 +211,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/schedules", s.handleSchedules)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/", s.handleRoot)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return &rootHandler{server: s, next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if reason := requestRefusal(s.bindHost(), r); reason != "" {
 			slog.Warn("refused request", "reason", reason, "remote", r.RemoteAddr)
 			writeJSON(w, http.StatusForbidden, errorBody{Error: reason})
@@ -215,7 +228,22 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		mux.ServeHTTP(w, withPythonPath(r, escaped))
-	})
+	})}
+}
+
+// rootHandler is Handler's concrete type. BindShutdown is how serve ties
+// hijacked chat sockets to http.Server.Shutdown and Close.
+type rootHandler struct {
+	server *Server
+	next   http.Handler
+}
+
+func (h *rootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.next.ServeHTTP(w, r)
+}
+
+func (h *rootHandler) BindShutdown(hs *http.Server, ln net.Listener) net.Listener {
+	return h.server.BindShutdown(hs, ln)
 }
 
 // bindHost is the address the process listens on. serve binds loopback only.

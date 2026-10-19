@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+
+event: answer.delta
+data: {"text": "你好 \"quote\"\nnext"}
+
+event: answer.final
+data: {"text": "你好 \"quote\"\nnext", "response": {"message": "你好 \"quote\"\nnext"}}
+

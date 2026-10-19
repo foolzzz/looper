@@ -89,11 +89,15 @@ func checkWebDir(dir string) error {
 
 // serveListener runs srv until ctx is cancelled, then shuts down within timeout.
 // Request contexts are not tied to ctx, so Shutdown can finish in-flight work.
+// Handler's BindShutdown closes hijacked chat sockets from Shutdown and Close.
 func serveListener(ctx context.Context, ln net.Listener, handler http.Handler, logger *slog.Logger, timeout time.Duration) error {
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}
+	if binder, ok := handler.(httpapi.ShutdownBinder); ok {
+		ln = binder.BindShutdown(srv, ln)
 	}
 	errCh := make(chan error, 1)
 	go func() {

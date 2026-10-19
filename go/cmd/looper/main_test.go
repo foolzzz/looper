@@ -455,6 +455,72 @@ func TestServeDrainsInFlightRequest(t *testing.T) {
 	}
 }
 
+type bindHandler struct {
+	called chan net.Listener
+}
+
+func (bindHandler) ServeHTTP(http.ResponseWriter, *http.Request) {}
+
+func (b bindHandler) BindShutdown(_ *http.Server, ln net.Listener) net.Listener {
+	wrapped := &closeListener{Listener: ln, closed: make(chan struct{})}
+	b.called <- wrapped
+	return wrapped
+}
+
+func TestServeListenerBindsShutdown(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := bindHandler{called: make(chan net.Listener, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- serveListener(ctx, ln, h, discardLogger(), time.Second)
+	}()
+	var wrapped *closeListener
+	select {
+	case got := <-h.called:
+		var ok bool
+		wrapped, ok = got.(*closeListener)
+		if !ok {
+			t.Fatalf("listener %T", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("BindShutdown was not called")
+	}
+	// Dial proves Serve is tracking the listener before Shutdown runs.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, dialErr := net.Dial("tcp", ln.Addr().String())
+		if dialErr == nil {
+			conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(dialErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-wrapped.closed:
+	case err := <-done:
+		t.Fatalf("shutdown returned before the bound listener closed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("bound listener was not closed")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not return")
+	}
+}
+
 func TestServeShutdownIsBounded(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
