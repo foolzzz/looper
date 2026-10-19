@@ -1761,7 +1761,7 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
         ["looper_schedules:ok"]]
     calls = {d: [turn["calls"] for turn in by_id[d]["turns"]] for d in (
         "schedule_create", "schedule_enable_declined", "schedule_modify", "schedule_run", "schedule_ambiguous",
-        "config_export", "hasty")}
+        "config_export", "hasty", "scheduler_settings", "schedule_timeout", "schedule_timeout_unnamed")}
     assert calls == {
         "schedule_create": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],
                             ["looper_schedules:ok"]],
@@ -1773,7 +1773,9 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
                                ["looper_schedules:ok"]],
         "config_export": [["looper_config_export:ok"], ["looper_config_export:error (forbidden)",
                                                         "looper_config_export:ok"]],
-        "hasty": [["looper_schedules:ok", "looper_schedules:error (conflict)"]]}
+        "hasty": [["looper_schedules:ok", "looper_schedules:error (conflict)"]],
+        "scheduler_settings": [["looper_settings:needs_confirmation"], ["looper_settings:ok"]],
+        "schedule_timeout": [["looper_schedules:ok"]], "schedule_timeout_unnamed": [["looper_schedules:ok"]]}
     assert by_id["hasty"]["outcome"] == "pass"
     assert by_id["wrong_one"]["problems"] == [f"{dialogs.PROJECT}'s {dialogs.SCHEDULE} ran, not {dialogs.OPS}'s"]
     assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]

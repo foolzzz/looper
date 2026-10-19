@@ -887,8 +887,10 @@ export interface ScheduleInfo {
   /** With overlap "parallel": how many runs may be in progress at once. */
   max_parallel_runs: number;
   catch_up: ScheduleCatchUp;
-  /** Null: no limit. */
-  run_timeout_seconds: number | null;
+  /** "default": follows the system default (Settings → Scheduler); null: no limit. */
+  run_timeout_seconds: number | "default" | null;
+  /** What a run that starts now gets (null: no limit). */
+  run_timeout_effective_seconds: number | null;
   /** Null: the project's task spend cap applies. */
   run_budget_usd: number | null;
   /** The Agent Profile of some of a run's roles; {} = none. */
@@ -933,6 +935,8 @@ export interface ScheduleLimits {
   /** The same for a schedule with a gate command. */
   min_interval_gated_seconds: number;
   default_timezone: string;
+  /** The system default run timeout, for a schedule that follows it. */
+  run_timeout_default_seconds: number | null;
   roles: TaskRole[];
   gate_command_max_chars: number;
   gate_timeout_default_seconds: number;
@@ -965,7 +969,8 @@ export interface ScheduleFields {
   overlap?: ScheduleOverlap;
   max_parallel_runs?: number;
   catch_up?: ScheduleCatchUp;
-  run_timeout_seconds?: number | null;
+  /** "default": the system default (a new schedule's); null: no limit. */
+  run_timeout_seconds?: number | "default" | null;
   run_budget_usd?: number | null;
   profile_overrides?: Partial<Record<TaskRole, string>>;
   /** Replaces the schedule's limits, a role left out being null; null clears both. */
@@ -980,6 +985,33 @@ export interface ScheduleFields {
 
 /** Any of a schedule's fields, plus turning it on or off. */
 export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
+
+/** One of the scheduler's system settings and where its value comes from. */
+export interface SchedulerSetting {
+  /** Null: no limit (the run timeout's built-in). */
+  value: number | null;
+  /** "setting" (saved in Settings), "env" (the deprecated variable) or "built-in". */
+  source: "setting" | "env" | "built-in";
+  built_in: number | null;
+  minimum: number;
+  maximum?: number;
+}
+
+export interface SchedulerSettings {
+  min_interval_seconds: SchedulerSetting & { gated_value: number };
+  run_timeout_seconds: SchedulerSetting;
+}
+
+/** Null goes back to the built-in value. */
+export type SchedulerSettingsUpdate = Partial<Record<keyof SchedulerSettings, number | null>>;
+
+export async function fetchSchedulerSettings(): Promise<SchedulerSettings> {
+  return scheduleCall<SchedulerSettings>("GET", `${API_BASE}/scheduler-settings`, "scheduler settings");
+}
+
+export async function updateSchedulerSettings(body: SchedulerSettingsUpdate): Promise<SchedulerSettings> {
+  return scheduleCall<SchedulerSettings>("PUT", `${API_BASE}/scheduler-settings`, "scheduler settings", body);
+}
 
 const scheduleUrl = (scheduleId: string) => `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}`;
 

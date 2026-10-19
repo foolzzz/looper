@@ -1604,6 +1604,25 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 -- S2: what the gate printed (clipped), and the earlier run whose unfinished input this run was given.
 ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS gate_output TEXT;
 ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS carried_from TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL;
+-- Once: a schedule's run timeout is typed. 'inherit' follows the system default (system_settings
+-- scheduler.run_timeout_seconds), 'seconds' is run_timeout_seconds, 'none' no limit. Schedules from before keep
+-- their meaning (a number stays that number, none stays no limit); new ones inherit. A run records the timeout it
+-- started with (schedule_runs.run_timeout_seconds, NULL: no limit), so changing a schedule or the default
+-- affects later runs only; runs in progress keep their schedule's number.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_run_timeout_mode') THEN
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS run_timeout_mode TEXT NOT NULL DEFAULT 'none'
+            CHECK (run_timeout_mode IN ('inherit', 'seconds', 'none'));
+        UPDATE schedules SET run_timeout_mode = 'seconds' WHERE run_timeout_seconds IS NOT NULL;
+        ALTER TABLE schedules ALTER COLUMN run_timeout_mode SET DEFAULT 'inherit';
+        ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS run_timeout_seconds INTEGER
+            CHECK (run_timeout_seconds > 0);
+        UPDATE schedule_runs r SET run_timeout_seconds = s.run_timeout_seconds
+            FROM schedules s WHERE s.id = r.schedule_id AND r.status IN ('queued', 'gating', 'running');
+        INSERT INTO schema_migrations (name) VALUES ('schedules_run_timeout_mode');
+    END IF;
+END $$;
 -- Once (S2): runs from before the gate and the daily budget accept their statuses ('gating' while the gate runs).
 DO $$
 BEGIN

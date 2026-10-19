@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...db import agent_setting_layers as db_layers, profile_registry as db_profiles, role_configs as db_roles
-from .. import agent_settings, projects, vault
+from .. import agent_settings, projects, schedules, scheduler_settings, vault
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, LayerValues, SettingsError
 from ..agent_settings import default_concurrency, index_layers, layer_update, resolve
 from ..project_execution import format_usd
@@ -154,9 +154,55 @@ def _shown_value(name: str, value: Any, profiles: Mapping[str, str]) -> str:
     return str(value)
 
 
+_SCHEDULER_WORDS = {"min_interval_seconds": "定时任务的最小间隔", "run_timeout_seconds": "定时任务的默认运行超时"}
+_SOURCE_WORDS = {"setting": "设置", "env": "旧环境变量", "built-in": "内置默认"}
+
+
+def _scheduler_values(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    values = arguments.get("scheduler")
+    if not isinstance(values, Mapping) or not values:
+        raise OpError(ErrorCode.INVALID, "scheduler: give min_interval_seconds and/or run_timeout_seconds (null: "
+                                         "the built-in)")
+    return dict(values)
+
+
+def _seconds(value: int | None) -> str:
+    return "不限" if value is None else f"{value} 秒"
+
+
+def _scheduler_shown(entry: Mapping[str, Any]) -> str:
+    return f"{_seconds(entry['value'])}（{_SOURCE_WORDS[entry['source']]}）"
+
+
+async def _scheduler_confirming(call: Call) -> str:
+    """What changing the scheduler's settings does, for the user to confirm."""
+    values = _scheduler_values(call.arguments)
+    try:
+        scheduler_settings.checked(values)
+    except ValueError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+    before = await scheduler_settings.settings_view()
+    lines = ["要修改定时任务的系统设置吗？"]
+    for name, value in values.items():
+        after = f"{value} 秒" if value is not None else f"内置默认 {_seconds(before[name]['built_in'])}"
+        lines.append(f"- {_SCHEDULER_WORDS[name]}：{_scheduler_shown(before[name])} → {after}")
+    lines.append("最小间隔决定定时任务最频繁能多久触发一次（已保存的不会重新检查）；默认运行超时只影响之后开始的运行。")
+    return "\n".join(lines)
+
+
+async def _scheduler_set(call: Call) -> dict[str, Any]:
+    values = _scheduler_values(call.arguments)
+    before = await scheduler_settings.settings_view()
+    after = await answered(schedules.update_scheduler_settings(values))
+    return {"changes": [{"setting": name, "before": _scheduler_shown(before[name]),
+                         "after": _scheduler_shown(after[name])} for name in values]}
+
+
 async def _confirming(call: Call) -> str | None:
     """What a change of the vault, the shared defaults, a limit, or one raising a spend cap does, for the user to confirm;
     None for any other call (``write``), or another action."""
+    if call.arguments["action"] == "scheduler":
+        return await _scheduler_confirming(call)
     if call.arguments["action"] == "knowledge_vault":
         values = _vault_values(call.arguments)
         try:
@@ -299,8 +345,10 @@ async def _view(call: Call) -> dict[str, Any]:
     if call.arguments.get("project") is None:
         view = await _read(_Place(Layer.SYSTEM, None, None))
         timeouts = {c["role"]: c["timeout_seconds"] for c in await db_roles.list_configs()}
+        scheduler = await scheduler_settings.settings_view()
         vault_view = await vault.settings_view()
-        return {"shared_defaults": _layer_set(view["system"]["values"], profiles),
+        return {"scheduler": {name: _scheduler_shown(entry) for name, entry in scheduler.items()},
+                "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
                                  "effective": _effective(entry["effective"]), "timeout_seconds": timeouts.get(role)}
                           for role, entry in view["roles"].items()},
@@ -347,6 +395,8 @@ async def _settings(call: Call) -> dict[str, Any]:
         return await _view(call)
     if action == "allowed_profiles":
         return await _allowed(call)
+    if action == "scheduler":
+        return await _scheduler_set(call)
     if action == "knowledge_vault":
         return {"knowledge_vault": await answered(vault.update_settings(_vault_values(call.arguments)))}
     return await _set(call)
@@ -358,14 +408,16 @@ TOOLS: tuple[Tool, ...] = (
         description="Settings agents inherit, a later layer winning: shared defaults → role → project → role in "
                     "project. view (with project: its layers and allowed profiles); set values on one layer (no role "
                     "nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners "
-                    "may choose (an empty list: they may choose any profile). knowledge_vault: the notes folder "
-                    "agents read in projects that turn it on, and the folders they may write (the user confirms "
-                    "first). The user confirms shared defaults, limits and higher spend caps first. Model and "
+                    "may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user "
+                    "confirms them first). knowledge_vault: the notes folder agents read in projects that turn it on, and "
+                    "the folders they may write (the user confirms first). The user confirms shared defaults, limits and "
+                    "higher spend caps first. Model and "
                     "effort are the profile's.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "knowledge_vault"]},
+                "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "scheduler",
+                                                      "knowledge_vault"]},
                 "knowledge_vault": {"type": "object", "description": "knowledge_vault: path (absolute), writable "
                                     "(folders in it), rules_file; {\"path\": null} turns it off."},
                 "project": {"type": "string", "minLength": 1, "description": "The project's name."},
@@ -388,6 +440,8 @@ TOOLS: tuple[Tool, ...] = (
                                                                         "a role a task's Planner defines ends with."},
                     },
                 },
+                "scheduler": {"type": "object", "description": "scheduler: min_interval_seconds (schedules' least "
+                                                              "gap), run_timeout_seconds (default); null: built-in."},
                 "add": {"type": "array", "description": "allowed_profiles: profile ids or names."},
                 "remove": {"type": "array", "description": "allowed_profiles: as add."},
             },

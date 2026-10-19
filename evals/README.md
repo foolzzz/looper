@@ -361,6 +361,9 @@ database, a disposable `looper serve`, and fake or real mode.
 | `schedule_planner_profile` | the user asks for a schedule whose Planner may be the cheaper `eval/light` profile (registered first): it is created disabled with only the Planner's profile set, and a later change of its time leaves the profile as it was |
 | `schedule_no_profiles` | the other direction: a schedule asked for with no word about profiles gets none (the project's apply) |
 | `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
+| `scheduler_settings` | the schedules' default run timeout (`looper_settings`, action `scheduler`) waits for the user's word in the next message, and 「确认。」 changes it to 1800 s |
+| `schedule_timeout` | a schedule created with a 20-minute run timeout the user names: it has 1200 s itself and the system default stays at the built-in value |
+| `schedule_timeout_unnamed` | the same schedule created with no timeout named: it follows the system default (`"default"`) |
 | `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |
 | `schedule_modify` | on an enabled schedule with a $1 daily cap: a new rule and a Worker limit change at once; raising the cap waits for the user's word in the next message, and a refusal leaves it |
 | `schedule_run` | on a schedule whose gate finds nothing (no task, no cost): asking when it runs next reads only; 「现在立即运行一次」 waits for the user's word in the next message and runs nothing, and 「确认。」 runs it once (`run`) |
