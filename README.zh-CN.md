@@ -71,10 +71,17 @@ docker run -d --name agentbox-postgres \
   -p 54329:5432 \
   postgres:16
 
-# 设置连接串
-export LOOPER_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"
-# 也可以写进 .env（已被 git 忽略）
+# 写运维配置文件（权限 0600，放在只有你能进入的目录里）
+mkdir -m 700 -p ~/.looper/ops
+cat > ~/.looper/ops/server.toml <<'EOF'
+[database]
+url = "postgresql://postgres:postgres@localhost:54329/loopx"
+EOF
+chmod 600 ~/.looper/ops/server.toml
 ```
+
+仍在用旧变量的安装（shell 或 `.env` 里的 `LOOPER_DATABASE_URL`，或 `LOOPX_DATABASE_URL`）可以在 `uv sync` 之后改跑一次
+`uv run looper config init-ops`。它按当前生效的值写成同一个文件，权限 0600，已有文件则拒绝覆盖。
 
 ### 2. 安装与构建
 
@@ -104,7 +111,7 @@ Settings 页的「Move to another machine」也能导出和导入。
 ### 4. 作为服务常驻
 
 ```bash
-uv run looper service install     # 可选 --port、--runtime-root、--label、--env NAME
+uv run looper service install     # 可选 --port、--runtime-root、--config、--label、--env NAME
 uv run looper service status      # 是否安装、是否运行、PID、上次退出、日志、GET /api/status
 uv run looper service restart     # 例如拉取新代码之后
 uv run looper service uninstall
@@ -112,43 +119,52 @@ uv run looper service uninstall
 
 `install` 让 `looper serve` 在后台常驻：macOS 上是 launchd LaunchAgent，Linux 上是 systemd 用户服务。登录后自动启动，
 崩溃后自动拉起，日志写到 `<runtime root>/logs/serve.log`。服务运行执行 `install` 的那个 `looper`（在 checkout 里就是
-`.venv/bin/looper`），工作目录是当前目录，所以 checkout 的 `.env` 照常生效。它从当前 shell 复制 `PATH`、语言和代理设置、
-`CLAUDE_CONFIG_DIR` 以及所有 `LOOPER_*`、`ANTHROPIC_*`、`LARK_*` 变量（其他变量用 `--env NAME` 加入），因此服务文件的权限是
-0600。改了配置再执行一次 `install` 即可生效。Linux 上执行 `loginctl enable-linger $USER` 后，未登录时也会运行。
+`.venv/bin/looper`），工作目录是当前目录，命令是 `looper serve --config <运维文件> --runtime-root <根目录>`，两者都是绝对路径。
+只有给 `install` 传了 `--port`，或以前的单元带了 `--port` 而文件里没写端口时，才加上 `--port`。没有运维文件，或某项设置仍来自环境变量时，
+安装会拒绝（先跑 `looper config init-ops`，再删掉该变量）。它复制 `PATH`、`TZ`、locale、代理和 CA 证书变量，运行时的目录和登录
+（`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`GROK_HOME`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、
+Anthropic 的模型变量、`CODEX_API_KEY`、`XAI_API_KEY`，以及 `child_env.RUNTIMES` 里的其余项）、`LOOPER_TELEGRAM_BOT_TOKEN`，
+以及每个 `--env NAME`。它不再复制全部 `LOOPER_*`、`LOOPX_*`、`ANTHROPIC_*`、`LARK_*`，报告里会点名没复制的变量。
+`--env` 指向运维变量时拒绝。再执行一次 `install` 会换掉旧单元，旧单元里带的数据库 URL 随之消失。单元文件仍是 0600，因为它可能含有 API key。
+改运维文件后重启服务才生效。Linux 上执行 `loginctl enable-linger $USER` 后，未登录时也会运行。
 
 ### 升级时的备份
 
 `looper serve` 每次启动都会应用 schema，升级可能删列、删表。schema 将要变化时，serve 先用 `pg_dump`
 备份到 `~/.looper/backups/`（runtime root 下的 `backups/`，每个库保留最近 5 份），并在日志里给出恢复方法；
-新建的空库不需要备份。它用 PATH 上的 `pg_dump` 或 `LOOPER_PG_DUMP` 指定的那个，主版本不能低于服务器
+新建的空库不需要备份。它用 PATH 上的 `pg_dump`，或运维文件里 `[backup] pg_dump` 指定的那个，主版本不能低于服务器
 （`looper doctor` 会检查；macOS 上 `brew install libpq`，再把 `$(brew --prefix libpq)/bin` 加进 PATH）。
-PostgreSQL 跑在 Docker 里时，可以改在容器里备份：
+PostgreSQL 跑在 Docker 里时，把 `[backup] command` 设成 argv 数组，在容器里备份（`{dbname}` 和 `{user}` 会填上）：
 
-```bash
-export LOOPER_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
+```toml
+[backup]
+command = ["docker", "exec", "agentbox-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
 ```
 
 没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出；`looper serve --skip-backup`
 不备份直接迁移，并记一条警告。回退时先停掉 Looper，把数据库重建为空库，用
-`pg_restore --no-owner --dbname "$LOOPER_DATABASE_URL" <文件>`（Docker 里用
+`pg_restore --no-owner --dbname '<database.url>' <文件>`（Docker 里用
 `docker exec -i agentbox-postgres pg_restore --no-owner -U postgres -d loopx < <文件>`）恢复，再运行旧版本。
-`looper service install` 会复制 `PATH` 和 `LOOPER_*` 变量，所以要在它之前设好。
+`[backup]` 写在运维文件里，改完重启即可；`service install` 不会把它们当成变量复制进去。
 
 ### 从 LoopX 升级
 
-Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
+Looper 在 v2.5.0 及以前叫 LoopX。改名本身不需要手动操作：
 
 - **命令：**`looper`。`loopx` 再保留一个版本：先打印一行弃用提示，再执行 `looper`。`install.sh`
   会先卸掉同一工具装的旧 `loopx` 包（数据不动）。
 - **数据目录：**`~/.looper`。第一次运行 `looper serve` 或 `looper service install` 时把 `~/.loopx`
   移过去（一次重命名，不复制也不删除任何文件），并在原处留一个指向它的链接，保留一个版本。两个目录都在时用
   `~/.looper` 并记一条警告。
-- **环境变量：**`LOOPER_*`。`LOOPER_*` 没设时仍读对应的 `LOOPX_*`，并给出警告；请在 shell 和 `.env` 里改名。
+- **环境变量：**旧的部署变量再读一个版本（`LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
+  `LOOPER_BACKUP_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名），先看环境变量，再看 `.env`，
+  每次使用都按变量名警告。`looper config init-ops` 把它们写进运维文件。其余的 `LOOPX_*` 在对应 `LOOPER_*` 没设时，
+  `looper.env` 仍会读，并警告，再保留一个版本。
 - **服务：**`com.looper.serve`。`looper service install` 会先停掉并删除旧的 `com.loopx.serve`。
 - **配置文件**：导出写 `looper-config/v2`；以前导出的 `looper-config/v1`、`loopx-config/v1` 文件仍然能导入。
-- **不变的**：默认数据库仍叫 `loopx`（`postgresql://localhost:5432/loopx`），里面的数据（比如你自己写的
-  harness）不会被改写；发布 tag 和历史保留原名；[NOTICE](NOTICE) 保留对上游 LoopX 的署名。因为 `schema.sql`
-  有变化，升级后第一次启动会照常先备份。
+- **不变的**：已有的数据库保持原名（常常是 `loopx`），里面的数据（比如你自己写的 harness）不会被改写。数据库 URL
+  不再有默认值；什么都没配时，`looper config init-ops` 才写入 `postgresql://localhost:5432/loopx`，并说明这一点。
+  发布 tag 和历史保留原名；[NOTICE](NOTICE) 保留对上游 LoopX 的署名。因为 `schema.sql` 有变化，升级后第一次启动会照常先备份。
 
 ## 架构
 
@@ -218,17 +234,53 @@ API 只响应操作者：在这台机器的浏览器中打开控制台会自动�
 
 ## 配置
 
-### 环境变量
+### 运维配置文件
 
-| 变量 | 必需 | 说明 |
+部署设置写在 `<runtime root>/ops/server.toml`（默认 `~/.looper/ops/server.toml`）。`looper serve`、`doctor`、
+`config export`、`config import`、`config init-ops` 和 `service install` 的 `--config /path` 指向别的文件。
+改完文件后重启服务才生效。Looper 原子写入。文件必须是普通文件（不能是符号链接），属主是你，权限 0600，
+所在目录也属你、权限 0700。不做展开：没有变量插值，没有 `~`，没有 include。未知的键、类型不对或值不合法会让命令停下；
+报错点名这个键，不显示值。
+
+| 键 | 必需 | 含义 |
 |---|---|---|
-| `LOOPER_DATABASE_URL` | 是 | PostgreSQL 连接串 |
-| `LOOPER_PUBLIC_URL` | 否 | 用户打开控制台时用的地址（例如 `https://looper.example.com`），用于任务结束通知和定时任务消息发到 Telegram、飞书里的链接；不设置时用服务自己的 `http://<host>:<port>`。值无效时 `looper serve` 不会启动 |
-| `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` | 否 | 只用于测试和验证：定时任务两次触发之间的最小间隔（默认 300 秒），启动时读取 |
+| `database.url` | 是 | PostgreSQL 连接串。没有它时，`looper serve`、`doctor` 和 `config import`、`export` 不会启动，并提示运行 `looper config init-ops` 或编辑该文件 |
+| `server.host` | 否 | 绑定地址（默认 `127.0.0.1`） |
+| `server.port` | 否 | 端口（默认 8767） |
+| `server.public_url` | 否 | 用户打开控制台时用的地址（例如 `https://looper.example.com`），用于任务结束通知和定时任务消息发到 Telegram、飞书里的链接；不设置时用服务自己的 `http://<host>:<port>`。值无效时 `looper serve` 不会启动 |
+| `server.log_level` | 否 | `debug`、`info`、`warning` 或 `error`（默认 `info`） |
+| `backup.pg_dump` | 否 | 不用 PATH 上那个时，改用这个 `pg_dump`；主版本不能低于服务器 |
+| `backup.command` | 否 | 一个 argv 数组，它的标准输出就是备份；`{dbname}` 和 `{user}` 从数据库 URL 填入 |
+| `operator_notes.root` | 否 | 操作者的 Claude Code 存放项目笔记的目录，必须是绝对路径 |
 
-`claude` 进程继承服务的环境变量，所以 Claude CLI 的认证方式和你在 shell 里一样：已登录，或按它自己的文档使用 API key。
+每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、
+文件、然后仅本版本仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
+`LOOPER_BACKUP_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名）、再是 checkout 的 `.env` 里的同名、
+最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值；下一版删除它们。
+runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），
+否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，
+其余的键（例如某个渠道 token 变量）会被忽略，并在警告里点名。
 
-渠道凭据不写进源码：Telegram 的 bot token 在 Settings 里填写或放在环境变量里，飞书凭据由 `lark-cli` 保管（见[渠道](#渠道)）。密钥放在 `.env` 里（已被 git 忽略，从仓库根目录读取），不要写进源码。
+已有安装迁过来：跑一次 `looper config init-ops`。它按当前生效的值写成文件，权限 0600，已有文件则拒绝覆盖。
+什么都没配时，写入旧的默认值 `postgresql://localhost:5432/loopx` 并说明。然后从 shell 和 `.env` 里删掉旧变量；
+用了服务的话再跑一次 `looper service install`。在此之前，`looper serve` 仍按这些变量工作，并带上警告。
+
+`LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` 不是运维设置。它只用于测试和验证：定时任务两次触发之间的最小间隔（默认 300 秒），
+`looper serve` 启动时读取。
+
+**子进程。** 服务启动的每个进程（agent 的运行时和它拉起的 MCP 服务器、定时任务的前置检查、探测，以及 git、ps、lark-cli 这些辅助程序）
+都从服务环境的一份允许名单起步（`looper/child_env.py`：系统路径、locale、XDG、SSH agent、git 身份和配置、代理和证书，
+以及运行时自己的登录变量），再加上 Looper 为这个子进程设置的项（provider 绑定、agent 设置里的变量、MCP 令牌、gate 的运行变量）。
+数据库 URL（新旧名字都算）、`PGPASSWORD`、任何 `LOOPER_*` 或 `LOOPX_*`，以及其他变量，都不传入。
+数据库备份用自己的环境：上述名单，加上 libpq 的 `PG*` 变量、Docker 的变量，以及从 URL 取出、交给 `pg_dump` 的 `PGPASSWORD`。
+agent 还需要别的变量时，从它的设置里取（Settings，或项目层）。允许名单里的登录变量，就是本机已登录的 CLI，
+或通过这些变量给了 API key 的 CLI，仍能认证的原因。
+
+这把秘密挡在子进程的环境之外。它不是沙箱。agent 以服务的用户运行，所以有 shell 的 agent 仍能读这个用户能读的文件：
+运维文件、操作者令牌、`.env`、服务单元。要隔开，需要单独的系统用户或沙箱，这一版没有做。
+
+渠道凭据不写进源码。Telegram 的 bot token 填在它的 Settings 字段里（存在数据库中），或放在服务的环境里
+（`looper service install --env NAME`）；飞书凭据由 `lark-cli` 保管（见[渠道](#渠道)）。
 
 ### 渠道
 
@@ -243,7 +295,7 @@ API 只响应操作者：在这台机器的浏览器中打开控制台会自动�
 - 飞书凭据由 `lark-cli` 保管；渠道的 `profile`（或 lark-cli 当前的 profile）决定以哪个应用的身份收发（`lark-cli whoami`）。open_id 因应用而异，所以白名单记下它是为哪个应用建的，换到别的应用后不启动，直到重建名单。
 - Manager 处理名单上发送者的消息时，机器人先给这条消息加一个表情（Telegram 私聊里是 👀，飞书里是「Get」），再用一条原地编辑的状态消息显示进展；回答和任务进度各自单独发消息。
 - 在飞书群里，机器人只回答名单上的发送者 @ 它的消息，回复那条消息，并把任务进度和结束通知发到群里、@ 发起人。其他群消息一律忽略。
-- 在 Telegram 或飞书里发起的任务完成或失败时，会在同一个聊天里通知，并附任务链接（见 `LOOPER_PUBLIC_URL`）。Telegram 私聊和飞书的对话会入库，在 Chat 页只读显示，并带进 Manager 新会话的续接简报。
+- 在 Telegram 或飞书里发起的任务完成或失败时，会在同一个聊天里通知，并附任务链接（见 `server.public_url`）。Telegram 私聊和飞书的对话会入库，在 Chat 页只读显示，并带进 Manager 新会话的续接简报。
 - 在网页对话、飞书或 Telegram 里单独发送 `/new`，Manager 就开始新会话：下一条消息（不论来自哪个渠道）从全新的上下文开始。网页对话的 **New session** 按钮发的就是它。运行中的任务不受影响。
 - 渠道启动失败会记日志，控制台照常运行。
 
