@@ -3400,6 +3400,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
+| `/api/channels/lark_bot/status` | GET | The Lark (bot token) channel as the platform sees its saved settings: the same fields as `/api/channels/lark/status` (`bot.profile` is empty); `problem` also says no `app_id` or no app secret is set |
+| `/api/channels/lark_bot/people` | GET | `?q=` a name or an email (1–50 characters): `people` as above and `complete` (false when the bounded directory scan, at most 40 requests, ended before reading every department); an email is looked up exactly; 400 for a bad query, 502 when the platform refuses |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
 ## Configuration
@@ -3505,6 +3507,19 @@ restart.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
   `/help` from an unlisted sender get no answer either.
+- **Lark (bot token)** (`lark_bot.py`, `lark_bot_settings.py`): an independent
+  `lark_bot` channel (`channel-lark_bot`), disabled by default, using the same
+  adapter as `lark` through `LarkTransport`. Its configuration holds `app_id`,
+  `domain` (`feishu` or `lark`), and its own app-bound `allowed_open_ids`;
+  `channel_secrets.bot_token` holds the app secret and APIs expose only
+  `has_bot_token`. It sends through the open platform and receives over its
+  long connection, restarting after 10 s when a connection stops. Direct
+  messages, group @-mentions, replies, statuses, notices, schedules and gates
+  follow the Lark rules below. The backend exposes
+  `GET /api/channels/lark_bot/status` and `GET /api/channels/lark_bot/people?q=`,
+  including sender names and rejected senders, and Settings → Channels has its
+  card (app id, domain, app secret, allowlist, search, refused senders). No
+  lark-cli binary or login is required.
 - **Lark (lark-cli)** (`looper/agents/channels/lark.py`, `lark_cli.py`,
   `lark_settings.py`): the Manager in Lark direct messages and group chats,
   through `lark-cli`
