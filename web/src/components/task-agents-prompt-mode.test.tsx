@@ -30,7 +30,7 @@ describe("a task's system prompt mode", () => {
 
   it("is shown for Claude Code roles only, saves a choice and resets the task's own", async () => {
     const bodies: unknown[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "PUT") {
         bodies.push(JSON.parse(String(init.body)));
         return new Response(JSON.stringify({ agents: agents() }), { status: 200 });
