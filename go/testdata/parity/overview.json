@@ -89,13 +89,13 @@
     "attention": 4,
     "cancelled": 1,
     "completed": 41,
-    "in_progress": 8,
+    "in_progress": 10,
     "needs_you": 1,
     "other": 1,
     "other_statuses": {
       "archived": 1
     },
     "ready": 3,
-    "total": 59
+    "total": 61
   }
 }

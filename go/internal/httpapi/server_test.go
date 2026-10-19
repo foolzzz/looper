@@ -333,6 +333,15 @@ func TestStaticAndSPA(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("INDEX"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Root app.js is a different file from assets/app.js. Python's pathlib
+	// does not lexically cancel ".." before the lookup: /missing/../app.js is
+	// not this file when missing/ is absent.
+	if err := os.WriteFile(filepath.Join(root, "app.js"), []byte("APP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notdir"), []byte("FILE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(filepath.Join(root, "assets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -356,6 +365,27 @@ func TestStaticAndSPA(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("assets", filepath.Join(root, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	// deep -> assets/deep. /deep/../app.js is assets/app.js once the symlink
+	// is followed. Cancelling ".." against the URL name would serve root app.js.
+	if err := os.Mkdir(filepath.Join(root, "assets", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "assets", "deep", "note.txt"), []byte("NOTE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("assets", "deep"), filepath.Join(root, "deep")); err != nil {
+		t.Fatal(err)
+	}
+	// assets/out -> outside, and outside/app.js exists. /deep/../out/app.js
+	// is that file once deep is followed: ".." applies to assets/deep, so the
+	// next component is assets/out. Cancelling ".." against the URL name
+	// "deep" never looks at assets/out and the index page is served.
+	if err := os.WriteFile(filepath.Join(outside, "app.js"), []byte("OUT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "assets", "out")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "plain"), []byte("PLAIN"), 0o644); err != nil {
@@ -409,6 +439,20 @@ func TestStaticAndSPA(t *testing.T) {
 		{name: "dotdot is the cleaned static file", h: h, method: http.MethodGet, path: "/../secret.txt", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "dot segment is the same file", h: h, method: http.MethodGet, path: "/./index.html", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "dot segment asset", h: h, method: http.MethodGet, path: "/assets/./app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
+		{name: "dot segment root file", h: h, method: http.MethodGet, path: "/./app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
+		{name: "repeated dot segment", h: h, method: http.MethodGet, path: "/././app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
+		{name: "duplicate slash", h: h, method: http.MethodGet, path: "/assets//app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
+		{name: "parent through existing dir", h: h, method: http.MethodGet, path: "/assets/../app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
+		{name: "parent through inside symlink", h: h, method: http.MethodGet, path: "/inside/../app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
+		{name: "nested symlink file", h: h, method: http.MethodGet, path: "/deep/note.txt", wantStatus: http.StatusOK, wantBody: "NOTE", wantType: "text/plain"},
+		{name: "parent through nested symlink", h: h, method: http.MethodGet, path: "/deep/../app.js", wantStatus: http.StatusOK, wantBody: "JS", wantType: "javascript"},
+		{name: "parent through nested symlink into outside link", h: h, method: http.MethodGet, path: "/deep/../out/app.js", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
+		{name: "two parents through nested symlink", h: h, method: http.MethodGet, path: "/deep/../../app.js", wantStatus: http.StatusOK, wantBody: "APP", wantType: "javascript"},
+		{name: "three parents through nested symlink", h: h, method: http.MethodGet, path: "/deep/../../../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
+		{name: "parent through missing dir falls back", h: h, method: http.MethodGet, path: "/missing/../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
+		{name: "parent through missing nested dir falls back", h: h, method: http.MethodGet, path: "/assets/foo/../../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
+		{name: "parent through a file falls back", h: h, method: http.MethodGet, path: "/notdir/../app.js", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
+		{name: "parent through escaping symlink", h: h, method: http.MethodGet, path: "/link/../app.js", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
 		{name: "collapse into api is still static", h: h, method: http.MethodGet, path: "/foo/../api/status", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "cleaned missing path falls back", h: h, method: http.MethodGet, path: "/secret.txt", wantStatus: http.StatusOK, wantBody: "INDEX", wantType: "text/html"},
 		{name: "no index", h: emptyH, method: http.MethodGet, path: "/missing", wantStatus: http.StatusNotFound, jsonErr: `{"error":"not found"}`},
@@ -466,5 +510,85 @@ func TestStaticAndSPA(t *testing.T) {
 	emptyH.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK || rr.Body.String() != "ONLY" {
 		t.Fatalf("status %d body %q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestStaticEscapingIndexFallbackIsNotFound(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.js"), []byte("APP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := New("dev", &fakeDB{}, root).Handler()
+	for _, path := range []string{"/missing", "/", "/tasks/1"} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+			t.Fatalf("%s status %d body %s", path, rr.Code, rr.Body.String())
+		}
+		if strings.Contains(rr.Body.String(), "SECRET") {
+			t.Fatal("response contained a file from outside the web dir")
+		}
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/app.js"))
+	if rr.Code != http.StatusOK || rr.Body.String() != "APP" {
+		t.Fatalf("app.js status %d body %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestStaticDotDotOutsideExistingFile(t *testing.T) {
+	// web/../pyproject.toml is a real file next to the web root. Python
+	// stats that path and answers 404. A lexical miss would serve index.html.
+	// web/../web/app.js walks back inside and is served. os.Root still opens
+	// only that inside file: the outside body must not appear.
+	parent := t.TempDir()
+	root := filepath.Join(parent, "web")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "PYPROJECT-SECRET"
+	if err := os.WriteFile(filepath.Join(parent, "pyproject.toml"), []byte(secret), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("INDEX"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.js"), []byte("APP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := New("dev", &fakeDB{}, root).Handler()
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "parent file exists", path: "/../pyproject.toml", wantStatus: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "parent file through existing dir", path: "/assets/../../pyproject.toml", wantStatus: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "parent file missing", path: "/../no-such-file", wantStatus: http.StatusOK, wantBody: "INDEX"},
+		{name: "dotdot walks back inside", path: "/../web/app.js", wantStatus: http.StatusOK, wantBody: "APP"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, loopbackRequest(http.MethodGet, tt.path))
+			if rr.Code != tt.wantStatus || rr.Body.String() != tt.wantBody {
+				t.Fatalf("status %d body %q, want %d %q", rr.Code, rr.Body.String(), tt.wantStatus, tt.wantBody)
+			}
+			if strings.Contains(rr.Body.String(), secret) || strings.Contains(rr.Body.String(), parent) {
+				t.Fatalf("response disclosed an outside path or file: %q", rr.Body.String())
+			}
+		})
 	}
 }

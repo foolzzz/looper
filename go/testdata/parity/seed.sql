@@ -18,7 +18,8 @@
 -- is SQL lower(name), so the blank name is first.
 -- task-zsame0001 and task-asame0001 share created_at. limit=2 returns z then
 -- a (id DESC) and next_before is task-asame0001. Every task status is present.
--- Fifty-nine tasks, more than the default page of 50, so GET /api/tasks
+-- Fifty-nine tasks on the pages above, plus two 2018 schedule-cost tasks
+-- below that stay off the default page of 50, so GET /api/tasks still
 -- sets next_before. The two newest stay z then a. task-sepname001 and
 -- task-sepfall001 are stopped tasks whose titles use U+001C–U+001F, which
 -- Python counts as whitespace. Forty completed fillers on Beta are dated in
@@ -159,9 +160,39 @@ SELECT
     timestamptz '2019-12-31 00:00:00+00' - (n - 1) * interval '1 day'
 FROM generate_series(1, 40) AS n;
 
+-- Dated in 2018 so they stay off the default task page. Their schedule runs
+-- have no stored cost. task-schedcost1's planner 0.1 and worker 0.2 are
+-- separate groups and must add to 0.3. task-schedzero1 has no llm rows, so
+-- the run's cost is 0.0. Neither task carries schedule_id, so the
+-- schedule_id task filter is unchanged. The Manager's 9 is not in the sum.
+INSERT INTO tasks (
+    id, requirement, project_id, status, title, created_at, updated_at
+) VALUES
+(
+    'task-schedcost1', 'cost groups', 'proj-alpha0001', 'running', 'Split cost',
+    '2018-01-03T00:00:00Z', '2018-01-03T00:00:00Z'
+),
+(
+    'task-schedzero1', 'no cost rows', 'proj-alpha0001', 'running', 'Zero cost',
+    '2018-01-04T00:00:00Z', '2018-01-04T00:00:00Z'
+);
+
+INSERT INTO llm_records (agent_id, task_id, status, cost_usd, model, created_at) VALUES
+('planner-schedcost1', 'task-schedcost1', 'completed', 0.1, 'plan-a', '2018-01-03T00:00:00Z'),
+('worker-schedcost1', 'task-schedcost1', 'completed', 0.2, 'work-b', '2018-01-03T00:00:01Z'),
+('manager', 'task-schedcost1', 'completed', 9, 'mgr-skip', '2018-01-03T00:00:02Z');
+
 INSERT INTO schedule_runs (
     id, schedule_id, scheduled_for, trigger, status, firings, created_at
 ) VALUES
+(
+    'run-costgroups', 'sched-nightly01', '2020-05-03T09:00:00Z', 'scheduled',
+    'running', 1, '2020-05-03T09:00:00Z'
+),
+(
+    'run-costempty', 'sched-nightly01', '2020-05-03T08:00:00Z', 'scheduled',
+    'running', 1, '2020-05-03T08:00:00Z'
+),
 (
     'run-skipbudget1', 'sched-nightly01', '2020-05-01T09:00:00Z', 'scheduled',
     'skipped_budget', 3, '2020-05-01T09:00:00Z'
@@ -177,6 +208,29 @@ INSERT INTO schedule_runs (
 (
     'run-skipbudgtdy', 'sched-nightly01', '2026-06-15T12:00:01Z', 'scheduled',
     'skipped_budget', 1, '2026-06-15T12:00:01Z'
+);
+
+-- cost_usd stays null. The API fills it from the task: 0.3 and 0.0.
+UPDATE schedule_runs SET task_id = 'task-schedcost1', fired_at = '2020-05-03T09:00:00Z' WHERE id = 'run-costgroups';
+UPDATE schedule_runs SET task_id = 'task-schedzero1', fired_at = '2020-05-03T08:00:00Z' WHERE id = 'run-costempty';
+
+-- spent_today_usd is this harness day's cost. run-spendtoday fires at
+-- 2026-06-15T12:00:00Z, on or after local midnight for UTC-12 through UTC+14
+-- (exactly midnight in UTC-12, so fired_at >= midnight keeps it) and costs
+-- 1.5. run-premidnight fires at 2026-06-14T09:00:00Z, before that midnight
+-- in every one of those zones, and its 4 must not be added. A reader that
+-- returns zero, or one that ignores the date, will not match. created_at
+-- stays in 2020 so neither run becomes last_run.
+INSERT INTO schedule_runs (
+    id, schedule_id, scheduled_for, fired_at, trigger, status, cost_usd, created_at
+) VALUES
+(
+    'run-spendtoday', 'sched-nightly01', '2026-06-15T12:00:00Z', '2026-06-15T12:00:00Z',
+    'scheduled', 'completed', 1.5, '2020-05-04T00:00:00Z'
+),
+(
+    'run-premidnight', 'sched-nightly01', '2026-06-14T09:00:00Z', '2026-06-14T09:00:00Z',
+    'scheduled', 'completed', 4, '2020-04-30T00:00:00Z'
 );
 
 INSERT INTO llm_records (agent_id, task_id, status, cost_usd, metadata, created_at) VALUES
@@ -581,6 +635,25 @@ INSERT INTO chat_messages (
 (3, 'planner-task-rich00001', 'p1', 'user', 'planner only', 'web', '2020-07-01T00:00:00Z', NULL, NULL),
 (4, 'sess-lark-1', 'l1', 'user', 'from lark', 'lark', '2020-06-02T00:00:00Z', NULL, NULL),
 (5, 'sess-lark-1', 'l2', 'assistant', repeat('x', 250), 'lark', '2020-06-02T00:02:00Z', 'send_failed', 'timeout');
+
+-- Three outbox rows for sched-nightly01. The list is created_at DESC, id DESC.
+-- The two June 2 rows share a timestamp; tie00000a is inserted first so an
+-- insertion-order tie would put it ahead of tie00000b. limit=1 is the newest.
+INSERT INTO schedule_notifications (
+    id, schedule_id, run_id, kind, channel, chat, text, status, error, created_at
+) VALUES
+(
+    'note-tie00000a', 'sched-nightly01', NULL, 'stale_alert',
+    NULL, NULL, 'no chat', 'dashboard', NULL, '2020-06-02T00:00:00Z'
+),
+(
+    'note-tie00000b', 'sched-nightly01', NULL, 'failures_alert',
+    'lark', 'oc_nightly', 'still failing', 'failed', 'timeout', '2020-06-02T00:00:00Z'
+),
+(
+    'note-newest001', 'sched-nightly01', 'run-skipbudgtdy', 'run',
+    'lark', 'oc_nightly', 'nightly finished', 'sent', NULL, '2020-06-03T00:00:00Z'
+);
 
 SELECT setval('chat_messages_id_seq', (SELECT MAX(id) FROM chat_messages));
 

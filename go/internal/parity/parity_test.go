@@ -27,22 +27,27 @@ import (
 //   - The value of a key in volatileTimes (since) becomes "<time>" and is not
 //     walked. Those are generated when the request runs. Seeded timestamps
 //     stay as written. volatileTimes is _VOLATILE_TIMES in make_goldens.py.
-//   - The value of a key named uptime, pid, or pids becomes "<volatile>" and is
-//     not walked. A string version (a build id) becomes "<volatile>" too. A
+//   - The value of a key named uptime, pid, pids, or default_timezone becomes
+//     "<volatile>" and is not walked. default_timezone is this machine's IANA
+//     zone. A string version (a build id) becomes "<volatile>" too. A
 //     numeric version, such as a requirement or role version, is compared.
 //     implementation and db are compared as written.
 //   - Object key order is not significant. Numbers compare by exact value, so 0
 //     and 0.0 match, and two integers above 2^53 stay distinct. Comparison
 //     remarshals both documents with encoding/json, which sorts object keys.
 //
-// The overview clock is local noon on 2026-06-15, the same day make_goldens.py
-// freezes. Seed rows at 2026-06-15T12:00:00Z count as today. Rows in 2020 do not.
+// The overview clock and the schedule clock are local noon on 2026-06-15, the
+// same day make_goldens.py freezes. Seed rows at 2026-06-15T12:00:00Z count as
+// today. Rows in 2020 do not. A schedule run at 2026-06-14T09:00:00Z is before
+// that local midnight everywhere from UTC-12 through UTC+14.
 //
 // goldenCases is the same list make_goldens.py writes.
 var (
 	volatileTimes = map[string]bool{"since": true}
-	volatileKeys  = map[string]bool{"uptime": true, "pid": true, "pids": true}
-	goldenCases   = []struct {
+	volatileKeys  = map[string]bool{
+		"uptime": true, "pid": true, "pids": true, "default_timezone": true,
+	}
+	goldenCases = []struct {
 		name   string
 		path   string
 		status int
@@ -148,6 +153,41 @@ var (
 		{"room-limit-circled", "/api/tasks/task-rich00001/room?limit=%E2%91%A1", http.StatusInternalServerError},
 		{"room-after-superscript", "/api/tasks/task-rich00001/room?after=%C2%B2", http.StatusInternalServerError},
 		{"room-after-circled", "/api/tasks/task-rich00001/room?after=%E2%91%A1", http.StatusInternalServerError},
+		{"workspace-missing-project", "/api/workspaces/check?project_id=proj-missing01", http.StatusNotFound},
+		{"workspace-missing-mode", "/api/workspaces/check?project_id=proj-missing01&mode=nope", http.StatusNotFound},
+		{"workspace-no-dir", "/api/workspaces/check", http.StatusBadRequest},
+		{"workspace-blank-project", "/api/workspaces/check?project_id=proj-blank0001", http.StatusBadRequest},
+		{"workspace-relative", "/api/workspaces/check?dir=relative", http.StatusBadRequest},
+		{"workspace-relative-mode", "/api/workspaces/check?dir=rel&mode=nope", http.StatusBadRequest},
+		{"workspace-bad-mode", "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=nope", http.StatusBadRequest},
+		{"workspace-base-inplace", "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=in_place&base=main", http.StatusBadRequest},
+		{"workspace-absent", "/api/workspaces/check?dir=/loopgo-parity-absent-workspace", http.StatusOK},
+		{"workspace-absent-asked", "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=worktree", http.StatusOK},
+		{"workspace-absent-base", "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=worktree&base=main", http.StatusOK},
+		{"workspace-absent-inplace", "/api/workspaces/check?dir=/loopgo-parity-absent-workspace&mode=in_place", http.StatusOK},
+		{"workspace-absent-project", "/api/workspaces/check?project_id=proj-alpha0001&dir=/loopgo-parity-absent-workspace", http.StatusOK},
+		{"schedules-project", "/api/projects/proj-alpha0001/schedules", http.StatusOK},
+		{"schedules-project-blank", "/api/projects/proj-blank0001/schedules", http.StatusOK},
+		{"schedules-project-missing", "/api/projects/proj-missing01/schedules", http.StatusNotFound},
+		{"schedules", "/api/schedules", http.StatusOK},
+		{"schedule", "/api/schedules/sched-nightly01", http.StatusOK},
+		{"schedule-missing", "/api/schedules/sched-missing01", http.StatusNotFound},
+		{"schedule-runs", "/api/schedules/sched-nightly01/runs", http.StatusOK},
+		{"schedule-runs-limit", "/api/schedules/sched-nightly01/runs?limit=1", http.StatusOK},
+		{"schedule-runs-hide", "/api/schedules/sched-nightly01/runs?skips=hide", http.StatusOK},
+		{"schedule-runs-before", "/api/schedules/sched-nightly01/runs?before=run-skipbudgtdy", http.StatusOK},
+		{"schedule-runs-bad-limit", "/api/schedules/sched-nightly01/runs?limit=0", http.StatusBadRequest},
+		{"schedule-runs-bad-skips", "/api/schedules/sched-nightly01/runs?skips=nope", http.StatusBadRequest},
+		{"schedule-runs-bad-before", "/api/schedules/sched-nightly01/runs?before=run-nope", http.StatusBadRequest},
+		{"schedule-runs-missing", "/api/schedules/sched-missing01/runs", http.StatusNotFound},
+		{"schedule-runs-limit-digits", "/api/schedules/sched-nightly01/runs?limit=" + strings.Repeat("9", 4300), http.StatusBadRequest},
+		{"schedule-runs-limit-superscript", "/api/schedules/sched-nightly01/runs?limit=%C2%B2", http.StatusInternalServerError},
+		{"schedule-runs-limit-overflow", "/api/schedules/sched-nightly01/runs?limit=" + strings.Repeat("9", 4301), http.StatusInternalServerError},
+		{"schedule-notifications", "/api/schedules/sched-nightly01/notifications", http.StatusOK},
+		{"schedule-notifications-limit", "/api/schedules/sched-nightly01/notifications?limit=1", http.StatusOK},
+		{"schedule-notifications-missing", "/api/schedules/sched-missing01/notifications", http.StatusNotFound},
+		{"schedule-notifications-bad-limit", "/api/schedules/sched-nightly01/notifications?limit=0", http.StatusBadRequest},
+		{"schedule-notifications-superscript", "/api/schedules/sched-nightly01/notifications?limit=%C2%B2", http.StatusInternalServerError},
 	}
 )
 
@@ -183,12 +223,19 @@ func TestGoldenParity(t *testing.T) {
 	}
 	t.Cleanup(func() { sqlDB.Close() })
 
+	// A non-empty root. An empty value is falsy and would read ~/.claude.
+	t.Setenv("LOOPER_OPERATOR_NOTES_ROOT", t.TempDir())
+
 	api := httpapi.New("parity-test", db.Probe{DB: sqlDB}, "")
-	api.Reads = db.NewStore(sqlDB)
-	api.BindHost = "127.0.0.1"
-	api.Now = func() time.Time {
+	store := db.NewStore(sqlDB)
+	// One harness noon for overview spend and schedule spent_today.
+	noon := func() time.Time {
 		return time.Date(2026, 6, 15, 12, 0, 0, 0, time.Local)
 	}
+	store.Now = noon
+	api.Reads = store
+	api.BindHost = "127.0.0.1"
+	api.Now = noon
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
 

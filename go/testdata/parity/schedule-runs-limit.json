@@ -1,0 +1,28 @@
+{
+  "next_before": "run-skipbudgtdy",
+  "routine_skips": {
+    "skipped_gate": 6,
+    "skipped_overlap": 0
+  },
+  "runs": [
+    {
+      "carried_from": null,
+      "cost_usd": null,
+      "error": null,
+      "finished_at": null,
+      "fired_at": null,
+      "firings": 1,
+      "gate_output": null,
+      "missed": 0,
+      "run_id": "run-skipbudgtdy",
+      "schedule_id": "sched-nightly01",
+      "scheduled_for": "2026-06-15T12:00:01+00:00",
+      "status": "skipped_budget",
+      "summary": null,
+      "task_id": null,
+      "task_status": null,
+      "task_title": null,
+      "trigger": "scheduled"
+    }
+  ]
+}

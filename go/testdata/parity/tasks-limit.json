@@ -9,7 +9,7 @@
     "init": 3,
     "pending": 1,
     "planning": 1,
-    "running": 1,
+    "running": 3,
     "stopped": 3,
     "stopping": 1,
     "verifying": 1,

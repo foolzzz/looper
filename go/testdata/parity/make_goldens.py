@@ -9,9 +9,10 @@ loopgo_. The script drops and recreates schema public, applies
 looper/db/schema.sql and seed.sql, then calls the real handlers in-process.
 It does not call configured_dsn and does not read .env.
 
-The overview clock is local noon on 2026-06-15, the same day the Go parity
-test freezes. seed.sql rows at 2026-06-15T12:00:00Z count as today. Rows in
-2020 do not.
+The overview clock and the schedule clock are local noon on 2026-06-15, the
+same day the Go parity test freezes. seed.sql rows at 2026-06-15T12:00:00Z
+count as today. Rows in 2020 do not. A schedule run at 2026-06-14T09:00:00Z
+is before that local midnight everywhere from UTC-12 through UTC+14.
 
 Normalization, the same rule the Go parity test applies before comparing:
 
@@ -20,8 +21,9 @@ Normalization, the same rule the Go parity test applies before comparing:
   walked. Those are generated when the request runs. Seeded timestamps stay
   as the handler returned them. _VOLATILE_TIMES is volatileTimes in
   parity_test.go.
-- The value of a key named uptime, pid, or pids becomes "<volatile>" and is
-  not walked. A string version (a build id) becomes "<volatile>" too. A
+- The value of a key named uptime, pid, pids, or default_timezone becomes
+  "<volatile>" and is not walked. default_timezone is this machine's IANA
+  zone. A string version (a build id) becomes "<volatile>" too. A
   numeric version, such as a requirement or role version, is written as the
   handler returned it. implementation and db are written as the handler
   returned them.
@@ -34,6 +36,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import tempfile
@@ -41,7 +44,7 @@ import urllib.parse
 from datetime import date
 from pathlib import Path
 
-_VOLATILE = {"uptime", "pid", "pids"}
+_VOLATILE = {"uptime", "pid", "pids", "default_timezone"}
 # Request-time timestamps only. Same set as volatileTimes in parity_test.go.
 _VOLATILE_TIMES = {"since"}
 _READS = (
@@ -232,6 +235,70 @@ _ROOM = (
     ("room-after-superscript", "task-rich00001", {"after": "²"}, 500),
     ("room-after-circled", "task-rich00001", {"after": "②"}, 500),
 )
+# The absent directory is not a git checkout and is not the seeded /work/alpha
+# path. A golden for /work/alpha would follow this machine's repository.
+# LOOPER_OPERATOR_NOTES_ROOT is a temp directory, so the notes are empty and
+# ~/.claude is not read. project_id is checked before mode. A relative dir is
+# refused before mode. base with in_place is refused before git.
+_ABSENT = "/loopgo-parity-absent-workspace"
+_WORKSPACES = (
+    ("workspace-missing-project", {"project_id": "proj-missing01"}, 404),
+    ("workspace-missing-mode", {"project_id": "proj-missing01", "mode": "nope"}, 404),
+    ("workspace-no-dir", {}, 400),
+    ("workspace-blank-project", {"project_id": "proj-blank0001"}, 400),
+    ("workspace-relative", {"dir": "relative"}, 400),
+    ("workspace-relative-mode", {"dir": "rel", "mode": "nope"}, 400),
+    ("workspace-bad-mode", {"dir": _ABSENT, "mode": "nope"}, 400),
+    ("workspace-base-inplace", {"dir": _ABSENT, "mode": "in_place", "base": "main"}, 400),
+    ("workspace-absent", {"dir": _ABSENT}, 200),
+    ("workspace-absent-asked", {"dir": _ABSENT, "mode": "worktree"}, 200),
+    ("workspace-absent-base", {"dir": _ABSENT, "mode": "worktree", "base": "main"}, 200),
+    ("workspace-absent-inplace", {"dir": _ABSENT, "mode": "in_place"}, 200),
+    ("workspace-absent-project", {"project_id": "proj-alpha0001", "dir": _ABSENT}, 200),
+)
+# One seeded schedule on Alpha. Blank has none. limits.default_timezone is
+# this machine's zone and is marked volatile.
+_PROJECT_SCHEDULES = (
+    ("schedules-project", "proj-alpha0001", 200),
+    ("schedules-project-blank", "proj-blank0001", 200),
+    ("schedules-project-missing", "proj-missing01", 404),
+)
+_ALL_SCHEDULES = (
+    ("schedules", 200),
+)
+_SCHEDULE = (
+    ("schedule", "sched-nightly01", 200),
+    ("schedule-missing", "sched-missing01", 404),
+)
+# Newest run is run-skipbudgtdy. hide drops skipped_gate rows and still counts
+# them in routine_skips. before=run-nope is 400 only after the schedule exists.
+# ² passes str.isdigit and int() raises, so the request loop answers 500.
+# 4,300 nines is a decimal integer outside 1..200 (400). 4,301 nines is the
+# same 500 as ².
+_RUNS = (
+    ("schedule-runs", "sched-nightly01", {}, 200),
+    ("schedule-runs-limit", "sched-nightly01", {"limit": "1"}, 200),
+    ("schedule-runs-hide", "sched-nightly01", {"skips": "hide"}, 200),
+    ("schedule-runs-before", "sched-nightly01", {"before": "run-skipbudgtdy"}, 200),
+    ("schedule-runs-bad-limit", "sched-nightly01", {"limit": "0"}, 400),
+    ("schedule-runs-bad-skips", "sched-nightly01", {"skips": "nope"}, 400),
+    ("schedule-runs-bad-before", "sched-nightly01", {"before": "run-nope"}, 400),
+    ("schedule-runs-missing", "sched-missing01", {}, 404),
+    ("schedule-runs-limit-digits", "sched-nightly01", {"limit": "9" * 4300}, 400),
+)
+_RUNS_500 = (
+    ("schedule-runs-limit-superscript", "sched-nightly01", {"limit": "²"}, 500),
+    ("schedule-runs-limit-overflow", "sched-nightly01", {"limit": "9" * 4301}, 500),
+)
+_NOTIFICATIONS = (
+    ("schedule-notifications", "sched-nightly01", {}, 200),
+    ("schedule-notifications-limit", "sched-nightly01", {"limit": "1"}, 200),
+    ("schedule-notifications-missing", "sched-missing01", {}, 404),
+    ("schedule-notifications-bad-limit", "sched-nightly01", {"limit": "0"}, 400),
+)
+_NOTIFICATIONS_500 = (
+    ("schedule-notifications-superscript", "sched-nightly01", {"limit": "²"}, 500),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -379,8 +446,14 @@ async def apply_sql(dsn: str) -> None:
 
 
 def _freeze_today() -> None:
-    """Make overview.local_midnight the local midnight of _PARITY_DAY."""
+    """Make overview and schedule midnights the local midnight of _PARITY_DAY.
+
+    The schedule clock is local noon that day, the same instant the Go harness
+    stores on Server.Now and Store.Now.
+    """
     import looper.agents.overview as overview
+    import looper.agents.schedules as schedules
+    from datetime import datetime
 
     class _Day(date):
         @classmethod
@@ -388,13 +461,20 @@ def _freeze_today() -> None:
             return _PARITY_DAY
 
     overview.date = _Day
+    noon = datetime(_PARITY_DAY.year, _PARITY_DAY.month, _PARITY_DAY.day, 12, 0, 0).astimezone()
+    real_midnight = schedules.local_midnight
+
+    def _midnight(now=None):
+        return real_midnight(noon)
+
+    schedules.local_midnight = _midnight
 
 
 async def capture(dsn: str) -> dict[str, object]:
     import looper.db.connection as dbconn
     from looper.agents.bus import MessageBus
     from looper.agents.channels.web import WebChannelAdapter
-    from looper.agents import role_api
+    from looper.agents import projects, role_api, schedules
     from looper.agents.gate_service import gate_settings, thread as gate_thread
     from looper.agents.http_server import HTTP_200, HTTP_500, AgentHTTPServer, _json_response
     from looper.agents.supervisor import AgentSupervisor
@@ -407,6 +487,9 @@ async def capture(dsn: str) -> dict[str, object]:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            # A non-empty root. An empty value is falsy and would read ~/.claude.
+            os.environ["LOOPER_OPERATOR_NOTES_ROOT"] = str(root / "operator-notes")
+            (root / "operator-notes").mkdir()
             server = AgentHTTPServer(
                 host="127.0.0.1",
                 port=0,
@@ -538,6 +621,35 @@ async def capture(dsn: str) -> dict[str, object]:
             for name, task_id, query, expect in _ROOM:
                 out[name] = await answered_room(
                     lambda task_id=task_id, query=query: server._task_room(task_id, query), expect)
+            for name, query, expect in _WORKSPACES:
+                out[name] = await answered(
+                    lambda query=query: projects.check_workspace(query), expect)
+            for name, project_id, expect in _PROJECT_SCHEDULES:
+                out[name] = await answered(
+                    lambda project_id=project_id: schedules.list_schedules(project_id), expect)
+            for name, expect in _ALL_SCHEDULES:
+                out[name] = await answered(schedules.list_all_schedules, expect)
+            for name, schedule_id, expect in _SCHEDULE:
+                out[name] = await answered(
+                    lambda schedule_id=schedule_id: schedules.get_schedule(schedule_id), expect)
+            for name, schedule_id, query, expect in _RUNS:
+                out[name] = await answered(
+                    lambda schedule_id=schedule_id, query=query: schedules.list_runs(schedule_id, query),
+                    expect)
+            for name, schedule_id, query, expect in _RUNS_500:
+                out[name] = await answered_room(
+                    lambda schedule_id=schedule_id, query=query: schedules.list_runs(schedule_id, query),
+                    expect)
+            for name, schedule_id, query, expect in _NOTIFICATIONS:
+                out[name] = await answered(
+                    lambda schedule_id=schedule_id, query=query: schedules.list_notifications(
+                        schedule_id, query),
+                    expect)
+            for name, schedule_id, query, expect in _NOTIFICATIONS_500:
+                out[name] = await answered_room(
+                    lambda schedule_id=schedule_id, query=query: schedules.list_notifications(
+                        schedule_id, query),
+                    expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -575,6 +687,14 @@ def main() -> None:
         + [name for name, _, _, _ in _ROLE_STATS]
         + [name for name, _, _, _ in _GATE_MESSAGES]
         + [name for name, _, _, _ in _ROOM]
+        + [name for name, _, _ in _WORKSPACES]
+        + [name for name, _, _ in _PROJECT_SCHEDULES]
+        + [name for name, _ in _ALL_SCHEDULES]
+        + [name for name, _, _ in _SCHEDULE]
+        + [name for name, _, _, _ in _RUNS]
+        + [name for name, _, _, _ in _RUNS_500]
+        + [name for name, _, _, _ in _NOTIFICATIONS]
+        + [name for name, _, _, _ in _NOTIFICATIONS_500]
     )
     for name in names:
         payload = normalize(bodies[name])

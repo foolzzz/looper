@@ -10,8 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/foolzzz/looper/go/internal/db"
@@ -31,6 +32,11 @@ type DBPinger interface {
 // 404. Gate settings, role templates, and role stats answer 500.
 // Gate messages and a task room answer 500 too: both read the database
 // before they can say the task or the gate is missing.
+// A project schedule list, one schedule, its runs, and its notifications
+// answer 500 when the store is missing, after a runs limit and skips value
+// that can be refused without it. A workspace check answers 500 once a
+// directory has been accepted and the active-task list is required. A
+// project id is looked up before that directory check.
 type Reader interface {
 	StatusTaskCounts(ctx context.Context) (total, running, completed int, err error)
 	Overview(ctx context.Context, since time.Time) (map[string]any, error)
@@ -58,6 +64,13 @@ type Reader interface {
 	ProjectRoleStats(ctx context.Context, projectID string, since *time.Time) (map[string]any, error)
 	GateMessages(ctx context.Context, taskID, label string) (map[string]any, error)
 	TaskRoom(ctx context.Context, taskID string, q db.RoomQuery) (map[string]any, error)
+	ProjectWorkspace(ctx context.Context, id string) (db.ProjectWorkspace, error)
+	ActiveWorkspaces(ctx context.Context) ([]db.ActiveWorkspace, error)
+	ListProjectSchedules(ctx context.Context, projectID string) (map[string]any, error)
+	ListSchedules(ctx context.Context) (map[string]any, error)
+	GetSchedule(ctx context.Context, id string) (map[string]any, error)
+	ListScheduleRuns(ctx context.Context, id string, q db.ScheduleRunsQuery) (map[string]any, error)
+	ListScheduleNotifications(ctx context.Context, id string, limit int) (map[string]any, error)
 }
 
 // Server serves the read-only API and, when WebDir is set, the dashboard files.
@@ -90,9 +103,12 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // A semicolon after the last slash is a path parameter and is not part of
 // the path. An API path ServeMux would redirect (a "." or ".." segment, or
 // a duplicate slash) is JSON 404: Python keeps that path and matches no
-// route. A static path is not redirected either. Python's static handler
-// joins it and lets pathlib collapse "." and "..", so the collapsed path is
-// served here, including when the collapse lands under /api/.
+// route. A static path is not redirected either. Python joins the path and
+// asks pathlib whether that file exists. pathlib drops "." and empty
+// segments, but a ".." segment is a real lookup: if the directory it leaves
+// is missing, the file is missing too, even when the lexical result names a
+// file that is there. The original path is what the static handler opens.
+// os.Root still refuses a symlink that leaves the web directory.
 //
 // This slice serves GET /api/status, GET /api/projects, GET /api/overview,
 // GET /api/tasks, GET /api/tasks/<id>, GET /api/agents/<id>/usage,
@@ -104,6 +120,8 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // role templates and role stats.
 // It also serves GET /api/tasks/<id>/gates/<label>/messages and
 // GET /api/tasks/<id>/room.
+// It also serves GET /api/workspaces/check, GET /api/projects/<id>/schedules,
+// GET /api/schedules, GET /api/schedules/<id>, its runs, and its notifications.
 // GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
 // are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
@@ -132,6 +150,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/gate-settings", s.handleGateSettings)
 	mux.HandleFunc("/api/projects/{id}/role-templates", s.handleRoleTemplates)
 	mux.HandleFunc("/api/projects/{id}/role-stats", s.handleRoleStats)
+	mux.HandleFunc("/api/workspaces/check", s.handleWorkspaceCheck)
+	mux.HandleFunc("/api/projects/{id}/schedules", s.handleProjectSchedules)
+	mux.HandleFunc("/api/schedules/{id}/runs", s.handleScheduleRuns)
+	mux.HandleFunc("/api/schedules/{id}/notifications", s.handleScheduleNotifications)
+	mux.HandleFunc("/api/schedules/{id}", s.handleSchedule)
+	mux.HandleFunc("/api/schedules", s.handleSchedules)
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/", s.handleRoot)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +171,7 @@ func (s *Server) Handler() http.Handler {
 				notFound(w)
 				return
 			}
-			s.handleRoot(w, withPythonPath(r, cleaned))
+			s.handleRoot(w, withPythonPath(r, escaped))
 			return
 		}
 		mux.ServeHTTP(w, withPythonPath(r, escaped))
@@ -300,14 +324,16 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 var (
-	errNotFound = errors.New("not found")
-	errUseIndex = errors.New("use index")
+	errNotFound     = errors.New("not found")
+	errUseIndex     = errors.New("use index")
+	errStaticEscape = errors.New("static path escapes")
 )
 
 // openStatic opens a regular file for urlPath inside rootDir.
 // os.Root follows symlinks and refuses one that leaves the directory, so a
 // path such as /link/secret.txt is refused when link itself points outside.
-// A missing path or a directory falls back to index.html.
+// A missing path or a directory falls back to index.html. An index.html
+// symlink that leaves the directory is a 404, the same as a missing index.
 func openStatic(rootDir, urlPath string) (*os.File, string, error) {
 	root, err := os.OpenRoot(rootDir)
 	if err != nil {
@@ -315,20 +341,21 @@ func openStatic(rootDir, urlPath string) (*os.File, string, error) {
 	}
 	defer root.Close()
 
-	rel := staticRel(urlPath)
-	if rel != "" {
-		f, err := openRegular(root, rel)
-		switch {
-		case err == nil:
-			return f, path.Base(rel), nil
-		case errors.Is(err, os.ErrNotExist), errors.Is(err, errUseIndex):
-		default:
-			return nil, "", err
-		}
+	f, name, err := openPythonStatic(root, urlPath)
+	switch {
+	case err == nil:
+		return f, name, nil
+	case errors.Is(err, os.ErrNotExist), errors.Is(err, errUseIndex):
+	default:
+		return nil, "", err
 	}
-	f, err := openRegular(root, "index.html")
+	f, err = openRegular(root, "index.html")
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, errUseIndex) || errors.Is(err, errNotFound) {
+		// An index.html symlink that leaves the web root is a miss. Python's
+		// resolve check answers 404. Returning the escape error here is a 500.
+		miss := errors.Is(err, os.ErrNotExist) || errors.Is(err, errUseIndex) ||
+			errors.Is(err, errNotFound) || errors.Is(err, errStaticEscape)
+		if miss {
 			return nil, "", errNotFound
 		}
 		return nil, "", err
@@ -336,22 +363,177 @@ func openStatic(rootDir, urlPath string) (*os.File, string, error) {
 	return f, "index.html", nil
 }
 
-func staticRel(urlPath string) string {
-	rel := strings.TrimPrefix(path.Clean("/"+urlPath), "/")
-	if rel == "" || rel == "." {
-		return ""
+// openPythonStatic opens urlPath the way CPython pathlib does.
+// "." and empty segments are dropped. ".." is kept for os.Root, which
+// follows a symlink and then applies ".." to that target: inside ->
+// assets/deep makes /inside/../app.js open assets/app.js. Popping ".."
+// off the URL before that lookup would open the root file instead.
+// A missing component or a file used as a directory is a missing file, so
+// the caller serves index.html. A symlink os.Root refuses is errNotFound,
+// a JSON 404 and not the index page. A ".." os.Root refuses is classified
+// by openEscapedStatic: an existing file outside the root is also a 404.
+// The returned name is the final URL component, for Content-Type.
+func openPythonStatic(root *os.Root, urlPath string) (*os.File, string, error) {
+	parts := pathlibParts(urlPath)
+	if len(parts) == 0 {
+		return nil, "", errUseIndex
 	}
-	return rel
+	f, err := openRegular(root, strings.Join(parts, "/"))
+	if err == nil {
+		return f, parts[len(parts)-1], nil
+	}
+	if errors.Is(err, errStaticEscape) && !staticSymlinkEscapes(root, parts) {
+		return openEscapedStatic(root, parts)
+	}
+	if errors.Is(err, errStaticEscape) {
+		return nil, "", errNotFound
+	}
+	return nil, "", err
+}
+
+// openEscapedStatic classifies a ".." that os.Root refused and that did not
+// leave through a symlink. Python stats the joined path, ".." included, and
+// only then checks where it resolved. An existing regular file outside the
+// web root is a 404. The same lookup walks back inside for /../web/app.js
+// and that file is served. A missing path, or anything that is not a regular
+// file, is the index page. The outside file is never opened: a path that
+// resolves inside is opened again through os.Root, under a relative name.
+func openEscapedStatic(root *os.Root, parts []string) (*os.File, string, error) {
+	// filepath.Join cleans ".." before the lookup. Python and the kernel
+	// apply ".." only after each symlink, so a missing component stays missing.
+	raw := strings.TrimRight(root.Name(), "/") + "/" + strings.Join(parts, "/")
+	info, err := os.Stat(raw)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, "", os.ErrNotExist
+	}
+	resolved, err := filepath.EvalSymlinks(raw)
+	if err != nil {
+		return nil, "", errNotFound
+	}
+	rootResolved, err := filepath.EvalSymlinks(root.Name())
+	if err != nil {
+		return nil, "", errNotFound
+	}
+	// A path boundary, not a string prefix: /tmp/web must not accept /tmp/web-evil.
+	if !pathInside(rootResolved, resolved) {
+		return nil, "", errNotFound
+	}
+	rel, err := filepath.Rel(rootResolved, resolved)
+	if err != nil || !relativeInside(rel) {
+		return nil, "", errNotFound
+	}
+	f, err := openRegular(root, rel)
+	if err != nil {
+		if errors.Is(err, errStaticEscape) || errors.Is(err, errNotFound) {
+			return nil, "", errNotFound
+		}
+		return nil, "", err
+	}
+	return f, parts[len(parts)-1], nil
+}
+
+func relativeInside(rel string) bool {
+	if rel == "" || rel == "." || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// staticSymlinkEscapes reports whether following parts leaves the root
+// through a symlink. A symlink is replaced by its target before ".." is
+// applied: deep -> assets/deep makes /deep/../out look at assets/out, not a
+// sibling of the URL name deep. Popping ".." off that name first hides the
+// link, and a path os.Root refuses is then served as the index page. An
+// absolute link, or a relative link whose ".." leaves the root, is an
+// escape. A ".." in the URL that leaves the root is not a symlink escape;
+// openEscapedStatic decides whether that path names an existing file.
+// os.Root still opens every file that is served, so a refused path is never read.
+func staticSymlinkEscapes(root *os.Root, parts []string) bool {
+	_, escaped := walkStatic(root, nil, parts, false, 0)
+	return escaped
+}
+
+// walkStatic applies parts to stack. inLink is true while the parts are a
+// symlink target: ".." that climbs out of the root is an escape there, and
+// not one when it is a URL segment. depth stops a link loop.
+func walkStatic(root *os.Root, stack, parts []string, inLink bool, depth int) ([]string, bool) {
+	if depth > 8 {
+		return stack, true
+	}
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			if len(stack) == 0 {
+				return stack, inLink
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		stack = append(stack, part)
+		rel := strings.Join(stack, "/")
+		info, err := root.Lstat(rel)
+		if err != nil {
+			return stack, pathEscapes(err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		// Go 1.24's os.Root can Lstat a link but cannot read its text.
+		// The text is only used to tell a JSON 404 from the index page.
+		// os.Root still opens the file, so this read cannot disclose it.
+		target, err := os.Readlink(filepath.Join(root.Name(), rel))
+		if err != nil {
+			return stack, true
+		}
+		if strings.HasPrefix(target, "/") {
+			return stack, true
+		}
+		parent := append([]string{}, stack[:len(stack)-1]...)
+		next, escaped := walkStatic(root, parent, linkParts(target), true, depth+1)
+		if escaped {
+			return next, true
+		}
+		stack = next
+	}
+	return stack, false
+}
+
+func linkParts(target string) []string {
+	raw := strings.Split(target, "/")
+	parts := make([]string, 0, len(raw))
+	for _, part := range raw {
+		if part == "" || part == "." {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+// pathlibParts splits a URL path the way pathlib joins it: empty segments
+// and "." are dropped, and ".." is kept for the caller to look up.
+func pathlibParts(urlPath string) []string {
+	raw := strings.Split(strings.TrimPrefix(urlPath, "/"), "/")
+	parts := make([]string, 0, len(raw))
+	for _, part := range raw {
+		if part == "" || part == "." {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
 }
 
 func openRegular(root *os.Root, name string) (*os.File, error) {
 	info, err := root.Stat(name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, err
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, os.ErrNotExist
 		}
 		if pathEscapes(err) {
-			return nil, errNotFound
+			return nil, errStaticEscape
 		}
 		return nil, fmt.Errorf("stat web file: %w", err)
 	}
@@ -363,11 +545,11 @@ func openRegular(root *os.Root, name string) (*os.File, error) {
 	}
 	f, err := root.Open(name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, err
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, os.ErrNotExist
 		}
 		if pathEscapes(err) {
-			return nil, errNotFound
+			return nil, errStaticEscape
 		}
 		return nil, fmt.Errorf("open web file: %w", err)
 	}

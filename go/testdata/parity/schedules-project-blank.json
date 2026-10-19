@@ -1,0 +1,35 @@
+{
+  "limits": {
+    "concurrency_max": 64,
+    "default_timezone": "<volatile>",
+    "gate_command_max_chars": 2000,
+    "gate_timeout_default_seconds": 60,
+    "gate_timeout_max_seconds": 600,
+    "max_parallel_runs_limit": 10,
+    "min_interval_gated_seconds": 60,
+    "min_interval_seconds": 300,
+    "name_max_chars": 80,
+    "notify_targets": [
+      {
+        "channel": "lark",
+        "channel_enabled": false,
+        "chat": "ou_abcdefgh",
+        "label": "Lark · ou_abcdefgh"
+      },
+      {
+        "channel": "telegram",
+        "channel_enabled": true,
+        "chat": "123456789",
+        "label": "Telegram · 123456789"
+      }
+    ],
+    "requirement_max_chars": 27000,
+    "roles": [
+      "planner",
+      "worker",
+      "reviewer"
+    ],
+    "run_timeout_max_seconds": 2592000
+  },
+  "schedules": []
+}

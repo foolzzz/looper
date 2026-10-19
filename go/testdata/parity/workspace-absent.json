@@ -1,0 +1,19 @@
+{
+  "default_mode": "worktree",
+  "git": null,
+  "mode": "in_place",
+  "notes": {
+    "files": [],
+    "found": false,
+    "omitted": []
+  },
+  "notes_on": true,
+  "requested_mode": "worktree",
+  "warnings": [
+    {
+      "kind": "not_git",
+      "text": "This project runs tasks in a worktree by default, but the workspace is not in a git repository with a commit, so the task runs in place, in the directory itself."
+    }
+  ],
+  "workspace": "/loopgo-parity-absent-workspace"
+}

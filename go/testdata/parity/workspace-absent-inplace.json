@@ -1,0 +1,14 @@
+{
+  "default_mode": "worktree",
+  "git": null,
+  "mode": "in_place",
+  "notes": {
+    "files": [],
+    "found": false,
+    "omitted": []
+  },
+  "notes_on": true,
+  "requested_mode": "in_place",
+  "warnings": [],
+  "workspace": "/loopgo-parity-absent-workspace"
+}

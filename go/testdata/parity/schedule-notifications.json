@@ -1,0 +1,37 @@
+{
+  "notifications": [
+    {
+      "channel": "lark",
+      "chat": "oc_nightly",
+      "created_at": "2020-06-03T00:00:00+00:00",
+      "error": null,
+      "kind": "run",
+      "notification_id": "note-newest001",
+      "run_id": "run-skipbudgtdy",
+      "status": "sent",
+      "text": "nightly finished"
+    },
+    {
+      "channel": "lark",
+      "chat": "oc_nightly",
+      "created_at": "2020-06-02T00:00:00+00:00",
+      "error": "timeout",
+      "kind": "failures_alert",
+      "notification_id": "note-tie00000b",
+      "run_id": null,
+      "status": "failed",
+      "text": "still failing"
+    },
+    {
+      "channel": null,
+      "chat": null,
+      "created_at": "2020-06-02T00:00:00+00:00",
+      "error": null,
+      "kind": "stale_alert",
+      "notification_id": "note-tie00000a",
+      "run_id": null,
+      "status": "dashboard",
+      "text": "no chat"
+    }
+  ]
+}
