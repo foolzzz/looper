@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-10-19
+
+### Fixes
+
+- **Knowledge vault search matches any query word.** Notes no longer need every word in a query to appear in their path or text. Results rank by matched query words, then text hit count, then path, and include `words`; the model-visible tool description reflects the change. ([#245](https://github.com/foolzzz/looper/pull/245))
+- **Vault writes pass search-only ancestor directories.** The no-symlink walk uses `O_SEARCH` on macOS or `O_PATH` on Linux, removing v2.12.0's requirement to read every ancestor on those systems. The server still needs to enter each ancestor and read and search the vault itself. Saving settings returns HTTP 400 for an impassable vault path, an unreadable or unsearchable vault, or an unreachable writable folder, instead of failing at write time or with HTTP 500. ([#245](https://github.com/foolzzz/looper/pull/245))
+
+See the [bilingual release notes](docs/releases/v2.12.1.md) for verification, activation and remaining limits.
+
 ## [2.12.0] - 2026-10-19
 
 ### Highlights
