@@ -3353,17 +3353,107 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 
 ## HTTP API
 
-The API answers only the dashboard and local clients: every agent runs Claude
-with every permission, so a web page in your browser must not be able to drive it.
+The HTTP server has four route classes: the exact paths `/login` and `/logout`
+handle sign-in and sign-out; other paths outside `/api/` serve dashboard
+pages and public assets; `/api/agent/v1/`, including `OPTIONS`, requires each agent's own token; all other
+`/api/` paths, including unknown paths and `OPTIONS`, answer only the operator.
+Only dashboard `OPTIONS` requests return 204 without authentication.
+At startup it creates a missing runtime root with mode 0700 and checks that
+the directory is owned by the current user and not writable by group or others
+(an existing 0755 directory is allowed; `looper service install` creates the
+runtime root 0700). Before connecting to the database,
+it reads or creates `<runtime root>/operator-token`, a private file (mode 0600).
+It opens the file without following symlinks and without blocking (a FIFO in
+its place cannot hang the start), checks with `fstat` that it is a regular
+file of the current user with mode 0600, and reads through that same
+descriptor. An unsafe
+directory or file refuses startup with a repair message; permissions are never
+changed automatically. Operator requests send that
+token as `Authorization: Bearer <token>` or the cookie `looper_operator_<port>`,
+or send a valid password session cookie.
+A dashboard page load signs the browser in when `Sec-Fetch-Mode: navigate` and
+`Sec-Fetch-Dest: document`, both the TCP peer and `Host` are loopback, and neither
+`Forwarded` nor `X-Forwarded-For` is present. This token cookie has `Path=/`,
+`HttpOnly` and `SameSite=Strict`, without `Max-Age`, `Expires` or `Secure`;
+pages use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, other
+files keep their public cache. Other browsers sign in with the user name and
+password set on the server's machine by
+`looper auth set-password [--user NAME] [--runtime-root DIR]`. The user defaults
+to `admin` and accepts `[A-Za-z0-9._-]{1,64}`; the password needs at least
+8 characters and is read twice without echo, never from an argument.
+`looper auth clear-password [--runtime-root DIR]` removes it. Both commands
+use the same default runtime root as `looper serve`.
+
+`<runtime root>/operator-password` is a mode-0600 JSON file, checked and read
+with the same directory and descriptor safety rules as the token. It stores
+the user and a scrypt hash (`n=32768`, `r=8`, `p=1`, `maxmem=64 MiB`,
+`dklen=32`) with a fresh 16-byte salt per set, both URL-safe base64 encoded.
+Writes use a mode-0600 temporary file, `fsync` and atomic replacement. A malformed
+or unsafe file cannot authenticate a request. Verification computes scrypt even
+for a wrong user name and compares both user and hash with `hmac.compare_digest`.
+The server caches the record by the file's inode, size, `mtime_ns`, mode and uid,
+re-reading it safely only when those change.
+
+A dashboard page request without a token cookie, valid session or local
+auto-login gets a self-contained, script-free login page (200); assets stay
+public. `GET /login` shows the same form, or redirects signed-in and locally
+auto-signed-in browsers to `/` (303). Without a password it shows no form and
+asks the operator to run `looper auth set-password` on the server's machine
+or open the dashboard there. `POST /login` accepts at most 4096 bytes of
+`application/x-www-form-urlencoded` fields `username` and `password`; larger
+bodies get 413. It and `POST /logout` require an `Origin` whose netloc equals
+`Host` and whose scheme is `https` when `dashboard_url` starts with `https://`,
+`http` otherwise (403 if missing or different; behind an https proxy, set
+`dashboard_url` to the https address). A wrong user or password gets the same
+401 error; no password also gets 401, and an unusable password file gets 503
+with a server-log pointer. Success redirects to `/` (303) with
+`looper_session_<port>=<id>; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800`;
+`Secure` is added only when `dashboard_url` starts with `https://`.
+The random session ID is not the token. Sessions last 7 days in memory, at most
+100 (expired first, then oldest removed); setting or clearing the password,
+or restarting the server, ends them. `POST /logout` ends the presented session,
+clears both cookies with `Max-Age=0`, and redirects to `/login` (303).
+Other methods on these paths get 405.
+
+Before any scrypt work, a limiter checks the TCP peer: 5 consecutive failures
+lock it for 60 seconds, doubling after further failures up to 900 seconds;
+a success resets it. More than 30 failures in a sliding 600-second window lock
+every peer until the count falls to 30 or fewer. Locked requests get 429 and
+`Retry-After` seconds, without adding another failure. All browsers behind a
+proxy share its peer address; `X-Forwarded-For` and `Forwarded` are ignored.
+Attempts are handled one at a time (check, scrypt, record), so parallel
+requests cannot pass the limiter before the first failure counts. Login logs contain only the peer and `failed`,
+`succeeded` or `locked`, never the request body, user name or password.
+Every login page and every `/login` or `/logout` response uses
+`Cache-Control: no-store`, `Referrer-Policy: same-origin` (under `no-referrer`
+a browser sends `Origin: null` with the form's POST, which the same-origin
+check refuses) and
+`Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`.
+There are no sign-in links or one-time codes; `code` and `token` query
+parameters are ignored. Without a password only local auto-login is available.
+
+`looper service` reads the file of the unit's `--runtime-root`, and the eval
+runner that of the server it starts; both send the Bearer token. A missing or
+wrong credential gets 401 with `WWW-Authenticate: Bearer realm="looper"` and a
+message saying how to sign in, which does not name the token file. The check
+precedes reading the body, including configuration uploads. A shell agent under the same system user can
+still deliberately read the file, imitate a browser or access the database;
+see [the RFC, section 5](rfcs/operator-api-auth-v0.zh-CN.md#5-agent-还能做到什么).
+
 A request whose `Origin` is not the server's own is refused with 403 and no
 response carries CORS headers. While the server listens on a loopback address,
 the `Host` must name a loopback address too, which defeats DNS rebinding.
-Clients without an `Origin` (curl, the CLI) are unaffected, and so is the Vite
-dev proxy, which keeps `Host` and `Origin` on its own port.
+Clients without an `Origin` (curl, the CLI) skip the Origin check except for
+`POST /login` and `POST /logout`. The Vite
+dev proxy keeps `Host` and `Origin` on its own port and forwards the browser
+cookie: open the dashboard on the server's port first, using the same hostname.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/status` | GET | System health: `agents`, each supervisor component's `healthy`, `state` (`running`, `restarting`, `crash_looping`), `up`, `restart_count` (restarts in a row), `last_crash_at`, `next_restart_at` and `agent_type`; `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `completed` |
+| `/login` | GET | Login form, or no-password instructions; 303 to `/` for a signed-in browser or local auto-login |
+| `/login` | POST | Same-origin password sign-in; 303 to `/` with a session cookie on success; 401 for wrong credentials or no password, 429 when locked, 503 for an unusable password file |
+| `/logout` | POST | Requires same-origin `Origin`; ends the session, clears both cookies and returns 303 to `/login` |
 | `/api/overview` | GET | The Dashboard's one read. `tasks`: the count per group (`in_progress`, `ready`, `attention`, `completed`, `cancelled`, `other`), `total` and `other_statuses` (each status no group knows, with its count); `agents`: `manager` (`state` `busy` or `idle`), `planners`, `workers` and `reviewers` (each with its task, project, `step`, `instruction`, `state` `running` or `waiting` and `elapsed_seconds`, and `task_role` when it runs as a role its task's Planner defined); `projects`: each project with a task in progress or ready, or an agent running, with `tasks` (`running`, `ready`), `workers` and `reviewers` (`running`, `waiting`: for room under their task's limit); `idle_projects`; `spend_today` (`since`, `provider_priced_usd`, `equivalent_usd`, `runs`, `running`, `unpriced_runs`); `schedules` (`total`, `enabled`, `next`: up to 5 with `next_fire_at` and `timezone`, `failing`: with `consecutive_failures`, `failures_since`, `stale_since`, `last_success_at`, `last_status`, and `skipped_today` by reason); `health.unhealthy`: each supervisor component not simply running, with `name`, `state` (`restarting`: down and waiting to start again; `crash_looping`: restarted 3 times in a row without staying up 5 minutes, up or down now), `up`, `restart_count`, `last_crash_at` and `next_restart_at`. 500 when the database cannot be read |
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count`, `active_count` and `schedule_count` |
 | `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters) and execution settings; 409 when the name exists ignoring case; 400 naming the agent-settings endpoint for `planner_harness_prompt`, `worker_harness_prompt`, `model` or `run_budget_usd` |

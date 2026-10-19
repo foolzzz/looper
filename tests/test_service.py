@@ -8,16 +8,19 @@ runs the real ``launchctl`` or ``systemctl``.
 
 from __future__ import annotations
 
+import io
 import plistlib
 import stat
 import subprocess
+import urllib.error
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from looper import cli
-from looper.agents import service
+from looper.agents import operator_auth, service
 
 UID = 501
 LABEL = "com.looper.serve.test"
@@ -170,7 +173,7 @@ def _host(tmp_path: Path, checkout: Path, fake, *, system: str, port_busy: bool 
         system=system, home=tmp_path / "home", uid=UID, environ=dict(SHELL_ENV),
         executable=str(checkout / ".venv" / "bin" / "python3"), cwd=checkout, run=fake,
         sleep=clock.sleep, clock=lambda: clock.now,
-        get_status=lambda port: answer if fake.serving else None,
+        get_status=lambda port, token: answer if fake.serving else None,
         port_in_use=lambda port: port_busy and not fake.serving,
     )
 
@@ -186,6 +189,44 @@ def _install(monkeypatch, host: service.Host, root: Path, *more: str, port: str 
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+@pytest.mark.parametrize("token", [None, "test-operator-token"])
+@pytest.mark.parametrize("code", [200, 401, 503])
+def test_status_request_sends_the_token_and_distinguishes_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, token: str | None, code: int,
+) -> None:
+    def open_request(request, *, timeout):
+        assert request.full_url == "http://127.0.0.1:18834/api/status"
+        assert request.get_header("Authorization") == (f"Bearer {token}" if token else None)
+        assert timeout == 3
+        if code != 200:
+            raise urllib.error.HTTPError(request.full_url, code, "refused", {}, None)
+        return io.BytesIO(b'{"status": "running"}')
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+    assert service._get_status(18834, token) == (
+        {"status": "running"} if code == 200 else {"status": "unauthorized"} if code == 401 else None)
+
+
+def test_start_wait_reads_the_token_again_when_the_new_server_creates_it(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeLaunchd()
+    host = _host(tmp_path, checkout, fake, system="Darwin")
+    root = tmp_path / "runtime"
+    received = []
+
+    def get_status(port: int, token: str | None) -> dict | None:
+        received.append((port, token))
+        if token is None:
+            operator_auth.token_path(root).write_text("test-operator-token\n")
+            return None
+        return {"status": "running"}
+
+    host.get_status = get_status
+    assert _install(monkeypatch, host, root) == 0
+    assert received == [(9876, None), (9876, "test-operator-token")]
 
 
 def test_launchd_unit_runs_this_looper_privately_with_the_captured_environment(
@@ -324,7 +365,7 @@ def test_waiting_gives_up_with_the_log_tail(
 ) -> None:
     fake = FakeLaunchd()
     host = _host(tmp_path, checkout, fake, system="Darwin")
-    host.get_status = lambda port: None
+    host.get_status = lambda port, token: None
     (tmp_path / "runtime" / "logs").mkdir(parents=True)
     (tmp_path / "runtime" / "logs" / "serve.log").write_text("starting\nOSError: address already in use\n")
 
@@ -389,6 +430,36 @@ def test_status_shows_state_pid_last_exit_log_and_the_api(
     assert "loaded, not running, last exit Killed: 9" in out and "no answer" in out
 
 
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_status_reads_the_operator_token_from_the_units_runtime_root(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, system: str,
+) -> None:
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    assert _install(monkeypatch, host, root) == 0
+    operator_auth.token_path(root).write_text("test-operator-token\n")
+    received = []
+    host.get_status = lambda port, token: received.append((port, token)) or {"status": "running"}
+
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
+    assert received == [(9876, "test-operator-token")]
+
+
+def test_status_reports_a_refused_operator_token_as_answering(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = FakeLaunchd()
+    host = _host(tmp_path, checkout, fake, system="Darwin", status={"status": "unauthorized"})
+    root = tmp_path / "runtime"
+    assert _install(monkeypatch, host, root) == 0
+    capsys.readouterr()
+
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
+    assert (f"api        http://127.0.0.1:9876/api/status: unauthorized "
+            f"(the operator token in {operator_auth.token_path(root)} was refused)") in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     ("setup", "expected"),
     [("none", service.SKIP), ("running", service.OK), ("stopped", service.WARN), ("windows", service.SKIP)],
@@ -448,7 +519,7 @@ def test_install_replaces_the_unit_from_before_the_rename_and_moves_its_runtime_
         fake = legacy = new = FakeSystemd()
         legacy.active = True
     host = _host(tmp_path, checkout, fake, system=system)
-    host.get_status = lambda port: {"status": "running"} if new.serving else None
+    host.get_status = lambda port, token: {"status": "running"} if new.serving else None
     old_unit = service.manager(host, "com.loopx.serve").unit_path
     old_unit.parent.mkdir(parents=True)
     old_unit.write_text("the old unit")

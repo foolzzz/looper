@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from evals.prompt_regression.runner import fresh_database, free_port
-from looper.agents import db_backup
+from looper.agents import db_backup, operator_auth
 from looper.agents.self_check import mask_dsn
 from looper.env import counterpart
 
@@ -109,7 +109,10 @@ def _serve(tmp_path: Path, database_url: str, *flags: str) -> tuple[int | None, 
             deadline = time.monotonic() + 90
             while process.poll() is None:
                 try:
-                    urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=2).read()
+                    token = operator_auth.read_token(tmp_path / "runtime")
+                    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/status",
+                                                     headers={"Authorization": f"Bearer {token}"} if token else {})
+                    urllib.request.urlopen(request, timeout=2).read()
                     break
                 except OSError:
                     assert time.monotonic() < deadline, "looper serve did not answer within 90 s"

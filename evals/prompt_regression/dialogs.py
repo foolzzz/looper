@@ -1194,7 +1194,7 @@ def run(
             install_claude(case / "bin", mode=mode, scenarios=scenarios,
                            max_budget_usd=None if register is not None else max_budget_usd,
                            real_claude=real_claude)
-            (case / "runtime").mkdir()
+            (case / "runtime").mkdir(mode=0o700)
             home = case / "home" if mode == "fake" else None
             if home is not None:
                 home.mkdir()

@@ -9,9 +9,11 @@ Pure stdlib asyncio — zero external dependencies. Serves:
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import mimetypes
+import os
 import re
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
@@ -21,7 +23,8 @@ from typing import Any
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
-    overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api, schedules, self_check,
+    operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
+    schedules, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -65,6 +68,7 @@ def _serialize(obj: Any) -> Any:
 
 HTTP_200 = "200 OK"
 HTTP_201 = "201 Created"
+HTTP_303 = "303 See Other"
 HTTP_400 = "400 Bad Request"
 HTTP_401 = "401 Unauthorized"
 HTTP_403 = "403 Forbidden"
@@ -74,6 +78,15 @@ HTTP_409 = "409 Conflict"
 HTTP_413 = "413 Content Too Large"
 HTTP_500 = "500 Internal Server Error"
 HTTP_502 = "502 Bad Gateway"
+HTTP_429 = "429 Too Many Requests"
+HTTP_503 = "503 Service Unavailable"
+# same-origin, not no-referrer: under no-referrer a browser sends `Origin: null` with the form's POST,
+# which the same-origin check refuses. Nothing leaves for another site either way.
+SIGN_IN_HEADERS = {
+    "Cache-Control": "no-store", "Referrer-Policy": "same-origin",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+}
+
 # The Manager's tools (``ops.service``).
 AGENT_API = "/api/agent/v1/"
 _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
@@ -92,15 +105,16 @@ TASKS_PAGE_MAX = 200
 CONFIG_IMPORTS_PATH = "/api/config/imports"
 
 
-def _json_response(status: str, body: Any) -> bytes:
+def _json_response(status: str, body: Any, *, headers: Mapping[str, str] | None = None) -> bytes:
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = (
+    head = (
         f"HTTP/1.1 {status}\r\n"
         f"Content-Type: application/json; charset=utf-8\r\n"
         f"Content-Length: {len(payload)}\r\n"
-        f"\r\n"
+        + "".join(f"{key}: {value}\r\n" for key, value in (headers or {}).items())
+        + "\r\n"
     )
-    return headers.encode("utf-8") + payload
+    return head.encode("utf-8") + payload
 
 
 def _no_content() -> bytes:
@@ -131,6 +145,8 @@ class AgentHTTPServer:
         broadcaster: Broadcaster | None = None,
         static_dir: Path | None = None,
         runtime_root: Path | None = None,
+        operator_token: str | None = None,
+        dashboard_url: str | None = None,
         self_checks: list[dict[str, str]] | None = None,
         claude_bin: str = "claude",
         scheduler: Scheduler | None = None,
@@ -151,6 +167,15 @@ class AgentHTTPServer:
         self._static_dir = static_dir or default_static_dir()
         # Where the agents' files live: project knowledge is materialized under it.
         self._runtime_root = runtime_root
+        # The CLI token and the local browser's credential; remote browsers use password sessions.
+        self._operator_token = operator_token
+        self._dashboard_url = dashboard_url
+        self._sessions = operator_auth.Sessions()
+        self._login_limiter = operator_auth.LoginLimiter()
+        self._sign_in_lock = asyncio.Lock()
+        self._password_key: tuple[int, ...] | None = None
+        self._password: operator_auth.PasswordRecord | None = None
+        self._password_error: operator_auth.OperatorTokenError | None = None
         # The startup self-check (self_check.Check.to_dict), reported on /api/status.
         self._self_checks = self_checks or []
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
@@ -172,6 +197,8 @@ class AgentHTTPServer:
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
+        if self._port == 0:
+            self._port = self._server.sockets[0].getsockname()[1]
         logger.info("HTTP server listening on %s:%d", self._host, self._port)
 
     async def stop(self) -> None:
@@ -187,6 +214,9 @@ class AgentHTTPServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        peer = writer.get_extra_info("peername")
+        peer_host = peer[0] if peer else None
+        sign_in_headers = None
         try:
             request_line = await asyncio.wait_for(reader.readline(), timeout=30.0)
             if not request_line:
@@ -207,26 +237,43 @@ class AgentHTTPServer:
             headers = await self._read_headers(reader)
             parsed = urllib.parse.urlparse(raw_path)
             path = parsed.path
-            query = dict(urllib.parse.parse_qsl(parsed.query))
+
+            area = operator_auth.access(path)
+            sign_in_headers = SIGN_IN_HEADERS if area is operator_auth.Access.SIGN_IN else None
 
             # Refused before its body is read: another site's page cannot even upload.
             refused = request_guard.refusal(headers, bind_host=self._host)
             if refused:
                 logger.warning("refused %s %s: %s", method, path, refused)
-                writer.write(_json_response(HTTP_403, {"error": refused}))
+                writer.write(_json_response(HTTP_403, {"error": refused}, headers=sign_in_headers))
                 await writer.drain()
                 writer.close()
                 return
 
+            if area is operator_auth.Access.OPERATOR and not self._is_operator(headers):
+                credential = operator_auth.presented(headers, port=self._port)
+                reason = operator_auth.WRONG if credential else operator_auth.REFUSAL
+                logger.warning("refused %s %s from %s: no operator credential%s", method, path, peer_host,
+                               " matched (one was presented)" if credential is not None else " was presented")
+                writer.write(_json_response(HTTP_401, {"error": reason},
+                                            headers={"WWW-Authenticate": 'Bearer realm="looper"'}))
+                await writer.drain()
+                writer.close()
+                return
+
+            query = dict(urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=area is operator_auth.Access.DASHBOARD))
             streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
             cap = config_imports.UPLOAD_MAX_BYTES if streamed else REQUEST_BODY_MAX_BYTES
+            if area is operator_auth.Access.SIGN_IN:
+                cap = 4096
             body = b""
             try:
                 content_length = int(headers.get("content-length", "0"))
             except ValueError:
                 content_length = -1
             if content_length < 0:
-                writer.write(_json_response(HTTP_400, {"error": "bad Content-Length"}))
+                writer.write(_json_response(HTTP_400, {"error": "bad Content-Length"}, headers=sign_in_headers))
                 await writer.drain()
                 return
             if content_length > cap:
@@ -234,7 +281,7 @@ class AgentHTTPServer:
                     "error": f"the request body has {content_length} bytes; "
                              f"{'a configuration import' if streamed else 'the server'} takes at most "
                              f"{cap // (1024 * 1024)} MiB ({cap} bytes)",
-                }))
+                }, headers=sign_in_headers))
                 await writer.drain()
                 return
             if streamed:
@@ -249,25 +296,27 @@ class AgentHTTPServer:
                     reader.readexactly(content_length), timeout=30.0
                 )
 
-            if method == "OPTIONS":
+            if method == "OPTIONS" and area is operator_auth.Access.DASHBOARD:
                 writer.write(_no_content())
                 await writer.drain()
                 writer.close()
                 return
 
-            if path.startswith(AGENT_API):
+            if area is operator_auth.Access.SIGN_IN:
+                await self._handle_sign_in(method, path, headers, body, peer_host, writer)
+            elif area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
-            elif path.startswith("/api/"):
+            elif area is operator_auth.Access.OPERATOR:
                 await self._route_api(method, path, query, body, writer)
             else:
-                await self._serve_static(path, writer)
+                await self._serve_static(path, writer, headers=headers, query=query, peer_host=peer_host)
 
         except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError):
             pass
         except Exception:
             logger.exception("error handling HTTP request")
             try:
-                writer.write(_json_response(HTTP_500, {"error": "internal server error"}))
+                writer.write(_json_response(HTTP_500, {"error": "internal server error"}, headers=sign_in_headers))
                 await writer.drain()
             except Exception:
                 pass
@@ -2021,20 +2070,165 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_200, channel_view(updated)))
         await writer.drain()
 
+    def _password_record(self) -> operator_auth.PasswordRecord | None:
+        if self._runtime_root is None:
+            return None
+        try:
+            info = os.stat(self._runtime_root / operator_auth.PASSWORD_FILE, follow_symlinks=False)
+            key = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_mode, info.st_uid)
+        except FileNotFoundError:
+            self._password_key, self._password, self._password_error = None, None, None
+            return None
+        except OSError as exc:
+            raise operator_auth.OperatorTokenError(f"cannot stat password file: {exc}") from None
+        if key != self._password_key:
+            self._password, self._password_error = None, None
+            try:
+                self._password = operator_auth.load_password(self._runtime_root)
+            except operator_auth.OperatorTokenError as exc:
+                self._password_error = exc
+                logger.error("%s", exc)
+            self._password_key = key
+        if self._password_error:
+            raise self._password_error
+        return self._password
+
+    def _session_cookie_name(self) -> str:
+        return f"looper_session_{self._port}"
+
+    def _is_operator(self, headers: Mapping[str, str], *, browser: bool = False) -> bool:
+        credentials = {key: value for key, value in headers.items() if key != "authorization"} if browser else headers
+        if operator_auth.is_operator(credentials, token=self._operator_token, port=self._port):
+            return True
+        session_id = operator_auth.cookie(headers, self._session_cookie_name())
+        if session_id is None:
+            return False
+        try:
+            record = self._password_record()
+        except operator_auth.OperatorTokenError:
+            return False
+        return record is not None and self._sessions.valid(session_id, record.hash)
+
+    async def _sign_in_response(self, writer: asyncio.StreamWriter, status: str, body: str = "", *,
+                                headers: Mapping[str, str] | None = None, cookies: tuple[str, ...] = ()) -> None:
+        data = body.encode("utf-8")
+        fields = {**SIGN_IN_HEADERS, **(headers or {})}
+        writer.write((f"HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
+                      f"Content-Length: {len(data)}\r\n"
+                      + "".join(f"{key}: {value}\r\n" for key, value in fields.items())
+                      + "".join(f"Set-Cookie: {cookie}\r\n" for cookie in cookies)
+                      + "\r\n").encode() + data)
+        await writer.drain()
+
+    async def _login_page(self, writer: asyncio.StreamWriter, status: str = HTTP_200, error: str = "", *,
+                          headers: Mapping[str, str] | None = None) -> None:
+        unusable = False
+        try:
+            record = self._password_record()
+        except operator_auth.OperatorTokenError:
+            record = None
+            unusable = True
+            status, error = HTTP_503, "the server's password file is unusable; see the server log"
+        form = ("<form method=\"post\" action=\"/login\"><label>User name"
+                "<input name=\"username\" value=\"admin\" autocomplete=\"username\" required></label>"
+                "<label>Password<input name=\"password\" type=\"password\" autocomplete=\"current-password\" required>"
+                "</label><button type=\"submit\">Sign in</button></form>") if record else (
+                "<p>No password is set. On the server's machine run <code>looper auth set-password</code>, "
+                "or open the dashboard there.</p>" if not unusable else "")
+        page = ("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Looper</title>"
+                "<style>:root{color-scheme:light dark;font:16px system-ui;background:#f4f5f7;color:#202124}"
+                "body{max-width:24rem;margin:12vh auto;padding:2rem}form,label{display:grid;gap:.6rem}"
+                "form{gap:1.2rem}input,button{font:inherit;padding:.7rem;border:1px solid #888;border-radius:.4rem}"
+                ".error{color:#b3261e}@media(prefers-color-scheme:dark){:root{background:#18191b;color:#eee}"
+                ".error{color:#ffb4ab}}</style><h1>Looper</h1>"
+                + (f"<p class=\"error\">{html.escape(error)}</p>" if error else "") + form + "</html>")
+        await self._sign_in_response(writer, status, page, headers=headers)
+
+    async def _handle_sign_in(self, method: str, path: str, headers: Mapping[str, str], body: bytes,
+                              peer_host: str | None, writer: asyncio.StreamWriter) -> None:
+        if method == "GET" and path == "/login":
+            cookies = ()
+            signed_in = self._is_operator(headers, browser=True)
+            if not signed_in and self._operator_token and operator_auth.signs_in(headers, peer_host=peer_host):
+                signed_in = True
+                cookies = (operator_auth.set_cookie(self._operator_token, port=self._port),)
+            if signed_in:
+                await self._sign_in_response(writer, HTTP_303, headers={"Location": "/"}, cookies=cookies)
+            else:
+                await self._login_page(writer)
+            return
+        if method != "POST":
+            await self._sign_in_response(writer, HTTP_405)
+            return
+        origin = urllib.parse.urlsplit(headers.get("origin") or "")
+        host = headers.get("host", "").lower()
+        scheme = "https" if (self._dashboard_url or "").startswith("https://") else "http"
+        if not host or origin.scheme != scheme or origin.netloc.lower() != host:
+            await self._sign_in_response(writer, HTTP_403)
+            return
+        if path == "/logout":
+            self._sessions.end(operator_auth.cookie(headers, self._session_cookie_name()) or "")
+            cookies = tuple(f"{name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict" for name in (
+                self._session_cookie_name(), operator_auth.cookie_name(self._port)))
+            await self._sign_in_response(writer, HTTP_303, headers={"Location": "/login"}, cookies=cookies)
+            return
+        # One attempt at a time, so parallel guesses can't all pass the limiter before a failure counts.
+        async with self._sign_in_lock:
+            retry_after = self._login_limiter.retry_after(peer_host)
+            if retry_after:
+                logger.warning("sign-in from %s locked", peer_host)
+                await self._login_page(writer, HTTP_429, "Please wait before signing in again.",
+                                       headers={"Retry-After": str(retry_after)})
+                return
+            if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+                await self._sign_in_response(writer, HTTP_400)
+                return
+            try:
+                fields = dict(urllib.parse.parse_qsl(body.decode("utf-8"), keep_blank_values=True))
+            except UnicodeError:
+                await self._sign_in_response(writer, HTTP_400)
+                return
+            try:
+                record = self._password_record()
+                if record is None:
+                    await self._login_page(writer, HTTP_401)
+                    return
+                matched = await asyncio.to_thread(operator_auth.verify, record, fields.get("username", ""),
+                                                  fields.get("password", ""))
+            except (operator_auth.OperatorTokenError, ValueError) as exc:
+                logger.error("password file is unusable: %s", exc)
+                await self._login_page(writer, HTTP_503,
+                                       "the server's password file is unusable; see the server log")
+                return
+            if not matched:
+                self._login_limiter.failure(peer_host)
+                logger.warning("sign-in from %s failed", peer_host)
+                await self._login_page(writer, HTTP_401, "wrong user name or password")
+                return
+            self._login_limiter.success(peer_host)
+            logger.info("sign-in from %s succeeded", peer_host)
+            session_id = self._sessions.create(record.user, record.hash)
+            cookie = (f"{self._session_cookie_name()}={session_id}; Path=/; HttpOnly; SameSite=Strict; "
+                      f"Max-Age={operator_auth.SESSION_TTL_SECONDS}")
+            if (self._dashboard_url or "").startswith("https://"):
+                cookie += "; Secure"
+            await self._sign_in_response(writer, HTTP_303, headers={"Location": "/"}, cookies=(cookie,))
+
     # --- Static file serving ---
 
     async def _serve_static(
-        self, path: str, writer: asyncio.StreamWriter
+        self, path: str, writer: asyncio.StreamWriter, *, headers: Mapping[str, str] | None = None,
+        query: Mapping[str, str] | None = None, peer_host: str | None = None,
     ) -> None:
-        if path == "/":
-            path = "/index.html"
-
-        file_path = self._static_dir / path.lstrip("/")
+        page = path in ("/", "/index.html")
+        file_path = self._static_dir / ("index.html" if path == "/" else path.lstrip("/"))
 
         if not file_path.is_file():
             index_path = self._static_dir / "index.html"
             if index_path.is_file():
                 file_path = index_path
+                page = True
             else:
                 writer.write(_json_response(HTTP_404, {"error": "not found"}))
                 await writer.drain()
@@ -2052,17 +2246,28 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        if page and not self._is_operator(headers or {}, browser=True) and not (
+            self._operator_token and operator_auth.signs_in(headers or {}, peer_host=peer_host)
+        ):
+            await self._login_page(writer)
+            return
+
         content_type, _ = mimetypes.guess_type(str(file_path))
         if content_type is None:
             content_type = "application/octet-stream"
 
         data = file_path.read_bytes()
-        headers = (
+        cookie = ""
+        if page and self._operator_token and operator_auth.signs_in(headers or {}, peer_host=peer_host):
+            cookie = f"Set-Cookie: {operator_auth.set_cookie(self._operator_token, port=self._port)}\r\n"
+        policy = "Referrer-Policy: no-referrer\r\n" if page else ""
+        response_headers = (
             f"HTTP/1.1 {HTTP_200}\r\n"
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(data)}\r\n"
-            f"Cache-Control: public, max-age=3600\r\n"
+            f"Cache-Control: {'no-store' if page else 'public, max-age=3600'}\r\n"
+            f"{policy}{cookie}"
             f"\r\n"
         )
-        writer.write(headers.encode("utf-8") + data)
+        writer.write(response_headers.encode("utf-8") + data)
         await writer.drain()
