@@ -38,7 +38,6 @@ the other variables it holds are warned about.
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import stat
@@ -348,13 +347,14 @@ def read_dotenv(path: Path = DOTENV) -> dict[str, str]:
 
 
 def load(flags: Flags = Flags(), *, environ: Mapping[str, str] | None = None, dotenv: Path = DOTENV,
-         require_database: bool = True) -> OpsConfig:
+         require_database: bool = True, require_file: bool = True) -> OpsConfig:
     """The settings in effect for a command with ``flags``; ``OpsConfigError`` when they cannot be used, or when
-    ``require_database`` and nothing names a database."""
+    ``require_database`` and nothing names a database. A ``--config`` file must exist unless not ``require_file``
+    (``init-ops``, about to write it)."""
     environ = os.environ if environ is None else environ
     root, root_warning = runtime_root(flags.runtime_root, environ)
     path = config_path(flags.config, root)
-    in_file = read_file(path, required=flags.config is not None and bool(str(flags.config).strip()))
+    in_file = read_file(path, required=require_file and flags.config is not None and bool(str(flags.config).strip()))
     legacy = read_dotenv(dotenv)
     warnings = [root_warning] if root_warning else []
     values: dict[str, Any] = {}
@@ -400,7 +400,18 @@ def load(flags: Flags = Flags(), *, environ: Mapping[str, str] | None = None, do
 
 
 def _toml_string(value: str) -> str:
-    return json.dumps(value)  # a JSON string, ASCII-escaped, is a TOML basic string
+    """``value`` as a TOML basic string: quotes, backslashes and control characters escaped, every other character
+    as it is (a JSON escape of a character outside the BMP is a surrogate pair, which TOML refuses)."""
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        raise OpsConfigError("a setting holds a byte that is not text (an undecodable variable?); fix where it comes "
+                             "from")
+    return '"' + "".join(_toml_char(char) for char in value) + '"'
+
+
+def _toml_char(char: str) -> str:
+    if char in '"\\':
+        return "\\" + char
+    return f"\\u{ord(char):04X}" if ord(char) < 0x20 or ord(char) == 0x7F else char
 
 
 def render(config: OpsConfig) -> str:
@@ -470,7 +481,8 @@ def init_file(flags: Flags = Flags(), *, environ: Mapping[str, str] | None = Non
     path = config_path(flags.config, root)
     if os.path.lexists(path):
         raise OpsConfigError(f"{path} exists already: edit it (`looper serve` reads it at every start)")
-    config = load(replace(flags, runtime_root=root), environ=environ, dotenv=dotenv, require_database=False)
+    config = load(replace(flags, runtime_root=root), environ=environ, dotenv=dotenv, require_database=False,
+                  require_file=False)
     write_private(path, render(config))
     written = load(Flags(runtime_root=root, config=path), environ={}, dotenv=Path(os.devnull))
     if written.database_url != (config.database_url or LEGACY_DEFAULT_DATABASE_URL):  # never expected

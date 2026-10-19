@@ -37,10 +37,13 @@ NETWORK = (
     "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
 )
 # The runtimes' own: their directories, and the login and endpoint an operator may set for a runtime's own provider.
-# A run's provider binding sets or removes these for its provider (``ProviderBinding``).
+# A run's provider binding sets or removes these for its provider (``ProviderBinding``). Claude Code: its config
+# directory, an API key or token and endpoint, the token of ``claude setup-token`` (CLAUDE_CODE_OAUTH_TOKEN), the
+# model names; Codex: CODEX_HOME (its auth.json) and the key ``codex exec`` reads; Grok: GROK_HOME and its keys. omp
+# runs with API keys only, through the binding (``LOOPER_PROVIDER_API_KEY``), and its directories are Looper's.
 RUNTIMES = (
     "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "COPILOT_HOME", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
     "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH",

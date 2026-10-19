@@ -30,7 +30,6 @@ import datetime
 import getpass
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import urllib.parse
@@ -88,7 +87,8 @@ def find_dumper(server_major: int | None, ops: OpsConfig | None = None) -> Dumpe
     or ``pg_dump`` is older than the server."""
     command, configured = (ops.backup_command, ops.pg_dump) if ops else ((), "")
     if command:
-        return Dumper(command, True, f"{ops.sources['backup_command']}: {shlex.join(command)} (version not checked)")
+        # The program only: its arguments can hold a password (docker exec -e PGPASSWORD=...).
+        return Dumper(command, True, f"{ops.sources['backup_command']}: {command[0]} … (version not checked)")
     program = shutil.which(configured or "pg_dump")
     if program is None:
         raise NoDumper(f"{ops.sources['pg_dump']} names {configured}, which is not an executable" if configured
