@@ -40,6 +40,10 @@ type DBPinger interface {
 // directory has been accepted and the active-task list is required. A
 // project id is looked up before that directory check.
 type Reader interface {
+	Knowledge(ctx context.Context, projectID, runtimeRoot string) (map[string]any, error)
+	Document(ctx context.Context, projectID, documentID, runtimeRoot string) (map[string]any, error)
+	Drafts(ctx context.Context, projectID string) (map[string]any, error)
+	ProjectSkill(ctx context.Context, projectID, skillID string) (map[string]any, error)
 	StatusTaskCounts(ctx context.Context) (total, running, completed int, err error)
 	Overview(ctx context.Context, since time.Time) (map[string]any, error)
 	Projects(ctx context.Context) (map[string]any, error)
@@ -89,12 +93,15 @@ type Reader interface {
 // Now is the clock for today's overview. Nil uses time.Now. The parity harness
 // sets it so spend and skipped runs do not follow the wall clock.
 type Server struct {
-	Version  string
-	DB       DBPinger
-	WebDir   string
-	Reads    Reader
-	BindHost string
-	Now      func() time.Time
+	// RuntimeRoot names stored knowledge read paths. Empty refuses knowledge GETs,
+	// matching a Python server started without a runtime root. GETs never write it.
+	RuntimeRoot string
+	Version     string
+	DB          DBPinger
+	WebDir      string
+	Reads       Reader
+	BindHost    string
+	Now         func() time.Time
 	// ClaudeBin is the Claude Code executable an empty claude-code runtime
 	// resolves. Empty means "claude", which is Python's default.
 	ClaudeBin string
@@ -139,7 +146,7 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // It also serves GET /api/workspaces/check, GET /api/projects/<id>/schedules,
 // GET /api/schedules, GET /api/schedules/<id>, its runs, and its notifications.
 // It also serves GET /api/agent-settings and GET /api/projects/<id>/agent-settings.
-// It also serves GET /api/registry.
+// It also serves GET /api/registry, project knowledge, documents, drafts, and owned skills.
 // GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
 // are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
@@ -172,6 +179,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/agent-settings", s.handleAgentSettings)
 	mux.HandleFunc("/api/projects/{id}/agent-settings", s.handleProjectAgentSettings)
 	mux.HandleFunc("/api/projects/{id}/role-stats", s.handleRoleStats)
+	mux.HandleFunc("/api/projects/{id}/knowledge", s.handleKnowledge)
+	mux.HandleFunc("/api/projects/{id}/knowledge/{document}", s.handleKnowledge)
+	mux.HandleFunc("/api/projects/{id}/skills/{skill}", s.handleProjectSkill)
 	mux.HandleFunc("/api/workspaces/check", s.handleWorkspaceCheck)
 	mux.HandleFunc("/api/projects/{id}/schedules", s.handleProjectSchedules)
 	mux.HandleFunc("/api/schedules/{id}/runs", s.handleScheduleRuns)

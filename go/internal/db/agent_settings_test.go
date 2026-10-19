@@ -375,6 +375,35 @@ func TestSeededAgentSettings(t *testing.T) {
 	}
 }
 
+func TestReviewerHarnessOverridesWorker(t *testing.T) {
+	tests := []struct {
+		name      string
+		scope     string
+		projectID string
+		value     string
+	}{
+		{name: "role", scope: "role", value: "Reviewer role harness."},
+		{name: "role project", scope: "role_project", projectID: "proj-alpha0001", value: "Alpha reviewer harness."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows := append(seedSettingRows(), settingRow(tt.scope, "reviewer", tt.projectID, map[string]any{
+				"harness_prompt": tt.value,
+			}))
+			layers := indexLayers(rows, tt.projectID)
+			view := settingsView(layers)
+			if tt.projectID != "" {
+				view = projectSettingsView(tt.projectID, layers)
+			}
+			harness := nested(t, view, "roles", "reviewer", "effective", "harness_prompt")
+			if harness["value"] != tt.value || harness["source"] != tt.scope {
+				t.Fatalf("reviewer harness %#v, want %q from %s", harness, tt.value, tt.scope)
+			}
+			assertNoKey(t, harness, "from_role")
+		})
+	}
+}
+
 func TestHarnessEdges(t *testing.T) {
 	tests := []struct {
 		name string

@@ -1,0 +1,17 @@
+{
+  "content": "# Live\n最新内容 🌍\n",
+  "document": {
+    "created_at": "2020-01-03T00:00:00+00:00",
+    "document_id": "doc-live001",
+    "filename": null,
+    "missing": false,
+    "path": "live.md",
+    "read_path": "<knowledge-root>/project/live.md",
+    "sha256": "stale-live-hash",
+    "size_bytes": 25,
+    "source_kind": "path",
+    "summary": "Read updated bytes",
+    "title": "Live file",
+    "updated_at": "2020-01-04T00:00:00+00:00"
+  }
+}

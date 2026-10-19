@@ -1,0 +1,18 @@
+{
+  "content": null,
+  "content_error": "gone.md is missing from the project's default directory",
+  "document": {
+    "created_at": "2020-01-03T00:00:00+00:00",
+    "document_id": "doc-missing01",
+    "filename": null,
+    "missing": true,
+    "path": "gone.md",
+    "read_path": "<knowledge-root>/project/gone.md",
+    "sha256": "missing-hash",
+    "size_bytes": 73,
+    "source_kind": "path",
+    "summary": "File was removed",
+    "title": "Missing file",
+    "updated_at": "2020-01-04T00:00:00+00:00"
+  }
+}

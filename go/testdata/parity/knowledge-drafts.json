@@ -1,0 +1,24 @@
+{
+  "count": 2,
+  "drafts": [
+    {
+      "content": "经验 🌍\n",
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "draft_id": "draft-a001",
+      "size_bytes": 12,
+      "summary": "Unicode byte size",
+      "task_id": null,
+      "title": "中文草稿"
+    },
+    {
+      "content": "First lesson\n",
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "draft_id": "draft-z001",
+      "size_bytes": 13,
+      "summary": "Task lessons",
+      "task_id": "task-rich00001",
+      "title": "From a task"
+    }
+  ],
+  "project_id": "proj-knowledge01"
+}

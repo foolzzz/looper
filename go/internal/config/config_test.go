@@ -17,8 +17,8 @@ func TestParseServeArgs(t *testing.T) {
 	}{
 		{
 			name: "all flags",
-			args: []string{"--port", "8080", "--db-url", "postgresql://postgres:postgres@127.0.0.1:54329/loopgo_x", "--web-dir", "/tmp/web"},
-			want: ServeConfig{Port: 8080, DBURL: "postgresql://postgres:postgres@127.0.0.1:54329/loopgo_x", WebDir: "/tmp/web"},
+			args: []string{"--port", "8080", "--db-url", "postgresql://postgres:postgres@127.0.0.1:54329/loopgo_x", "--web-dir", "/tmp/web", "--runtime-root", "/tmp/runtime"},
+			want: ServeConfig{Port: 8080, DBURL: "postgresql://postgres:postgres@127.0.0.1:54329/loopgo_x", WebDir: "/tmp/web", RuntimeRoot: "/tmp/runtime"},
 		},
 		{
 			name: "web dir optional",

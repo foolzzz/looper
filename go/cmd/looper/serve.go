@@ -66,6 +66,10 @@ func serveContext(ctx context.Context, args []string, logger *slog.Logger) error
 	}
 	api := httpapi.New(version, db.Probe{DB: sqlDB}, cfg.WebDir)
 	api.Reads = db.NewStore(sqlDB)
+	api.RuntimeRoot = cfg.RuntimeRoot
+	if api.RuntimeRoot == "" {
+		api.RuntimeRoot = "."
+	}
 	return serveListener(ctx, ln, api.Handler(), logger, shutdownTimeout)
 }
 

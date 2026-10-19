@@ -17,7 +17,7 @@ import (
 // There is no Date header. make_goldens.py --raw-only writes these files and
 // does not rewrite the sorted JSON goldens.
 //
-// CompareRaw checks status code, reason phrase, body bytes, and every header
+// CompareRaw checks protocol version, status code, reason phrase, body bytes, and every header
 // except Date. net/http writes Date itself and sorts header names on the
 // wire, so names are compared as a map. Header values are not sorted:
 // Set-Cookie order is significant. Cache-Control, WWW-Authenticate, Allow,
@@ -50,6 +50,9 @@ func CompareRaw(resp *http.Response, body, golden []byte, paths []string) error 
 	wantCode, wantStatus, wantHeader, wantBody, err := parsePythonResponse(golden)
 	if err != nil {
 		return err
+	}
+	if resp.Proto != "HTTP/1.1" || resp.ProtoMajor != 1 || resp.ProtoMinor != 1 {
+		return fmt.Errorf("raw protocol %q (%d.%d), want HTTP/1.1", resp.Proto, resp.ProtoMajor, resp.ProtoMinor)
 	}
 	gotHeader := resp.Header.Clone()
 	if gotHeader == nil {

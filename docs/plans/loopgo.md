@@ -169,6 +169,23 @@ chooses it. A provider API key is `***` when a secret row exists. Codex and
 Grok login state is read from the server environment and cached for 30
 seconds.
 
+G1j serves `GET /api/agent-settings` and
+`GET /api/projects/<id>/agent-settings`, including the settings inheritance
+sources and the Reviewer's fallback to the Worker's harness only when the
+Reviewer has no harness override.
+
+G1m serves a project's knowledge list, one document, drafts, and one owned
+skill. Knowledge GETs compute stored read paths without materializing files;
+path documents report the current file size and content while refusing files
+outside the project's directory. Missing and non-text files retain metadata
+and return `content_error`. `--runtime-root DIR` selects the root used for
+stored read paths; its default is the current directory. The dashboard uses
+these existing HTTP shapes unchanged; channel and CLI commands need no new
+behavior beyond the server's runtime-root option. The new Python v2.10.0
+goldens use temporary project files; offline view comparisons cover their
+content and sizes. Database-backed generation and parity remain unverified
+in the current sandbox, which refuses the disposable PostgreSQL connection.
+
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
@@ -176,13 +193,7 @@ is not in this list.
 
 - `GET /api/chat/events` (SSE)
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts`
 - `GET /api/projects/(proj-[a-zA-Z0-9]+)/installs`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)`
-- `GET /api/agent-settings`
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/agent-settings`
 - `GET /api/config/export`
 - `GET /api/catalog`
 - `GET /api/catalog/([a-z]+-[a-zA-Z0-9]+)`

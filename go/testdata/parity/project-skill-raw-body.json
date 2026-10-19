@@ -1,0 +1,12 @@
+{
+  "content": "---\nname: a-different-name\n---\n\nKeep this frontmatter.\n",
+  "skill": {
+    "created_at": "2020-01-01T00:00:00+00:00",
+    "description": "Not matching frontmatter",
+    "name": "raw-body",
+    "qualified_name": "project:raw-body",
+    "size_bytes": 55,
+    "skill_id": "skill-rawbody01",
+    "updated_at": "2020-01-02T00:00:00+00:00"
+  }
+}

@@ -27,6 +27,9 @@ Normalization, the same rule the Go parity test applies before comparing:
   numeric version, such as a requirement or role version, is written as the
   handler returned it. implementation and db are written as the handler
   returned them.
+- Knowledge fixture paths become "<knowledge-root>". The harness first checks
+  index_chars against the original index, then compares its length after this
+  path replacement as well.
 - Object key order is not significant. Numbers compare by value, so 0 and 0.0
   match. The files below are written with sorted keys for review.
 
@@ -343,6 +346,43 @@ _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database n
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
 
+
+# New project fixture is loaded after the legacy responses are captured.
+_KNOWLEDGE = (
+    ("knowledge", "proj-knowledge01", None, 200),
+    ("knowledge-empty", "proj-knowledge02", None, 200),
+    ("knowledge-missing", "proj-missing01", None, 404),
+    ("document-text", "proj-knowledge01", "doc-text001", 200),
+    ("document-upload", "proj-knowledge01", "doc-upload01", 200),
+    ("document-unicode", "proj-knowledge01", "doc-unicode01", 200),
+    ("document-live", "proj-knowledge01", "doc-live001", 200),
+    ("document-file-missing", "proj-knowledge01", "doc-missing01", 200),
+    ("document-binary", "proj-knowledge01", "doc-binary01", 200),
+    ("document-invalid-utf8", "proj-knowledge01", "doc-invalid01", 200),
+    ("document-large", "proj-knowledge01", "doc-large001", 200),
+    ("document-symlink", "proj-knowledge01", "doc-symlink01", 200),
+    ("document-parent", "proj-knowledge01", "doc-parent01", 200),
+    ("document-directory", "proj-knowledge01", "doc-dir0001", 200),
+    ("document-missing", "proj-knowledge01", "doc-absent01", 404),
+    ("document-cross-project", "proj-knowledge02", "doc-text001", 404),
+    ("document-project-missing", "proj-missing01", "doc-text001", 404),
+)
+_DRAFTS = (
+    ("knowledge-drafts", "proj-knowledge01", 200),
+    ("knowledge-drafts-empty", "proj-knowledge02", 200),
+    ("knowledge-drafts-missing", "proj-missing01", 404),
+)
+_SKILLS = (
+    ("project-skill", "proj-knowledge01", "skill-project001", 200),
+    ("project-skill-file-missing", "proj-knowledge01", "skill-nofile001", 200),
+    ("project-skill-raw-body", "proj-knowledge01", "skill-rawbody01", 200),
+    ("project-skill-cross-project", "proj-knowledge02", "skill-project001", 404),
+    ("project-skill-missing", "proj-knowledge01", "skill-absent01", 404),
+    ("project-skill-other-origin", "proj-knowledge01", "skill-otherorigin01", 404),
+    ("project-skill-project-missing", "proj-missing01", "skill-project001", 404),
+)
+_KNOWLEDGE_PLACEHOLDER = "<knowledge-root>"
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]  # go/testdata/parity -> worktree root
 
@@ -362,6 +402,8 @@ def normalize(value):
                 out[key] = "<time>"
                 continue
             out[key] = normalize(item)
+        if "index" in out and "index_chars" in out:
+            out["index_chars"] = len(out["index"])
         return out
     if isinstance(value, list):
         return [normalize(item) for item in value]
@@ -714,9 +756,66 @@ async def capture(dsn: str) -> dict[str, object]:
                         lambda project_id=project_id: agent_settings.project_settings_view(project_id),
                         expect)
             out.update(await _capture_registry(server, take))
+            out.update(await _capture_knowledge(server, root))
             return out
     finally:
         await dbconn.close_pool()
+
+
+async def _capture_knowledge(server, root: Path) -> dict[str, object]:
+    from looper.agents import knowledge, project_skills
+    from looper.agents.http_server import HTTP_200
+    from looper.db.connection import get_pool
+
+    # Every path and symlink target is below this owned fixture root. An escaped
+    # symlink points to a harmless sibling, and must never yield its sentinel.
+    root = root.resolve()
+    project = root / "project"
+    project.mkdir()
+    (root / "empty").mkdir()
+    (project / "subdir").mkdir()
+    (project / "live.md").write_text("# Live\n最新内容 🌍\n", encoding="utf-8")
+    (project / "binary.dat").write_bytes(b"text\x00binary")
+    (project / "invalid.dat").write_bytes(b"\xffinvalid")
+    (project / "large.txt").write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    (root / "outside.md").write_text("OUTSIDE_SENTINEL", encoding="utf-8")
+    (project / "escaped.md").symlink_to(root / "outside.md")
+    sql = (HERE / "knowledge_fixture.sql").read_text(encoding="utf-8")
+    await get_pool().execute(sql.replace("__KNOWLEDGE_ROOT__", str(root).replace("'", "''")))
+    server._runtime_root = root
+    _parity_rewrites.append((str(root), _KNOWLEDGE_PLACEHOLDER))
+
+    class Capture:
+        def __init__(self):
+            self.buf = bytearray()
+        def write(self, data):
+            self.buf.extend(data)
+        async def drain(self):
+            pass
+
+    async def take(call, expect, catalog=False):
+        cap = Capture()
+        if catalog:
+            await server._handle_catalog(cap, HTTP_200, call)
+        else:
+            await server._handle_knowledge(cap, HTTP_200, lambda _: call())
+        value = response_json(bytes(cap.buf), expect)
+        if "index_chars" in value and value["index_chars"] != len(value["index"]):
+            raise SystemExit("knowledge index_chars does not count the real index")
+        return value
+
+    out = {}
+    for name, project_id, document_id, expect in _KNOWLEDGE:
+        if document_id is None:
+            call = lambda p=project_id: knowledge.knowledge_view(p, root)
+        else:
+            call = lambda p=project_id, d=document_id: knowledge.get_document(p, d, root)
+        out[name] = await take(call, expect)
+    for name, project_id, expect in _DRAFTS:
+        out[name] = await take(lambda p=project_id: knowledge.drafts_view(p), expect)
+    for name, project_id, skill_id, expect in _SKILLS:
+        out[name] = await take(lambda p=project_id, s=skill_id: project_skills.get_skill(p, s), expect, True)
+    return out
 
 
 def _names() -> list[str]:
@@ -754,6 +853,9 @@ def _names() -> list[str]:
         + [name for name, _, _, _ in _NOTIFICATIONS_500]
         + [name for name, _, _ in _AGENT_SETTINGS]
         + [name for name, _ in _REGISTRY]
+        + [name for name, _, _, _ in _KNOWLEDGE]
+        + [name for name, _, _ in _DRAFTS]
+        + [name for name, _, _, _ in _SKILLS]
     )
 
 

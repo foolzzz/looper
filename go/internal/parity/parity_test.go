@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -45,7 +47,8 @@ import (
 // today. Rows in 2020 do not. A schedule run at 2026-06-14T09:00:00Z is before
 // that local midnight everywhere from UTC-12 through UTC+14.
 //
-// goldenCases is the same list make_goldens.py writes.
+// goldenCases is the legacy list make_goldens.py writes. Knowledge and skill
+// cases have an isolated fixture in TestKnowledgeGoldenParity.
 var (
 	volatileTimes = map[string]bool{"since": true}
 	volatileKeys  = map[string]bool{
@@ -391,6 +394,166 @@ func TestGoldenParity(t *testing.T) {
 				t.Fatal(err)
 			}
 			compareCaseRaw(t, tc.name, resp, body, true)
+		})
+	}
+}
+
+var knowledgeCases = []struct {
+	name, path string
+	status     int
+}{
+	{"knowledge", "/api/projects/proj-knowledge01/knowledge", 200},
+	{"knowledge-empty", "/api/projects/proj-knowledge02/knowledge", 200},
+	{"knowledge-missing", "/api/projects/proj-missing01/knowledge", 404},
+	{"document-text", "/api/projects/proj-knowledge01/knowledge/doc-text001", 200},
+	{"document-upload", "/api/projects/proj-knowledge01/knowledge/doc-upload01", 200},
+	{"document-unicode", "/api/projects/proj-knowledge01/knowledge/doc-unicode01", 200},
+	{"document-live", "/api/projects/proj-knowledge01/knowledge/doc-live001", 200},
+	{"document-file-missing", "/api/projects/proj-knowledge01/knowledge/doc-missing01", 200},
+	{"document-binary", "/api/projects/proj-knowledge01/knowledge/doc-binary01", 200},
+	{"document-invalid-utf8", "/api/projects/proj-knowledge01/knowledge/doc-invalid01", 200},
+	{"document-large", "/api/projects/proj-knowledge01/knowledge/doc-large001", 200},
+	{"document-symlink", "/api/projects/proj-knowledge01/knowledge/doc-symlink01", 200},
+	{"document-parent", "/api/projects/proj-knowledge01/knowledge/doc-parent01", 200},
+	{"document-directory", "/api/projects/proj-knowledge01/knowledge/doc-dir0001", 200},
+	{"document-missing", "/api/projects/proj-knowledge01/knowledge/doc-absent01", 404},
+	{"document-cross-project", "/api/projects/proj-knowledge02/knowledge/doc-text001", 404},
+	{"document-project-missing", "/api/projects/proj-missing01/knowledge/doc-text001", 404},
+	{"knowledge-drafts", "/api/projects/proj-knowledge01/knowledge/drafts", 200},
+	{"knowledge-drafts-empty", "/api/projects/proj-knowledge02/knowledge/drafts", 200},
+	{"knowledge-drafts-missing", "/api/projects/proj-missing01/knowledge/drafts", 404},
+	{"project-skill", "/api/projects/proj-knowledge01/skills/skill-project001", 200},
+	{"project-skill-file-missing", "/api/projects/proj-knowledge01/skills/skill-nofile001", 200},
+	{"project-skill-raw-body", "/api/projects/proj-knowledge01/skills/skill-rawbody01", 200},
+	{"project-skill-cross-project", "/api/projects/proj-knowledge02/skills/skill-project001", 404},
+	{"project-skill-missing", "/api/projects/proj-knowledge01/skills/skill-absent01", 404},
+	{"project-skill-other-origin", "/api/projects/proj-knowledge01/skills/skill-otherorigin01", 404},
+	{"project-skill-project-missing", "/api/projects/proj-missing01/skills/skill-project001", 404},
+}
+
+// TestKnowledgeGoldenParity owns its project files and schema. It runs separately
+// so fixture projects cannot change the pre-existing project/overview goldens.
+func TestKnowledgeGoldenParity(t *testing.T) {
+	dsn := os.Getenv("LOOPGO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("LOOPGO_TEST_DATABASE_URL is not set")
+	}
+	if !acceptableDatabase(dsn) {
+		t.Fatal("refusing database URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := db.ExecScript(ctx, dsn, "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureSchema(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"project", "project/subdir", "empty"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string][]byte{
+		"project/live.md":     []byte("# Live\n最新内容 🌍\n"),
+		"project/binary.dat":  []byte("text\x00binary"),
+		"project/invalid.dat": []byte{0xff, 'i', 'n', 'v', 'a', 'l', 'i', 'd'},
+		"project/large.txt":   bytes.Repeat([]byte("x"), 2*1024*1024+1),
+		"outside.md":          []byte("OUTSIDE_SENTINEL"),
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(root, "outside.md"), filepath.Join(root, "project", "escaped.md")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"seed.sql", "knowledge_fixture.sql"} {
+		sql, err := os.ReadFile(filepath.Join("..", "..", "testdata", "parity", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ExecScript(ctx, dsn, strings.ReplaceAll(string(sql), "__KNOWLEDGE_ROOT__", strings.ReplaceAll(root, "'", "''"))); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	sqlDB, err := db.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	api := httpapi.New("parity-test", db.Probe{DB: sqlDB}, "")
+	api.RuntimeRoot = root
+	api.Reads = db.NewStore(sqlDB)
+	// Disposable runtime checks use an explicit port above the operator range.
+	var listener net.Listener
+	for port := 18001; port < 18101; port++ {
+		listener, err = net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("listen on a disposable port: %v", err)
+	}
+	srv := &httptest.Server{Listener: listener, Config: &http.Server{Handler: api.Handler()}}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	client := srv.Client()
+	client.Timeout = 30 * time.Second
+
+	for _, tc := range knowledgeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := client.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status %d body %s, want %d", resp.StatusCode, body, tc.status)
+			}
+			if bytes.Contains(body, []byte("OUTSIDE_SENTINEL")) {
+				t.Fatal("response leaked a file outside the project")
+			}
+			var value map[string]any
+			if err := json.Unmarshal(body, &value); err != nil {
+				t.Fatal(err)
+			}
+			if index, ok := value["index"].(string); ok {
+				if value["index_chars"] != float64(utf8.RuneCountInString(index)) {
+					t.Fatalf("index_chars %v does not count real index", value["index_chars"])
+				}
+			}
+			// Compare the index count after replacing the unique fixture path too.
+			rewritten := bytes.ReplaceAll(body, []byte(root), []byte("<knowledge-root>"))
+			if err := json.Unmarshal(rewritten, &value); err != nil {
+				t.Fatal(err)
+			}
+			if index, ok := value["index"].(string); ok {
+				value["index_chars"] = utf8.RuneCountInString(index)
+			}
+			rewritten, err = json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", "parity", tc.name+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, want := canonical(t, rewritten), canonical(t, golden)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("canonical JSON differs\n got %s\nwant %s", got, want)
+			}
+			compareCaseRaw(t, tc.name, resp, body, false)
 		})
 	}
 }

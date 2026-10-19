@@ -1,0 +1,18 @@
+{
+  "content": null,
+  "content_error": "subdir is missing from the project's default directory",
+  "document": {
+    "created_at": "2020-01-03T00:00:00+00:00",
+    "document_id": "doc-dir0001",
+    "filename": null,
+    "missing": true,
+    "path": "subdir",
+    "read_path": "<knowledge-root>/project/subdir",
+    "sha256": "directory-hash",
+    "size_bytes": 4,
+    "source_kind": "path",
+    "summary": "Target is a directory",
+    "title": "Directory",
+    "updated_at": "2020-01-04T00:00:00+00:00"
+  }
+}
