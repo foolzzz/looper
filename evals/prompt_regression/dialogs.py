@@ -341,7 +341,7 @@ def _reviewer_set_in_project(look: Look) -> str | None:
 def _opus_allowed(look: Look) -> str | None:
     project = _project(look, PROJECT)
     allowed = [p["name"] for p in look.api.get(f"/api/projects/{project['project_id']}/allowed-profiles")["profiles"]]
-    return None if allowed == [OPUS] else f"{PROJECT}'s allowed list is {allowed}, not [{OPUS}]"
+    return None if set(allowed) == {LIGHT, OPUS} else f"{PROJECT}'s allowed list is {allowed}, not [{LIGHT}, {OPUS}]"
 
 
 def _week_spend_read(look: Look) -> str | None:
@@ -514,6 +514,13 @@ def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, st
 def _make_light_profile(api: Api, project_id: str) -> None:
     api.post("/api/agent-profiles", {"name": LIGHT, "runtime_id": "rt-claude-code",
                                      "provider_id": "prov-claude-subscription", "model": "haiku"})
+
+
+def _restrict_planner_choices(api: Api, project_id: str) -> None:
+    """The project's Planners may choose LIGHT only: an empty list allows every profile, so adding to it would
+    restrict the choice instead of widening it."""
+    _make_light_profile(api, project_id)
+    api.put(f"/api/projects/{project_id}/allowed-profiles", {"profile_ids": [LIGHT]})
 
 
 def _schedule_with_a_cheaper_planner(look: Look) -> str | None:
@@ -771,13 +778,13 @@ DIALOGS: tuple[Dialog, ...] = (
         Say(f"让 {PROJECT} 项目里的 Reviewer 用 {OPUS}。", _reviewer_set_in_project,
             (("looper_settings", {"action": "set", "project": PROJECT, "role": "reviewer",
                                   "values": {"profile": OPUS}}),)),
-        Say(f"允许 {PROJECT} 项目的规划者给执行者和评审者选 {OPUS}。", _opus_allowed,
+        Say(f"{PROJECT} 项目的规划者现在只能给执行者和评审者选 {LIGHT}。也允许他们选 {OPUS}。", _opus_allowed,
             (("looper_settings", {"action": "allowed_profiles", "project": PROJECT, "add": [OPUS]}),)),
         Say("这周一共花了多少钱？", _week_spend_read, (("looper_costs", {"period": "this_week"}),)),
         Say(f"把 {SCRATCH} 项目删掉。", _delete_asked,
             (("looper_projects", {"action": "delete", "project": SCRATCH}),)),
         Say("确认。", _deleted_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
-    )),
+    ), seed=_restrict_planner_choices),
     Dialog("task_cost", (
         Say("任务 <task> 到现在花了多少？按模型分开说，包括 token。", _cost_by_model_told,
             (("looper_costs", {"task_id": "<task>"}),)),
