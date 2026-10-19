@@ -6,16 +6,22 @@ migrations that drop columns and tables. When the schema is about to change
 ``<runtime root>/backups/`` and keeps the newest ``KEEP`` of that database's;
 without a way to make one it does not start (``--skip-backup`` overrides).
 
-The dump is made by, in order of precedence:
+The dump is made by, in order of precedence (the ops file's ``[backup]``,
+``looper.ops_config``; ``LOOPER_BACKUP_CMD`` and ``LOOPER_PG_DUMP`` for one
+release):
 
-- ``LOOPER_BACKUP_CMD``: a command run as given whose stdout is the dump, for a
-  ``pg_dump`` that cannot reach ``LOOPER_DATABASE_URL`` as written, such as the
-  one inside a PostgreSQL container; ``{dbname}`` and ``{user}`` are filled in
+- ``backup.command``: a command run as given whose stdout is the dump, for a
+  ``pg_dump`` that cannot reach the database URL as written, such as the one
+  inside a PostgreSQL container; ``{dbname}`` and ``{user}`` are filled in
   from the database URL. Its version is not checked, and the dump is checked
   by its header only;
-- the ``pg_dump`` that ``LOOPER_PG_DUMP`` names, else ``pg_dump`` on PATH. Its
+- the ``pg_dump`` that ``backup.pg_dump`` names, else ``pg_dump`` on PATH. Its
   major version must be at least the server's; the dump is then listed with
   the ``pg_restore`` beside it (else the one on PATH) to prove it is readable.
+
+Each of these runs with a backup's environment (``child_env.backup``): a
+child's, with libpq's and Docker's variables, and ``PGPASSWORD`` from the
+database URL for ``pg_dump``.
 """
 
 from __future__ import annotations
@@ -24,17 +30,14 @@ import datetime
 import getpass
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import env as looper_env
-
-PG_DUMP_ENV = "LOOPER_PG_DUMP"
-BACKUP_CMD_ENV = "LOOPER_BACKUP_CMD"
+from .. import child_env
+from ..ops_config import OpsConfig
 BACKUP_DIRNAME = "backups"
 KEEP = 5
 
@@ -60,8 +63,8 @@ class BackupFailed(Exception):
 class Dumper:
     """How a backup is made."""
 
-    argv: tuple[str, ...]  # the pg_dump program, or the whole LOOPER_BACKUP_CMD
-    command: bool  # LOOPER_BACKUP_CMD: run as given (placeholders filled in)
+    argv: tuple[str, ...]  # the pg_dump program, or the whole backup.command
+    command: bool  # backup.command: run as given (placeholders filled in)
     detail: str  # what doctor and the log show
 
     @property
@@ -79,22 +82,19 @@ def _first_line(text: str) -> str:
     return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
-def find_dumper(server_major: int | None) -> Dumper:
-    """The way backups are made here; ``NoDumper`` when there is none or ``pg_dump`` is older than the server."""
-    template = (looper_env.get(BACKUP_CMD_ENV) or "").strip()
-    if template:
-        try:
-            argv = shlex.split(template)
-        except ValueError as exc:
-            raise NoDumper(f"{BACKUP_CMD_ENV} cannot be parsed: {exc}") from None
-        return Dumper(tuple(argv), True, f"{BACKUP_CMD_ENV}: {template} (version not checked)")
-    configured = (looper_env.get(PG_DUMP_ENV) or "").strip()
+def find_dumper(server_major: int | None, ops: OpsConfig | None = None) -> Dumper:
+    """The way backups are made here with the ops settings ``ops`` (None: none set); ``NoDumper`` when there is none
+    or ``pg_dump`` is older than the server."""
+    command, configured = (ops.backup_command, ops.pg_dump) if ops else ((), "")
+    if command:
+        # The program only: its arguments can hold a password (docker exec -e PGPASSWORD=...).
+        return Dumper(command, True, f"{ops.sources['backup_command']}: {command[0]} … (version not checked)")
     program = shutil.which(configured or "pg_dump")
     if program is None:
-        raise NoDumper(f"{PG_DUMP_ENV}={configured} is not an executable" if configured
+        raise NoDumper(f"{ops.sources['pg_dump']} names {configured}, which is not an executable" if configured
                        else "`pg_dump` is not on PATH")
     try:
-        version = subprocess.run([program, "--version"], capture_output=True, text=True,
+        version = subprocess.run([program, "--version"], capture_output=True, text=True, env=child_env.backup(),
                                  stdin=subprocess.DEVNULL, timeout=_VERSION_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise NoDumper(f"`{program} --version` failed: {exc}") from None
@@ -156,10 +156,10 @@ def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetim
     bare_dsn, password, dbname, user = _connection(dsn)
     if dumper.command:
         argv = [_PLACEHOLDER.sub(lambda m: dbname if m.group(1) == "dbname" else user, arg) for arg in dumper.argv]
-        env = dict(os.environ)
+        env = child_env.backup()
     else:
         argv = [*dumper.argv, "--format=custom", "--no-password", f"--dbname={bare_dsn}"]
-        env = {**os.environ, **({"PGPASSWORD": password} if password else {})}
+        env = {**child_env.backup(), **({"PGPASSWORD": password} if password else {})}
     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime(_STAMP)
     path = backup_dir / f"{_file_stem(dbname)}-{stamp}.dump"
@@ -196,7 +196,7 @@ def _verify(path: Path, pg_restore: str | None, *, password: str | None) -> str:
         return "header checked; no pg_restore to list it"
     try:
         listed = subprocess.run([pg_restore, "--list", str(path)], capture_output=True, stdin=subprocess.DEVNULL,
-                                timeout=_LIST_TIMEOUT_SECONDS)
+                                env=child_env.backup(), timeout=_LIST_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise BackupFailed(f"`{pg_restore} --list` did not finish: {exc}") from None
     if listed.returncode != 0:

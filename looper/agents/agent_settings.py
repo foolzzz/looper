@@ -868,8 +868,9 @@ class Launch:
         """The runtime's flags for these settings, installed items and knowledge (``RuntimeAdapter.launch_args``)."""
         return self.runtime.launch_args(self)
 
-    def environment(self) -> dict[str, str] | None:
-        """The subprocess environment (``RuntimeAdapter.environment``); None to inherit the server's."""
+    def environment(self) -> dict[str, str]:
+        """The subprocess environment: ``child_env.inherited()`` with the run's own variables; never the server's whole
+        environment."""
         return self.runtime.environment(self)
 
     @property

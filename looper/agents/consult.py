@@ -54,6 +54,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .. import child_env
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from .agent_settings import AgentType, Launch, load_agent_settings
@@ -567,7 +568,7 @@ async def _run_cost(task_id: str, run_id: str) -> float | None:
 
 def _git(work_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(work_dir), *args], capture_output=True,
-                          text=True, timeout=GIT_TIMEOUT_SEC, check=False)
+                          text=True, timeout=GIT_TIMEOUT_SEC, check=False, env=child_env.inherited())
 
 
 def _snapshot(work_dir: Path, target: Path) -> tuple[Path, Path, Path] | None:

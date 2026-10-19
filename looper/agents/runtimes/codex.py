@@ -70,6 +70,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from ... import child_env
 from ..run_usage import Usage, reported_totals, run_usage
 from ..reported_files import prompt_name
 from ..system_prompt_mode import SystemPromptMode
@@ -130,7 +131,7 @@ class CodexRuntime(RuntimeAdapter):
         home = tempfile.mkdtemp(prefix="looper-codex-probe-")
         try:
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                  timeout=_PROBE_TIMEOUT_SEC, check=False, env={**os.environ, "CODEX_HOME": home})
+                                  timeout=_PROBE_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "CODEX_HOME": home})
         except FileNotFoundError:
             return Probe(None, self.capabilities, f"{executable!r} was not found")
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -152,7 +153,7 @@ class CodexRuntime(RuntimeAdapter):
                     schema = subprocess.run(
                         [executable, "app-server", "generate-json-schema", "--out", str(root / "schema")],
                         capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SEC, check=False,
-                        env={**os.environ, "CODEX_HOME": str(home)},
+                        env={**child_env.inherited(), "CODEX_HOME": str(home)},
                     )
                     if schema.returncode == 0 and '"turn/steer"' in (root / "schema" / "ClientRequest.json").read_text(
                         encoding="utf-8",
@@ -198,10 +199,10 @@ class CodexRuntime(RuntimeAdapter):
         ]
 
     def environment(self, launch: Launch) -> dict[str, str]:
-        """The server's environment, then the settings' variables and the provider's binding (its own variables
+        """``child_env.inherited()``, then the settings' variables and the provider's binding (its own variables
         and its key)."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        return {**{k: v for k, v in os.environ.items() if k not in binding.unset}, **dict(launch.env),
+        return {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset}, **dict(launch.env),
                 **dict(binding.env)}
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:

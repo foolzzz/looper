@@ -80,6 +80,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from ... import child_env
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
@@ -179,7 +180,7 @@ class OmpRuntime(RuntimeAdapter):
         try:
             try:
                 done = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                      timeout=_PROBE_TIMEOUT_SEC, check=False, env={**_omp_env(os.environ), "HOME": home})
+                                      timeout=_PROBE_TIMEOUT_SEC, check=False, env={**_omp_env(child_env.inherited()), "HOME": home})
             except FileNotFoundError:
                 return Probe(None, self.capabilities_for(None), f"{executable!r} was not found")
             except (OSError, subprocess.TimeoutExpired) as exc:
@@ -194,7 +195,7 @@ class OmpRuntime(RuntimeAdapter):
                 try:
                     help_result = subprocess.run([executable, "--help"], capture_output=True, text=True,
                                                  timeout=_PROBE_TIMEOUT_SEC, check=False,
-                                                 env={**_omp_env(os.environ), "HOME": home})
+                                                 env={**_omp_env(child_env.inherited()), "HOME": home})
                     output = (help_result.stdout or "") + (help_result.stderr or "")
                     if help_result.returncode == 0 and "--no-ui" in output and "rpc" in output:
                         capabilities |= {Capability.STEER}
@@ -236,17 +237,17 @@ class OmpRuntime(RuntimeAdapter):
         ]
 
     def environment(self, launch: Launch) -> dict[str, str]:
-        """The server's environment and the settings' variables, less what the isolation removes, then the
+        """``child_env.inherited()`` and the settings' variables, less what the isolation removes, then the
         provider's binding and the shell prefix that gives the agent's shell commands back what was removed."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        visible = {**os.environ, **dict(launch.env)}
+        visible = {**child_env.inherited(), **dict(launch.env)}
         return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
                 SHELL_PREFIX_VAR: shell_prefix(visible)}
 
     def _command(self, executable: str, cwd: str | Path, prompt_file: Path, launch: Launch, *,
                  mode: tuple[str, ...] = ("-p", "--mode", "json")) -> list[str]:
         local = _local_dir(prompt_file)
-        visible = {**os.environ, **dict(launch.env)}
+        visible = {**child_env.inherited(), **dict(launch.env)}
         mcp = mcp_config(launch.library, visible)
         home = write_home(local, models_yml(launch), overlay(launch, outside_repository=outside_repository(cwd)), mcp)
         prompt = write_prompt(home, _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch,

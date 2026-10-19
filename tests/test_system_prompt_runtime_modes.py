@@ -205,6 +205,8 @@ def test_explicit_append_is_byte_identical_to_default_and_legacy_home(
     substitutions["<HOME>"] = render(expected.get("home", ""))
     expected_argv = [render(arg) for arg in expected["argv"][command_kind]]
     expected_env = {name: render(value) for name, value in expected["environment"].items()}
+    # Only host inheritance changes: the arbitrary server sentinel is no longer passed on.
+    expected_env.pop("UNCHANGED")
     expected_files = {
         render(name): (render(content["symlink"]) if "symlink" in content else render(content["text"]).encode("utf-8"))
         for name, content in expected["files"].items()

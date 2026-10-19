@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from looper.agents import operator_notes
 from looper.agents import step_workspaces as ws
 from looper.agents import task_workspaces as tw
 from looper.agents.project_execution import TaskWorkspaces
@@ -78,7 +79,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> Store:
 def _git_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("LOOPER_OPERATOR_NOTES_ROOT", str(tmp_path / "notes"))
+    monkeypatch.setattr(operator_notes, "_root", str(tmp_path / "notes"))
     yield
     marks = tmp_path / "hook-marks"
     assert not marks.exists(), f"hooks ran: {marks.read_text()}"

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fake_claude import fake_claude
+from looper import child_env
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.runtimes import Capability, StreamChannel
@@ -124,6 +125,10 @@ while True:
 
 
 def _fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str = "normal") -> str:
+    # The stand-in has explicit controls; they are not part of the production allowlist.
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {
+        "FAKE_SCENARIO", "FAKE_RECORD", "FAKE_VERSION", "FAKE_HELP", "FAKE_HELP_EXIT",
+    })
     monkeypatch.setenv("FAKE_SCENARIO", scenario)
     monkeypatch.setenv("FAKE_RECORD", str(tmp_path / "requests.jsonl"))
     return fake_claude(tmp_path / "omp", _RPC)
