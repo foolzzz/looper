@@ -15,7 +15,7 @@ Usage:
     looper serve
     # or directly:
     from looper.agents.serve import serve_agent
-    serve_agent(host="127.0.0.1", port=8767)
+    serve_agent(port=8767)  # with the ops file's other settings
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import env
+from .. import env, ops_config
+from ..ops_config import OpsConfig
 from ..paths import settle_runtime_root
 from .broadcast import Broadcaster
 from .bus import MessageBus
@@ -548,8 +549,9 @@ async def _register_optional_channel(
             await registry.unregister(adapter.channel_id)
 
 
-async def _back_up_before_schema_change(pool: Any, dsn: str, runtime_root: Path, *, skip_backup: bool) -> None:
-    """Dump the database into ``<runtime root>/backups`` when ``ensure_schema`` is about to change it.
+async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root: Path, *, skip_backup: bool) -> None:
+    """Dump the database (``ops.database_url``, the way ``ops`` says) into ``<runtime root>/backups`` when
+    ``ensure_schema`` is about to change it.
 
     Raises ``StartupCheckFailed``, before any DDL, when there is no usable
     ``pg_dump`` or the dump fails; ``skip_backup`` goes ahead without one.
@@ -561,12 +563,13 @@ async def _back_up_before_schema_change(pool: Any, dsn: str, runtime_root: Path,
         if not await schema_change_pending(conn):
             return
         server_version_num = int(await conn.fetchval("SELECT current_setting('server_version_num')"))
+    dsn = ops.database_url
     shown = self_check.mask_dsn(dsn)
     if skip_backup:
         logger.warning("BACKUP SKIPPED (--skip-backup): the database schema of %s changes now without a backup; "
                        "the columns and tables its migrations drop cannot be restored", shown)
         return
-    check, dumper = await asyncio.to_thread(self_check.check_pg_dump, server_version_num, True)
+    check, dumper = await asyncio.to_thread(self_check.check_pg_dump, server_version_num, True, ops)
     if dumper is None:
         raise StartupCheckFailed(self_check.format_checks([check]))
     logger.info("the database schema is about to change; backing up %s with %s", shown, dumper.detail)
@@ -658,23 +661,23 @@ def _local_url(host: str, port: int) -> str:
 
 async def _run_agent_system(
     *,
-    host: str = "127.0.0.1",
-    port: int = 8767,
+    ops: OpsConfig,
     runtime_root: Path,
     work_dir: Path,
     claude_bin: str = "claude",
     skip_backup: bool = False,
 ) -> None:
-    """Start the full agent system and run until interrupted."""
+    """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
-    from ..db.connection import configured_dsn
 
-    from . import links, schedules
+    from . import links, operator_notes, schedules
+    host, port = ops.host, ops.port
+    dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
+    operator_notes.configure_root(ops.operator_notes_root)
     try:
         min_interval = schedules.configure_min_interval()
-        dashboard_url = links.dashboard_url(host=host, port=port)
     except ValueError as exc:
         raise StartupCheckFailed(str(exc)) from None
     if min_interval != schedules.DEFAULT_MIN_INTERVAL_SECONDS:
@@ -688,12 +691,12 @@ async def _run_agent_system(
     except operator_auth.OperatorTokenError as exc:
         raise StartupCheckFailed(str(exc)) from None
 
-    dsn = configured_dsn()
+    dsn = ops.database_url
     database_check = await self_check.check_database(dsn)
     if database_check.status != self_check.OK:
         raise StartupCheckFailed(self_check.format_checks([database_check]))
     pool = await init_pool(dsn)
-    await _back_up_before_schema_change(pool, dsn, runtime_root, skip_backup=skip_backup)
+    await _back_up_before_schema_change(pool, ops, runtime_root, skip_backup=skip_backup)
     await ensure_schema(pool)
 
     await seed_role_configs(pool)
@@ -936,41 +939,50 @@ async def _run_agent_system(
     await shut_down_within(shut_down())
 
 
-def _configure_logging(verbose: bool) -> None:
-    """Log to stderr with secrets masked (``log_redaction``). httpx and httpcore log every request URL, and a
-    Telegram one holds the bot token: they log only from WARNING unless ``verbose``."""
-    log_to_stderr(logging.DEBUG if verbose else logging.INFO, "%(asctime)s %(name)s %(levelname)s %(message)s")
-    if not verbose:
+def _configure_logging(level: str) -> None:
+    """Log to stderr from ``level`` (an ops ``log_level``) with secrets masked (``log_redaction``). httpx and httpcore
+    log every request URL, and a Telegram one holds the bot token: they log only from WARNING below debug."""
+    log_to_stderr(getattr(logging, level.upper()), "%(asctime)s %(name)s %(levelname)s %(message)s")
+    if level != "debug":
         for name in ("httpx", "httpcore"):
             logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def serve_agent(
     *,
-    host: str = "127.0.0.1",
-    port: int = 8767,
+    host: str | None = None,
+    port: int | None = None,
     runtime_root: Path | None = None,
     work_dir: Path | None = None,
     claude_bin: str = "claude",
     verbose: bool = False,
     skip_backup: bool = False,
+    config: Path | None = None,
 ) -> None:
-    """Synchronous entry point for the agent system."""
-    _configure_logging(verbose)
+    """Synchronous entry point for the agent system: ``host``, ``port``, ``runtime_root``, ``config`` and ``verbose``
+    are the command line's flags (None and False: not given), read with the ops file (``ops_config.load``) before
+    anything else; settings that cannot be used stop it here."""
+    try:
+        ops = ops_config.load(ops_config.Flags(runtime_root=runtime_root, config=config, host=host, port=port,
+                                               log_level="debug" if verbose else None))
+    except ops_config.OpsConfigError as exc:
+        _configure_logging("info")
+        logger.error("looper serve cannot start: %s", exc)
+        raise SystemExit(1) from None
+    _configure_logging(ops.log_level)
+    for warning in ops.warnings:
+        logger.warning("%s", warning)
 
-    resolved_root = runtime_root or Path.cwd()
-    settled = settle_runtime_root(resolved_root)  # ~/.loopx from before the rename becomes ~/.looper
+    settled = settle_runtime_root(ops.runtime_root)  # ~/.loopx from before the rename becomes ~/.looper
     if settled.note:
         logger.log(logging.WARNING if settled.warning else logging.INFO, "%s", settled.note)
-    resolved_root = settled.root
     resolved_work_dir = work_dir or Path.cwd()
 
     try:
         asyncio.run(
             _run_agent_system(
-                host=host,
-                port=port,
-                runtime_root=resolved_root,
+                ops=ops,
+                runtime_root=settled.root,
                 work_dir=resolved_work_dir,
                 claude_bin=claude_bin,
                 skip_backup=skip_backup,

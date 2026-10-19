@@ -20,8 +20,8 @@ W6):
   under the operator's Claude Code configuration, and the agents get the
   text, not the path.
 
-``LOOPER_OPERATOR_NOTES_ROOT`` stands in for ``<config>/projects`` (tests and
-evals).
+The ops file's ``operator_notes.root`` stands in for ``<config>/projects``
+(tests and evals).
 """
 
 from __future__ import annotations
@@ -35,11 +35,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import child_env
 from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)
 
-NOTES_ROOT_ENV = "LOOPER_OPERATOR_NOTES_ROOT"
 NOTES_MAX_BYTES = 24 * 1024
 INDEX = "MEMORY.md"
 INDEX_MAX_LINES = 200  # as much of the index as Claude Code itself loads
@@ -76,10 +76,21 @@ class OperatorNotes:
 NO_NOTES = OperatorNotes()
 
 
+# The ops file's operator_notes.root, set when the server starts (``configure_root``); "" for Claude Code's own.
+_root = ""
+
+
+def configure_root(root: str) -> None:
+    """Read the notes from ``root`` (the ops file's ``operator_notes.root``); "" for Claude Code's own directory."""
+    global _root
+    _root = root
+
+
 def notes_root() -> Path:
-    """Where the operator's Claude Code keeps a directory per project (``<config>/projects``)."""
-    if configured := os.environ.get(NOTES_ROOT_ENV):
-        return Path(configured).expanduser()
+    """Where the operator's Claude Code keeps a directory per project: the configured root
+    (``configure_root``), else ``<config>/projects``."""
+    if _root:
+        return Path(_root)
     from .library import claude_config_dir
 
     return claude_config_dir() / "projects"
@@ -117,7 +128,7 @@ def notes_key(work_dir: str) -> str:
     """The directory Claude Code keys ``work_dir``'s auto memory by: the top level of its repository's main checkout,
     else ``work_dir`` itself; symbolic links resolved."""
     directory = os.path.realpath(work_dir)
-    env = {name: value for name, value in os.environ.items()
+    env = {name: value for name, value in child_env.inherited().items()
            if name not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
     try:
         run = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=directory,

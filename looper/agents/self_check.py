@@ -37,6 +37,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .. import child_env
+from ..ops_config import OpsConfig
 from . import db_backup
 
 if TYPE_CHECKING:
@@ -57,8 +59,9 @@ DATABASE_FIX = (
     "start PostgreSQL if it is not running, for example with Docker:\n"
     "  docker run -d --name agentbox-postgres -e POSTGRES_DB=loopx -e POSTGRES_USER=postgres "
     "-e POSTGRES_PASSWORD=postgres -p 54329:5432 postgres:16\n"
-    "then point Looper at it with LOOPER_DATABASE_URL (in the environment or .env):\n"
-    '  export LOOPER_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"'
+    "then point Looper at it in the ops file (<runtime root>/ops/server.toml; `looper config init-ops` writes it):\n"
+    '  [database]\n'
+    '  url = "postgresql://postgres:postgres@localhost:54329/loopx"'
 )
 LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on the Settings page"
 CODEX_LOGIN_FIX = "run `codex login` and sign in with ChatGPT, or give the Agent Profiles an API key provider"
@@ -123,7 +126,8 @@ async def check_database(dsn: str) -> Check:
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
-            argv, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=_COMMAND_TIMEOUT_SECONDS
+            argv, capture_output=True, text=True, stdin=subprocess.DEVNULL, env=child_env.inherited(),
+            timeout=_COMMAND_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -324,22 +328,24 @@ def pg_dump_fix(server_major: int | None) -> str:
     )
     return (
         f"install pg_dump {version}. {install}\n"
-        f"or set {db_backup.PG_DUMP_ENV} to a pg_dump; with PostgreSQL in Docker, dump inside its container:\n"
-        f"  export {db_backup.BACKUP_CMD_ENV}='docker exec <container> pg_dump --format=custom -U {{user}} {{dbname}}'\n"
+        "or name a pg_dump in the ops file's [backup] (pg_dump = \"/path/to/pg_dump\"); with PostgreSQL in Docker, "
+        "dump inside its container:\n"
+        '  command = ["docker", "exec", "<container>", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]\n'
         "or migrate once without a backup: looper serve --skip-backup"
     )
 
 
-def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple[Check, db_backup.Dumper | None]:
+def check_pg_dump(server_version_num: int | None, pending: bool | None,
+                  ops: OpsConfig | None = None) -> tuple[Check, db_backup.Dumper | None]:
     """Can Looper back the database up before it changes the schema? With the way it would, when it can.
 
-    ``pending``: whether the schema is about to change (``None``: unknown).
+    ``pending``: whether the schema is about to change (``None``: unknown); ``ops``: the ops settings (``[backup]``).
     Without a way to back up, ``looper serve`` refuses only then, so only then
     is this a failure.
     """
     server_major = server_version_num // 10000 if server_version_num else None
     try:
-        dumper = db_backup.find_dumper(server_major)
+        dumper = db_backup.find_dumper(server_major, ops)
     except db_backup.NoDumper as exc:
         if pending:
             return Check("pg_dump", "pg_dump", FAIL,
@@ -411,10 +417,11 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
         await conn.close()
 
 
-async def run_checks(*, dsn: str, claude_bin: str = "claude") -> list[Check]:
-    """Every check, reading only what it can: the channel settings and the schema state need the database."""
-    database = await check_database(dsn)
-    facts = await _database_facts(dsn) if database.status == OK else _DatabaseFacts()
+async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Check]:
+    """Every check with the ops settings ``ops``, reading only what it can: the channel settings and the schema state
+    need the database."""
+    database = await check_database(ops.database_url)
+    facts = await _database_facts(ops.database_url) if database.status == OK else _DatabaseFacts()
     from .runtimes import grok_login
     from .runtimes.codex_login import probe_login
 
@@ -422,7 +429,7 @@ async def run_checks(*, dsn: str, claude_bin: str = "claude") -> list[Check]:
     codex = await asyncio.to_thread(check_codex_login, facts.codex_login_profiles, facts.codex_login_problem,
                                     probe_login)
     grok = check_grok_login(facts.grok_login_profiles, facts.grok_login_problem, grok_login.probe_login)
-    pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending)
+    pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
     return [database, *claude, codex, grok, check_lark_cli(facts.lark_enabled), pg_dump, git,
             await check_step_worktrees(facts.worktree_projects)]
@@ -451,11 +458,11 @@ def log_problems(checks: list[Check]) -> None:
                            consequence, check.fix.replace("\n", " "))
 
 
-def doctor(claude_bin: str = "claude") -> int:
-    """``looper doctor``: print every check, and whether the background service runs; 1 when one failed."""
-    from ..db.connection import configured_dsn
+def doctor(ops: OpsConfig, claude_bin: str = "claude") -> int:
+    """``looper doctor`` with the ops settings ``ops``: print every check, and whether the background service runs; 1
+    when one failed."""
     from .service import doctor_check
 
-    checks = [*asyncio.run(run_checks(dsn=configured_dsn(), claude_bin=claude_bin)), doctor_check()]
+    checks = [*asyncio.run(run_checks(ops, claude_bin=claude_bin)), doctor_check()]
     print(format_checks(checks))
     return 1 if any(check.status == FAIL for check in checks) else 0
