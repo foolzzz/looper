@@ -49,10 +49,15 @@ def exec_events(method: str, params: Mapping[str, Any], usage: Mapping[str, Any]
     if method == "turn/started":
         return [{"type": "turn.started"}]
     if method in ("item/started", "item/completed"):
-        item = exec_item(params.get("item") or {})
+        raw_item = params.get("item")
+        if not isinstance(raw_item, Mapping):
+            return []
+        item = exec_item(raw_item)
         return [{"type": method.replace("/", "."), "item": item}] if item is not None else []
     if method == "turn/completed":
-        turn = params.get("turn") or {}
+        turn = params.get("turn")
+        if not isinstance(turn, Mapping):
+            return []
         if turn.get("status") == "completed":
             totals = usage or {}
             return [{"type": "turn.completed", "usage": {
@@ -62,10 +67,11 @@ def exec_events(method: str, params: Mapping[str, Any], usage: Mapping[str, Any]
                 "output_tokens": totals.get("outputTokens", 0),
             }}]
         message = "the turn was interrupted" if turn.get("status") == "interrupted" \
-            else (turn.get("error") or {}).get("message") or "the turn failed"
+            else (turn["error"].get("message") if isinstance(turn.get("error"), Mapping) else None) or "the turn failed"
         return [{"type": "turn.failed", "error": {"message": message}}]
     if method == "error":
-        return [{"type": "error", "message": (params.get("error") or {}).get("message")}]
+        error = params.get("error")
+        return [{"type": "error", "message": error.get("message") if isinstance(error, Mapping) else None}]
     return []
 
 
@@ -146,7 +152,7 @@ class CodexChannel:
                 if ("params" in message and not isinstance(params, dict)) or (
                         "result" in message and not isinstance(result, dict)):
                     logger.debug("ignoring a Codex app-server envelope whose params or result is not an object "
-                                 "(keys: %s)", sorted(message)[:6])
+                                 "(%d keys)", len(message))
                     continue
                 if "method" in message:
                     method = message["method"]
@@ -166,9 +172,15 @@ class CodexChannel:
                         usage = total if isinstance(total, dict) else {}
                     if method == "turn/completed":
                         self._turn_id = None
-                    for raw in exec_events(method, params, usage):
-                        for event in self._stream.translate(raw):
-                            yield event
+                    try:
+                        translated = [event for raw in exec_events(method, params, usage)
+                                      for event in self._stream.translate(raw)]
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        logger.debug("ignoring a Codex app-server notification that does not fit its shape (%s)",
+                                     type(exc).__name__)
+                        continue
+                    for event in translated:
+                        yield event
                     continue
                 future = self._pending.pop(request_id, None)
                 if future is None or future.done():
@@ -191,7 +203,8 @@ class CodexChannel:
                         "sandbox": "danger-full-access", "ephemeral": not self._keep_session,
                     })
                 elif method == "thread/start":
-                    self._thread_id = (result.get("thread") or {}).get("id")
+                    thread = result.get("thread")
+                    self._thread_id = thread.get("id") if isinstance(thread, dict) else None
                     if not self._thread_id:
                         yield self._failed("thread/start returned no thread id")
                         return
@@ -202,7 +215,8 @@ class CodexChannel:
                         **({"effort": self._effort} if self._effort else {}),
                     })
                 elif method == "turn/start":
-                    self._turn_id = (result.get("turn") or {}).get("id")
+                    turn = result.get("turn")
+                    self._turn_id = turn.get("id") if isinstance(turn, dict) else None
                     if not self._turn_id:
                         yield self._failed("turn/start returned no turn id")
                         return

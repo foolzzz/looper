@@ -752,3 +752,56 @@ def test_the_reader_survives_malformed_envelopes(envelope: dict[str, Any]) -> No
         assert not any(e.get("is_error") for e in events)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("envelope", [
+    {"method": "item/started", "params": {"item": [1]}},
+    {"method": "item/completed", "params": {"item": {"type": "fileChange", "changes": [1]}}},
+    {"method": "turn/completed", "params": {"turn": [1]}},
+    {"method": "turn/completed", "params": {"turn": {"status": "failed", "error": [1]}}},
+    {"method": "error", "params": {"error": [1]}},
+])
+def test_the_reader_survives_nested_non_objects(envelope: dict[str, Any]) -> None:
+    async def run() -> None:
+        process = _Process(object(), [json.dumps(envelope).encode() + b"\n"])
+        channel = CodexChannel(process, model="m", effort="", cwd="/", keep_session=False)  # type: ignore[arg-type]
+        channel._turn_ready.set()
+        process.stdout.feed_eof()
+        [e async for e in channel.events()]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("method", "result"), [("thread/start", {"thread": [1]}), ("turn/start", {"turn": [1]})])
+def test_a_handshake_result_with_a_non_object_fails_the_launch_cleanly(method: str, result: dict[str, Any]) -> None:
+    class Stdin(_StalledStdin):
+        async def drain(self) -> None:
+            return None
+
+    async def run() -> None:
+        process = _Process(Stdin())
+        channel = CodexChannel(process, model="m", effort="", cwd="/", keep_session=False)  # type: ignore[arg-type]
+        await channel.start("p")
+        order = ["initialize", "thread/start", "turn/start"]
+        for name in order[: order.index(method) + 1]:
+            process.stdout.feed_data(json.dumps({"id": order.index(name) + 1, "result": result if name == method
+                                                 else ({"thread": {"id": "t"}} if name == "thread/start" else {})}).encode() + b"\n")
+        process.stdout.feed_eof()
+        events = [e async for e in channel.events()]
+        assert [e["is_error"] for e in events if e["type"] == "result"] == [True]
+
+    asyncio.run(run())
+
+
+def test_a_secret_used_as_a_key_does_not_reach_the_logs(caplog: pytest.LogCaptureFixture) -> None:
+    async def run() -> None:
+        line = json.dumps({"SECRET-KEY-xyz": 1, "params": [1]}).encode() + b"\n"
+        process = _Process(object(), [line, b"not json SECRET-KEY-xyz\n"])
+        channel = CodexChannel(process, model="m", effort="", cwd="/", keep_session=False)  # type: ignore[arg-type]
+        channel._turn_ready.set()
+        process.stdout.feed_eof()
+        [e async for e in channel.events()]
+
+    caplog.set_level("DEBUG")
+    asyncio.run(run())
+    assert "ignoring" in caplog.text and "SECRET" not in caplog.text

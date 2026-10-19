@@ -502,3 +502,45 @@ def test_a_stalled_writer_cannot_outlast_the_one_steer_deadline(monkeypatch: pyt
         assert channel._pending == {}
 
     asyncio.run(run())
+
+
+def test_the_prompt_waits_for_both_setup_acks_in_any_order() -> None:
+    import json as _json
+
+    class Stdin:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        def write(self, data: bytes) -> None:
+            self.sent.append(_json.loads(data))
+
+        async def drain(self) -> None:
+            return None
+
+        def is_closing(self) -> bool:
+            return False
+
+    async def run() -> None:
+        from types import SimpleNamespace
+
+        stdin = Stdin()
+        process = SimpleNamespace(stdin=stdin, stdout=asyncio.StreamReader())
+        channel = OmpChannel(process, model=None, cwd="/")  # type: ignore[arg-type]
+        await channel.start("the prompt")
+        ids = {r["type"]: r["id"] for r in stdin.sent}
+        assert [r["type"] for r in stdin.sent] == ["set_interrupt_mode", "get_state"]
+
+        def ack(command: str, **extra: Any) -> None:
+            process.stdout.feed_data(_json.dumps({"type": "response", "id": ids[command], "command": command,
+                                                  "success": True, **extra}).encode() + b"\n")
+
+        events = channel.events()
+        ack("get_state", data={"sessionId": "s"})  # out of order: the interrupt mode is not acknowledged yet
+        first = await asyncio.wait_for(events.__anext__(), 2)
+        assert first["type"] == "system" and "prompt" not in [r["type"] for r in stdin.sent]
+        ack("set_interrupt_mode")
+        process.stdout.feed_eof()
+        [e async for e in events]
+        assert [r["type"] for r in stdin.sent] == ["set_interrupt_mode", "get_state", "prompt"]
+
+    asyncio.run(run())

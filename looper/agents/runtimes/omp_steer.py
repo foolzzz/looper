@@ -29,6 +29,7 @@ class OmpChannel:
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._startup: dict[str, str] = {}
         self._prompt = ""
+        self._setup_acked: set[str] = set()  # the setup requests acknowledged so far; the prompt needs both
         self._prompt_acknowledged = False
         self._ended = False
         self._result_seen = False
@@ -84,13 +85,17 @@ class OmpChannel:
                             yield self._failure(str(raw.get("error") or f"{command} failed"))
                             return
                         if command == "get_state":
-                            data = raw.get("data") or {}
-                            for event in self._stream.translate({"type": "session", "id": data.get("sessionId"),
+                            data = raw.get("data")
+                            session_id = data.get("sessionId") if isinstance(data, dict) else None
+                            for event in self._stream.translate({"type": "session", "id": session_id,
                                                                  "cwd": self._cwd}):
                                 yield event
-                            async with self._lock:
-                                request_id, _ = await self._write("prompt", message=self._prompt)
-                                self._startup[request_id] = "prompt"
+                        if command in ("set_interrupt_mode", "get_state"):
+                            self._setup_acked.add(command)
+                            if len(self._setup_acked) == 2:
+                                async with self._lock:
+                                    request_id, _ = await self._write("prompt", message=self._prompt)
+                                    self._startup[request_id] = "prompt"
                         elif command == "prompt":
                             self._prompt_acknowledged = True
                     continue
