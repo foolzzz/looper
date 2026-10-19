@@ -8,7 +8,9 @@ API, Lark and Telegram, and schedules. It serves the dashboard already in
 `web/`. Release builds use `CGO_ENABLED=0`. `looper version` prints
 `looper-go <version>` so a Go binary is obvious next to Python's `looper`.
 Release builds set that string with `-ldflags -X=main.version=<version>`
-(the symbol is `main.version`). The unset value is `dev`.
+(the symbol is `main.version`). The unset value is `dev`. The same build
+sets `github.com/foolzzz/looper/go/internal/version.Version` to that version.
+Go release tags are `vX.Y.Z-go`. The steps are under Releases.
 
 ## Compatibility contract
 
@@ -171,6 +173,48 @@ Switch over when all of these hold:
   behavior covered by the tests from G3 through G5.
 - A `CGO_ENABLED=0` build can replace `looper serve` for an operator who
   points it at the same database and the built dashboard.
+
+## Releases
+
+Go tags are `vX.Y.Z-go`, for example `v0.1.0-go`. Python releases stay on
+`vX.Y.Z`. `.github/workflows/release.yml` does not run for a tag that ends
+in `-go` (the tag filter is `v*`, then `!v*-go`).
+`.github/workflows/go-release.yml` runs when a `v*-go` tag is pushed.
+
+`install.sh` installs the wheel of the latest GitHub release. A Go release
+is created with `gh release create --latest=false`, which sets
+`make_latest: false`, so it never becomes that latest release.
+
+`Version` in `go/internal/version` is the release version without a leading
+`v` (currently `0.1.0`). The tag's version, with `v` and `-go` removed, must
+equal it, and the tagged commit must be on `loopgo-main`.
+
+1. Bump `Version` on `loopgo-main`.
+2. Tag that commit and push the tag. Do not mark the release latest by hand.
+
+   ```bash
+   git tag -a vX.Y.Z-go -m "looper vX.Y.Z-go" <commit>
+   git push origin vX.Y.Z-go
+   ```
+
+3. The workflow then:
+   1. checks that the tag is `vX.Y.Z-go`, is on `loopgo-main`, and matches
+      `Version`;
+   2. runs `go vet ./...` and `go test ./...` with the PostgreSQL service
+      from `.github/workflows/go-tests.yml`;
+   3. builds `CGO_ENABLED=0` binaries for darwin/arm64, darwin/amd64,
+      linux/amd64, and linux/arm64, named
+      `looper-vX.Y.Z-go-<goos>-<goarch>`, plus `checksums.txt` (sha256);
+   4. publishes those assets with `--latest=false` and `--verify-tag`.
+
+   The build passes
+
+   ```text
+   -ldflags "-X main.version=X.Y.Z -X github.com/foolzzz/looper/go/internal/version.Version=X.Y.Z"
+   ```
+
+   `looper version` then prints `looper-go X.Y.Z`. A build without those
+   flags still prints `looper-go dev`.
 
 ## Out of scope until a milestone names it
 

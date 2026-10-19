@@ -1,0 +1,108 @@
+name: Go Release
+
+# Pushing a vX.Y.Z-go tag publishes static Go binaries. The release is never
+# latest: install.sh installs the wheel of the latest release.
+on:
+  push:
+    tags:
+      - "v*-go"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: go-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test, build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: go
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: loopgo_ci
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d loopgo_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: go/go.sum
+
+      - name: Check the tag
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-go$ ]] || { echo "::error::$TAG is not vX.Y.Z-go"; exit 1; }
+          git fetch --no-tags origin '+refs/heads/loopgo-main:refs/remotes/origin/loopgo-main'
+          git merge-base --is-ancestor "$TAG" origin/loopgo-main || { echo "::error::$TAG is not on loopgo-main"; exit 1; }
+          LOOPGO_RELEASE_TAG="$TAG" go test -count=1 -run '^TestReleaseTagFromEnv$' ./internal/version
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          LOOPGO_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/loopgo_ci
+        run: go test ./...
+
+      - name: Build static binaries
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          ver="${ver%-go}"
+          [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::${ver} is not X.Y.Z"; exit 1; }
+          ldflags="-X main.version=${ver} -X github.com/foolzzz/looper/go/internal/version.Version=${ver}"
+          dist="${GITHUB_WORKSPACE}/dist"
+          mkdir -p "$dist"
+          targets=(darwin/arm64 darwin/amd64 linux/amd64 linux/arm64)
+          for pair in "${targets[@]}"; do
+            goos="${pair%%/*}"
+            goarch="${pair##*/}"
+            out="${dist}/looper-${TAG}-${goos}-${goarch}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -ldflags "$ldflags" -o "$out" ./cmd/looper
+          done
+          count="$(find "$dist" -maxdepth 1 -type f -name "looper-${TAG}-*" | wc -l | tr -d ' ')"
+          [ "$count" -eq 4 ] || { echo "::error::built ${count} binaries, want 4"; exit 1; }
+          host="${dist}/looper-${TAG}-linux-amd64"
+          got="$("$host" version)" || { echo "::error::linux/amd64 version command failed"; exit 1; }
+          [ "$got" = "looper-go ${ver}" ] || { echo "::error::linux/amd64 reports ${got}, want looper-go ${ver}"; exit 1; }
+          (
+            cd "$dist"
+            sha256sum looper-"${TAG}"-* > checksums.txt
+          )
+          lines="$(wc -l < "${dist}/checksums.txt" | tr -d ' ')"
+          [ "$lines" -eq 4 ] || { echo "::error::checksums.txt has ${lines} lines, want 4"; exit 1; }
+
+      - name: Publish the release
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          # make_latest false: install.sh installs the wheel of the latest release.
+          notes="Static Go binaries for ${TAG}. This release is not latest, so install.sh keeps installing the Python wheel."
+          gh release create "$TAG" dist/looper-"${TAG}"-* dist/checksums.txt \
+            --latest=false \
+            --verify-tag \
+            --title "looper ${TAG}" \
+            --notes "$notes"

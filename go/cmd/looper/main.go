@@ -10,12 +10,20 @@ import (
 	"os"
 
 	"github.com/foolzzz/looper/go/internal/config"
+	relversion "github.com/foolzzz/looper/go/internal/version"
 )
 
 // version is the build version. Release builds set it with
 // -ldflags "-X main.version=<version>". Package main's symbol is main.version;
 // the module path does not match it, so that form leaves this as "dev".
 var version = "dev"
+
+// linkedReleaseVersion keeps internal/version.Version in this binary so a
+// release build can stamp it with
+// -ldflags "-X github.com/foolzzz/looper/go/internal/version.Version=<version>".
+// The release workflow sets that flag and -X main.version to the same value.
+// `looper version` prints main.version.
+var linkedReleaseVersion = relversion.Version
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

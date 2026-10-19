@@ -5,10 +5,13 @@ name: Release
 # docs/releases/vX.Y.Z.md; vX.Y.Z.surfaces lists its optional-capability
 # surfaces, one per line (empty: the release declares none). A run can be
 # repeated for an existing tag from the Actions tab.
+# Tags ending in -go are Go releases (go-release.yml). The negative pattern
+# is listed after v* so it excludes them; the Python steps below are unchanged.
 on:
   push:
     tags:
       - "v*"
+      - "!v*-go"
   workflow_dispatch:
     inputs:
       tag:
