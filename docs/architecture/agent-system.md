@@ -734,8 +734,13 @@ Planner bypasses permissions. Looper cuts its agents off both ways:
 - **Outbound.** `claude_cli.peer_args` adds `--disallowedTools ListAgents` to
   every launch, with `SendMessage` as well when the run has no agent teams
   (`Launch.agent_teams`: never for a Planner or a consult). A run with teams
-  keeps `SendMessage`, which its lead and teammates use. A read-only run's
-  second `--disallowedTools` adds to its own; Claude Code applies both.
+  keeps `SendMessage`, which its lead and teammates use. Without `ListAgents`
+  it cannot discover the operator's sessions, but it can still send to one
+  whose name or socket address it learns (from its prompt or a file). Only the
+  receiving session's own `crossSessionInbound` stops that (`"refuse"` or
+  `"hold"` in the operator's `~/.claude/settings.json`), and Looper does not
+  set it for the operator. A read-only run's second `--disallowedTools` adds to
+  its own; Claude Code applies both.
 
 Verified with Claude Code 2.1.285, haiku agents and a sonnet sender, all
 sessions started for the check: a resident Manager-style session with the
@@ -746,11 +751,7 @@ and runs no turn, where the same session without the setting received the
 message as a user turn and answered it. A Worker with agent teams and
 `ListAgents` denied starts a named teammate, messages it, and gets its reply.
 
-Not covered: a run with agent teams can still message a session whose name or
-socket address it knows (from its prompt or a file), and such a message is
-delivered to any session that accepts it. The operator's own sessions are fully
-protected only with `"crossSessionInbound": "hold"` or `"refuse"` in their own
-Claude Code settings, which Looper does not edit. An agent with a shell can also
+Not covered: besides the known-name send above, an agent with a shell can
 reach the sockets, or other runtimes' sessions (`codex queue` queues a message
 in a Codex session it names), through commands Looper does not filter. Codex,
 Grok and OMP agents get no flag for it: none of them has a tool that reaches
