@@ -80,9 +80,10 @@ run).
 G1a applies the schema on startup, refuses a non-loopback Host and a
 cross-origin Origin, and serves `GET /api/status`, `GET /api/projects`, and
 `GET /api/overview`. G1b serves `GET /api/tasks` with Python's query
-parameters, defaults, 400 messages, and ordering. Golden JSON for these
-routes is `go/testdata/parity/`. `GET /api/tasks/:id` and the cost routes
-(`/api/agents/<id>/usage`, `/api/llm-records`) return
+parameters, defaults, 400 messages, and ordering. G1c serves
+`GET /api/tasks/:id` with the detail Python returns when no agent is
+running. Golden JSON for these routes is `go/testdata/parity/`. The cost
+routes (`/api/agents/<id>/usage`, `/api/llm-records`) return
 `501 {"error":"not implemented in the Go server yet"}` and do not read task
 data. Those endpoints stay for a later card.
 

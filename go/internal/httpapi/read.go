@@ -29,6 +29,21 @@ const (
 // taskIDPattern is Python's task detail path: /api/tasks/(task-[a-zA-Z0-9]+).
 var taskIDPattern = regexp.MustCompile(`^task-[a-zA-Z0-9]+$`)
 
+// rawTaskID is the id Python's route sees. The handler has already applied
+// urlparse, so a semicolon parameter is gone and percent-escapes remain.
+// The pattern allows only letters and digits, so
+// /api/tasks/task-rich0000%31 is not a task id. PathValue decodes %31 to 1
+// and would load task-rich00001.
+func rawTaskID(r *http.Request) (string, bool) {
+	const prefix = "/api/tasks/"
+	path := r.URL.EscapedPath()
+	id, found := strings.CutPrefix(path, prefix)
+	if !found || strings.Contains(id, "/") || !taskIDPattern.MatchString(id) {
+		return "", false
+	}
+	return id, true
+}
+
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		notFound(w)
@@ -103,14 +118,32 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// handleTask is GET /api/tasks/<id> for a task id. Other single segments,
-// such as /api/tasks/create, stay 404.
+// handleTask is GET /api/tasks/<id>. A task id that is not in the database is
+// 404 {"error":"task not found"}. Any other method, or a segment that is not
+// task-[A-Za-z0-9]+ on the raw path, is 404 {"error":"not found"} and does not
+// read the database.
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
-	if !taskIDPattern.MatchString(r.PathValue("id")) {
+	id, ok := rawTaskID(r)
+	if r.Method != http.MethodGet || !ok {
 		notFound(w)
 		return
 	}
-	notImplemented(w, r)
+	ctx, cancel := readContext(r)
+	defer cancel()
+	if s.Reads == nil {
+		databaseUnavailable(w, r, errors.New("no database"))
+		return
+	}
+	body, err := s.Reads.Task(ctx, id)
+	if errors.Is(err, db.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, errorBody{Error: "task not found"})
+		return
+	}
+	if err != nil {
+		databaseUnavailable(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func parseTaskQuery(r *http.Request) (db.TaskQuery, string, error) {

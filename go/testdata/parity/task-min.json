@@ -1,0 +1,179 @@
+{
+  "agents": {
+    "concurrency_max": 64,
+    "editable": true,
+    "roles": {
+      "planner": {
+        "profile": {
+          "source": "role",
+          "value": {
+            "effort": "medium",
+            "model": "layer-planner",
+            "name": "claude-code/layer-planner",
+            "profile_id": "agent-layer-planner",
+            "provider": "claude-subscription",
+            "runtime": "claude-code"
+          }
+        }
+      },
+      "reviewer": {
+        "concurrency": {
+          "default": {
+            "source": "role",
+            "value": 5
+          },
+          "source": "role",
+          "task": null,
+          "value": 5
+        },
+        "profile": {
+          "source": "role",
+          "value": {
+            "effort": "xhigh",
+            "model": "layer-reviewer",
+            "name": "claude-code/layer-reviewer",
+            "profile_id": "agent-layer-reviewer",
+            "provider": "claude-subscription",
+            "runtime": "claude-code"
+          }
+        }
+      },
+      "worker": {
+        "concurrency": {
+          "default": {
+            "source": "role",
+            "value": 4
+          },
+          "source": "role",
+          "task": null,
+          "value": 4
+        },
+        "profile": {
+          "source": "role",
+          "value": {
+            "effort": "high",
+            "model": "layer-worker",
+            "name": "claude-code/layer-worker",
+            "profile_id": "agent-layer-worker",
+            "provider": "claude-subscription",
+            "runtime": "claude-code"
+          }
+        }
+      }
+    }
+  },
+  "builtin_role_stats": {
+    "reviewer": {
+      "accepted": 0,
+      "contract_violation_rate": null,
+      "contract_violations": 0,
+      "cost_usd": 0,
+      "failed": 0,
+      "retries": 0,
+      "review_pass_rate": null,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 0
+      },
+      "running": 0,
+      "runs": 0,
+      "steps": 0
+    },
+    "worker": {
+      "accepted": 0,
+      "contract_violation_rate": null,
+      "contract_violations": 0,
+      "cost_usd": 0,
+      "failed": 0,
+      "retries": 0,
+      "review_pass_rate": null,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 0
+      },
+      "running": 0,
+      "runs": 0,
+      "steps": 0
+    }
+  },
+  "completed_at": null,
+  "config": {},
+  "correlation_id": "",
+  "cost": {
+    "by_model": [],
+    "by_role": {
+      "planner": {
+        "cost_usd": 0.0,
+        "runs": 0
+      },
+      "reviewer": {
+        "cost_usd": 0.0,
+        "runs": 0
+      },
+      "worker": {
+        "cost_usd": 0.0,
+        "runs": 0
+      }
+    },
+    "cost_usd": 0.0,
+    "equivalent_runs": 0,
+    "manager_by_model": [],
+    "provider_price_runs": 0,
+    "running": 0,
+    "runs": 0,
+    "unpriced_runs": 0
+  },
+  "created_at": "2018-01-02T00:00:00+00:00",
+  "error": null,
+  "fail_kind": null,
+  "gates": [],
+  "goal_id": "",
+  "group": "ready",
+  "journal": [],
+  "manager_actions": [],
+  "name": "Minimal",
+  "origin_channel_id": "",
+  "own_budget_usd": null,
+  "phase": "pending",
+  "planner_id": null,
+  "profile_overrides": {},
+  "progress": [],
+  "project_id": "proj-blank0001",
+  "project_name": "",
+  "requirement": "a minimal task",
+  "requirement_versions": [],
+  "result_summary": null,
+  "roles": [],
+  "room": {
+    "by_step": {},
+    "consults": {
+      "answered": 0,
+      "by_reason": {},
+      "cost_usd": 0,
+      "total": 0
+    },
+    "counts": {
+      "by_kind": {},
+      "messages": 0,
+      "questions": 0,
+      "unanswered": 0
+    },
+    "enabled": true
+  },
+  "schedule_id": null,
+  "schedule_name": null,
+  "status": "init",
+  "step_workspaces": null,
+  "steps": [],
+  "supplements": [],
+  "task_budget_usd": null,
+  "task_id": "task-min000001",
+  "task_workspace": {
+    "base": "",
+    "mode": "in_place",
+    "workspace_dir": "",
+    "worktree": null
+  },
+  "updated_at": "2018-01-02T00:00:00+00:00",
+  "work_dir": ""
+}

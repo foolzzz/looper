@@ -1,0 +1,665 @@
+{
+  "agents": {
+    "concurrency_max": 64,
+    "editable": true,
+    "roles": {
+      "planner": {
+        "profile": {
+          "source": "role_project",
+          "value": {
+            "effort": "low",
+            "model": "layer-rp-plan",
+            "name": "claude-code/layer-rp-plan",
+            "profile_id": "agent-layer-rp-plan",
+            "provider": "claude-subscription",
+            "runtime": "claude-code"
+          }
+        }
+      },
+      "reviewer": {
+        "concurrency": {
+          "default": {
+            "source": "role",
+            "value": 5
+          },
+          "source": "role",
+          "task": null,
+          "value": 5
+        },
+        "profile": {
+          "source": "planner_task",
+          "value": {
+            "effort": "max",
+            "model": "layer-pt-rev",
+            "name": "claude-code/layer-pt-rev",
+            "profile_id": "agent-layer-pt-rev",
+            "provider": "claude-subscription",
+            "runtime": "claude-code"
+          }
+        }
+      },
+      "worker": {
+        "concurrency": {
+          "default": {
+            "source": "role",
+            "value": 4
+          },
+          "source": "task",
+          "task": 3,
+          "value": 3
+        },
+        "profile": {
+          "source": "task",
+          "value": {
+            "effort": "low",
+            "model": "layer-task-work",
+            "name": "claude-code/layer-task-work",
+            "profile_id": "agent-layer-task-work",
+            "provider": "claude-subscription",
+            "runtime": "claude-code"
+          }
+        }
+      }
+    }
+  },
+  "builtin_role_stats": {
+    "reviewer": {
+      "accepted": 1,
+      "contract_violation_rate": 0.0,
+      "contract_violations": 0,
+      "cost_usd": 0.125,
+      "failed": 0,
+      "retries": 1,
+      "review_pass_rate": 1.0,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 1
+      },
+      "running": 0,
+      "runs": 1,
+      "steps": 1
+    },
+    "worker": {
+      "accepted": 0,
+      "contract_violation_rate": null,
+      "contract_violations": 0,
+      "cost_usd": 0.0,
+      "failed": 1,
+      "retries": 0,
+      "review_pass_rate": null,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 0
+      },
+      "running": 1,
+      "runs": 1,
+      "steps": 3
+    }
+  },
+  "completed_at": null,
+  "config": {},
+  "correlation_id": "corr-rich",
+  "cost": {
+    "by_model": [
+      {
+        "cache_creation_tokens": 3,
+        "cache_read_tokens": 13,
+        "cost_usd": 0.75,
+        "input_tokens": 300,
+        "interrupted_runs": 0,
+        "model": "opus",
+        "output_tokens": 60,
+        "running": 0,
+        "runs": 2,
+        "unpriced_runs": 0
+      },
+      {
+        "cache_creation_tokens": 2,
+        "cache_read_tokens": 6,
+        "cost_usd": 0.375,
+        "input_tokens": 130,
+        "interrupted_runs": 0,
+        "model": "sonnet",
+        "output_tokens": 26,
+        "running": 1,
+        "runs": 3,
+        "unpriced_runs": 0
+      }
+    ],
+    "by_role": {
+      "planner": {
+        "cost_usd": 0.25,
+        "runs": 1
+      },
+      "reviewer": {
+        "cost_usd": 0.125,
+        "runs": 1
+      },
+      "worker": {
+        "cost_usd": 0.75,
+        "runs": 3
+      }
+    },
+    "cost_usd": 1.125,
+    "equivalent_runs": 4,
+    "manager_by_model": [
+      {
+        "cache_creation_tokens": 4,
+        "cache_read_tokens": 3,
+        "cost_usd": 0.5,
+        "input_tokens": 11,
+        "interrupted_runs": 0,
+        "model": "opus",
+        "output_tokens": 22,
+        "running": 0,
+        "runs": 1,
+        "unpriced_runs": 0
+      }
+    ],
+    "provider_price_runs": 0,
+    "running": 1,
+    "runs": 5,
+    "unpriced_runs": 0
+  },
+  "created_at": "2018-01-01T00:00:00+00:00",
+  "error": null,
+  "fail_kind": null,
+  "gates": [
+    {
+      "agenda": [
+        {
+          "id": "q1",
+          "options": [
+            "yes",
+            "no"
+          ],
+          "question": "Ship it?",
+          "status": "open"
+        }
+      ],
+      "channel_posts": null,
+      "closed_at": null,
+      "depends_on": [],
+      "ended_by_user": false,
+      "findings": "waiting on the API shape",
+      "first_reply_at": null,
+      "not_delivered": 0,
+      "opened_at": "2020-05-02T00:00:00+00:00",
+      "plan_change": null,
+      "reminders": 0,
+      "resolution": "",
+      "retry_at": null,
+      "state": "discussing",
+      "step": "g1",
+      "step_id": "step-rich0003",
+      "summary": null,
+      "topic": "Ship the API?",
+      "turns": 0,
+      "waiting_on": "planner"
+    }
+  ],
+  "goal_id": "goal-rich",
+  "group": "in_progress",
+  "journal": [
+    {
+      "created_at": "2018-01-04T00:00:00+00:00",
+      "delivered_at": null,
+      "id": 1,
+      "kind": "supplement",
+      "learnings": [],
+      "step_id": "",
+      "step_key": "",
+      "summary": "Also cover the write path.",
+      "task_id": "task-rich00001",
+      "via": "task_page"
+    },
+    {
+      "created_at": "2018-01-05T00:00:00+00:00",
+      "delivered_at": null,
+      "id": 2,
+      "kind": "progress",
+      "learnings": [],
+      "step_id": "step-rich0001",
+      "step_key": "s1",
+      "summary": "{\"done\":\"schema\",\"now\":\"handlers\",\"next\":\"tests\",\"risks\":\"none\",\"estimate\":\"one day\"}",
+      "task_id": "task-rich00001",
+      "via": ""
+    },
+    {
+      "created_at": "2018-01-06T00:00:00+00:00",
+      "delivered_at": null,
+      "id": 3,
+      "kind": "step_accepted",
+      "learnings": [],
+      "step_id": "step-rich0001",
+      "step_key": "s1",
+      "summary": "s1 accepted",
+      "task_id": "task-rich00001",
+      "via": ""
+    }
+  ],
+  "manager_actions": [
+    {
+      "arguments": {
+        "text": "look at the gate"
+      },
+      "channel": "web",
+      "confirmation_id": null,
+      "created_at": "2020-04-02T00:00:00+00:00",
+      "risk": "read",
+      "status": "ok",
+      "tool": "task_note"
+    }
+  ],
+  "name": "Rich task",
+  "origin_channel_id": "",
+  "own_budget_usd": null,
+  "phase": "executing",
+  "planner_id": "planner-task-rich00001",
+  "profile_overrides": {
+    "worker": {
+      "agent_teams": false,
+      "builtin": false,
+      "cost": {
+        "equivalent": true,
+        "source": "runtime",
+        "unpriced": []
+      },
+      "effort": "low",
+      "model": "layer-task-work",
+      "name": "claude-code/layer-task-work",
+      "profile_id": "agent-layer-task-work",
+      "provider_id": "prov-claude-subscription",
+      "provider_name": "claude-subscription",
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer"
+      ],
+      "runtime_id": "rt-claude-code",
+      "runtime_name": "claude-code",
+      "runtime_type": "claude-code",
+      "system_prompt_mode": "append",
+      "used_by": {
+        "allowed_in": [],
+        "layers": [],
+        "schedule_count": 0,
+        "task_count": 0
+      }
+    }
+  },
+  "progress": [
+    {
+      "at": "2018-01-05T00:00:00+00:00",
+      "done": "schema",
+      "estimate": "one day",
+      "next": "tests",
+      "now": "handlers",
+      "risks": "none"
+    }
+  ],
+  "project_id": "proj-alpha0001",
+  "project_name": "Alpha",
+  "requirement": "Build the read and write API.",
+  "requirement_versions": [
+    {
+      "created_at": "2018-01-01T00:00:00+00:00",
+      "delivered_at": null,
+      "text": "Build the read API.",
+      "version": 1,
+      "via": "user"
+    },
+    {
+      "created_at": "2018-01-04T00:00:00+00:00",
+      "delivered_at": null,
+      "text": "Build the read and write API.",
+      "version": 2,
+      "via": "user"
+    }
+  ],
+  "result_summary": null,
+  "roles": [
+    {
+      "created_at": "2018-01-03T00:00:00+00:00",
+      "harness": null,
+      "id": "backend",
+      "items": [
+        {
+          "id": "lib-rich0001",
+          "kind": "skill",
+          "name": "rich-skill"
+        },
+        {
+          "id": "lib-missing01",
+          "kind": null,
+          "name": null
+        }
+      ],
+      "kind": "work",
+      "profile": {
+        "allowed": true,
+        "name": "claude-code/layer-roledef",
+        "profile_id": "agent-layer-roledef"
+      },
+      "reason": "add tests",
+      "role_prompt": "Write the API and the tests.",
+      "stats": {
+        "accepted": 1,
+        "contract_violation_rate": 0.0,
+        "contract_violations": 0,
+        "cost_usd": 0.75,
+        "failed": 0,
+        "retries": 1,
+        "review_pass_rate": 1.0,
+        "reviews": {
+          "not_passed": 0,
+          "passed": 1
+        },
+        "running": 0,
+        "runs": 2,
+        "steps": 1
+      },
+      "steps": [
+        "s1"
+      ],
+      "template": null,
+      "version": 2,
+      "versions": [
+        {
+          "created_at": "2018-01-02T00:00:00+00:00",
+          "reason": "first cut",
+          "sha256": "6bb800c9ecd329b99631dc2f18c934fb0e82e1890ca86213e05ae9e131eeb42d",
+          "template": null,
+          "version": 1,
+          "via": "planner"
+        },
+        {
+          "created_at": "2018-01-03T00:00:00+00:00",
+          "reason": "add tests",
+          "sha256": "701603b73889d0e976430feee2a754ab80396a87344e7931e4964af9f41457e4",
+          "template": null,
+          "version": 2,
+          "via": "planner"
+        }
+      ],
+      "via": "planner"
+    }
+  ],
+  "room": {
+    "by_step": {
+      "s1": {
+        "received": 1,
+        "sent": 2,
+        "unanswered": 1
+      },
+      "s2": {
+        "received": 1,
+        "sent": 1,
+        "unanswered": 0
+      },
+      "s4": {
+        "received": 1,
+        "sent": 0,
+        "unanswered": 1
+      }
+    },
+    "consults": {
+      "answered": 1,
+      "by_reason": {
+        "no_session": 1
+      },
+      "cost_usd": 0.375,
+      "total": 3
+    },
+    "counts": {
+      "by_kind": {
+        "answer": 1,
+        "question": 2
+      },
+      "messages": 3,
+      "questions": 2,
+      "unanswered": 1
+    },
+    "enabled": true
+  },
+  "run_roles": {
+    "worker-rich0001": {
+      "id": "backend",
+      "kind": "work",
+      "version": 2
+    },
+    "worker-rich0003": {
+      "id": "backend",
+      "kind": "work",
+      "version": 2
+    }
+  },
+  "schedule_id": null,
+  "schedule_name": null,
+  "status": "executing",
+  "step_workspaces": {
+    "start": {
+      "branch": "main",
+      "commit": "abc1234dead"
+    },
+    "undo": [],
+    "workspaces": [
+      {
+        "base_commit": "abc1234dead",
+        "branch": "looper/task-rich00001/s1-1",
+        "checkpoint": false,
+        "detail": "",
+        "discardable": false,
+        "id": 1,
+        "links": [],
+        "merge_commit": "deadbeef1",
+        "merge_error": null,
+        "merge_files": [],
+        "path": "/work/alpha/wt/s1",
+        "removed_at": null,
+        "result_commit": "cafebabe1",
+        "state": "merged",
+        "step_id": "step-rich0001",
+        "step_key": "s1",
+        "target_branch": "main"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "acceptance_criteria": [],
+      "completed_at": null,
+      "created_at": "2018-01-01T00:00:00+00:00",
+      "depends_on": [],
+      "feedback": [],
+      "id": "step-rich0001",
+      "instruction": "Write the read API.",
+      "kind": "work",
+      "missed_messages": [],
+      "result": null,
+      "retries": 1,
+      "review": true,
+      "review_position": null,
+      "review_roles": [
+        {
+          "required": true,
+          "role": "qa",
+          "version": 1
+        }
+      ],
+      "review_stage": "builtin",
+      "reviewer_id": "reviewer-rich01",
+      "role_key": "backend",
+      "role_version": 2,
+      "started_at": null,
+      "status": "verified",
+      "step_index": 0,
+      "step_key": "s1",
+      "target_files": [],
+      "task_id": "task-rich00001",
+      "updated_at": "2018-01-01T00:00:00+00:00",
+      "validation_commands": [],
+      "worker_id": "worker-rich0001"
+    },
+    {
+      "acceptance_criteria": [],
+      "completed_at": null,
+      "created_at": "2018-01-01T00:00:01+00:00",
+      "depends_on": [],
+      "feedback": [],
+      "id": "step-rich0002",
+      "instruction": "Write the write API.",
+      "kind": "work",
+      "missed_messages": [],
+      "result": null,
+      "retries": 0,
+      "review": false,
+      "review_position": null,
+      "review_roles": [],
+      "review_stage": null,
+      "reviewer_id": null,
+      "role_key": null,
+      "role_version": null,
+      "started_at": null,
+      "status": "running",
+      "step_index": 1,
+      "step_key": "s2",
+      "target_files": [],
+      "task_id": "task-rich00001",
+      "updated_at": "2018-01-01T00:00:01+00:00",
+      "validation_commands": [],
+      "worker_id": "worker-rich0002"
+    },
+    {
+      "acceptance_criteria": [],
+      "completed_at": null,
+      "created_at": "2018-01-01T00:00:02+00:00",
+      "depends_on": [],
+      "feedback": [],
+      "id": "step-rich0003",
+      "instruction": "Ask whether to ship.",
+      "kind": "gate",
+      "missed_messages": [],
+      "result": null,
+      "retries": 0,
+      "review": false,
+      "review_position": null,
+      "review_roles": [],
+      "review_stage": null,
+      "reviewer_id": null,
+      "role_key": null,
+      "role_version": null,
+      "started_at": null,
+      "status": "waiting_user",
+      "step_index": 2,
+      "step_key": "g1",
+      "target_files": [],
+      "task_id": "task-rich00001",
+      "updated_at": "2018-01-01T00:00:02+00:00",
+      "validation_commands": [],
+      "worker_id": null
+    },
+    {
+      "acceptance_criteria": [],
+      "completed_at": null,
+      "created_at": "2018-01-01T00:00:03+00:00",
+      "depends_on": [],
+      "feedback": [],
+      "id": "step-rich0004",
+      "instruction": "Write the schema.",
+      "kind": "work",
+      "missed_messages": [],
+      "result": null,
+      "retries": 0,
+      "review": false,
+      "review_position": null,
+      "review_roles": [],
+      "review_stage": null,
+      "reviewer_id": null,
+      "role_key": null,
+      "role_version": null,
+      "started_at": null,
+      "status": "failed",
+      "step_index": 3,
+      "step_key": "s4",
+      "target_files": [],
+      "task_id": "task-rich00001",
+      "updated_at": "2018-01-01T00:00:03+00:00",
+      "validation_commands": [],
+      "worker_id": null
+    },
+    {
+      "acceptance_criteria": [],
+      "completed_at": null,
+      "created_at": "2018-01-01T00:00:04+00:00",
+      "depends_on": [],
+      "feedback": [],
+      "id": "step-rich0005",
+      "instruction": "Skip the old client.",
+      "kind": "work",
+      "missed_messages": [],
+      "result": null,
+      "retries": 0,
+      "review": false,
+      "review_position": null,
+      "review_roles": [],
+      "review_stage": null,
+      "reviewer_id": null,
+      "role_key": "backend",
+      "role_version": 1,
+      "started_at": null,
+      "status": "skipped",
+      "step_index": 4,
+      "step_key": "s5",
+      "target_files": [],
+      "task_id": "task-rich00001",
+      "updated_at": "2018-01-01T00:00:04+00:00",
+      "validation_commands": [],
+      "worker_id": null
+    }
+  ],
+  "supplements": [
+    {
+      "created_at": "2018-01-04T00:00:00+00:00",
+      "delivered_at": null,
+      "text": "Also cover the write path.",
+      "via": "task_page"
+    }
+  ],
+  "task_budget_usd": 1.5,
+  "task_id": "task-rich00001",
+  "task_workspace": {
+    "base": "abc1234base",
+    "mode": "worktree",
+    "workspace_dir": "/work/alpha",
+    "worktree": {
+      "base_commit": "abc1234base",
+      "branch": "looper/task-rich00001/task",
+      "commands": [
+        {
+          "command": "git log --oneline abc1234base..looper/task-rich00001/task",
+          "what": "See the task's commits"
+        },
+        {
+          "command": "git diff abc1234base...looper/task-rich00001/task",
+          "what": "See its changes"
+        },
+        {
+          "command": "git merge looper/task-rich00001/task",
+          "what": "Merge it into the branch you have checked out"
+        }
+      ],
+      "links": [
+        ".venv"
+      ],
+      "path": "/work/alpha/wt/task",
+      "removed_at": null,
+      "repository": "/work/alpha",
+      "result_commit": null,
+      "state": "active"
+    }
+  },
+  "updated_at": "2018-01-01T00:00:00+00:00",
+  "work_dir": "/work/alpha/wt/task"
+}

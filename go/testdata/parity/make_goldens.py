@@ -20,9 +20,11 @@ Normalization, the same rule the Go parity test applies before comparing:
   walked. Those are generated when the request runs. Seeded timestamps stay
   as the handler returned them. _VOLATILE_TIMES is volatileTimes in
   parity_test.go.
-- The value of a key named uptime, pid, pids, or version becomes "<volatile>"
-  and is not walked. implementation and db are written as the handler returned
-  them.
+- The value of a key named uptime, pid, or pids becomes "<volatile>" and is
+  not walked. A string version (a build id) becomes "<volatile>" too. A
+  numeric version, such as a requirement or role version, is written as the
+  handler returned it. implementation and db are written as the handler
+  returned them.
 - Object key order is not significant. Numbers compare by value, so 0 and 0.0
   match. The files below are written with sorted keys for review.
 """
@@ -39,7 +41,7 @@ import urllib.parse
 from datetime import date
 from pathlib import Path
 
-_VOLATILE = {"uptime", "pid", "pids", "version"}
+_VOLATILE = {"uptime", "pid", "pids"}
 # Request-time timestamps only. Same set as volatileTimes in parity_test.go.
 _VOLATILE_TIMES = {"since"}
 _READS = (
@@ -75,6 +77,13 @@ _TASKS = (
         "schedule_id": "sched-nightly01",
     }, 200),
 )
+# One rich task, one task with nothing attached, and an id the database does
+# not have. The missing id is the handler's 404, not the router's.
+_DETAILS = (
+    ("task-rich", "task-rich00001", 200),
+    ("task-min", "task-min000001", 200),
+    ("task-missing", "task-missing01", 404),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -88,6 +97,10 @@ def normalize(value):
         out = {}
         for key, item in value.items():
             if key in _VOLATILE:
+                out[key] = "<volatile>"
+                continue
+            # A build id is a string. Requirement and role versions are numbers.
+            if key == "version" and isinstance(item, str):
                 out[key] = "<volatile>"
                 continue
             if key in _VOLATILE_TIMES:
@@ -280,6 +293,10 @@ async def capture(dsn: str) -> dict[str, object]:
                 cap = Capture()
                 await server._handle_list_tasks(query, cap)
                 out[name] = response_json(bytes(cap.buf), expect)
+            for name, task_id, expect in _DETAILS:
+                cap = Capture()
+                await server._handle_task_detail(task_id, cap)
+                out[name] = response_json(bytes(cap.buf), expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -294,7 +311,7 @@ def main() -> None:
         sys.path.insert(0, str(REPO))
     asyncio.run(apply_sql(args.db_url))
     bodies = asyncio.run(capture(args.db_url))
-    names = [name for name, _ in _READS] + [name for name, _, _ in _TASKS]
+    names = [name for name, _ in _READS] + [name for name, _, _ in _TASKS] + [name for name, _, _ in _DETAILS]
     for name in names:
         payload = normalize(bodies[name])
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

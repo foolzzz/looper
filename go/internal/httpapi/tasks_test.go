@@ -3,6 +3,8 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -316,6 +318,109 @@ func TestTasksBadQuerySkipsDatabase(t *testing.T) {
 	}
 }
 
+func TestMalformedTaskPathsAreJSON404(t *testing.T) {
+	reads := &recordingReads{taskBody: map[string]any{"task_id": "task-abc123"}}
+	srv := New("dev", &fakeDB{}, "")
+	srv.Reads = reads
+	h := srv.Handler()
+	paths := []string{
+		"/api/./tasks/task-abc123",
+		"/api//tasks/task-abc123",
+		"/api/tasks/./task-abc123",
+		"/api/tasks/../tasks/task-abc123",
+		"/api/tasks//task-abc123",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
+			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` || rr.Header().Get("Location") != "" {
+				t.Fatalf("status %d body %s location %q", rr.Code, rr.Body.String(), rr.Header().Get("Location"))
+			}
+		})
+	}
+	if len(reads.calls) != 0 {
+		t.Fatalf("database calls %v", reads.calls)
+	}
+}
+
+func TestPythonPathOnServer(t *testing.T) {
+	reads := &recordingReads{taskBody: map[string]any{"task_id": "task-abc123"}}
+	srv := New("dev", &fakeDB{}, "")
+	srv.Reads = reads
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	client := ts.Client()
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(ts.URL + "/api/tasks/task-abc123;foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != `{"task_id":"task-abc123"}` || reads.taskID != "task-abc123" {
+		t.Fatalf("semicolon status %d body %s id %q", resp.StatusCode, body, reads.taskID)
+	}
+
+	for _, path := range []string{"/api/./tasks/task-abc123", "/api//tasks/task-abc123"} {
+		resp, err := client.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusNotFound || string(body) != `{"error":"not found"}` || resp.Header.Get("Location") != "" {
+			t.Fatalf("%s status %d body %s location %q", path, resp.StatusCode, body, resp.Header.Get("Location"))
+		}
+	}
+
+	list, err := client.Get(ts.URL + "/api/tasks;foo?limit=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list.Body.Close()
+	if list.StatusCode != http.StatusOK || reads.tasksQuery.Limit != 1 {
+		t.Fatalf("tasks parameter status %d limit %d", list.StatusCode, reads.tasksQuery.Limit)
+	}
+
+	status, err := client.Get(ts.URL + "/api/status;ignored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status.Body.Close()
+	if status.StatusCode != http.StatusOK {
+		t.Fatalf("status parameter %d", status.StatusCode)
+	}
+	triple, err := client.Get(ts.URL + "/api///status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tripleBody, _ := io.ReadAll(triple.Body)
+	triple.Body.Close()
+	if triple.StatusCode != http.StatusNotFound || string(tripleBody) != `{"error":"not found"}` {
+		t.Fatalf("duplicate slash status %d body %s", triple.StatusCode, tripleBody)
+	}
+
+	// urlparse('///api/status') is /api/status. The client may clean a
+	// leading triple slash, so this one is handed to the handler directly.
+	rr := httptest.NewRecorder()
+	req := loopbackRequest(http.MethodGet, "/api/status")
+	req.RequestURI = "///api/status"
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scheme-relative status %d body %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestTasksOtherMethodsAreNotFound(t *testing.T) {
 	reads := &recordingReads{}
 	srv := New("dev", &fakeDB{}, "")
@@ -329,5 +434,72 @@ func TestTasksOtherMethodsAreNotFound(t *testing.T) {
 	}
 	if len(reads.calls) != 0 {
 		t.Fatalf("calls %v", reads.calls)
+	}
+}
+
+func TestTaskDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		body     map[string]any
+		err      error
+		noReads  bool
+		want     int
+		wantBody string
+		called   bool
+		id       string
+	}{
+		{name: "ok", method: http.MethodGet, path: "/api/tasks/task-abc123", body: map[string]any{"task_id": "task-abc123", "note": "a < b"}, want: http.StatusOK, wantBody: `{"note":"a < b","task_id":"task-abc123"}`, called: true, id: "task-abc123"},
+		{name: "missing", method: http.MethodGet, path: "/api/tasks/task-missing01", err: db.ErrNotFound, want: http.StatusNotFound, wantBody: `{"error":"task not found"}`, called: true, id: "task-missing01"},
+		{name: "wrapped missing", method: http.MethodGet, path: "/api/tasks/task-missing01", err: fmt.Errorf("load: %w", db.ErrNotFound), want: http.StatusNotFound, wantBody: `{"error":"task not found"}`, called: true, id: "task-missing01"},
+		{name: "create", method: http.MethodGet, path: "/api/tasks/create", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "bare hyphen", method: http.MethodGet, path: "/api/tasks/task-", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "not a task id", method: http.MethodGet, path: "/api/tasks/not-a-task", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "percent encoded digit", method: http.MethodGet, path: "/api/tasks/task-rich0000%31", body: map[string]any{"task_id": "task-rich00001"}, want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "percent encoded digit and parameter", method: http.MethodGet, path: "/api/tasks/task-rich0000%31;foo", body: map[string]any{"task_id": "task-rich00001"}, want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "semicolon parameter", method: http.MethodGet, path: "/api/tasks/task-abc123;foo", body: map[string]any{"task_id": "task-abc123"}, want: http.StatusOK, wantBody: `{"task_id":"task-abc123"}`, called: true, id: "task-abc123"},
+		{name: "semicolon before a slash", method: http.MethodGet, path: "/api/tasks/task-abc123;foo/bar", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "percent encoded letter", method: http.MethodGet, path: "/api/tasks/%74ask-abc123", body: map[string]any{"task_id": "task-abc123"}, want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "post", method: http.MethodPost, path: "/api/tasks/task-abc123", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "head", method: http.MethodHead, path: "/api/tasks/task-abc123", want: http.StatusNotFound, wantBody: `{"error":"not found"}`},
+		{name: "database", method: http.MethodGet, path: "/api/tasks/task-abc123", err: errors.New("dial SECRET"), want: http.StatusInternalServerError, wantBody: `{"error":"database unavailable"}`, called: true, id: "task-abc123"},
+		{name: "no reader", method: http.MethodGet, path: "/api/tasks/task-abc123", noReads: true, want: http.StatusInternalServerError, wantBody: `{"error":"database unavailable"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reads := &recordingReads{taskBody: tt.body, taskErr: tt.err}
+			srv := New("dev", &fakeDB{}, "")
+			if !tt.noReads {
+				srv.Reads = reads
+			}
+			logs := captureLogs(t)
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, loopbackRequest(tt.method, tt.path))
+			if rr.Code != tt.want || rr.Body.String() != tt.wantBody {
+				t.Fatalf("status %d body %s, want %d %s", rr.Code, rr.Body.String(), tt.want, tt.wantBody)
+			}
+			if strings.Contains(rr.Body.String(), "SECRET") || strings.Contains(logs.String(), "SECRET") {
+				t.Fatal("response or log leaked SECRET")
+			}
+			called := len(reads.calls) == 1 && reads.calls[0] == "task"
+			if called != tt.called {
+				t.Fatalf("calls %v, want called %v", reads.calls, tt.called)
+			}
+			if tt.called && reads.taskID != tt.id {
+				t.Fatalf("task id %q, want %q", reads.taskID, tt.id)
+			}
+			if !tt.called {
+				return
+			}
+			deadline, ok := reads.taskCtx.Deadline()
+			if !ok {
+				t.Fatal("task read has no deadline")
+			}
+			limit := time.Until(deadline)
+			if limit < readTimeout-200*time.Millisecond || limit > readTimeout+50*time.Millisecond {
+				t.Fatalf("deadline %s, want about %s", limit, readTimeout)
+			}
+		})
 	}
 }

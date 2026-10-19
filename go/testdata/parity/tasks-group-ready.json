@@ -1,6 +1,6 @@
 {
   "counts": {
-    "init": 2
+    "init": 3
   },
   "next_before": null,
   "tasks": [
@@ -86,6 +86,48 @@
       "schedule_name": null,
       "status": "init",
       "task_id": "task-readyalph1",
+      "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "",
+      "cost": {
+        "by_model": [],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "reviewer": {
+            "cost_usd": 0.0,
+            "runs": 0
+          },
+          "worker": {
+            "cost_usd": 0.0,
+            "runs": 0
+          }
+        },
+        "cost_usd": 0.0,
+        "equivalent_runs": 0,
+        "manager_by_model": [],
+        "provider_price_runs": 0,
+        "running": 0,
+        "runs": 0,
+        "unpriced_runs": 0
+      },
+      "created_at": "2018-01-02T00:00:00+00:00",
+      "goal_id": "",
+      "group": "ready",
+      "name": "Minimal",
+      "phase": "pending",
+      "planner_id": null,
+      "project_id": "proj-blank0001",
+      "project_name": "",
+      "requirement": "a minimal task",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "init",
+      "task_id": "task-min000001",
       "work_dir": ""
     }
   ]

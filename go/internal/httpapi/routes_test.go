@@ -28,6 +28,10 @@ type recordingReads struct {
 	exists                    bool
 	existsErr                 error
 	existsID                  string
+	taskBody                  map[string]any
+	taskErr                   error
+	taskID                    string
+	taskCtx                   context.Context
 	calls                     []string
 	since                     time.Time
 }
@@ -70,9 +74,17 @@ func (r *recordingReads) Tasks(ctx context.Context, q db.TaskQuery) (map[string]
 	return r.tasksBody, nil
 }
 
-func (r *recordingReads) Task(context.Context, string) (map[string]any, error) {
+func (r *recordingReads) Task(ctx context.Context, id string) (map[string]any, error) {
 	r.calls = append(r.calls, "task")
-	return nil, errors.New("not used")
+	r.taskID = id
+	r.taskCtx = ctx
+	if r.taskErr != nil {
+		return nil, r.taskErr
+	}
+	if r.taskBody == nil {
+		return map[string]any{}, nil
+	}
+	return r.taskBody, nil
 }
 
 func TestNotImplementedRoutes(t *testing.T) {
@@ -87,8 +99,6 @@ func TestNotImplementedRoutes(t *testing.T) {
 		body   string
 	}{
 		{http.MethodPost, "/api/tasks", http.StatusNotFound, `{"error":"not found"}`},
-		{http.MethodGet, "/api/tasks/task-abc123", http.StatusNotImplemented, notImplementedBody},
-		{http.MethodPost, "/api/tasks/task-abc123", http.StatusNotImplemented, notImplementedBody},
 		{http.MethodGet, "/api/tasks/create", http.StatusNotFound, `{"error":"not found"}`},
 		{http.MethodGet, "/api/agents/worker-1/usage", http.StatusNotImplemented, notImplementedBody},
 		{http.MethodGet, "/api/llm-records", http.StatusNotImplemented, notImplementedBody},

@@ -1,7 +1,7 @@
 {
   "counts": {
     "assigned": 1,
-    "executing": 1,
+    "executing": 2,
     "pending": 1,
     "planning": 1,
     "running": 1,
@@ -401,6 +401,86 @@
       "status": "executing",
       "task_id": "task-runalpha1",
       "work_dir": ""
+    },
+    {
+      "completed_at": null,
+      "correlation_id": "corr-rich",
+      "cost": {
+        "by_model": [
+          {
+            "cache_creation_tokens": 3,
+            "cache_read_tokens": 13,
+            "cost_usd": 0.75,
+            "input_tokens": 300,
+            "interrupted_runs": 0,
+            "model": "opus",
+            "output_tokens": 60,
+            "running": 0,
+            "runs": 2,
+            "unpriced_runs": 0
+          },
+          {
+            "cache_creation_tokens": 2,
+            "cache_read_tokens": 6,
+            "cost_usd": 0.375,
+            "input_tokens": 130,
+            "interrupted_runs": 0,
+            "model": "sonnet",
+            "output_tokens": 26,
+            "running": 1,
+            "runs": 3,
+            "unpriced_runs": 0
+          }
+        ],
+        "by_role": {
+          "planner": {
+            "cost_usd": 0.25,
+            "runs": 1
+          },
+          "reviewer": {
+            "cost_usd": 0.125,
+            "runs": 1
+          },
+          "worker": {
+            "cost_usd": 0.75,
+            "runs": 3
+          }
+        },
+        "cost_usd": 1.125,
+        "equivalent_runs": 4,
+        "manager_by_model": [
+          {
+            "cache_creation_tokens": 4,
+            "cache_read_tokens": 3,
+            "cost_usd": 0.5,
+            "input_tokens": 11,
+            "interrupted_runs": 0,
+            "model": "opus",
+            "output_tokens": 22,
+            "running": 0,
+            "runs": 1,
+            "unpriced_runs": 0
+          }
+        ],
+        "provider_price_runs": 0,
+        "running": 1,
+        "runs": 5,
+        "unpriced_runs": 0
+      },
+      "created_at": "2018-01-01T00:00:00+00:00",
+      "goal_id": "goal-rich",
+      "group": "in_progress",
+      "name": "Rich task",
+      "phase": "executing",
+      "planner_id": "planner-task-rich00001",
+      "project_id": "proj-alpha0001",
+      "project_name": "Alpha",
+      "requirement": "Build the read and write API.",
+      "schedule_id": null,
+      "schedule_name": null,
+      "status": "executing",
+      "task_id": "task-rich00001",
+      "work_dir": "/work/alpha/wt/task"
     }
   ]
 }

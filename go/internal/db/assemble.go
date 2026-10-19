@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -304,43 +305,6 @@ func progressNote(text string) map[string]any {
 		out[name] = s
 	}
 	return out
-}
-
-// agentsView is the empty-layers path of agent_settings.task_agents_view:
-// the built-in Claude Code profile, and the built-in worker and reviewer limits.
-// Setting layers and task profile overrides are not applied.
-func agentsView(status string) map[string]any {
-	profile := func() map[string]any {
-		return map[string]any{
-			"value": map[string]any{
-				"profile_id": "agent-claude-code-opus",
-				"name":       "claude-code/opus",
-				"model":      "opus",
-				"effort":     nil,
-				"runtime":    "claude-code",
-				"provider":   "claude-subscription",
-			},
-			"source": "builtin",
-		}
-	}
-	conc := func(value int) map[string]any {
-		one := map[string]any{"value": value, "source": "builtin"}
-		return map[string]any{
-			"value":   value,
-			"source":  "builtin",
-			"task":    nil,
-			"default": one,
-		}
-	}
-	return map[string]any{
-		"roles": map[string]any{
-			"planner":  map[string]any{"profile": profile()},
-			"worker":   map[string]any{"profile": profile(), "concurrency": conc(16)},
-			"reviewer": map[string]any{"profile": profile(), "concurrency": conc(8)},
-		},
-		"concurrency_max": 64,
-		"editable":        agentsEditable(status),
-	}
 }
 
 func agentsEditable(status string) bool {
@@ -754,9 +718,23 @@ func modelKey(v any) string {
 	return "m:" + asString(v)
 }
 
+// roundN is CPython's round(v, n) for a finite float and n >= 0.
+// Python formats v in fixed point with n digits after the decimal
+// (round half to even on the decimal digits) and parses that back.
+// math.Round is half away from zero, so one contract violation among
+// 32 finished runs (1/32 = 0.03125) becomes 0.0313 instead of 0.0312.
+// Scaling first and then rounding half to even still misses values whose
+// decimal expansion is not the scaled binary product, such as round(1/160, 4).
 func roundN(v float64, n int) float64 {
-	p := math.Pow(10, float64(n))
-	return math.Round(v*p) / p
+	if math.IsNaN(v) || math.IsInf(v, 0) || n < 0 {
+		return v
+	}
+	s := strconv.FormatFloat(v, 'f', n, 64)
+	out, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return v
+	}
+	return out
 }
 
 func asString(v any) string {
