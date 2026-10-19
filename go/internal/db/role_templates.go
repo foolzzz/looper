@@ -102,7 +102,8 @@ func oneLine(v any, limit int) string {
 	default:
 		text = fmt.Sprint(t)
 	}
-	text = strings.Join(strings.Fields(text), " ")
+	// str.split treats U+001C–U+001F as whitespace. strings.Fields does not.
+	text = strings.Join(pythonFields(text), " ")
 	runes := []rune(text)
 	if len(runes) > limit {
 		return string(runes[:limit])

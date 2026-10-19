@@ -1,0 +1,138 @@
+{
+  "by_step": {
+    "s1": {
+      "received": 1,
+      "sent": 2,
+      "unanswered": 1
+    },
+    "s2": {
+      "received": 1,
+      "sent": 1,
+      "unanswered": 0
+    },
+    "s4": {
+      "received": 1,
+      "sent": 0,
+      "unanswered": 1
+    }
+  },
+  "consults": {
+    "answered": 1,
+    "by_reason": {
+      "no_session": 1
+    },
+    "cost_usd": 0.375,
+    "list": [
+      {
+        "at": "2020-05-03T00:00:00+00:00",
+        "cost_usd": 0.125,
+        "denied_writes": 0,
+        "questions": [],
+        "read_only": "runtime",
+        "reason": null,
+        "seat": "worker@s2",
+        "state": "answered"
+      },
+      {
+        "at": "2020-05-03T00:00:02+00:00",
+        "cost_usd": 0.25,
+        "denied_writes": 0,
+        "questions": [],
+        "read_only": null,
+        "reason": "no_session",
+        "seat": "backend@s1",
+        "state": "fallback"
+      },
+      {
+        "at": "2020-05-03T00:00:04+00:00",
+        "cost_usd": null,
+        "denied_writes": 0,
+        "questions": [],
+        "read_only": "snapshot",
+        "reason": null,
+        "seat": "worker@s4",
+        "state": "failed"
+      }
+    ],
+    "total": 3
+  },
+  "counts": {
+    "by_kind": {
+      "answer": 1,
+      "question": 2
+    },
+    "messages": 3,
+    "questions": 2,
+    "unanswered": 1
+  },
+  "enabled": true,
+  "messages": [
+    {
+      "answered": true,
+      "at": "2020-05-01T00:00:00+00:00",
+      "body": "Does s2 own the port?",
+      "cc_planner": false,
+      "from": "backend@s1",
+      "id": 1,
+      "kind": "question",
+      "to": [
+        "worker@s2"
+      ]
+    },
+    {
+      "answered": false,
+      "at": "2020-05-01T00:00:02+00:00",
+      "body": "Can s4 take the schema?",
+      "cc_planner": false,
+      "from": "backend@s1",
+      "id": 3,
+      "kind": "question",
+      "to": [
+        "worker@s4"
+      ]
+    }
+  ],
+  "more": false,
+  "seats": [
+    {
+      "kind": "work",
+      "presence": "offline",
+      "role": "backend",
+      "seat": "backend@s1",
+      "step": "s1",
+      "step_status": "verified"
+    },
+    {
+      "kind": "review",
+      "presence": "offline",
+      "role": "reviewer",
+      "seat": "reviewer@s1",
+      "step": "s1",
+      "step_status": "verified"
+    },
+    {
+      "kind": "work",
+      "presence": "offline",
+      "role": "worker",
+      "seat": "worker@s2",
+      "step": "s2",
+      "step_status": "running"
+    },
+    {
+      "kind": "work",
+      "presence": "planned",
+      "role": "worker",
+      "seat": "worker@s4",
+      "step": "s4",
+      "step_status": "failed"
+    },
+    {
+      "kind": "work",
+      "presence": "dropped",
+      "role": "backend",
+      "seat": "backend@s5",
+      "step": "s5",
+      "step_status": "skipped"
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "gate": {
+    "agenda": [
+      {
+        "id": "q1",
+        "options": [
+          "yes",
+          "no"
+        ],
+        "question": "Ship it?",
+        "status": "open"
+      }
+    ],
+    "channel_posts": {
+      "channel": "lark",
+      "failed": 1,
+      "last_error": "lark timeout",
+      "sent": 2,
+      "target": "Lark group oc_richgate01"
+    },
+    "closed_at": null,
+    "depends_on": [],
+    "ended_by_user": false,
+    "findings": "waiting on the API shape",
+    "first_reply_at": null,
+    "not_delivered": 0,
+    "opened_at": "2020-05-02T00:00:00+00:00",
+    "plan_change": null,
+    "reminders": 0,
+    "resolution": "",
+    "retry_at": null,
+    "state": "discussing",
+    "step": "g1",
+    "step_id": "step-rich0003",
+    "summary": null,
+    "topic": "Ship the API?",
+    "turns": 0,
+    "waiting_on": "planner"
+  },
+  "messages": [
+    {
+      "agenda_item": null,
+      "author": null,
+      "created_at": "2020-05-02T00:01:00+00:00",
+      "id": 1,
+      "kind": "message",
+      "option": null,
+      "role": "user",
+      "text": "Please ship the read API.",
+      "via": ""
+    },
+    {
+      "agenda_item": null,
+      "author": null,
+      "created_at": "2020-05-02T00:02:00+00:00",
+      "id": 2,
+      "kind": "reply",
+      "option": null,
+      "role": "planner",
+      "text": "Shipping the read API.",
+      "via": ""
+    },
+    {
+      "agenda_item": null,
+      "author": null,
+      "created_at": "2020-05-02T00:03:00+00:00",
+      "id": 3,
+      "kind": "reply",
+      "option": null,
+      "role": "planner",
+      "text": "Second note.",
+      "via": ""
+    },
+    {
+      "agenda_item": null,
+      "author": null,
+      "created_at": "2020-05-02T00:04:00+00:00",
+      "id": 4,
+      "kind": "opened",
+      "option": null,
+      "role": "looper",
+      "text": "Gate opened.",
+      "via": ""
+    }
+  ],
+  "task_id": "task-rich00001"
+}

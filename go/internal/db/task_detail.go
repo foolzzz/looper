@@ -59,8 +59,9 @@ const roleVersionsSQL = `SELECT r.task_id, r.role_key, r.version, r.kind, r.prof
 	`(SELECT min(f.created_at) FROM task_roles f WHERE f.task_id = r.task_id AND f.role_key = r.role_key), ` +
 	`r.role_key, r.version`
 
-// Copied from looper/db/user_gates.py _GATES plus list_for_task's order.
-const gatesSQL = `SELECT g.*, s.step_key, s.step_index, s.depends_on, ` +
+// gateSelectSQL is looper/db/user_gates.py _GATES. gatesSQL adds list_for_task's
+// order. gateByKeySQL is get: the same select, one step_key.
+const gateSelectSQL = `SELECT g.*, s.step_key, s.step_index, s.depends_on, ` +
 	`EXISTS (SELECT 1 FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.role = 'user' ` +
 	`AND m.id > GREATEST(g.delivered_through, g.failed_through)) AS waiting_for_planner, ` +
 	`(SELECT count(*) FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.role = 'user' ` +
@@ -69,8 +70,11 @@ const gatesSQL = `SELECT g.*, s.step_key, s.step_index, s.depends_on, ` +
 	`(SELECT count(*) FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.post_state = 'failed') AS posts_failed, ` +
 	`(SELECT m.post_error FROM task_user_gate_messages m WHERE m.step_id = g.step_id AND m.post_state = 'failed' ` +
 	`ORDER BY m.id DESC LIMIT 1) AS post_last_error ` +
-	`FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id ` +
-	`WHERE g.task_id = $1 ORDER BY s.step_index, s.created_at`
+	`FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id `
+
+const gatesSQL = gateSelectSQL + `WHERE g.task_id = $1 ORDER BY s.step_index, s.created_at`
+
+const gateByKeySQL = gateSelectSQL + `WHERE g.task_id = $1 AND s.step_key = $2`
 
 const (
 	concurrencyMax       = 64
@@ -446,6 +450,64 @@ func (s *Store) taskGates(ctx context.Context, task map[string]any) ([]any, erro
 	return out, nil
 }
 
+// GateMessages is gate_service.thread. A missing task and a missing label are
+// both ErrGateNotFound: the message names the task and the label either way.
+func (s *Store) GateMessages(ctx context.Context, taskID, label string) (map[string]any, error) {
+	row, err := s.one(ctx, "gate", gateByKeySQL, taskID, label)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, ErrGateNotFound
+	}
+	task, err := s.one(ctx, "gate task", `
+		SELECT id, schedule_id, origin_channel_id, chat_kind, chat_id FROM tasks WHERE id = $1`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		task = map[string]any{}
+	}
+	var chat *gateChat
+	found, ok, err := s.gateChat(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		chat = &found
+	}
+	msgs, err := s.query(ctx, "gate messages", `
+		SELECT id, role, kind, text, author, via, agenda_item, option, created_at
+		FROM task_user_gate_messages WHERE step_id = $1 ORDER BY id`, row["step_id"])
+	if err != nil {
+		return nil, err
+	}
+	views := make([]any, 0, len(msgs))
+	for _, msg := range msgs {
+		views = append(views, gateMessageView(msg))
+	}
+	return map[string]any{
+		"task_id":  taskID,
+		"gate":     gateRecord(row, chat, time.Now().UTC()),
+		"messages": views,
+	}, nil
+}
+
+// gateMessageView is gate_service._message_view. Null columns stay null.
+func gateMessageView(row map[string]any) map[string]any {
+	return map[string]any{
+		"id":          row["id"],
+		"role":        row["role"],
+		"kind":        row["kind"],
+		"text":        row["text"],
+		"author":      row["author"],
+		"via":         row["via"],
+		"agenda_item": row["agenda_item"],
+		"option":      row["option"],
+		"created_at":  row["created_at"],
+	}
+}
+
 func (s *Store) gateChat(ctx context.Context, task map[string]any) (gateChat, bool, error) {
 	if asString(task["schedule_id"]) != "" {
 		return gateChat{}, false, nil
@@ -586,7 +648,8 @@ func senderIDs(channel string, raw any) ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("%s: each entry is a %s written as a string", spec.field, spec.label)
 		}
-		text = strings.TrimSpace(text)
+		// str.strip treats U+001C–U+001F as whitespace. strings.TrimSpace does not.
+		text = pythonStrip(text)
 		if text == "" {
 			continue
 		}

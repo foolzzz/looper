@@ -1,0 +1,20 @@
+{
+  "by_step": {},
+  "consults": {
+    "answered": 0,
+    "by_reason": {},
+    "cost_usd": 0,
+    "list": [],
+    "total": 0
+  },
+  "counts": {
+    "by_kind": {},
+    "messages": 0,
+    "questions": 0,
+    "unanswered": 0
+  },
+  "enabled": true,
+  "messages": [],
+  "more": false,
+  "seats": []
+}

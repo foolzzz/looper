@@ -29,6 +29,8 @@ type DBPinger interface {
 // do too. Activity detail answers 404. Chat sessions answer 500. Role and
 // channel lists answer 200 with an empty list. One role or channel answers
 // 404. Gate settings, role templates, and role stats answer 500.
+// Gate messages and a task room answer 500 too: both read the database
+// before they can say the task or the gate is missing.
 type Reader interface {
 	StatusTaskCounts(ctx context.Context) (total, running, completed int, err error)
 	Overview(ctx context.Context, since time.Time) (map[string]any, error)
@@ -54,6 +56,8 @@ type Reader interface {
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	RoleTemplates(ctx context.Context, projectID string) (map[string]any, error)
 	ProjectRoleStats(ctx context.Context, projectID string, since *time.Time) (map[string]any, error)
+	GateMessages(ctx context.Context, taskID, label string) (map[string]any, error)
+	TaskRoom(ctx context.Context, taskID string, q db.RoomQuery) (map[string]any, error)
 }
 
 // Server serves the read-only API and, when WebDir is set, the dashboard files.
@@ -98,6 +102,8 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // It also serves GET /api/roles, GET /api/roles/<role>, GET /api/channel-configs,
 // GET /api/channel-configs/<id>, GET /api/gate-settings, and a project's
 // role templates and role stats.
+// It also serves GET /api/tasks/<id>/gates/<label>/messages and
+// GET /api/tasks/<id>/room.
 // GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
 // are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
@@ -109,6 +115,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/tasks/{id}/activity/{seq}", s.handleActivityDetail)
 	mux.HandleFunc("/api/tasks/{id}/activity", s.handleActivity)
 	mux.HandleFunc("/api/tasks/{id}/conversation", s.handleConversation)
+	mux.HandleFunc("/api/tasks/{id}/gates/{label}/messages", s.handleGateMessages)
+	mux.HandleFunc("/api/tasks/{id}/room", s.handleTaskRoom)
 	mux.HandleFunc("/api/tasks/{id}", s.handleTask)
 	mux.HandleFunc("/api/chat/targets", s.handleChatTargets)
 	mux.HandleFunc("/api/chat/sessions", s.handleChatSessions)
@@ -247,7 +255,10 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	f, name, err := openStatic(s.WebDir, r.URL.Path)
+	// Python joins the undecoded request-target path. EscapedPath re-encodes
+	// raw UTF-8, so /é.js would look up "%C3%A9.js". /%C3%A9.js is that other
+	// file, and /%61pp.js is not app.js. A miss falls back to index.html.
+	f, name, err := openStatic(s.WebDir, pythonURLPath(requestTarget(r)))
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			writeJSON(w, http.StatusNotFound, errorBody{Error: "not found"})

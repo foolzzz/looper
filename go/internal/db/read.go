@@ -20,6 +20,10 @@ var ErrNotFound = errors.New("task not found")
 // ErrNotFound stays the task miss: the two 404 texts differ.
 var ErrProjectNotFound = errors.New("project not found")
 
+// ErrGateNotFound is a task with no gate of that step key. A missing task
+// is the same error: user_gates.get joins gates to steps and returns no row.
+var ErrGateNotFound = errors.New("gate not found")
+
 // TaskQuery is the Tasks page filter. Empty strings are unset.
 // Statuses nil with Inside true is no group filter. Limit is the page size.
 type TaskQuery struct {
