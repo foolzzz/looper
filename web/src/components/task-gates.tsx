@@ -84,7 +84,7 @@ function GatePosts({ posts }: { posts: UserGate["channel_posts"] }) {
 /** Where the user wrote a message, in words. */
 function viaText(via: string | null): string {
   if (!via || via === "dashboard") return "task page";
-  if (via === "lark") return "Lark";
+  if (via === "lark" || via === "lark_bot") return "Lark";
   if (via === "telegram") return "Telegram";
   if (via.startsWith("manager:")) return `the Manager (${via.slice("manager:".length)})`;
   return via;
