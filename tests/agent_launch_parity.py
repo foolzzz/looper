@@ -203,10 +203,14 @@ AGENT_TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 
 
 def without_agent_teams(argv: list[str]) -> list[str]:
-    """``argv`` less ``--teammate-mode in-process``, which it must have."""
+    """``argv`` as a run without agent teams has it: less ``--teammate-mode in-process``, which it must have, and with
+    SendMessage denied beside ListAgents, where a run with teams keeps it for its teammates (``claude_cli.peer_args``)."""
     at = argv.index("--teammate-mode")
     assert argv[at + 1] == "in-process", argv
-    return argv[:at] + argv[at + 2:]
+    argv = argv[:at] + argv[at + 2:]
+    denied = argv.index("--disallowedTools") + 1
+    assert argv[denied] == "ListAgents", argv
+    return [*argv[:denied], "ListAgents,SendMessage", *argv[denied + 1:]]
 
 
 # A Planner runs read-only since the fixture was made (the Planner read-only RFC): its permission flag, and the line of

@@ -4,6 +4,8 @@
    "manager": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus"
     ],
@@ -14,6 +16,8 @@
    "planner@proj-a": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus",
      "--max-budget-usd",
@@ -26,6 +30,8 @@
    "reviewer@proj-a": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus",
      "--max-budget-usd",
@@ -38,6 +44,8 @@
    "worker@proj-a": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus",
      "--max-budget-usd",
@@ -52,6 +60,8 @@
    "manager": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus",
      "--effort",
@@ -73,6 +83,8 @@
    "planner@proj-a": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus[1m]",
      "--effort",
@@ -96,6 +108,8 @@
    "planner@proj-b": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "haiku",
      "--effort",
@@ -117,6 +131,8 @@
    "reviewer@proj-a": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus[1m]",
      "--effort",
@@ -140,6 +156,8 @@
    "reviewer@proj-b": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "sonnet",
      "--effort",
@@ -161,6 +179,8 @@
    "worker@proj-a": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "opus[1m]",
      "--effort",
@@ -184,6 +204,8 @@
    "worker@proj-b": {
     "args": [
      "--dangerously-skip-permissions",
+     "--disallowedTools",
+     "ListAgents,SendMessage",
      "--model",
      "claude-sonnet-4-5",
      "--effort",
