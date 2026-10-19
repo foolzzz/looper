@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Any
 from .profile_registry import BUILTIN_PROFILE, AgentProfile
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
-from .runtimes import AuthKind, CostSource
+from .runtimes import AuthKind, CostSource, ReadOnly
 from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
@@ -755,6 +755,11 @@ class Launch:
         return self.role is AgentType.PLANNER or self.consult
 
     @property
+    def read_only_mode(self) -> ReadOnly:
+        """How a read-only run is kept read-only with this profile's runtime as probed (``ReadOnly``)."""
+        return self.runtime.read_only_for(self.profile.runtime.capabilities)
+
+    @property
     def model(self) -> str:
         return self.settings.model
 
@@ -839,7 +844,7 @@ class Launch:
             "settings_sources": self.settings.sources(),
         }
         if self.read_only:
-            record["read_only"] = self.runtime.read_only.value  # how it is kept from changing files
+            record["read_only"] = self.read_only_mode.value  # how it is kept from changing files
         if self.env:
             record["env"] = {
                 "sha256": self.env_sha256,
