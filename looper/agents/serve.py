@@ -941,11 +941,11 @@ async def _run_agent_system(
 
 def _configure_logging(level: str) -> None:
     """Log to stderr from ``level`` (an ops ``log_level``) with secrets masked (``log_redaction``). httpx and httpcore
-    log every request URL, and a Telegram one holds the bot token: they log only from WARNING below debug."""
+    log every request URL, and a Telegram one holds the bot token: they log only from WARNING below debug. Set in full
+    each time: a second call (after a refused start, or in a test) leaves nothing of the first."""
     log_to_stderr(getattr(logging, level.upper()), "%(asctime)s %(name)s %(levelname)s %(message)s")
-    if level != "debug":
-        for name in ("httpx", "httpcore"):
-            logging.getLogger(name).setLevel(logging.WARNING)
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.NOTSET if level == "debug" else logging.WARNING)
 
 
 def serve_agent(
