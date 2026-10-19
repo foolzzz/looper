@@ -31,7 +31,7 @@ type DBPinger interface {
 // answers 200 with an empty list. Chat messages, activity, and conversation
 // do too. Activity detail answers 404. Chat sessions answer 500. Role and
 // channel lists answer 200 with an empty list. One role or channel answers
-// 404. Gate settings, role templates, and role stats answer 500.
+// 404. Gate settings, role templates, role stats, and agent settings answer 500.
 // Gate messages and a task room answer 500 too: both read the database
 // before they can say the task or the gate is missing.
 // A project schedule list, one schedule, its runs, and its notifications
@@ -65,6 +65,8 @@ type Reader interface {
 	RoleTemplates(ctx context.Context, projectID string) (map[string]any, error)
 	AllowedProfiles(ctx context.Context, projectID string) (map[string]any, error)
 	ProjectRoleStats(ctx context.Context, projectID string, since *time.Time) (map[string]any, error)
+	AgentSettings(ctx context.Context) (map[string]any, error)
+	ProjectAgentSettings(ctx context.Context, projectID string) (map[string]any, error)
 	GateMessages(ctx context.Context, taskID, label string) (map[string]any, error)
 	TaskRoom(ctx context.Context, taskID string, q db.RoomQuery) (map[string]any, error)
 	ProjectWorkspace(ctx context.Context, id string) (db.ProjectWorkspace, error)
@@ -125,6 +127,7 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // GET /api/tasks/<id>/room.
 // It also serves GET /api/workspaces/check, GET /api/projects/<id>/schedules,
 // GET /api/schedules, GET /api/schedules/<id>, its runs, and its notifications.
+// It also serves GET /api/agent-settings and GET /api/projects/<id>/agent-settings.
 // GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
 // are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
@@ -153,6 +156,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/gate-settings", s.handleGateSettings)
 	mux.HandleFunc("/api/projects/{id}/role-templates", s.handleRoleTemplates)
 	mux.HandleFunc("/api/projects/{id}/allowed-profiles", s.handleAllowedProfiles)
+	mux.HandleFunc("/api/agent-settings", s.handleAgentSettings)
+	mux.HandleFunc("/api/projects/{id}/agent-settings", s.handleProjectAgentSettings)
 	mux.HandleFunc("/api/projects/{id}/role-stats", s.handleRoleStats)
 	mux.HandleFunc("/api/workspaces/check", s.handleWorkspaceCheck)
 	mux.HandleFunc("/api/projects/{id}/schedules", s.handleProjectSchedules)

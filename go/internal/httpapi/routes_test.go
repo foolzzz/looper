@@ -103,6 +103,10 @@ type recordingReads struct {
 	workspaceErr              error
 	active                    []db.ActiveWorkspace
 	activeErr                 error
+	agentSettings             map[string]any
+	agentSettingsErr          error
+	projectAgentSettings      map[string]any
+	projectAgentSettingsErr   error
 }
 
 func (r *recordingReads) StatusTaskCounts(context.Context) (int, int, int, error) {
@@ -463,6 +467,29 @@ func (r *recordingReads) ListScheduleRuns(_ context.Context, id string, q db.Sch
 			"skipped_overlap": 0,
 		},
 	}, nil
+}
+
+func (r *recordingReads) AgentSettings(context.Context) (map[string]any, error) {
+	r.calls = append(r.calls, "agent-settings")
+	if r.agentSettingsErr != nil {
+		return nil, r.agentSettingsErr
+	}
+	if r.agentSettings == nil {
+		return map[string]any{}, nil
+	}
+	return r.agentSettings, nil
+}
+
+func (r *recordingReads) ProjectAgentSettings(_ context.Context, id string) (map[string]any, error) {
+	r.calls = append(r.calls, "project-agent-settings")
+	r.projectIDSeen = id
+	if r.projectAgentSettingsErr != nil {
+		return nil, r.projectAgentSettingsErr
+	}
+	if r.projectAgentSettings == nil {
+		return map[string]any{}, nil
+	}
+	return r.projectAgentSettings, nil
 }
 
 func (r *recordingReads) ListScheduleNotifications(_ context.Context, id string, limit int) (map[string]any, error) {

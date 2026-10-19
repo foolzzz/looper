@@ -102,3 +102,7 @@ schedule-runs-hide
 schedule-runs-before
 schedule-notifications
 schedule-notifications-limit
+agent-settings
+agent-settings-alpha
+agent-settings-beta
+agent-settings-blank
