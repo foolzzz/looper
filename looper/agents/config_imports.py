@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import config_transfer
+from . import config_transfer, scheduler_settings
 from .config_transfer import ConfigFileError
 from .library import LIBRARY_MAX_BYTES
 
@@ -73,7 +73,10 @@ async def _run(data: dict[str, Any], *, apply: bool) -> config_transfer.Plan:
     from ..db.connection import get_pool
 
     async with get_pool().acquire() as conn:
-        return await config_transfer.run_import(conn, data, apply=apply)
+        plan = await config_transfer.run_import(conn, data, apply=apply)
+    if apply:
+        await scheduler_settings.load()  # a minimum interval in the file applies at once
+    return plan
 
 
 class ConfigImports:

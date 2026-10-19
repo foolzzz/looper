@@ -289,7 +289,12 @@ def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
         return _OVERLAP_WORDS.get(value, value)
     if key == "catch_up":
         return "补跑一次" if value == "once" else "跳过"
-    if key in ("run_timeout_seconds", "gate_timeout_seconds"):
+    if key == "run_timeout_seconds":
+        if value == schedules.TIMEOUT_DEFAULT:
+            effective = view["run_timeout_effective_seconds"]
+            return f"系统默认（{'不限' if effective is None else f'{effective} 秒'}）"
+        return "不限" if value is None else f"{value} 秒"
+    if key == "gate_timeout_seconds":
         return "不限" if value is None else f"{value} 秒"
     if key == "gate_command":
         return f"`{value}`" if value else "没有"
@@ -330,8 +335,7 @@ async def _configuration(view: Mapping[str, Any], project: Mapping[str, Any]) ->
              f"- 前置检查：{_shown('gate_command', view, names)}",
              f"- 花费上限：每次运行 {_shown('run_budget_usd', view, names)}，每天 {_shown('daily_budget_usd', view, names)}",
              f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}"]
-    if view["run_timeout_seconds"] is not None:
-        lines.append(f"- 运行超时：{_shown('run_timeout_seconds', view, names)}")
+    lines.append(f"- 运行超时：{_shown('run_timeout_seconds', view, names)}")
     if view["profile_overrides"]:
         lines.append(f"- Agent Profile：{_shown('profile_overrides', view, names)}")
     if any(limit is not None for limit in view["task_limits"].values()):
@@ -366,7 +370,9 @@ _FIELDS = {
         "overlap": {"type": "string", "enum": [o.value for o in schedules.Overlap]},
         "max_parallel_runs": {"type": "integer"},
         "catch_up": {"type": "string", "enum": [c.value for c in schedules.CatchUp]},
-        "run_timeout_seconds": {"type": "integer"}, "run_budget_usd": {"type": "number"},
+        "run_timeout_seconds": {"description": "Seconds; null: no limit; 'default' (a new schedule's): the system "
+                                               "default."},
+        "run_budget_usd": {"type": "number"},
         "daily_budget_usd": {"type": "number"},
         "gate_command": {"type": "string", "description": "Shell; prints each run's input, nothing skips it."},
         "gate_timeout_seconds": {"type": "integer"},

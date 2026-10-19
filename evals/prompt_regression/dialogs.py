@@ -34,7 +34,10 @@ one created disabled at once, enabled only after 「启用」 and then 「确认
 (``schedule_enable_declined``), none created without a project
 (``schedule_ask_project``), one changed at once but its spend cap raised only
 on the user's word (``schedule_modify``), one read without running it, then
-run now only after 「确认」 (``schedule_run``), and a name two projects have run
+run now only after 「确认」 (``schedule_run``), the schedules' default run timeout
+changed only on the user's word (``scheduler_settings``), a timeout the user names
+kept on that schedule alone (``schedule_timeout``) and none set when they name none
+(``schedule_timeout_unnamed``), and a name two projects have run
 only once the user says which and confirms (``schedule_ambiguous``). The configuration exported to a file, never
 with a key (``config_export``). The user gates: the user answers
 the question a running task's gate asks in the Manager's chat, and the Manager passes their words on to the gate
@@ -576,6 +579,45 @@ def _schedule_stays_disabled(look: Look) -> str | None:
     return None if look.reply.strip() else "no reply"
 
 
+def _run_timeout_default(look: Look) -> dict[str, Any]:
+    return look.api.get("/api/scheduler-settings")["run_timeout_seconds"]
+
+
+def _default_timeout_change_asked(look: Look) -> str | None:
+    if not _writes(look, status="needs_confirmation", tool="looper_settings"):
+        return "changing the default run timeout does not wait for the user's confirmation"
+    source = _run_timeout_default(look)["source"]
+    return None if source == "built-in" else f"the default run timeout was changed before the user confirmed ({source})"
+
+
+def _default_timeout_changed_on_confirmation(look: Look) -> str | None:
+    value = _run_timeout_default(look)["value"]
+    if value != 1800:
+        return f"the default run timeout is {value} s, not 1800"
+    confirmed = [a for a in _writes(look, status="ok", tool="looper_settings") if a["confirmation_id"]]
+    return _raw_json(look.reply) if confirmed else "it changed without a confirmed call"
+
+
+def _schedule_with_its_own_timeout(look: Look) -> str | None:
+    schedule = _named(look, DEPS)
+    if schedule is None:
+        return f"no schedule {DEPS}"
+    if schedule["run_timeout_seconds"] != 1200:
+        return f"{DEPS}'s run timeout is {schedule['run_timeout_seconds']!r}, not 1200 s"
+    if _run_timeout_default(look)["source"] != "built-in":
+        return "the system default run timeout was changed for one schedule's timeout"
+    return None if "要启用吗" in look.reply else "the reply lacks the schedule's configuration and the question"
+
+
+def _schedule_follows_the_default(look: Look) -> str | None:
+    schedule = _named(look, DEPS)
+    if schedule is None:
+        return f"no schedule {DEPS}"
+    if schedule["run_timeout_seconds"] != "default":
+        return f"{DEPS}'s run timeout is {schedule['run_timeout_seconds']!r} though the user named none"
+    return None if "要启用吗" in look.reply else "the reply lacks the schedule's configuration and the question"
+
+
 def _no_schedule_without_a_project(look: Look) -> str | None:
     if look.api.get("/api/schedules")["schedules"]:
         return "a schedule was created though the user named no project"
@@ -831,6 +873,26 @@ DIALOGS: tuple[Dialog, ...] = (
                 "requirement": "检查依赖有没有新版本，把结果写进 deps.md。"}}),)),
         Say("启用。", _schedule_enable_asked, (("looper_schedules", {"action": "enable", "schedule": DEPS}),)),
         Say("确认。", _schedule_enabled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    )),
+    Dialog("scheduler_settings", (
+        Say("所有定时任务默认的运行超时改成 30 分钟。", _default_timeout_change_asked,
+            (("looper_settings", {"action": "scheduler", "scheduler": {"run_timeout_seconds": 1800}}),)),
+        Say("确认。", _default_timeout_changed_on_confirmation,
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    )),
+    Dialog("schedule_timeout", (
+        Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"
+            "把结果写进 deps.md。目录用项目默认的，每次运行最多跑 20 分钟。", _schedule_with_its_own_timeout,
+            (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
+                "name": DEPS, "cron": "0 9 * * 1-5", "timezone": "Asia/Shanghai",
+                "requirement": "检查依赖有没有新版本，把结果写进 deps.md。", "run_timeout_seconds": 1200}}),)),
+    )),
+    Dialog("schedule_timeout_unnamed", (
+        Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"
+            "把结果写进 deps.md。目录用项目默认的。", _schedule_follows_the_default,
+            (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
+                "name": DEPS, "cron": "0 9 * * 1-5", "timezone": "Asia/Shanghai",
+                "requirement": "检查依赖有没有新版本，把结果写进 deps.md。"}}),)),
     )),
     Dialog("schedule_planner_profile", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"

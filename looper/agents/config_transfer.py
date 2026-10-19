@@ -136,7 +136,8 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "profiles", "settings.layers", "settings.roles", "channels", "catalog", "installs",
+SECTIONS = ("runtimes", "providers", "profiles", "settings.layers", "settings.roles", "settings.scheduler", "channels",
+            "catalog", "installs",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs")
 # A schedule's settings the file carries as they are; its notify target, Agent Profiles and task limits are
@@ -337,10 +338,34 @@ def document_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     return {**entry, "content": row["content"]}
 
 
+def schedule_timeout(row: Mapping[str, Any]) -> Any:
+    """A schedule's run timeout as the file holds it: ``"default"`` (the system default), seconds, or null."""
+    from .schedules import TIMEOUT_DEFAULT
+
+    if row["run_timeout_mode"] == "inherit":
+        return TIMEOUT_DEFAULT
+    return row["run_timeout_seconds"] if row["run_timeout_mode"] == "seconds" else None
+
+
+async def stored_scheduler_settings(conn: Any) -> dict[str, int]:
+    """The scheduler's system settings that are stored here (a setting left at its built-in is not carried, so
+    the machine that imports keeps its own)."""
+    from ..db import system_settings as db_settings
+    from . import scheduler_settings
+
+    keys = {"min_interval_seconds": scheduler_settings.MIN_INTERVAL_KEY,
+            "run_timeout_seconds": scheduler_settings.RUN_TIMEOUT_KEY}
+    if not await conn.fetchval("SELECT to_regclass('system_settings') IS NOT NULL"):
+        return {}  # a database not set up yet: a preview before the first start
+    stored = await db_settings.get_settings(list(keys.values()), pool=conn)
+    return {name: int(stored[key]) for name, key in keys.items() if key in stored}
+
+
 def schedule_entry(row: Mapping[str, Any], profile_names: Mapping[str, str]) -> dict[str, Any]:
     """A schedule as the file holds it: no enabled flag, runs or counters, and no directory (``repoint`` when it had
     one of its own)."""
     entry = {name: row[name] for name in _SCHEDULE_FIELDS}
+    entry["run_timeout_seconds"] = schedule_timeout(row)
     entry["notify_target"] = ({"channel": row["notify_channel"], "chat": row["notify_chat"]}
                               if row["notify_channel"] else None)
     entry["profiles"] = {role: profile_names.get(pid, pid) for role, pid in sorted(row["profile_overrides"].items())}
@@ -403,9 +428,12 @@ async def export_chunks(
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
+    if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
+        head["settings"]["scheduler"] = scheduler
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
                            "profiles": len(head["profiles"]), "settings.layers": len(head["settings"]["layers"]),
-                           "settings.roles": len(head["settings"]["roles"]), "channels": len(channels),
+                           "settings.roles": len(head["settings"]["roles"]),
+                           "settings.scheduler": len(scheduler), "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
@@ -528,6 +556,8 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
     for section in ("layers", "roles"):
         if not isinstance(data.get("settings", {}).get(section, []), list):
             raise ConfigFileError(f"settings.{section} must be a JSON list")
+    if not isinstance(data.get("settings", {}).get("scheduler", {}), dict):
+        raise ConfigFileError("settings.scheduler must be a JSON object")
     return _from_v1(data) if data["format"] in V1_FORMATS else data
 
 
@@ -876,6 +906,7 @@ class _Importer:
         self.channel_configs = {kind: dict(row["config"] or {}) for kind, row in target.channels.items()}
         # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
         self.disabled_schedules: list[str] = []
+        self.min_interval: int | None = None  # the file's, once read
         self.repointed_schedules: list[str] = []
         self.role_text_limits: dict[str, int] = {}  # by project id: how long its roles' texts may be
         # Runtimes, providers and Agent Profiles by name, stored and from the file: their ids ("new:..." in a
@@ -1254,6 +1285,35 @@ class _Importer:
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             await db.write_role(self.conn, role, values, exists=row is not None)
 
+    async def scheduler(self, entry: Any) -> None:
+        """The scheduler's system settings of the file: each one it names is set here (a number only)."""
+        from . import scheduler_settings
+
+        try:
+            entry = _mapping(entry, "scheduler")
+        except _Skip as exc:
+            self.record("settings.scheduler", "scheduler", Action.SKIPPED, reason=str(exc))
+            return
+        current = await stored_scheduler_settings(self.conn)
+        for name in scheduler_settings.FIELDS:
+            if name not in entry:
+                continue
+            try:
+                if entry[name] is None:
+                    raise ValueError(f"{name} must be a number of seconds")
+                value = scheduler_settings.checked({name: entry[name]})[name]
+            except ValueError as exc:
+                self.record("settings.scheduler", name, Action.SKIPPED, reason=str(exc))
+                continue
+            if name == "min_interval_seconds":
+                self.min_interval = value  # the file's schedules are checked against it
+            action = self.outcome("settings.scheduler", name, current.get(name),
+                                  (name,) if current.get(name) != value else ())
+            if self.apply and action in (Action.ADDED, Action.CHANGED):
+                await scheduler_settings.store(name, value, conn=self.conn)
+        for name in sorted(set(entry) - set(scheduler_settings.FIELDS)):
+            self.record("settings.scheduler", name, Action.SKIPPED, reason="unknown scheduler setting")
+
     async def channel(self, entry: Any) -> None:
         from .channels.allowlist import AllowlistError, normalized_config
 
@@ -1568,11 +1628,12 @@ class _Importer:
         values: dict[str, Any] = {}
         try:
             for name in _SCHEDULE_FIELDS:
-                if name not in ("cron", "timezone"):
+                if name not in ("cron", "timezone", "run_timeout_seconds"):
                     values[name] = schedules._PARSERS[name](entry.get(name, defaults.get(name)))
+            values.update(schedules._timeout(entry.get("run_timeout_seconds", schedules.TIMEOUT_DEFAULT)))
             zone = entry.get("timezone") or cron.local_zone_name()
             rule, _ = schedules.checked_rule(entry.get("cron"), zone, now=datetime.now(UTC),
-                                             gated=bool(values["gate_command"]))
+                                             gated=bool(values["gate_command"]), base_interval=self.min_interval)
             values.update(cron=rule.text, timezone=zone)
             limits = _concurrency_limits(entry.get("task_limits") or {}, field="task_limits")
         except ValueError as exc:
@@ -1628,7 +1689,8 @@ class _Importer:
             profile_ids = {role: profile_id for role, (_, profile_id) in profiles.items()}
             current = None
             if row is not None:
-                current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "notify_channel", "notify_chat")}
+                current = {name: row[name] for name in (*_SCHEDULE_FIELDS, "run_timeout_mode", "notify_channel",
+                                                        "notify_chat")}
                 current["profiles"] = {role: names.get(pid, pid) for role, pid in row["profile_overrides"].items()}
                 current["task_limits"] = dict(row["task_limits"])
             action = self.outcome("project.schedules", key, current, _differs(new, current, new))
@@ -1684,6 +1746,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await importer.layer(entry, None)
     for entry in settings.get("roles", []):
         await importer.role(entry)
+    if "scheduler" in settings:
+        await importer.scheduler(settings["scheduler"])
     if any(isinstance(entry, Mapping) and "max_concurrency" in entry for entry in settings.get("roles", [])):
         importer.plan.notes.append(
             "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many of a "
