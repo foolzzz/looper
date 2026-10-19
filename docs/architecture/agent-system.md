@@ -641,8 +641,21 @@ answer to an edit on the task page goes.
     parallel counts as evidence too: the check catches misreports; it does
     not attribute work. The failure lists the files and where the check
     looked; files found outside the work directory are listed in the result's
-    `found_elsewhere` and in the task's activity. In a project with step
-    workspaces the work directory is the step's worktree.
+    `found_elsewhere`, a JSON list of typed locations: `path`, `deleted`,
+    `where` (`worktree` or `commit`), and the full `commit` SHA. Worktree
+    entries also include the absolute `worktree`, short `branch` (empty for
+    detached/unknown), and `repo_path` relative to the repository root;
+    commit entries include `repo_path` when known (omitted for absolute-path
+    suffix matches). The task's activity lists the locations. The Reviewer's
+    first turn and Planner's step report share a renderer: each location is
+    one JSON line in a fenced block labelled as untrusted Worker data, followed
+    by fixed read-only hints with placeholders. Git hints use repo-root-relative
+    `repo_path` with `-- ':(top,literal)<repo_path>'`; without a known path they
+    show the whole commit's stat. Readers ignore old free-string dictionaries,
+    malformed entries, commits other than full lowercase 40- or 64-digit hashes,
+    non-absolute worktrees, and path/worktree/branch fields containing ASCII
+    control characters or exceeding 512 characters (200 for branches). In a
+    project with step workspaces the work directory is the step's worktree.
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
 - `learnings` is optional in both the report and the verdict: up to 5 short
@@ -1962,7 +1975,10 @@ when it fires), `overlap` (`skip`, `queue` or `parallel`, with
 `max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
 an optional `run_timeout_seconds` and `run_budget_usd`, `profile_overrides`
 for the Planner, Workers or Reviewers (by id or name, as a new task takes them;
-a profile a schedule chose cannot be deleted) and `task_limits`
+a role it does not name keeps the project's, and no change to a schedule alters
+its profiles unless the request carries them; a repetitive schedule such as
+alert triage can name a lower-effort Planner profile, since the Planner is
+often the largest share of a run's cost; a profile a schedule chose cannot be deleted) and `task_limits`
 (`{worker, reviewer}`, each 1–64 or null for the default: how many of each
 run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, from S2, an optional
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,

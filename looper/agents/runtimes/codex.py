@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, reported_totals, run_usage
+from ..reported_files import prompt_name
 from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
@@ -580,7 +581,7 @@ def runtime_notes(catalog: RuntimeCatalog) -> str:
             "",
             "## Available skills",
             "",
-            *(f"- {skill.name}: {skill.description or '(no description)'} ({skill.path})" for skill in catalog.skills),
+            *(f"- {prompt_name(skill.name)}: {skill.description or '(no description)'} ({prompt_name(skill.path)})" for skill in catalog.skills),
         ]
     return "\n".join(lines)
 
