@@ -1862,7 +1862,7 @@ export interface PlannerRole {
 export interface TaskRoleEdit {
   role_prompt: string;
   harness: string | null;
-  /** One on the project's list of Agent Profiles that can run the kind. */
+  /** One the project allows its Planners (its list, or any while the list is empty) that can run the kind. */
   profile_id: string | null;
   /** Item ids, each installed for roles in the project; left out keeps the current ones. */
   items?: string[];
@@ -2803,10 +2803,13 @@ export interface AllowedProfile {
   usd_per_million_tokens: { input: number | null; output: number | null };
 }
 
-/** The profiles a project's Planners may choose, by name; empty by default. */
+/** The profiles a project's Planners may choose: its list (`profiles`, empty by default, which lets them choose any
+ * profile) and what they may choose now (`choosable`: the list, or every profile that can run a Worker or Reviewer). */
 export interface AllowedProfiles {
   project_id: string;
+  restricted: boolean;
   profiles: AllowedProfile[];
+  choosable: AllowedProfile[];
 }
 
 export async function fetchAllowedProfiles(projectId: string): Promise<AllowedProfiles> {
@@ -2815,7 +2818,7 @@ export async function fetchAllowedProfiles(projectId: string): Promise<AllowedPr
   return res.json();
 }
 
-/** Make `profileIds` the whole list ([] empties it); a profile it drops takes the Planners' choices of it along.
+/** Make `profileIds` the whole list ([] lifts the restriction); a profile it drops takes the Planners' choices of it along.
  * Resolves to the list as saved. */
 export function setAllowedProfiles(projectId: string, profileIds: string[]): Promise<AllowedProfiles> {
   return putJson(

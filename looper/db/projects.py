@@ -6,7 +6,8 @@ is none. Names are unique ignoring case; a taken name raises
 ``asyncpg.UniqueViolationError``. Its execution settings (``EXECUTION_COLUMNS``,
 typed and validated by ``looper.agents.project_execution``) are NULL to inherit.
 Its agent settings are layers of their own (``agent_setting_layers``). The Agent Profiles its tasks' Planners may
-choose for their Workers and Reviewers are a list of their own (``project_allowed_profiles``), empty by default.
+choose for their Workers and Reviewers are a list of their own (``project_allowed_profiles``); empty, the default,
+allows every profile.
 """
 
 from __future__ import annotations
@@ -152,6 +153,15 @@ async def delete_project(project_id: str, *, pool: asyncpg.Pool | None = None) -
     return result == "DELETE 1"
 
 
+def profile_allowed_sql(project_col: str, profile_col: str) -> str:
+    """SQL for whether a project's Planners may choose a profile now: it is on the project's list, or the list is
+    empty (or there is no project), which allows every profile. Whether the profile can run a role is checked
+    where it is chosen."""
+    return (f"(EXISTS (SELECT 1 FROM project_allowed_profiles al WHERE al.project_id = {project_col} "
+            f"AND al.profile_id = {profile_col}) OR NOT EXISTS (SELECT 1 FROM project_allowed_profiles al "
+            f"WHERE al.project_id = {project_col}))")
+
+
 async def allowed_profiles(project_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
                            ) -> list[dict[str, Any]]:
     """The Agent Profiles the project's Planners may choose (``profile_registry.PROFILE_JSON``), by name."""
@@ -173,7 +183,8 @@ async def set_allowed_profiles(project_id: str, profile_ids: list[str], *, pool:
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute("DELETE FROM project_allowed_profiles WHERE project_id = $1 AND NOT profile_id = ANY($2)",
                            project_id, profile_ids)
-        await conn.execute("DELETE FROM task_planner_profiles c USING tasks k WHERE k.id = c.task_id "
-                           "AND k.project_id = $1 AND NOT c.profile_id = ANY($2)", project_id, profile_ids)
+        if profile_ids:  # an empty list allows every profile, so no choice goes
+            await conn.execute("DELETE FROM task_planner_profiles c USING tasks k WHERE k.id = c.task_id "
+                               "AND k.project_id = $1 AND NOT c.profile_id = ANY($2)", project_id, profile_ids)
         await conn.executemany("INSERT INTO project_allowed_profiles (project_id, profile_id) VALUES ($1, $2) "
                                "ON CONFLICT DO NOTHING", [(project_id, profile_id) for profile_id in profile_ids])

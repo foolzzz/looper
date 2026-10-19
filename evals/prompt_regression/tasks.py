@@ -40,7 +40,7 @@ class EvalTask:
     chat: str | None = None  # sent to the task's Planner once its plan exists (a supplement to the task)
     edit_requirement: str | None = None  # the requirement is edited to this once the plan exists
     # The task's project lets its Planner choose CHOSEN_PROFILE for its Workers and Reviewers (its list is empty
-    # otherwise).
+    # otherwise, which also lets it choose any profile).
     planner_may_choose: bool = False
     # The task's project lets its Planner define the roles its steps run as (planner_roles on), and keeps these
     # role templates (each its key and fields, as the dashboard writes one) for it to copy.

@@ -27,14 +27,14 @@ const TEXTAREA =
   "w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const builtinName = (kind: Kind) => (kind === "work" ? "Worker" : "Reviewer");
 
-/** The profiles of the project's list that can run a role of `kind`; null while they load. */
+/** The profiles the project's Planners may choose that can run a role of `kind`; null while they load. */
 function useAllowedProfiles(projectId: string | null, kind: Kind) {
   const [profiles, setProfiles] = useState<AllowedProfile[] | null>(projectId ? null : []);
   useEffect(() => {
     if (!projectId) return;
     let alive = true;
     fetchAllowedProfiles(projectId)
-      .then((list) => alive && setProfiles(list.profiles))
+      .then((list) => alive && setProfiles(list.choosable))
       .catch(() => alive && setProfiles([]));
     return () => {
       alive = false;
@@ -101,7 +101,7 @@ function ItemChecks({
   );
 }
 
-/** A role's prompt, harness and profile; the profile from the project's list that can run its kind. */
+/** A role's prompt, harness and profile; a profile the project allows its Planners, that can run its kind. */
 function DefinitionFields({
   projectId,
   kind,
@@ -188,8 +188,8 @@ function DefinitionFields({
         </select>
         <p id={`${id}-profile-help`} className="text-xs text-muted-foreground">
           {profiles?.length === 0
-            ? `The project's list of ${AGENT_PROFILE.plural} for roles is empty: it runs as the built-in ${builtinName(kind)}.`
-            : `From the project's list (${AGENT_PROFILE.plural} tab).`}
+            ? `No ${AGENT_PROFILE.name} can run this role: it runs as the built-in ${builtinName(kind)}.`
+            : `Any ${AGENT_PROFILE.name} the project allows its Planners (${AGENT_PROFILE.plural} tab).`}
         </p>
       </div>
       <ItemChecks

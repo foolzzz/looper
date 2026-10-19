@@ -1059,6 +1059,16 @@ async def deletable_profile(profile_id: str) -> dict[str, Any]:
     row = await _existing_profile(profile_id)
     _not_builtin(row, "profile")
     used_by = (await db.profile_usage(profile_id)).get(profile_id)
+    # A Planner's choice under a project without a list is not on any list; one of a task that has not ended blocks
+    # the deletion, one of an ended task goes with the profile.
+    from ..db import agent_setting_layers, tasks as db_tasks
+
+    chosen = await agent_setting_layers.open_planner_choices(profile_id, [db_tasks.READY, *db_tasks.ACTIVE_STATUSES])
+    if chosen:
+        named = ", ".join(f"{t['title']!r} ({t['id']})" for t in chosen[:5])
+        raise RegistryConflict(f"Agent Profile {row['name']!r} is chosen by the Planner of {len(chosen)} task(s) that "
+                               f"have not ended: {named}; clear the choice (looper_task_profile_set with a null "
+                               "profile_id) or wait for the task to end")
     if used_by:
         raise RegistryConflict(f"Agent Profile {row['name']!r} is selected by {usage_text(used_by)}: select "
                                "another profile there first")

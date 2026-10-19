@@ -2548,7 +2548,7 @@ agent room](#a-tasks-agent-room)).
 | Tool | Does | Tier |
 |---|---|---|
 | `looper_task_profiles` | The profiles its project allows (id, name, runtime, model, effort, which of the Worker and Reviewer each can run, the input and output price per million tokens, `null` where Looper does not know it), what the Workers and the Reviewers run now with its source, the user's choice for the task, and the Planner's own choices, per step too | read |
-| `looper_task_profile_set` | `{role: worker \| reviewer, profile_id: id or name \| null, step?, reason?}`: run that role on a profile from the project's list, for the rest of the task or for one step that has not ended (each attempt of it); `null` clears its choice. Refused with an empty list or a profile not on it (`forbidden`), when the user chose that role's profile for the task (`forbidden`: theirs stands), for the Planner role, an ended or unknown step, or a profile that cannot run the role, with the reason the dashboard gives (`invalid`). Each change is a `profile_choice` journal entry and an activity line | write |
+| `looper_task_profile_set` | `{role: worker \| reviewer, profile_id: id or name \| null, step?, reason?}`: run that role on a profile the project lets its Planners choose (its list, or any profile that can run the role while the list is empty), for the rest of the task or for one step that has not ended (each attempt of it); `null` clears its choice. Refused with a profile the project does not allow (not on its list, or not one that can run a Worker or Reviewer; `forbidden`), when the user chose that role's profile for the task (`forbidden`: theirs stands), for the Planner role, an ended or unknown step, or a profile that cannot run the role, with the reason the dashboard gives (`invalid`). Each change is a `profile_choice` journal entry and an activity line | write |
 | `looper_task_concurrency` | `{limits: {worker?, reviewer?}, reason?}`: the task's own Worker and Reviewer limits, as `PUT /api/tasks/:id/agents` sets them | write |
 
 The concurrency tool goes through the Manager's code (`set_task_limits`) and
@@ -2566,18 +2566,27 @@ that started keeps its profile, and one still waiting for room in its task
 uses the choice in effect when it starts. The precedence, highest
 first: the user's choice for the task, the Planner's for the step, the
 Planner's for the rest of the task, then the setting layers. A choice counts
-only while its profile is on the task's project's list: dropping a profile
-from the list drops the project's Planners' choices of it, and a task moved
-to another project runs what that project allows. Planning a task anew
+only while the task's project allows its profile (on its list, or any
+profile while the list is empty): a list set later that leaves a profile out
+drops the project's Planners' choices of it, and a task moved to another
+project runs what that project allows. Planning a task anew
 (`start_over`) drops its Planner's choices; going on from its plan keeps
 them.
 
-The list, `project_allowed_profiles`, is empty by default, so a Planner
-chooses nothing until the maintainer adds profiles to it on the project's
-Agent Profiles tab (row "Profiles the Planner may choose",
-`GET`/`PUT /api/projects/:id/allowed-profiles`). A pricier profile needs no
-confirmation: the list is the consent, and the task's spend cap still holds.
-A profile on a list cannot be deleted (its usage names the project).
+The list, `project_allowed_profiles`, is empty by default, and an empty list
+lets a project's Planners choose **any** registered profile that can run the
+role; a non-empty list restricts the choice to it. One function decides
+(`projects.choosable_profiles`, used by `looper_task_profiles`,
+`looper_task_profile_set`, `task_roles.allowed_profile` and the SQL that reads
+a stored choice, `projects.profile_allowed_sql`); a task without a project
+behaves like an empty list. The maintainer edits the list on the project's
+Agent Profiles tab (row "Profiles the Planner may choose", empty: "Any
+profile (no restriction)"; `GET`/`PUT /api/projects/:id/allowed-profiles`). A
+pricier profile needs no confirmation: the setting is the consent, and the run
+budget caps still hold. A profile on a list cannot be deleted (its usage names
+the project); a profile a Planner chose in a task that has not ended cannot
+be deleted either (the refusal names the task: clear the choice or wait),
+while the choices of ended tasks go with the profile.
 
 ### Roles a task's Planner defines
 
@@ -2609,7 +2618,7 @@ refused with that reason.
   dashboard) and reads again. Refused, with what to fix: a reserved or
   malformed id, a kind other than the role's own, an empty prompt, a prompt
   or harness over the project's limit, an unknown template or one of another
-  kind (`invalid`); a profile when the list is empty or does not hold it, or
+  kind (`invalid`); a profile the project does not allow, or
   when the user chose that kind's profile for the task, or a role whose
   current version the user wrote (`forbidden`); a profile that cannot run the
   kind (`invalid`). Writes only in a turn Looper sent the Planner, as for its
@@ -3253,7 +3262,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `task_planner_profiles` | A task's Planner's choice of Agent Profile for its `worker` or `reviewer`: for the rest of the task (`step_id` NULL) or one step, going with its task and step (and with the profile); it counts only while the task's project allows the profile |
-| `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; a profile on a list is not deleted |
+| `project_allowed_profiles` | The Agent Profiles a project's Planners may choose (project, profile), going with the project; none allows every profile; a profile on a list is not deleted |
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via` (`dashboard`, `manager` or `import`); a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
@@ -3460,7 +3469,7 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears it) and the execution settings; 400 (as for POST), 404, 409 |
 | `/api/projects/:id/agent-settings` | GET/PUT | GET: `project.values` (the project layer), `roles` (`planner`, `worker`, `reviewer`, each with `values`, its role-in-project layer, and `effective`: every field's `value` and `source` layer, the harness with `from_role` when a Reviewer takes the Workers'), and `limits`. PUT sets the project layer; 404 for an unknown project |
 | `/api/projects/:id/agent-settings/roles/:role` | PUT | Set one role's layer in the project (`planner`, `worker` or `reviewer`; 400 for `manager`) |
-| `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}]}`, empty by default. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` empties it) and drops the project's Planners' choices of a profile it removes; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` sets it with the same code |
+| `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, restricted, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}], choosable: [same]}`: `profiles` is the list, empty by default, which lets the Planners choose any profile; `choosable` is what they may choose now. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` lifts the restriction and keeps their choices) and drops the project's Planners' choices of a profile a non-empty list leaves out; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` sets it with the same code |
 | `/api/projects/:id/role-templates` | GET | The project's role templates by key (each `{key, kind, description, role_prompt, harness, profile, items, updated_at}`, `profile` `{profile_id, name, allowed}` or null, `items` each `{id, kind, name}`), its `role_text_max_chars` and `role_items` (the catalog items installed for roles here, which a role or a template may name); 404 for an unknown project |
 | `/api/projects/:id/role-templates/:key` | PUT/DELETE | PUT creates the template or replaces it whole with `{kind, role_prompt, description?, harness?, profile_id?, items?}`, checked as a task role is (a profile from the project's list, items installed for roles); DELETE removes it (task roles copied from it keep their versions). Both answer the project's templates. 400 for a definition a task role would be refused or an unknown field, 404 for an unknown project or template |
 | `/api/projects/:id/knowledge` | GET | The project's knowledge: `documents` (`document_id`, `title`, `summary`, `source_kind`, `filename`, `path`, `read_path`, `missing`, `size_bytes`, `sha256`, timestamps; no content), `count`, `stored_bytes`, the `index` agents get and its `index_chars`, and `caps`; 404 for an unknown project |

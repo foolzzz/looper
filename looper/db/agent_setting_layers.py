@@ -8,7 +8,8 @@ or the Reviewers' role layer only) how many of them run at once in a task that s
 the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
 (``task_concurrency_limits``): together, its task layer. Its Planner may choose the profile of its Workers or
 Reviewers, for the rest of the task or for one step (``task_planner_profiles``), under the task layer; a choice
-counts only while its profile is on the list of the task's project (``project_allowed_profiles``); so does the
+counts only while its profile is allowed by the task's project (on its list, ``project_allowed_profiles``, or any
+while the list is empty); so does the
 profile of a role its Planner defined (``task_roles``), for a run of that role. The system layer alone may hold
 ``boundaries``. Code owns the fields' types, validation and resolution (``looper.agents.agent_settings``); this module
 only stores rows.
@@ -24,14 +25,15 @@ import asyncpg
 
 from .profile_registry import PROFILE_JOIN, PROFILE_JSON
 from .connection import get_pool
+from .projects import profile_allowed_sql
 
 FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries")
 
 # A task's Planner's choices that count: those whose profile its project allows now.
 _PLANNER_CHOICES = (
     "FROM task_planner_profiles c JOIN tasks k ON k.id = c.task_id "
-    "JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = c.profile_id "
 )
+_CHOICE_ALLOWED = profile_allowed_sql("k.project_id", "c.profile_id")
 
 
 def _row(row: asyncpg.Record) -> dict[str, Any]:
@@ -72,7 +74,8 @@ async def list_layers(
         chosen = await pool.fetch(
             f"SELECT CASE WHEN c.step_id IS NULL THEN 'planner_task' ELSE 'planner_step' END AS scope, c.role, "
             f"c.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
-            f"{_PLANNER_CHOICES} WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2)",
+            f"{_PLANNER_CHOICES} WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2) "
+            f"AND {_CHOICE_ALLOWED}",
             task_id, step_id,
         )
         layers += [{"task_id": task_id, **_row(r)} for r in chosen]
@@ -81,8 +84,8 @@ async def list_layers(
                 f"SELECT 'task_role' AS scope, CASE tr.kind WHEN 'work' THEN 'worker' ELSE 'reviewer' END AS role, "
                 f"tr.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = tr.profile_id) AS profile "
                 "FROM task_roles tr JOIN tasks k ON k.id = tr.task_id "
-                "JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = tr.profile_id "
-                "WHERE tr.task_id = $1 AND tr.role_key = $2 AND tr.version = $3",
+                "WHERE tr.task_id = $1 AND tr.role_key = $2 AND tr.version = $3 "
+                f"AND {profile_allowed_sql('k.project_id', 'tr.profile_id')}",
                 task_id, task_role[0], task_role[1],
             )
             layers += [{"task_id": task_id, **_row(r)} for r in role]
@@ -185,6 +188,17 @@ async def profile_overrides(task_id: str, *, pool: asyncpg.Pool | None = None) -
     return {r["role"]: _row(r)["profile"] for r in rows}
 
 
+async def open_planner_choices(profile_id: str, statuses: list[str], *,
+                               pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The tasks in one of ``statuses`` (not ended) whose Planner chose Agent Profile ``profile_id``, each
+    ``{id, title}``, oldest first."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT DISTINCT k.id, COALESCE(NULLIF(k.title, ''), left(k.requirement, 40)) AS title, k.created_at FROM task_planner_profiles c JOIN tasks k ON k.id = c.task_id "
+        "WHERE c.profile_id = $1 AND k.status = ANY($2::text[]) ORDER BY k.created_at, k.id", profile_id, statuses)
+    return [{"id": r["id"], "title": r["title"]} for r in rows]
+
+
 async def selected_roles(profile_id: str, *, pool: asyncpg.Pool | None = None) -> list[tuple[str, str | None]]:
     """Where Agent Profile ``profile_id`` is selected: (scope, role) of each layer, ('task', role) of each task's
     or task's Planner's choice and ('schedule', role) of each schedule's."""
@@ -206,7 +220,7 @@ async def planner_profiles(task_id: str, *, pool: asyncpg.Pool | None = None) ->
         f"SELECT c.role, c.step_id, COALESCE(s.step_key, '') AS step_key, "
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
         f"{_PLANNER_CHOICES} LEFT JOIN task_steps s ON s.id = c.step_id WHERE c.task_id = $1 "
-        "ORDER BY c.step_id IS NOT NULL, s.step_index, c.role", task_id,
+        f"AND {_CHOICE_ALLOWED} ORDER BY c.step_id IS NOT NULL, s.step_index, c.role", task_id,
     )
     return [_row(r) for r in rows]
 
