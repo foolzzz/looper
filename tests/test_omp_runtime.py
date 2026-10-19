@@ -270,7 +270,9 @@ def test_a_run_gets_a_home_of_its_own_with_only_the_generated_files(
     assert models == {"providers": {"looper": {
         "baseUrl": "http://127.0.0.1:8317/v1", "apiKey": KEY_ENV, "api": "openai-responses",
         "models": [{"id": "gpt-5.5", "name": "gpt-5.5", "reasoning": True, "input": ["text"], "contextWindow": 272_000,
-                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                    # Or omp leaves strict out of the MCP tools, which the Responses API then takes as strict.
+                    "compat": {"supportsStrictMode": True}}]}}}
     settings = json.loads((home / OVERLAY).read_text())
     assert settings["enabledModels"] == ["looper/gpt-5.5"]
     assert set(settings["modelRoles"].values()) == {"looper/gpt-5.5"}
@@ -315,6 +317,8 @@ def test_the_provider_api_follows_its_protocols(protocols: set[ApiProtocol], api
     provider = json.loads((home / ".omp" / "agent" / "models.yml").read_text())["providers"]["looper"]
     assert (provider["api"], provider["baseUrl"]) == (api, base_url)
     assert "--thinking" not in command
+    # Their tools are not strict unless they say so: omp's own defaults stand.
+    assert "compat" not in provider["models"][0]
 
 
 @pytest.mark.parametrize(("provider", "error"), [
