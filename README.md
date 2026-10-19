@@ -235,7 +235,8 @@ release wheel serves the copy packaged with it.
 ### HTTP API
 
 The API answers only the operator: the dashboard signs in when opened in a browser
-on this machine; other clients send the token from `<runtime root>/operator-token`.
+on this machine (a browser elsewhere signs in with a link from `looper login-link`); other clients send
+the token from `<runtime root>/operator-token`.
 The main route groups:
 
 | Group | Endpoints | Purpose |
