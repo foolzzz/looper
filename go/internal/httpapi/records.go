@@ -22,6 +22,10 @@ const (
 	recordsLimitMax     = 500
 	eventsLimitDefault  = 1000
 	eventsLimitMax      = 5000
+	// pythonIntMaxStrDigits is sys.get_int_max_str_digits(). int() counts
+	// decimal digits after stripping whitespace and the sign, and ignores
+	// underscores. One more digit is ValueError.
+	pythonIntMaxStrDigits = 4300
 )
 
 var (
@@ -200,9 +204,13 @@ func (s *Server) handleRecordEvents(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	id, idOver, ok := pythonInt(raw)
-	if !ok || idOver != 0 {
-		databaseUnavailable(w, r, errors.New("llm record id out of range"))
+	// The route converts the id with int() before the handler runs. A value
+	// past Python's digit limit is that conversion failing, so it is 500
+	// before the query is read. A value that parses and does not fit int64
+	// reaches the handler, which checks after and limit first.
+	id, idOver, idOK := pythonInt(raw)
+	if !idOK {
+		internalServerError(w, errors.New("llm record id is not an integer"))
 		return
 	}
 	values := pythonQuery(r.URL.RawQuery)
@@ -218,6 +226,10 @@ func (s *Server) handleRecordEvents(w http.ResponseWriter, r *http.Request) {
 	limit, limitOver, ok2 := pythonInt(limitRaw)
 	if !ok1 || !ok2 {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "after and limit must be integers"})
+		return
+	}
+	if idOver != 0 {
+		databaseUnavailable(w, r, errors.New("llm record id out of range"))
 		return
 	}
 	if afterOver != 0 || limitOver < 0 {
@@ -245,7 +257,11 @@ func (s *Server) handleRecordEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeRecord(w http.ResponseWriter, r *http.Request, raw string) {
 	id, overflow, ok := pythonInt(raw)
-	if !ok || overflow != 0 {
+	if !ok {
+		internalServerError(w, errors.New("llm record id is not an integer"))
+		return
+	}
+	if overflow != 0 {
 		databaseUnavailable(w, r, errors.New("llm record id out of range"))
 		return
 	}
@@ -290,10 +306,11 @@ func internalServerError(w http.ResponseWriter, err error) {
 // pythonInt parses s the way Python int() parses a str. overflow is 1 when
 // the value is above math.MaxInt64, -1 when it is below math.MinInt64, and 0
 // when n is the value. ok is false on ValueError: blank, a sign that is not
-// ASCII, a trailing or doubled underscore, or a non-digit. Unicode decimal
-// digits and underscores between digits are accepted. The result is not
-// clamped. Leading and trailing whitespace is the set int() strips.
-// str.isspace() is true for U+001C–U+001F, and int() still rejects them.
+// ASCII, a trailing or doubled underscore, a non-digit, or more than
+// pythonIntMaxStrDigits decimal digits. Unicode decimal digits and
+// underscores between digits are accepted. The result is not clamped.
+// Leading and trailing whitespace is the set int() strips. str.isspace() is
+// true for U+001C–U+001F, and int() still rejects them.
 func pythonInt(s string) (n int64, overflow int, ok bool) {
 	s = pythonStrip(s)
 	if s == "" {
@@ -314,6 +331,9 @@ func pythonInt(s string) (n int64, overflow int, ok bool) {
 		}
 	}
 	if !pythonDigits(s) {
+		return 0, 0, false
+	}
+	if pythonDigitCount(s) > pythonIntMaxStrDigits {
 		return 0, 0, false
 	}
 	mag := new(big.Int)
@@ -338,6 +358,19 @@ func pythonStrip(s string) string {
 // not spaces here: turns=%1C2 is 400 and limit=%1C2 is 500.
 func pythonSpace(r rune) bool {
 	return unicode.IsSpace(r)
+}
+
+// pythonDigitCount is the digit count int() compares with
+// sys.get_int_max_str_digits. Underscores are not digits. The sign and
+// surrounding whitespace are already gone.
+func pythonDigitCount(s string) int {
+	n := 0
+	for _, r := range s {
+		if r != '_' {
+			n++
+		}
+	}
+	return n
 }
 
 func pythonDigits(s string) bool {

@@ -1,0 +1,389 @@
+{
+  "targets": [
+    {
+      "can_send": true,
+      "id": "manager",
+      "kind": "manager"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-zsame0001",
+      "kind": "planner",
+      "name": "Ship the patch",
+      "requirement": "ship it",
+      "status": "running",
+      "task_id": "task-zsame0001"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-asame0001",
+      "kind": "planner",
+      "name": "goal alpha",
+      "requirement": "ignored because goal",
+      "status": "assigned",
+      "task_id": "task-asame0001"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-planalpha1",
+      "kind": "planner",
+      "name": "Plan the",
+      "requirement": "Plan the\nsecond line stays out",
+      "status": "planning",
+      "task_id": "task-planalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-verialpha1",
+      "kind": "planner",
+      "name": "verify the result",
+      "requirement": "verify the result",
+      "status": "verifying",
+      "task_id": "task-verialpha1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-stopalpha1",
+      "kind": "planner",
+      "name": "stopping at the cap",
+      "requirement": "stopping at the cap",
+      "status": "stopping",
+      "task_id": "task-stopalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-pendalpha1",
+      "kind": "planner",
+      "name": "planner is starting",
+      "requirement": "planner is starting",
+      "status": "pending",
+      "task_id": "task-pendalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-failbeta01",
+      "kind": "planner",
+      "name": "beta failed",
+      "requirement": "beta failed",
+      "status": "failed",
+      "task_id": "task-failbeta01"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-stopbeta01",
+      "kind": "planner",
+      "name": "beta stopped",
+      "requirement": "beta stopped",
+      "status": "stopped",
+      "task_id": "task-stopbeta01"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-cancbeta01",
+      "kind": "planner",
+      "name": "beta cancelled",
+      "requirement": "beta cancelled",
+      "status": "cancelled",
+      "task_id": "task-cancbeta01"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-readyblank1",
+      "kind": "planner",
+      "name": "blank project is ready",
+      "requirement": "blank project is ready",
+      "status": "init",
+      "task_id": "task-readyblank1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-sepname001",
+      "kind": "planner",
+      "name": "File separator name",
+      "requirement": "should not win",
+      "status": "stopped",
+      "task_id": "task-sepname001"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-sepfall001",
+      "kind": "planner",
+      "name": "fallback line",
+      "requirement": "\u001cfallback line\u001f\nsecond line",
+      "status": "stopped",
+      "task_id": "task-sepfall001"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-archbeta01",
+      "kind": "planner",
+      "name": "beta archived",
+      "requirement": "beta archived",
+      "status": "archived",
+      "task_id": "task-archbeta01"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-donebeta01",
+      "kind": "planner",
+      "name": "beta finished",
+      "requirement": "beta finished",
+      "status": "completed",
+      "task_id": "task-donebeta01"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-readyalph1",
+      "kind": "planner",
+      "name": "ready to start",
+      "requirement": "ready to start",
+      "status": "init",
+      "task_id": "task-readyalph1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-waitalpha1",
+      "kind": "planner",
+      "name": "need a decision",
+      "requirement": "need a decision",
+      "status": "waiting_user",
+      "task_id": "task-waitalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-runalpha1",
+      "kind": "planner",
+      "name": "do the alpha work",
+      "requirement": "do the alpha work",
+      "status": "executing",
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-alpha01",
+      "instruction": "Do the alpha work.",
+      "kind": "worker",
+      "started_at": "2020-03-01T00:00:00+00:00",
+      "status": "completed",
+      "step_index": 0,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-alphaneg",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2020-03-02T00:00:00+00:00",
+      "status": "completed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-provold1",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2020-03-03T00:00:00+00:00",
+      "status": "completed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "reviewer-alpha1",
+      "instruction": "",
+      "kind": "reviewer",
+      "started_at": "2020-03-04T00:00:02+00:00",
+      "status": "completed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "reviewer-alpha2",
+      "instruction": "",
+      "kind": "reviewer",
+      "started_at": "2020-03-04T00:00:03+00:00",
+      "status": "completed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-live0001",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2020-03-04T00:00:04+00:00",
+      "status": "running",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-dead0001",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2020-03-04T00:00:05+00:00",
+      "status": "failed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-cut00001",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2020-03-04T00:00:06+00:00",
+      "status": "interrupted",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-big00001",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2020-03-04T00:00:07+00:00",
+      "status": "completed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-alphatdy",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2026-06-15T12:00:00+00:00",
+      "status": "completed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "worker-provtdy1",
+      "instruction": "",
+      "kind": "worker",
+      "started_at": "2026-06-15T12:00:01+00:00",
+      "status": "completed",
+      "step_index": null,
+      "task_id": "task-runalpha1"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0001",
+      "kind": "planner",
+      "name": "filler 1",
+      "requirement": "filler 1",
+      "status": "completed",
+      "task_id": "task-fill0001"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0002",
+      "kind": "planner",
+      "name": "filler 2",
+      "requirement": "filler 2",
+      "status": "completed",
+      "task_id": "task-fill0002"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0003",
+      "kind": "planner",
+      "name": "filler 3",
+      "requirement": "filler 3",
+      "status": "completed",
+      "task_id": "task-fill0003"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0004",
+      "kind": "planner",
+      "name": "filler 4",
+      "requirement": "filler 4",
+      "status": "completed",
+      "task_id": "task-fill0004"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0005",
+      "kind": "planner",
+      "name": "filler 5",
+      "requirement": "filler 5",
+      "status": "completed",
+      "task_id": "task-fill0005"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0006",
+      "kind": "planner",
+      "name": "filler 6",
+      "requirement": "filler 6",
+      "status": "completed",
+      "task_id": "task-fill0006"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0007",
+      "kind": "planner",
+      "name": "filler 7",
+      "requirement": "filler 7",
+      "status": "completed",
+      "task_id": "task-fill0007"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0008",
+      "kind": "planner",
+      "name": "filler 8",
+      "requirement": "filler 8",
+      "status": "completed",
+      "task_id": "task-fill0008"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0009",
+      "kind": "planner",
+      "name": "filler 9",
+      "requirement": "filler 9",
+      "status": "completed",
+      "task_id": "task-fill0009"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0010",
+      "kind": "planner",
+      "name": "filler 10",
+      "requirement": "filler 10",
+      "status": "completed",
+      "task_id": "task-fill0010"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0011",
+      "kind": "planner",
+      "name": "filler 11",
+      "requirement": "filler 11",
+      "status": "completed",
+      "task_id": "task-fill0011"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0012",
+      "kind": "planner",
+      "name": "filler 12",
+      "requirement": "filler 12",
+      "status": "completed",
+      "task_id": "task-fill0012"
+    },
+    {
+      "can_send": false,
+      "id": "planner-task-fill0013",
+      "kind": "planner",
+      "name": "filler 13",
+      "requirement": "filler 13",
+      "status": "completed",
+      "task_id": "task-fill0013"
+    }
+  ]
+}

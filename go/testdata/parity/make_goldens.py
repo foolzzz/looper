@@ -128,6 +128,45 @@ _EVENTS = (
     ("llm-record-events-missing", 91009, {}, 200),
     ("llm-record-events-neg-limit", 91001, {"limit": "-1"}, 500),
 )
+# The Manager, then the newest 30 tasks and their step agents. No query.
+_CHAT_TARGETS = (("chat-targets", 200),)
+# Planner threads are excluded. sess-lark-1 is newer than sess-web-1, and its
+# last message is longer than 200 characters. There is no query parameter.
+_CHAT_SESSIONS = (("chat-sessions", 200),)
+# The lark session's assistant message is the full 250 characters, with the
+# delivery fields. An unknown session is an empty 200. A missing session_id
+# is the handler's 400. A session id of spaces is queried.
+_CHAT_MESSAGES = (
+    ("chat-messages", {"session_id": "sess-lark-1"}, 200),
+    ("chat-messages-web", {"session_id": "sess-web-1"}, 200),
+    ("chat-messages-missing", {"session_id": "sess-missing"}, 200),
+    ("chat-messages-required", {}, 400),
+    ("chat-messages-spaces", {"session_id": " "}, 200),
+)
+# Five rows on task-rich00001. since is exclusive. limit=0 and a negative
+# limit are empty 200s. A non-integer is parsed outside the try, so take()
+# writes the request loop's 500. seq 5 is a tool row and stays in the list.
+_ACTIVITY = (
+    ("activity", "task-rich00001", {}, 200),
+    ("activity-since", "task-rich00001", {"since": "1"}, 200),
+    ("activity-limit-zero", "task-rich00001", {"limit": "0"}, 200),
+    ("activity-neg-limit", "task-rich00001", {"limit": "-1"}, 200),
+    ("activity-bad-since", "task-rich00001", {"since": "nope"}, 500),
+    ("activity-bad-limit", "task-rich00001", {"limit": "nope"}, 500),
+)
+# Detail is the row, and the task id in the path is not part of the query,
+# so task-min000001's seq 1 is the rich task's row. 99 is not a row.
+_ACTIVITY_DETAIL = (
+    ("activity-detail", "task-rich00001", 1, 200),
+    ("activity-detail-other", "task-min000001", 1, 200),
+    ("activity-missing", "task-rich00001", 99, 404),
+)
+# text, phase, error, and user_message. The tool row is left out.
+# task-min000001 has no activity.
+_CONVERSATION = (
+    ("conversation", "task-rich00001", 200),
+    ("conversation-empty", "task-min000001", 200),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -366,6 +405,27 @@ async def capture(dsn: str) -> dict[str, object]:
                     lambda cap, record_id=record_id, query=query: server._handle_llm_record_events(
                         record_id, query, cap),
                     expect)
+            for name, expect in _CHAT_TARGETS:
+                out[name] = await take(server._handle_chat_targets, expect)
+            for name, expect in _CHAT_SESSIONS:
+                out[name] = await take(server._handle_chat_sessions, expect)
+            for name, query, expect in _CHAT_MESSAGES:
+                out[name] = await take(
+                    lambda cap, query=query: server._handle_chat_messages(query, cap), expect)
+            for name, task_id, query, expect in _ACTIVITY:
+                out[name] = await take(
+                    lambda cap, task_id=task_id, query=query: server._handle_task_activity(
+                        task_id, query, cap),
+                    expect)
+            for name, task_id, seq, expect in _ACTIVITY_DETAIL:
+                out[name] = await take(
+                    lambda cap, task_id=task_id, seq=seq: server._handle_task_activity_detail(
+                        task_id, seq, cap),
+                    expect)
+            for name, task_id, expect in _CONVERSATION:
+                out[name] = await take(
+                    lambda cap, task_id=task_id: server._handle_task_conversation(task_id, cap),
+                    expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -388,6 +448,12 @@ def main() -> None:
         + [name for name, _, _ in _RECORDS]
         + [name for name, _, _ in _RECORD]
         + [name for name, _, _, _ in _EVENTS]
+        + [name for name, _ in _CHAT_TARGETS]
+        + [name for name, _ in _CHAT_SESSIONS]
+        + [name for name, _, _ in _CHAT_MESSAGES]
+        + [name for name, _, _, _ in _ACTIVITY]
+        + [name for name, _, _, _ in _ACTIVITY_DETAIL]
+        + [name for name, _, _ in _CONVERSATION]
     )
     for name in names:
         payload = normalize(bodies[name])

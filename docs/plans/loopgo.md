@@ -14,8 +14,10 @@ Go release tags are `vX.Y.Z-go`. The steps are under Releases.
 
 ## Compatibility contract
 
-- Schema: `looper/db/schema.sql` is the only schema. Go reads that file when
-  it starts applying schema. There is no second copy under `go/`.
+- Schema: `looper/db/schema.sql` is the only schema. `go generate` in
+  `go/internal/db` copies it to `go/internal/db/schema.sql`, and the server
+  embeds that copy. A test fails when the copy differs. There is no
+  hand-written second schema.
 - HTTP: request and response shapes match `looper/agents/http_server.py`,
   including status codes and `{"error":...}` bodies, so `web/` stays as it is.
 - Python is the reference until switch-over. Read-only routes are checked by
@@ -33,8 +35,8 @@ driver, `github.com/jackc/pgx/v5/stdlib`, behind `database/sql`.
 
 - `cmd/looper` — `version`, `serve`, signal handling, shutdown.
 - `internal/config` — flag parsing.
-- `internal/db` — pool, `SELECT` probes, and later the queries. Schema text
-  stays in `looper/db/schema.sql`.
+- `internal/db` — pool, `SELECT` probes, and the queries. Schema text stays
+  in `looper/db/schema.sql`; the server embeds the generated copy.
 - `internal/httpapi` — routes, JSON, and static files.
 - `internal/runtime/...` — process start, stream-json, process-tree kill,
   run records. Claude Code first; Codex, Grok, and OMP with the remaining parity.
@@ -88,21 +90,21 @@ parameters, defaults, 400 messages, and ordering. G1c serves
 running. G1d serves `GET /api/agents/<id>/usage` and `GET /api/llm-records`
 (the list, one record, and its events) with Python's filters, clamps, and
 400 and 500 bodies. Task costs sum millionths of a dollar and convert once.
-Golden JSON for these routes is `go/testdata/parity/`. G1 is done.
+Golden JSON for these routes is `go/testdata/parity/`.
+
+G1e serves the next read-only JSON routes: chat targets, sessions, and
+messages, plus a task's activity detail, activity list, and conversation.
+Integer parsing follows Python's 4,300-digit limit. POST and PUT on a
+GET-only route are 404, and a percent-encoded path such as `/api/%74asks`
+is 404. The two SSE routes below are not served yet.
 
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
 is not in this list.
 
-- `GET /api/chat/targets`
-- `GET /api/chat/sessions`
-- `GET /api/chat/messages`
 - `GET /api/chat/events` (SSE)
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
-- `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)`
-- `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity`
-- `GET /api/tasks/(task-[a-zA-Z0-9]+)/conversation`
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/messages`
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/room`
 - `GET /api/workspaces/check`

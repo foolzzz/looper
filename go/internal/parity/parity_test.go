@@ -89,6 +89,24 @@ var (
 		{"llm-record-events-bad", "/api/llm-records/91001/events?after=nope", http.StatusBadRequest},
 		{"llm-record-events-missing", "/api/llm-records/91009/events", http.StatusOK},
 		{"llm-record-events-neg-limit", "/api/llm-records/91001/events?limit=-1", http.StatusInternalServerError},
+		{"chat-targets", "/api/chat/targets", http.StatusOK},
+		{"chat-sessions", "/api/chat/sessions", http.StatusOK},
+		{"chat-messages", "/api/chat/messages?session_id=sess-lark-1", http.StatusOK},
+		{"chat-messages-web", "/api/chat/messages?session_id=sess-web-1", http.StatusOK},
+		{"chat-messages-missing", "/api/chat/messages?session_id=sess-missing", http.StatusOK},
+		{"chat-messages-required", "/api/chat/messages", http.StatusBadRequest},
+		{"chat-messages-spaces", "/api/chat/messages?session_id=%20", http.StatusOK},
+		{"activity", "/api/tasks/task-rich00001/activity", http.StatusOK},
+		{"activity-since", "/api/tasks/task-rich00001/activity?since=1", http.StatusOK},
+		{"activity-limit-zero", "/api/tasks/task-rich00001/activity?limit=0", http.StatusOK},
+		{"activity-neg-limit", "/api/tasks/task-rich00001/activity?limit=-1", http.StatusOK},
+		{"activity-bad-since", "/api/tasks/task-rich00001/activity?since=nope", http.StatusInternalServerError},
+		{"activity-bad-limit", "/api/tasks/task-rich00001/activity?limit=nope", http.StatusInternalServerError},
+		{"activity-detail", "/api/tasks/task-rich00001/activity/1", http.StatusOK},
+		{"activity-detail-other", "/api/tasks/task-min000001/activity/1", http.StatusOK},
+		{"activity-missing", "/api/tasks/task-rich00001/activity/99", http.StatusNotFound},
+		{"conversation", "/api/tasks/task-rich00001/conversation", http.StatusOK},
+		{"conversation-empty", "/api/tasks/task-min000001/conversation", http.StatusOK},
 	}
 )
 
@@ -178,6 +196,7 @@ func TestGoldenParity(t *testing.T) {
 		{"dot in id", "/api/tasks/./task-rich00001", http.StatusNotFound, ""},
 		{"duplicate slash", "/api//tasks/task-rich00001", http.StatusNotFound, ""},
 		{"parent segment", "/api/tasks/../tasks/task-rich00001", http.StatusNotFound, ""},
+		{"escaped tasks", "/api/%74asks", http.StatusNotFound, ""},
 	}
 	for _, tc := range extra {
 		t.Run(tc.name, func(t *testing.T) {

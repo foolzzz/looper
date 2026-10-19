@@ -1,5 +1,7 @@
 // Package db opens the Looper PostgreSQL database.
-// Schema changes live in looper/db/schema.sql. This package does not copy that file.
+// Schema changes live in looper/db/schema.sql. go generate copies that file
+// to schema.sql, and the server embeds the copy. There is no hand-written
+// second schema.
 package db
 
 import (

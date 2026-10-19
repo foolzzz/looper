@@ -561,3 +561,36 @@ INSERT INTO llm_record_events (record_id, seq, event, created_at) VALUES
 (91001, 2, '{"type":"text","text":"world"}'::jsonb, '2020-04-02T00:00:02Z');
 
 SELECT setval('llm_records_id_seq', (SELECT MAX(id) FROM llm_records));
+
+-- Chat and activity rows for the G1e read routes. No earlier golden reads
+-- these tables. The step is on task-runalpha1, which is inside the newest
+-- 30 tasks, so chat targets can show a step agent. task-rich00001 is older
+-- than that window; its activity is only reached by the activity routes.
+INSERT INTO task_steps (
+    id, task_id, step_index, step_key, instruction, status, kind, worker_id, created_at, updated_at
+) VALUES (
+    'step-alpha0001', 'task-runalpha1', 0, 's1', 'Do the alpha work.', 'verified', 'work',
+    'worker-alpha01', '2020-03-01T00:00:00Z', '2020-03-01T00:00:00Z'
+);
+
+INSERT INTO chat_messages (
+    id, session_id, message_id, role, content, channel, created_at, delivery_failure, delivery_error
+) VALUES
+(1, 'sess-web-1', 'm1', 'user', 'hello web', 'web', '2020-06-01T00:00:00Z', NULL, NULL),
+(2, 'sess-web-1', 'm2', 'assistant', 'hello back', 'web', '2020-06-01T00:01:00Z', NULL, NULL),
+(3, 'planner-task-rich00001', 'p1', 'user', 'planner only', 'web', '2020-07-01T00:00:00Z', NULL, NULL),
+(4, 'sess-lark-1', 'l1', 'user', 'from lark', 'lark', '2020-06-02T00:00:00Z', NULL, NULL),
+(5, 'sess-lark-1', 'l2', 'assistant', repeat('x', 250), 'lark', '2020-06-02T00:02:00Z', 'send_failed', 'timeout');
+
+SELECT setval('chat_messages_id_seq', (SELECT MAX(id) FROM chat_messages));
+
+INSERT INTO activity (
+    seq, task_id, worker, kind, summary, detail, metadata, input_tokens, output_tokens, created_at
+) VALUES
+(1, 'task-rich00001', 'worker-rich0001', 'text', 'hello', 'full detail', '{"k":"v"}'::jsonb, 3, 4, '2018-01-01T01:00:00Z'),
+(2, 'task-rich00001', 'planner-task-rich00001', 'phase', 'planning', NULL, NULL, NULL, NULL, '2018-01-01T01:00:01Z'),
+(3, 'task-rich00001', '', 'error', 'boom', 'stack', NULL, NULL, NULL, '2018-01-01T01:00:02Z'),
+(4, 'task-rich00001', 'user', 'user_message', 'please', NULL, NULL, NULL, NULL, '2018-01-01T01:00:03Z'),
+(5, 'task-rich00001', 'worker-rich0001', 'tool', 'ran ls', 'ls out', NULL, 1, 1, '2018-01-01T01:00:04Z');
+
+SELECT setval('activity_seq_seq', (SELECT MAX(seq) FROM activity));

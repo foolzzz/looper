@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "channel": "web",
+      "content": "hello web",
+      "created_at": "2020-06-01T00:00:00+00:00",
+      "delivery_error": null,
+      "delivery_failure": null,
+      "message_id": "m1",
+      "role": "user"
+    },
+    {
+      "channel": "web",
+      "content": "hello back",
+      "created_at": "2020-06-01T00:01:00+00:00",
+      "delivery_error": null,
+      "delivery_failure": null,
+      "message_id": "m2",
+      "role": "assistant"
+    }
+  ]
+}

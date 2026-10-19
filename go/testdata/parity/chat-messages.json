@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "channel": "lark",
+      "content": "from lark",
+      "created_at": "2020-06-02T00:00:00+00:00",
+      "delivery_error": null,
+      "delivery_failure": null,
+      "message_id": "l1",
+      "role": "user"
+    },
+    {
+      "channel": "lark",
+      "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "created_at": "2020-06-02T00:02:00+00:00",
+      "delivery_error": "timeout",
+      "delivery_failure": "send_failed",
+      "message_id": "l2",
+      "role": "assistant"
+    }
+  ]
+}
