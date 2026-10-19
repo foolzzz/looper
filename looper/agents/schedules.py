@@ -348,7 +348,7 @@ async def _notify_target(raw: Any) -> dict[str, str | None]:
     if raw is None:
         return {"notify_channel": None, "notify_chat": None}
     if not isinstance(raw, dict) or not isinstance(raw.get("channel"), str) or not isinstance(raw.get("chat"), str):
-        raise RequestError(HTTP_400, 'notify_target must be {"channel": "telegram" | "lark", "chat": "<id>"} or '
+        raise RequestError(HTTP_400, 'notify_target must be {"channel": "telegram" | "lark" | "lark_bot", "chat": "<id>"} or '
                                      "null for the dashboard only")
     allowed = {(target["channel"], target["chat"]) for target in await notify_targets()}
     if (raw["channel"], raw["chat"]) not in allowed:

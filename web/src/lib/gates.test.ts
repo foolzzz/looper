@@ -53,6 +53,15 @@ describe("gatePostsText", () => {
       .toEqual({ where: "Also in Telegram chat 42", failure: "3 messages could not be sent to Telegram.", error: "" });
   });
 
+  it.each([
+    ["lark", "Lark"],
+    ["lark_bot", "Lark (bot token)"],
+    ["telegram", "Telegram"],
+  ] as const)("names %s in a delivery failure", (channel, label) => {
+    expect(gatePostsText(posts({ channel, failed: 1 }))?.failure)
+      .toBe(`1 message could not be sent to ${label}.`);
+  });
+
   it("clips a long reason, keeping the whole text for the tooltip", () => {
     const long = "x".repeat(POST_ERROR_SHOWN_CHARS + 50);
     const text = gatePostsText(posts({ failed: 2, last_error: long }));

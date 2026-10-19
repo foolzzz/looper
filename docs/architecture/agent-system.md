@@ -936,12 +936,14 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
-  `autonomous_turns`, `cost_report` (Claude Code has all but
-  `structured_output`; Codex has `run`, `resident_session`, `resume`,
+  `autonomous_turns`, `cost_report`, `steer` (Claude Code has all but
+  `structured_output` and `steer`; Codex has `run`, `resident_session`, `resume`,
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
   `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
   `compaction_events`; Grok has `run`, `resident_session`, `resume`, `mcp`,
-  `compaction_events` and `cost_report`).
+  `compaction_events` and `cost_report`). Codex and OMP list `steer` when
+  their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
+  Claude Code and Grok do not.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
@@ -958,7 +960,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `codex/instructions/<sha256>.md`, referenced by the top-level
   `model_instructions_file` key; the home's `AGENTS.md` is empty. The operator's `~/.codex` is
   never read. A Worker or Reviewer is one `--ephemeral` process with its
-  prompt on stdin, which then closes: it cannot be steered while it runs (in
+  prompt on stdin, which then closes, so it cannot be steered while it runs;
+  with the probed `steer` capability (`codex app-server` found to have `turn/steer`) the run is driven through
+  `app-server` instead (`codex_steer`, [RFC](rfcs/worker-steering-v0.zh-CN.md)) and the Planner's messages
+  reach it at once (in
   a task with an agent room, one that keeps its session in a home of its own:
   [A task's agent room](#a-tasks-agent-room)).
   The Manager and a Planner run one process per turn that resumes the
@@ -1008,7 +1013,8 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   Its runs are priced at the built-in prices as a subscription equivalent;
   the form suggests the models a ChatGPT login offers (`suggested_models`).
 - **OMP** (`looper/agents/runtimes/omp.py`, oh-my-pi's `omp`, verified against
-  omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` with API key
+  omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` (a Worker or Reviewer with the probed `steer`
+  capability runs `omp --mode rpc` instead, `omp_steer`, with `interruptMode` `wait`) with API key
   providers that serve `openai-responses`, `openai-chat` or
   `anthropic-messages`. Each process runs with `HOME` set to a home of
   Looper's own, `omp/homes/<sha256>` (one per set of generated settings,
@@ -3515,6 +3521,8 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
+| `/api/channels/lark_bot/status` | GET | The Lark (bot token) channel as the platform sees its saved settings: the same fields as `/api/channels/lark/status` (`bot.profile` is empty); `problem` also says no `app_id` or no app secret is set |
+| `/api/channels/lark_bot/people` | GET | `?q=` a name or an email (1–50 characters): `people` as above and `complete` (false when the bounded directory scan, at most 40 requests, ended before reading every department); an email is looked up exactly; 400 for a bad query, 502 when the platform refuses |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
 ## Configuration
@@ -3620,6 +3628,20 @@ restart.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
   `/help` from an unlisted sender get no answer either.
+- **Lark (bot token)** (`lark_bot.py`, `lark_bot_settings.py`): an independent
+  `lark_bot` channel (`channel-lark_bot`), disabled by default, using the same
+  adapter as `lark` through `LarkTransport`. Its configuration holds `app_id`,
+  `domain` (`feishu` or `lark`), and its own app-bound `allowed_open_ids`;
+  `channel_secrets.bot_token` holds the app secret and APIs expose only
+  `has_bot_token`. It sends through the open platform and receives over its
+  long connection, reconnecting with exponential backoff capped at 300 s and
+  0.5–1.0 jitter; a stream that yields an event or lasts 60 s resets the backoff. Direct
+  messages, group @-mentions, replies, statuses, notices, schedules and gates
+  follow the Lark rules below. The backend exposes
+  `GET /api/channels/lark_bot/status` and `GET /api/channels/lark_bot/people?q=`,
+  including sender names and rejected senders, and Settings → Channels has its
+  card (app id, domain, app secret, allowlist, search, refused senders). No
+  lark-cli binary or login is required.
 - **Lark (lark-cli)** (`looper/agents/channels/lark.py`, `lark_cli.py`,
   `lark_settings.py`): the Manager in Lark direct messages and group chats,
   through `lark-cli`

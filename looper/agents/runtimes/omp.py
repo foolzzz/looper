@@ -2,10 +2,10 @@
 
 Verified against omp 18.4.3 (the multi-runtime RFC, section 6):
 
-- **A run** is ``omp -p --mode json --no-session ...``: the prompt comes on
-  stdin, read to its end, and the process runs it and exits. It takes no user
-  turn while it runs, so a Worker cannot be steered (``write_turn`` closes
-  stdin after the prompt).
+- **A run** with ``STEER`` is driven through ``--mode rpc`` (``omp_steer``),
+  accepting messages while it runs. Otherwise it is ``omp -p --mode json
+  --no-session ...``: the prompt comes on stdin, read to its end, and the
+  process runs it and exits (``write_turn`` closes stdin after the prompt).
 - **A resident session** (the Manager, a Planner) is one such process per
   turn, keeping its session in a directory of the owner's own and resuming it
   (``--session-dir <dir> --resume <id>``, ``ResidentOmp``). Each process's
@@ -80,7 +80,7 @@ from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
-    RuntimeUnsupported, instructions, runtime_prompt_text,
+    RunChannel, RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -136,6 +136,7 @@ IDLE_SEC = 24 * 3600
 # path or the home directory are neither prevented nor detected.
 READ_ONLY_TOOLS = ("read", "glob", "grep")
 READ_TOOLS_MIN_VERSION = (18, 4, 3)
+STEER_MIN_VERSION = (18, 4, 3)
 
 
 class OmpRuntime(RuntimeAdapter):
@@ -169,22 +170,35 @@ class OmpRuntime(RuntimeAdapter):
         return ReadOnly.TOOLS if Capability.READ_TOOLS in capabilities else ReadOnly.CHECK
 
     def probe(self, executable: str) -> Probe:
-        """``<executable> --version``, with an empty ``HOME`` of its own so nothing of the operator's is read."""
+        """The version and rpc flags, with an empty ``HOME`` so nothing of the operator's is read."""
         home = tempfile.mkdtemp(prefix="looper-omp-probe-")
         try:
-            done = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                  timeout=_PROBE_TIMEOUT_SEC, check=False, env={**_omp_env(os.environ), "HOME": home})
-        except FileNotFoundError:
-            return Probe(None, self.capabilities_for(None), f"{executable!r} was not found")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return Probe(None, self.capabilities_for(None), f"{executable} --version did not run: {type(exc).__name__}: {exc}")
+            try:
+                done = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                      timeout=_PROBE_TIMEOUT_SEC, check=False, env={**_omp_env(os.environ), "HOME": home})
+            except FileNotFoundError:
+                return Probe(None, self.capabilities_for(None), f"{executable!r} was not found")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return Probe(None, self.capabilities_for(None), f"{executable} --version did not run: {type(exc).__name__}: {exc}")
+            first = next((line.strip() for line in (done.stdout or done.stderr).splitlines() if line.strip()), "")
+            if done.returncode != 0 or not first:
+                return Probe(None, self.capabilities_for(None), f"{executable} --version failed (exit code {done.returncode})"
+                                                      + (f": {first}" if first else ""))
+            capabilities = self.capabilities_for(first)
+            found = re.search(r"(\d+)\.(\d+)\.(\d+)", first)
+            if found and tuple(map(int, found.groups())) >= STEER_MIN_VERSION:
+                try:
+                    help_result = subprocess.run([executable, "--help"], capture_output=True, text=True,
+                                                 timeout=_PROBE_TIMEOUT_SEC, check=False,
+                                                 env={**_omp_env(os.environ), "HOME": home})
+                    output = (help_result.stdout or "") + (help_result.stderr or "")
+                    if help_result.returncode == 0 and "--no-ui" in output and "rpc" in output:
+                        capabilities |= {Capability.STEER}
+                except (OSError, subprocess.TimeoutExpired, UnicodeError):
+                    pass
+            return Probe(first[:200], capabilities)
         finally:
             shutil.rmtree(home, ignore_errors=True)
-        first = next((line.strip() for line in (done.stdout or done.stderr).splitlines() if line.strip()), "")
-        if done.returncode != 0 or not first:
-            return Probe(None, self.capabilities_for(None), f"{executable} --version failed (exit code {done.returncode})"
-                                                  + (f": {first}" if first else ""))
-        return Probe(first[:200], self.capabilities_for(first))
 
     def isolation_args(self, cwd: str | Path) -> list[str]:
         """None: omp's isolation is its ``HOME`` and the overlay Looper writes there (``overlay``)."""
@@ -205,12 +219,12 @@ class OmpRuntime(RuntimeAdapter):
             unset=(*DIRECTORY_VARS, *RESTORED_VARS[1:]),
         )
 
-    def launch_args(self, launch: Launch) -> list[str]:
-        """The print-mode flags of every run, the model and the effort, and the installed plugin directories. The
+    def launch_args(self, launch: Launch, *, mode: tuple[str, ...] = ("-p", "--mode", "json")) -> list[str]:
+        """The mode flags of every run, the model and the effort, and the installed plugin directories. The
         home's overlay, prompt and MCP plugin come with the command (``run_command``)."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         return [
-            "-p", "--mode", "json", "--no-title",
+            *mode, "--no-title",
             # A read-only run (an agent room consult) has only the tools that read.
             *(["--tools", ",".join(READ_ONLY_TOOLS)] if launch.read_only and launch.read_only_mode is ReadOnly.TOOLS else []),
             *binding.args,
@@ -225,7 +239,8 @@ class OmpRuntime(RuntimeAdapter):
         return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
                 SHELL_PREFIX_VAR: shell_prefix(visible)}
 
-    def _command(self, executable: str, cwd: str | Path, prompt_file: Path, launch: Launch) -> list[str]:
+    def _command(self, executable: str, cwd: str | Path, prompt_file: Path, launch: Launch, *,
+                 mode: tuple[str, ...] = ("-p", "--mode", "json")) -> list[str]:
         local = _local_dir(prompt_file)
         visible = {**os.environ, **dict(launch.env)}
         mcp = mcp_config(launch.library, visible)
@@ -235,7 +250,7 @@ class OmpRuntime(RuntimeAdapter):
         prompt_flag = ("--system-prompt" if launch.system_prompt_mode is SystemPromptMode.REPLACE
                        else "--append-system-prompt")
         return [
-            "env", f"HOME={home}", executable, *self.launch_args(launch),
+            "env", f"HOME={home}", executable, *self.launch_args(launch, mode=mode),
             "--config", str(home / OVERLAY), prompt_flag, str(prompt),
             *(["--plugin-dir", str(home / "plugins" / MCP_PLUGIN)] if mcp else []),
         ]
@@ -264,6 +279,24 @@ class OmpRuntime(RuntimeAdapter):
         session_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(session_dir, 0o700)
         return [*self._command(executable, cwd, prompt_file, launch), "--session-dir", str(session_dir)]
+
+    def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                      max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """One rpc run, keeping its session only when ``session_dir`` is given."""
+        command = self._command(executable, cwd, prompt_file, launch, mode=("--mode", "rpc", "--no-ui"))
+        if session_dir is None:
+            return [*command, "--no-session"]
+        session_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(session_dir, 0o700)
+        return [*command, "--session-dir", str(session_dir)]
+
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None) -> RunChannel:
+        from .omp_steer import OmpChannel
+
+        if not launch.steers:
+            return super().run_channel(process, launch=launch, cwd=cwd, session_dir=session_dir)
+        return OmpChannel(process, model=launch.model, cwd=str(cwd))
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:

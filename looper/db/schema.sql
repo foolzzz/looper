@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
         CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
                                      'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
-                                     'read_tools']),
+                                     'read_tools', 'steer']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
@@ -619,18 +619,18 @@ BEGIN
     END IF;
 END $$;
 
--- read_tools: a runtime may list the capability to run with only the tools that read. The definition is read only
+-- steer: a runtime may list the capability to receive messages while it works. The definition is read only
 -- for this schema's table (see library_installs_roles_check below).
 DO $$
 DECLARE def TEXT;
 BEGIN
     SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
      WHERE c.conrelid = to_regclass('agent_runtimes') AND c.conname = 'agent_runtimes_capabilities_check';
-    IF def IS NULL OR def NOT LIKE '%read_tools%' THEN
+    IF def IS NULL OR def NOT LIKE '%steer%' THEN
         ALTER TABLE agent_runtimes DROP CONSTRAINT IF EXISTS agent_runtimes_capabilities_check;
         ALTER TABLE agent_runtimes ADD CONSTRAINT agent_runtimes_capabilities_check CHECK (capabilities <@ ARRAY[
             'run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp', 'add_dirs',
-            'compaction_events', 'autonomous_turns', 'cost_report', 'read_tools']);
+            'compaction_events', 'autonomous_turns', 'cost_report', 'read_tools', 'steer']);
     END IF;
 END $$;
 
@@ -1227,6 +1227,23 @@ CREATE TABLE IF NOT EXISTS task_user_gate_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_message ON task_user_gate_posts (message_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_external ON task_user_gate_posts (channel, external_id);
+DO $$
+DECLARE
+    table_oid REGCLASS := to_regclass('task_user_gate_posts');
+    c RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_posts_lark_bot') THEN
+        FOR c IN SELECT conname FROM pg_constraint
+                 WHERE conrelid = table_oid AND contype = 'c'
+                   AND pg_get_constraintdef(oid) ~ '\mchannel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
+        LOOP
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'task_user_gate_posts', c.conname);
+        END LOOP;
+        ALTER TABLE task_user_gate_posts ADD CONSTRAINT task_user_gate_posts_channel_check
+            CHECK (channel IN ('lark', 'lark_bot', 'telegram'));
+        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_posts_lark_bot');
+    END IF;
+END $$;
 
 -- A task's agent room (looper/agents/room.py): the messages its Planner and its steps' seats send each other, only
 -- ever added. A seat is '<role>@<step key>' (worker@s2, backend_rd@s2, reviewer@s2); the sender comes from the
@@ -1429,6 +1446,23 @@ ALTER TABLE schedules ADD COLUMN IF NOT EXISTS daily_budget_usd DOUBLE PRECISION
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify TEXT NOT NULL DEFAULT 'failures'
     CHECK (notify IN ('failures', 'always', 'never'));
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark'));
+DO $$
+DECLARE
+    table_oid REGCLASS := to_regclass('schedules');
+    c RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_notify_channel_lark_bot') THEN
+        FOR c IN SELECT conname FROM pg_constraint
+                 WHERE conrelid = table_oid AND contype = 'c'
+                   AND pg_get_constraintdef(oid) ~ '\mnotify_channel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
+        LOOP
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'schedules', c.conname);
+        END LOOP;
+        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_channel_check
+            CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot'));
+        INSERT INTO schema_migrations (name) VALUES ('schedules_notify_channel_lark_bot');
+    END IF;
+END $$;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_chat TEXT;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failures_alert_at TIMESTAMPTZ;

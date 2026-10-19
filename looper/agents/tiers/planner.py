@@ -2400,8 +2400,8 @@ class PlannerAgent:
             step.missed_messages.append(reply.text)
             await self._save(plan, step)
             await self._activity("phase", f"User message for step {step.index + 1} ({step.label}) arrived after "
-                                          f"{step.worker_id} finished; kept for the Planner's decision")
-            return f"{reply.reply}\n\n（{step.worker_id} 在消息送达前已经结束；处理它的结果时我会考虑这条消息。）"
+                                          f"{step.worker_id} finished or was not confirmed; kept for the Planner's decision")
+            return f"{reply.reply}\n\n（消息送达未确认，{step.worker_id} 可能已经按它行动；处理它的结果时我会考虑这条消息。）"
         if reply.action is ChatAction.ADD_STEPS:
             steps = self._add_steps(plan, reply.steps)
             await self._save(plan, *steps, entries=[self._added_entry(plan, steps, reply, at)])
@@ -2573,7 +2573,7 @@ class PlannerAgent:
             await self._save(plan, step)
             await self._activity(
                 "phase", f"Planner steer for step {step.index + 1} ({step.label}) arrived after "
-                         f"{step.worker_id} finished; kept for its decision",
+                         f"{step.worker_id} finished or was not confirmed; kept for its decision",
             )
 
     async def _kill_and_decide(self, plan: TaskPlan, step: PlanStep, reason: str) -> None:
@@ -3282,7 +3282,7 @@ class PlannerAgent:
             *report,
         ]
         if step.missed_messages:
-            lines += ["", "The user sent this to the step's Worker through you, but it arrived after the Worker finished:"]
+            lines += ["", "The user sent this to the step's Worker through you; delivery not confirmed; the Worker may already have acted on it:"]
             lines += [f"- {_clip(m, 500)}" for m in step.missed_messages]
         if context.result is ResultKind.WORK and context.succeeded and context.review_required:
             lines += ["", "This step needs a passing review before it can be accepted."]
