@@ -1034,7 +1034,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   shared by its runs), named on its command line (`env HOME=... omp ...
   --config <home>/looper.yml`): `.omp/agent/models.yml` (the provider
   `looper`: endpoint, API, the agent's model at no price; its `apiKey` names
-  the `LOOPER_PROVIDER_API_KEY` variable), the `--config` overlay (only the
+  the `LOOPER_PROVIDER_API_KEY` variable; with `openai-responses` the model is
+  marked as taking strict tools, so the MCP tools go as `strict: false`, since
+  the Responses API takes a tool that leaves strict out as strict, every
+  argument required), the `--config` overlay (only the
   agent's model for every model role, no fallback, no approvals, MCP tools as
   ordinary tools, no background jobs, no update check or issue reports), a
   link to the native library every home shares (`omp/natives`), the prompt
