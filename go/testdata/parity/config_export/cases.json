@@ -1,0 +1,54 @@
+[
+  {
+    "name": "default",
+    "query": {}
+  },
+  {
+    "name": "secrets",
+    "query": {
+      "secrets": "1"
+    }
+  },
+  {
+    "name": "projects",
+    "query": {
+      "projects": "1"
+    }
+  },
+  {
+    "name": "projects-secrets",
+    "query": {
+      "projects": "1",
+      "secrets": "1"
+    }
+  },
+  {
+    "name": "invalid-query",
+    "query": {
+      "projects": "true",
+      "secrets": "yes",
+      "unknown": "1"
+    }
+  },
+  {
+    "name": "blank-query",
+    "query": {
+      "projects": "",
+      "secrets": ""
+    }
+  },
+  {
+    "name": "zero-query",
+    "query": {
+      "projects": "0",
+      "secrets": "0"
+    }
+  },
+  {
+    "name": "spaces-query",
+    "query": {
+      "projects": " 1",
+      "secrets": "1 "
+    }
+  }
+]

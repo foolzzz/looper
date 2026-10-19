@@ -47,7 +47,32 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Seed config export parity database
+        working-directory: .
+        run: |
+          python -m pip install .
+          python - <<'PY'
+          import asyncio
+          import asyncpg
+
+          async def main():
+              conn = await asyncpg.connect("postgresql://postgres:postgres@127.0.0.1:54329/postgres")
+              try:
+                  await conn.execute("CREATE DATABASE loopgo_config_export_ci")
+              finally:
+                  await conn.close()
+
+          asyncio.run(main())
+          PY
+          python go/testdata/parity/make_config_export_goldens.py --db-url postgresql://postgres:postgres@127.0.0.1:54329/loopgo_config_export_ci
+          git diff --exit-code -- go/testdata/parity/config_export
+
       - name: Test
         env:
           LOOPGO_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54329/loopgo_ci
+          LOOPGO_CONFIG_EXPORT_PARITY_URL: postgresql://postgres:postgres@127.0.0.1:54329/loopgo_config_export_ci
         run: go test ./...
