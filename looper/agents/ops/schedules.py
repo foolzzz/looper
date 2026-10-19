@@ -371,7 +371,7 @@ _FIELDS = {
         "gate_timeout_seconds": {"type": "integer"},
         "notify": {"type": "string", "enum": [n.value for n in schedules.Notify]},
         "notify_target": {"type": "object", "description": "{channel, chat}; null: dashboard only."},
-        "profiles": {"type": "object", "description": "role: Agent Profile."},
+        "profiles": {"type": "object", "description": "{planner, worker, reviewer}: Agent Profile (id or name) per role; a role left out keeps the project's. Set only what the user asks for: a repetitive schedule's Planner may be a cheaper profile."},
         "task_limits": {"type": "object", "description": "{worker, reviewer}: each run's task's own limits."},
     },
 }

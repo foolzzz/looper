@@ -1963,7 +1963,10 @@ when it fires), `overlap` (`skip`, `queue` or `parallel`, with
 `max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
 an optional `run_timeout_seconds` and `run_budget_usd`, `profile_overrides`
 for the Planner, Workers or Reviewers (by id or name, as a new task takes them;
-a profile a schedule chose cannot be deleted) and `task_limits`
+a role it does not name keeps the project's, and no change to a schedule alters
+its profiles unless the request carries them; a repetitive schedule such as
+alert triage can name a lower-effort Planner profile, since the Planner is
+often the largest share of a run's cost; a profile a schedule chose cannot be deleted) and `task_limits`
 (`{worker, reviewer}`, each 1–64 or null for the default: how many of each
 run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, from S2, an optional
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,

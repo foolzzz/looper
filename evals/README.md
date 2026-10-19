@@ -332,6 +332,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `workspace_in_place` | the user asks for the task to change the project directory itself, no worktree or branch: it is created ready and runs in place (`workspace_mode` `in_place`) |
 | `workspace_default` | the user says nothing about how the task runs: it is created ready, and the Manager passes no `workspace_mode` |
 | `schedule_create` | a schedule asked for in the project is created at once, disabled, on the rule the user said (`looper_schedules` `create`), and the reply carries its configuration and the question whether to enable it; 「启用」 waits for the user's word in the next message (`needs_confirmation`, still disabled), and 「确认。」 enables it |
+| `schedule_planner_profile` | the user asks for a schedule whose Planner may be the cheaper `eval/light` profile (registered first): it is created disabled with only the Planner's profile set, and a later change of its time leaves the profile as it was |
+| `schedule_no_profiles` | the other direction: a schedule asked for with no word about profiles gets none (the project's apply) |
 | `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
 | `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |
 | `schedule_modify` | on an enabled schedule with a $1 daily cap: a new rule and a Worker limit change at once; raising the cap waits for the user's word in the next message, and a refusal leaves it |
