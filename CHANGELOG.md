@@ -18,6 +18,42 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-10-18
+
+### Highlights
+
+- **The operator's HTTP API asks who is calling.** Every `/api/` route except the agents' own tools needs the operator token in `<runtime root>/operator-token` (mode 0600). The CLI sends it. A local browser signs in automatically only on a direct loopback connection that meets the top-level navigation conditions; LAN or proxy access needs a password. Another machine signs in with `looper auth set-password`. Anonymous calls get 401. Password sign-in is new; query token/code sign-in is not supported. ([#207](https://github.com/foolzzz/looper/pull/207))
+- **A custom system prompt, with a preview.** An Agent Profile's `custom_prompt` prefixes Looper's composed prompt for Claude Code, Codex, Grok and OMP; the harness, role, context and contract follow. `system_prompt_mode` separately controls append/replace. Claude Code still sends a billing header and a fixed identity line before the main block. Empty adds no custom-prompt layer; clearing it removes only the prefix and retains other v2.9.0 changes. The preview shows Profile/role templates; task-specific contracts and other launch context are resolved later. ([#198](https://github.com/foolzzz/looper/pull/198))
+- **Codex and OMP Planners are read-only.** Codex uses its read-only sandbox and approves only Looper's MCP tools. OMP gets a read-only tool list when its version reports that capability. ([#203](https://github.com/foolzzz/looper/pull/203))
+- **Grok keeps the Manager and each task's Planner in separate resident processes and sessions.** `grok agent stdio` (ACP). Workers stay one-shot. Cost of a resident turn comes from `costUsdTicks` (1e10 ticks per USD). ([#205](https://github.com/foolzzz/looper/pull/205))
+- **Lark (bot token), off by default.** A second Lark channel talks to the open platform with an app id and an app secret. The lark-cli channel is unchanged. Not yet tried against a real tenant. ([#209](https://github.com/foolzzz/looper/pull/209))
+- **A running Codex or OMP Worker can be steered** when the installed CLI reports that capability. Older CLIs keep the previous one-shot run. ([#211](https://github.com/foolzzz/looper/pull/211))
+- **Where a file was written.** A Worker that writes in another worktree or a commit gives the Reviewer and the Planner a typed location and read-only git hints. Structured locations and Reviewer file lists use single-line ASCII JSON; other name fields use `prompt_name`. A schedule can already name a profile per role; the Manager and the schedule dialog now suggest a cheaper Planner. ([#210](https://github.com/foolzzz/looper/pull/210))
+
+### Behavior changes
+
+These apply on upgrade. Each line says what the operator does.
+
+1. **Anonymous `/api/` calls get 401**, including `/api/status` and unknown paths. Send `Authorization: Bearer` with the token, or open the dashboard through a direct loopback connection that meets the top-level navigation conditions for local auto-login. Agent routes under `/api/agent/v1/` still use agent credentials. `OPTIONS /api/*` no longer returns 204 unconditionally: missing the appropriate credential gives 401; an unimplemented method with a valid credential gives 404. ([#207](https://github.com/foolzzz/looper/pull/207))
+2. **Password sign-in is new.** Query token/code sign-in is not supported. ([#207](https://github.com/foolzzz/looper/pull/207))
+3. **`looper serve` refuses a runtime root that group or others can write**, and one the user does not own. It prints `chmod go-w <runtime root>` and does not change the mode itself. An invalid token file also prevents startup. An invalid password file makes password sign-in return 503; fix its permissions or run `looper auth set-password`. Deleting the password file does not recreate it on startup. ([#207](https://github.com/foolzzz/looper/pull/207))
+4. **Other machines need a password.** `looper auth set-password [--user NAME]` asks twice and never takes the password on the command line. It stores a scrypt hash. `looper auth clear-password` removes it. Until one is set, only a local browser on a direct loopback connection that meets the top-level navigation conditions signs in; LAN or proxy access needs a password. Sessions last 7 days and end when the password is changed or cleared, or when the server restarts. ([#207](https://github.com/foolzzz/looper/pull/207))
+5. **Behind an https reverse proxy, set `dashboard_url` to the https address** (`LOOPER_PUBLIC_URL` before start), or `POST /login` and `POST /logout` answer 403. For an installed service, set the variable and rerun `looper service install`, preserving its original label, port and runtime root; restart alone does not recapture `LOOPER_PUBLIC_URL`. Those two routes require an Origin whose scheme and host match. Sign-in is rate-limited with lockout. Login responses are `no-store`, and logs never contain the credentials. ([#207](https://github.com/foolzzz/looper/pull/207))
+6. **Reload a dashboard tab that was open before the upgrade.** The page is now `no-store`. After a session ends, the page does not yet handle 401 by itself; reload it. There is no logout button; `POST /logout` is the endpoint. ([#207](https://github.com/foolzzz/looper/pull/207))
+7. **An OMP Planner loses its shell when the probed OMP version reports a read-only tool list.** Re-detect an OMP runtime that was already registered (Settings → Agent Runtimes). An older or unreadable version keeps the previous directory comparison. Without `read_tools`, OMP does not run a consult and hands it to the Planner as `runtime_cannot`. Re-detect an existing OMP runtime to restore consult; older or unrecognized CLI versions do not support it. A Codex Planner retains its existing read-only sandbox and regains Looper MCP tool calls. ([#203](https://github.com/foolzzz/looper/pull/203))
+8. **The Grok Manager and each task's Planner keep separate resident ACP processes and sessions.** The first turn starts it; later turns reuse it. If `grok agent stdio` cannot serve, that session falls back to one process per turn. Workers and Reviewers stay one-shot. A resident turn's cost is `costUsdTicks` divided by 1e10. A missing or zero cost stays unknown. ([#205](https://github.com/foolzzz/looper/pull/205))
+9. **Re-detect Codex and OMP to steer a running Worker.** Steering starts when the stored probe reports the capability (Codex `app-server`, OMP `rpc`). An older CLI keeps the previous behavior. A steer that times out at 4 seconds may still arrive; the Planner keeps it as delivery not confirmed. ([#211](https://github.com/foolzzz/looper/pull/211))
+10. **A file found in another worktree or commit is named on the Reviewer's first turn and in the Planner's step report**, with read-only git hints. Structured locations and Reviewer file lists use single-line ASCII JSON, which can quote ordinary names too. Other name fields use `prompt_name`: a plain printable name stays as written; anything else is one line of ASCII-escaped JSON. A schedule's Planner does not change unless you set a profile. The dialog and the Manager tool only suggest a cheaper one. ([#210](https://github.com/foolzzz/looper/pull/210))
+11. **The dashboard renders over plain http from another host.** Reload that tab. `crypto.randomUUID` is only available in a secure context, so ids fall back to `crypto.getRandomValues`. https and localhost are unchanged. ([#213](https://github.com/foolzzz/looper/pull/213))
+
+`custom_prompt` stays empty until a profile sets it. The Lark (bot token) channel stays off until Settings enables it. A `vX.Y.Z` tag still publishes the Python release.
+
+### Fixes
+
+- **Grok Workers run again.** v2.8.0 passed `session_dir` into `run_command()`, which the Grok adapter did not accept, so every Grok Worker run failed. A test now checks that each runtime adapter accepts every parameter of the abstract commands. ([#208](https://github.com/foolzzz/looper/pull/208))
+- **Planner step decisions see the agent room again.** Since v2.8.0 every room summary failed with "cannot read the room for step ...", because the decision still read a single `review_role` after steps gained `review_roles`. ([#214](https://github.com/foolzzz/looper/pull/214))
+- **Tags `vX.Y.Z-go` do not start the Python release workflow.** A `vX.Y.Z` tag still does. ([#202](https://github.com/foolzzz/looper/pull/202))
+
 ## [2.8.0] - 2026-10-18
 
 ### Highlights

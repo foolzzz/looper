@@ -167,16 +167,16 @@ run gets `--max-budget-usd` (default 0.25), and the run stops once its tasks
 have spent `--total-cap-usd` (default 0.80); a task that reaches the cap is
 cancelled and the rest are skipped. `--model` sets the model in the system
 settings layer of the run's database, so every agent uses it. Measured at
-`3ca041201` with `--reps 3 --jobs 4` (the committed baselines): all 33 tasks
-with haiku cost $12.32 in about 29 minutes, about $4.11 a rep, the costliest
-being `roles_multi_platform` (about $0.51) and `many_steps` (about $0.31); the
-opus tier, `--model opus --tasks planner` (20 tasks), cost $27.73, about $9.24
-a rep, `roles_multi_platform` about $2.06 and `interface_first` about $0.92
+`c9ac42d5c` with `--reps 3 --jobs 4` (the committed baselines): all 35 tasks
+with haiku cost $12.30 in about 29 minutes, about $4.10 a rep, the costliest
+being `roles_multi_platform` (about $0.42) and `many_steps` (about $0.30); the
+opus tier, `--model opus --tasks planner` (20 tasks), cost $27.81, about $9.27
+a rep, `roles_multi_platform` about $2.06 and `interface_first` about $0.89
 of it. The default caps stop either run early: give it a `--total-cap-usd`
 that covers all its reps, such as 20 for haiku and 40 for opus at `--reps 3`,
 and a `--max-budget-usd` no single run reaches, such as 1.0 for haiku and 3.0
-for opus (the costliest whole task, all its runs together, was $0.59 with
-haiku and $2.13 with opus). The parallel runs used `--case-budget-usd 2.0`
+for opus (the costliest whole task, all its runs together, was $0.52 with
+haiku and $2.26 with opus). The parallel runs used `--case-budget-usd 2.0`
 for haiku and `--case-budget-usd 6.0` for opus.
 (`baselines/real-sonnet.json` is older: five tasks,
 one rep each.) With haiku, `interface_first` fails on the plan's shape in all
@@ -357,9 +357,9 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode with haiku cost $4.36 for all
-22 dialogs at `--reps 3 --jobs 4` in about 8 minutes (about $1.45 a rep,
-measured at `3ca041201`, the committed baseline), so the default
+MCP; it takes about two minutes. Real mode with haiku cost $4.23 for all
+24 dialogs at `--reps 3 --jobs 4` in about 9 minutes (about $1.41 a rep,
+measured at `c9ac42d5c`, the committed baseline), so the default
 `--total-cap-usd` (0.50) stops it before the first rep ends: give it one that
 covers all the reps, such as 8, and `--case-budget-usd 1.0` with `--jobs 4`:
 
@@ -370,8 +370,8 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
-model, the other roles on `--model`; all 22 dialogs at `--reps 3 --jobs 4`
-cost $7.91 at `3ca041201` (the committed baseline), about $2.64 a rep, the
+model, the other roles on `--model`; all 24 dialogs at `--reps 3 --jobs 4`
+cost $8.43 at `c9ac42d5c` (the committed baseline), about $2.81 a rep, the
 costliest single dialog `task_cost` at about $0.46; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd` such as 12),
