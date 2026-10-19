@@ -44,8 +44,8 @@ args = sys.argv[2:]
 if args[:1] in (["--version"], ["auth"]):  # the server's startup self-check, not an agent run
     sys.exit(0)
 prompt = ""
-if "--append-system-prompt-file" in args:
-    prompt = open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8").read()
+if any(f in args for f in ("--append-system-prompt-file", "--system-prompt-file")):
+    prompt = open(args[args.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in args)) + 1], encoding="utf-8").read()
 variant = re.search(r"variant=(\w+)", prompt).group(1)
 
 def log(name, value):

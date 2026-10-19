@@ -117,8 +117,8 @@ _CLAUDE = """\
 import json, os, sys
 argv = sys.argv[1:]
 prompt = None
-if '--append-system-prompt-file' in argv:
-    prompt = open(argv[argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read()
+if any(f in argv for f in ('--append-system-prompt-file', '--system-prompt-file')):
+    prompt = open(argv[argv.index(next(f for f in ('--append-system-prompt-file', '--system-prompt-file') if f in argv)) + 1], encoding='utf-8').read()
 seen = {{'executable': sys.argv[0], 'argv': argv, 'env': dict(os.environ), 'system_prompt': prompt}}
 def emit(event):
     print(json.dumps(event), flush=True)
@@ -180,9 +180,9 @@ def _normalized(seen: dict[str, Any], root: str, executable: str, environ: dict[
     if "--settings" in argv:
         at = argv.index("--settings") + 1
         argv[at] = _isolation_settings(argv[at], root)
-    if "--append-system-prompt-file" in argv:
+    if any(f in argv for f in ("--append-system-prompt-file", "--system-prompt-file")):
         # The file is named by its text's hash, and the text names directories under root.
-        at = argv.index("--append-system-prompt-file") + 1
+        at = argv.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in argv)) + 1
         path = Path(argv[at])
         if path.name != hashlib.sha256((seen["system_prompt"] or "").encode("utf-8")).hexdigest() + ".md":
             raise AssertionError(f"the system prompt file {path} is not named by its text's hash")

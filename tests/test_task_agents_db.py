@@ -254,8 +254,8 @@ async def _profiles(pool: Any) -> None:
     # One bad value refuses the whole change: nothing of it is stored.
     ({"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 0}}, "got 0"),
     ({"profiles": {"worker": "claude-code/sonnet", "reviewer": "nope"}, "concurrency": {"worker": 2}}, "'nope'"),
-    ({}, "give at least one role's profiles or concurrency"),
-    ({"concurrency": {}}, "give at least one role's profiles or concurrency"),
+    ({}, "give at least one role's profiles, concurrency, system_prompt_modes"),
+    ({"concurrency": {}}, "give at least one role's profiles, concurrency, system_prompt_modes"),
     ({"worker": 2}, "unknown field 'worker'; the fields are profiles, concurrency"),
     ([1], "body must be a JSON object"),
 ])

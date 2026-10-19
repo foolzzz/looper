@@ -58,7 +58,7 @@ if mode == "no_stdin":
     print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
     time.sleep(60)
 prompt = json.loads(sys.stdin.readline())["message"]["content"]
-system = open(sys.argv[sys.argv.index("--append-system-prompt-file") + 1]).read()
+system = open(sys.argv[sys.argv.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in sys.argv)) + 1]).read()
 open(os.environ["SEEN"], "a").write(json.dumps({"argv": sys.argv[1:], "prompt": prompt, "system": system}) + "\\n")
 if mode == "gone":
     print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "num_turns": 0,
