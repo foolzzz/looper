@@ -25,21 +25,21 @@ func TestAllowedProfilesRoute(t *testing.T) {
 
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodPost, "/api/projects/proj-alpha0001/allowed-profiles"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 		t.Fatalf("post status %d body %s", rr.Code, rr.Body.String())
 	}
 
 	before := len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/projects/proj-alpha000%31/allowed-profiles"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` || len(reads.calls) != before {
 		t.Fatalf("encoded status %d body %s calls %d", rr.Code, rr.Body.String(), len(reads.calls))
 	}
 
 	gone := &recordingReads{allowedProfilesErr: db.ErrProjectNotFound}
 	rr = httptest.NewRecorder()
 	tailHandler(gone).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/projects/proj-missing01/allowed-profiles"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"project 'proj-missing01' not found"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "project 'proj-missing01' not found"}` {
 		t.Fatalf("missing status %d body %s", rr.Code, rr.Body.String())
 	}
 }

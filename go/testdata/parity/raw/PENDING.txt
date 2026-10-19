@@ -1,0 +1,104 @@
+# Structured goldens that do not have a raw byte file yet.
+# Move a name out of this list in the same change that adds raw/<name>.http.
+# /api/status and every non-200 goldenCases entry must be raw, not pending.
+#
+# A raw file is the exact Python _json_response or _no_content byte string.
+# Compare status, reason, body, and every header except Date. Do not sort
+# keys, re-encode numbers, or drop fields. Optional raw/<name>.paths lists
+# JSON Pointers; only those value spans may be replaced, and a missing path
+# fails. Content-Length is the body length from before that replacement.
+# Set-Cookie order, Cache-Control, and WWW-Authenticate are compared.
+#
+# Not in this list, and not served by the Go server yet:
+# raw/no-content.http is the OPTIONS 204 shape (fixture only).
+# 401 WWW-Authenticate, sign-in Set-Cookie / Cache-Control, 413, a bad
+# request line, and a bad Content-Length are later cards.
+# Static 405 Allow is Go-only and is not a Python raw case.
+# The semicolon parity case reuses task-rich.json and is still structured only.
+projects
+overview
+tasks
+tasks-group-needs_you
+tasks-group-in_progress
+tasks-group-ready
+tasks-group-attention
+tasks-group-completed
+tasks-group-cancelled
+tasks-group-other
+tasks-project
+tasks-limit
+tasks-before
+tasks-status
+tasks-schedule
+tasks-combined
+task-rich
+task-min
+usage
+usage-turns
+usage-turns-zero
+llm-records
+llm-records-agent
+llm-records-task
+llm-records-role
+llm-records-page
+llm-records-unknown-role
+llm-records-limit-zero
+llm-records-neg-offset
+llm-record
+llm-record-events
+llm-record-events-after
+llm-record-events-missing
+chat-targets
+chat-sessions
+chat-messages
+chat-messages-web
+chat-messages-missing
+chat-messages-spaces
+activity
+activity-since
+activity-limit-zero
+activity-neg-limit
+activity-detail
+activity-detail-other
+conversation
+conversation-empty
+roles
+role-planner
+channel-configs
+channel-lark
+channel-telegram-empty
+channel-web
+gate-settings
+role-templates-alpha
+role-templates-beta
+allowed-profiles-alpha
+allowed-profiles-beta
+role-stats-alpha
+role-stats-since
+role-stats-future
+role-stats-week
+role-stats-compact
+role-stats-beta
+gate-messages
+room
+room-min
+room-kind
+room-from
+room-unanswered
+room-limit
+room-after
+workspace-absent
+workspace-absent-asked
+workspace-absent-base
+workspace-absent-inplace
+workspace-absent-project
+schedules-project
+schedules-project-blank
+schedules
+schedule
+schedule-runs
+schedule-runs-limit
+schedule-runs-hide
+schedule-runs-before
+schedule-notifications
+schedule-notifications-limit

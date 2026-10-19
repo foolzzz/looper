@@ -29,6 +29,13 @@ Normalization, the same rule the Go parity test applies before comparing:
   returned them.
 - Object key order is not significant. Numbers compare by value, so 0 and 0.0
   match. The files below are written with sorted keys for review.
+
+--raw-only writes raw/<name>.http for /api/status and every response whose
+status is not 200, plus error-not-found, error-bad-host, error-cross-origin,
+and no-content. Those files are the exact _json_response / _no_content bytes.
+Sorted JSON files are left untouched. Blank lines and # comments in
+raw/<name>.paths name JSON Pointers the Go compare may replace; this script
+does not write path files.
 """
 
 from __future__ import annotations
@@ -423,7 +430,12 @@ def _one_host(spec: str) -> tuple[str, int | None]:
     return host, int(urllib.parse.unquote(port_text))
 
 
+# One raw _json_response per name, in the same order as _names().
+_RAW: list[bytes] = []
+
+
 def response_json(raw: bytes, expect: int = 200):
+    _RAW.append(raw)
     head, _, body = raw.partition(b"\r\n\r\n")
     status_line = head.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
     parts = status_line.split(" ", 2)
@@ -666,16 +678,8 @@ async def capture(dsn: str) -> dict[str, object]:
         await dbconn.close_pool()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--db-url", required=True)
-    args = parser.parse_args()
-    check_db_url(args.db_url)
-    if str(REPO) not in sys.path:
-        sys.path.insert(0, str(REPO))
-    asyncio.run(apply_sql(args.db_url))
-    bodies = asyncio.run(capture(args.db_url))
-    names = (
+def _names() -> list[str]:
+    return (
         [name for name, _ in _READS]
         + [name for name, _, _ in _TASKS]
         + [name for name, _, _ in _DETAILS]
@@ -708,6 +712,61 @@ def main() -> None:
         + [name for name, _, _, _ in _NOTIFICATIONS]
         + [name for name, _, _, _ in _NOTIFICATIONS_500]
     )
+
+
+def _status_code(raw: bytes) -> int:
+    line = raw.split(b"\r\n", 1)[0].decode("utf-8", "replace")
+    parts = line.split(" ")
+    if len(parts) < 2 or not parts[1].isdigit():
+        raise SystemExit("bad status line")
+    return int(parts[1])
+
+
+def write_raw_goldens(names: list[str]) -> None:
+    """Write exact Python response bytes. Does not rewrite sorted JSON."""
+    if len(_RAW) != len(names):
+        raise SystemExit(f"raw responses {len(_RAW)} != names {len(names)}")
+    from looper.agents.http_server import HTTP_403, HTTP_404, _json_response, _no_content
+    from looper.agents.request_guard import refusal
+
+    raw_dir = HERE / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    for name, raw in zip(names, _RAW):
+        if name == "status" or _status_code(raw) != 200:
+            (raw_dir / f"{name}.http").write_bytes(raw)
+    (raw_dir / "error-not-found.http").write_bytes(
+        _json_response(HTTP_404, {"error": "not found"}))
+    host = refusal({"host": "evil.example:8767"}, bind_host="127.0.0.1")
+    origin = refusal(
+        {"host": "127.0.0.1:8767", "origin": "https://attacker.example"},
+        bind_host="127.0.0.1",
+    )
+    if not host or not origin:
+        raise SystemExit("refusal fixture was allowed")
+    (raw_dir / "error-bad-host.http").write_bytes(_json_response(HTTP_403, {"error": host}))
+    (raw_dir / "error-cross-origin.http").write_bytes(
+        _json_response(HTTP_403, {"error": origin}))
+    (raw_dir / "no-content.http").write_bytes(_no_content())
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db-url", required=True)
+    parser.add_argument(
+        "--raw-only",
+        action="store_true",
+        help="write raw status and non-200 responses; do not rewrite sorted JSON",
+    )
+    args = parser.parse_args()
+    check_db_url(args.db_url)
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    asyncio.run(apply_sql(args.db_url))
+    bodies = asyncio.run(capture(args.db_url))
+    names = _names()
+    if args.raw_only:
+        write_raw_goldens(names)
+        return
     for name in names:
         payload = normalize(bodies[name])
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

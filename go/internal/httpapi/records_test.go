@@ -151,14 +151,14 @@ func TestRecordRoutes(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/agents/usage-agent01/usage?turns=many"))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"turns must be an integer"}` {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "turns must be an integer"}` {
 		t.Fatalf("bad turns %d %s", rr.Code, rr.Body.String())
 	}
 	for _, enc := range []string{"%1C", "%1D", "%1E", "%1F"} {
 		before := len(reads.calls)
 		rr = httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/agents/usage-agent01/usage?turns="+enc+"2"))
-		if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"turns must be an integer"}` || len(reads.calls) != before {
+		if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "turns must be an integer"}` || len(reads.calls) != before {
 			t.Fatalf("turns %s %d %s calls %d", enc, rr.Code, rr.Body.String(), len(reads.calls)-before)
 		}
 	}
@@ -175,19 +175,19 @@ func TestRecordRoutes(t *testing.T) {
 	before := len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records?limit=many"))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 		t.Fatalf("bad limit %d %s calls %v", rr.Code, rr.Body.String(), reads.calls)
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records?offset=1.5"))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` {
 		t.Fatalf("bad offset %d %s", rr.Code, rr.Body.String())
 	}
 	for _, enc := range []string{"%1C", "%1D", "%1E", "%1F"} {
 		before := len(reads.calls)
 		rr = httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records?limit="+enc+"2"))
-		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 			t.Fatalf("limit %s %d %s calls %d", enc, rr.Code, rr.Body.String(), len(reads.calls)-before)
 		}
 	}
@@ -200,7 +200,7 @@ func TestRecordRoutes(t *testing.T) {
 	reads.record = nil
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/01"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"llm record 1 not found"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "llm record 1 not found"}` {
 		t.Fatalf("missing %d %s", rr.Code, rr.Body.String())
 	}
 
@@ -211,7 +211,7 @@ func TestRecordRoutes(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/12/events?after=nope"))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"after and limit must be integers"}` {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "after and limit must be integers"}` {
 		t.Fatalf("bad events %d %s", rr.Code, rr.Body.String())
 	}
 	rr = httptest.NewRecorder()
@@ -244,33 +244,33 @@ func TestRecordIntegerDigitLimit(t *testing.T) {
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/agents/usage-agent01/usage?turns="+past))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"turns must be an integer"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "turns must be an integer"}` || len(reads.calls) != before {
 		t.Fatalf("4301-digit turns %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records?limit="+past))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 		t.Fatalf("4301-digit records limit %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+oversized+"/events?after=nope"))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"after and limit must be integers"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "after and limit must be integers"}` || len(reads.calls) != before {
 		t.Fatalf("oversized id after=nope %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+oversized+"/events?after=1"))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "database unavailable"}` || len(reads.calls) != before {
 		t.Fatalf("oversized id valid after %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/12/events?limit="+past))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"after and limit must be integers"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "after and limit must be integers"}` || len(reads.calls) != before {
 		t.Fatalf("4301-digit events limit %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	before = len(reads.calls)
@@ -282,13 +282,13 @@ func TestRecordIntegerDigitLimit(t *testing.T) {
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+past+"/events?after=nope"))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 		t.Fatalf("4301-digit id %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 	before = len(reads.calls)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/llm-records/"+past))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != before {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != before {
 		t.Fatalf("4301-digit record %d %s calls %d", rr.Code, rr.Body.String(), len(reads.calls)-before)
 	}
 }
@@ -311,14 +311,14 @@ func TestRecordHEADAndEncodedListAreNotFound(t *testing.T) {
 	} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodHead, path))
-		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 			t.Fatalf("HEAD %s %d %s", path, rr.Code, rr.Body.String())
 		}
 	}
 	for _, path := range []string{"/api/llm%2drecords", "/api/llm%2Drecords", "/api/llm%2drecords?limit=1"} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
-		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+		if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 			t.Fatalf("GET %s %d %s", path, rr.Code, rr.Body.String())
 		}
 	}
@@ -355,7 +355,7 @@ func TestRecordDatabaseErrors(t *testing.T) {
 	for _, path := range []string{"/api/agents/usage-agent01/usage", "/api/llm-records/12", "/api/llm-records/12/events"} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, loopbackRequest(http.MethodGet, path))
-		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"database unavailable"}` {
+		if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "database unavailable"}` {
 			t.Fatalf("%s %d %s", path, rr.Code, rr.Body.String())
 		}
 	}

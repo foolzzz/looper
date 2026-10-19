@@ -67,11 +67,11 @@ func TestRequestGuard(t *testing.T) {
 			if tt.reason == "" {
 				return
 			}
-			want := `{"error":"` + tt.reason + `"}`
+			want := `{"error": "` + tt.reason + `"}`
 			if rr.Body.String() != want {
 				t.Fatalf("body %s, want %s", rr.Body.String(), want)
 			}
-			if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+			if ct := rr.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 				t.Fatalf("content type %q", ct)
 			}
 		})

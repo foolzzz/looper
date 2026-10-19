@@ -37,7 +37,7 @@ func TestGateAndRoomRouting(t *testing.T) {
 			before := len(reads.calls)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, loopbackRequest(tt.method, tt.path))
-			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 				t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 			}
 			if len(reads.calls) != before {
@@ -53,10 +53,10 @@ func TestGateAndRoomNilReads(t *testing.T) {
 		path, body string
 		status     int
 	}{
-		{path: "/api/tasks/task-rich00001/gates/g1/messages", status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
-		{path: "/api/tasks/task-rich00001/room", status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
-		{path: "/api/tasks/task-missing01/room?limit=nope", status: http.StatusBadRequest, body: `{"error":"limit must be a whole number"}`},
-		{path: "/api/tasks/task-missing01/room?after=nope", status: http.StatusBadRequest, body: `{"error":"after must be a whole number"}`},
+		{path: "/api/tasks/task-rich00001/gates/g1/messages", status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
+		{path: "/api/tasks/task-rich00001/room", status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
+		{path: "/api/tasks/task-missing01/room?limit=nope", status: http.StatusBadRequest, body: `{"error": "limit must be a whole number"}`},
+		{path: "/api/tasks/task-missing01/room?after=nope", status: http.StatusBadRequest, body: `{"error": "after must be a whole number"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -74,7 +74,7 @@ func TestGateAndRoomResults(t *testing.T) {
 	missing := &recordingReads{gateMessagesErr: db.ErrGateNotFound}
 	rr := httptest.NewRecorder()
 	tailHandler(missing).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-missing01/gates/g1/messages"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"task task-missing01 has no gate g1"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "task task-missing01 has no gate g1"}` {
 		t.Fatalf("gate 404 %d %s", rr.Code, rr.Body.String())
 	}
 	if missing.gateTask != "task-missing01" || missing.gateLabel != "g1" {
@@ -97,7 +97,7 @@ func TestGateAndRoomResults(t *testing.T) {
 	gone := &recordingReads{roomErr: db.ErrNotFound}
 	rr = httptest.NewRecorder()
 	tailHandler(gone).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-missing01/room"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"task not found"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "task not found"}` {
 		t.Fatalf("room 404 %d %s", rr.Code, rr.Body.String())
 	}
 }
@@ -122,9 +122,9 @@ func TestRoomQuery(t *testing.T) {
 		{name: "unanswered last", path: "/api/tasks/task-rich00001/room?unanswered=no&unanswered=true", status: http.StatusOK, want: db.RoomQuery{Unanswered: true, Limit: 500}},
 		{name: "after past int64", path: "/api/tasks/task-rich00001/room?after=" + strings.Repeat("9", pythonIntMaxStrDigits), status: http.StatusOK, want: db.RoomQuery{AfterTooBig: true, Limit: 500}},
 		{name: "limit past int64", path: "/api/tasks/task-rich00001/room?limit=" + strings.Repeat("9", pythonIntMaxStrDigits), status: http.StatusOK, want: db.RoomQuery{Limit: 500}},
-		{name: "file separator", path: "/api/tasks/task-rich00001/room?limit=%1C2", status: http.StatusBadRequest, body: `{"error":"limit must be a whole number"}`, noStore: true},
-		{name: "space", path: "/api/tasks/task-rich00001/room?after=%202", status: http.StatusBadRequest, body: `{"error":"after must be a whole number"}`, noStore: true},
-		{name: "underscore", path: "/api/tasks/task-rich00001/room?limit=1_2", status: http.StatusBadRequest, body: `{"error":"limit must be a whole number"}`, noStore: true},
+		{name: "file separator", path: "/api/tasks/task-rich00001/room?limit=%1C2", status: http.StatusBadRequest, body: `{"error": "limit must be a whole number"}`, noStore: true},
+		{name: "space", path: "/api/tasks/task-rich00001/room?after=%202", status: http.StatusBadRequest, body: `{"error": "after must be a whole number"}`, noStore: true},
+		{name: "underscore", path: "/api/tasks/task-rich00001/room?limit=1_2", status: http.StatusBadRequest, body: `{"error": "limit must be a whole number"}`, noStore: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -157,7 +157,7 @@ func TestRoomDigitLimit(t *testing.T) {
 	raw := strings.Repeat("9", pythonIntMaxStrDigits+1)
 	rr := httptest.NewRecorder()
 	tailHandler(reads).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/tasks/task-rich00001/room?after="+raw))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` {
 		t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 	}
 	if len(reads.calls) != 0 {
@@ -222,12 +222,12 @@ func TestRoomPythonDigits(t *testing.T) {
 			}
 			switch tc.Status {
 			case http.StatusBadRequest:
-				want := `{"error":"` + tc.Key + ` must be a whole number"}`
+				want := `{"error": "` + tc.Key + ` must be a whole number"}`
 				if rr.Body.String() != want || len(reads.calls) != 0 {
 					t.Fatalf("body %s calls %v", rr.Body.String(), reads.calls)
 				}
 			case http.StatusInternalServerError:
-				if rr.Body.String() != `{"error":"internal server error"}` || len(reads.calls) != 0 {
+				if rr.Body.String() != `{"error": "internal server error"}` || len(reads.calls) != 0 {
 					t.Fatalf("body %s calls %v", rr.Body.String(), reads.calls)
 				}
 			case http.StatusOK:

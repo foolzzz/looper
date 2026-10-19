@@ -43,7 +43,7 @@ func TestChatSessionsReportsUndefinedTable(t *testing.T) {
 	logs := captureLogs(t)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/chat/sessions"))
-	const want = `{"error":"the database could not be read (UndefinedTableError)"}`
+	const want = `{"error": "the database could not be read (UndefinedTableError)"}`
 	if rr.Code != http.StatusInternalServerError || rr.Body.String() != want {
 		t.Fatalf("sessions %d %s", rr.Code, rr.Body.String())
 	}

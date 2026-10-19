@@ -1,0 +1,5 @@
+HTTP/1.1 400 Bad Request
+Content-Type: application/json; charset=utf-8
+Content-Length: 41
+
+{"error": "limit must be a whole number"}

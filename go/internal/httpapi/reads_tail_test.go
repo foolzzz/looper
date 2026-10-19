@@ -34,7 +34,7 @@ func TestReadTailRouting(t *testing.T) {
 			before := len(reads.calls)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, loopbackRequest(tt.method, tt.path))
-			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"not found"}` {
+			if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "not found"}` {
 				t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 			}
 			if len(reads.calls) != before {
@@ -52,12 +52,12 @@ func TestReadTailNilReads(t *testing.T) {
 		status     int
 	}{
 		{path: "/api/roles", status: http.StatusOK, body: `{"configs":[]}`},
-		{path: "/api/roles/planner", status: http.StatusNotFound, body: `{"error":"role 'planner' not found"}`},
+		{path: "/api/roles/planner", status: http.StatusNotFound, body: `{"error": "role 'planner' not found"}`},
 		{path: "/api/channel-configs", status: http.StatusOK, body: `{"configs":[]}`},
-		{path: "/api/channel-configs/lark", status: http.StatusNotFound, body: `{"error":"channel 'lark' not found"}`},
-		{path: "/api/gate-settings", status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
-		{path: "/api/projects/proj-alpha0001/role-templates", status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
-		{path: "/api/projects/proj-alpha0001/role-stats?since=nope", status: http.StatusInternalServerError, body: `{"error":"internal server error"}`},
+		{path: "/api/channel-configs/lark", status: http.StatusNotFound, body: `{"error": "channel 'lark' not found"}`},
+		{path: "/api/gate-settings", status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
+		{path: "/api/projects/proj-alpha0001/role-templates", status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
+		{path: "/api/projects/proj-alpha0001/role-stats?since=nope", status: http.StatusInternalServerError, body: `{"error": "internal server error"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -92,7 +92,7 @@ func TestReadTailDatabaseErrors(t *testing.T) {
 		{
 			name: "role get", reads: &recordingReads{roleConfigErr: secret},
 			path: "/api/roles/planner", status: http.StatusNotFound,
-			body:  `{"error":"role 'planner' not found"}`,
+			body:  `{"error": "role 'planner' not found"}`,
 			calls: []string{"role"}, log: "role config",
 		},
 		{
@@ -103,31 +103,31 @@ func TestReadTailDatabaseErrors(t *testing.T) {
 		{
 			name: "channel get", reads: &recordingReads{channelConfigErr: secret},
 			path: "/api/channel-configs/lark", status: http.StatusNotFound,
-			body:  `{"error":"channel 'lark' not found"}`,
+			body:  `{"error": "channel 'lark' not found"}`,
 			calls: []string{"channel"}, log: "channel config",
 		},
 		{
 			name: "gate", reads: &recordingReads{gateErr: secret},
 			path: "/api/gate-settings", status: http.StatusInternalServerError,
-			body:  `{"error":"internal server error"}`,
+			body:  `{"error": "internal server error"}`,
 			calls: []string{"gate"}, log: "gate settings",
 		},
 		{
 			name: "templates", reads: &recordingReads{templatesErr: secret},
 			path:   "/api/projects/proj-alpha0001/role-templates",
-			status: http.StatusInternalServerError, body: `{"error":"internal server error"}`,
+			status: http.StatusInternalServerError, body: `{"error": "internal server error"}`,
 			calls: []string{"templates"}, log: "role templates",
 		},
 		{
 			name: "stats exists", reads: &recordingReads{projectExistsErr: secret},
 			path:   "/api/projects/proj-alpha0001/role-stats?since=nope",
-			status: http.StatusInternalServerError, body: `{"error":"internal server error"}`,
+			status: http.StatusInternalServerError, body: `{"error": "internal server error"}`,
 			calls: []string{"project-exists"}, log: "role stats",
 		},
 		{
 			name: "stats query", reads: &recordingReads{projectOK: true, roleStatsErr: secret},
 			path:   "/api/projects/proj-alpha0001/role-stats",
-			status: http.StatusInternalServerError, body: `{"error":"internal server error"}`,
+			status: http.StatusInternalServerError, body: `{"error": "internal server error"}`,
 			calls: []string{"project-exists", "role-stats"}, log: "role stats",
 		},
 	}
@@ -158,7 +158,7 @@ func TestRoleStatsSince(t *testing.T) {
 	missing := &recordingReads{}
 	rr := httptest.NewRecorder()
 	tailHandler(missing).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/projects/proj-missing01/role-stats?since=nope"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"project 'proj-missing01' not found"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "project 'proj-missing01' not found"}` {
 		t.Fatalf("missing status %d body %s", rr.Code, rr.Body.String())
 	}
 	if strings.Join(missing.calls, ",") != "project-exists" {
@@ -168,7 +168,7 @@ func TestRoleStatsSince(t *testing.T) {
 	bad := &recordingReads{projectOK: true}
 	rr = httptest.NewRecorder()
 	tailHandler(bad).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/projects/proj-alpha0001/role-stats?since=nope"))
-	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error":"since must be a day (YYYY-MM-DD), not 'nope'"}` {
+	if rr.Code != http.StatusBadRequest || rr.Body.String() != `{"error": "since must be a day (YYYY-MM-DD), not 'nope'"}` {
 		t.Fatalf("bad status %d body %s", rr.Code, rr.Body.String())
 	}
 	if strings.Join(bad.calls, ",") != "project-exists" {
@@ -208,7 +208,7 @@ func TestRoleStatsSince(t *testing.T) {
 	long := &recordingReads{projectOK: true}
 	rr = httptest.NewRecorder()
 	tailHandler(long).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/projects/proj-alpha0001/role-stats?since="+longRaw))
-	wantErr := `{"error":"` + sinceError(longRaw) + `"}`
+	wantErr := `{"error": "` + sinceError(longRaw) + `"}`
 	if rr.Code != http.StatusBadRequest || rr.Body.String() != wantErr {
 		t.Fatalf("long status %d body %s, want %s", rr.Code, rr.Body.String(), wantErr)
 	}
@@ -219,14 +219,14 @@ func TestRoleStatsSince(t *testing.T) {
 	quote := &recordingReads{projectOK: true}
 	rr = httptest.NewRecorder()
 	tailHandler(quote).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/projects/proj-alpha0001/role-stats?since="+`bad'day`))
-	if rr.Body.String() != `{"error":"since must be a day (YYYY-MM-DD), not \"bad'day\""}` {
+	if rr.Body.String() != `{"error": "since must be a day (YYYY-MM-DD), not \"bad'day\""}` {
 		t.Fatalf("quote body %s", rr.Body.String())
 	}
 
 	gone := &recordingReads{templatesErr: db.ErrProjectNotFound}
 	rr = httptest.NewRecorder()
 	tailHandler(gone).ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/projects/proj-missing01/role-templates"))
-	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error":"project 'proj-missing01' not found"}` {
+	if rr.Code != http.StatusNotFound || rr.Body.String() != `{"error": "project 'proj-missing01' not found"}` {
 		t.Fatalf("templates status %d body %s", rr.Code, rr.Body.String())
 	}
 	if strings.Contains(logs.String(), "role stats") || strings.Contains(logs.String(), "role templates") {

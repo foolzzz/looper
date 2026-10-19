@@ -36,6 +36,9 @@ import (
 //     and 0.0 match, and two integers above 2^53 stay distinct. Comparison
 //     remarshals both documents with encoding/json, which sorts object keys.
 //
+// When raw/<name>.http exists, the same response is also compared as bytes.
+// That compare does not sort keys, re-encode numbers, or drop fields. See raw.go.
+//
 // The overview clock and the schedule clock are local noon on 2026-06-15, the
 // same day make_goldens.py freezes. Seed rows at 2026-06-15T12:00:00Z count as
 // today. Rows in 2020 do not. A schedule run at 2026-06-14T09:00:00Z is before
@@ -267,6 +270,7 @@ func TestGoldenParity(t *testing.T) {
 			if string(got) != string(want) {
 				t.Fatalf("canonical JSON differs\n got %s\nwant %s", got, want)
 			}
+			compareCaseRaw(t, tc.name, resp, body, false)
 		})
 	}
 
@@ -304,7 +308,7 @@ func TestGoldenParity(t *testing.T) {
 				t.Fatalf("status %d location %q body %s, want %d", resp.StatusCode, resp.Header.Get("Location"), body, tc.status)
 			}
 			if tc.golden == "" {
-				if string(body) != `{"error":"not found"}` {
+				if string(body) != `{"error": "not found"}` {
 					t.Fatalf("body %s", body)
 				}
 				return
@@ -319,6 +323,62 @@ func TestGoldenParity(t *testing.T) {
 				t.Fatalf("canonical JSON differs\n got %s\nwant %s", got, want)
 			}
 		})
+	}
+
+	// These are not goldenCases. The 403 Host is set explicitly: the test
+	// server's port is not 8767, and the golden uses the header value.
+	live := []struct {
+		name   string
+		path   string
+		host   string
+		origin string
+	}{
+		{name: "error-not-found", path: "/api/no-such-route"},
+		{name: "error-bad-host", path: "/api/status", host: "evil.example:8767"},
+		{name: "error-cross-origin", path: "/api/status", host: "127.0.0.1:8767", origin: "https://attacker.example"},
+	}
+	for _, tc := range live {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, srv.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.host != "" {
+				req.Host = tc.host
+			}
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareCaseRaw(t, tc.name, resp, body, true)
+		})
+	}
+}
+
+func compareCaseRaw(t *testing.T, name string, resp *http.Response, body []byte, required bool) {
+	t.Helper()
+	dir := filepath.Join("..", "..", "testdata", "parity", "raw")
+	golden, err := os.ReadFile(filepath.Join(dir, name+".http"))
+	if err != nil {
+		if os.IsNotExist(err) && !required {
+			return
+		}
+		t.Fatal(err)
+	}
+	paths, err := readPointerFile(filepath.Join(dir, name+".paths"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CompareRaw(resp, body, golden, paths); err != nil {
+		t.Fatalf("raw: %v", err)
 	}
 }
 

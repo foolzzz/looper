@@ -101,7 +101,7 @@ func TestGateSettingsTruthyConfigIs500(t *testing.T) {
 	srv.Reads = db.NewStore(sqlDB)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, loopbackRequest(http.MethodGet, "/api/gate-settings"))
-	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error":"internal server error"}` {
+	if rr.Code != http.StatusInternalServerError || rr.Body.String() != `{"error": "internal server error"}` {
 		t.Fatalf("gate settings %d %s", rr.Code, rr.Body.String())
 	}
 }
