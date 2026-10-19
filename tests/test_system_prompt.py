@@ -307,8 +307,11 @@ def test_vault_section_follows_task_and_room_and_has_its_own_hash(defined_role: 
         builder = build_system_prompt
         arguments.update(role_id="worker", role="Do work.", recommended=False)
     original = builder(**arguments)
-    assert builder(**arguments, vault="").text == original.text
+    empty_vault = builder(**arguments, vault="")
+    assert empty_vault.text == original.text
+    assert empty_vault.layers == original.layers
     assert "vault" not in original.layers
+    assert "vault" not in empty_vault.layers
     section = "## Knowledge vault\nRead earlier notes."
     prompt = builder(**arguments, vault=f" \n{section}\n ")
     assert prompt.text.index("## Task") < prompt.text.index(section) < prompt.text.index(WORK_CONTRACT)

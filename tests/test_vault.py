@@ -23,7 +23,9 @@ def git(root: Path, *args: str) -> str:
 
 
 @pytest.fixture
-def config(tmp_path: Path) -> vault.VaultConfig:
+def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> vault.VaultConfig:
+    # Use stock Git: local patched builds may automatically remove a competing index.lock.
+    monkeypatch.setenv("PATH", os.defpath + os.pathsep + os.environ.get("PATH", ""))
     root = tmp_path / "vault"
     (root / "codex-mem").mkdir(parents=True)
     (root / "mine").mkdir()
@@ -59,9 +61,21 @@ def test_config_refuses_symlinks_leaving_root(config: vault.VaultConfig, field: 
     outside = config.path.parent / "outside"
     (outside / "rules.md").write_text("outside")
     (config.path / "escape").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match="leaves the vault"):
+    with pytest.raises(ValueError, match="symbolic link" if field == "writable" else "leaves the vault"):
         vault.check_config({"path": str(config.path), field: ["escape"] if field == "writable"
                            else "escape/rules.md"})
+
+
+@pytest.mark.parametrize("folder", ["inner", "via/sub"])
+def test_config_refuses_a_writable_folder_through_a_link_inside_the_vault(
+    config: vault.VaultConfig, folder: str,
+) -> None:
+    # Writes walk real folders only, so a link is refused when the setting is saved, not at the first write.
+    (config.path / "codex-mem/sub").mkdir()
+    (config.path / "inner").symlink_to(config.path / "codex-mem", target_is_directory=True)
+    (config.path / "via").symlink_to(config.path / "codex-mem", target_is_directory=True)
+    with pytest.raises(ValueError, match=f"writable folder {folder} is or passes through a symbolic link"):
+        vault.check_config({"path": str(config.path), "writable": [folder]})
 
 
 def test_config_normalizes_and_resolves(config: vault.VaultConfig) -> None:
@@ -197,10 +211,10 @@ def test_concurrent_writes_with_one_sha_make_exactly_one_commit(config: vault.Va
     entered, release = threading.Event(), threading.Event()
     original = vault.os.replace
 
-    def paused(source, target):
+    def paused(source, target, **kwargs):
         entered.set()
         assert release.wait(timeout=5)
-        original(source, target)
+        original(source, target, **kwargs)
 
     monkeypatch.setattr(vault.os, "replace", paused)
 
@@ -225,7 +239,7 @@ def test_replace_failure_leaves_original_and_no_tempfile(config: vault.VaultConf
                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     first = write(config)
 
-    def fail(*args: object) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
         raise OSError("replace failed")
 
     monkeypatch.setattr(vault.os, "replace", fail)
@@ -286,7 +300,8 @@ def test_tool_descriptions_and_guides_are_the_model_contract(config: vault.Vault
 
     assert [t.description for t in tools.TOOLS] == [
         "Search the operator's knowledge vault (Markdown notes): every word of query, in any case, in a note's "
-        "path or text. Up to limit paths (relative to the vault), most hits first, each with a snippet.",
+        "path or text. Up to limit paths (relative to the vault), most hits first, each with a snippet. "
+        "Each vault call re-checks that this task's project still has the vault on.",
         "Read a file of the knowledge vault by its path (relative to the vault): its text (the first 64 KiB) "
         "and the sha256 of the whole file, which looper_vault_write needs to change it.",
         "Write a Markdown note (its whole text) in a writable folder of the knowledge vault. expected_sha256: "
@@ -312,21 +327,23 @@ def test_tool_descriptions_and_guides_are_the_model_contract(config: vault.Vault
 
 def test_cancelled_write_keeps_the_lock_until_the_file_thread_finishes(config: vault.VaultConfig,
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import AsyncMock
+    from unittest.mock import Mock
 
     entered, release = threading.Event(), threading.Event()
     original = vault.os.replace
     replacements: list[str] = []
 
-    def paused(source, target):
-        replacements.append(Path(source).read_text())
+    def paused(source, target, **kwargs):
+        fd = os.open(source, os.O_RDONLY, dir_fd=kwargs["src_dir_fd"])
+        with os.fdopen(fd, "r") as stream:
+            replacements.append(stream.read())
         if len(replacements) == 1:
             entered.set()
             assert release.wait(timeout=5)
-        original(source, target)
+        original(source, target, **kwargs)
 
     monkeypatch.setattr(vault.os, "replace", paused)
-    monkeypatch.setattr(vault, "_git_root", AsyncMock(return_value=None))
+    monkeypatch.setattr(vault, "_git_root_sync", Mock(return_value=None))
 
     async def race() -> None:
         first = asyncio.create_task(vault.write(config, "codex-mem/race.md", "first", None, "why",
@@ -347,3 +364,322 @@ def test_cancelled_write_keeps_the_lock_until_the_file_thread_finishes(config: v
         assert caught.value.code is ErrorCode.CONFLICT
 
     asyncio.run(race())
+
+
+@pytest.mark.parametrize(("name", "operator_name"), [
+    ("a*.md", "ab.md"), ("a?.md", "ab.md"), ("[ab].md", "a.md"),
+])
+def test_git_pathspec_magic_names_commit_only_the_literal_note(
+        config: vault.VaultConfig, name: str, operator_name: str) -> None:
+    operator = config.path / "codex-mem" / operator_name
+    operator.write_text("original")
+    git(config.path, "add", "--", f"codex-mem/{operator_name}")
+    git(config.path, "-c", "commit.gpgsign=false", "commit", "-qm", "operator baseline")
+    operator.write_text("operator's uncommitted change")
+
+    result = write(config, f"codex-mem/{name}")
+
+    assert result["commit"]
+    assert git(config.path, "show", "--name-only", "--format=", "HEAD") == f"codex-mem/{name}"
+    assert git(config.path, "status", "--porcelain") == f"M codex-mem/{operator_name}"
+    assert git(config.path, "diff", "--cached", "--name-only") == ""
+    assert git(config.path, "diff", "--name-only") == f"codex-mem/{operator_name}"
+    assert git(config.path, "show", f"HEAD:codex-mem/{operator_name}") == "original"
+    assert operator.read_text() == "operator's uncommitted change"
+
+
+@pytest.mark.parametrize("hidden", [".git/config", ".obsidian/x.md"])
+def test_read_refuses_symlink_to_a_hidden_resolved_path(config: vault.VaultConfig, hidden: str) -> None:
+    target = config.path / hidden
+    if hidden.startswith(".obsidian"):
+        target.parent.mkdir()
+        target.write_text("synthetic private settings")
+    (config.path / "codex-mem/leak.md").symlink_to(target)
+    with pytest.raises(OpError, match="points into a hidden path") as caught:
+        asyncio.run(vault.read(config, "codex-mem/leak.md"))
+    assert caught.value.code is ErrorCode.FORBIDDEN
+
+
+def test_write_refuses_parent_swapped_for_symlink_at_fd_open(
+        config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = config.path / "codex-mem/sub"
+    parent.mkdir()
+    outside = config.path.parent / "outside"
+    original_open = os.open
+    swapped = False
+
+    def swap_and_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == "sub" and dir_fd is not None and not swapped:
+            swapped = True
+            parent.rename(parent.with_name("original-sub"))
+            parent.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(vault.os, "open", swap_and_open)
+    with pytest.raises(OpError) as caught:
+        write(config, "codex-mem/sub/new.md")
+    assert caught.value.code is ErrorCode.FORBIDDEN
+    assert swapped, "the race must run at the directory-fd walk, after initial validation"
+    assert not (outside / "new.md").exists()
+    assert not (parent.with_name("original-sub") / "new.md").exists()
+
+
+def test_write_refuses_saved_writable_folder_replaced_with_internal_symlink(config: vault.VaultConfig) -> None:
+    folder = config.path / "codex-mem"
+    folder.rename(config.path / "original-codex-mem")
+    folder.symlink_to(config.path / "mine", target_is_directory=True)
+    with pytest.raises(OpError) as caught:
+        write(config)
+    assert caught.value.code is ErrorCode.FORBIDDEN
+    assert not (config.path / "mine/new.md").exists()
+
+
+def test_write_refuses_parent_symlink_without_writing_outside(config: vault.VaultConfig) -> None:
+    outside = config.path.parent / "outside"
+    (config.path / "codex-mem/sub").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OpError) as caught:
+        write(config, "codex-mem/sub/new.md")
+    assert caught.value.code is ErrorCode.FORBIDDEN
+    assert list(outside.iterdir()) == []
+
+
+def test_writes_from_separate_event_loops_share_one_transaction_lock(
+        config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = write(config)
+    barrier = threading.Barrier(3)
+    entered, release, contenders = threading.Event(), threading.Event(), threading.Event()
+    original_replace = os.replace
+    results: list[dict | BaseException] = []
+    mutex, attempts_mutex = threading.Lock(), threading.Lock()
+    attempts = 0
+
+    class ObservedLock:
+        def __enter__(self):
+            nonlocal attempts
+            with attempts_mutex:
+                attempts += 1
+                if attempts == 2:
+                    contenders.set()
+            mutex.acquire()
+            return self
+
+        def __exit__(self, *args):
+            mutex.release()
+
+    monkeypatch.setitem(vault._LOCKS, str(config.path), ObservedLock())
+
+    def paused_replace(source, target, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original_replace(source, target, **kwargs)
+
+    def writer(content: str) -> None:
+        try:
+            barrier.wait(timeout=5)
+            results.append(write(config, content=content, expected=first["sha256"]))
+        except BaseException as exc:
+            results.append(exc)
+
+    monkeypatch.setattr(vault.os, "replace", paused_replace)
+    threads = [threading.Thread(target=writer, args=(text,), daemon=True) for text in ("one", "two")]
+    for thread in threads:
+        thread.start()
+    try:
+        barrier.wait(timeout=5)
+        assert entered.wait(5)
+        assert contenders.wait(5), "both event loops must reach the same transaction lock"
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+    assert not any(thread.is_alive() for thread in threads), "writers must finish across independent event loops"
+    successes = [result for result in results if isinstance(result, dict)]
+    errors = [result for result in results if isinstance(result, OpError)]
+    assert len(successes) == 1, results
+    assert len(errors) == 1 and errors[0].code is ErrorCode.CONFLICT, results
+    assert successes[0]["commit"]
+    assert git(config.path, "rev-list", "--count", f"{first['commit']}..HEAD") == "1"
+
+
+def test_git_index_lock_released_during_retry_commits(
+        config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock = config.path / ".git/index.lock"
+    lock.write_text("synthetic competing git operation")
+    timer = threading.Timer(0.3, lambda: lock.unlink(missing_ok=True))
+    original_run = subprocess.run
+    started = False
+    failed_attempts = 0
+
+    def record_run(args, **kwargs):
+        nonlocal started, failed_attempts
+        result = original_run(args, **kwargs)
+        if "add" in args and result.returncode and "index.lock" in result.stderr:
+            failed_attempts += 1
+            if not started:
+                # Start only after Git really encounters the lock, independent of process startup speed.
+                started = True
+                timer.start()
+        return result
+
+    monkeypatch.setattr(vault.subprocess, "run", record_run)
+    try:
+        result = write(config)
+    finally:
+        if started:
+            timer.cancel()
+            timer.join(timeout=5)
+        lock.unlink(missing_ok=True)
+    assert started and failed_attempts >= 1, "a real index.lock failure must precede a successful retry"
+    assert result["commit"] == git(config.path, "rev-parse", "HEAD"), result.get("note")
+    assert git(config.path, "show", "--name-only", "--format=", "HEAD") == "codex-mem/new.md"
+
+
+def test_git_index_lock_held_through_retries_keeps_written_note(config: vault.VaultConfig) -> None:
+    head = git(config.path, "rev-parse", "HEAD")
+    lock = config.path / ".git/index.lock"
+    lock.write_text("synthetic competing git operation")
+    try:
+        result = write(config)
+    finally:
+        lock.unlink(missing_ok=True)
+    assert result["commit"] is None, result
+    assert result["git_exit"] != 0 and "index.lock" in result["note"]
+    assert git(config.path, "rev-parse", "HEAD") == head
+    assert (config.path / "codex-mem/new.md").read_text() == "new note"
+
+
+@pytest.mark.parametrize("command", ["add", "commit"])
+def test_git_index_lock_retries_exactly_three_times(
+        config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fail(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 128, "", "fatal: unable to create index.lock")
+
+    monkeypatch.setattr(vault.subprocess, "run", fail)
+    monkeypatch.setattr(vault.time, "sleep", sleeps.append)
+    with pytest.raises(subprocess.CalledProcessError):
+        vault._git(config.path, command, "--", "codex-mem/new.md")
+    assert len(calls) == 3
+    assert sleeps == [0.25, 0.5]
+
+
+@pytest.mark.parametrize(("command", "stderr"), [
+    ("add", "synthetic ordinary failure"), ("rev-parse", "synthetic index.lock failure"),
+])
+def test_git_does_not_retry_other_failures(
+        config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch, command: str, stderr: str) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fail(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1, "", stderr)
+
+    monkeypatch.setattr(vault.subprocess, "run", fail)
+    monkeypatch.setattr(vault.time, "sleep", sleeps.append)
+    with pytest.raises(subprocess.CalledProcessError):
+        vault._git(config.path, command)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_search_stops_at_total_byte_cap(config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    for number in range(10):
+        (config.path / "mine" / f"note-{number}.md").write_text("searchbudgetword " * 30)
+    baseline = asyncio.run(vault.search(config, "searchbudgetword"))
+    assert baseline["matches"] == 10 and not baseline["truncated"]
+    monkeypatch.setattr(vault, "SEARCH_MAX_BYTES", 300)
+    result = asyncio.run(vault.search(config, "searchbudgetword"))
+    assert result["truncated"]
+    assert 0 < result["scanned"] < baseline["scanned"]
+
+
+def test_search_stops_at_elapsed_time_cap(config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    (config.path / "mine/note.md").write_text("searchbudgetword")
+    assert asyncio.run(vault.search(config, "searchbudgetword"))["matches"] == 1
+    monkeypatch.setattr(vault, "SEARCH_MAX_SECONDS", 0)
+    result = asyncio.run(vault.search(config, "searchbudgetword"))
+    assert result["truncated"] and result["scanned"] == 0 and result["results"] == []
+
+
+def test_search_and_read_exclude_temporary_notes(config: vault.VaultConfig) -> None:
+    (config.path / "codex-mem/.looper-1.tmp").write_text("syntheticsecret")
+    (config.path / "codex-mem/.looper-1.tmp.md").write_text("syntheticsecret")
+    (config.path / "mine/visible.md").write_text("syntheticsecret")
+    result = asyncio.run(vault.search(config, "syntheticsecret"))
+    assert [entry["path"] for entry in result["results"]] == ["mine/visible.md"]
+    for name in (".looper-1.tmp", ".looper-1.tmp.md"):
+        with pytest.raises(OpError) as caught:
+            asyncio.run(vault.read(config, f"codex-mem/{name}"))
+        assert caught.value.code is ErrorCode.INVALID
+
+
+def test_git_uses_literal_pathspecs_and_the_allowed_child_environment(
+        config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper import child_env
+
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "LOOPER_DATABASE_URL", "PGPASSWORD",
+                 "VAULT_SYNTHETIC_SECRET"):
+        monkeypatch.setenv(name, "synthetic-private-value")
+    calls: list[tuple[list[str], dict]] = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "synthetic output\n", "")
+
+    monkeypatch.setattr(vault.subprocess, "run", run)
+    assert vault._git(config.path, "add", "--", "codex-mem/a*.md") == "synthetic output"
+    args, kwargs = calls[0]
+    assert args == ["git", "--literal-pathspecs", "-C", str(config.path), "add", "--", "codex-mem/a*.md"]
+    assert kwargs == {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True,
+                      "env": {**child_env.inherited(), "GIT_TERMINAL_PROMPT": "0"},
+                      "timeout": vault.GIT_TIMEOUT_SECONDS, "check": False}
+    assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "LOOPER_DATABASE_URL", "PGPASSWORD",
+                "VAULT_SYNTHETIC_SECRET"} & kwargs["env"].keys()
+
+
+@pytest.mark.parametrize("failure", [None, "fdopen_read", "fdopen_write", "fsync", "fchmod", "replace"])
+def test_fd_write_closes_every_descriptor_and_cleans_temporary_files(
+        config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch, failure: str | None) -> None:
+    import errno
+
+    path = "codex-mem/nested/deeper/note.md"
+    first = write(config, path, "original")
+    opened: list[int] = []
+    original_open, original_fdopen = os.open, os.fdopen
+
+    def tracking_open(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def fail(*args, **kwargs):
+        raise OSError("synthetic fd failure")
+
+    def fdopen(fd, mode, *args, **kwargs):
+        if failure == f"fdopen_{'read' if mode == 'rb' else 'write'}":
+            fail()
+        return original_fdopen(fd, mode, *args, **kwargs)
+
+    monkeypatch.setattr(vault.os, "open", tracking_open)
+    monkeypatch.setattr(vault.os, "fdopen", fdopen)
+    if failure in ("fsync", "fchmod", "replace"):
+        monkeypatch.setattr(vault.os, failure, fail)
+    if failure:
+        with pytest.raises(OSError, match="synthetic fd failure"):
+            write(config, path, "changed", first["sha256"])
+    else:
+        result = write(config, path, "changed", first["sha256"])
+        assert result["commit"] and (config.path / path).read_text() == "changed"
+    assert len(opened) >= 5, "root, writable, nested parents and current note must all be opened"
+    for fd in set(opened):
+        with pytest.raises(OSError) as caught:
+            os.fstat(fd)
+        assert caught.value.errno == errno.EBADF
+    assert not list(config.path.rglob(".looper-*.tmp"))
+    if failure:
+        assert (config.path / path).read_text() == "original"

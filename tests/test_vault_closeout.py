@@ -68,6 +68,41 @@ def test_vault_closeout_asks_once_and_records_it(tmp_path: Path, monkeypatch: py
     agent._activity.assert_awaited_once_with("phase", "Vault closeout: kept the build quirk")
 
 
+@pytest.mark.parametrize("ending", ["closeout", "fail_plan"])
+@pytest.mark.parametrize("failed_turn", [False, True])
+def test_repeated_endings_ask_for_vault_closeout_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str, failed_turn: bool,
+) -> None:
+    agent, plan, _ = _agent(tmp_path, monkeypatch)
+    if failed_turn:
+        agent._ask.side_effect = planner.PlannerTurnError("the vault turn failed")
+    agent._bus = SimpleNamespace(publish=AsyncMock())
+    agent._save = AsyncMock()
+    monkeypatch.setattr(planner, "update_task_phase", AsyncMock())
+
+    async def finish_twice() -> None:
+        for _ in range(2):
+            if ending == "fail_plan":
+                await agent._fail_plan(plan, reason="build broke")
+            else:
+                await agent._vault_closeout(plan, "completed")
+
+    asyncio.run(finish_twice())
+    agent._ask.assert_awaited_once()
+    assert agent._ask.await_args.args[0] is protocol.TurnKind.VAULT
+
+
+def test_a_restarted_tasks_new_planner_gets_its_own_vault_closeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, plan, _ = _agent(tmp_path, monkeypatch)
+    asyncio.run(first._vault_closeout(plan, "failed: build broke"))
+    restarted, _, _ = _agent(tmp_path, monkeypatch)
+    asyncio.run(restarted._vault_closeout(plan, "completed"))
+    first._ask.assert_awaited_once()
+    restarted._ask.assert_awaited_once()
+
+
 @pytest.mark.parametrize("skip", ["no_ops", "no_token", "project_off", "not_configured", "read_only"])
 def test_vault_closeout_skips_without_write_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                        skip: str) -> None:

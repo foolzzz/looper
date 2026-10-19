@@ -26,7 +26,7 @@ TOOLS: tuple[Tool, ...] = (
         name=SEARCH,
         description="Search the operator's knowledge vault (Markdown notes): every word of query, in any case, "
                     "in a note's path or text. Up to limit paths (relative to the vault), most hits first, each "
-                    "with a snippet.",
+                    "with a snippet. Each vault call re-checks that this task's project still has the vault on.",
         schema={"type": "object", "required": ["query"], "additionalProperties": False, "properties": {
             "query": {"type": "string", "minLength": 1},
             "limit": {"type": "integer", "minimum": 1, "maximum": 30},
@@ -95,7 +95,14 @@ async def run_tool(config: VaultConfig, name: str, arguments: Mapping[str, Any],
         if not result.get("unchanged"):
             usage.written_bytes += result["bytes"]
             commit = result.get("commit")
-            detail = f"commit {commit[:12]}" if commit else f"not committed: {result.get('note', 'no commit')}"
+            if commit:
+                detail = f"commit {commit[:12]}"
+            elif result.get("git_status") == "timed_out":
+                detail = "not committed: git timed out"
+            elif result.get("git_status") == "not_repository":
+                detail = "not committed: not a git repository"
+            else:
+                detail = f"not committed: commit failed, git exit {result.get('git_exit')}"
             await _activity(task_id, worker,
                             f"Vault: {who} wrote {result['path']} ({detail}): {arguments['reason'].strip()}")
         return result

@@ -746,6 +746,7 @@ class PlannerAgent:
         # read the knowledge keeps it, as a failed project read keeps the last project.
         self._knowledge: AgentKnowledge | None = None
         self._vault: VaultConfig | None = None
+        self._vault_closed = False
         # The installed items the last turn ran with, kept the same way when a turn cannot read them.
         self._library: AgentLibrary | None = None
         # The agent settings the last turn ran with, kept the same way when a turn cannot read them.
@@ -3466,7 +3467,12 @@ class PlannerAgent:
         return cap if spent >= cap else None
 
     async def _vault_closeout(self, plan: TaskPlan, ended: str) -> None:
-        """Keep lasting notes when a task ends; any problem only adds a warning to its activity."""
+        """Keep lasting notes once per Planner; any problem only adds a warning to its activity.
+
+        A task restarted later has a new Planner, whose own ending gets its own closeout.
+        """
+        if self._vault_closed:
+            return
         try:
             if self._ops is None or self._token is None or not (await self._read_execution()).vault_on:
                 return
@@ -3485,6 +3491,7 @@ class PlannerAgent:
             if problem:
                 await self._activity("error", f"Warning: {problem}"[:500])
             try:
+                self._vault_closed = True
                 line = await self._ask(TurnKind.VAULT, self._vault_message(plan, ended, config, rules), parse_vault)
             except PlannerTurnError as exc:
                 await self._activity("error", f"Warning: the Planner's vault closeout failed: {exc}"[:500])

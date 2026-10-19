@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from looper import child_env
 from tests.test_room_db import BACKEND, _room, _room_task
 from tests.test_usage_api_db import DSN, _run
 
@@ -157,6 +158,7 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
 '''
     seen = tmp_path / "seen.json"
     monkeypatch.setenv("SEEN", str(seen))
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"SEEN"})
 
     async def test(pool: Any) -> None:
         await _room_task(pool, room="off", vault=enabled, operator_notes="off")
@@ -194,5 +196,110 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
         if enabled == "on":
             mcp_path = record["argv"][record["argv"].index("--mcp-config") + 1]
             assert not Path(mcp_path).exists()
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize(("configured", "enabled"), [(True, "off"), (False, "on"), (False, "off")])
+def test_vault_off_worker_prompt_and_argv_match_the_unconfigured_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, configured: bool, enabled: str,
+) -> None:
+    from looper.agents import vault
+    from looper.agents.bus import MessageBus
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.ops.room import RoomOps
+    from looper.agents.room import RoomService
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+    from tests.fake_claude import fake_claude
+    from tests.test_task_agents_db import _until
+
+    body = '''
+import json, os, sys
+flag = next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in sys.argv)
+record = {"argv": sys.argv[1:], "prompt": open(sys.argv[sys.argv.index(flag) + 1]).read()}
+open(os.environ["SEEN"], "w").write(json.dumps(record))
+json.loads(sys.stdin.readline())
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                  "result": json.dumps({"status": "completed", "changed_files": {}, "summary": "done"})}), flush=True)
+'''
+    seen = tmp_path / "seen.json"
+    monkeypatch.setenv("SEEN", str(seen))
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"SEEN"})
+    claude = fake_claude(tmp_path / "claude", body)
+
+    async def run_worker() -> dict[str, Any]:
+        bus = MessageBus(runtime_root=tmp_path)
+        workers = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=tmp_path / "runtime")
+        workers.room_ops = RoomOps(RoomService(worker_pool=workers), url="http://127.0.0.1:9")
+        results: list[MessageEnvelope] = []
+        bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+        await workers.start(bus)
+        await asyncio.sleep(0)
+        try:
+            await bus.publish(MessageEnvelope.create(
+                source=planner_address("task-r"), target=worker_address("worker-2"), message_type=MessageType.WORK_ITEM,
+                payload={"task_id": "step-s2", "parent_task_id": "task-r", "step_key": "s2", "instruction": "do it",
+                         "context": {"work_dir": str(tmp_path / "work")}}))
+            await _until(lambda: results, "the run's result", seconds=30)
+        finally:
+            await workers.stop()
+            await bus.shutdown()
+        assert results[0].payload["status"] == "completed", results[0].payload
+        return json.loads(seen.read_text())
+
+    async def test(pool: Any) -> None:
+        project = await _room_task(pool, room="off", vault="off", operator_notes="off")
+        (tmp_path / "work").mkdir()
+        baseline = await run_worker()
+        if configured:
+            await vault.update_settings({"path": str(_vault_path(tmp_path)), "writable": ["codex-mem"]})
+        await pool.execute("UPDATE projects SET vault = $2 WHERE id = $1", project["id"], enabled)
+        record = await run_worker()
+        assert record["prompt"] == baseline["prompt"]
+        assert "Knowledge vault" not in record["prompt"]
+        assert "Knowledge vault" not in baseline["prompt"]
+        assert "--mcp-config" not in record["argv"]
+        assert "--mcp-config" not in baseline["argv"]
+
+    _run(test, monkeypatch)
+
+
+def test_concurrent_planner_vault_calls_commit_once_and_record_one_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents import vault
+    from looper.agents.ops.planner import PlannerOps
+    from tests.test_vault import git
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool, room="off", vault="on")
+        root = _vault_path(tmp_path)
+        git(root, "init")
+        git(root, "config", "user.name", "Vault Tester")
+        git(root, "config", "user.email", "vault@example.test")
+        note = root / "codex-mem/build.md"
+        note.write_text("initial synthetic note")
+        git(root, "add", "--", "codex-mem/build.md")
+        git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "initial note")
+        before = git(root, "rev-parse", "HEAD")
+        await vault.update_settings({"path": str(root), "writable": ["codex-mem"]})
+        config = await vault.active()
+        expected = (await vault.read(config, "codex-mem/build.md"))["sha256"]
+        ops = PlannerOps(SimpleNamespace(), url="http://127.0.0.1:9")
+        token = ops.issue("task-r")
+        header = f"Bearer {token}"
+        ops.begin_turn(token)
+        args = {"path": "codex-mem/build.md", "expected_sha256": expected, "reason": "keep build note"}
+        try:
+            results = await asyncio.gather(*(ops.call(header, "looper_vault_write", {**args, "content": text})
+                                             for text in ("first synthetic note", "second synthetic note")))
+        finally:
+            ops.end_turn(token)
+            ops.revoke(token)
+        assert sum(result["status"] == "ok" for result in results) == 1, results
+        assert sum(result.get("error", {}).get("code") == "conflict" for result in results) == 1, results
+        assert git(root, "rev-list", "--count", f"{before}..HEAD") == "1"
+        rows = await pool.fetch("SELECT summary FROM activity WHERE task_id = 'task-r'")
+        assert sum(row["summary"].startswith("Vault: planner wrote") for row in rows) == 1
 
     _run(test, monkeypatch)

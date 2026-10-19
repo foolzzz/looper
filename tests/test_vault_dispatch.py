@@ -170,7 +170,7 @@ def test_activity_failure_does_not_undo_a_real_write_or_its_budget(
 
     async def run() -> None:
         (tmp_path / "codex-mem").mkdir()
-        monkeypatch.setattr(vault, "_git_root", AsyncMock(return_value=None))
+        monkeypatch.setattr(vault, "_git_root_sync", lambda root: None)
         record = AsyncMock(side_effect=RuntimeError("activity is unavailable"))
         monkeypatch.setattr(activity, "insert_activity", record)
         usage = tools.VaultUsage()
@@ -225,3 +225,90 @@ def test_cancelling_a_write_waits_for_its_budget_and_activity_before_returning(
             "task-1", "planner-task-1", "Vault: planner wrote codex-mem/build.md (commit aaaaaaaaaaaa): keep note")
 
     asyncio.run(run())
+
+
+def test_git_hook_output_stays_out_of_task_activity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents import vault
+    from looper.agents.ops import vault as tools
+    from looper.db import activity
+    from tests.test_vault import git
+
+    root = tmp_path / "vault"
+    (root / "codex-mem").mkdir(parents=True)
+    git(root, "init")
+    git(root, "config", "user.name", "Vault Tester")
+    git(root, "config", "user.email", "vault@example.test")
+    hook = root / ".git/hooks/pre-commit"
+    first_line = "SECRET-123" + "x" * 300
+    hook.write_text(f"#!/bin/sh\necho {first_line} >&2\necho second-line >&2\nexit 1\n")
+    hook.chmod(0o755)
+    record = AsyncMock()
+    monkeypatch.setattr(activity, "insert_activity", record)
+    usage = tools.VaultUsage()
+    result = asyncio.run(tools.run_tool(
+        vault.check_config({"path": str(root), "writable": ["codex-mem"]}), tools.WRITE,
+        {"path": "codex-mem/build.md", "content": "synthetic note", "reason": "keep note"},
+        task_id="task-1", who="planner", worker="planner-task-1", usage=usage))
+    assert result["commit"] is None and result["git_exit"] == 1
+    assert result["note"] == "written, but the commit failed: " + first_line[:200]
+    assert "second-line" not in result["note"]
+    record.assert_awaited_once()
+    summary = record.await_args.kwargs["summary"]
+    assert "SECRET-123" not in summary
+    assert "(not committed: commit failed, git exit 1)" in summary
+    assert usage.written_bytes == len("synthetic note")
+
+
+@pytest.mark.parametrize(("state", "detail"), [
+    ("timed_out", "git timed out"), ("not_repository", "not a git repository"),
+])
+def test_uncommitted_activity_uses_fixed_state_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str, detail: str,
+) -> None:
+    from looper.agents import vault
+    from looper.agents.ops import vault as tools
+    from looper.db import activity
+
+    monkeypatch.setattr(vault, "write", AsyncMock(return_value={
+        "path": "codex-mem/build.md", "bytes": 4, "commit": None,
+        "git_status": state, "note": "SECRET-123",
+    }))
+    record = AsyncMock()
+    monkeypatch.setattr(activity, "insert_activity", record)
+    asyncio.run(tools.run_tool(
+        vault.VaultConfig(tmp_path, ("codex-mem",), None), tools.WRITE,
+        {"path": "codex-mem/build.md", "content": "note", "reason": "keep note"},
+        task_id="task-1", who="planner", worker="planner-task-1", usage=tools.VaultUsage()))
+    assert record.await_args.kwargs["summary"] == (
+        f"Vault: planner wrote codex-mem/build.md (not committed: {detail}): keep note")
+
+
+@pytest.mark.parametrize("phase", ["root", "add"])
+def test_git_timeout_keeps_the_written_note_and_records_only_timeout_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase: str,
+) -> None:
+    import subprocess
+
+    from looper.agents import vault
+    from looper.agents.ops import vault as tools
+    from looper.db import activity
+
+    (tmp_path / "notes").mkdir()
+    if phase == "add":
+        monkeypatch.setattr(vault, "_git_root_sync", lambda root: root)
+
+    def timeout(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, vault.GIT_TIMEOUT_SECONDS, stderr="SECRET-123")
+
+    monkeypatch.setattr(vault.subprocess, "run", timeout)
+    record = AsyncMock()
+    monkeypatch.setattr(activity, "insert_activity", record)
+    result = asyncio.run(tools.run_tool(
+        vault.VaultConfig(tmp_path, ("notes",), None), tools.WRITE,
+        {"path": "notes/build.md", "content": "note", "reason": "keep note"},
+        task_id="task-1", who="planner", worker="planner-task-1", usage=tools.VaultUsage()))
+    assert (tmp_path / "notes/build.md").read_text() == "note"
+    assert result["commit"] is None and result["git_status"] == "timed_out"
+    assert "SECRET-123" not in result["note"]
+    assert record.await_args.kwargs["summary"] == (
+        "Vault: planner wrote notes/build.md (not committed: git timed out): keep note")

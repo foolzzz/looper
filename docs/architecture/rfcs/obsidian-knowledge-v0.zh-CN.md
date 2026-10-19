@@ -51,7 +51,8 @@
 
 - `path` 是绝对路径、存在、是目录；存的是解析后的真实路径；
 - `writable` 每一项是知识库里的相对路径：不空、不是绝对路径、没有 `..`、没有以 `.` 开头的部分（`.git`、`.obsidian`），
-  存在且是目录，解析后（跟随符号链接）仍在知识库里；去掉末尾的 `/`，不重复；空列表即只读；
+  存在且是目录，自己不是、路径上也不经过符号链接（写入只走真实目录，所以保存时就拒绝），解析后仍在知识库里；去掉末尾的
+  `/`，不重复；空列表即只读；
 - `rules_file` 同样是知识库里的相对路径，存在、是普通文件，解析后仍在知识库里。
 
 `GET /api/knowledge-vault` 回 `{configured, path, writable, rules_file, git, problem}`：`git` 是知识库是否在 git 仓库里，
@@ -70,7 +71,8 @@
 ## 4. 工具
 
 三个 MCP 工具，都走运行已有的令牌（规划者的 `planner.` 令牌、运行的 `run.` 令牌），只在任务的项目开着 `vault`
-且系统设置成立时列出；每次调用时重新读设置，关掉后调用被拒绝（`forbidden`）。没有可写目录时不列出写工具。
+且系统设置成立时列出。工具列表在运行开始（规划者每一轮、Worker 和 Reviewer 每次运行）
+时确定，之后不变；每次调用都重新读项目开关和系统设置，关掉后调用被拒绝（`forbidden`）。没有可写目录时不列出写工具。
 路径一律相对知识库根目录，用 `/` 分隔。
 
 | 工具 | 参数 | 做什么 |
@@ -86,25 +88,26 @@
 
 **写**（`looper_vault_write`）：
 
-1. 校验：路径同读的规则，后缀是 `.md`，在某个可写目录下（不在时拒绝并列出可写目录，`mine/` 就是这样被拒的）；最近的
-   已存在上级目录解析后仍在那个可写目录里；目标若存在，必须是普通文件、不是符号链接、不超过 64 KiB（更大的文件读不全，
+1. 校验：路径同读的规则，后缀是 `.md`，在某个可写目录下（不在时拒绝并列出可写目录，`mine/` 就是这样被拒的）；从知识库根目录的 fd 逐层打开上级目录，拒绝符号链接（可写目录自身也是符号链接时同样拒绝）；
+   后续创建目录、读取、临时文件和替换都相对目录 fd 操作，不跟随符号链接。目标若存在，必须是普通文件、不是符号链接、不超过 64 KiB（更大的文件读不全，
    不能整篇改写）。`content` 不超过 64 KiB、不含 NUL；`reason` 一行，1–200 字符。每个令牌累计最多写 256 KiB。
 2. 在知识库的锁里（D6）：读当前 sha256。`expected_sha256` 为 null（或不给）而文件已存在、给了而文件不存在、或与当前不一致，
    都是冲突（`conflict`），要求重新读；内容与当前相同则不写、不提交（`unchanged`）。
 3. 原子写：同目录下的临时文件（`.looper-*.tmp`）写入并 fsync，`os.replace` 换上，保留原文件的权限；缺的上级目录在可写
    目录里创建。任何一步失败都删掉临时文件、原文件不变；进程在中途被杀时可能留下临时文件，它以 `.` 开头，搜索和读都
    跳过它。
-4. git：知识库在 git 仓库里（`git rev-parse --show-toplevel`）时 `git add -- <路径>`，再
-   `git -c commit.gpgsign=false commit -m "looper: <任务 id> <角色>: <reason>" -- <路径>`：只提交这个路径，运维者暂存的
+4. git：知识库在 git 仓库里（`git rev-parse --show-toplevel`）时 `git --literal-pathspecs -C <根目录> add -- <路径>`，再
+   `git --literal-pathspecs -C <根目录> -c commit.gpgsign=false commit -m "looper: <任务 id> <角色>: <reason>" -- <路径>`：只提交这个路径，运维者暂存的
    其他改动不受影响；作者取知识库仓库自己的配置；不加任何工具署名。角色是 `planner` 或运行的席位（`worker@s2`、
    `reviewer@s2`、`backend_rd@s2`）。git 命令有 30 秒超时，`GIT_TERMINAL_PROMPT=0`，去掉 `GIT_DIR` 等环境变量。
    提交照常运行知识库自己的 hook（那是运维者的策略，不加 `--no-verify`），30 秒超时也约束 hook。运维者或别的程序同时在
-   知识库里跑 git 时，`git add`/`git commit` 会因为 `index.lock` 失败：只对这种失败重试，共 3 次、约 2 秒内退避。
-   仍失败（或别的失败）时文件已写入，回 `committed: false` 和 git 的第一行错误。
-5. 记录：任务动态一行 `Vault: <角色> wrote <路径> (commit <sha 前 12 位>): <reason>`（不是 git 仓库或提交失败时写明）；
+   知识库里跑 git 时，`git add`/`git commit` 会因为 `index.lock` 失败：只对这种失败重试，共 3 次，两次等待分别为 0.25 秒和 0.5 秒。
+   仍失败（或别的失败）时文件已写入，回 `commit: null`，`note` 带 git 第一行错误（最多 200 字符），失败时另带 `git_exit`。
+5. 记录：任务动态一行 `Vault: <角色> wrote <路径> (commit <sha 前 12 位>): <reason>`（未提交时只记录固定状态：`not committed: commit failed, git exit N`、
+   `not committed: git timed out` 或 `not committed: not a git repository`，不带 git 输出）；
    被拒的写也记一行。日志和动态里只有路径、提交和理由，没有文件内容。
 
-回给 agent：`{path, sha256, bytes, commit, note}`（冲突时带当前 sha256，不带内容）。
+回给 agent：`{path, sha256, bytes, commit, note, git_exit}`（冲突时带当前 sha256，不带内容）。
 
 ## 5. 模型看得到的内容
 
