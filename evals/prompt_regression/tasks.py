@@ -1205,6 +1205,16 @@ _SUMMARY_REQUIREMENT = ("Write summary.txt in the working directory: one line `<
                         "team reports on, from sales.csv, in the order the regions first appear there. An independent "
                         "Reviewer must check it.")
 
+# The team keeps this summary on its own branch, in a worktree beside the working directory: the work is not in the
+# working directory, and the Reviewer must look where the task put it.
+_ELSEWHERE_WHERE = ("on the branch `feat`, checked out in a git worktree named like the working directory with "
+                    "`-feat` added, beside it (not in the working directory itself)")
+_ELSEWHERE_REQUIREMENT = (f"Write summary.txt {_ELSEWHERE_WHERE}: one line `<region> <total>` for each region the team "
+                          "reports on, from sales.csv, in the order the regions first appear there. An independent "
+                          "Reviewer must check it.")
+_ELSEWHERE_STEP = (f"Write summary.txt {_ELSEWHERE_WHERE}: one line `<region> <total>` per region of sales.csv, in "
+                   "the order the regions first appear.")
+
 READ_ONLY_TASKS: tuple[EvalTask, ...] = (
     EvalTask(
         # A plan file the Planner may be tempted to write itself: it runs read-only, so a Worker writes it.
@@ -1270,7 +1280,7 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
     ),
     EvalTask(
         id="reviewer_elsewhere",
-        requirement=_SUMMARY_REQUIREMENT,
+        requirement=_ELSEWHERE_REQUIREMENT,
         files={"sales.csv": _sales_csv(",")},
         check=_elsewhere_summary,
         init_git=True,
@@ -1278,7 +1288,7 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
         fake={
             "real_reviewer": True,
             "review_reads": {"s1": {"file": "summary.txt", "contains": ["north", "south", "east", "west", "central"]}},
-            "plan": [_step("s1", _SUMMARY_STEP,
+            "plan": [_step("s1", _ELSEWHERE_STEP,
                            ["summary.txt has all five regions' totals, in their first appearance order"], review=True)],
             "attempts": {"s1": [{"status": "completed", "elsewhere": {
                 "branch": "feat", "files": {"summary.txt": _SUMMARY + "\n"}}}]},
@@ -1286,7 +1296,7 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
     ),
     EvalTask(
         id="reviewer_elsewhere_wrong",
-        requirement=_SUMMARY_REQUIREMENT,
+        requirement=_ELSEWHERE_REQUIREMENT,
         files={"sales.csv": _sales_csv(",")},
         check=_elsewhere_summary,
         init_git=True,
@@ -1294,7 +1304,7 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
         fake={
             "real_reviewer": True,
             "review_reads": {"s1": {"file": "summary.txt", "contains": ["north", "south", "east", "west", "central"]}},
-            "plan": [_step("s1", _SUMMARY_STEP,
+            "plan": [_step("s1", _ELSEWHERE_STEP,
                            ["summary.txt has all five regions' totals, in their first appearance order"], review=True)],
             "attempts": {"s1": [
                 {"status": "completed", "elsewhere": {"branch": "feat", "files": {
