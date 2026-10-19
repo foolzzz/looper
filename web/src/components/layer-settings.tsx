@@ -359,15 +359,11 @@ export function LayerSettingsForm({
               id={`${idPrefix}-prompt-mode`}
               value={draft.promptMode || effective?.system_prompt_mode || "append"}
               onChange={(e) => set({ promptMode: e.target.value as SystemPromptMode })}
-              aria-describedby={`${idPrefix}-prompt-mode-hint`}
               className={SELECT}
             >
-              <option value="append">Append to Claude Code&apos;s prompt</option>
-              <option value="replace">Replace Claude Code&apos;s prompt</option>
+              <option value="append">Append to the runtime&apos;s prompt</option>
+              <option value="replace">Replace the runtime&apos;s prompt</option>
             </select>
-            <p id={`${idPrefix}-prompt-mode-hint`} className="text-[11px] text-muted-foreground">
-              Only for runs on Claude Code.
-            </p>
           </div>
         )}
         {concurrencyRole && (

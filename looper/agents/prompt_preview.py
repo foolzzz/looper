@@ -93,9 +93,8 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
     return {
         "profile": {"id": profile.id, "name": profile.name}, "role": role,
         "runtime": launch.runtime.type, "system_prompt_mode": launch.system_prompt_mode.value,
-        # The role's setting, which applies only on Claude Code (the mode above is what the launch uses).
+        # The role's setting (the mode above is what the launch uses: append where the runtime cannot replace).
         "role_system_prompt_mode": settings.system_prompt_mode.value,
-        "system_prompt_mode_applies": profile.runtime.type == "claude-code",
         "custom_prompt_set": bool(profile.custom_prompt.strip()),
         "looper_prompt_sha256": system_prompt.sha256, "prompt_layers": system_prompt.layers,
         "blocks": [asdict(block) for block in launch.runtime.prompt_blocks(launch, system_prompt.text, cwd=cwd)],

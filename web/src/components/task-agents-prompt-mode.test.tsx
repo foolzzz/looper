@@ -28,7 +28,7 @@ function agents(editable = true): TaskAgents {
 describe("a task's system prompt mode", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("is shown for Claude Code roles only, saves a choice and resets the task's own", async () => {
+  it("is shown for every role, on any runtime, saves a choice and resets the task's own", async () => {
     const bodies: unknown[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "PUT") {
@@ -42,8 +42,8 @@ describe("a task's system prompt mode", () => {
     const root = createRoot(container);
     await act(async () => root.render(<TaskAgentsSection taskId="task-1" agents={agents()} onSaved={() => {}} />));
     const fields = [...container.querySelectorAll<HTMLSelectElement>("select[id$='-mode']")];
-    expect(fields).toHaveLength(2); // planner and reviewer; the worker runs on Codex
-    expect(fields.map((f) => f.value)).toEqual(["replace", "append"]);
+    expect(fields).toHaveLength(3); // planner, worker (on Codex) and reviewer
+    expect(fields.map((f) => f.value)).toEqual(["replace", "append", "append"]);
     await act(async () => {
       fields[0].value = "append";
       fields[0].dispatchEvent(new Event("change", { bubbles: true }));
@@ -63,7 +63,7 @@ describe("a task's system prompt mode", () => {
     const root = createRoot(container);
     await act(async () => root.render(<TaskAgentsSection taskId="task-1" agents={agents(false)} onSaved={() => {}} />));
     expect(container.querySelector("select[id$='-mode']")).toBeNull();
-    expect(container.textContent).toContain("Replace Claude Code's prompt");
+    expect(container.textContent).toContain("Replace the runtime's prompt");
     act(() => root.unmount());
     container.remove();
   });

@@ -147,8 +147,8 @@ PLANNER_CHOICE_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
 # At most this many of a task's Workers, or of its Reviewers, run at once when neither the task nor the role's layer
 # sets a limit.
 BUILTIN_CONCURRENCY = {AgentType.WORKER: 16, AgentType.REVIEWER: 8}
-# Whether a role replaces Claude Code's default system prompt or appends to it, when its role layer sets none. It
-# applies only to runs on Claude Code (``Launch.system_prompt_mode``).
+# Whether a role replaces its runtime's default system prompt or appends to it, when its role layer sets none
+# (``Launch.system_prompt_mode``).
 BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.MANAGER: SystemPromptMode.REPLACE, AgentType.PLANNER: SystemPromptMode.REPLACE,
     AgentType.WORKER: SystemPromptMode.APPEND, AgentType.REVIEWER: SystemPromptMode.APPEND,
@@ -638,8 +638,7 @@ def system_prompt_mode_choice(role: AgentType | None, layers: Mapping[Place, Lay
 
 
 def role_system_prompt_mode(role: AgentType | None, layers: Mapping[Place, LayerValues]) -> SystemPromptMode:
-    """Whether ``role`` replaces its runtime's default system prompt or appends to it (``system_prompt_mode_choice``).
-    A launch applies it on Claude Code only."""
+    """Whether ``role`` replaces its runtime's default system prompt or appends to it (``system_prompt_mode_choice``)."""
     return system_prompt_mode_choice(role, layers)[0]
 
 
@@ -788,14 +787,17 @@ class Launch:
 
     @property
     def system_prompt_mode(self) -> SystemPromptMode:
-        """What the run uses: on Claude Code its role's mode (append for a launch with no role); on any other runtime
-        its profile's, as before the mode was a role's setting."""
-        if self.profile.runtime.type == "claude-code":
-            # A consult resumes a seat's session and is read-only: it appends, whatever the seat's role.
-            if self.role is None or self.consult:
-                return SystemPromptMode.APPEND
-            return self.settings.system_prompt_mode
-        return self.profile.system_prompt_mode
+        """What the run uses: its role's mode, whatever the runtime (append for a launch with no role and for a
+        runtime whose adapter cannot replace)."""
+        # A consult resumes a seat's session and is read-only: it appends, whatever the seat's role.
+        if self.role is None or self.consult:
+            return SystemPromptMode.APPEND
+        from .runtimes import ADAPTERS
+
+        adapter = ADAPTERS.get(self.profile.runtime.type)
+        if adapter is None or not adapter.can_replace_system_prompt:
+            return SystemPromptMode.APPEND
+        return self.settings.system_prompt_mode
 
     @property
     def agent_teams(self) -> bool:
