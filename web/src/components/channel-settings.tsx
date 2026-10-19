@@ -32,6 +32,7 @@ import {
   type LarkPerson,
   type LarkStatus,
 } from "@/lib/api";
+import { larkPeopleSearchNote } from "@/lib/chat-channels";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { errorText, useAction } from "@/lib/use-action";
 import { cn } from "@/lib/utils";
@@ -40,6 +41,14 @@ function channelIcon(type: string) {
   if (type === "telegram") return Send;
   return MessageCircle;
 }
+
+const LARK_ALLOWLIST = {
+  field: "allowed_open_ids",
+  label: "Lark open_ids",
+  pattern: /^ou_[0-9A-Za-z]{8,64}$/,
+  placeholder: "ou_…",
+  hint: "Each sender's open_id for this bot's app, starting with ou_ (not a union_id or a user_id); open_ids differ per app. Direct messages to the bot are handled, and in a group only the messages that @-mention it.",
+};
 
 /** Each chat channel's sender allowlist, as the server checks it (looper/agents/channels/allowlist.py). */
 const SENDER_ALLOWLISTS: Record<string, { field: string; label: string; pattern: RegExp; placeholder: string; hint: string }> = {
@@ -50,13 +59,8 @@ const SENDER_ALLOWLISTS: Record<string, { field: string; label: string; pattern:
     placeholder: "123456789",
     hint: "Each sender's numeric Telegram user ID (a negative number is a group or channel, not a sender).",
   },
-  lark: {
-    field: "allowed_open_ids",
-    label: "Lark open_ids",
-    pattern: /^ou_[0-9A-Za-z]{8,64}$/,
-    placeholder: "ou_…",
-    hint: "Each sender's open_id for this bot's app, starting with ou_ (not a union_id or a user_id); open_ids differ per app. Direct messages to the bot are handled, and in a group only the messages that @-mention it.",
-  },
+  lark: LARK_ALLOWLIST,
+  lark_bot: LARK_ALLOWLIST,
 };
 const MAX_SENDERS = 100;
 
@@ -66,6 +70,7 @@ const SECRET_MASK = "***";
 /** Channels whose bot token is stored server-side (masked). */
 const TOKEN_CHANNELS: Record<string, { label: string; hint: string }> = {
   telegram: { label: "Bot token", hint: "From @BotFather. Stored on the server and never shown; leave as is to keep it, clear to remove it." },
+  lark_bot: { label: "App secret", hint: "From the Lark developer console (Credentials & Basic Info). Stored on the server and never shown; leave as is to keep it, clear to remove it." },
 };
 
 /** Config keys the server owns: shown elsewhere or not at all, never as an editable field. */
@@ -76,6 +81,14 @@ const FIELD_HELP: Record<string, { placeholder: string; hint: string }> = {
   profile: {
     placeholder: "Empty: lark-cli's active profile",
     hint: "The lark-cli profile the channel runs as (`lark-cli profile list`): it chooses the app, and so the bot.",
+  },
+  app_id: {
+    placeholder: "cli_…",
+    hint: "The app's App ID. Enable the bot capability, subscribe to the im.message.receive_v1 event with the long-connection mode, and grant the im:message, im:message:send_as_bot, im:message.reactions:write_only and contact read scopes.",
+  },
+  domain: {
+    placeholder: "feishu",
+    hint: "feishu for open.feishu.cn, lark for open.larksuite.com",
   },
 };
 
@@ -109,20 +122,20 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const [error, setError] = useState("");
   const [justSaved, setJustSaved] = useState(false);
   const Icon = channelIcon(channel.channel_type);
-  const isLark = channel.channel_type === "lark";
-  // The Lark channel as lark-cli sees its saved settings: the bot, names, refused senders. Read again after a save.
+  const isLark = channel.channel_type === "lark" || channel.channel_type === "lark_bot";
+  // The Lark channel's saved settings: the bot, names, refused senders. Read again after a save.
   const [lark, setLark] = useState<LarkStatus | null>(null);
   const [larkError, setLarkError] = useState("");
   useEffect(() => {
     if (!isLark) return;
     let alive = true;
-    fetchLarkStatus()
+    fetchLarkStatus(channel.channel_type)
       .then((status) => alive && (setLark(status), setLarkError("")))
       .catch((e: Error) => alive && setLarkError(e.message));
     return () => {
       alive = false;
     };
-  }, [isLark, channel.updated_at]);
+  }, [isLark, channel.channel_type, channel.updated_at]);
   // An import's "secrets to fill in" links here (#settings/channels/<id>).
   const ref = useSettingsTarget<HTMLDivElement>("channel", channel.channel_id);
 
@@ -190,7 +203,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           <div>
             <h3 className="text-sm font-semibold">{channel.display_name}</h3>
             <p className="text-xs text-muted-foreground">{description}</p>
-            {isLark && <LarkBotLine status={lark} error={larkError} />}
+            {isLark && <LarkBotLine status={lark} error={larkError} channelType={channel.channel_type} />}
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -220,7 +233,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
               autoComplete="off"
               value={botToken}
               onChange={(e) => setBotToken(e.target.value)}
-              placeholder={channel.has_bot_token ? "" : "123456:ABC-DEF…"}
+              placeholder={channel.has_bot_token ? "" : channel.channel_type === "lark_bot" ? "App secret" : "123456:ABC-DEF…"}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">{tokenChannel.hint}</p>
@@ -303,6 +316,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
 
         {isLark && (
           <LarkPeople
+            channelType={channel.channel_type}
             status={lark}
             ids={ids.map((value) => value.trim())}
             onAdd={(openId) => setIds((current) => (current.some((v) => v.trim() === openId) ? current : [...current, openId]))}
@@ -339,18 +353,19 @@ function shortId(id: string): string {
   return id.length > 14 ? `${id.slice(0, 12)}…` : id;
 }
 
-/** "Bot: HBDataBot (cli_a945…, profile …)", or why lark-cli cannot act as the bot. */
-function LarkBotLine({ status, error }: { status: LarkStatus | null; error: string }) {
+/** The bot's name and app (with a profile for lark-cli), or why it is unavailable. */
+function LarkBotLine({ status, error, channelType }: { status: LarkStatus | null; error: string; channelType: string }) {
+  const isBotToken = channelType === "lark_bot";
   if (error) return <p className="mt-0.5 text-xs text-destructive">Bot: {error}</p>;
-  if (!status) return <p className="mt-0.5 text-xs text-muted-foreground">Bot: checking lark-cli…</p>;
-  if (!status.bot) return <p className="mt-0.5 text-xs text-warning">Bot: unknown, lark-cli cannot act as it</p>;
+  if (!status) return <p className="mt-0.5 text-xs text-muted-foreground">{isBotToken ? "Bot: checking the Lark platform…" : "Bot: checking lark-cli…"}</p>;
+  if (!status.bot) return <p className="mt-0.5 text-xs text-warning">{isBotToken ? `Bot: unknown${status.problem ? `, ${status.problem}` : ""}` : "Bot: unknown, lark-cli cannot act as it"}</p>;
   return (
     <p className="mt-0.5 flex items-center gap-1 text-xs text-foreground">
       <Bot className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
       <span>
         Bot: <span className="font-medium">{status.bot.name}</span>{" "}
         <span className="text-muted-foreground">
-          ({shortId(status.bot.app_id)}, profile {status.bot.profile})
+          ({shortId(status.bot.app_id)}{status.bot.profile ? `, profile ${status.bot.profile}` : ""})
         </span>
       </span>
     </p>
@@ -360,11 +375,13 @@ function LarkBotLine({ status, error }: { status: LarkStatus | null; error: stri
 /** Add Lark senders by name or email, and let in the ones the allowlist refused lately. Adding changes the draft
  * allowlist above; Save stores it. */
 function LarkPeople({
+  channelType,
   status,
   ids,
   onAdd,
   full,
 }: {
+  channelType: string;
   status: LarkStatus | null;
   ids: string[];
   onAdd: (openId: string) => void;
@@ -373,6 +390,7 @@ function LarkPeople({
   const id = useId();
   const [query, setQuery] = useState("");
   const [people, setPeople] = useState<LarkPerson[] | null>(null);
+  const [complete, setComplete] = useState(true);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
   const listed = (openId: string) => ids.includes(openId);
@@ -382,8 +400,11 @@ function LarkPeople({
     if (!query.trim()) return;
     setSearching(true);
     setError("");
-    searchLarkPeople(query.trim())
-      .then(setPeople, (e: Error) => setError(e.message))
+    searchLarkPeople(query.trim(), channelType)
+      .then((result) => {
+        setPeople(result.people);
+        setComplete(result.complete);
+      }, (e: Error) => setError(e.message))
       .finally(() => setSearching(false));
   };
 
@@ -434,8 +455,8 @@ function LarkPeople({
             ))}
           </ul>
         )}
-        <p className="text-[10px] text-muted-foreground">
-          Searches as the user lark-cli is signed in as; the open_ids found are this app&apos;s.
+        <p aria-live="polite" className="text-[10px] text-muted-foreground">
+          {larkPeopleSearchNote(channelType, complete)}
         </p>
       </form>
 
@@ -609,7 +630,7 @@ function DashboardGatesCard({ reloadKey }: { reloadKey: string }) {
   );
 }
 
-/** Settings → Channels: the Telegram and Lark (lark-cli) channels, each with its sender allowlist. */
+/** Settings → Channels: Telegram and both Lark types (lark-cli and bot token), each with its sender allowlist. */
 export function ChannelsSection() {
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
   const [loading, setLoading] = useState(true);

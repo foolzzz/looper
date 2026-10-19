@@ -412,7 +412,7 @@ export interface DbChatMessage {
   message_id: string;
   role: string;
   content: string;
-  /** The channel the turn came in on: "web", "telegram" or "lark". */
+  /** The channel the turn came in on: "web", "telegram", "lark" or "lark_bot". */
   channel?: string;
   created_at: string;
   /** Set for a Lark or Telegram answer its channel did not deliver, with the channel's error. */
@@ -432,7 +432,7 @@ export async function fetchChatMessages(sessionId: string): Promise<DbChatMessag
  * not listed). */
 export interface ChatSession {
   session_id: string;
-  /** The channel the session belongs to: "web", "telegram" or "lark". */
+  /** The channel the session belongs to: "web", "telegram", "lark" or "lark_bot". */
   channel: string;
   message_count: number;
   first_message_at: string;
@@ -1384,7 +1384,7 @@ export interface Supplement {
 /** Something the Manager did to a task through its tools (its audit trail), or asked the user to confirm. */
 export interface ManagerAction {
   created_at: string;
-  /** The chat's channel: "web", "lark", "telegram". */
+  /** The chat's channel: "web", "lark", "lark_bot", "telegram". */
   channel: string;
   /** The tool, e.g. "looper_task_control". */
   tool: string;
@@ -1710,7 +1710,7 @@ export interface UserGate {
 }
 
 /** A channel gate messages can go to. */
-export type GateChannel = "lark" | "telegram";
+export type GateChannel = "lark" | "lark_bot" | "telegram";
 
 /** How the gate's own messages fared in its chat. */
 export interface GateChannelPosts {
@@ -1735,7 +1735,7 @@ export interface GateMessage {
   text: string;
   /** Who wrote it in a group chat; null otherwise. */
   author: string | null;
-  /** Where the user wrote it: "dashboard", "lark", "telegram" or "manager:<channel>". */
+  /** Where the user wrote it: "dashboard", "lark", "lark_bot", "telegram" or "manager:<channel>". */
   via: string | null;
   /** The agenda item and option the user picked with an option button. */
   agenda_item: string | null;
@@ -3276,15 +3276,15 @@ export interface ChannelConfig {
   updated_at: string;
 }
 
-/** The Lark (lark-cli) channel as lark-cli sees its saved settings (`GET /api/channels/lark/status`). */
+/** A Lark channel's saved settings (`GET /api/channels/{lark|lark_bot}/status`). */
 export interface LarkStatus {
-  /** The bot lark-cli acts as under the channel's profile; null when it cannot (see `problem`). */
+  /** The channel's bot; profile is empty for lark_bot, and bot is null when unavailable (see `problem`). */
   bot: { name: string; app_id: string; open_id: string; profile: string } | null;
-  /** Why the channel would not start (lark-cli, or the allowlist made for another app); null otherwise. */
+  /** Why the channel would not start (credentials, lark-cli, or an allowlist for another app); null otherwise. */
   problem: string | null;
   /** The app the sender allowlist was made for; open_ids differ per app. */
   allowlist_app_id: string | null;
-  /** Names of the allowlist's and the refused senders' open_ids, where lark-cli knows them. */
+  /** Names of the allowlist's and the refused senders' open_ids, where the channel knows them. */
   names: Record<string, string>;
   /** The latest senders the allowlist refused, newest first, not on the saved allowlist; `chat_id` is the group
    * chat they last @-mentioned the bot in, null for a direct message. */
@@ -3299,16 +3299,17 @@ export interface LarkPerson {
   department: string;
 }
 
-export async function fetchLarkStatus(): Promise<LarkStatus> {
-  const res = await fetch(`${API_BASE}/channels/lark/status`);
+export async function fetchLarkStatus(channelType = "lark"): Promise<LarkStatus> {
+  const res = await fetch(`${API_BASE}/channels/${channelType}/status`);
   if (!res.ok) await failed(res, "lark status");
   return res.json();
 }
 
-export async function searchLarkPeople(query: string): Promise<LarkPerson[]> {
-  const res = await fetch(`${API_BASE}/channels/lark/people?q=${encodeURIComponent(query)}`);
+export async function searchLarkPeople(query: string, channelType = "lark"): Promise<{ people: LarkPerson[]; complete: boolean }> {
+  const res = await fetch(`${API_BASE}/channels/${channelType}/people?q=${encodeURIComponent(query)}`);
   if (!res.ok) await failed(res, "lark people");
-  return (await res.json()).people ?? [];
+  const data = await res.json();
+  return { people: data.people ?? [], complete: data.complete ?? true };
 }
 
 export async function fetchChannelConfigs(): Promise<ChannelConfig[]> {

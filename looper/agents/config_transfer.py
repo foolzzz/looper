@@ -99,11 +99,13 @@ PLACEHOLDER = {"secret": "omitted"}
 _CHANNEL_PUBLIC_KEYS = {
     "telegram": frozenset({"allowed_user_ids", "bot_token_env", "description"}),
     "lark": frozenset({"allowed_open_ids", "allowlist_app_id", "profile", "description"}),
+    "lark_bot": frozenset({"allowed_open_ids", "allowlist_app_id", "app_id", "domain", "description"}),
 }
 
 # A channel whose credential is a DB-stored secret (channel_secrets), not a config key: it is not
 # carried in the file, so an import of an enabled such channel still needs it set on this machine.
-_CHANNEL_TOKEN_SECRET = {"telegram": "bot token (Settings → Channels)"}
+_CHANNEL_TOKEN_SECRET = {"telegram": "bot token (Settings → Channels)",
+                         "lark_bot": "app secret (Settings → Channels)"}
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
 _LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency", "boundaries")
 # The roles whose role layer takes a concurrency limit: the default for every task.
@@ -1273,6 +1275,10 @@ class _Importer:
                     from .channels.lark_cli import lark_config
 
                     config = lark_config(config)
+                elif kind == "lark_bot":
+                    from .channels.lark_bot_settings import stored_config
+
+                    config = stored_config(config)
             except (AllowlistError, ValueError) as exc:
                 raise _Skip(str(exc)) from None
             values = {"display_name": _string(entry.get("display_name", ""), "display_name", max_chars=200),

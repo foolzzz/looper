@@ -32,7 +32,7 @@ from typing import Any
 from ..db import user_gates as db_user_gates
 from .bus import MessageBus
 from .gate_service import HTTP_409, origin_chat, post_message
-from .message import AgentAddress, MessageEnvelope
+from .message import AgentAddress, MessageEnvelope, is_lark
 from .projects import RequestError
 from .user_gates import MESSAGE_MAX_CHARS, GateState
 
@@ -70,9 +70,9 @@ def references(envelope: MessageEnvelope) -> tuple[str, str, str, dict[str, Any]
     elsewhere, or one that replies to nothing."""
     channel = envelope.source.channel or ""
     context = envelope.payload.get("channel_context")
-    if channel not in ("lark", "telegram") or not isinstance(context, dict):
+    if not (is_lark(channel) or channel == "telegram") or not isinstance(context, dict):
         return None
-    keys = ("reply_to", "root_id") if channel == "lark" else ("reply_to_message_id",)
+    keys = ("reply_to", "root_id") if is_lark(channel) else ("reply_to_message_id",)
     ref = next((str(context[key]) for key in keys if context.get(key)), None)
     chat = str(context.get("chat_id") or "")
     if ref is None or not chat:
@@ -81,7 +81,7 @@ def references(envelope: MessageEnvelope) -> tuple[str, str, str, dict[str, Any]
 
 
 def _group(channel: str, context: dict[str, Any]) -> bool:
-    if channel == "lark":
+    if is_lark(channel):
         return context.get("chat_type") == "group"
     return str(context.get("chat_id") or "").startswith("-")
 
@@ -89,7 +89,7 @@ def _group(channel: str, context: dict[str, Any]) -> bool:
 def _author(channel: str, context: dict[str, Any]) -> str | None:
     """Who wrote it, for the discussion: in a Lark group the sender's name, in a Telegram group their username;
     None in a direct message."""
-    name = context.get("sender_name") if channel == "lark" else context.get("username") or context.get("user_id")
+    name = context.get("sender_name") if is_lark(channel) else context.get("username") or context.get("user_id")
     return str(name) if _group(channel, context) and name else None
 
 

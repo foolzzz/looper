@@ -65,6 +65,7 @@ SENDER_ID_FORMATS: dict[str, SenderIdFormat] = {
              "(a union_id starts with on_, and a user_id has no prefix)",
     ),
 }
+SENDER_ID_FORMATS["lark_bot"] = SENDER_ID_FORMATS["lark"]
 
 
 def sender_ids(channel_type: str, raw: Any) -> tuple[str, ...]:
