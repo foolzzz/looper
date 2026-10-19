@@ -1109,6 +1109,16 @@ class TestJudgeResult:
         assert result["status"] == "failed"
         assert error in result["error"]
 
+    @pytest.mark.parametrize(("event", "error"), [
+        (None, "Codex ended without a result event"),
+        (_result("x", is_error=True), "Codex run did not succeed"),
+    ])
+    def test_failure_names_the_runtime_that_ran(self, tmp_path: Path, event: dict[str, Any] | None, error: str) -> None:
+        from looper.agents.tiers.worker import judge_result
+
+        result = judge_result(event, work_dir=tmp_path, is_verify=False, runtime_label="Codex")
+        assert error in result["error"]
+
     def test_missing_report_keeps_the_final_message(self, tmp_path: Path) -> None:
         from looper.agents.tiers.worker import judge_result
 

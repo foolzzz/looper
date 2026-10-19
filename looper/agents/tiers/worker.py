@@ -234,6 +234,7 @@ def judge_result(
     work_dir: Path,
     is_verify: bool,
     started_at: datetime | None = None,
+    runtime_label: str = "Claude Code",
 ) -> dict[str, Any]:
     """Decide a step's outcome from Claude's stream-json ``result`` event.
 
@@ -245,10 +246,10 @@ def judge_result(
     """
     failed = _verify_failed if is_verify else _work_failed
     if result_event is None:
-        return failed("Claude Code ended without a result event")
+        return failed(f"{runtime_label} ended without a result event")
     if result_event.get("is_error") or result_event.get("subtype") != "success":
         subtype = result_event.get("subtype") or "error"
-        return failed(budget_error(result_event) or f"Claude Code run did not succeed ({subtype})")
+        return failed(budget_error(result_event) or f"{runtime_label} run did not succeed ({subtype})")
     text = str(result_event.get("result") or "")
     if is_verify:
         verdict = extract_report(text, "passed")
@@ -1107,7 +1108,7 @@ class WorkerPool:
                 )
 
             outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
-                                              started_at=started_at)
+                                              started_at=started_at, runtime_label=runtime.label)
             if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
                 places = []
                 for item in elsewhere:
