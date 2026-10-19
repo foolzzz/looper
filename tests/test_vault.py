@@ -507,7 +507,7 @@ def test_git_index_lock_released_during_retry_commits(
     lock = config.path / ".git/index.lock"
     lock.write_text("synthetic competing git operation")
     timer = threading.Timer(0.3, lambda: lock.unlink(missing_ok=True))
-    original_run = subprocess.run
+    original_run = vault._run_git
     started = False
     failed_attempts = 0
 
@@ -522,7 +522,7 @@ def test_git_index_lock_released_during_retry_commits(
                 timer.start()
         return result
 
-    monkeypatch.setattr(vault.subprocess, "run", record_run)
+    monkeypatch.setattr(vault, "_run_git", record_run)
     try:
         result = write(config)
     finally:
@@ -559,7 +559,7 @@ def test_git_index_lock_retries_exactly_three_times(
         calls.append(args)
         return subprocess.CompletedProcess(args, 128, "", "fatal: unable to create index.lock")
 
-    monkeypatch.setattr(vault.subprocess, "run", fail)
+    monkeypatch.setattr(vault, "_run_git", fail)
     monkeypatch.setattr(vault.time, "sleep", sleeps.append)
     with pytest.raises(subprocess.CalledProcessError):
         vault._git(config.path, command, "--", "codex-mem/new.md")
@@ -579,7 +579,7 @@ def test_git_does_not_retry_other_failures(
         calls.append(args)
         return subprocess.CompletedProcess(args, 1, "", stderr)
 
-    monkeypatch.setattr(vault.subprocess, "run", fail)
+    monkeypatch.setattr(vault, "_run_git", fail)
     monkeypatch.setattr(vault.time, "sleep", sleeps.append)
     with pytest.raises(subprocess.CalledProcessError):
         vault._git(config.path, command)
@@ -631,13 +631,11 @@ def test_git_uses_literal_pathspecs_and_the_allowed_child_environment(
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(args, 0, "synthetic output\n", "")
 
-    monkeypatch.setattr(vault.subprocess, "run", run)
+    monkeypatch.setattr(vault, "_run_git", run)
     assert vault._git(config.path, "add", "--", "codex-mem/a*.md") == "synthetic output"
     args, kwargs = calls[0]
     assert args == ["git", "--literal-pathspecs", "-C", str(config.path), "add", "--", "codex-mem/a*.md"]
-    assert kwargs == {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True,
-                      "env": {**child_env.inherited(), "GIT_TERMINAL_PROMPT": "0"},
-                      "timeout": vault.GIT_TIMEOUT_SECONDS, "check": False}
+    assert kwargs == {"env": {**child_env.inherited(), "GIT_TERMINAL_PROMPT": "0"}}
     assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "LOOPER_DATABASE_URL", "PGPASSWORD",
                 "VAULT_SYNTHETIC_SECRET"} & kwargs["env"].keys()
 
@@ -683,3 +681,75 @@ def test_fd_write_closes_every_descriptor_and_cleans_temporary_files(
     assert not list(config.path.rglob(".looper-*.tmp"))
     if failure:
         assert (config.path / path).read_text() == "original"
+
+
+def test_a_git_timeout_ends_the_hooks_it_started(config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    marker = "31.4159"  # a sleep no other process runs
+    hook = config.path / ".git/hooks/pre-commit"
+    hook.write_text(f"#!/bin/sh\nsleep {marker} &\nsleep {marker}\n")
+    hook.chmod(0o755)
+    monkeypatch.setattr(vault, "GIT_TIMEOUT_SECONDS", 1)
+    result = write(config)
+    assert result["commit"] is None and result["git_status"] == "timed_out"
+    assert (config.path / "codex-mem/new.md").read_text() == "new note"
+    left = subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True, text=True, timeout=10).stdout
+    assert left.strip() == "", "the hook's processes outlived git's timeout"
+
+
+def test_a_hook_printing_bytes_that_are_not_utf8_still_gives_a_result(config: vault.VaultConfig) -> None:
+    hook = config.path / ".git/hooks/pre-commit"
+    hook.write_text("#!/bin/sh\nprintf '\\377\\376 not utf-8\\n' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    result = write(config)
+    assert result["commit"] is None and result["git_exit"] == 1
+    assert result["note"].startswith("written, but the commit failed: ") and "not utf-8" in result["note"]
+    assert (config.path / "codex-mem/new.md").read_text() == "new note"
+
+
+def test_a_root_swapped_for_a_link_after_the_check_is_refused(config: vault.VaultConfig) -> None:
+    real = config.path.with_name("vault-real")
+    config.path.rename(real)
+    config.path.symlink_to(real, target_is_directory=True)
+    with pytest.raises(OpError) as caught:
+        write(config)
+    assert caught.value.code is ErrorCode.FORBIDDEN and "vault folder changed" in str(caught.value)
+    assert not (real / "codex-mem/new.md").exists()
+
+
+def test_a_parent_of_the_root_swapped_for_a_link_is_refused(config: vault.VaultConfig, tmp_path: Path) -> None:
+    # The root itself is a real directory, but the path to it now passes through a link to a copy elsewhere.
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "vault/codex-mem").mkdir(parents=True)
+    moved = tmp_path.with_name(f"{tmp_path.name}-moved")
+    tmp_path.rename(moved)
+    try:
+        tmp_path.symlink_to(elsewhere, target_is_directory=True)
+        with pytest.raises(OpError) as caught:
+            write(config)
+        assert caught.value.code is ErrorCode.FORBIDDEN
+        assert not (elsewhere / "vault/codex-mem/new.md").exists()
+    finally:
+        tmp_path.unlink()
+        moved.rename(tmp_path)
+
+
+def test_a_saved_root_that_now_leads_elsewhere_no_longer_holds(
+    config: vault.VaultConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from looper.db import system_settings
+
+    stored = {vault.SETTING_KEY: json.dumps({"path": str(config.path), "writable": ["codex-mem"], "rules_file": None})}
+
+    async def get_settings(keys, **kwargs):
+        return {key: stored[key] for key in keys if key in stored}
+
+    monkeypatch.setattr(system_settings, "get_settings", get_settings)
+    assert asyncio.run(vault.load())[0] == vault.VaultConfig(config.path, ("codex-mem",), None)
+    real = config.path.with_name("vault-real")
+    config.path.rename(real)
+    config.path.symlink_to(real, target_is_directory=True)
+    loaded, problem = asyncio.run(vault.load())
+    assert loaded is None and "now leads to" in problem

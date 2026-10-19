@@ -14,6 +14,7 @@ import ntpath
 import os
 import re
 import secrets
+import signal
 import stat
 import subprocess
 import threading
@@ -134,7 +135,12 @@ async def load() -> tuple[VaultConfig | None, str | None]:
     if SETTING_KEY not in stored:
         return None, None
     try:
-        return check_config(json.loads(stored[SETTING_KEY])), None
+        raw = json.loads(stored[SETTING_KEY])
+        config = check_config(raw)
+        if str(config.path) != raw.get("path"):
+            # It was saved resolved: a link somewhere on the path now leads elsewhere.
+            raise ValueError(f"the vault path {raw.get('path')} now leads to {config.path} (a symbolic link?)")
+        return config, None
     except (ValueError, OSError, RuntimeError) as exc:
         return None, f"the knowledge vault setting no longer holds: {exc}"
 
@@ -298,17 +304,34 @@ async def rules_text(config: VaultConfig) -> tuple[str | None, str | None]:
         return None, f"the vault's rules file {config.rules_file} could not be read: {exc}"
 
 
+def _run_git(command: list[str], *, env: Mapping[str, str]) -> subprocess.CompletedProcess:
+    """One git command in a process group of its own, so a timeout ends the hooks it started too; its output is
+    decoded with replacement, whatever a hook prints."""
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=env, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=GIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(command, proc.returncode, out.decode("utf-8", errors="replace"),
+                                       err.decode("utf-8", errors="replace"))
+
+
 def _git(root: Path, *args: str) -> str:
     env = {**child_env.inherited(), "GIT_TERMINAL_PROMPT": "0"}
+    command = ["git", "--literal-pathspecs", "-C", str(root), *args]
     for attempt in range(3):
-        proc = subprocess.run(["git", "--literal-pathspecs", "-C", str(root), *args],
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env,
-                              timeout=GIT_TIMEOUT_SECONDS, check=False)
+        proc = _run_git(command, env=env)
         if not proc.returncode:
             return proc.stdout.strip()
         if "index.lock" not in proc.stderr or not ({"add", "commit"} & set(args)) or attempt == 2:
             lines = proc.stderr.splitlines()
-            raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout,
+            raise subprocess.CalledProcessError(proc.returncode, command, output=proc.stdout,
                                                 stderr=lines[0][:200] if lines else "")
         time.sleep(0.25 * (attempt + 1))
     raise AssertionError("unreachable")
@@ -356,8 +379,19 @@ async def write(config: VaultConfig, path: str, content: str, expected_sha256: s
     def replace_note() -> dict:
         fds: list[int] = []
         try:
-            fd = os.open(config.path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fd = os.open(config.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
+                                                       "(a symbolic link?)") from None
+                raise
             fds.append(fd)
+            opened_root, named_root = os.fstat(fd), os.stat(config.path)
+            if ((opened_root.st_dev, opened_root.st_ino) != (named_root.st_dev, named_root.st_ino)
+                    or os.path.realpath(config.path) != str(config.path)):
+                raise OpError(ErrorCode.FORBIDDEN, "the vault folder changed since its setting was checked "
+                                                   "(a symbolic link?)")
             for index, part in enumerate(rel.parts[:-1]):
                 try:
                     try:

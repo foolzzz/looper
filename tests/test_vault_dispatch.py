@@ -300,7 +300,7 @@ def test_git_timeout_keeps_the_written_note_and_records_only_timeout_state(
     def timeout(args, **kwargs):
         raise subprocess.TimeoutExpired(args, vault.GIT_TIMEOUT_SECONDS, stderr="SECRET-123")
 
-    monkeypatch.setattr(vault.subprocess, "run", timeout)
+    monkeypatch.setattr(vault, "_run_git", timeout)
     record = AsyncMock()
     monkeypatch.setattr(activity, "insert_activity", record)
     result = asyncio.run(tools.run_tool(
