@@ -73,8 +73,10 @@ def telegram_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 def _run_adapter(
     tmp_path: Path, calls: list[str], then: Callable[[TelegramChannelAdapter], Awaitable[Any]] | None = None,
+    *, polls: int = 1,
 ) -> Any:
-    """Start the adapter, wait for its first poll, run ``then`` on it, stop it; ``then``'s result."""
+    """Start the adapter, wait until it has started ``polls`` polls, run ``then`` on it, stop it; ``then``'s result.
+    A poll starts only once the one before it was answered (and httpx logged it)."""
 
     async def main() -> Any:
         bus = MessageBus(runtime_root=tmp_path)
@@ -83,7 +85,7 @@ def _run_adapter(
         )
         await adapter.start(bus)
         async with asyncio.timeout(10):
-            while "getUpdates" not in calls:
+            while calls.count("getUpdates") < polls:
                 await asyncio.sleep(0.01)
         result = await then(adapter) if then else None
         await adapter.stop()
@@ -99,7 +101,7 @@ def test_the_token_stays_out_of_the_serve_log(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _configure_logging("debug" if verbose else "info")
-    _run_adapter(tmp_path, telegram_calls)
+    _run_adapter(tmp_path, telegram_calls, polls=2)  # the first poll answered, so its request line is logged
 
     log = capsys.readouterr().err
     assert "telegram channel adapter started" in log
