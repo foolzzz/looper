@@ -186,16 +186,20 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
     def launch_args(self, launch: Launch) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions (read-only for a run that must not
-        change files, ``Launch.read_only``; only reading tools for a consult), the model, the effort, the plugin
+        change files, ``Launch.read_only``; only reading tools for a consult) with the tools that reach the
+        operator's other Claude Code sessions denied (``claude_cli.peer_args``), the model, the effort, the plugin
         directories of the installed items, the directories of the project knowledge, the per-run spend cap (when
         Claude Code's own figure is the run's cost), the provider's binding and, with agent teams
         (``Launch.agent_teams``), where teammates run."""
-        from ..claude_cli import budget_args, consult_args, knowledge_args, library_args, permission_args, read_only_args
+        from ..claude_cli import (
+            budget_args, consult_args, knowledge_args, library_args, peer_args, permission_args, read_only_args,
+        )
 
         provider = launch.profile.provider
         return [
             *(consult_args() if launch.consult else
               read_only_args(launch.library) if launch.read_only else permission_args()),
+            *peer_args(launch.agent_teams),
             "--model", launch.model,
             *(["--effort", launch.effort] if launch.effort else []),
             *library_args(launch.library),

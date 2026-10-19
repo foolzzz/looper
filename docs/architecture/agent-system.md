@@ -670,11 +670,11 @@ Every agent (Manager, Planner, Worker, Reviewer) sees what Looper composes and
 the project's own `CLAUDE.md` (or `AGENTS.md`, below), not the personal Claude
 Code configuration of whoever runs Looper. `isolation_args(cwd)` in
 `looper/agents/claude_cli.py` is the one flag set all four commands carry;
-`ISOLATION_ID` (`personal-config-off/v2`) names it in each run's record:
+`ISOLATION_ID` (`personal-config-off/v3`) names it in each run's record:
 
 ```
 --setting-sources project --strict-mcp-config
---settings {"autoMemoryEnabled":false,"claudeMdExcludes":[...]}
+--settings {"autoMemoryEnabled":false,"claudeMdExcludes":[...],"crossSessionInbound":"refuse"}
 ```
 
 Verified with Claude Code 2.1.285 (`/context`, the stream-json `init` and hook
@@ -691,6 +691,7 @@ events, and real-model probes):
 | Custom agents in `~/.claude/agents`, output styles | loaded | not loaded |
 | MCP servers: user (dropped by `--setting-sources`), project `.mcp.json` and claude.ai connectors (dropped by `--strict-mcp-config`) | loaded | none |
 | Auto memory under `~/.claude/projects/<dir>/memory/` | loaded | off |
+| Messages from the operator's other Claude Code sessions (`SendMessage`; below) | delivered as a user turn when both sessions bypass permissions | refused |
 | Project `.claude/settings.json` and `CLAUDE.md` (its `AGENTS.md` when it has no `CLAUDE.md`) | loaded | loaded |
 | Login (OAuth in the Keychain) | works | works |
 
@@ -718,9 +719,51 @@ Looper (next section), not from the operator's Claude Code settings, and the
 plugins and skills come from the Looper catalog,
 where they are installed (below), never from `~/.claude` itself.
 
+### The operator's other Claude Code sessions
+
+Claude Code sessions on one machine find each other (each listens on a socket
+under `/tmp/cc-socks/`) and message each other: `ListAgents` lists them, and
+`SendMessage` reaches one by its name or socket address. Left alone, an agent
+could list the operator's own sessions and message them, and they could message
+it: with `crossSessionInbound` unset, Claude Code delivers a peer's message
+when both sessions are in the same permission-mode class, and every agent but a
+Planner bypasses permissions. Looper cuts its agents off both ways:
+
+- **Inbound.** The isolation `--settings` set `"crossSessionInbound":
+  "refuse"`, so another session's message to an agent is turned away and the
+  sender is told so.
+- **Outbound.** `claude_cli.peer_args` adds `--disallowedTools ListAgents` to
+  every launch, with `SendMessage` as well when the run has no agent teams
+  (`Launch.agent_teams`: never for a Planner or a consult). A run with teams
+  keeps `SendMessage`, which its lead and teammates use. Without `ListAgents`
+  it cannot discover the operator's sessions, but it can still send to one
+  whose name or socket address it learns (from its prompt or a file). Only the
+  receiving session's own `crossSessionInbound` stops that (`"refuse"` or
+  `"hold"` in the operator's `~/.claude/settings.json`), and Looper does not
+  set it for the operator. A read-only run's second `--disallowedTools` adds to
+  its own; Claude Code applies both.
+
+Verified with Claude Code 2.1.285, haiku agents and a sonnet sender, all
+sessions started for the check: a resident Manager-style session with the
+generated flags lists neither tool in its `init` event, and asked to call
+`ListAgents` it finds no such tool; a plain session that sends it a message by
+its name gets `Cross-session message refused` back, and the agent sees nothing
+and runs no turn, where the same session without the setting received the
+message as a user turn and answered it. A Worker with agent teams and
+`ListAgents` denied starts a named teammate, messages it, and gets its reply.
+
+Not covered: besides the known-name send above, an agent with a shell can
+reach the sockets, or other runtimes' sessions (`codex queue` queues a message
+in a Codex session it names), through commands Looper does not filter. Codex,
+Grok and OMP agents get no flag for it: none of them has a tool that reaches
+another session (checked in Codex 0.162.0, whose multi-agent tools reach only
+the agents it spawns and whose message board is off; Grok 1.0.62, which Looper
+runs without the shared leader; OMP 18.4.3).
+
 ### What an agent may do
 
-The Manager, the Workers and the Reviewers have every tool and run without
+The Manager, the Workers and the Reviewers have every tool but the ones that
+reach the operator's other Claude Code sessions (above) and run without
 permission prompts (RFC decision 8): `permission_args()` in
 `looper/agents/claude_cli.py` is `--dangerously-skip-permissions`, and
 `agent_settings.Launch.args` puts it in front of their launch flags, beside
@@ -728,8 +771,8 @@ the installed plugins'. Verified with Claude Code 2.1.285 in `--print` mode
 with the isolation flags and a `--plugin-dir`: the init event reports
 `permissionMode: bypassPermissions`, and Bash, Write and a plugin skill that
 declares `allowed-tools: Bash` all ran without a permission denial. The
-isolation `--settings` (`claudeMdExcludes`, `autoMemoryEnabled`) leave
-permissions alone. Not checked: managed (admin policy) settings that deny
+isolation `--settings` (`claudeMdExcludes`, `autoMemoryEnabled`,
+`crossSessionInbound`) leave permissions alone. Not checked: managed (admin policy) settings that deny
 tools or turn bypass mode off.
 
 A Planner runs read-only (`Launch.read_only`; [Planner read-only
@@ -743,7 +786,8 @@ adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
   cannot loosen it, and `--permission-prompts none` leaves no one to answer
   a prompt: in `--print` mode every tool call Claude Code would ask about is
   refused. `--disallowedTools Edit,Write,NotebookEdit` leaves out the
-  file-editing tools, and `--allowedTools` lets through what the Planner may
+  file-editing tools (and a second one `ListAgents,SendMessage`, above), and
+  `--allowedTools` lets through what the Planner may
   use without asking: its skills (`Skill`), web reads (`WebFetch`,
   `WebSearch`) and each of its MCP servers (`mcp_rule`: `mcp__<server>`,
   with each character of the name that is not a letter, a digit, `_` or `-`
@@ -1278,8 +1322,9 @@ The built-in profile is read-only: to run without teams, select a profile with
 them off. Asking for them on another runtime is refused (400). A profile with
 `agent_teams` starts the Manager's, the Workers' and the Reviewers' Claude Code
 (so any of them can spawn teammates) with
-`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and `--teammate-mode in-process`. A
-Planner never has them (`Launch.agent_teams`, keyed on the Planner's role): its
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and `--teammate-mode in-process`, and
+keeps `SendMessage`, which teammates use (the operator's other Claude Code
+sessions, above). A Planner never has them (`Launch.agent_teams`, keyed on the Planner's role): its
 plan and each of its decisions are read from the result of its own turn, so a
 turn that waited for a teammate would end without its decision, and the
 teammate's later turns are Claude's own, which the Planner only logs (#26); the

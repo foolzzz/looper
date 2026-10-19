@@ -57,6 +57,11 @@ logger = logging.getLogger(__name__)
 #   (runtimes.instructions).
 # - "autoMemoryEnabled": false turns off the per-directory auto memory under
 #   ~/.claude/projects/.
+# - "crossSessionInbound": "refuse" turns away the messages the operator's
+#   other Claude Code sessions send it (SendMessage over the local socket each
+#   session listens on). Unset, Claude Code delivers one when both sessions
+#   bypass permissions, as every agent but a Planner does. What an agent may
+#   send to those sessions is in ``peer_args``.
 # Authentication is unaffected. "--bare" and a separate CLAUDE_CONFIG_DIR were
 # rejected: both lose the operator's login.
 #
@@ -79,7 +84,7 @@ logger = logging.getLogger(__name__)
 
 # Names this flag set in every run's record (prompt_layers.isolation); change
 # it whenever the flags change.
-ISOLATION_ID = "personal-config-off/v2"
+ISOLATION_ID = "personal-config-off/v3"
 
 
 def repository_root(directory: Path) -> Path:
@@ -124,7 +129,8 @@ def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
     result depends only on ``cwd`` (and where the operator's configuration
     lives), so a resident agent's command stays the same between turns.
     """
-    settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd))}
+    settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd)),
+                "crossSessionInbound": "refuse"}
     return [
         "--setting-sources", "project",
         "--strict-mcp-config",
@@ -163,7 +169,8 @@ def knowledge_args(knowledge: AgentKnowledge) -> list[str]:
 
 # --- What an agent may do ---
 #
-# The Manager, the Workers and the Reviewers have every tool and run without
+# The Manager, the Workers and the Reviewers have every tool but the ones that
+# reach the operator's other Claude Code sessions (``peer_args``) and run without
 # permission prompts (RFC decision 8): ``permission_args``. A Planner runs
 # read-only (decision 8 as revised for the Planner, the Planner read-only RFC):
 # ``read_only_args`` in their place. The flags reach every command through
@@ -173,9 +180,9 @@ def knowledge_args(knowledge: AgentKnowledge) -> list[str]:
 # "bypassPermissions", and Bash, Write and a plugin skill that declares
 # allowed-tools all run without a denial, where the default mode denies the
 # Write and the skill. The isolation --settings (claudeMdExcludes,
-# autoMemoryEnabled) leave permissions alone. Since the Manager can run any
-# command on this machine, the chat channels that reach it pass on only the
-# senders they list (channels/allowlist.py).
+# autoMemoryEnabled, crossSessionInbound) leave permissions alone. Since the
+# Manager can run any command on this machine, the chat channels that reach it
+# pass on only the senders they list (channels/allowlist.py).
 
 
 def budget_args(max_budget_usd: float | None) -> list[str]:
@@ -309,6 +316,26 @@ def read_only_args(library: AgentLibrary) -> list[str]:
     servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
     return [*READ_ONLY_MODE, "--disallowedTools", ",".join(WRITE_TOOLS),
             "--allowedTools", ",".join((*READ_ONLY_ALLOWED, *servers))]
+
+
+# The tools that reach the operator's other Claude Code sessions on this machine: ListAgents lists them (with a
+# run's own subagents and teammates), SendMessage messages one by name or socket address, and a teammate by name.
+LIST_PEERS = "ListAgents"
+SEND_MESSAGE = "SendMessage"
+
+
+def peer_args(agent_teams: bool) -> list[str]:
+    """The flag that keeps an agent from reaching the operator's other Claude Code sessions: every launch carries it
+    beside its permissions. It denies ListAgents, and SendMessage unless the run has agent teams
+    (``Launch.agent_teams``), whose lead and teammates message each other with it; such a run can still message a
+    session whose name or socket it knows, which only that session's own ``crossSessionInbound`` keeps out
+    (``isolation_args`` sets it for Looper's own agents). A second ``--disallowedTools`` adds to a read-only run's.
+
+    Verified against Claude Code 2.1.285 in ``--print`` stream-json mode with the isolation flags: the init event
+    lists neither denied tool (a Planner's lists none of its five denied tools either), a model asked to call
+    ListAgents finds no such tool, and a run with agent teams starts a named teammate, messages it and gets its reply.
+    """
+    return ["--disallowedTools", ",".join((LIST_PEERS, *(() if agent_teams else (SEND_MESSAGE,))))]
 
 
 def consult_args() -> list[str]:

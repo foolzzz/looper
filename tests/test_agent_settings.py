@@ -252,13 +252,15 @@ class TestRecord:
         assert record["max_budget_usd"] == 0.5
         assert settings.harness.record() == {"source": "role_project", "sha256": _sha("H"), "project_id": "proj-a"}
         from looper.agents.claude_cli import permission_args
-        assert launch.args() == [*permission_args(), "--model", "sonnet", "--effort", "high",
-                                 "--max-budget-usd", "0.5"]
+        assert launch.args() == [*permission_args(), "--disallowedTools", "ListAgents,SendMessage",
+                                 "--model", "sonnet", "--effort", "high", "--max-budget-usd", "0.5"]
 
     def test_the_builtin_launch(self) -> None:
         from looper.agents.claude_cli import permission_args
 
-        assert Launch().args() == [*permission_args(), "--model", "opus", *TEAMMATE_MODE_ARGS]  # it has agent teams
+        # It has agent teams, which keep SendMessage.
+        assert Launch().args() == [*permission_args(), "--disallowedTools", "ListAgents", "--model", "opus",
+                                   *TEAMMATE_MODE_ARGS]
         assert Launch().record() == {
             "system_prompt_mode": "append",
             "profile": {**BUILTIN_PROFILE.record(), "source": "builtin"},
