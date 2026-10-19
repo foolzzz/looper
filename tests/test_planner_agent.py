@@ -27,6 +27,7 @@ from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ISOLATION_ID, isolation_args
 from looper.agents.run_usage import Usage
+from looper.agents.runtimes import ReadOnly, adapter
 from looper.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -49,6 +50,17 @@ REVIEW_PASS = {"passed": True, "findings": [], "summary": "looks right"}
 REVIEW_FAIL = {"passed": False, "findings": ["no tests"], "summary": "missing tests"}
 
 Outcome = Callable[[MessageEnvelope], "dict[str, Any] | None"]
+
+
+@pytest.mark.parametrize(("runtime", "read_only"), [
+    ("claude-code", ReadOnly.PERMISSIONS),
+    ("codex", ReadOnly.SANDBOX),
+    ("omp", ReadOnly.TOOLS),
+    ("grok", ReadOnly.TOOLS),
+])
+def test_every_shipped_runtime_keeps_a_planner_read_only(runtime: str, read_only: ReadOnly) -> None:
+    assert adapter(runtime).read_only is read_only
+    assert adapter(runtime).read_only is not ReadOnly.CHECK
 
 
 # --- Scripted Planner replies ---

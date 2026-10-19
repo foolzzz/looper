@@ -49,7 +49,8 @@ format translates it at launch (Codex: ``codex.materialize``,
 (``launch_record``).
 
 A runtime whose CLI runs one turn per process keeps the Manager's and a
-Planner's session by resuming it on every turn (``per_turn.PerTurnSession``).
+Planner's session by resuming it on every turn (``per_turn.PerTurnSession``);
+Grok keeps one process for it over ACP (``grok_acp``), per turn when it cannot.
 
 The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
 (``omp``) and ``grok`` (``grok``).
@@ -102,6 +103,7 @@ class Capability(str, Enum):
     ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
     COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
+    READ_TOOLS = "read_tools"  # it can run with only the tools that read (OMP's --tools), keeping its MCP tools
     COST_REPORT = "cost_report"  # it reports what a run cost
 
 
@@ -109,8 +111,16 @@ class ReadOnly(str, Enum):
     """How a run that must not change files (``Launch.read_only``, a Planner's) is kept from changing them."""
 
     PERMISSIONS = "permissions"  # the runtime refuses the tools and commands that would, and reports each refusal
+    SANDBOX = "sandbox"  # its sandbox fails the commands and edits that would; nothing is reported as refused
     TOOLS = "tools"  # it runs with reading tools only (no shell, no write tool); nothing is refused, so nothing is reported
     CHECK = "check"  # it cannot: the Planner compares the task directory before and after each turn
+
+
+class ResidentTransport(str, Enum):
+    """How a runtime serves the Manager's and a Planner's session (``RuntimeAdapter.resident_transport``)."""
+
+    PER_TURN = "per_turn"  # one process per turn, resuming the session (``per_turn.PerTurnSession``)
+    ACP = "acp"  # one process for the session, speaking the Agent Client Protocol (``grok_acp.AcpGrok``)
 
 
 class CostSource(str, Enum):
@@ -161,8 +171,9 @@ class Probe:
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
-    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex, OMP and Grok one process per turn
-    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``, ``grok.ResidentGrok``)."""
+    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Grok one over ACP (``grok_acp.AcpGrok``),
+    Codex and OMP one process per turn (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``;
+    ``grok.ResidentGrok`` is Grok's fallback)."""
 
     @property
     def label(self) -> str: ...
@@ -236,12 +247,18 @@ class RuntimeAdapter(ABC):
     # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
     runtime_cost_capped: ClassVar[bool] = True
     can_replace_system_prompt: ClassVar[bool] = False
+    # How its resident sessions run. A runtime with ACP falls back to a process per turn when it cannot serve one.
+    resident_transport: ClassVar[ResidentTransport] = ResidentTransport.PER_TURN
 
     # --- Registration ---
 
     @abstractmethod
     def probe(self, executable: str) -> Probe:
         """The version and capabilities of ``executable``; never a model call."""
+
+    def read_only_for(self, capabilities: frozenset[Capability]) -> ReadOnly:
+        """How a read-only run is kept read-only with a runtime of these (probed) ``capabilities``."""
+        return self.read_only
 
     def capabilities_for(self, version: str | None) -> frozenset[Capability]:
         """What a probed version can do; every version of the type, unless the adapter says otherwise."""
