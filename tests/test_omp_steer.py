@@ -101,7 +101,7 @@ while True:
     emit(response)
     if command == 'prompt':
         if scenario == 'noise':
-            print('not json', flush=True)
+            print('not json SECRET-xyz', flush=True)
             print('[]', flush=True)
             emit({'type': 'response', 'command': 'parse', 'success': False, 'error': 'bad line'})
             emit({'type': 'response', 'id': 'unknown', 'success': False})
@@ -233,7 +233,7 @@ def test_steer_ack_waits_for_server_acceptance_and_reaches_result(
 
 
 @pytest.mark.parametrize("scenario,problem", [("fail_steer", "steer rejected"),
-                                             ("no_answer", "OMP did not answer the steer")])
+                                             ("no_answer", "OMP did not accept the steer in time")])
 def test_steer_failure_and_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                    scenario: str, problem: str) -> None:
     executable = _fake(tmp_path, monkeypatch, scenario)
@@ -275,7 +275,8 @@ def test_handshake_failure_yields_one_error_without_retry(tmp_path: Path, monkey
         finally:
             await _close(process, channel)
         commands = [r["type"] for r in _requests(tmp_path) if "id" in r]
-        assert commands.count("prompt") == 1
+        # The prompt follows only after both setup requests succeeded.
+        assert commands.count("prompt") == (0 if scenario in ("fail_set_interrupt_mode", "fail_get_state") else 1)
 
     asyncio.run(run())
 
@@ -350,7 +351,7 @@ def test_protocol_noise_does_not_change_the_result(tmp_path: Path, monkeypatch: 
             await asyncio.wait_for(_collect(channel, events), 3)
             assert [e["subtype"] for e in events if e["type"] == "result"] == ["success"]
             assert [e["event"]["type"] for e in events if e.get("subtype") == "omp_event"] == ["future_event"]
-            assert "not json" in caplog.text and "bad line" in caplog.text
+            assert "non-JSON line" in caplog.text and "SECRET" not in caplog.text and "bad line" not in caplog.text
         finally:
             await _close(process, channel)
 
@@ -473,5 +474,31 @@ def test_worker_omp_input_over_the_bus(tmp_path: Path, monkeypatch: pytest.Monke
         finally:
             await pool.stop()
             await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stalled_writer_cannot_outlast_the_one_steer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(omp_steer, "_STEER_TIMEOUT_SEC", 0.2)
+
+    class Stalled:
+        def write(self, data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            await asyncio.Event().wait()
+
+        def is_closing(self) -> bool:
+            return False
+
+    async def run() -> None:
+        channel = OmpChannel(SimpleNamespace(stdin=Stalled(), stdout=None), model=None, cwd="/")  # type: ignore[arg-type]
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(RuntimeError, match="in time"):
+            await channel.send("x")
+        assert asyncio.get_running_loop().time() - started < 0.6
+        assert channel._pending == {}
 
     asyncio.run(run())

@@ -609,7 +609,7 @@ def test_pending_steer_fails_when_stdout_closes(app_server: tuple[str, Path], tm
 
 
 @pytest.mark.parametrize(("mode", "message"), [
-    ("stall_initialize", "the Codex turn has not started"),
+    ("stall_initialize", "did not accept the steer"),
     ("stall_steer", "did not accept the steer"),
 ])
 def test_send_has_bounded_handshake_and_ack_waits(app_server: tuple[str, Path], tmp_path: Path,
@@ -692,3 +692,63 @@ def test_unreadable_version_does_not_probe_schema(app_server: tuple[str, Path],
     probe = CODEX.probe(app_server[0])
     assert Capability.STEER not in probe.capabilities
     assert not any(r.get("probe") == "schema" for r in _requests(app_server[1]))
+
+
+class _StalledStdin:
+    """A pipe under backpressure: writes buffer, ``drain`` never returns."""
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        await asyncio.Event().wait()
+
+    def is_closing(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+
+class _Process:
+    def __init__(self, stdin: Any, lines: list[bytes] | None = None) -> None:
+        self.stdin = stdin
+        self.stdout = asyncio.StreamReader()
+        for line in lines or []:
+            self.stdout.feed_data(line)
+
+
+def test_a_stalled_writer_cannot_outlast_the_one_steer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.runtimes import codex_steer
+
+    monkeypatch.setattr(codex_steer, "_REQUEST_TIMEOUT_SEC", 0.2)
+
+    async def run() -> None:
+        channel = CodexChannel(_Process(_StalledStdin()), model="m", effort="", cwd="/", keep_session=False)  # type: ignore[arg-type]
+        channel._turn_ready.set()
+        channel._turn_id, channel._thread_id = "t", "th"
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(RuntimeError, match="in time"):
+            await channel.send("x")
+        assert asyncio.get_running_loop().time() - started < 0.6
+        assert channel._pending == {}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("envelope", [
+    {"id": [], "result": {}}, {"id": True, "result": {}}, {"id": {"a": 1}, "method": "item/x", "params": {}},
+    {"method": "turn/started", "params": [1]}, {"id": 1, "result": [1]}, {"method": 5, "params": {}},
+    {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": []}},
+])
+def test_the_reader_survives_malformed_envelopes(envelope: dict[str, Any]) -> None:
+    async def run() -> None:
+        good = {"method": "turn/started", "params": {}}
+        process = _Process(object(), [json.dumps(envelope).encode() + b"\n", json.dumps(good).encode() + b"\n"])
+        channel = CodexChannel(process, model="m", effort="", cwd="/", keep_session=False)  # type: ignore[arg-type]
+        channel._turn_ready.set()
+        process.stdout.feed_eof()
+        events = [e async for e in channel.events()]
+        assert not any(e.get("is_error") for e in events)
+
+    asyncio.run(run())

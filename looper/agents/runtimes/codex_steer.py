@@ -132,29 +132,44 @@ class CodexChannel:
                 try:
                     message = json.loads(line)
                 except (ValueError, UnicodeDecodeError):
-                    logger.debug("ignoring a non-JSON Codex app-server line")
+                    logger.debug("ignoring a non-JSON Codex app-server line (%d bytes)", len(line))
                     continue
                 if not isinstance(message, dict):
                     logger.debug("ignoring a Codex app-server line that is not an object")
                     continue
+                request_id = message.get("id")
+                if "id" in message and (isinstance(request_id, bool) or not isinstance(request_id, (int, str))):
+                    logger.debug("ignoring a Codex app-server envelope with a bad id (%s)", type(request_id).__name__)
+                    continue
+                params = message.get("params")
+                result = message.get("result")
+                if ("params" in message and not isinstance(params, dict)) or (
+                        "result" in message and not isinstance(result, dict)):
+                    logger.debug("ignoring a Codex app-server envelope whose params or result is not an object "
+                                 "(keys: %s)", sorted(message)[:6])
+                    continue
                 if "method" in message:
                     method = message["method"]
+                    if not isinstance(method, str):
+                        logger.debug("ignoring a Codex app-server envelope with a bad method")
+                        continue
                     if "id" in message:
                         async with self._lock:
                             await self._write({"id": message["id"], "error": {
                                 "code": -32601, "message": "Looper runs Codex without interactive requests"}})
                         yield {"type": "system", "subtype": "codex_server_request", "method": method}
                         continue
-                    params = message.get("params") or {}
+                    params = params or {}
                     if method == "thread/tokenUsage/updated":
-                        usage = (params.get("tokenUsage") or {}).get("total") or {}
+                        token_usage = params.get("tokenUsage")
+                        total = token_usage.get("total") if isinstance(token_usage, dict) else None
+                        usage = total if isinstance(total, dict) else {}
                     if method == "turn/completed":
                         self._turn_id = None
                     for raw in exec_events(method, params, usage):
                         for event in self._stream.translate(raw):
                             yield event
                     continue
-                request_id = message.get("id")
                 future = self._pending.pop(request_id, None)
                 if future is None or future.done():
                     continue
@@ -163,9 +178,11 @@ class CodexChannel:
                     continue
                 method = self._handshake[0]
                 if "error" in message:
-                    yield self._failed(str(message["error"].get("message") or "request failed"))
+                    error = message["error"]
+                    yield self._failed(str((error.get("message") if isinstance(error, dict) else None)
+                                           or "request failed"))
                     return
-                result = message.get("result") or {}
+                result = result or {}
                 if method == "initialize":
                     async with self._lock:
                         await self._write({"method": "initialized"})
@@ -213,11 +230,15 @@ class CodexChannel:
             raise RuntimeError("the Codex run has ended")
 
     async def send(self, text: str, *, uuid: str | None = None) -> None:
-        self._check_open()
         try:
-            await asyncio.wait_for(self._turn_ready.wait(), _REQUEST_TIMEOUT_SEC)
-        except TimeoutError as exc:
-            raise RuntimeError("the Codex turn has not started") from exc
+            await asyncio.wait_for(self._steer(text), _REQUEST_TIMEOUT_SEC)
+        except TimeoutError:
+            raise RuntimeError("Codex app-server did not accept the steer in time") from None
+
+    async def _steer(self, text: str) -> None:
+        """Readiness, lock, write and acknowledgement under the caller's one deadline."""
+        self._check_open()
+        await self._turn_ready.wait()
         async with self._lock:
             self._check_open()
             if self._turn_id is None:
@@ -227,13 +248,13 @@ class CodexChannel:
                 "input": [{"type": "text", "text": text}],
             })
         try:
-            response = await asyncio.wait_for(future, _REQUEST_TIMEOUT_SEC)
-        except TimeoutError as exc:
-            raise RuntimeError("Codex app-server did not accept the steer in time") from exc
+            response = await future
         finally:
             self._pending.pop(request_id, None)
         if "error" in response:
-            raise RuntimeError(str(response["error"].get("message") or "Codex app-server rejected the steer"))
+            error = response["error"]
+            raise RuntimeError(str((error.get("message") if isinstance(error, dict) else None)
+                                   or "Codex app-server rejected the steer"))
 
     def end_input(self) -> None:
         assert self._process.stdin is not None

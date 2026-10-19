@@ -28,6 +28,7 @@ class OmpChannel:
         self._next_id = 0
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._startup: dict[str, str] = {}
+        self._prompt = ""
         self._prompt_acknowledged = False
         self._ended = False
         self._result_seen = False
@@ -48,9 +49,11 @@ class OmpChannel:
         return request_id, future
 
     async def start(self, prompt: str) -> None:
+        # The prompt follows only after both setup requests succeeded (``events``), so a refused interrupt mode
+        # fails the launch before the model sees anything.
+        self._prompt = prompt
         async with self._lock:
-            for command, params in (("set_interrupt_mode", {"mode": "wait"}), ("get_state", {}),
-                                    ("prompt", {"message": prompt})):
+            for command, params in (("set_interrupt_mode", {"mode": "wait"}), ("get_state", {})):
                 request_id, _ = await self._write(command, **params)
                 self._startup[request_id] = command
 
@@ -61,17 +64,17 @@ class OmpChannel:
                 try:
                     raw = json.loads(line)
                 except (ValueError, UnicodeDecodeError):
-                    logger.debug("OMP rpc: skipping non-JSON line: %r", line)
+                    logger.debug("OMP rpc: skipping a non-JSON line (%d bytes)", len(line))
                     continue
                 if not isinstance(raw, dict):
-                    logger.debug("OMP rpc: skipping non-object line: %r", line)
+                    logger.debug("OMP rpc: skipping a non-object line (%d bytes)", len(line))
                     continue
                 if raw.get("type") == "response":
                     request_id = raw.get("id")
                     future = self._pending.pop(request_id, None) if isinstance(request_id, str) else None
                     if future is None:
                         if raw.get("command") == "parse" and not raw.get("success"):
-                            logger.debug("OMP rpc: parse failed: %s", raw.get("error"))
+                            logger.debug("OMP rpc: a command failed to parse")
                         continue
                     if not future.done():
                         future.set_result(raw)
@@ -85,6 +88,9 @@ class OmpChannel:
                             for event in self._stream.translate({"type": "session", "id": data.get("sessionId"),
                                                                  "cwd": self._cwd}):
                                 yield event
+                            async with self._lock:
+                                request_id, _ = await self._write("prompt", message=self._prompt)
+                                self._startup[request_id] = "prompt"
                         elif command == "prompt":
                             self._prompt_acknowledged = True
                     continue
@@ -111,19 +117,24 @@ class OmpChannel:
                 "errors": [f"OMP rpc: {message}"]}
 
     async def send(self, text: str, *, uuid: str | None = None) -> None:
+        try:
+            response = await asyncio.wait_for(self._steer(text), _STEER_TIMEOUT_SEC)
+        except TimeoutError:
+            raise RuntimeError("OMP did not accept the steer in time") from None
+        if not response.get("success"):
+            raise RuntimeError(response.get("error") or "OMP rejected the steer")
+
+    async def _steer(self, text: str) -> dict[str, Any]:
+        """Lock, write and acknowledgement under the caller's one deadline."""
         assert self._process.stdin is not None
         async with self._lock:
             if self._ended or self._result_seen or self._process.stdin.is_closing():
                 raise RuntimeError("the OMP run has ended")
             request_id, future = await self._write("steer", message=text)
         try:
-            response = await asyncio.wait_for(future, _STEER_TIMEOUT_SEC)
-        except TimeoutError:
-            raise RuntimeError("OMP did not answer the steer") from None
+            return await future
         finally:
             self._pending.pop(request_id, None)
-        if not response.get("success"):
-            raise RuntimeError(response.get("error") or "OMP rejected the steer")
 
     def end_input(self) -> None:
         assert self._process.stdin is not None
