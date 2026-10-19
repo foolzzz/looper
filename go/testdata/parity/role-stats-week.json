@@ -1,0 +1,64 @@
+{
+  "builtin": {
+    "reviewer": {
+      "accepted": 1,
+      "contract_violation_rate": 0.0,
+      "contract_violations": 0,
+      "cost_usd": 0.125,
+      "failed": 0,
+      "retries": 1,
+      "review_pass_rate": 1.0,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 1
+      },
+      "running": 0,
+      "runs": 1,
+      "steps": 1
+    },
+    "worker": {
+      "accepted": 0,
+      "contract_violation_rate": 0.0,
+      "contract_violations": 0,
+      "cost_usd": 0.015625,
+      "failed": 1,
+      "retries": 0,
+      "review_pass_rate": null,
+      "reviews": {
+        "not_passed": 0,
+        "passed": 0
+      },
+      "running": 1,
+      "runs": 4,
+      "steps": 3
+    }
+  },
+  "project_id": "proj-alpha0001",
+  "roles": [
+    {
+      "id": "backend",
+      "kinds": [
+        "work"
+      ],
+      "stats": {
+        "accepted": 1,
+        "contract_violation_rate": 0.0,
+        "contract_violations": 0,
+        "cost_usd": 0.75,
+        "failed": 0,
+        "retries": 1,
+        "review_pass_rate": 1.0,
+        "reviews": {
+          "not_passed": 0,
+          "passed": 1
+        },
+        "running": 0,
+        "runs": 2,
+        "steps": 1
+      },
+      "tasks": 1,
+      "templates": []
+    }
+  ],
+  "tasks": 1
+}

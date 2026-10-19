@@ -89,7 +89,7 @@ func TestChatRunRoleVersionMatchesPythonInt(t *testing.T) {
 	tests := []struct {
 		name    string
 		version any
-		want    int
+		want    any
 		ok      bool
 	}{
 		{name: "string", version: "2", want: 2, ok: true},
@@ -101,15 +101,23 @@ func TestChatRunRoleVersionMatchesPythonInt(t *testing.T) {
 		{name: "unicode negative", version: "  -２  ", want: -2, ok: true},
 		{name: "zeros at the digit limit", version: strings.Repeat("0", pythonIntMaxDigits), want: 0, ok: true},
 		{name: "float", version: 2.9, want: 2, ok: true},
+		{name: "negative float", version: -2.9, want: -2, ok: true},
+		{name: "finite float past int", version: math.Ldexp(1, 63), want: json.Number("9223372036854775808"), ok: true},
 		{name: "bool", version: true, want: 1, ok: true},
 		{name: "json number", version: json.Number("2"), want: 2, ok: true},
 		{name: "json number fraction", version: json.Number("2.9"), want: 2, ok: true},
+		// int(float("9"*40 + ".0")) in CPython. The token is a float, so the
+		// integer is the truncated float, and the role is kept.
+		{name: "json number whole fraction past int", version: json.Number(strings.Repeat("9", 40) + ".0"), want: json.Number("10000000000000000303786028427003666890752"), ok: true},
+		{name: "json number does not fit in int", version: json.Number(strings.Repeat("9", 40)), want: json.Number(strings.Repeat("9", 40)), ok: true},
+		{name: "negative json number does not fit in int", version: json.Number("-" + strings.Repeat("9", 40)), want: json.Number("-" + strings.Repeat("9", 40)), ok: true},
 		{name: "decimal string", version: "2.0", ok: false},
 		{name: "space after sign", version: "+ 2", ok: false},
 		{name: "trailing underscore", version: "2_", ok: false},
 		{name: "file separator is not stripped", version: "\x1c2", ok: false},
 		{name: "past the digit limit", version: strings.Repeat("0", pythonIntMaxDigits+1), ok: false},
-		{name: "does not fit in int", version: strings.Repeat("9", 40), ok: false},
+		{name: "does not fit in int", version: strings.Repeat("9", 40), want: json.Number(strings.Repeat("9", 40)), ok: true},
+		{name: "negative does not fit in int", version: "-" + strings.Repeat("9", 40), want: json.Number("-" + strings.Repeat("9", 40)), ok: true},
 		{name: "nan", version: math.NaN(), ok: false},
 		{name: "blank", version: "  ", ok: false},
 		{name: "nil", version: nil, ok: false},
@@ -124,7 +132,16 @@ func TestChatRunRoleVersionMatchesPythonInt(t *testing.T) {
 				return
 			}
 			if role == nil || role["id"] != "backend" || role["kind"] != "work" || role["version"] != tt.want {
-				t.Fatalf("role %#v, want version %d", role, tt.want)
+				t.Fatalf("role %#v, want version %#v", role, tt.want)
+			}
+			if number, ok := tt.want.(json.Number); ok {
+				body, err := json.Marshal(role)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Contains(body, []byte(`"version":`+string(number))) || bytes.Contains(body, []byte(`"version":"`)) {
+					t.Fatalf("marshal %s", body)
+				}
 			}
 		})
 	}
@@ -200,6 +217,59 @@ func TestChatTargetsKeepsTasksWhenLaterReadsFail(t *testing.T) {
 	}
 	if _, err := store.ChatTargets(ctx); err == nil {
 		t.Fatal("task query failure was kept")
+	}
+}
+
+func TestChatTargetKeepsBareJSONRoleVersion(t *testing.T) {
+	version := strings.Repeat("9", 40)
+	body, err := json.Marshal(map[string]any{
+		"prompt_layers": map[string]any{
+			"task_role": map[string]any{"id": "backend", "kind": "work", "version": json.Number(version)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsn := withDisposableDB(t, "loopgo_g1efix_role")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := EnsureSchema(ctx, dsn); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	statements := []struct {
+		sql  string
+		args []any
+	}{
+		{sql: `INSERT INTO projects (id, name) VALUES ('proj-1', 'P')`},
+		{sql: `INSERT INTO tasks (id, requirement, project_id) VALUES ('task-1', 'ship it', 'proj-1')`},
+		{sql: `INSERT INTO llm_records (agent_id, task_id, metadata) VALUES ('worker-1', 'task-1', $1::jsonb)`, args: []any{string(body)}},
+	}
+	for _, stmt := range statements {
+		if _, err := sqlDB.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := NewStore(sqlDB).ChatTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := findChatTarget(got, "worker-1")
+	role, _ := worker["task_role"].(map[string]any)
+	number, ok := role["version"].(json.Number)
+	if worker == nil || role["id"] != "backend" || role["kind"] != "work" || !ok || string(number) != version {
+		t.Fatalf("worker %#v", worker)
+	}
+	encoded, err := json.Marshal(role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"version":`+version)) || bytes.Contains(encoded, []byte(`"version":"`)) {
+		t.Fatalf("marshal %s", encoded)
 	}
 }
 

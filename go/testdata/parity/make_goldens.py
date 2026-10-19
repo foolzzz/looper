@@ -167,6 +167,44 @@ _CONVERSATION = (
     ("conversation", "task-rich00001", 200),
     ("conversation-empty", "task-min000001", 200),
 )
+# Role configs. A missing role is the handler's 404.
+_ROLES = (("roles", 200),)
+_ROLE = (
+    ("role-planner", "planner", 200),
+    ("role-missing", "missing", 404),
+)
+# Channel views add start_problem and has_bot_token. The bot token is not in
+# the body. telegram-empty's allowlist is empty. web has no allowlist.
+_CHANNELS = (("channel-configs", 200),)
+_CHANNEL = (
+    ("channel-lark", "lark", 200),
+    ("channel-telegram-empty", "telegram-empty", 200),
+    ("channel-web", "web", 200),
+    ("channel-missing", "missing", 404),
+)
+# The saved dashboard chat is on the telegram allowlist, so the problem is null.
+_GATE = (("gate-settings", 200),)
+# Alpha has one template and one role item. Beta has neither. The missing
+# project is the handler's 404, through _answer.
+_TEMPLATES = (
+    ("role-templates-alpha", "proj-alpha0001", 200),
+    ("role-templates-beta", "proj-beta00002", 200),
+    ("role-templates-missing", "proj-missing01", 404),
+)
+# 2010-01-01, 2010-W01-1, and 20100101 are all before the rich task, so those
+# stats match the unfiltered alpha body. 2099 includes no task. 2010-W53-1
+# is not a day. The missing project is 404.
+_ROLE_STATS = (
+    ("role-stats-alpha", "proj-alpha0001", None, 200),
+    ("role-stats-since", "proj-alpha0001", "2010-01-01", 200),
+    ("role-stats-future", "proj-alpha0001", "2099-01-01", 200),
+    ("role-stats-week", "proj-alpha0001", "2010-W01-1", 200),
+    ("role-stats-compact", "proj-alpha0001", "20100101", 200),
+    ("role-stats-beta", "proj-beta00002", None, 200),
+    ("role-stats-missing", "proj-missing01", None, 404),
+    ("role-stats-bad-since", "proj-alpha0001", "nope", 400),
+    ("role-stats-bad-week", "proj-alpha0001", "2010-W53-1", 400),
+)
 _REFUSAL = "refusing database URL: want 127.0.0.1:54329 and a loopgo_ database name"
 # Local noon on this day is the parity clock. Keep it in step with parity_test.go.
 _PARITY_DAY = date(2026, 6, 15)
@@ -329,7 +367,9 @@ async def capture(dsn: str) -> dict[str, object]:
     import looper.db.connection as dbconn
     from looper.agents.bus import MessageBus
     from looper.agents.channels.web import WebChannelAdapter
-    from looper.agents.http_server import HTTP_500, AgentHTTPServer, _json_response
+    from looper.agents import role_api
+    from looper.agents.gate_service import gate_settings
+    from looper.agents.http_server import HTTP_200, HTTP_500, AgentHTTPServer, _json_response
     from looper.agents.supervisor import AgentSupervisor
     from looper.agents.tiers.task import TaskRouter
 
@@ -426,6 +466,34 @@ async def capture(dsn: str) -> dict[str, object]:
                 out[name] = await take(
                     lambda cap, task_id=task_id: server._handle_task_conversation(task_id, cap),
                     expect)
+
+            async def answered(call, expect: int):
+                # Gate settings, templates, and role stats go through _answer,
+                # so a RequestError is 400 or 404 rather than an empty buffer.
+                cap = Capture()
+                await server._answer(cap, HTTP_200, call)
+                return response_json(bytes(cap.buf), expect)
+
+            for name, expect in _ROLES:
+                out[name] = await take(server._handle_list_role_configs, expect)
+            for name, role, expect in _ROLE:
+                out[name] = await take(
+                    lambda cap, role=role: server._handle_get_role_config(role, cap), expect)
+            for name, expect in _CHANNELS:
+                out[name] = await take(server._handle_list_channel_configs, expect)
+            for name, channel_id, expect in _CHANNEL:
+                out[name] = await take(
+                    lambda cap, channel_id=channel_id: server._handle_get_channel_config(channel_id, cap),
+                    expect)
+            for name, expect in _GATE:
+                out[name] = await answered(gate_settings, expect)
+            for name, project_id, expect in _TEMPLATES:
+                out[name] = await answered(
+                    lambda project_id=project_id: role_api.templates_view(project_id), expect)
+            for name, project_id, since, expect in _ROLE_STATS:
+                out[name] = await answered(
+                    lambda project_id=project_id, since=since: role_api.role_stats(project_id, since),
+                    expect)
             return out
     finally:
         await dbconn.close_pool()
@@ -454,6 +522,13 @@ def main() -> None:
         + [name for name, _, _, _ in _ACTIVITY]
         + [name for name, _, _, _ in _ACTIVITY_DETAIL]
         + [name for name, _, _ in _CONVERSATION]
+        + [name for name, _ in _ROLES]
+        + [name for name, _, _ in _ROLE]
+        + [name for name, _ in _CHANNELS]
+        + [name for name, _, _ in _CHANNEL]
+        + [name for name, _ in _GATE]
+        + [name for name, _, _ in _TEMPLATES]
+        + [name for name, _, _, _ in _ROLE_STATS]
     )
     for name in names:
         payload = normalize(bodies[name])

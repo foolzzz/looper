@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -84,12 +83,19 @@ const (
 var (
 	windowSuffix = regexp.MustCompile(`\[[^\]]*\]$`)
 	dateSuffix   = regexp.MustCompile(`-\d{8}$`)
-	senderFormat = map[string]struct {
-		field string
-		re    *regexp.Regexp
-	}{
-		"telegram": {"allowed_user_ids", regexp.MustCompile(`^[1-9][0-9]{0,19}$`)},
-		"lark":     {"allowed_open_ids", regexp.MustCompile(`^ou_[0-9A-Za-z]{8,64}$`)},
+	senderFormat = map[string]senderSpec{
+		"telegram": {
+			field: "allowed_user_ids",
+			label: "Telegram user ID",
+			hint:  "use the sender's numeric Telegram user ID, such as 123456789 (a negative number is a group or channel, not a sender)",
+			re:    regexp.MustCompile(`^[1-9][0-9]{0,19}$`),
+		},
+		"lark": {
+			field: "allowed_open_ids",
+			label: "Lark open_id",
+			hint:  "use the sender's open_id for this app, which starts with ou_ (a union_id starts with on_, and a user_id has no prefix)",
+			re:    regexp.MustCompile(`^ou_[0-9A-Za-z]{8,64}$`),
+		},
 	}
 	roleNeeds = []struct {
 		role  string
@@ -146,6 +152,14 @@ type layerKey struct {
 type layerValues struct {
 	profile map[string]any
 	limit   *int
+}
+
+// senderSpec is allowlist.SenderIdFormat for one channel type.
+type senderSpec struct {
+	field string
+	label string
+	hint  string
+	re    *regexp.Regexp
 }
 
 type gateChat struct {
@@ -563,21 +577,25 @@ func senderIDs(channel string, raw any) ([]string, error) {
 			entries = append(entries, part)
 		}
 	default:
-		return nil, fmt.Errorf("%s must be a list", spec.field)
+		return nil, fmt.Errorf("%s must be a list of %ss", spec.field, spec.label)
 	}
 	seen := map[string]struct{}{}
 	var ids []string
 	for _, entry := range entries {
 		text, ok := senderText(channel, entry)
 		if !ok {
-			return nil, fmt.Errorf("%s: bad entry", spec.field)
+			return nil, fmt.Errorf("%s: each entry is a %s written as a string", spec.field, spec.label)
 		}
 		text = strings.TrimSpace(text)
 		if text == "" {
 			continue
 		}
 		if !spec.re.MatchString(text) {
-			return nil, fmt.Errorf("%s: %q does not match", spec.field, text)
+			shown := text
+			if runes := []rune(text); len(runes) > 80 {
+				shown = string(runes[:80])
+			}
+			return nil, fmt.Errorf("%s is not a %s; %s", pyRepr(shown), spec.label, spec.hint)
 		}
 		if _, ok := seen[text]; ok {
 			continue
@@ -586,33 +604,39 @@ func senderIDs(channel string, raw any) ([]string, error) {
 		ids = append(ids, text)
 	}
 	if len(ids) > maxSenders {
-		return nil, fmt.Errorf("%s lists at most %d senders", spec.field, maxSenders)
+		return nil, fmt.Errorf("%s lists at most %d senders, got %d", spec.field, maxSenders, len(ids))
 	}
 	return ids, nil
 }
 
+// senderText is the string form of one allowlist entry. Telegram also accepts
+// a Python int, which JSONB delivers as int64 or, past int64, as json.Number.
+// A JSON float such as 123.0 is not an int, and a float64 of an integer past
+// 2^53 is a different id, so neither is accepted.
 func senderText(channel string, entry any) (string, bool) {
 	switch t := entry.(type) {
 	case string:
 		return t, true
-	case int, int32, int64:
+	case int:
 		if channel != "telegram" {
 			return "", false
 		}
-		n, ok := wholeInt(entry)
-		if !ok {
+		return strconv.Itoa(t), true
+	case int32:
+		if channel != "telegram" {
 			return "", false
 		}
-		return strconv.Itoa(n), true
-	case float64:
-		if channel != "telegram" || math.IsNaN(t) || math.IsInf(t, 0) || t != math.Trunc(t) {
+		return strconv.FormatInt(int64(t), 10), true
+	case int64:
+		if channel != "telegram" {
 			return "", false
 		}
-		n := int64(t)
-		if float64(n) != t {
+		return strconv.FormatInt(t, 10), true
+	case json.Number:
+		if channel != "telegram" {
 			return "", false
 		}
-		return strconv.FormatInt(n, 10), true
+		return jsonIntegerText(t)
 	default:
 		return "", false
 	}

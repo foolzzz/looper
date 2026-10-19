@@ -425,8 +425,8 @@ func taskRoleRaw(record map[string]any) any {
 }
 
 // runRole is task_roles.run_role. The key is omitted when the recorded role
-// is missing or not a work or review role. A JSON number is a float64 here
-// and an int in Python, so an integral float is formatted as an int.
+// is missing or not a work or review role. version is db.RoleVersion, the
+// same Python int() task detail and chat targets use.
 func runRole(raw any) map[string]any {
 	m, ok := raw.(map[string]any)
 	if !ok {
@@ -442,7 +442,7 @@ func runRole(raw any) map[string]any {
 	if !ok || (kindName != "work" && kindName != "review") {
 		return nil
 	}
-	ver, ok := roleVersion(version)
+	ver, ok := db.RoleVersion(version)
 	if !ok {
 		return nil
 	}
@@ -451,38 +451,6 @@ func runRole(raw any) map[string]any {
 		return nil
 	}
 	return map[string]any{"id": text, "kind": kindName, "version": ver}
-}
-
-func roleVersion(v any) (int, bool) {
-	switch t := v.(type) {
-	case bool:
-		if t {
-			return 1, true
-		}
-		return 0, true
-	case int:
-		return t, true
-	case int32:
-		return int(t), true
-	case int64:
-		if int64(int(t)) != t {
-			return 0, false
-		}
-		return int(t), true
-	case float64:
-		if math.IsNaN(t) || math.IsInf(t, 0) || t < math.MinInt || t > math.MaxInt {
-			return 0, false
-		}
-		return int(math.Trunc(t)), true
-	case string:
-		n, overflow, ok := pythonInt(t)
-		if !ok || overflow != 0 || int64(int(n)) != n {
-			return 0, false
-		}
-		return int(n), true
-	default:
-		return 0, false
-	}
 }
 
 func roleID(v any) (string, bool) {

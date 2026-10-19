@@ -63,6 +63,27 @@ type recordingReads struct {
 	conversation              []map[string]any
 	conversationErr           error
 	conversationTask          string
+	roleConfigs               []map[string]any
+	roleConfigsErr            error
+	roleConfig                map[string]any
+	roleConfigErr             error
+	roleName                  string
+	channelConfigs            []map[string]any
+	channelConfigsErr         error
+	channelConfig             map[string]any
+	channelConfigErr          error
+	channelID                 string
+	gate                      map[string]any
+	gateErr                   error
+	projectOK                 bool
+	projectExistsErr          error
+	projectIDSeen             string
+	templates                 map[string]any
+	templatesErr              error
+	roleStatsBody             map[string]any
+	roleStatsErr              error
+	roleStatsProject          string
+	roleStatsSince            *time.Time
 	calls                     []string
 	since                     time.Time
 }
@@ -224,6 +245,94 @@ func (r *recordingReads) ActivityDetail(_ context.Context, seq int64) (map[strin
 		return nil, r.activityRowErr
 	}
 	return r.activityRow, nil
+}
+
+func (r *recordingReads) ListRoleConfigs(context.Context) ([]map[string]any, error) {
+	r.calls = append(r.calls, "roles")
+	if r.roleConfigsErr != nil {
+		return nil, r.roleConfigsErr
+	}
+	if r.roleConfigs == nil {
+		return []map[string]any{}, nil
+	}
+	return r.roleConfigs, nil
+}
+
+func (r *recordingReads) GetRoleConfig(_ context.Context, role string) (map[string]any, error) {
+	r.calls = append(r.calls, "role")
+	r.roleName = role
+	if r.roleConfigErr != nil {
+		return nil, r.roleConfigErr
+	}
+	return r.roleConfig, nil
+}
+
+func (r *recordingReads) ListChannelConfigs(context.Context) ([]map[string]any, error) {
+	r.calls = append(r.calls, "channels")
+	if r.channelConfigsErr != nil {
+		return nil, r.channelConfigsErr
+	}
+	if r.channelConfigs == nil {
+		return []map[string]any{}, nil
+	}
+	return r.channelConfigs, nil
+}
+
+func (r *recordingReads) GetChannelConfig(_ context.Context, id string) (map[string]any, error) {
+	r.calls = append(r.calls, "channel")
+	r.channelID = id
+	if r.channelConfigErr != nil {
+		return nil, r.channelConfigErr
+	}
+	return r.channelConfig, nil
+}
+
+func (r *recordingReads) GateSettings(context.Context) (map[string]any, error) {
+	r.calls = append(r.calls, "gate")
+	if r.gateErr != nil {
+		return nil, r.gateErr
+	}
+	if r.gate == nil {
+		return map[string]any{}, nil
+	}
+	return r.gate, nil
+}
+
+func (r *recordingReads) ProjectExists(_ context.Context, id string) (bool, error) {
+	r.calls = append(r.calls, "project-exists")
+	r.projectIDSeen = id
+	if r.projectExistsErr != nil {
+		return false, r.projectExistsErr
+	}
+	return r.projectOK, nil
+}
+
+func (r *recordingReads) RoleTemplates(_ context.Context, id string) (map[string]any, error) {
+	r.calls = append(r.calls, "templates")
+	r.projectIDSeen = id
+	if r.templatesErr != nil {
+		return nil, r.templatesErr
+	}
+	if r.templates == nil {
+		return map[string]any{}, nil
+	}
+	return r.templates, nil
+}
+
+func (r *recordingReads) ProjectRoleStats(_ context.Context, id string, since *time.Time) (map[string]any, error) {
+	r.calls = append(r.calls, "role-stats")
+	r.roleStatsProject = id
+	if since != nil {
+		copied := *since
+		r.roleStatsSince = &copied
+	}
+	if r.roleStatsErr != nil {
+		return nil, r.roleStatsErr
+	}
+	if r.roleStatsBody == nil {
+		return map[string]any{}, nil
+	}
+	return r.roleStatsBody, nil
 }
 
 func (r *recordingReads) ListConversation(_ context.Context, taskID string) ([]map[string]any, error) {

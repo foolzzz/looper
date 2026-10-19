@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/foolzzz/looper/go/internal/db"
 )
@@ -215,8 +216,16 @@ func knownTaskStatus(status string) bool {
 // does. A superscript such as ² is not a decimal digit: Python's int()
 // raises ValueError and that handler sends no limit 400. This server
 // answers the limit 400. Overflow is the same 400.
+//
+// More than sys.get_int_max_str_digits() (4,300) digits makes Python's int()
+// raise ValueError before the 1..200 check, and the request loop answers 500.
+// This server answers the limit 400. Leading zeros count. See the
+// compatibility contract in docs/plans/loopgo.md.
 func wholeNumber(s string) (int, bool) {
 	if s == "" {
+		return 0, false
+	}
+	if utf8.RuneCountInString(s) > pythonIntMaxStrDigits {
 		return 0, false
 	}
 	n := 0

@@ -316,23 +316,42 @@ func agentsEditable(status string) bool {
 	}
 }
 
+// roleInputs is what one role's numbers count: its runs, the steps it ran or
+// reviewed, and the reviews of its work. Project stats append these across
+// tasks and call roleStats once, so a rate is not the average of the rates.
+type roleInputs struct {
+	runs    []map[string]any
+	steps   []map[string]any
+	reviews []map[string]any
+}
+
+func (in *roleInputs) add(other roleInputs) {
+	in.runs = append(in.runs, other.runs...)
+	in.steps = append(in.steps, other.steps...)
+	in.reviews = append(in.reviews, other.reviews...)
+}
+
+func (in roleInputs) stats() map[string]any {
+	return roleStats(in.runs, in.steps, in.reviews)
+}
+
 func builtinStats(runs []map[string]any, steps []map[string]any) map[string]any {
+	worker, reviewer := builtinInputs(runs, steps)
+	return map[string]any{
+		"worker":   worker.stats(),
+		"reviewer": reviewer.stats(),
+	}
+}
+
+// builtinInputs is the built-in Worker and Reviewer selection inside builtinStats.
+func builtinInputs(runs []map[string]any, steps []map[string]any) (worker, reviewer roleInputs) {
 	roleOf := map[string]any{}
 	for _, step := range steps {
 		roleOf[asString(step["id"])] = step["role_key"]
 	}
-	runsOf := func(role, key string) []map[string]any {
-		var out []map[string]any
-		for _, row := range runs {
-			if asString(row["role"]) == role && asString(row["task_role"]) == key {
-				out = append(out, row)
-			}
-		}
-		return out
-	}
 	builtinReviews := func(workKey any) []map[string]any {
 		var out []map[string]any
-		for _, row := range runsOf("reviewer", "") {
+		for _, row := range runsOf(runs, "reviewer", "") {
 			if sameRole(roleOf[asString(row["step_id"])], workKey) {
 				out = append(out, row)
 			}
@@ -349,10 +368,9 @@ func builtinStats(runs []map[string]any, steps []map[string]any) map[string]any 
 			reviewerSteps = append(reviewerSteps, step)
 		}
 	}
-	return map[string]any{
-		"worker":   roleStats(runsOf("worker", ""), workerSteps, builtinReviews(nil)),
-		"reviewer": roleStats(runsOf("reviewer", ""), reviewerSteps, runsOf("reviewer", "")),
-	}
+	worker = roleInputs{runs: runsOf(runs, "worker", ""), steps: workerSteps, reviews: builtinReviews(nil)}
+	reviewer = roleInputs{runs: runsOf(runs, "reviewer", ""), steps: reviewerSteps, reviews: runsOf(runs, "reviewer", "")}
+	return worker, reviewer
 }
 
 func sameRole(stepRole, workKey any) bool {
@@ -471,7 +489,7 @@ func runRole(raw any) map[string]any {
 	if !ok || (kind != "work" && kind != "review") {
 		return nil
 	}
-	ver, ok := asIntOK(m["version"])
+	ver, ok := RoleVersion(m["version"])
 	if !ok {
 		return nil
 	}

@@ -17,6 +17,7 @@ const (
 	stepRetriesMax        = 20
 	roleTextMinChars      = 500
 	roleTextMaxChars      = 20000
+	defaultRoleTextChars  = 8000
 	gateReminderMaxHours  = 168
 	budgetMaxUSD          = 100000
 	consultBudgetMin      = 0.01
@@ -81,6 +82,25 @@ func executionView(row map[string]any) map[string]any {
 		out[field] = val
 	}
 	return out
+}
+
+// roleTextLimit is ProjectExecution.from_row(row).role_text_limit. An invalid
+// stored value is unset, which is the 8000 default, and a warning is logged.
+func roleTextLimit(row map[string]any) int {
+	if row == nil {
+		return defaultRoleTextChars
+	}
+	raw := row["role_text_max_chars"]
+	if raw == nil || raw == "" {
+		return defaultRoleTextChars
+	}
+	n, err := parseWhole("role_text_max_chars", raw, roleTextMinChars, roleTextMaxChars)
+	if err != nil {
+		slog.Warn("ignoring project execution setting",
+			"project_id", asString(row["id"]), "field", "role_text_max_chars", "reason", err.Error())
+		return defaultRoleTextChars
+	}
+	return n
 }
 
 func parseExecution(field string, raw any) (any, error) {
