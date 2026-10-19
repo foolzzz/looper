@@ -1418,6 +1418,10 @@ export interface TaskRoleConcurrency extends Sourced<number> {
 /** One task role's Agent Profile (source "task": the task chose it). */
 export interface TaskRoleAgents {
   profile: Sourced<EffectiveProfile>;
+  /** The runtime type of the role's profile: the prompt mode below applies to "claude-code" only. */
+  runtime_type: string;
+  /** What the role's runs use on Claude Code; source "task" (the task chose it), "role" or "builtin". */
+  system_prompt_mode: Sourced<SystemPromptMode>;
 }
 
 /** A Worker's or Reviewer's: also how many run at once in the task. */
@@ -1445,6 +1449,8 @@ export interface TaskAgentsUpdate {
   profiles?: Partial<Record<TaskRole, string | null>>;
   /** A value that is not a number goes as typed, so the server's reason shows. */
   concurrency?: Partial<Record<TaskLimitRole, number | string | null>>;
+  /** Append or replace per role, on Claude Code; null drops the task's choice. */
+  system_prompt_modes?: Partial<Record<TaskRole, SystemPromptMode | null>>;
 }
 
 /** Change the task's own Agent Profiles or Worker and Reviewer limits. Resolves to its agents as saved, and, after a
