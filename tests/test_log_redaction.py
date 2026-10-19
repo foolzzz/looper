@@ -159,3 +159,18 @@ def test_every_entry_point_masks_a_bot_url(
 
     err = capsys.readouterr().err
     assert "POST https://api.telegram.org/bot***/getMe failed" in err and other.split(":")[1] not in err
+
+
+def test_a_second_logging_setup_replaces_the_first(serve_logging: None) -> None:
+    """``--verbose`` after an earlier setup at info (a refused start, another test) logs httpx's requests, through one
+    masked handler."""
+    _configure_logging("info")
+    _configure_logging("debug")
+
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.DEBUG
+    assert logging.getLogger("httpcore").getEffectiveLevel() == logging.DEBUG
+    assert len([h for h in logging.getLogger().handlers if isinstance(h.formatter, RedactingFormatter)]) == 1
+
+    _configure_logging("info")
+
+    assert logging.getLogger("httpx").getEffectiveLevel() == logging.WARNING

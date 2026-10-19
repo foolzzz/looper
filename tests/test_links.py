@@ -47,6 +47,7 @@ def test_serve_does_not_start_with_a_malformed_public_url(
     create_pool = AsyncMock(side_effect=AssertionError("the database pool must not be opened"))
     monkeypatch.setattr(asyncpg, "connect", connect)
     monkeypatch.setattr(asyncpg, "create_pool", create_pool)
+    monkeypatch.setattr(serve, "_configure_logging", lambda level: None)  # leaves the process's logging alone
     monkeypatch.setenv("LOOPER_PUBLIC_URL", "looper.example.com")
     monkeypatch.setenv("LOOPER_DATABASE_URL", "postgresql://u:Sekr1t-pw@127.0.0.1:1/db")
     with pytest.raises(SystemExit) as stopped:
