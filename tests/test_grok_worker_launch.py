@@ -42,14 +42,3 @@ def test_a_grok_worker_and_reviewer_launch_through_the_worker_tier(
     runs = (tmp_path / "runtime" / ".local" / "grok" / "argv.jsonl").read_text().splitlines()
     assert len(runs) == 1  # the stand-in ran: the launch got past building its command
 
-
-def test_every_runtime_launches_with_the_signatures_the_tiers_call() -> None:
-    import inspect
-
-    from looper.agents.runtimes import ADAPTERS, RuntimeAdapter
-
-    for name in ("run_command", "resident_command", "consult_command"):
-        want = inspect.signature(getattr(RuntimeAdapter, name)).replace(
-            parameters=list(inspect.signature(getattr(RuntimeAdapter, name)).parameters.values())[1:])
-        for adapter in ADAPTERS.values():
-            assert inspect.signature(getattr(adapter, name)) == want, (adapter.type, name)

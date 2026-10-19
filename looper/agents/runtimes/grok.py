@@ -224,15 +224,9 @@ class GrokRuntime(RuntimeAdapter):
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                     max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
-        """One run: the prompt read from stdin. Grok keeps its session in its home whatever the command says, so the
-        session stays in the run's home, removed with it; with ``session_dir`` that directory is the run's home
-        (given the run home's configuration, rules, login link and shared directories, ``_sync_home``), kept for a
-        later consult."""
-        command = self._command(executable, prompt_file, launch, max_turns)
-        if session_dir is None:
-            return command
-        _sync_home(Path(command[1].removeprefix("GROK_HOME=")), session_dir)
-        return ["env", f"GROK_HOME={session_dir}", f"HOME={session_dir}", *command[3:]]
+        """One run: the prompt read from stdin; its session stays in the run's home, removed with it. ``session_dir``
+        is not used: a consult finds a Grok run's session in the home its recorded command names."""
+        return self._command(executable, prompt_file, launch, max_turns)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:
         """The home a finished run (its recorded ``command``) kept its session in: its ``GROK_HOME``."""
