@@ -1,5 +1,5 @@
 HTTP/1.1 200 OK
 Content-Type: application/json; charset=utf-8
-Content-Length: 189
+Content-Length: 212
 
-{"status": "running", "agents": {}, "tasks": {"total": 61, "running": 11, "completed": 41}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": []}
+{"status": "running", "agents": {}, "tasks": {"total": 61, "running": 11, "completed": 41}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": [], "can_sign_out": false}

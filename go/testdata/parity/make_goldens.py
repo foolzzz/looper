@@ -616,7 +616,8 @@ async def capture(dsn: str) -> dict[str, object]:
 
             out = {}
             handlers = {
-                "status": server._handle_status,
+                # No password session and no token cookie: can_sign_out stays false.
+                "status": lambda writer: server._handle_status(writer, {}),
                 "projects": server._handle_list_projects,
                 "overview": server._handle_overview,
             }

@@ -252,6 +252,9 @@ type statusBody struct {
 	Tasks    statusTasks    `json:"tasks"`
 	Channels statusChannels `json:"channels"`
 	Checks   []any          `json:"checks"`
+	// CanSignOut is Python _can_sign_out. This server has no password session,
+	// so the value stays false and the dashboard hides Sign out.
+	CanSignOut bool `json:"can_sign_out"`
 }
 
 type errorBody struct {

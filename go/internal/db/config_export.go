@@ -14,13 +14,17 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
+// PythonVersion is looper.__version__ on the parity target. A configuration
+// export writes it as looper_version.
+const PythonVersion = "2.11.0"
+
 // Each read is deliberately separate from dashboard reads: only this explicit
 // download path may read provider keys and unmasked MCP values.
 var configExportSQL = map[string]string{
 	"layers":    `SELECT l.scope,l.role,l.project_id,l.harness_prompt,l.profile_id,a.name AS profile,l.env,l.run_budget_usd,l.max_concurrency,l.boundaries,l.system_prompt_mode FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id=l.profile_id ORDER BY l.project_id NULLS FIRST,l.scope,l.role NULLS FIRST`,
 	"runtimes":  `SELECT id,name,type,executable,capabilities,builtin FROM agent_runtimes ORDER BY name COLLATE "C"`,
 	"providers": `SELECT p.id,p.name,p.protocols,p.auth,p.oauth_runtime_type,p.base_url,p.models,p.env,p.max_concurrency,p.builtin,s.api_key FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id=p.id ORDER BY p.name COLLATE "C"`,
-	"profiles":  `SELECT a.id,a.name,r.name AS runtime,p.name AS provider,a.model,a.effort,a.agent_teams,a.system_prompt_mode,a.custom_prompt,a.builtin FROM agent_profiles a JOIN agent_runtimes r ON r.id=a.runtime_id JOIN llm_providers p ON p.id=a.provider_id ORDER BY a.name COLLATE "C"`,
+	"profiles":  `SELECT a.id,a.name,r.name AS runtime,p.name AS provider,a.model,a.effort,a.agent_teams,a.custom_prompt,a.builtin FROM agent_profiles a JOIN agent_runtimes r ON r.id=a.runtime_id JOIN llm_providers p ON p.id=a.provider_id ORDER BY a.name COLLATE "C"`,
 	"roles":     `SELECT role,system_prompt,default_prompt,timeout_seconds,enabled FROM role_configs WHERE role=ANY(ARRAY['manager','planner','worker','reviewer']) ORDER BY role`,
 	"items":     `SELECT i.id,i.kind,i.name,i.origin,i.owner_project_id,p.name AS owner_project_name,i.description,i.source,i.version,i.sha256,i.size_bytes,i.file_count,i.modified,m.transport,m.command,m.args,m.env,m.url,m.headers FROM library_items i LEFT JOIN projects p ON p.id=i.owner_project_id LEFT JOIN library_mcp_servers m ON m.item_id=i.id ORDER BY i.owner_project_id NULLS FIRST,i.kind,i.name COLLATE "C"`,
 	"files":     `SELECT path,content,sha256,executable FROM library_files WHERE item_id=$1 ORDER BY path COLLATE "C"`,
@@ -172,7 +176,7 @@ func exportConfig(ctx context.Context, out io.Writer, opts configtransfer.Option
 	}
 	version := opts.Version
 	if version == "" {
-		version = "2.10.0"
+		version = PythonVersion
 	}
 	secrets := "omitted"
 	if opts.IncludeSecrets {

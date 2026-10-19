@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture Python v2.10.0 config exports, without loading operator configuration.
+"""Capture config exports from this checkout's looper package, without loading operator configuration.
 
 --db-url replaces public in an owned disposable loopgo_* DB at localhost:54329,
 loads fixture.sql and runs Python's legacy effort migration before capture.
@@ -229,7 +229,7 @@ async def capture(pool):
     server = object.__new__(AgentHTTPServer)
     with (patch.object(connection, "get_pool", return_value=pool),
           patch.object(config_transfer, "datetime", FrozenDatetime),
-          patch.object(dt, "date", FrozenDate), patch.object(looper, "__version__", "2.10.0")):
+          patch.object(dt, "date", FrozenDate)):
         for case in CASES:
             writer = Capture()
             await server._handle_config_export(case["query"], writer)
@@ -239,6 +239,7 @@ async def capture(pool):
             assert b"Cache-Control: no-store" in headers
             assert b'filename="looper-config-2026-06-15.json"' in headers
             value = json.loads(body)
+            assert value["looper_version"] == looper.__version__
             include_secrets = case["query"].get("secrets") == "1"
             include_projects = case["query"].get("projects") == "1"
             assert (SECRET.encode() in body) == include_secrets

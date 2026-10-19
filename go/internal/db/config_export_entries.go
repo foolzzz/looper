@@ -137,7 +137,7 @@ func exportProvider(row map[string]any, include bool) (exportObject, error) {
 	return append(out, exportField{Key: "api_key", Value: key}), nil
 }
 func exportProfile(row map[string]any) exportObject {
-	out := exportFields(row, "name", "runtime", "provider", "model", "effort", "agent_teams", "system_prompt_mode")
+	out := exportFields(row, "name", "runtime", "provider", "model", "effort", "agent_teams")
 	prompt := row["custom_prompt"]
 	if prompt == nil {
 		prompt = ""

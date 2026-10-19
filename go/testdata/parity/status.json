@@ -1,5 +1,6 @@
 {
   "agents": {},
+  "can_sign_out": false,
   "channels": {
     "web": {
       "active_sse_streams": 0,
