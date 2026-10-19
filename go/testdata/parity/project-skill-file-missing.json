@@ -1,0 +1,12 @@
+{
+  "content": "",
+  "skill": {
+    "created_at": "2020-01-01T00:00:00+00:00",
+    "description": "File removed",
+    "name": "missing-file",
+    "qualified_name": "project:missing-file",
+    "size_bytes": 10,
+    "skill_id": "skill-nofile001",
+    "updated_at": "2020-01-02T00:00:00+00:00"
+  }
+}

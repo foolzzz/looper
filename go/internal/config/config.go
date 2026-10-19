@@ -11,9 +11,10 @@ import (
 
 // ServeConfig is the parsed `looper serve` command.
 type ServeConfig struct {
-	Port   int
-	DBURL  string
-	WebDir string
+	Port        int
+	DBURL       string
+	WebDir      string
+	RuntimeRoot string
 }
 
 // HelpError asks the process to print usage and exit 0.
@@ -42,23 +43,24 @@ func usage(err error) error {
 }
 
 // ParseServeArgs parses `looper serve` arguments, without the serve word.
-// --port and --db-url are required. --web-dir is optional.
+// --port and --db-url are required. --web-dir and --runtime-root are optional.
 func ParseServeArgs(args []string) (ServeConfig, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	var buf strings.Builder
 	fs.SetOutput(&buf)
 	portStr := fs.String("port", "", "TCP port to listen on")
 	dbURL := fs.String("db-url", "", "PostgreSQL URL")
+	runtimeRoot := fs.String("runtime-root", "", "runtime directory used for knowledge read paths (default current directory)")
 	webDir := fs.String("web-dir", "", "dashboard directory; unknown paths fall back to index.html")
 	fs.Usage = func() {
-		fmt.Fprintf(&buf, "usage: looper serve --port N --db-url URL [--web-dir DIR]\n")
+		fmt.Fprintf(&buf, "usage: looper serve --port N --db-url URL [--web-dir DIR] [--runtime-root DIR]\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
 		msg := strings.TrimSpace(buf.String())
 		if errors.Is(err, flag.ErrHelp) {
 			if msg == "" {
-				msg = "usage: looper serve --port N --db-url URL [--web-dir DIR]"
+				msg = "usage: looper serve --port N --db-url URL [--web-dir DIR] [--runtime-root DIR]"
 			}
 			return ServeConfig{}, &HelpError{Text: msg}
 		}
@@ -82,8 +84,9 @@ func ParseServeArgs(args []string) (ServeConfig, error) {
 		return ServeConfig{}, usage(errors.New("--db-url is required"))
 	}
 	return ServeConfig{
-		Port:   port,
-		DBURL:  url,
-		WebDir: strings.TrimSpace(*webDir),
+		Port:        port,
+		DBURL:       url,
+		WebDir:      strings.TrimSpace(*webDir),
+		RuntimeRoot: *runtimeRoot,
 	}, nil
 }

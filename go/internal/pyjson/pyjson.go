@@ -46,10 +46,12 @@ var (
 
 // visit is one container currently being encoded. Pointers use n -1.
 // Slices and Objects use the data pointer and the length, so a value may
-// contain a shorter subslice of itself. The same pair again is a cycle.
+// contain a shorter subslice of itself. Type distinguishes a struct pointer
+// from a pointer to its first field, which can have the same address.
 type visit struct {
 	ptr uintptr
 	n   int
+	typ reflect.Type
 }
 
 // Marshal returns the Python json.dumps encoding of v.
@@ -68,14 +70,14 @@ type state struct {
 
 // enter records a container. n == 0 is an empty slice or Object: it has no
 // elements, so it cannot contain itself and is not recorded.
-func (s *state) enter(ptr uintptr, n int) error {
+func (s *state) enter(ptr uintptr, n int, typ reflect.Type) error {
 	if n == 0 {
 		return nil
 	}
 	if s.seen == nil {
 		s.seen = make(map[visit]struct{})
 	}
-	v := visit{ptr: ptr, n: n}
+	v := visit{ptr: ptr, n: n, typ: typ}
 	if _, ok := s.seen[v]; ok {
 		return fmt.Errorf("python json: cycle")
 	}
@@ -83,11 +85,11 @@ func (s *state) enter(ptr uintptr, n int) error {
 	return nil
 }
 
-func (s *state) leave(ptr uintptr, n int) {
+func (s *state) leave(ptr uintptr, n int, typ reflect.Type) {
 	if n == 0 || s.seen == nil {
 		return
 	}
-	delete(s.seen, visit{ptr: ptr, n: n})
+	delete(s.seen, visit{ptr: ptr, n: n, typ: typ})
 }
 
 func (s *state) appendValue(v any) error {
@@ -110,10 +112,10 @@ func (s *state) appendObject(obj Object) error {
 	if n > 0 {
 		ptr = reflect.ValueOf(obj).Pointer()
 	}
-	if err := s.enter(ptr, n); err != nil {
+	if err := s.enter(ptr, n, objectType); err != nil {
 		return err
 	}
-	defer s.leave(ptr, n)
+	defer s.leave(ptr, n, objectType)
 	s.buf = append(s.buf, '{')
 	for i, f := range obj {
 		if i > 0 {
@@ -145,10 +147,10 @@ func (s *state) appendReflect(v reflect.Value) error {
 				return nil
 			}
 			ptr := v.Pointer()
-			if err := s.enter(ptr, -1); err != nil {
+			if err := s.enter(ptr, -1, v.Type()); err != nil {
 				return err
 			}
-			defer s.leave(ptr, -1)
+			defer s.leave(ptr, -1, v.Type())
 			v = v.Elem()
 			continue
 		}
@@ -231,10 +233,10 @@ func (s *state) appendSlice(v reflect.Value) error {
 	if n > 0 {
 		ptr = v.Pointer()
 	}
-	if err := s.enter(ptr, n); err != nil {
+	if err := s.enter(ptr, n, v.Type()); err != nil {
 		return err
 	}
-	defer s.leave(ptr, n)
+	defer s.leave(ptr, n, v.Type())
 	return s.appendSequence(v)
 }
 

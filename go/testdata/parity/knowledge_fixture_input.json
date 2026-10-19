@@ -1,0 +1,261 @@
+{
+  "library_files": [
+    {
+      "content": "---\nname: project-guide\ndescription: \"Read: \\\"中文\\\" # guide\"\n---\n\n# Guide\n使用步骤 🌍\n",
+      "item_id": "skill-project001",
+      "path": "SKILL.md",
+      "sha256": "skill-file-hash"
+    },
+    {
+      "content": "---\nname: a-different-name\n---\n\nKeep this frontmatter.\n",
+      "item_id": "skill-rawbody01",
+      "path": "SKILL.md",
+      "sha256": "raw-file-hash"
+    }
+  ],
+  "library_items": [
+    {
+      "description": "Read: \"中文\" # guide",
+      "file_count": 1,
+      "id": "skill-project001",
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "kind": "skill",
+      "name": "project-guide",
+      "origin": "project",
+      "owner_project_id": "proj-knowledge01",
+      "sha256": "skill-hash",
+      "size_bytes": 95,
+      "updated_at": "2020-01-02T00:00:00+00:00"
+    },
+    {
+      "description": "File removed",
+      "file_count": 1,
+      "id": "skill-nofile001",
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "kind": "skill",
+      "name": "missing-file",
+      "origin": "project",
+      "owner_project_id": "proj-knowledge01",
+      "sha256": "missing-hash",
+      "size_bytes": 10,
+      "updated_at": "2020-01-02T00:00:00+00:00"
+    },
+    {
+      "description": "Not matching frontmatter",
+      "file_count": 1,
+      "id": "skill-rawbody01",
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "kind": "skill",
+      "name": "raw-body",
+      "origin": "project",
+      "owner_project_id": "proj-knowledge01",
+      "sha256": "raw-hash",
+      "size_bytes": 55,
+      "updated_at": "2020-01-02T00:00:00+00:00"
+    },
+    {
+      "description": "Machine imported skill",
+      "file_count": 1,
+      "id": "skill-otherorigin01",
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "kind": "skill",
+      "name": "other-origin",
+      "origin": "machine",
+      "sha256": "machine-hash",
+      "size_bytes": 10,
+      "updated_at": "2020-01-02T00:00:00+00:00"
+    }
+  ],
+  "project_document_drafts": [
+    {
+      "content": "First lesson\n",
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "id": "draft-z001",
+      "project_id": "proj-knowledge01",
+      "summary": "Task lessons",
+      "task_id": "task-rich00001",
+      "title": "From a task"
+    },
+    {
+      "content": "经验 🌍\n",
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "id": "draft-a001",
+      "project_id": "proj-knowledge01",
+      "summary": "Unicode byte size",
+      "task_id": null,
+      "title": "中文草稿"
+    }
+  ],
+  "project_documents": [
+    {
+      "content": "# Text\n你好 🌍\n",
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "filename": "Shared.md",
+      "id": "doc-text001",
+      "path": null,
+      "project_id": "proj-knowledge01",
+      "sha256": "text-hash",
+      "size_bytes": 19,
+      "source_kind": "text",
+      "summary": "Stored text",
+      "title": "Text 文档",
+      "updated_at": "2020-01-02T00:00:00+00:00"
+    },
+    {
+      "content": "alpha,beta\n1,2\n",
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "filename": "shared.md",
+      "id": "doc-upload01",
+      "path": null,
+      "project_id": "proj-knowledge01",
+      "sha256": "upload-hash",
+      "size_bytes": 15,
+      "source_kind": "upload",
+      "summary": "Uploaded text",
+      "title": "Upload",
+      "updated_at": "2020-01-02T00:00:00+00:00"
+    },
+    {
+      "content": "UTF-8 正文\n",
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "filename": "说明.md",
+      "id": "doc-unicode01",
+      "path": null,
+      "project_id": "proj-knowledge01",
+      "sha256": "unicode-hash",
+      "size_bytes": 13,
+      "source_kind": "text",
+      "summary": "中文 reference",
+      "title": "Unicode filename",
+      "updated_at": "2020-01-02T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-live001",
+      "path": "live.md",
+      "project_id": "proj-knowledge01",
+      "sha256": "stale-live-hash",
+      "size_bytes": 1,
+      "source_kind": "path",
+      "summary": "Read updated bytes",
+      "title": "Live file",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-missing01",
+      "path": "gone.md",
+      "project_id": "proj-knowledge01",
+      "sha256": "missing-hash",
+      "size_bytes": 73,
+      "source_kind": "path",
+      "summary": "File was removed",
+      "title": "Missing file",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-binary01",
+      "path": "binary.dat",
+      "project_id": "proj-knowledge01",
+      "sha256": "binary-hash",
+      "size_bytes": 1,
+      "source_kind": "path",
+      "summary": "File became binary",
+      "title": "Binary file",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-invalid01",
+      "path": "invalid.dat",
+      "project_id": "proj-knowledge01",
+      "sha256": "invalid-hash",
+      "size_bytes": 1,
+      "source_kind": "path",
+      "summary": "File became invalid UTF-8",
+      "title": "Invalid UTF-8",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-large001",
+      "path": "large.txt",
+      "project_id": "proj-knowledge01",
+      "sha256": "large-hash",
+      "size_bytes": 1,
+      "source_kind": "path",
+      "summary": "File grew beyond cap",
+      "title": "Large file",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-symlink01",
+      "path": "escaped.md",
+      "project_id": "proj-knowledge01",
+      "sha256": "symlink-hash",
+      "size_bytes": 11,
+      "source_kind": "path",
+      "summary": "Target outside project",
+      "title": "Escaped symlink",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-parent01",
+      "path": "../outside.md",
+      "project_id": "proj-knowledge01",
+      "sha256": "parent-hash",
+      "size_bytes": 11,
+      "source_kind": "path",
+      "summary": "Target outside project",
+      "title": "Parent traversal",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    },
+    {
+      "content": null,
+      "created_at": "2020-01-03T00:00:00+00:00",
+      "filename": "",
+      "id": "doc-dir0001",
+      "path": "subdir",
+      "project_id": "proj-knowledge01",
+      "sha256": "directory-hash",
+      "size_bytes": 4,
+      "source_kind": "path",
+      "summary": "Target is a directory",
+      "title": "Directory",
+      "updated_at": "2020-01-04T00:00:00+00:00"
+    }
+  ],
+  "projects": [
+    {
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "id": "proj-knowledge01",
+      "name": "Knowledge fixture",
+      "updated_at": "2020-01-02T00:00:00+00:00",
+      "work_dir": "<knowledge-root>/project"
+    },
+    {
+      "created_at": "2020-01-01T00:00:00+00:00",
+      "id": "proj-knowledge02",
+      "name": "Empty knowledge fixture",
+      "updated_at": "2020-01-02T00:00:00+00:00",
+      "work_dir": "<knowledge-root>/empty"
+    }
+  ]
+}

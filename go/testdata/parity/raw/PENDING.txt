@@ -107,3 +107,23 @@ agent-settings-alpha
 agent-settings-beta
 agent-settings-blank
 registry
+
+# Knowledge/skill successful responses currently use semantic parity.
+knowledge
+knowledge-empty
+document-text
+document-upload
+document-unicode
+document-live
+document-file-missing
+document-binary
+document-invalid-utf8
+document-large
+document-symlink
+document-parent
+document-directory
+knowledge-drafts
+knowledge-drafts-empty
+project-skill
+project-skill-file-missing
+project-skill-raw-body

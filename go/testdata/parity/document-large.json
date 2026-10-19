@@ -1,0 +1,18 @@
+{
+  "content": null,
+  "content_error": "a document has at most 2 MiB (2097152 bytes); large.txt has 2097153 bytes",
+  "document": {
+    "created_at": "2020-01-03T00:00:00+00:00",
+    "document_id": "doc-large001",
+    "filename": null,
+    "missing": false,
+    "path": "large.txt",
+    "read_path": "<knowledge-root>/project/large.txt",
+    "sha256": "large-hash",
+    "size_bytes": 2097153,
+    "source_kind": "path",
+    "summary": "File grew beyond cap",
+    "title": "Large file",
+    "updated_at": "2020-01-04T00:00:00+00:00"
+  }
+}

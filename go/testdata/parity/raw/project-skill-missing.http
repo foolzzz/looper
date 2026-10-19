@@ -1,0 +1,5 @@
+HTTP/1.1 404 Not Found
+Content-Type: application/json; charset=utf-8
+Content-Length: 69
+
+{"error": "project 'proj-knowledge01' has no skill 'skill-absent01'"}

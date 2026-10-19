@@ -1,0 +1,14 @@
+{
+  "caps": {
+    "document_max_bytes": 2097152,
+    "index_max_chars": 4000,
+    "project_max_bytes": 52428800,
+    "project_max_documents": 100
+  },
+  "count": 0,
+  "documents": [],
+  "index": "",
+  "index_chars": 0,
+  "project_id": "proj-knowledge02",
+  "stored_bytes": 0
+}

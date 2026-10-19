@@ -77,6 +77,18 @@ func TestCompareRaw(t *testing.T) {
 		wantErr string
 	}{
 		{
+			name:   "HTTP 1.0 protocol rejected",
+			golden: base,
+			live: func() (*http.Response, []byte) {
+				resp, b := liveMessage(200, "200 OK", body, headerPairs(
+					"Content-Type", "application/json; charset=utf-8",
+				))
+				resp.Proto, resp.ProtoMajor, resp.ProtoMinor = "HTTP/1.0", 1, 0
+				return resp, b
+			},
+			wantErr: "protocol",
+		},
+		{
 			name:   "date ignored",
 			golden: base,
 			live: func() (*http.Response, []byte) {
@@ -239,6 +251,9 @@ func TestCompareRaw(t *testing.T) {
 				// ContentLength is 0 because the status is 204. The header
 				// was not sent. Filling it in would hide that.
 				return &http.Response{
+					Proto:         "HTTP/1.1",
+					ProtoMajor:    1,
+					ProtoMinor:    1,
 					StatusCode:    204,
 					Status:        "204 No Content",
 					Header:        http.Header{},
@@ -309,7 +324,7 @@ func TestRawPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := map[string]bool{}
-	for _, tc := range goldenCases {
+	for _, tc := range append(goldenCases, knowledgeCases...) {
 		_, dup := seen[tc.name]
 		seen[tc.name] = true
 		if dup {
@@ -406,9 +421,37 @@ func liveMessage(code int, status, body string, h http.Header) (*http.Response, 
 
 func liveWith(code int, status, body string, h http.Header) (*http.Response, []byte) {
 	return &http.Response{
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
 		StatusCode:    code,
 		Status:        status,
 		Header:        h,
 		ContentLength: int64(len(body)),
 	}, []byte(body)
+}
+
+func TestReplaceJSONPointersPythonNaN(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		path string
+		want string
+	}{
+		{"scalar", `NaN`, "", `"<volatile>"`},
+		{"object value", `{"n": NaN, "keep": 1.0}`, "/n", `{"n": "<volatile>", "keep": 1.0}`},
+		{"skip preceding NaN", `{"n": NaN, "keep": 1.0}`, "/keep", `{"n": NaN, "keep": "<volatile>"}`},
+		{"container", `{"values": [NaN, Infinity, -Infinity, null]}`, "/values", `{"values": "<volatile>"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := replaceJSONPointers([]byte(tt.body), []string{tt.path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("got %s, want %s", got, tt.want)
+			}
+		})
+	}
 }

@@ -75,6 +75,11 @@ func TestMarshalTable(t *testing.T) {
 	nestedSub[1] = 2
 	nestedSub[2] = nestedSub[:2]
 	shared := Object{{Key: "a", Value: 1}}
+	firstField := &struct {
+		Value int  `json:"value"`
+		Alias *int `json:"alias"`
+	}{Value: 7}
+	firstField.Alias = &firstField.Value
 	num := json.Number("1.0")
 	var nilMap map[string]any
 	var nilSlice []any
@@ -132,6 +137,7 @@ func TestMarshalTable(t *testing.T) {
 		{name: "neginf", v: math.Inf(-1), want: "-Infinity"},
 		{name: "neg zero", v: math.Copysign(0, -1), want: "-0.0"},
 		{name: "pointer nil", v: (*int)(nil), want: "null"},
+		{name: "pointer to first field", v: firstField, want: `{"value": 7, "alias": 7}`},
 		{name: "cycle", v: loop, wantErr: "cycle"},
 		{name: "channel", v: make(chan int), wantErr: "unsupported type"},
 		{

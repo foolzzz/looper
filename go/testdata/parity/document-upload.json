@@ -1,0 +1,17 @@
+{
+  "content": "alpha,beta\n1,2\n",
+  "document": {
+    "created_at": "2020-01-01T00:00:00+00:00",
+    "document_id": "doc-upload01",
+    "filename": "shared.md",
+    "missing": false,
+    "path": null,
+    "read_path": "<knowledge-root>/.local/projects/proj-knowledge01/knowledge/1d96b7ab04954088a841f646d3ea49833986fa428a987301a8b2111f2fb33f03/shared-2.md",
+    "sha256": "upload-hash",
+    "size_bytes": 15,
+    "source_kind": "upload",
+    "summary": "Uploaded text",
+    "title": "Upload",
+    "updated_at": "2020-01-02T00:00:00+00:00"
+  }
+}

@@ -240,13 +240,9 @@ func valueEnd(data []byte, i int) (int, error) {
 	case 'f':
 		return literalEnd(data, i, "false")
 	case 'n':
-		if bytes.HasPrefix(data[i:], []byte("null")) {
-			return i + 4, nil
-		}
-		if bytes.HasPrefix(data[i:], []byte("NaN")) {
-			return i + 3, nil
-		}
-		return 0, fmt.Errorf("python json scan: bad literal at %d", i)
+		return literalEnd(data, i, "null")
+	case 'N':
+		return literalEnd(data, i, "NaN")
 	case 'I':
 		return literalEnd(data, i, "Infinity")
 	default:
