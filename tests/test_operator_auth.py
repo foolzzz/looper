@@ -172,7 +172,7 @@ except urllib.error.HTTPError as error:
     asyncio.run(run())
 
 
-def _assert_cookie(headers: dict[str, str], port: int, *, referrer: str = "no-referrer") -> None:
+def _assert_cookie(headers: dict[str, str], port: int, *, referrer: str = "same-origin") -> None:
     cookie, *attributes = headers["set-cookie"].split("; ")
     assert cookie == f"looper_operator_{port}={TOKEN}"
     assert set(attributes) == {"Path=/", "HttpOnly", "SameSite=Strict"}
@@ -876,6 +876,26 @@ def test_logout_ends_session_and_clears_both_cookies(tmp_path: Path, transport: 
     asyncio.run(run())
 
 
+def test_status_says_only_a_password_session_can_sign_out(tmp_path: Path, transport: str) -> None:
+    operator_auth.set_password(tmp_path, USER, PASSWORD)
+
+    async def run() -> None:
+        async with _login_server(tmp_path, transport) as server:
+            server._supervisor = SimpleNamespace(agent_status=lambda: {})
+            server._web_adapter = SimpleNamespace(healthcheck=lambda: {})
+            _, headers, _ = await _password_login(server)
+            session = headers["set-cookie"].split(";", 1)[0]
+            token = f"{operator_auth.cookie_name(server._port)}={TOKEN}"
+            cases = {"password session": ({"Cookie": session}, True),
+                     "token cookie": ({"Cookie": token}, False),
+                     "bearer token": ({"Authorization": f"Bearer {TOKEN}"}, False),
+                     "both cookies": ({"Cookie": f"{session}; {token}"}, False)}
+            for name, (credential, expected) in cases.items():
+                status, _, body = await _send(server, "GET /api/status", credential)
+                assert status == 200 and json.loads(body)["can_sign_out"] is expected, name
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("line", ["OPTIONS /logout", "GET /logout", "OPTIONS /login", "PUT /login"])
 def test_sign_in_methods(tmp_path: Path, transport: str, line: str) -> None:
     async def run() -> None:
@@ -986,7 +1006,7 @@ def test_local_navigation_and_token_cookie_still_open_pages(tmp_path: Path, tran
                 assert status == 200 and "dashboard" in body
             status, headers, _ = await _send(server, "GET /login", NAVIGATE)
             assert status == 303 and headers["location"] == "/"
-            _assert_cookie(headers, server._port, referrer="same-origin")
+            _assert_cookie(headers, server._port)
             _policies(headers)
     asyncio.run(run())
 

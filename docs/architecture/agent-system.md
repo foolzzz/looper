@@ -3395,7 +3395,7 @@ A dashboard page load signs the browser in when `Sec-Fetch-Mode: navigate` and
 `Sec-Fetch-Dest: document`, both the TCP peer and `Host` are loopback, and neither
 `Forwarded` nor `X-Forwarded-For` is present. This token cookie has `Path=/`,
 `HttpOnly` and `SameSite=Strict`, without `Max-Age`, `Expires` or `Secure`;
-pages use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, other
+pages use `Cache-Control: no-store` and `Referrer-Policy: same-origin` (the Sign out form's POST must carry an `Origin`), other
 files keep their public cache. Other browsers sign in with the user name and
 password set on the server's machine by
 `looper auth set-password [--user NAME] [--runtime-root DIR]`. The user defaults
@@ -3470,7 +3470,7 @@ cookie: open the dashboard on the server's port first, using the same hostname.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | System health: `agents`, each supervisor component's `healthy`, `state` (`running`, `restarting`, `crash_looping`), `up`, `restart_count` (restarts in a row), `last_crash_at`, `next_restart_at` and `agent_type`; `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `completed` |
+| `/api/status` | GET | System health: `agents`, each supervisor component's `healthy`, `state` (`running`, `restarting`, `crash_looping`), `up`, `restart_count` (restarts in a row), `last_crash_at`, `next_restart_at` and `agent_type`; `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `completed`; `can_sign_out`: true for a browser signed in with the password and without a token cookie, which the dashboard's Sign out control (`POST /logout`) ends, false for the local browser's auto-login or a Bearer token |
 | `/login` | GET | Login form, or no-password instructions; 303 to `/` for a signed-in browser or local auto-login |
 | `/login` | POST | Same-origin password sign-in; 303 to `/` with a session cookie on success; 401 for wrong credentials or no password, 429 when locked, 503 for an unusable password file |
 | `/logout` | POST | Requires same-origin `Origin`; ends the session, clears both cookies and returns 303 to `/login` |

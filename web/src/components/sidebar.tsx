@@ -13,6 +13,7 @@ import {
   Plus,
   X,
 } from "lucide-react";
+import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
@@ -103,8 +104,9 @@ export function Sidebar({
 
       <SettingsGroup activePage={activeSettingsPage} onOpen={onOpenSettings} />
 
-      <div className="shrink-0 border-t border-border px-4 py-3">
-        <p className="text-xs text-muted-foreground">Looper Agent System</p>
+      <div className="shrink-0 space-y-1 border-t border-border px-2 py-3">
+        <SignOut />
+        <p className="px-2 text-xs text-muted-foreground">Looper Agent System</p>
       </div>
     </aside>
   );

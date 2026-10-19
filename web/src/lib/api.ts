@@ -7,6 +7,8 @@ export interface SystemStatus {
   uptime: number;
   /** The startup self-check, as `looper doctor` prints it. */
   checks?: SelfCheck[];
+  /** True for a password session, which can sign out; false for the local browser's auto-login. */
+  can_sign_out?: boolean;
 }
 
 /** One startup check; "skip" means not checked, with the reason in `detail`. */

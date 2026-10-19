@@ -307,7 +307,7 @@ class AgentHTTPServer:
             elif area is operator_auth.Access.AGENT:
                 await self._handle_agent_api(method, path, headers, body, writer)
             elif area is operator_auth.Access.OPERATOR:
-                await self._route_api(method, path, query, body, writer)
+                await self._route_api(method, path, query, body, writer, headers)
             else:
                 await self._serve_static(path, writer, headers=headers, query=query, peer_host=peer_host)
 
@@ -406,9 +406,10 @@ class AgentHTTPServer:
         query: dict[str, str],
         body: bytes,
         writer: asyncio.StreamWriter,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         if path == "/api/status" and method == "GET":
-            await self._handle_status(writer)
+            await self._handle_status(writer, headers or {})
         elif path == "/api/overview" and method == "GET":
             await self._handle_overview(writer)
         elif path == "/api/tasks" and method == "GET":
@@ -825,7 +826,7 @@ class AgentHTTPServer:
                for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS}
         return [now.get(check.get("id"), check) for check in self._self_checks]
 
-    async def _handle_status(self, writer: asyncio.StreamWriter) -> None:
+    async def _handle_status(self, writer: asyncio.StreamWriter, headers: Mapping[str, str]) -> None:
         agents = self._supervisor.agent_status()
         web_health = self._web_adapter.healthcheck()
         try:
@@ -845,6 +846,7 @@ class AgentHTTPServer:
             },
             "channels": {"web": web_health},
             "checks": await self._checks_now(),
+            "can_sign_out": self._can_sign_out(headers),
         }
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()
@@ -2100,6 +2102,9 @@ class AgentHTTPServer:
         credentials = {key: value for key, value in headers.items() if key != "authorization"} if browser else headers
         if operator_auth.is_operator(credentials, token=self._operator_token, port=self._port):
             return True
+        return self._has_password_session(headers)
+
+    def _has_password_session(self, headers: Mapping[str, str]) -> bool:
         session_id = operator_auth.cookie(headers, self._session_cookie_name())
         if session_id is None:
             return False
@@ -2108,6 +2113,13 @@ class AgentHTTPServer:
         except operator_auth.OperatorTokenError:
             return False
         return record is not None and self._sessions.valid(session_id, record.hash)
+
+    def _can_sign_out(self, headers: Mapping[str, str]) -> bool:
+        """True for a browser that signed in with the password and holds no token cookie: signing out ends it. A
+        token session (the local browser's auto-login) has nothing to sign out of: /login would sign it in again."""
+        browser = {key: value for key, value in headers.items() if key != "authorization"}
+        return (self._has_password_session(headers)
+                and not operator_auth.is_operator(browser, token=self._operator_token, port=self._port))
 
     async def _sign_in_response(self, writer: asyncio.StreamWriter, status: str, body: str = "", *,
                                 headers: Mapping[str, str] | None = None, cookies: tuple[str, ...] = ()) -> None:
@@ -2260,7 +2272,7 @@ class AgentHTTPServer:
         cookie = ""
         if page and self._operator_token and operator_auth.signs_in(headers or {}, peer_host=peer_host):
             cookie = f"Set-Cookie: {operator_auth.set_cookie(self._operator_token, port=self._port)}\r\n"
-        policy = "Referrer-Policy: no-referrer\r\n" if page else ""
+        policy = "Referrer-Policy: same-origin\r\n" if page else ""  # the Sign out form POST needs a real Origin
         response_headers = (
             f"HTTP/1.1 {HTTP_200}\r\n"
             f"Content-Type: {content_type}\r\n"
