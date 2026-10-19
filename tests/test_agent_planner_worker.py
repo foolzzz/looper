@@ -39,6 +39,19 @@ from looper.agents.tiers.worker import (
 from tests.test_planner_agent import _assert_unrestricted, _flag, _sha, activity
 
 
+def test_step_seats_include_the_reviewer_and_each_review_role() -> None:
+    from looper.agents.room import seat_key
+    from looper.agents.tiers.planner import StepReviewRole
+
+    step = PlanStep(step_id="s1", index=0, instruction="A",
+                    review_roles=[StepReviewRole("security"), StepReviewRole("docs", required=False)])
+    assert PlannerAgent._step_seats(None, step) == [  # type: ignore[arg-type]
+        seat_key("worker", step.label), seat_key("reviewer", step.label),
+        seat_key("security", step.label), seat_key("docs", step.label)]
+    plain = PlanStep(step_id="s2", index=1, instruction="B")
+    assert PlannerAgent._step_seats(None, plain) == [seat_key("worker", plain.label)]  # type: ignore[arg-type]
+
+
 # --- TaskPlan unit tests ---
 
 

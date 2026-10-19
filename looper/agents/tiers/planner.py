@@ -2369,12 +2369,11 @@ class PlannerAgent:
         return "\n".join(lines) + tail, shown
 
     def _step_seats(self, step: PlanStep) -> list[str]:
-        """The room seats of ``step``: its Worker's, its Reviewer's, its review role's."""
+        """The room seats of ``step``: its Worker's, its Reviewer's, its review roles'."""
         seats = [seat_key(step.role or "worker", step.label)]
-        if step.review or step.reviewer_id or step.review_role:
+        if step.review or step.reviewer_id or step.review_roles:
             seats.append(seat_key("reviewer", step.label))
-        if step.review_role:
-            seats.append(seat_key(step.review_role, step.label))
+        seats += [seat_key(item.role, step.label) for item in step.review_roles]
         return seats
 
     async def _room_lines(self, step: PlanStep) -> list[str]:
