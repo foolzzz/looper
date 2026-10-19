@@ -243,7 +243,7 @@ def test_lark_an_edit_failure_sends_nothing_more(tmp_path: Path, lark_cli_stand_
     from looper.agents.channels.lark import LarkChannelAdapter
 
     # The status message's edits fail: the stand-in refuses edits of a message id ending in "gone".
-    monkeypatch.setattr("looper.agents.channels.lark_transport.sent_message_id", lambda answer: "om_gone")
+    monkeypatch.setattr("looper.agents.channels.lark_cli.sent_message_id", lambda answer: "om_gone")
 
     async def main() -> None:
         adapter = LarkChannelAdapter(runtime_root=tmp_path,
