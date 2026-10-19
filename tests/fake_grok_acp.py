@@ -5,6 +5,8 @@ processes and writes one line per start to ``<runtime_root>/.local/grok/acp-argv
 chosen by its text (the stand-in is told, not guessed):
 
 - ``TOOL``: one response that runs a shell command, then one that answers;
+- ``LOOP``: model responses in a row (a tool call each) until ``session/cancel``, which it logs to ``cancels.log``;
+- ``ORPHAN``: starts a long ``sleep`` that inherits stdout, then dies;
 - ``HANG``: thinks, then waits for ``session/cancel`` and ends with ``cancelled``;
 - ``CRASH``: streams a chunk, then dies;
 - ``GARBAGE``: lines that are not JSON objects between the notifications;
@@ -73,6 +75,24 @@ def prompt(request, text):
     if 'GARBAGE' in text:
         print('this is not json', flush=True)
         print('[1, 2, 3]', flush=True)
+        print(json.dumps({'id': request, 'result': {'stopReason': 'end_turn'}}), flush=True)  # no "jsonrpc": 2.0
+    if 'ORPHAN' in text:
+        import subprocess
+        subprocess.Popen(['sleep', '20'])
+        print('SECRET-STDERR', file=sys.stderr, flush=True)
+        os._exit(3)
+    if 'LOOP' in text:
+        for n in range(1, 40):
+            completed(10, 0, 1)
+            update('tool_call', toolCallId='c%d' % n, title='read_file', rawInput={})
+            update('tool_call_update', toolCallId='c%d' % n, status='completed', rawOutput={'type': 'ReadFile'})
+            time.sleep(0.05)
+            sys.stdout.flush()
+        for line in sys.stdin:
+            if json.loads(line).get('method') == 'session/cancel':
+                open(os.path.join(root, 'cancels.log'), 'a').write('cancel\\n')
+                finish(request, 'cancelled', usage(1, 100, 0, 3, 50000000))
+                return
     if 'HANG' in text:
         chunk('thinking...', thought=True)
         for line in sys.stdin:
@@ -86,6 +106,7 @@ def prompt(request, text):
         sys.exit(0)
     if 'CRASH' in text:
         chunk('about to ')
+        print('SECRET-STDERR', file=sys.stderr, flush=True)
         os._exit(3)
     if 'ASK' in text:
         out({'id': 'perm-1', 'method': 'session/request_permission', 'params': {'sessionId': state['session'], 'toolCall': {'toolCallId': 'x'}, 'options': []}})
@@ -122,7 +143,7 @@ for line in sys.stdin:
         if os.environ.get('FAKE_ACP_SILENT'):
             time.sleep(600)
         capabilities = {} if os.environ.get('FAKE_ACP_NO_LOAD') else {'loadSession': True}
-        out({'id': request, 'result': {'protocolVersion': 1, 'agentCapabilities': capabilities}})
+        out({'id': request, 'result': {'protocolVersion': int(os.environ.get('FAKE_ACP_PROTOCOL', 1)), 'agentCapabilities': capabilities}})
     elif method == 'session/new':
         os.makedirs(group, exist_ok=True)
         state['session'] = '0199a000-0000-7000-8000-%012d' % (len(os.listdir(group)) + 1)
@@ -131,8 +152,11 @@ for line in sys.stdin:
     elif method == 'session/load':
         session = message['params']['sessionId']
         path = os.path.join(group, session, 'summary.json')
+        if os.environ.get('FAKE_ACP_LOAD_ERROR'):
+            out({'id': request, 'error': {'code': -32000, 'message': 'busy, try later'}})
+            continue
         if not os.path.exists(path):
-            out({'id': request, 'error': {'code': -32603, 'message': 'Path not found.'}})
+            out({'id': request, 'error': {'code': -32603, 'message': 'Path not found.', 'data': {'code': 'FS_NOT_FOUND'}}})
             continue
         state['session'], state['turns'] = session, json.load(open(path))['turns']
         out({'id': request, 'result': {}})

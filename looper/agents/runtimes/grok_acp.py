@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = 1
 INIT_TIMEOUT_SEC = 30.0  # `initialize`: Grok answers without calling a model
 SETUP_TIMEOUT_SEC = 60.0  # `session/new`, `session/load`: the MCP servers start here
+_EXIT_POLL_SEC = 0.2
 CANCEL_GRACE_SEC = 5.0  # how long a cancelled turn may take to end before the process is ended
 PROFILE_FILE = "acp-agent.md"  # the agent profile of a read-only session, in the owner's home
 # xAI's cost unit: a tick is 1e-10 USD (Grok runtime RFC section 14.5).
@@ -83,6 +84,13 @@ class AcpError(Exception):
         detail = error.get("message") if isinstance(error, Mapping) else error
         super().__init__(f"{method}: {detail}")
         self.error = error
+
+
+def _missing_session(error: Any) -> bool:
+    """Whether a ``session/load`` error says the session is not there (Grok 1.0.62: -32603 with ``FS_NOT_FOUND``);
+    any other error may be transient and does not discard the session."""
+    data = error.get("data") if isinstance(error, Mapping) else None
+    return isinstance(data, Mapping) and data.get("code") == "FS_NOT_FOUND"
 
 
 # --- The command ---
@@ -455,7 +463,9 @@ class AcpGrok:
             stderr=asyncio.subprocess.PIPE)
         self._process, self._active = process, False
         assert process.stdout is not None
-        self._tasks = [asyncio.create_task(self._read(process.stdout))]
+        inbox = self._inbox
+        self._tasks = [asyncio.create_task(self._read(process.stdout)),
+                       asyncio.create_task(self._watch(process, inbox))]
         self._stderr = asyncio.create_task(stderr_tail(process.stderr))
         logger.info("%s started a Grok ACP process (pid=%s)", self._label, process.pid)
 
@@ -523,13 +533,21 @@ class AcpGrok:
                     message = json.loads(line)
                 except json.JSONDecodeError:
                     message = None
-                if not isinstance(message, dict):
-                    logger.warning("%s: Grok wrote a line that is not a JSON object: %.200s", self._label, line)
+                if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" \
+                        or not isinstance(message.get("id", 0), (int, str)) or isinstance(message.get("id"), bool):
+                    logger.warning("%s: Grok wrote a line that is not a JSON-RPC 2.0 message (%d bytes)", self._label,
+                                   len(raw))
                     continue
                 await self._route(message)
         finally:
             self._inbox.put_nowait(None)  # the output ended
             self._fail_pending(ConnectionError("the Grok process ended"))
+
+    async def _watch(self, process: asyncio.subprocess.Process, inbox: asyncio.Queue[dict[str, Any] | None]) -> None:
+        """End a waiting turn when the process exits, though a tool it left running still holds its output open."""
+        while process.returncode is None:  # ``wait()`` itself returns only once every pipe is closed
+            await asyncio.sleep(_EXIT_POLL_SEC)
+        inbox.put_nowait(None)
 
     async def _route(self, message: dict[str, Any]) -> None:
         method, ident = message.get("method"), message.get("id")
@@ -567,6 +585,8 @@ class AcpGrok:
             except (AcpError, ConnectionError, TimeoutError) as exc:
                 raise AcpUnavailable(f"initialize failed: {exc or type(exc).__name__}{await self._stderr_note()}") \
                     from None
+            if not isinstance(init, Mapping) or init.get("protocolVersion") != PROTOCOL_VERSION:
+                raise AcpUnavailable("Grok does not speak ACP protocol version " + str(PROTOCOL_VERSION))
             capabilities = init.get("agentCapabilities") if isinstance(init, Mapping) else None
             self._can_load = bool(isinstance(capabilities, Mapping) and capabilities.get("loadSession"))
             if self._session:
@@ -576,6 +596,8 @@ class AcpGrok:
                     await self._request("session/load", {"sessionId": self._session, "cwd": self._cwd,
                                                          "mcpServers": []}, timeout=SETUP_TIMEOUT_SEC)
                 except AcpError as exc:
+                    if not _missing_session(exc.error):
+                        raise AcpUnavailable(f"session/load failed: {exc}") from None
                     raise SessionGone(str(exc)) from None
             else:
                 created = await self._request("session/new", {"cwd": self._cwd, "mcpServers": []},
@@ -587,11 +609,12 @@ class AcpGrok:
             self._active = True
 
     async def _stderr_note(self) -> str:
+        """How much the exited process wrote to stderr (its text may hold paths and values: it is not logged)."""
         process, stderr = self._process, self._stderr
         if process is None or stderr is None or process.returncode is None:
             return ""
         with contextlib.suppress(Exception):
-            return f" ({(await asyncio.wait_for(stderr, 2)).strip()[-300:]})"
+            return f" (stderr: {len((await asyncio.wait_for(stderr, 2)).strip())} bytes)"
         return ""
 
     # --- A turn ---
@@ -694,10 +717,10 @@ class AcpGrok:
     async def _cancel(self, session: str) -> dict[str, Any] | None:
         """``session/cancel`` and wait for the prompt's response (its notifications are dropped); None, with the
         process ended, when it does not come in ``CANCEL_GRACE_SEC``."""
-        with contextlib.suppress(ConnectionError):
-            await self._send({"method": "session/cancel", "params": {"sessionId": session}})
         try:
-            async with asyncio.timeout(CANCEL_GRACE_SEC):
+            async with asyncio.timeout(CANCEL_GRACE_SEC):  # the write and the wait share one grace period
+                with contextlib.suppress(ConnectionError):
+                    await self._send({"method": "session/cancel", "params": {"sessionId": session}})
                 while (message := await self._inbox.get()) is not None:
                     if message.get("method") is None:
                         return message

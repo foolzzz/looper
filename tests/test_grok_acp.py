@@ -319,18 +319,75 @@ def test_a_turn_over_max_turns_is_cancelled_with_a_max_turns_result(
 
     async def _run() -> Any:
         session = AcpGrok(label="planner-task-1")
-        # TOOL answers in two model responses; one is all the turn may have.
-        await session.start(_command(root, grok, read_only=True, max_turns=1), cwd=str(tmp_path), signature="s")
-        (turn,) = await _turns(session, "TOOL")
+        await session.start(_command(root, grok, read_only=True, max_turns=2), cwd=str(tmp_path), signature="s")
+        (turn,) = await _turns(session, "LOOP")
         await session.stop()
         return turn
 
     turn = _go(_run())
     assert turn.result_event["subtype"] == "error_max_turns" and turn.result_event["is_error"]
+    # Grok got the cancel and answered it (it logs a cancel it received, then ends the prompt as cancelled).
+    assert (root / ".local" / "grok" / "cancels.log").read_text() == "cancel\n"
+    assert turn.result_event["stop_reason"] == "max_turns"
+
+
+def test_a_cancel_that_cannot_be_written_is_bounded_and_ends_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    monkeypatch.setattr(grok_acp, "CANCEL_GRACE_SEC", 0.5)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+    send = AcpGrok._send
+
+    async def blocked(self: AcpGrok, message: dict[str, Any]) -> None:
+        if message.get("method") == "session/cancel":
+            await asyncio.sleep(3600)  # a writer that never drains
+        await send(self, message)
+
+    monkeypatch.setattr(AcpGrok, "_send", blocked)
+
+    async def _run() -> tuple[bool, int | None]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        waiting = asyncio.Event()
+
+        async def on_event(event: dict[str, Any]) -> None:
+            waiting.set()
+
+        task = asyncio.create_task(session.run_turn("HANG", on_event))
+        await waiting.wait()
+        pid = session.pid
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        stale = session.stale("s")
+        await session.stop()
+        return stale, pid
+
+    stale, pid = _go(_run())
+    assert stale and pid is not None
+
+
+def test_a_dead_grok_ends_the_turn_though_a_tool_it_left_holds_its_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> Any:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        (turn,) = await asyncio.wait_for(_turns(session, "ORPHAN"), 8)  # the sleep it left lives 20 s
+        await session.stop()
+        return turn
+
+    turn = asyncio.run(_run())
+    assert (turn.result_event, turn.exit_code) == (None, 3)
+    assert "SECRET-STDERR" not in caplog.text  # only how much Grok wrote is logged
 
 
 def test_a_process_that_dies_mid_turn_is_a_turn_without_a_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     _operator(tmp_path, monkeypatch)
     root, grok = tmp_path / "runtime", _fake(tmp_path)
@@ -348,9 +405,12 @@ def test_a_process_that_dies_mid_turn_is_a_turn_without_a_result(
     assert (turn.result_event, turn.exit_code, turn.session_started) == (None, 3, True)
     assert stale  # the owner starts over
     assert events.kinds() == ["system:init"]
+    assert "SECRET-STDERR" not in caplog.text
 
 
-def test_lines_that_are_not_json_objects_are_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lines_that_are_not_jsonrpc_messages_are_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
     _operator(tmp_path, monkeypatch)
     root, grok = tmp_path / "runtime", _fake(tmp_path)
 
@@ -364,6 +424,7 @@ def test_lines_that_are_not_json_objects_are_skipped(tmp_path: Path, monkeypatch
     first, second = _go(_run())
     assert first.result_event["result"].endswith("| GARBAGE | turn 1")
     assert second.result_event["result"].endswith("| after | turn 2")
+    assert "this is not json" not in caplog.text
 
 
 def test_a_permission_request_is_refused_and_the_turn_goes_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -470,6 +531,32 @@ def test_a_saved_session_needs_loadsession_or_the_session_goes_on_per_turn(
     one, two, transport = _go(_run())
     assert transport == "per-turn" and two.result_event["result"] == "prompt A | again | turn 2"
     assert one.result_event["result"] == "prompt A | hello | turn 1"
+
+
+@pytest.mark.parametrize("variable", ["FAKE_ACP_LOAD_ERROR", "FAKE_ACP_PROTOCOL"])
+def test_a_load_error_that_is_not_a_missing_session_or_another_protocol_goes_on_per_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake_with_headless(tmp_path)
+
+    async def _run() -> tuple[Any, str]:
+        events = Events()
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=_launch().environment())
+        await _turns(session, "hello", events=events)
+        await session.stop()
+        env = {**_launch().environment(), variable: "2" if variable == "FAKE_ACP_PROTOCOL" else "1"}
+        command = _command(root, grok) + GROK.resume_args(events.seen[0]["session_id"])
+        await session.start(command, cwd=str(tmp_path), signature="s", env=env)
+        (two,) = await _turns(session, "again")
+        transport = session.transport
+        await session.stop()
+        return two, transport
+
+    two, transport = _go(_run())
+    # The session is not discarded: the per-turn path resumes it.
+    assert transport == "per-turn" and two.result_event["result"] == "prompt A | again | turn 2"
 
 
 def test_a_grok_that_does_not_answer_initialize_is_given_up_on(
