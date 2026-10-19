@@ -223,9 +223,9 @@ class TestPlannerChatThroughClaude:
 
         h = drive(claude, hold_first(), scenario)
         reply_text = [r.payload["text"] for r in h.replies if r.target == WEB][0]
-        assert reply_text.startswith("我转给它。") and "已经结束" in reply_text
+        assert reply_text.startswith("我转给它。") and "送达未确认" in reply_text
         decision = claude.turns()[2]["text"]
-        assert "arrived after the Worker finished" in decision and "also log errors" in decision
+        assert "delivery not confirmed; the Worker may already have acted on it" in decision and "also log errors" in decision
         assert h.work_items[1].payload["feedback"] == ["also log errors"]
 
     def test_invalid_action_gets_a_repair_turn(self, planner_claude: Any) -> None:

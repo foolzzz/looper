@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Any
 from .profile_registry import BUILTIN_PROFILE, AgentProfile
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
-from .runtimes import AuthKind, CostSource, ReadOnly
+from .runtimes import AuthKind, Capability, CostSource, ReadOnly
 from .system_prompt_mode import SystemPromptMode
 
 if TYPE_CHECKING:
@@ -758,6 +758,12 @@ class Launch:
     def read_only_mode(self) -> ReadOnly:
         """How a read-only run is kept read-only with this profile's runtime as probed (``ReadOnly``)."""
         return self.runtime.read_only_for(self.profile.runtime.capabilities)
+
+    @property
+    def steers(self) -> bool:
+        """Whether the run is driven through its runtime's steering protocol (the probed capability of the
+        registered runtime), so the Planner's messages reach it while it works."""
+        return Capability.STEER in self.profile.runtime.capabilities
 
     @property
     def model(self) -> str:

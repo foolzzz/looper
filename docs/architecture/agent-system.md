@@ -936,12 +936,14 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
-  `autonomous_turns`, `cost_report` (Claude Code has all but
-  `structured_output`; Codex has `run`, `resident_session`, `resume`,
+  `autonomous_turns`, `cost_report`, `steer` (Claude Code has all but
+  `structured_output` and `steer`; Codex has `run`, `resident_session`, `resume`,
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
   `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
   `compaction_events`; Grok has `run`, `resident_session`, `resume`, `mcp`,
-  `compaction_events` and `cost_report`).
+  `compaction_events` and `cost_report`). Codex and OMP list `steer` when
+  their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
+  Claude Code and Grok do not.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
@@ -958,7 +960,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `codex/instructions/<sha256>.md`, referenced by the top-level
   `model_instructions_file` key; the home's `AGENTS.md` is empty. The operator's `~/.codex` is
   never read. A Worker or Reviewer is one `--ephemeral` process with its
-  prompt on stdin, which then closes: it cannot be steered while it runs (in
+  prompt on stdin, which then closes, so it cannot be steered while it runs;
+  with the probed `steer` capability (`codex app-server` found to have `turn/steer`) the run is driven through
+  `app-server` instead (`codex_steer`, [RFC](rfcs/worker-steering-v0.zh-CN.md)) and the Planner's messages
+  reach it at once (in
   a task with an agent room, one that keeps its session in a home of its own:
   [A task's agent room](#a-tasks-agent-room)).
   The Manager and a Planner run one process per turn that resumes the
@@ -1008,7 +1013,8 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   Its runs are priced at the built-in prices as a subscription equivalent;
   the form suggests the models a ChatGPT login offers (`suggested_models`).
 - **OMP** (`looper/agents/runtimes/omp.py`, oh-my-pi's `omp`, verified against
-  omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` with API key
+  omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` (a Worker or Reviewer with the probed `steer`
+  capability runs `omp --mode rpc` instead, `omp_steer`, with `interruptMode` `wait`) with API key
   providers that serve `openai-responses`, `openai-chat` or
   `anthropic-messages`. Each process runs with `HOME` set to a home of
   Looper's own, `omp/homes/<sha256>` (one per set of generated settings,

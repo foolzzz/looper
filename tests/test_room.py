@@ -207,7 +207,9 @@ def test_the_reply_contract_and_the_prompts_are_unchanged_with_the_room_off() ->
 
 def test_a_reminder_waits_for_a_tool_call_and_comes_at_most_once_a_minute(tmp_path: Any) -> None:
     import asyncio
+    from types import SimpleNamespace
 
+    from looper.agents.runtimes import StreamChannel
     from looper.agents.tiers.worker import WorkerConfig, WorkerPool, _Reminders
 
     async def run() -> None:
@@ -218,7 +220,7 @@ def test_a_reminder_waits_for_a_tool_call_and_comes_at_most_once_a_minute(tmp_pa
             async def write_turn(self, stdin: Any, text: str, *, uuid: str | None = None) -> None:
                 written.append((text, uuid))
 
-        pool._inputs["w1"] = (object(), Runtime())  # type: ignore[assignment]
+        pool._inputs["w1"] = StreamChannel(Runtime(), SimpleNamespace(stdin=object()), model=None)  # type: ignore[arg-type]
         pool._reminders["w1"] = state = _Reminders()
         assert not await pool.remind("w1", "one")  # no tool call runs: it waits
         state.tools_running = 1
