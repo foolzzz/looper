@@ -5,7 +5,12 @@ their own tokens. A local browser's page load signs it in without passing the to
 
 from __future__ import annotations
 
+import base64
+import binascii
 import enum
+import hashlib
+import json
+import math
 import errno
 import hmac
 import os
@@ -13,6 +18,7 @@ import re
 import secrets
 import stat
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,57 +29,59 @@ TOKEN_FILE = "operator-token"
 # Non-blocking, so a FIFO in the file's place can't hang the start before fstat refuses it.
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 COOKIE_PREFIX = "looper_operator_"
-LOGIN_CODE_TTL_SECONDS = 300
-LOGIN_CODE_REFUSAL = ("this sign-in link is not valid: it was used already, has expired (after 5 minutes) or is wrong; "
-                      "run looper login-link for a new one")
+PASSWORD_FILE = "operator-password"
+USER_PATTERN = r"[A-Za-z0-9._-]{1,64}"
+PASSWORD_MIN_CHARS = 8
+SESSION_TTL_SECONDS = 7 * 24 * 3600
+SIGN_IN_PATHS = frozenset({"/login", "/logout"})
 REFUSAL = ("this API answers the operator only: open the dashboard in a browser on the server's machine "
-           "(it signs in on load), or run looper login-link for a sign-in link; "
-           "the looper CLI sends the token itself")
+           "(it signs in on load), or sign in at /login with the user name and password set by "
+           "looper auth set-password; the looper CLI sends the token itself")
 WRONG = ("the operator credential does not match this server's: reload the dashboard, or read the token again")
 
 
 class OperatorTokenError(RuntimeError):
-    """The token file is unusable; the message says what to do."""
+    """A credential file is unusable; the message says what to do."""
 
 
 def token_path(runtime_root: Path) -> Path:
     return runtime_root / TOKEN_FILE
 
 
-def ensure_token(runtime_root: Path) -> str:
-    """Validate and read the same private file descriptor, creating the token atomically if missing."""
-    path = token_path(runtime_root)
-    remedy = f"delete it and start looper serve again to make a new one: {path}"
-    dir_fd = fd = None
+def _remedy(path: Path) -> str:
+    if path.name == TOKEN_FILE:
+        return f"delete it and start looper serve again to make a new one: {path}"
+    return f"delete it and run looper auth set-password to make a new one: {path}"
+
+
+def _open_root(runtime_root: Path) -> int:
     try:
         os.makedirs(runtime_root, mode=0o700, exist_ok=True)
-        dir_fd = os.open(runtime_root, os.O_RDONLY | os.O_DIRECTORY)
-        info = os.fstat(dir_fd)
+        fd = os.open(runtime_root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        raise OperatorTokenError(f"cannot open runtime root {runtime_root}: {exc}") from None
+    try:
+        info = os.fstat(fd)
         if info.st_uid != os.getuid():
             raise OperatorTokenError(f"the runtime root {runtime_root} is owned by uid {info.st_uid}, not you")
         if info.st_mode & 0o022:
             raise OperatorTokenError(f"the runtime root {runtime_root} must be owned by you and not writable by "
                                      f"group or others (chmod go-w {runtime_root})")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _read_private(dir_fd: int, name: str, path: Path) -> bytes | None:
+    remedy = _remedy(path)
+    kind = "token" if name == TOKEN_FILE else "password record"
+    fd = None
+    try:
         try:
-            fd = os.open(TOKEN_FILE, _READ_FLAGS, dir_fd=dir_fd)
+            fd = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
         except FileNotFoundError:
-            tmp = f".{TOKEN_FILE}-{secrets.token_hex(16)}.tmp"
-            created = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
-            try:
-                try:
-                    data = (secrets.token_urlsafe(32) + "\n").encode()
-                    while data:
-                        data = data[os.write(created, data):]
-                    os.fsync(created)
-                finally:
-                    os.close(created)
-                try:
-                    os.link(tmp, TOKEN_FILE, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
-                except FileExistsError:
-                    pass  # another server made it
-            finally:
-                os.unlink(tmp, dir_fd=dir_fd)
-            fd = os.open(TOKEN_FILE, _READ_FLAGS, dir_fd=dir_fd)
+            return None
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OperatorTokenError(f"operator credential {path} is not a regular file; {remedy}")
@@ -82,56 +90,195 @@ def ensure_token(runtime_root: Path) -> str:
         if stat.S_IMODE(info.st_mode) != 0o600:
             raise OperatorTokenError(f"operator credential {path} must have mode 0600 (chmod 600 {path})")
         if info.st_size > 4096:
-            raise OperatorTokenError(f"operator credential is not a token; {remedy}")
+            raise OperatorTokenError(f"operator credential is not a {kind}; {remedy}")
         data = b""
-        while len(data) < 4096:
-            chunk = os.read(fd, 4096 - len(data))
+        while len(data) <= 4096:
+            chunk = os.read(fd, 4097 - len(data))
             if not chunk:
-                break
+                return data
             data += chunk
-        try:
-            token = data.decode("utf-8").strip()
-        except UnicodeError:
-            raise OperatorTokenError(f"operator credential is not a token; {remedy}") from None
-        if not re.fullmatch(r"[A-Za-z0-9_-]{32,}", token):
-            raise OperatorTokenError(f"operator credential is not a token; {remedy}")
-        return token
+        raise OperatorTokenError(f"operator credential is not a {kind}; {remedy}")
     except OSError as exc:
         reason = "is a symbolic link" if exc.errno == errno.ELOOP else str(exc)
         raise OperatorTokenError(f"cannot use operator credential {path}: {reason}; {remedy}") from None
     finally:
         if fd is not None:
             os.close(fd)
-        if dir_fd is not None:
-            os.close(dir_fd)
 
 
-class LoginCodes:
-    """Short-lived, single-use browser sign-ins, kept only in this server."""
+def _write_private(dir_fd: int, name: str, data: bytes) -> None:
+    tmp = f".{name}-{secrets.token_hex(16)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+    try:
+        try:
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
 
+
+def ensure_token(runtime_root: Path) -> str:
+    """Read the private token, creating it without replacing a concurrent server's token."""
+    path = token_path(runtime_root)
+    dir_fd = _open_root(runtime_root)
+    try:
+        data = _read_private(dir_fd, TOKEN_FILE, path)
+        if data is None:
+            tmp = f".{TOKEN_FILE}-{secrets.token_hex(16)}.tmp"
+            try:
+                _write_private(dir_fd, tmp, (secrets.token_urlsafe(32) + "\n").encode())
+                try:
+                    os.link(tmp, TOKEN_FILE, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+                except FileExistsError:
+                    pass
+            finally:
+                try:
+                    os.unlink(tmp, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    pass
+            data = _read_private(dir_fd, TOKEN_FILE, path)
+        try:
+            token = data.decode("utf-8").strip() if data is not None else ""
+        except UnicodeError:
+            token = ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,}", token):
+            raise OperatorTokenError(f"operator credential is not a token; {_remedy(path)}")
+        return token
+    except OSError as exc:
+        raise OperatorTokenError(f"cannot use operator credential {path}: {exc}; {_remedy(path)}") from None
+    finally:
+        os.close(dir_fd)
+
+
+@dataclass(frozen=True)
+class PasswordRecord:
+    user: str
+    n: int
+    r: int
+    p: int
+    salt: bytes
+    hash: bytes
+
+
+def _hash(password: str, *, salt: bytes, n: int, r: int, p: int) -> bytes:
+    return hashlib.scrypt(password.encode(), salt=salt, n=n, r=r, p=p, maxmem=64 * 1024 * 1024, dklen=32)
+
+
+def set_password(runtime_root: Path, user: str, password: str) -> None:
+    if not re.fullmatch(USER_PATTERN, user):
+        raise ValueError("user name must contain 1 to 64 letters, digits, dots, underscores or hyphens")
+    if len(password) < PASSWORD_MIN_CHARS:
+        raise ValueError(f"password must contain at least {PASSWORD_MIN_CHARS} characters")
+    salt = secrets.token_bytes(16)
+    record = {"user": user, "scheme": "scrypt", "n": 32768, "r": 8, "p": 1,
+              "salt": base64.urlsafe_b64encode(salt).decode(),
+              "hash": base64.urlsafe_b64encode(_hash(password, salt=salt, n=32768, r=8, p=1)).decode()}
+    fd = _open_root(runtime_root)
+    try:
+        _write_private(fd, PASSWORD_FILE, (json.dumps(record) + "\n").encode())
+    except OSError as exc:
+        path = runtime_root / PASSWORD_FILE
+        raise OperatorTokenError(f"cannot write operator credential {path}: {exc}; {_remedy(path)}") from None
+    finally:
+        os.close(fd)
+
+
+def clear_password(runtime_root: Path) -> bool:
+    fd = _open_root(runtime_root)
+    try:
+        try:
+            os.unlink(PASSWORD_FILE, dir_fd=fd)
+        except FileNotFoundError:
+            return False
+        return True
+    finally:
+        os.close(fd)
+
+
+def load_password(runtime_root: Path) -> PasswordRecord | None:
+    path = runtime_root / PASSWORD_FILE
+    fd = _open_root(runtime_root)
+    try:
+        data = _read_private(fd, PASSWORD_FILE, path)
+    finally:
+        os.close(fd)
+    if data is None:
+        return None
+    try:
+        value = json.loads(data)
+        user, n, r, p = (value[key] for key in ("user", "n", "r", "p"))
+        if (value["scheme"] != "scrypt" or not isinstance(user, str) or not re.fullmatch(USER_PATTERN, user)
+                or any(type(v) is not int for v in (n, r, p)) or not 2**14 <= n <= 2**20 or n & (n - 1)
+                or not 1 <= r <= 32 or not 1 <= p <= 32):
+            raise ValueError
+        salt, digest = (base64.b64decode(value[key], altchars=b"-_", validate=True) for key in ("salt", "hash"))
+        if len(salt) != 16 or len(digest) != 32:
+            raise ValueError
+        return PasswordRecord(user, n, r, p, salt, digest)
+    except (ValueError, TypeError, KeyError, UnicodeError, binascii.Error):
+        raise OperatorTokenError(f"operator credential {path} is not a password record; {_remedy(path)}") from None
+
+
+def verify(record: PasswordRecord, user: str, password: str) -> bool:
+    digest = _hash(password, salt=record.salt, n=record.n, r=record.r, p=record.p)
+    user_matches = hmac.compare_digest(user.encode(), record.user.encode())
+    hash_matches = hmac.compare_digest(digest, record.hash)
+    return user_matches and hash_matches
+
+
+class Sessions:
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        self._codes: dict[str, float] = {}
+        self._sessions: dict[str, tuple[str, bytes, float]] = {}
 
-    def _prune(self) -> None:
+    def create(self, user: str, record_hash: bytes) -> str:
         now = self._clock()
-        self._codes = {code: expiry for code, expiry in self._codes.items() if expiry > now}
+        self._sessions = {key: value for key, value in self._sessions.items() if value[2] > now}
+        if len(self._sessions) >= 100:
+            del self._sessions[next(iter(self._sessions))]
+        session_id = secrets.token_urlsafe(32)
+        self._sessions[session_id] = (user, record_hash, now + SESSION_TTL_SECONDS)
+        return session_id
 
-    def issue(self) -> str:
-        self._prune()
-        if len(self._codes) >= 20:
-            del self._codes[next(iter(self._codes))]
-        code = secrets.token_urlsafe(24)
-        self._codes[code] = self._clock() + LOGIN_CODE_TTL_SECONDS
-        return code
+    def valid(self, session_id: str, current_record_hash: bytes) -> bool:
+        session = self._sessions.get(session_id)
+        return bool(session and session[2] > self._clock() and hmac.compare_digest(session[1], current_record_hash))
 
-    def redeem(self, code: str) -> bool:
-        self._prune()
-        for issued in self._codes:
-            if hmac.compare_digest(code.encode(), issued.encode()):
-                del self._codes[issued]
-                return True
-        return False
+    def end(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+
+class LoginLimiter:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._clients: dict[str | None, tuple[int, float]] = {}
+        self._failures: deque[float] = deque()
+
+    def retry_after(self, client: str | None) -> int:
+        now = self._clock()
+        while self._failures and self._failures[0] <= now - 600:
+            self._failures.popleft()
+        until = self._clients.get(client, (0, 0.0))[1]
+        if len(self._failures) > 30:
+            until = max(until, self._failures[len(self._failures) - 31] + 600)
+        return max(0, math.ceil(until - now))
+
+    def failure(self, client: str | None) -> None:
+        now = self._clock()
+        failures = self._clients.get(client, (0, 0.0))[0] + 1
+        delay = min(900, 60 * 2 ** min(failures - 5, 4)) if failures >= 5 else 0
+        self._clients[client] = (failures, now + delay)
+        self._failures.append(now)
+
+    def success(self, client: str | None) -> None:
+        self._clients.pop(client, None)
 
 
 def read_token(runtime_root: Path) -> str | None:
@@ -146,6 +293,7 @@ class Access(enum.Enum):
     DASHBOARD = "dashboard"
     AGENT = "agent"
     OPERATOR = "operator"
+    SIGN_IN = "sign_in"
 
 
 @dataclass(frozen=True)
@@ -158,6 +306,8 @@ AREAS: tuple[Area, ...] = (Area("/api/agent/v1/", Access.AGENT), Area("/api/", A
 
 
 def access(path: str) -> Access:
+    if path in SIGN_IN_PATHS:
+        return Access.SIGN_IN
     return next((area.access for area in AREAS if path.startswith(area.prefix)), Access.DASHBOARD)
 
 
@@ -170,23 +320,23 @@ def _bearer(headers: Mapping[str, str]) -> str | None:
     return parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else None
 
 
-def _cookie(headers: Mapping[str, str], port: int) -> str | None:
+def cookie(headers: Mapping[str, str], name: str) -> str | None:
     for item in headers.get("cookie", "").split(";"):
-        name, separator, value = item.partition("=")
-        if separator and name.strip() == cookie_name(port):
+        key, separator, value = item.partition("=")
+        if separator and key.strip() == name:
             return value.strip()
     return None
 
 
 def presented(headers: Mapping[str, str], *, port: int) -> str | None:
     bearer = _bearer(headers)
-    return bearer if bearer is not None else _cookie(headers, port)
+    return bearer if bearer is not None else cookie(headers, cookie_name(port))
 
 
 def is_operator(headers: Mapping[str, str], *, token: str | None, port: int) -> bool:
     return token is not None and any(
         credential is not None and hmac.compare_digest(credential.encode(), token.encode())
-        for credential in (_bearer(headers), _cookie(headers, port))
+        for credential in (_bearer(headers), cookie(headers, cookie_name(port)))
     )
 
 

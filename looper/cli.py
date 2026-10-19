@@ -36,10 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Change the database schema without the pg_dump backup otherwise taken first into "
              "<runtime root>/backups (logged as a warning).",
     )
-    login = commands.add_parser("login-link", allow_abbrev=False,
-                                help="Print a dashboard sign-in link valid once, for 5 minutes.")
-    login.add_argument("--port", type=int, default=8767, help="Server port (default 8767).")
-    login.add_argument("--runtime-root", help="Override the default ~/.looper state directory.")
+    auth = commands.add_parser("auth", allow_abbrev=False, help="Manage the browser sign-in password.")
+    auth_commands = auth.add_subparsers(dest="auth_command", required=True)
+    set_password = auth_commands.add_parser("set-password", allow_abbrev=False,
+                                           help="Set the browser sign-in password (prompted without echo).")
+    set_password.add_argument("--user", default="admin", help="User name (default admin).")
+    clear_password = auth_commands.add_parser("clear-password", allow_abbrev=False,
+                                             help="Remove the browser sign-in password.")
+    for command in (set_password, clear_password):
+        command.add_argument("--runtime-root", help="Override the default ~/.looper state directory.")
     commands.add_parser(
         "doctor",
         allow_abbrev=False,
@@ -148,17 +153,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = {"ok": True, "schema_version": "looper_version_v0", "name": "looper", "version": __version__}
         print(json.dumps(payload, indent=2) if args.format == "json" else f"looper {__version__}")
         return 0
-    if args.command == "login-link":
-        from .agents import service
+    if args.command == "auth":
+        from .agents import auth_commands
         from .paths import default_runtime_root
 
-        try:
-            print(service.login_link(port=args.port, runtime_root=(
-                Path(args.runtime_root) if args.runtime_root else default_runtime_root())))
-        except service.ServiceError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        return 0
+        root = Path(args.runtime_root) if args.runtime_root else default_runtime_root()
+        return (auth_commands.set_password(root, args.user) if args.auth_command == "set-password"
+                else auth_commands.clear_password(root))
     if args.command == "doctor":
         from .agents.self_check import doctor
 
