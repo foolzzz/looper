@@ -196,7 +196,7 @@
       }
     },
     "omp": {
-      "home": "<LOCAL>/omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020",
+      "home": "<LOCAL>/omp/homes/9c8e6e1ad5a4674f1483cea2ed78d383c5ba6ca55031f676ccd10660fab7ccc6",
       "argv": {
         "run_command": [
           "env",
@@ -242,16 +242,16 @@
         "prompts/3df583ce7c9a6b9469979f4b4d6652d585c09337fd6b7993c9aab559f419e8c8.md": {
           "text": "Looper contract\nwith Unicode: 契约\n"
         },
-        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/.omp/agent/models.yml": {
-          "text": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"http://localhost.invalid/v1\",\n   \"models\": [\n    {\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"test-model\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"test-model\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n"
+        "omp/homes/9c8e6e1ad5a4674f1483cea2ed78d383c5ba6ca55031f676ccd10660fab7ccc6/.omp/agent/models.yml": {
+          "text": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"http://localhost.invalid/v1\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"test-model\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"test-model\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n"
         },
-        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/looper.yml": {
+        "omp/homes/9c8e6e1ad5a4674f1483cea2ed78d383c5ba6ca55031f676ccd10660fab7ccc6/looper.yml": {
           "text": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"enabledModels\": [\n  \"looper/test-model\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/test-model\",\n  \"plan\": \"looper/test-model\",\n  \"slow\": \"looper/test-model\",\n  \"smol\": \"looper/test-model\",\n  \"vision\": \"looper/test-model\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
-        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/.omp/natives": {
+        "omp/homes/9c8e6e1ad5a4674f1483cea2ed78d383c5ba6ca55031f676ccd10660fab7ccc6/.omp/natives": {
           "symlink": "<LOCAL>/omp/natives"
         },
-        "omp/homes/1fae708985a3bd64cdc61bc5e72854e5df5b97b6116cde6c949d395194ab4020/prompts/71a2608c86f94649e434ccdcbf6696e7f7f487e1833b97e8430ee960e5a3a715.md": {
+        "omp/homes/9c8e6e1ad5a4674f1483cea2ed78d383c5ba6ca55031f676ccd10660fab7ccc6/prompts/71a2608c86f94649e434ccdcbf6696e7f7f487e1833b97e8430ee960e5a3a715.md": {
           "text": "# Runtime notes (OMP)\n\nLooper runs you through OMP. The instructions after these notes are Looper's.\n\n- Looper reads only your final message. When the instructions ask for a reply or a report in a given shape (such as a JSON block), put all of it in that final message.\n\n---\n\nLooper contract\nwith Unicode: 契约\n"
         }
       }
