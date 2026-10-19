@@ -142,7 +142,8 @@ runtime root 默认与 `looper serve` 相同。`looper auth clear-password [--ru
   cookie（`Path=/; Max-Age=0; HttpOnly; SameSite=Strict`）。`/login` 只接受 GET、POST，`/logout` 只接受 POST；
   其余方法回答 405。
 - **响应和日志：** 每个登录页及 `/login`、`/logout` 的所有响应均带 `Cache-Control: no-store`、
-  `Referrer-Policy: no-referrer` 和
+  `Referrer-Policy: same-origin`（不用 `no-referrer`：那样浏览器提交表单时 `Origin` 为 `null`，同源检查会拒绝登录；
+  `same-origin` 同样不向其他站点发送来源）和
   `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`。
   错误文本 HTML 转义。登录日志只写对端和 `failed`、`succeeded`、`locked`，绝不记录正文、账号或密码。
 

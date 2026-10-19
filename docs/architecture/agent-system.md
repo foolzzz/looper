@@ -3407,7 +3407,9 @@ Attempts are handled one at a time (check, scrypt, record), so parallel
 requests cannot pass the limiter before the first failure counts. Login logs contain only the peer and `failed`,
 `succeeded` or `locked`, never the request body, user name or password.
 Every login page and every `/login` or `/logout` response uses
-`Cache-Control: no-store`, `Referrer-Policy: no-referrer` and
+`Cache-Control: no-store`, `Referrer-Policy: same-origin` (under `no-referrer`
+a browser sends `Origin: null` with the form's POST, which the same-origin
+check refuses) and
 `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`.
 There are no sign-in links or one-time codes; `code` and `token` query
 parameters are ignored. Without a password only local auto-login is available.
