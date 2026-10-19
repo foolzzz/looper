@@ -51,9 +51,8 @@ def test_preview_uses_profile_harness_contract_and_runtime_blocks(monkeypatch, r
     assert loader.await_args.args == (None,)
     assert result["profile"] == {"id": profile.id, "name": profile.name}
     assert result["role"] == role and result["runtime"] == runtime
-    claude = runtime == "claude-code"
-    assert result["system_prompt_mode"] == (mode if claude else "append")
-    assert result["role_system_prompt_mode"] == mode and result["system_prompt_mode_applies"] is claude
+    assert result["system_prompt_mode"] == mode
+    assert result["role_system_prompt_mode"] == mode and "system_prompt_mode_applies" not in result
     assert result["custom_prompt_set"]
     assert result["prompt_layers"]["custom_prompt"] == {"sha256": sha256_text("My profile identity")}
     assert result["prompt_layers"]["harness"]["source"] == "system"

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Menu } from "lucide-react";
 import { Sidebar, SIDEBAR_ID, type Page } from "@/components/sidebar";
 import { ClaudeCheckBanner } from "@/components/claude-check-banner";
+import { SessionEndedBanner } from "@/components/session-ended-banner";
+import { useSessionEnded } from "@/lib/session";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
@@ -76,6 +78,15 @@ function App() {
   const navigateSub = useCallback((p: Page, sub: string, query = "") => {
     window.location.hash = (sub ? `${p}/${sub}` : p) + (query ? `?${query}` : "");
   }, []);
+
+  // Once the session ended nothing else renders: unmounting the pages stops every poller and stream.
+  if (useSessionEnded()) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background p-4">
+        <SessionEndedBanner />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">

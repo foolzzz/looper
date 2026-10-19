@@ -463,8 +463,7 @@ async def agents_view(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_modes(raw: Any) -> dict[str, str | None]:
-    """``system_prompt_modes``, a task's own append or replace per role (null drops it); it applies on Claude Code
-    only. 400 for another role or value."""
+    """``system_prompt_modes``, a task's own append or replace per role (null drops it). 400 for another role or value."""
     if not isinstance(raw, dict):
         raise RequestError(HTTP_400, 'system_prompt_modes must be an object: {"planner" | "worker" | "reviewer": '
                                      '"append" | "replace" | null}')
@@ -622,8 +621,7 @@ def _concurrency_limits(raw: Any, *, field: str = "concurrency") -> dict[str, in
 
 async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Change the task's own choices per role, together: ``profiles`` (an Agent Profile, by id or name, for its
-    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once) and ``system_prompt_modes`` (append or replace
-    on Claude Code); null drops
+    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once) and ``system_prompt_modes`` (append or replace); null drops
     the task's choice of that role, and its layers apply. 400 for a bad field, role or
     value, 404 for an unknown task, 409 for a completed one (a failed, stopped or cancelled task changes too, and its
     restart runs with them). Answers the task's agents as they are then (and when a new profile applies). The caller

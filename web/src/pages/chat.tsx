@@ -252,6 +252,8 @@ export function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  // Leaving the page (the session ended, for one) stops the reply stream.
+  useEffect(() => () => cleanupRef.current?.(), []);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const sessionIdRef = useRef(sessionId);

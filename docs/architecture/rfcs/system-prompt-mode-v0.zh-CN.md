@@ -6,12 +6,12 @@
 
 Looper 给每个 agent 一份自己的系统提示词（`SystemPrompt`），四种运行时都是把它**追加**在运行时自带的默认系统提示词之后（Claude Code `--append-system-prompt-file`、Codex 家目录的 `AGENTS.md`、OMP `--append-system-prompt`、Grok 家目录的 `rules/looper.md`）。默认提示词里有编码助手的通用行为（工具用法、输出风格、拒绝引用自己的提示词等），对 Looper 的角色来说是多余的，有时还和角色的约束冲突。
 
-目标：每个 Agent Profile 可以选择「追加」或「替换」运行时的默认系统提示词。
+目标：可以选择「追加」或「替换」运行时的默认系统提示词（现在按角色设置，见决定 1）。
 
 ## 2. 决定
 
-1. 设置放在 Agent Profile 上：`system_prompt_mode`，取值 `append`（默认）或 `replace`。Claude Code 之后改为按角色放在 `agent_setting_layers` 的角色层（内置值：管家、规划者 `replace`，其余 `append`），Profile 的值对它不再生效；Codex、Grok、OMP 仍按 Profile。
-2. 运行时不能替换默认系统提示词时，保存 Profile 就被拒绝（HTTP 400，写明原因）；界面把选项置灰并显示原因。**不静默退回追加。** 已存的 `replace` Profile 被改到不能替换的运行时，同样被拒绝，不会被悄悄改回 `append`。
+1. 设置按角色放在 `agent_setting_layers` 的角色层（内置值：管家、规划者 `replace`，其余 `append`），对 Claude Code、Codex、Grok、OMP 一视同仁；任务可以按角色覆盖（`task_system_prompt_modes`）；Agent Profile 没有这个字段（最初放在 Profile 上，2026-10-19 起删除，旧导出里的该字段导入时忽略并给一条说明）。
+2. 运行时不能替换默认系统提示词时，启动一律用追加（适配器的类型化属性 `can_replace_system_prompt`，目前四种运行时都能替换）；设置本身不按运行时校验，因为角色不绑定运行时。
 3. 能不能替换是适配器的类型化属性（`RuntimeAdapter.can_replace_system_prompt`，与 `run_input` 一样放在适配器上，不进数据库）。一个运行时只有实跑探针通过才标为可替换。
 4. 每次运行的 prompt 记录里存它运行时用的模式，运行页显示。
 5. 随 v2.8.0 发布；默认不变，替换是显式选择，没有默认行为变化。
@@ -35,14 +35,14 @@ Looper 给每个 agent 一份自己的系统提示词（`SystemPrompt`），四�
 
 ## 4. 数据与接口
 
-- `agent_profiles.system_prompt_mode TEXT NOT NULL DEFAULT 'append' CHECK (system_prompt_mode IN ('append', 'replace'))`，`ADD COLUMN IF NOT EXISTS`，已有行得到 `append`。Claude Code 的按角色设置是 `agent_setting_layers.system_prompt_mode`（命名 CHECK，只在角色层；NULL 为角色内置值），加列时一次性迁移。
-- Profile 接口（`/api/agent-profiles`、`/api/registry`）读写该字段；保存时按运行时能力校验；配置导出/导入带上它，缺省为 `append`。
-- 管家的 Profile 配置工具加同名字段，工具的 schema 和描述对模型可见。
-- `Launch.system_prompt_mode` 在 Claude Code 上取角色的值（无角色为 `append`），其他运行时取 Profile 的；适配器的 `resident_command`、`run_command` 据此布置命令。
+- `agent_setting_layers.system_prompt_mode`（命名 CHECK，只在角色层；NULL 为角色内置值），任务的选择在 `task_system_prompt_modes`；`agent_profiles.system_prompt_mode` 已在一次性迁移后删除（迁移把工作者、评审者原先为 `replace` 的有效 Profile 带到角色层）。
+- 角色设置接口（`/api/agent-settings/roles/<role>`）和任务接口（`PUT /api/tasks/:id/agents` 的 `system_prompt_modes`）读写它；配置导出/导入带上角色层的值，Profile 上的旧字段接受并忽略。
+- 管家的 Profile 配置工具没有该字段。
+- `Launch.system_prompt_mode` 在任何运行时都取角色的值（无角色为 `append`，适配器不能替换时也是 `append`）；适配器的 `resident_command`、`run_command` 据此布置命令。
 
 ## 5. 待办与风险
 
-- 替换会丢掉默认提示词里的安全与行为约束，由 Looper 的提示词自己承担；所以它是 Profile 级的显式选择，且不做任何自动切换。
+- 替换会丢掉默认提示词里的安全与行为约束，由 Looper 的提示词自己承担；所以它是按角色的显式选择，且不做任何自动切换。
 - 替换模式下的质量用 haiku 全任务 `--reps 3`（每个角色都用替换模式）评测，结果写在 PR 里。
 
 ## 6. 系统提示词的分块、自定义文本与预览（v2.9 方案）
@@ -86,7 +86,7 @@ Looper 给每个 agent 一份自己的系统提示词（`SystemPrompt`），四�
 3. 与 harness、角色提示词的分工：harness 是性格和稳定性（按 Agent 类型与项目），角色提示词是角色做什么（按角色），`custom_prompt` 是**这个 Profile**无论跑什么角色都要带的文字（口径、语言、对外身份）。
 4. 默认空：空串不加任何文字，也不进 `prompt_layers`，启动参数和提示词文件与 v2.8.0 逐字节一致（有测试固定）。非空时 `prompt_layers.custom_prompt = {sha256}`。
 5. 校验：必须是不含 NUL 字符的字符串，长度不超过 harness 的上限（`HARNESS_MAX_CHARS`），含 NUL、超过上限或类型不对返回 400。四种运行时都能带这一层，所以没有运行时因为它被拒绝；以后出现不能带的运行时，沿用 `system_prompt_mode` 的做法（适配器的类型化属性，保存时 400，不静默丢弃）。
-6. 管家的 Profile 配置工具已经编辑 `system_prompt_mode`，所以同样加 `custom_prompt`（schema 和描述对模型可见）。
+6. 管家的 Profile 配置工具编辑 Profile 的字段，所以加 `custom_prompt`（schema 和描述对模型可见）。
 
 ### 6.3 预览
 

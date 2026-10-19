@@ -10,7 +10,7 @@ import { fetchPromptPreview, type AgentProfile, type Registry } from "@/lib/api"
 const REFUSAL = "the Stand-in runtime cannot replace its default system prompt";
 const PROFILE: AgentProfile = {
   profile_id: "p", name: "Profile", model: "model", effort: null, agent_teams: true,
-  system_prompt_mode: "append", custom_prompt: "", runtime_id: "rt-claude-code", runtime_type: "claude-code",
+  custom_prompt: "", runtime_id: "rt-claude-code", runtime_type: "claude-code",
   runtime_name: "Claude Code", provider_id: "provider", provider_name: "Provider", builtin: false,
   roles: ["worker"], used_by: { layers: [], task_count: 0, allowed_in: [] },
   cost: { source: "runtime", equivalent: false, unpriced: [] },
@@ -82,52 +82,18 @@ describe("Agent Profile prompts", () => {
 
   const CODEX: AgentProfile = { ...PROFILE, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
 
-  it("hides the choice on Claude Code, which sets it per role", async () => {
-    await show();
+  it.each([PROFILE, CODEX])("has no system prompt choice on $runtime_type, which is set per role", async (profile) => {
+    await show(profile);
     expect([...container.querySelectorAll("label")].some((l) => l.textContent === "System prompt")).toBe(false);
     expect(container.querySelector('[data-testid="prompt-mode-per-role"]')!.textContent)
       .toContain("set per role in Settings → Roles");
   });
 
-  it("renders the append and replace choices with append selected by default", async () => {
+  it("does not send a system_prompt_mode in the profile save body", async () => {
     await show(CODEX);
-    const field = select("System prompt");
-    expect(field.value).toBe("append");
-    expect(field.disabled).toBe(false);
-    expect([...field.options].map((option) => option.text)).toEqual([
-      "Append to the runtime's default", "Replace the runtime's default",
-    ]);
-  });
-
-  it("disables system prompt selection with the runtime's refusal reason", async () => {
-    await show({ ...PROFILE, runtime_id: "rt-stand-in", runtime_type: "stand-in", agent_teams: false });
-    const field = select("System prompt");
-    expect(field.disabled).toBe(true);
-    expect(document.getElementById(field.getAttribute("aria-describedby")!)?.textContent).toContain(REFUSAL);
-  });
-
-  it("sends the selected system_prompt_mode in the profile save body", async () => {
-    await show(CODEX);
-    await choose("System prompt", "replace");
     await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(requests).toEqual([expect.objectContaining({ url: "/api/agent-profiles/p", body: expect.objectContaining({ system_prompt_mode: "replace" }) })]);
-  });
-
-  it("resets a replace draft to append and explains why when the runtime cannot replace", async () => {
-    const savedProfile = { ...PROFILE, system_prompt_mode: "replace" as const };
-    await show(savedProfile);
-    await choose("Runtime", "rt-stand-in");
-    expect(select("System prompt").value).toBe("append");
-    expect(container.textContent).toContain(REFUSAL);
-    expect(container.textContent).toContain("The editor changed this draft to append.");
-    expect(savedProfile.system_prompt_mode).toBe("replace");
-  });
-
-  it("shows replace mode in the read-only profile summary", async () => {
-    const registry = { ...REGISTRY, profiles: [{ ...PROFILE, system_prompt_mode: "replace" as const }] };
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(registry), { status: 200 })));
-    await act(async () => root.render(<AgentProfilesSection />));
-    expect(container.textContent).toContain("agent teams on · replaces default system prompt");
+    expect(requests).toHaveLength(1);
+    expect(requests[0].body).not.toHaveProperty("system_prompt_mode");
   });
 
   it("edits and saves custom prompt text", async () => {
