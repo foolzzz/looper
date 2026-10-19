@@ -930,8 +930,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   are materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
   `OmpRuntime` and `GrokRuntime` (`codex`, `omp`, `grok`, below) translate
-  them at launch; all three keep the Manager's and a Planner's session with
-  one process per turn (`runtimes/per_turn.py`). Capabilities:
+  them at launch; Codex and OMP keep the Manager's and a Planner's session
+  with one process per turn (`runtimes/per_turn.py`), Grok with one process
+  over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
+  Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
   `autonomous_turns`, `cost_report` (Claude Code has all but
@@ -1074,9 +1076,18 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   instruction files are read by Grok itself, every name it knows in each
   directory from the repository's root down (`AGENTS.md` and `CLAUDE.md`
   both when both are there). A Worker or Reviewer is one process with its
-  prompt on stdin, which then closes; the Manager and a Planner run one
-  process per turn with `--resume <id>` in a home of their own
-  (`grok/sessions/<agent>`, refreshed from the run home before each turn).
+  prompt on stdin, which then closes. The Manager and a Planner run one
+  resident process over ACP (`grok --trust --no-auto-update agent
+  --always-approve -m <model> --effort <effort> stdio`, JSON-RPC lines on
+  stdio; `grok_acp.AcpGrok`) in a home of their own (`grok/sessions/<agent>`,
+  refreshed from the run home): `session/new` or, after a restart,
+  `session/load`; one `session/prompt` per turn, whose updates become the
+  stream-json events below and whose result carries the turn's tokens and
+  cost; `session/cancel` for a turn given up. A Planner's reading tools are
+  the `tools:` line of an agent profile. When Grok cannot serve a session over
+  ACP (no `agent stdio`, no `initialize` answer, no `loadSession` for a saved
+  session) it runs one process per turn with `--resume <id>` in the same home
+  (`ResidentGrok`).
   The stream is Claude Code's stream-json: each response's tokens become a
   `usage` event, a command's output (byte values) is decoded, and the run's
   cost is Grok's `total_cost_usd` (`runtime`; a 0 for tokens spent is

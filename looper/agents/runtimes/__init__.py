@@ -49,7 +49,8 @@ format translates it at launch (Codex: ``codex.materialize``,
 (``launch_record``).
 
 A runtime whose CLI runs one turn per process keeps the Manager's and a
-Planner's session by resuming it on every turn (``per_turn.PerTurnSession``).
+Planner's session by resuming it on every turn (``per_turn.PerTurnSession``);
+Grok keeps one process for it over ACP (``grok_acp``), per turn when it cannot.
 
 The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
 (``omp``) and ``grok`` (``grok``).
@@ -115,6 +116,13 @@ class ReadOnly(str, Enum):
     CHECK = "check"  # it cannot: the Planner compares the task directory before and after each turn
 
 
+class ResidentTransport(str, Enum):
+    """How a runtime serves the Manager's and a Planner's session (``RuntimeAdapter.resident_transport``)."""
+
+    PER_TURN = "per_turn"  # one process per turn, resuming the session (``per_turn.PerTurnSession``)
+    ACP = "acp"  # one process for the session, speaking the Agent Client Protocol (``grok_acp.AcpGrok``)
+
+
 class CostSource(str, Enum):
     """Where a run's cost comes from: what the runtime reported, or its tokens at the provider's prices."""
 
@@ -163,8 +171,9 @@ class Probe:
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
-    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex, OMP and Grok one process per turn
-    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``, ``grok.ResidentGrok``)."""
+    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Grok one over ACP (``grok_acp.AcpGrok``),
+    Codex and OMP one process per turn (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``;
+    ``grok.ResidentGrok`` is Grok's fallback)."""
 
     @property
     def label(self) -> str: ...
@@ -238,6 +247,8 @@ class RuntimeAdapter(ABC):
     # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
     runtime_cost_capped: ClassVar[bool] = True
     can_replace_system_prompt: ClassVar[bool] = False
+    # How its resident sessions run. A runtime with ACP falls back to a process per turn when it cannot serve one.
+    resident_transport: ClassVar[ResidentTransport] = ResidentTransport.PER_TURN
 
     # --- Registration ---
 
