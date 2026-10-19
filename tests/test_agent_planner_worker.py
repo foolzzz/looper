@@ -580,6 +580,21 @@ class TestWorkerSubprocess:
         if error:
             assert error in result["error"]
 
+    def test_nonzero_exit_without_a_result_names_the_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The exit-code failure is built before judge_result runs; it must still name the runtime that ran."""
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "label", "Codex")
+
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), "sys.exit(1)")
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        result = asyncio.run(_run())
+        assert result["status"] == "failed" and result["error"] == "Codex exited with code 1"
+
     @pytest.mark.parametrize(("row", "failure", "limits"), [
         (None, None, (86400, 0)),  # no row: 86400 s, no turn limit
         (None, RuntimeError("database pool not initialised"), (86400, 0)),

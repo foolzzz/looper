@@ -1097,7 +1097,7 @@ class WorkerPool:
                 if process.stderr:
                     stderr_bytes = await process.stderr.read()
                     stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-                error = f"Claude Code exited with code {return_code}"
+                error = f"{runtime.label} exited with code {return_code}"
                 await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error, "stderr": stderr[:500]}

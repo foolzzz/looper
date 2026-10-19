@@ -5,19 +5,27 @@ let installed = false;
 const listeners = new Set<() => void>();
 
 /** Remembers the first 401 any /api call gets, so the page says once that the session ended instead of every widget
- * showing "status 401". It only reads the response: nothing is retried. */
+ * showing its own error. From then on an /api call makes no request and never settles (until its signal aborts), so
+ * the chat watch, the pollers and any retry loop stop without each of them handling a 401. */
 export function installSessionGuard(): void {
   if (installed) return;
   installed = true;
   const original = window.fetch.bind(window);
   window.fetch = async (input, init) => {
+    if (!isApi(input)) return original(input, init);
+    if (ended) return settleNever(init?.signal);
     const res = await original(input, init);
-    if (res.status === 401 && !ended && isApi(input)) {
-      ended = true;
-      listeners.forEach((notify) => notify());
-    }
-    return res;
+    if (res.status !== 401) return res;
+    ended = true;
+    listeners.forEach((notify) => notify());
+    return settleNever(init?.signal);
   };
+}
+
+function settleNever(signal?: AbortSignal | null): Promise<Response> {
+  return new Promise((_, reject) => {
+    signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+  });
 }
 
 function isApi(input: RequestInfo | URL): boolean {
