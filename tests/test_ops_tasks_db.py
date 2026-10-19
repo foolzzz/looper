@@ -338,6 +338,40 @@ def test_a_supplement_goes_to_a_task_under_way(
     _run(test, monkeypatch)
 
 
+def test_the_manager_sets_and_clears_a_tasks_system_prompt_mode(monkeypatch: pytest.MonkeyPatch,
+                                                                tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-r", "init", project)
+        await _task(pool, "task-c", "completed", project)
+        chat = _Chat(tmp_path)
+        modes = "SELECT role, system_prompt_mode FROM task_system_prompt_modes WHERE task_id = 'task-r' ORDER BY role"
+        (both, ) = await chat.say("replace", ("looper_task_update", {
+            "task_id": "task-r", "system_prompt_modes": {"worker": "replace", "reviewer": "append"}}))
+        assert both["status"] == "ok" and both["result"]["changed"] == ["system_prompt_modes"], both
+        assert [tuple(r) for r in await pool.fetch(modes)] == [("reviewer", "append"), ("worker", "replace")]
+
+        # null returns a role to its setting; the other role stays.
+        (cleared, ) = await chat.say("back", ("looper_task_update", {
+            "task_id": "task-r", "system_prompt_modes": {"worker": None}}))
+        assert cleared["status"] == "ok", cleared
+        assert [tuple(r) for r in await pool.fetch(modes)] == [("reviewer", "append")]
+
+        # A bad role, a bad value, an empty object, a completed task: refused, nothing stored.
+        bad_role, bad_value, empty, done = await chat.say(
+            "bad",
+            ("looper_task_update", {"task_id": "task-r", "system_prompt_modes": {"manager": "append"}}),
+            ("looper_task_update", {"task_id": "task-r", "system_prompt_modes": {"worker": "swap"}}),
+            ("looper_task_update", {"task_id": "task-r", "system_prompt_modes": {}}),
+            ("looper_task_update", {"task_id": "task-c", "system_prompt_modes": {"worker": "replace"}}))
+        assert [_error(a) for a in (bad_role, bad_value, empty, done)] == ["invalid", "invalid", "invalid", "conflict"]
+        assert "'manager'" in bad_role["error"]["message"] and "worker must be one of: append, replace" in bad_value["error"]["message"]
+        assert [tuple(r) for r in await pool.fetch(modes)] == [("reviewer", "append")]
+        assert await pool.fetchval("SELECT count(*) FROM task_system_prompt_modes") == 1
+
+    _run(test, monkeypatch)
+
+
 def test_updating_a_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.db import agent_setting_layers, task_changes, tasks
 
