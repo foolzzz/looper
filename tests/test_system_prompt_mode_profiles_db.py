@@ -64,7 +64,7 @@ def test_a_claude_code_profile_refuses_replace_and_keeps_append(monkeypatch: pyt
     async def run(_pool: Any) -> None:
         fields = {"runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription", "model": "sonnet"}
         status, body = await _call("POST", "/api/agent-profiles", {"name": "c", **fields, "system_prompt_mode": "replace"})
-        assert status == 400 and "set per role in Settings → Agents" in body["error"]
+        assert status == 400 and "set per role in Settings → Roles" in body["error"]
         created = await _ok("POST", "/api/agent-profiles", {"name": "c", **fields})
         assert created["profile"]["system_prompt_mode"] == "append"
         status, body = await _call("PUT", f"/api/agent-profiles/{created['profile']['profile_id']}",

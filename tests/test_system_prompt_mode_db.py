@@ -66,7 +66,7 @@ def test_mode_is_set_only_on_a_role_layer_and_a_claude_code_profile_refuses_repl
         status, body = await _call("POST", "/api/agent-profiles", {
             "name": "p", "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
             "model": "sonnet", "system_prompt_mode": "replace"})
-        assert status == 400 and "set per role in Settings → Agents" in body["error"]
+        assert status == 400 and "set per role in Settings → Roles" in body["error"]
 
     _run(run, monkeypatch)
 

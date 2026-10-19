@@ -461,7 +461,7 @@ def check_system_prompt_mode(runtime: RuntimeSpec, mode: SystemPromptMode) -> No
     if mode is not SystemPromptMode.REPLACE:
         return
     if runtime.type == "claude-code":
-        raise RegistryError("Claude Code's system prompt mode is set per role in Settings → Agents")
+        raise RegistryError("Claude Code's system prompt mode is set per role in Settings → Roles")
     adapter = runtimes.ADAPTERS.get(runtime.type)
     if adapter is None:
         raise RegistryError(f"runtime {runtime.name!r} ({runtime.type}) cannot replace its default system prompt: "

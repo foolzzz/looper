@@ -86,7 +86,7 @@ describe("Agent Profile prompts", () => {
     await show();
     expect([...container.querySelectorAll("label")].some((l) => l.textContent === "System prompt")).toBe(false);
     expect(container.querySelector('[data-testid="prompt-mode-per-role"]')!.textContent)
-      .toContain("set per role in Settings → Agents");
+      .toContain("set per role in Settings → Roles");
   });
 
   it("renders the append and replace choices with append selected by default", async () => {

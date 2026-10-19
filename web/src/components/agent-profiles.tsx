@@ -312,7 +312,7 @@ export function AgentProfileForm({
         </div>
         {claudeCode ? (
           <p className="text-[11px] text-muted-foreground sm:col-span-2" data-testid="prompt-mode-per-role">
-            Claude Code&apos;s system prompt mode is set per role in Settings → Agents.
+            Claude Code&apos;s system prompt mode is set per role in Settings → Roles.
           </p>
         ) : (
           <div className="space-y-1 sm:col-span-2">

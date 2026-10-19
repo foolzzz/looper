@@ -435,7 +435,7 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
         elif name == "system_prompt_mode":
             if scope is not Layer.ROLE:
                 raise SettingsError("system_prompt_mode is set per role: set it on the role's layer "
-                                    "(Settings → Agents), not on the shared defaults or in a project")
+                                    "(Settings → Roles), not on the shared defaults or in a project")
             values[name] = _stored_prompt_mode(raw).value
         else:
             values[name] = budget_usd(raw)

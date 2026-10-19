@@ -1235,7 +1235,7 @@ Manager and the Planner and `append` for every other launch: Workers, Reviewers,
 consults and a launch with no role (`agent_settings.BUILTIN_SYSTEM_PROMPT_MODE`). The settings view shows the
 effective value of every role (`effective.system_prompt_mode`). A task may set its own per role (`task_system_prompt_modes`, `system_prompt_modes` of `PUT /api/tasks/:id/agents`): its choice wins over the role layer's, which wins over the built-in value; the task's `agents` view gives each role's effective value with its source (`task`, `role` or `builtin`) and the runtime type, so the task page shows the choice only where it applies. A Planner-defined role's runs and reviews follow the task's Worker or Reviewer choice, a consult appends, and the Manager has no task level. Only a role layer takes it: the shared defaults, a
 project and a role in a project refuse it (400). A Claude Code profile does not use its own `system_prompt_mode`: the
-registry refuses `replace` on it ("Claude Code's system prompt mode is set per role in Settings → Agents"), and the
+registry refuses `replace` on it ("Claude Code's system prompt mode is set per role in Settings → Roles"), and the
 dashboard's profile editor shows that line in place of the choice. On **Codex, Grok and OMP** nothing changed: each
 profile chooses `append` or `replace`, the adapter's typed `can_replace_system_prompt` capability is exposed by
 `/api/registry` with `replace_system_prompt_refusal`, and creating, updating or importing a replacement profile is
