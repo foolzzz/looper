@@ -40,6 +40,9 @@ type DBPinger interface {
 // directory has been accepted and the active-task list is required. A
 // project id is looked up before that directory check.
 type Reader interface {
+	Catalog(ctx context.Context) (map[string]any, error)
+	CatalogItem(ctx context.Context, itemID string) (map[string]any, error)
+	ProjectInstalls(ctx context.Context, projectID string) (map[string]any, error)
 	Knowledge(ctx context.Context, projectID, runtimeRoot string) (map[string]any, error)
 	Document(ctx context.Context, projectID, documentID, runtimeRoot string) (map[string]any, error)
 	Drafts(ctx context.Context, projectID string) (map[string]any, error)
@@ -147,6 +150,7 @@ func New(version string, pinger DBPinger, webDir string) *Server {
 // GET /api/schedules, GET /api/schedules/<id>, its runs, and its notifications.
 // It also serves GET /api/agent-settings and GET /api/projects/<id>/agent-settings.
 // It also serves GET /api/registry, project knowledge, documents, drafts, and owned skills.
+// It also serves GET /api/catalog, GET /api/catalog/<id>, and project installs.
 // GET /api/chat/events and GET /api/tasks/<id>/activity/stream are SSE and
 // are not served here; /activity/stream is 404 until that route exists.
 func (s *Server) Handler() http.Handler {
@@ -182,6 +186,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/projects/{id}/knowledge", s.handleKnowledge)
 	mux.HandleFunc("/api/projects/{id}/knowledge/{document}", s.handleKnowledge)
 	mux.HandleFunc("/api/projects/{id}/skills/{skill}", s.handleProjectSkill)
+	mux.HandleFunc("/api/catalog", s.handleCatalog)
+	mux.HandleFunc("/api/catalog/{id}", s.handleCatalogItem)
+	mux.HandleFunc("/api/projects/{id}/installs", s.handleProjectInstalls)
 	mux.HandleFunc("/api/workspaces/check", s.handleWorkspaceCheck)
 	mux.HandleFunc("/api/projects/{id}/schedules", s.handleProjectSchedules)
 	mux.HandleFunc("/api/schedules/{id}/runs", s.handleScheduleRuns)

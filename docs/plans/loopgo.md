@@ -186,6 +186,24 @@ goldens use temporary project files; offline view comparisons cover their
 content and sizes. Database-backed generation and parity remain unverified
 in the current sandbox, which refuses the disposable PostgreSQL connection.
 
+G1n implements `GET /api/catalog`, `GET /api/catalog/<id>`, and
+`GET /api/projects/<id>/installs`, including origin/kind views, installation
+scope and task-role filtering, MCP masking, file listings, skill bodies,
+project ownership, and 404s. Route tests and 21 projection cases pass against
+Python v2.10.0's offline goldens; fixture-presence checks cover both raw 404
+responses. `go vet ./...` passes.
+Acceptance remains blocked: external database parity found four skill file-list
+ordering mismatches in the offline goldens because PostgreSQL collation differs
+from Python string order. Offline catalog generation has been removed; generator
+regressions cover refusing offline writes and preserving outputs on connection
+failure. Both Go CI workflows now pin `en_US.utf8`; the generator refuses other
+LC_COLLATE/LC_CTYPE values before replacing the schema. Generator regressions
+also cover locale rejection and preserving captured file order when publishing.
+Database-backed regeneration and validation of that CI locale remain pending:
+the current sandbox refuses PostgreSQL connections, and `go test ./...` fails
+where existing tests need TCP connections or listeners. The dashboard consumes the existing HTTP shapes;
+Telegram, Lark, and CLI entry points need no changes for these read-only APIs.
+
 These are the read-only GET routes Python still serves and Go does not.
 Later cards pick them up. Two of them are SSE streams, not JSON documents.
 `POST /api/agent/v1/ops/looper_costs` is a Manager tool, not a GET, so it
@@ -193,10 +211,7 @@ is not in this list.
 
 - `GET /api/chat/events` (SSE)
 - `GET /api/tasks/(task-[a-zA-Z0-9]+)/activity/stream` (SSE)
-- `GET /api/projects/(proj-[a-zA-Z0-9]+)/installs`
 - `GET /api/config/export`
-- `GET /api/catalog`
-- `GET /api/catalog/([a-z]+-[a-zA-Z0-9]+)`
 - `GET /api/channels/lark/status`
 - `GET /api/channels/lark/people`
 - `GET /api/agent/v1/tools` (Manager, Planner, or room token)

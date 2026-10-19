@@ -1,0 +1,541 @@
+{
+  "projects": [
+    {
+      "id": "proj-catalog01",
+      "name": "Alpha catalog",
+      "work_dir": "",
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "proj-catalog02",
+      "name": "Beta catalog",
+      "work_dir": "",
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "proj-catalog03",
+      "name": "Empty catalog",
+      "work_dir": "",
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    }
+  ],
+  "library_items": [
+    {
+      "id": "lib-machineplugin01",
+      "kind": "plugin",
+      "name": "Zebra@market",
+      "origin": "machine",
+      "owner_project_id": null,
+      "description": "machine plugin fixture",
+      "source": "fixture/machine/Zebra@market",
+      "version": "1.2.3",
+      "sha256": "lib-machineplugin01-hash",
+      "size_bytes": 46,
+      "file_count": 2,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "lib-uploadplugin01",
+      "kind": "plugin",
+      "name": "Alpha",
+      "origin": "upload",
+      "owner_project_id": null,
+      "description": "upload plugin fixture",
+      "source": "fixture/upload/Alpha",
+      "version": "1.2.3",
+      "sha256": "lib-uploadplugin01-hash",
+      "size_bytes": 33,
+      "file_count": 1,
+      "modified": true,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "lib-gitplugin01",
+      "kind": "plugin",
+      "name": "alpha",
+      "origin": "git",
+      "owner_project_id": null,
+      "description": "git plugin fixture",
+      "source": "fixture/git/alpha",
+      "version": "1.2.3",
+      "sha256": "lib-gitplugin01-hash",
+      "size_bytes": 11,
+      "file_count": 1,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "lib-machineskill01",
+      "kind": "skill",
+      "name": "machine-guide",
+      "origin": "machine",
+      "owner_project_id": null,
+      "description": "machine skill fixture",
+      "source": "fixture/machine/machine-guide",
+      "version": "1.2.3",
+      "sha256": "lib-machineskill01-hash",
+      "size_bytes": 106,
+      "file_count": 2,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "lib-uploadskill01",
+      "kind": "skill",
+      "name": "upload-guide",
+      "origin": "upload",
+      "owner_project_id": null,
+      "description": "upload skill fixture",
+      "source": "fixture/upload/upload-guide",
+      "version": "1.2.3",
+      "sha256": "lib-uploadskill01-hash",
+      "size_bytes": 63,
+      "file_count": 2,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "lib-gitskill01",
+      "kind": "skill",
+      "name": "git-guide",
+      "origin": "git",
+      "owner_project_id": null,
+      "description": "git skill fixture",
+      "source": "fixture/git/git-guide",
+      "version": "1.2.3",
+      "sha256": "lib-gitskill01-hash",
+      "size_bytes": 66,
+      "file_count": 2,
+      "modified": true,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "lib-uiskill01",
+      "kind": "skill",
+      "name": "ui-guide",
+      "origin": "ui",
+      "owner_project_id": null,
+      "description": "ui skill fixture",
+      "source": "fixture/ui/ui-guide",
+      "version": "1.2.3",
+      "sha256": "lib-uiskill01-hash",
+      "size_bytes": 51,
+      "file_count": 2,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "skill-ownedalpha01",
+      "kind": "skill",
+      "name": "shared-guide",
+      "origin": "project",
+      "owner_project_id": "proj-catalog01",
+      "description": "project skill fixture",
+      "source": "fixture/project/shared-guide",
+      "version": "1.2.3",
+      "sha256": "skill-ownedalpha01-hash",
+      "size_bytes": 66,
+      "file_count": 1,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "skill-ownedbeta01",
+      "kind": "skill",
+      "name": "shared-guide",
+      "origin": "project",
+      "owner_project_id": "proj-catalog02",
+      "description": "project skill fixture",
+      "source": "fixture/project/shared-guide",
+      "version": "1.2.3",
+      "sha256": "skill-ownedbeta01-hash",
+      "size_bytes": 66,
+      "file_count": 1,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "skill-missingfile01",
+      "kind": "skill",
+      "name": "no-file",
+      "origin": "project",
+      "owner_project_id": "proj-catalog01",
+      "description": "project skill fixture",
+      "source": "fixture/project/no-file",
+      "version": "1.2.3",
+      "sha256": "skill-missingfile01-hash",
+      "size_bytes": 0,
+      "file_count": 0,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "mcp-machine01",
+      "kind": "mcp",
+      "name": "mcp_stdio",
+      "origin": "machine",
+      "owner_project_id": null,
+      "description": "machine mcp fixture",
+      "source": "fixture/machine/mcp_stdio",
+      "version": "1.2.3",
+      "sha256": "mcp-machine01-hash",
+      "size_bytes": 123,
+      "file_count": 0,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "mcp-http01",
+      "kind": "mcp",
+      "name": "mcp_http",
+      "origin": "ui",
+      "owner_project_id": null,
+      "description": "ui mcp fixture",
+      "source": "fixture/ui/mcp_http",
+      "version": "1.2.3",
+      "sha256": "mcp-http01-hash",
+      "size_bytes": 123,
+      "file_count": 0,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "mcp-sse01",
+      "kind": "mcp",
+      "name": "mcp_sse",
+      "origin": "ui",
+      "owner_project_id": null,
+      "description": "ui mcp fixture",
+      "source": "fixture/ui/mcp_sse",
+      "version": "1.2.3",
+      "sha256": "mcp-sse01-hash",
+      "size_bytes": 123,
+      "file_count": 0,
+      "modified": false,
+      "imported_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    }
+  ],
+  "library_files": [
+    {
+      "item_id": "lib-machineplugin01",
+      "path": "tools/run.sh",
+      "content": "PLUGIN_FILE_CONTENT_SENTINEL\n",
+      "sha256": "lib-machineplugin01-tools/run.sh-hash",
+      "executable": true
+    },
+    {
+      "item_id": "lib-machineplugin01",
+      "path": ".claude-plugin/plugin.json",
+      "content": "{\"name\":\"Zebra\"}\n",
+      "sha256": "lib-machineplugin01-.claude-plugin/plugin.json-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-uploadplugin01",
+      "path": "README.md",
+      "content": "UPLOADED_PLUGIN_CONTENT_SENTINEL\n",
+      "sha256": "lib-uploadplugin01-README.md-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-gitplugin01",
+      "path": "README.md",
+      "content": "git plugin\n",
+      "sha256": "lib-gitplugin01-README.md-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-machineskill01",
+      "path": "SKILL.md",
+      "content": "---\nname: machine-guide\ndescription: Read machine\n---\n\n# Read\n你好 🌍\n",
+      "sha256": "lib-machineskill01-SKILL.md-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-machineskill01",
+      "path": "references/note.txt",
+      "content": "REFERENCE_FILE_CONTENT_SENTINEL\n",
+      "sha256": "lib-machineskill01-references/note.txt-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-uploadskill01",
+      "path": "SKILL.md",
+      "content": "plain body without frontmatter\n",
+      "sha256": "lib-uploadskill01-SKILL.md-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-uploadskill01",
+      "path": "references/note.txt",
+      "content": "REFERENCE_FILE_CONTENT_SENTINEL\n",
+      "sha256": "lib-uploadskill01-references/note.txt-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-gitskill01",
+      "path": "SKILL.md",
+      "content": "---\nname: git-guide\n---\n\nGit body\n",
+      "sha256": "lib-gitskill01-SKILL.md-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-gitskill01",
+      "path": "references/note.txt",
+      "content": "REFERENCE_FILE_CONTENT_SENTINEL\n",
+      "sha256": "lib-gitskill01-references/note.txt-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-uiskill01",
+      "path": "SKILL.md",
+      "content": "---\nname: ui-guide\n",
+      "sha256": "lib-uiskill01-SKILL.md-hash",
+      "executable": false
+    },
+    {
+      "item_id": "lib-uiskill01",
+      "path": "references/note.txt",
+      "content": "REFERENCE_FILE_CONTENT_SENTINEL\n",
+      "sha256": "lib-uiskill01-references/note.txt-hash",
+      "executable": false
+    },
+    {
+      "item_id": "skill-ownedalpha01",
+      "path": "SKILL.md",
+      "content": "---\nname: shared-guide\ndescription: Owned guide\n---\n\nProject body\n",
+      "sha256": "skill-ownedalpha01-SKILL.md-hash",
+      "executable": false
+    },
+    {
+      "item_id": "skill-ownedbeta01",
+      "path": "SKILL.md",
+      "content": "---\nname: shared-guide\ndescription: Owned guide\n---\n\nProject body\n",
+      "sha256": "skill-ownedbeta01-SKILL.md-hash",
+      "executable": false
+    }
+  ],
+  "library_mcp_servers": [
+    {
+      "item_id": "mcp-machine01",
+      "transport": "stdio",
+      "command": "fixture-command",
+      "args": [
+        "--unicode",
+        "中文",
+        "--flag=<fixture>"
+      ],
+      "env": {
+        "Z_TOKEN": "MCP_ENV_SECRET_SENTINEL",
+        "A_EMPTY": ""
+      },
+      "url": "",
+      "headers": {}
+    },
+    {
+      "item_id": "mcp-http01",
+      "transport": "http",
+      "command": "",
+      "args": [],
+      "env": {},
+      "url": "https://example.invalid/mcp",
+      "headers": {
+        "X-Token": "MCP_HEADER_SECRET_SENTINEL",
+        "Authorization": "MCP_AUTH_SECRET_SENTINEL"
+      }
+    },
+    {
+      "item_id": "mcp-sse01",
+      "transport": "sse",
+      "command": "",
+      "args": [],
+      "env": {},
+      "url": "https://example.invalid/mcp",
+      "headers": {
+        "X-Token": "MCP_HEADER_SECRET_SENTINEL",
+        "Authorization": "MCP_AUTH_SECRET_SENTINEL"
+      }
+    }
+  ],
+  "library_installs": [
+    {
+      "id": "inst-globalmanager01",
+      "item_id": "lib-machineplugin01",
+      "scope": "global",
+      "project_id": null,
+      "roles": [
+        "manager"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-globaltask01",
+      "item_id": "lib-uploadplugin01",
+      "scope": "global",
+      "project_id": null,
+      "roles": [
+        "task_role"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-globalmixed01",
+      "item_id": "lib-machineskill01",
+      "scope": "global",
+      "project_id": null,
+      "roles": [
+        "manager",
+        "planner",
+        "worker",
+        "reviewer",
+        "task_role"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-globaldisabled01",
+      "item_id": "mcp-http01",
+      "scope": "global",
+      "project_id": null,
+      "roles": [
+        "reviewer"
+      ],
+      "enabled": false,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-globalstdio01",
+      "item_id": "mcp-machine01",
+      "scope": "global",
+      "project_id": null,
+      "roles": [
+        "worker"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-localplugin01",
+      "item_id": "lib-gitplugin01",
+      "scope": "project",
+      "project_id": "proj-catalog01",
+      "roles": [
+        "planner",
+        "worker",
+        "reviewer",
+        "task_role"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-localoverride01",
+      "item_id": "lib-machineskill01",
+      "scope": "project",
+      "project_id": "proj-catalog01",
+      "roles": [
+        "task_role"
+      ],
+      "enabled": false,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-localowned01",
+      "item_id": "skill-ownedalpha01",
+      "scope": "project",
+      "project_id": "proj-catalog01",
+      "roles": [
+        "worker"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-crossowned01",
+      "item_id": "skill-ownedalpha01",
+      "scope": "project",
+      "project_id": "proj-catalog02",
+      "roles": [
+        "reviewer",
+        "task_role"
+      ],
+      "enabled": false,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-betaskill01",
+      "item_id": "skill-ownedbeta01",
+      "scope": "project",
+      "project_id": "proj-catalog02",
+      "roles": [
+        "planner"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-betaplugin01",
+      "item_id": "lib-uploadplugin01",
+      "scope": "project",
+      "project_id": "proj-catalog02",
+      "roles": [
+        "worker"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    },
+    {
+      "id": "inst-localhttp01",
+      "item_id": "mcp-http01",
+      "scope": "project",
+      "project_id": "proj-catalog01",
+      "roles": [
+        "worker"
+      ],
+      "enabled": true,
+      "created_at": "2020-01-01T00:00:00Z",
+      "updated_at": "2020-01-02T03:04:05Z"
+    }
+  ],
+  "system_settings": [
+    {
+      "key": "library.last_import",
+      "value": "{\"imported_at\": \"2020-01-02T03:04:05Z\", \"added\": [\"plugin:Zebra@market\"], \"unchanged\": 2, \"skipped\": [], \"skipped_count\": 0}"
+    },
+    {
+      "key": "library.last_mcp_import",
+      "value": "{\"imported_at\": \"2020-01-02T03:04:05Z\", \"source\": \"fixture/mcp.json\", \"servers\": 3, \"added\": [\"mcp:mcp_http\"], \"updated\": [], \"removed\": [], \"unchanged\": 2, \"skipped\": [], \"skipped_count\": 0}"
+    }
+  ]
+}

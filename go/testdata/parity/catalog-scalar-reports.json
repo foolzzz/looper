@@ -1,0 +1,504 @@
+{
+  "caps": {
+    "file_max_bytes": 2097152,
+    "item_max_bytes": 33554432,
+    "item_max_files": 5000,
+    "library_max_bytes": 134217728,
+    "upload_max_bytes": 6000000
+  },
+  "installed_count": 8,
+  "items": [
+    {
+      "description": "ui mcp fixture",
+      "file_count": 0,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": false,
+          "install_id": "inst-globaldisabled01",
+          "item_id": "mcp-http01",
+          "project_id": null,
+          "project_name": null,
+          "roles": [
+            "reviewer"
+          ],
+          "scope": "global",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        },
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-localhttp01",
+          "item_id": "mcp-http01",
+          "project_id": "proj-catalog01",
+          "project_name": "Alpha catalog",
+          "roles": [
+            "worker"
+          ],
+          "scope": "project",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "mcp-http01",
+      "kind": "mcp",
+      "mcp": {
+        "args": [],
+        "command": "",
+        "env": {},
+        "headers": {
+          "Authorization": "***",
+          "X-Token": "***"
+        },
+        "transport": "http",
+        "url": "https://example.invalid/mcp"
+      },
+      "modified": false,
+      "name": "mcp_http",
+      "origin": "ui",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "mcp_http",
+      "sha256": "mcp-http01-hash",
+      "size_bytes": 123,
+      "source": "fixture/ui/mcp_http",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "ui mcp fixture",
+      "file_count": 0,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [],
+      "item_id": "mcp-sse01",
+      "kind": "mcp",
+      "mcp": {
+        "args": [],
+        "command": "",
+        "env": {},
+        "headers": {
+          "Authorization": "***",
+          "X-Token": "***"
+        },
+        "transport": "sse",
+        "url": "https://example.invalid/mcp"
+      },
+      "modified": false,
+      "name": "mcp_sse",
+      "origin": "ui",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "mcp_sse",
+      "sha256": "mcp-sse01-hash",
+      "size_bytes": 123,
+      "source": "fixture/ui/mcp_sse",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "machine mcp fixture",
+      "file_count": 0,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-globalstdio01",
+          "item_id": "mcp-machine01",
+          "project_id": null,
+          "project_name": null,
+          "roles": [
+            "worker"
+          ],
+          "scope": "global",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "mcp-machine01",
+      "kind": "mcp",
+      "mcp": {
+        "args": [
+          "--unicode",
+          "中文",
+          "--flag=<fixture>"
+        ],
+        "command": "fixture-command",
+        "env": {
+          "A_EMPTY": "***",
+          "Z_TOKEN": "***"
+        },
+        "headers": {},
+        "transport": "stdio",
+        "url": ""
+      },
+      "modified": false,
+      "name": "mcp_stdio",
+      "origin": "machine",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "mcp_stdio",
+      "sha256": "mcp-machine01-hash",
+      "size_bytes": 123,
+      "source": "fixture/machine/mcp_stdio",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "upload plugin fixture",
+      "file_count": 1,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-globaltask01",
+          "item_id": "lib-uploadplugin01",
+          "project_id": null,
+          "project_name": null,
+          "roles": [
+            "task_role"
+          ],
+          "scope": "global",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        },
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-betaplugin01",
+          "item_id": "lib-uploadplugin01",
+          "project_id": "proj-catalog02",
+          "project_name": "Beta catalog",
+          "roles": [
+            "worker"
+          ],
+          "scope": "project",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "lib-uploadplugin01",
+      "kind": "plugin",
+      "mcp": null,
+      "modified": true,
+      "name": "Alpha",
+      "origin": "upload",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "Alpha",
+      "sha256": "lib-uploadplugin01-hash",
+      "size_bytes": 33,
+      "source": "fixture/upload/Alpha",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "machine plugin fixture",
+      "file_count": 2,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-globalmanager01",
+          "item_id": "lib-machineplugin01",
+          "project_id": null,
+          "project_name": null,
+          "roles": [
+            "manager"
+          ],
+          "scope": "global",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "lib-machineplugin01",
+      "kind": "plugin",
+      "mcp": null,
+      "modified": false,
+      "name": "Zebra@market",
+      "origin": "machine",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "Zebra",
+      "sha256": "lib-machineplugin01-hash",
+      "size_bytes": 46,
+      "source": "fixture/machine/Zebra@market",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "git plugin fixture",
+      "file_count": 1,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-localplugin01",
+          "item_id": "lib-gitplugin01",
+          "project_id": "proj-catalog01",
+          "project_name": "Alpha catalog",
+          "roles": [
+            "planner",
+            "worker",
+            "reviewer",
+            "task_role"
+          ],
+          "scope": "project",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "lib-gitplugin01",
+      "kind": "plugin",
+      "mcp": null,
+      "modified": false,
+      "name": "alpha",
+      "origin": "git",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "alpha",
+      "sha256": "lib-gitplugin01-hash",
+      "size_bytes": 11,
+      "source": "fixture/git/alpha",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "git skill fixture",
+      "file_count": 2,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [],
+      "item_id": "lib-gitskill01",
+      "kind": "skill",
+      "mcp": null,
+      "modified": true,
+      "name": "git-guide",
+      "origin": "git",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "personal:git-guide",
+      "sha256": "lib-gitskill01-hash",
+      "size_bytes": 66,
+      "source": "fixture/git/git-guide",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "machine skill fixture",
+      "file_count": 2,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-globalmixed01",
+          "item_id": "lib-machineskill01",
+          "project_id": null,
+          "project_name": null,
+          "roles": [
+            "manager",
+            "planner",
+            "worker",
+            "reviewer",
+            "task_role"
+          ],
+          "scope": "global",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        },
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": false,
+          "install_id": "inst-localoverride01",
+          "item_id": "lib-machineskill01",
+          "project_id": "proj-catalog01",
+          "project_name": "Alpha catalog",
+          "roles": [
+            "task_role"
+          ],
+          "scope": "project",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "lib-machineskill01",
+      "kind": "skill",
+      "mcp": null,
+      "modified": false,
+      "name": "machine-guide",
+      "origin": "machine",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "personal:machine-guide",
+      "sha256": "lib-machineskill01-hash",
+      "size_bytes": 106,
+      "source": "fixture/machine/machine-guide",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "project skill fixture",
+      "file_count": 0,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [],
+      "item_id": "skill-missingfile01",
+      "kind": "skill",
+      "mcp": null,
+      "modified": false,
+      "name": "no-file",
+      "origin": "project",
+      "owner_project_id": "proj-catalog01",
+      "owner_project_name": "Alpha catalog",
+      "qualified_name": "project:no-file",
+      "sha256": "skill-missingfile01-hash",
+      "size_bytes": 0,
+      "source": "fixture/project/no-file",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "project skill fixture",
+      "file_count": 1,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-localowned01",
+          "item_id": "skill-ownedalpha01",
+          "project_id": "proj-catalog01",
+          "project_name": "Alpha catalog",
+          "roles": [
+            "worker"
+          ],
+          "scope": "project",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        },
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": false,
+          "install_id": "inst-crossowned01",
+          "item_id": "skill-ownedalpha01",
+          "project_id": "proj-catalog02",
+          "project_name": "Beta catalog",
+          "roles": [
+            "reviewer",
+            "task_role"
+          ],
+          "scope": "project",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "skill-ownedalpha01",
+      "kind": "skill",
+      "mcp": null,
+      "modified": false,
+      "name": "shared-guide",
+      "origin": "project",
+      "owner_project_id": "proj-catalog01",
+      "owner_project_name": "Alpha catalog",
+      "qualified_name": "project:shared-guide",
+      "sha256": "skill-ownedalpha01-hash",
+      "size_bytes": 66,
+      "source": "fixture/project/shared-guide",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "project skill fixture",
+      "file_count": 1,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [
+        {
+          "created_at": "2020-01-01T00:00:00+00:00",
+          "enabled": true,
+          "install_id": "inst-betaskill01",
+          "item_id": "skill-ownedbeta01",
+          "project_id": "proj-catalog02",
+          "project_name": "Beta catalog",
+          "roles": [
+            "planner"
+          ],
+          "scope": "project",
+          "updated_at": "2020-01-02T03:04:05+00:00"
+        }
+      ],
+      "item_id": "skill-ownedbeta01",
+      "kind": "skill",
+      "mcp": null,
+      "modified": false,
+      "name": "shared-guide",
+      "origin": "project",
+      "owner_project_id": "proj-catalog02",
+      "owner_project_name": "Beta catalog",
+      "qualified_name": "project:shared-guide",
+      "sha256": "skill-ownedbeta01-hash",
+      "size_bytes": 66,
+      "source": "fixture/project/shared-guide",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "ui skill fixture",
+      "file_count": 2,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [],
+      "item_id": "lib-uiskill01",
+      "kind": "skill",
+      "mcp": null,
+      "modified": false,
+      "name": "ui-guide",
+      "origin": "ui",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "personal:ui-guide",
+      "sha256": "lib-uiskill01-hash",
+      "size_bytes": 51,
+      "source": "fixture/ui/ui-guide",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    },
+    {
+      "description": "upload skill fixture",
+      "file_count": 2,
+      "imported_at": "2020-01-01T00:00:00+00:00",
+      "installs": [],
+      "item_id": "lib-uploadskill01",
+      "kind": "skill",
+      "mcp": null,
+      "modified": false,
+      "name": "upload-guide",
+      "origin": "upload",
+      "owner_project_id": null,
+      "owner_project_name": null,
+      "qualified_name": "personal:upload-guide",
+      "sha256": "lib-uploadskill01-hash",
+      "size_bytes": 63,
+      "source": "fixture/upload/upload-guide",
+      "updated_at": "2020-01-02T03:04:05+00:00",
+      "version": "1.2.3"
+    }
+  ],
+  "last_import": 7,
+  "last_mcp_import": [
+    true,
+    null
+  ],
+  "mcp_caps": {
+    "args_max": 100,
+    "mask": "***",
+    "servers_max": 200,
+    "value_max": 8192,
+    "variables_max": 50
+  },
+  "roles": [
+    "manager",
+    "planner",
+    "worker",
+    "reviewer",
+    "task_role"
+  ],
+  "task_roles": [
+    "planner",
+    "worker",
+    "reviewer",
+    "task_role"
+  ],
+  "total_bytes": 877
+}

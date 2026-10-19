@@ -1,0 +1,25 @@
+{
+  "content": null,
+  "files": [],
+  "item": {
+    "description": "project skill fixture",
+    "file_count": 0,
+    "imported_at": "2020-01-01T00:00:00+00:00",
+    "installs": [],
+    "item_id": "skill-missingfile01",
+    "kind": "skill",
+    "mcp": null,
+    "modified": false,
+    "name": "no-file",
+    "origin": "project",
+    "owner_project_id": "proj-catalog01",
+    "owner_project_name": "Alpha catalog",
+    "qualified_name": "project:no-file",
+    "sha256": "skill-missingfile01-hash",
+    "size_bytes": 0,
+    "source": "fixture/project/no-file",
+    "updated_at": "2020-01-02T03:04:05+00:00",
+    "version": "1.2.3"
+  },
+  "skill_md": null
+}

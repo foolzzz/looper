@@ -1,0 +1,58 @@
+{
+  "content": null,
+  "files": [
+    {
+      "executable": false,
+      "path": "README.md",
+      "size_bytes": 33
+    }
+  ],
+  "item": {
+    "description": "upload plugin fixture",
+    "file_count": 1,
+    "imported_at": "2020-01-01T00:00:00+00:00",
+    "installs": [
+      {
+        "created_at": "2020-01-01T00:00:00+00:00",
+        "enabled": true,
+        "install_id": "inst-globaltask01",
+        "item_id": "lib-uploadplugin01",
+        "project_id": null,
+        "project_name": null,
+        "roles": [
+          "task_role"
+        ],
+        "scope": "global",
+        "updated_at": "2020-01-02T03:04:05+00:00"
+      },
+      {
+        "created_at": "2020-01-01T00:00:00+00:00",
+        "enabled": true,
+        "install_id": "inst-betaplugin01",
+        "item_id": "lib-uploadplugin01",
+        "project_id": "proj-catalog02",
+        "project_name": "Beta catalog",
+        "roles": [
+          "worker"
+        ],
+        "scope": "project",
+        "updated_at": "2020-01-02T03:04:05+00:00"
+      }
+    ],
+    "item_id": "lib-uploadplugin01",
+    "kind": "plugin",
+    "mcp": null,
+    "modified": true,
+    "name": "Alpha",
+    "origin": "upload",
+    "owner_project_id": null,
+    "owner_project_name": null,
+    "qualified_name": "Alpha",
+    "sha256": "lib-uploadplugin01-hash",
+    "size_bytes": 33,
+    "source": "fixture/upload/Alpha",
+    "updated_at": "2020-01-02T03:04:05+00:00",
+    "version": "1.2.3"
+  },
+  "skill_md": null
+}

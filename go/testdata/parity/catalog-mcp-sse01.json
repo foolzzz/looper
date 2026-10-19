@@ -1,0 +1,35 @@
+{
+  "content": null,
+  "files": [],
+  "item": {
+    "description": "ui mcp fixture",
+    "file_count": 0,
+    "imported_at": "2020-01-01T00:00:00+00:00",
+    "installs": [],
+    "item_id": "mcp-sse01",
+    "kind": "mcp",
+    "mcp": {
+      "args": [],
+      "command": "",
+      "env": {},
+      "headers": {
+        "Authorization": "***",
+        "X-Token": "***"
+      },
+      "transport": "sse",
+      "url": "https://example.invalid/mcp"
+    },
+    "modified": false,
+    "name": "mcp_sse",
+    "origin": "ui",
+    "owner_project_id": null,
+    "owner_project_name": null,
+    "qualified_name": "mcp_sse",
+    "sha256": "mcp-sse01-hash",
+    "size_bytes": 123,
+    "source": "fixture/ui/mcp_sse",
+    "updated_at": "2020-01-02T03:04:05+00:00",
+    "version": "1.2.3"
+  },
+  "skill_md": null
+}
