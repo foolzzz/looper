@@ -3302,13 +3302,33 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 
 ## HTTP API
 
-The API answers only the dashboard and local clients: every agent runs Claude
-with every permission, so a web page in your browser must not be able to drive it.
+The HTTP server has three route classes: paths outside `/api/` serve public
+dashboard files; `/api/agent/v1/` requires each agent's own token; all other
+`/api/` paths, including unknown paths and `OPTIONS`, answer only the operator.
+At startup it reads or creates `<runtime root>/operator-token`, a private file
+(mode 0600), before connecting to the database. Operator requests send that
+token as `Authorization: Bearer <token>` or the cookie `looper_operator_<port>`.
+A dashboard page load signs the browser in when `Sec-Fetch-Mode: navigate` and
+`Sec-Fetch-Dest: document`, both the TCP peer and `Host` are loopback, and neither
+`Forwarded` nor `X-Forwarded-For` is present. The session cookie has `Path=/`,
+`HttpOnly` and `SameSite=Strict`, without `Max-Age`, `Expires` or `Secure`;
+pages use `Cache-Control: no-store`, other files keep their public cache.
+Other browsers can open `/?token=<operator token>` once: a matching token sets
+the cookie and redirects with 303 to the URL without `token`; a wrong one gets
+401. `looper service` reads the file of the unit's `--runtime-root`, and the eval
+runner that of the server it starts; both send the Bearer token. A missing or
+wrong credential gets 401 with `WWW-Authenticate: Bearer realm="looper"` and a
+message saying how to sign in, which does not name the token file. The check
+precedes reading the body, including configuration uploads. A shell agent under the same system user can
+still deliberately read the file, imitate a browser or access the database;
+see [the RFC, section 5](rfcs/operator-api-auth-v0.zh-CN.md#5-agent-还能做到什么).
+
 A request whose `Origin` is not the server's own is refused with 403 and no
 response carries CORS headers. While the server listens on a loopback address,
 the `Host` must name a loopback address too, which defeats DNS rebinding.
-Clients without an `Origin` (curl, the CLI) are unaffected, and so is the Vite
-dev proxy, which keeps `Host` and `Origin` on its own port.
+Clients without an `Origin` (curl, the CLI) skip the Origin check. The Vite
+dev proxy keeps `Host` and `Origin` on its own port and forwards the browser
+cookie: open the dashboard on the server's port first, using the same hostname.
 
 | Endpoint | Method | Purpose |
 |---|---|---|

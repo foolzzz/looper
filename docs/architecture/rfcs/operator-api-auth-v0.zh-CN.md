@@ -146,7 +146,7 @@ agent 和服务以同一个系统用户运行，本 PR 不改这一点。这里�
 - 令牌文件：第一次生成且为 0600，第二次读到同一个，权限宽的被收紧，内容不对的启动失败。
 - `looper service`：状态查询带上单元 runtime root 里的令牌，401 显示 `unauthorized`。
 - 故意改坏检查（分类把 `/api/` 当成 `DASHBOARD`、跳过凭据比较、cookie 不带 `HttpOnly`），测试都能失败。
-- 真实路径：端口 18834 上的一次性 `looper serve`，无头 Chrome 打开 dashboard 不登录就能看到数据；`looper service` 的状态
+- 真实路径：一次性端口上的 `looper serve`（新数据库、临时 runtime root、替身 Claude），无头 Chrome 打开 dashboard 不登录就能看到数据；`looper service` 的状态
   查询带令牌能读到；一次替身模式的评测（`run --mode fake`）说明 runner 能用。不改模型可见的内容，不跑真实评测。
 
 ## 7. 决定（等维护者确认）
