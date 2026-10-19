@@ -3542,7 +3542,8 @@ restart.
   `domain` (`feishu` or `lark`), and its own app-bound `allowed_open_ids`;
   `channel_secrets.bot_token` holds the app secret and APIs expose only
   `has_bot_token`. It sends through the open platform and receives over its
-  long connection, restarting after 10 s when a connection stops. Direct
+  long connection, reconnecting with exponential backoff capped at 300 s and
+  0.5–1.0 jitter; a stream that yields an event or lasts 60 s resets the backoff. Direct
   messages, group @-mentions, replies, statuses, notices, schedules and gates
   follow the Lark rules below. The backend exposes
   `GET /api/channels/lark_bot/status` and `GET /api/channels/lark_bot/people?q=`,

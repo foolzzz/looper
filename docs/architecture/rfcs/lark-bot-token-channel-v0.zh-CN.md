@@ -33,13 +33,13 @@
 | 回调地址（HTTP webhook） | 需要公网地址，与「本机自托管」不符 |
 | 按文档实现长连接协议（采用） | 协议很小：`POST /callback/ws/endpoint` 取连接地址和 `ClientConfig`，WebSocket 上是 protobuf `Frame`（7 个字段），控制帧 ping/pong，数据帧 `event`，收到后立即回包 `{"code":200}`，大消息按 `sum/seq` 分片。手写 varint 编解码约百行，不引入 protobuf；WebSocket 用 `websockets`、REST 用 `httpx`（后者本来就是 python-telegram-bot 的依赖） |
 
-协议细节取自官方 SDK 源码（`lark_oapi/ws/client.py`、`pbbp2.proto`，v1.7.5）。新增直接依赖：`websockets>=13,<16`、`httpx>=0.27,<1`。
+协议细节取自官方 SDK 源码（`lark_oapi/ws/client.py`、`pbbp2.proto`，v1.7.5）。新增直接依赖：`websockets>=15,<16`（连接使用 `proxy=None`）、`httpx>=0.27,<1`。
 
 **事件处理要点**
 
 - 收到数据帧先回包再处理：平台约 3 秒内没收到回包会重发。
 - 去重：按 `event_id` 与 `message_id` 两个键，各留最近 1000 个，跨重连保留（重连后平台可能补发）。
-- 断线：服务端关闭、网络断开、或超过 3 倍 ping 间隔没有任何帧（半开连接）都结束这一轮连接，适配器 10 秒后重新取地址再连；失败（如密钥错误、超过连接数上限）同样每 10 秒重试一次并写日志。
+- 断线：服务端关闭、网络断开、或超过 3 倍 ping 间隔没有任何帧（半开连接）都结束这一轮连接，重新取地址再连。连续无事件且不足 60 秒的连接按 `min(10 × 2^n, 300) × uniform(0.5, 1.0)` 秒退避（`n` 为连续失败次数）；收到事件或连接持续至少 60 秒后重置为 `n=0`，每次重连写日志。lark-cli 渠道保持固定 10 秒重试。
 - 事件转成 lark-cli 渠道已经在读的「扁平事件」，所以 `_handle_lark_event` 不用改。
 
 ### 2.4 发送：tenant_access_token

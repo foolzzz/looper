@@ -1228,9 +1228,17 @@ CREATE TABLE IF NOT EXISTS task_user_gate_posts (
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_message ON task_user_gate_posts (message_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_external ON task_user_gate_posts (channel, external_id);
 DO $$
+DECLARE
+    table_oid REGCLASS := to_regclass('task_user_gate_posts');
+    c RECORD;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_posts_lark_bot') THEN
-        ALTER TABLE task_user_gate_posts DROP CONSTRAINT IF EXISTS task_user_gate_posts_channel_check;
+        FOR c IN SELECT conname FROM pg_constraint
+                 WHERE conrelid = table_oid AND contype = 'c'
+                   AND pg_get_constraintdef(oid) ~ '\mchannel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
+        LOOP
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'task_user_gate_posts', c.conname);
+        END LOOP;
         ALTER TABLE task_user_gate_posts ADD CONSTRAINT task_user_gate_posts_channel_check
             CHECK (channel IN ('lark', 'lark_bot', 'telegram'));
         INSERT INTO schema_migrations (name) VALUES ('task_user_gate_posts_lark_bot');
@@ -1439,9 +1447,17 @@ ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify TEXT NOT NULL DEFAULT 'fai
     CHECK (notify IN ('failures', 'always', 'never'));
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark'));
 DO $$
+DECLARE
+    table_oid REGCLASS := to_regclass('schedules');
+    c RECORD;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_notify_channel_lark_bot') THEN
-        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_notify_channel_check;
+        FOR c IN SELECT conname FROM pg_constraint
+                 WHERE conrelid = table_oid AND contype = 'c'
+                   AND pg_get_constraintdef(oid) ~ '\mnotify_channel\M[[:space:]]*=[[:space:]]*ANY[[:space:]]*\('
+        LOOP
+            EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', 'schedules', c.conname);
+        END LOOP;
         ALTER TABLE schedules ADD CONSTRAINT schedules_notify_channel_check
             CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot'));
         INSERT INTO schema_migrations (name) VALUES ('schedules_notify_channel_lark_bot');

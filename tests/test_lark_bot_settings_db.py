@@ -213,6 +213,97 @@ def test_stored_config_validates_fields(field: str, value: Any) -> None:
         stored_config({**CONFIG, field: value})
 
 
+@pytest.mark.parametrize("key", ["app_secret", "bot_token", "token", "extra"])
+def test_stored_config_refuses_unknown_keys_without_exposing_values(key: str) -> None:
+    from looper.agents.channels.lark_bot_settings import stored_config
+
+    with pytest.raises(ValueError, match=key) as error:
+        stored_config({**CONFIG, key: SECRET, "another_unknown": SECRET})
+    assert "another_unknown" in str(error.value)
+    assert SECRET not in str(error.value)
+
+
+@requires_db
+def test_config_secret_is_refused_before_any_write(monkeypatch: pytest.MonkeyPatch, platform: Any) -> None:
+    from looper.agents.channels.allowlist import channel_view
+    from looper.db.channel_configs import get_config, get_bot_token
+
+    async def test(pool: Any) -> None:
+        before = await get_config("channel-lark_bot")
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark_bot", {
+            "enabled": True, "config": {**CONFIG, "app_secret": SECRET}, "bot_token": SECRET})
+        assert status == 400 and "app_secret" in answer["error"]
+        assert SECRET not in json.dumps(answer)
+        after = await get_config("channel-lark_bot")
+        assert after == before and await get_bot_token("channel-lark_bot") is None
+        assert SECRET not in json.dumps(channel_view(after), default=str)
+        for path in ("/api/channel-configs/channel-lark_bot", "/api/channel-configs"):
+            status, answer = await _call("GET", path)
+            assert status == 200 and SECRET not in json.dumps(answer)
+
+    _run(test, monkeypatch)
+
+
+def test_config_secret_api_rejection_does_not_reach_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.channels.allowlist import channel_view
+    from looper.db import channel_configs
+
+    row = {"channel_id": "channel-lark_bot", "channel_type": "lark_bot", "config": CONFIG,
+           "enabled": False, "has_bot_token": False}
+
+    async def get_config(channel_id: str) -> dict[str, Any]:
+        assert channel_id == row["channel_id"]
+        return row
+
+    async def list_configs() -> list[dict[str, Any]]:
+        return [row]
+
+    async def write(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("invalid configuration reached storage")
+
+    monkeypatch.setattr(channel_configs, "get_config", get_config)
+    monkeypatch.setattr(channel_configs, "list_configs", list_configs)
+    monkeypatch.setattr(channel_configs, "set_config", write)
+    monkeypatch.setattr(channel_configs, "set_bot_token", write)
+
+    async def test() -> None:
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark_bot", {
+            "config": {**CONFIG, "app_secret": SECRET}, "bot_token": SECRET})
+        assert status == 400 and "app_secret" in answer["error"]
+        assert SECRET not in json.dumps(answer)
+        assert SECRET not in json.dumps(channel_view(row))
+        for path in ("/api/channel-configs/channel-lark_bot", "/api/channel-configs"):
+            status, answer = await _call("GET", path)
+            assert status == 200 and SECRET not in json.dumps(answer)
+            if path.endswith("configs"):
+                assert answer["configs"][0]["channel_id"] == row["channel_id"]
+            else:
+                assert answer["config"] == CONFIG
+
+    asyncio.run(test())
+
+
+@requires_db
+def test_import_skips_extra_config_key_with_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.config_transfer import Action, export_chunks, import_config
+    from looper.db.channel_configs import get_config
+
+    async def test(pool: Any) -> None:
+        before = await get_config("channel-lark_bot")
+        async with pool.acquire() as conn:
+            data = json.loads("".join([chunk async for chunk in export_chunks(
+                conn, include_projects=False, include_secrets=False)]))
+            entry = next(row for row in data["channels"] if row["channel_type"] == "lark_bot")
+            entry["config"] = {**CONFIG, "extra": SECRET}
+            plan = await import_config(conn, data, apply=True)
+        [change] = [c for c in plan.changes if c.section == "channels" and c.key == "lark_bot"]
+        assert change.action == Action.SKIPPED and "extra" in change.reason
+        assert SECRET not in change.reason
+        assert await get_config("channel-lark_bot") == before
+
+    _run(test, monkeypatch)
+
+
 def test_stored_config_defaults_and_allowlist_binding() -> None:
     from looper.agents.channels.lark_bot_settings import bound_config, stored_config
 

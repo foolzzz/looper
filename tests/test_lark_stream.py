@@ -93,6 +93,40 @@ async def _stream(fake: FakeLarkPlatform, **kwargs: Any) -> AsyncIterator[AsyncI
         await api.aclose()
 
 
+@contextlib.asynccontextmanager
+async def _memory_stream(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> AsyncIterator[Any]:
+    """Use platform message fixtures with an in-memory WebSocket boundary."""
+    fake = FakeLarkPlatform()
+    incoming = asyncio.Queue()
+
+    class Server:
+        async def send(self, raw: bytes) -> None:
+            await incoming.put(raw)
+
+    async def send_ack(raw: bytes) -> None:
+        frame = Frame.decode(raw)
+        fake.ack_frames.append(frame)
+        fake.acks.append((frame.header("message_id"), json.loads(frame.payload)))
+        await fake._notify()
+
+    @contextlib.asynccontextmanager
+    async def connect(*args: Any, **options: Any) -> AsyncIterator[Any]:
+        fake.clients.add(Server())
+        fake.connections += 1
+        await fake._notify()
+        yield SimpleNamespace(recv=incoming.get, send=send_ack)
+
+    async def endpoint() -> tuple[str, dict]:
+        return "ws://local.invalid/?service_id=7", {}
+
+    monkeypatch.setattr(lark_stream, "connect", connect)
+    events = stream_events(SimpleNamespace(stream_endpoint=endpoint), **kwargs)
+    try:
+        yield fake, events
+    finally:
+        await events.aclose()
+
+
 async def _wait_until(predicate: Callable[[], bool]) -> None:
     async with asyncio.timeout(2):
         while not predicate():
@@ -136,6 +170,127 @@ def test_message_is_flattened_and_acked_while_consumer_is_paused() -> None:
             await fake.wait_acks(2)
             assert (await anext(events))["content"] == "while consumer is paused"
     asyncio.run(main())
+
+
+def test_paused_consumer_bounds_queue_and_counts_drops(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    queues = []
+    queue_type = asyncio.Queue
+
+    class TrackingQueue(queue_type):
+        peak = 0
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            queues.append(self)
+
+        def put_nowait(self, item: Any) -> None:
+            super().put_nowait(item)
+            self.peak = max(self.peak, self.qsize())
+
+    monkeypatch.setattr(lark_stream.asyncio, "Queue", TrackingQueue)
+    caplog.set_level(logging.WARNING, logger=lark_stream.__name__)
+
+    async def main() -> None:
+        stats = lark_stream.StreamStats()
+        async with _memory_stream(monkeypatch, stats=stats) as (fake, events):
+            first = asyncio.create_task(anext(events))
+            await fake.push_message(text="start", event_id="start", message_id="start")
+            await asyncio.wait_for(first, 2)
+            for number in range(300):
+                await fake.push_message(text="private-overflow-content", sender="private-overflow-sender",
+                                        event_id=f"event-{number}", message_id=f"message-{number}")
+            await fake.wait_acks(301)
+            await _wait_until(lambda: stats.dropped == 200)
+            queue = next(queue for queue in queues if queue.maxsize == 100)
+            assert queue.qsize() == queue.peak == 100
+            assert all(payload == {"code": 200} for _, payload in fake.acks)
+            warnings = [record for record in caplog.records if record.name == lark_stream.__name__]
+            assert len(warnings) == 3
+            assert "private-overflow-content" not in caplog.text
+            assert "private-overflow-sender" not in caplog.text
+    asyncio.run(main())
+
+
+def test_admission_reduces_refused_event_before_queueing(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    queued = []
+    queue_type = asyncio.Queue
+
+    class TrackingQueue(queue_type):
+        def put_nowait(self, item: Any) -> None:
+            if isinstance(item, dict):
+                queued.append(item.copy())
+            super().put_nowait(item)
+
+    monkeypatch.setattr(lark_stream.asyncio, "Queue", TrackingQueue)
+
+    def admit(event: dict[str, Any]) -> bool:
+        calls.append(event["sender_id"])
+        return event["sender_id"] == "allowed"
+
+    async def main() -> None:
+        async with _memory_stream(monkeypatch, admit=admit) as (fake, events):
+            received = asyncio.create_task(anext(events))
+            await fake.push_message(text="private refused text", sender="refused", event_id="evt-1",
+                                    message_id="om_1", parent_id="parent",
+                                    root_id="root", mentions=[{"id": {"open_id": "bot"}, "name": "Bot"}])
+            refused = await asyncio.wait_for(received, 2)
+            assert refused == {"type": "im.message.receive_v1", "event_id": "evt-1", "message_id": "om_1",
+                               "chat_id": "oc_chat", "chat_type": "p2p", "sender_id": "refused",
+                               "sender_type": "user", "mentions": [{"id": "bot", "key": "", "name": "Bot"}],
+                               "message_type": "text", "content": ""}
+            assert queued[0] == refused
+            await fake.push_message(text="allowed text", sender="allowed", event_id="evt-2", message_id="om_2",
+                                    parent_id="parent", root_id="root")
+            await fake.wait_acks(2)
+            admitted = await anext(events)
+            assert admitted["content"] == "allowed text"
+            assert admitted["reply_to"] == "parent" and admitted["root_id"] == "root"
+            assert queued[1] == admitted
+            assert calls == ["refused", "allowed"]
+    asyncio.run(main())
+
+
+def test_fragment_count_and_empty_payloads_are_rejected() -> None:
+    fragments = lark_stream._Fragments()
+    with pytest.raises(ValueError):
+        fragments.add(_event_frame({}, total=65, payload=b"a"))
+    for number in range(10_000):
+        with pytest.raises(ValueError):
+            fragments.add(_event_frame({}, message_id=f"empty-{number}", total=2, payload=b""))
+    assert not fragments._groups
+
+
+def test_assembled_fragment_bytes_cannot_cross_group_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lark_stream, "_MAX_BYTES", 8)
+    fragments = lark_stream._Fragments()
+    assert fragments.add(_event_frame({}, total=2, payload=b"12345")) is None
+    with pytest.raises(ValueError, match="assembled frame is too large"):
+        fragments.add(_event_frame({}, seq=1, total=2, payload=b"6789"))
+    assert not fragments._groups
+
+
+def test_global_fragment_cap_evicts_oldest_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lark_stream, "_MAX_BYTES", 8)
+    fragments = lark_stream._Fragments()
+    for key in ("oldest", "middle", "newest"):
+        assert fragments.add(_event_frame({}, message_id=key, total=2, payload=b"123456")) is None
+    assert list(fragments._groups) == ["middle", "newest"]
+    assert fragments.add(_event_frame({}, message_id="middle", total=2, seq=1, payload=b"x")) == b"123456x"
+
+
+def test_repeated_fragment_sequence_adjusts_assembled_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lark_stream, "_MAX_BYTES", 8)
+    fragments = lark_stream._Fragments()
+    assert fragments.add(_event_frame({}, total=2, payload=b"123456")) is None
+    assert fragments._bytes == 6
+    assert fragments.add(_event_frame({}, total=2, payload=b"1234")) is None
+    assert fragments._bytes == 4
+    assert fragments.add(_event_frame({}, total=2, seq=1, payload=b"5678")) == b"12345678"
+    assert not fragments._groups
+    assert fragments._bytes == 0
 
 
 @pytest.mark.parametrize(("message_type", "content", "expected"), [

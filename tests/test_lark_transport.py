@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.lark_cli import LarkCliError
+from looper.agents.channels.lark_transport import CliTransport
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.task_notice import NotifyTarget, TargetKind
 
@@ -46,14 +48,14 @@ class StubTransport:
 
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
-                   idempotency_key: str | None = None) -> str | None:
+                   idempotency_key: str | None = None, return_id: bool = False) -> str | None:
         return await self._call("send", chat_id=chat_id, user_id=user_id, text=text, markdown=markdown,
-                                idempotency_key=idempotency_key)
+                                idempotency_key=idempotency_key, **({"return_id": True} if return_id else {}))
 
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
-                    idempotency_key: str | None = None) -> str | None:
+                    idempotency_key: str | None = None, return_id: bool = False) -> str | None:
         return await self._call("reply", message_id=message_id, text=text, markdown=markdown,
-                                idempotency_key=idempotency_key)
+                                idempotency_key=idempotency_key, **({"return_id": True} if return_id else {}))
 
     async def edit(self, message_id: str, *, text: str) -> None:
         await self._call("edit", message_id=message_id, text=text)
@@ -100,6 +102,50 @@ def _envelope(correlation_id: str, message_type: MessageType = MessageType.AGENT
               **payload: Any) -> MessageEnvelope:
     return MessageEnvelope.create(source=MANAGER_ADDRESS, target=channel_address("lark_bot"), message_type=message_type,
                                   correlation_id=correlation_id, payload=payload)
+
+
+@pytest.mark.parametrize("printed", ["", "sent, without JSON"])
+@pytest.mark.parametrize("reply", [False, True])
+def test_cli_ordinary_messages_ignore_successful_stdout(
+    lark_cli_stand_in: Path, printed: str, reply: bool,
+) -> None:
+    executable = Path(f"{shutil.which('lark-cli')}.py")
+    executable.write_text(executable.read_text().replace("print(json.dumps(value))", f"print({printed!r}, end='')"))
+
+    async def main() -> None:
+        transport = CliTransport()
+        if reply:
+            assert await transport.reply("om_parent", text="hello") is None
+        else:
+            assert await transport.send(chat_id="oc_dm", text="hello") is None
+
+    asyncio.run(main())
+    assert len(lark_cli_stand_in.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("reply", [False, True])
+def test_cli_posts_and_status_require_json_even_when_stdout_is_empty(
+    tmp_path: Path, lark_cli_stand_in: Path, reply: bool,
+) -> None:
+    executable = Path(f"{shutil.which('lark-cli')}.py")
+    executable.write_text(executable.read_text().replace("print(json.dumps(value))", "print('', end='')"))
+
+    async def main() -> None:
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+        adapter._correlation_chat["c1"] = "oc_dm"
+        if reply:
+            adapter._group_message["c1"] = "om_parent"
+        try:
+            receipt = await adapter.post(USER, "question", reply_to="om_parent" if reply else None)
+            assert not receipt.success
+            assert "not JSON" in (receipt.error or "")
+            with pytest.raises(LarkCliError, match="not JSON"):
+                await adapter._send_status("c1", "thinking")
+        finally:
+            await adapter.stop()
+
+    asyncio.run(main())
 
 
 @pytest.mark.parametrize("group", [False, True])
@@ -187,6 +233,7 @@ def test_status_is_sent_once_then_edited_while_progress_and_answer_stay_messages
             assert method == ("reply" if group else "send")
             assert fields.get("message_id" if group else "chat_id") == ("om_in" if group else "oc_dm")
             assert fields["text"].startswith("⏳")
+            assert fields["return_id"] is True
             receipt = await adapter.deliver(_envelope("c1", MessageType.STATUS_UPDATE, text="task progress"))
             assert receipt.success and receipt.channel == "lark_bot"
             assert transport.calls[-1] == ("send", {"chat_id": "oc_team" if group else "oc_dm",
@@ -214,7 +261,8 @@ def test_posts_keep_the_target_reply_and_idempotency_key(
         adapter = _adapter(tmp_path, transport)
         receipt = await adapter.post(target, "gate question", reply_to=reply_to, idempotency_key="gate-42")
         assert receipt.success and receipt.external_ids == ("om_sent",)
-        assert transport.calls == [(method, {**destination, "markdown": markdown, "idempotency_key": "gate-42"})]
+        assert transport.calls == [(method, {**destination, "markdown": markdown, "idempotency_key": "gate-42",
+                                             "return_id": True})]
         await adapter.stop()
 
     asyncio.run(main())
@@ -365,7 +413,7 @@ def test_bot_transport_delegates_calls_and_reuses_seen_events_across_connections
     from looper.agents.channels.lark_bot import BotTransport
 
     transport_calls: list[tuple[str, dict[str, Any]]] = []
-    connections: list[tuple[Any, Any]] = []
+    connections: list[tuple[Any, Any, Any, Any]] = []
     made: list[tuple[str, str, Any]] = []
 
     class Api(StubTransport):
@@ -377,8 +425,8 @@ def test_bot_transport_delegates_calls_and_reuses_seen_events_across_connections
     class Seen:
         pass
 
-    async def events(api: Any, *, seen: Any) -> AsyncIterator[dict[str, Any]]:
-        connections.append((api, seen))
+    async def events(api: Any, *, seen: Any, admit: Any, stats: Any) -> AsyncIterator[dict[str, Any]]:
+        connections.append((api, seen, admit, stats))
         yield _event()
 
     monkeypatch.setattr(lark_api, "LarkApi", Api)
@@ -386,10 +434,13 @@ def test_bot_transport_delegates_calls_and_reuses_seen_events_across_connections
     monkeypatch.setattr(lark_stream, "stream_events", events)
 
     async def main() -> None:
-        transport = BotTransport("cli_example", "example-secret", base_url="https://platform.invalid")
+        def admit(event: dict[str, Any]) -> bool:
+            return event["sender_id"] == OPEN_ID
+
+        transport = BotTransport("cli_example", "example-secret", base_url="https://platform.invalid", admit=admit)
         assert transport.available()
-        assert await transport.send(user_id=OPEN_ID, markdown="hello", idempotency_key="send-1") == "om_sent"
-        assert await transport.reply("om_parent", text="reply", idempotency_key="reply-1") == "om_sent"
+        assert await transport.send(user_id=OPEN_ID, markdown="hello", idempotency_key="send-1", return_id=True) == "om_sent"
+        assert await transport.reply("om_parent", text="reply", idempotency_key="reply-1", return_id=True) == "om_sent"
         await transport.edit("om_edit", text="updated")
         await transport.react("om_in")
         assert await transport.names(iter([OPEN_ID])) == {OPEN_ID: "Ada Lovelace"}
@@ -403,13 +454,16 @@ def test_bot_transport_delegates_calls_and_reuses_seen_events_across_connections
             ("react", {"message_id": "om_in"}),
             ("names", {"open_ids": [OPEN_ID]}),
         ]
-        (api, seen), (next_api, next_seen) = connections
+        (api, seen, policy, stats), (next_api, next_seen, next_policy, next_stats) = connections
         assert isinstance(seen, Seen) and seen is next_seen and api is next_api
+        assert policy is next_policy is admit
+        assert isinstance(stats, lark_stream.StreamStats) and stats is next_stats and stats.dropped == 0
         await transport.aclose()
         assert api.closed
         other = BotTransport("cli_other", "other-secret", base_url="https://platform.invalid")
         assert [event async for event in other.events()] == [_event()]
         assert connections[-1][1] is not seen
+        assert connections[-1][2] is None and connections[-1][3] is not stats
         await other.aclose()
 
     asyncio.run(main())
@@ -446,6 +500,9 @@ def test_make_adapter_selects_the_domain_and_keeps_the_bot_channel_identity(
         assert adapter.healthcheck()["channel"] == "lark_bot"
         assert made == [("cli_example", "example-secret", expected)]
         assert "example-secret" not in str(adapter.healthcheck())
+        assert adapter._backoff is True
+        assert adapter._transport._admit({"sender_id": OPEN_ID}) is True
+        assert adapter._transport._admit({"sender_id": OTHER_ID}) is False
         await adapter.stop()
 
     asyncio.run(main())

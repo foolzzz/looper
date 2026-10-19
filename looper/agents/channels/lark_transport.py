@@ -19,9 +19,9 @@ _CONSUMER_STOP_GRACE_SEC = 5.0
 class LarkTransport(Protocol):
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
-                   idempotency_key: str | None = None) -> str | None: ...
+                   idempotency_key: str | None = None, return_id: bool = False) -> str | None: ...
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
-                    idempotency_key: str | None = None) -> str | None: ...
+                    idempotency_key: str | None = None, return_id: bool = False) -> str | None: ...
     async def edit(self, message_id: str, *, text: str) -> None: ...
     async def react(self, message_id: str) -> None: ...
     def events(self) -> AsyncIterator[dict[str, Any]]: ...
@@ -63,30 +63,23 @@ class CliTransport:
 
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
-                   idempotency_key: str | None = None) -> str | None:
+                   idempotency_key: str | None = None, return_id: bool = False) -> str | None:
         return await self._message(lark_cli.send_command(
             chat_id=chat_id, user_id=user_id, text=text, markdown=markdown, profile=self._profile,
-            idempotency_key=idempotency_key))
+            idempotency_key=idempotency_key), return_id=return_id)
 
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
-                    idempotency_key: str | None = None) -> str | None:
+                    idempotency_key: str | None = None, return_id: bool = False) -> str | None:
         return await self._message(lark_cli.reply_command(
-            message_id, text=text, markdown=markdown, profile=self._profile, idempotency_key=idempotency_key))
+            message_id, text=text, markdown=markdown, profile=self._profile, idempotency_key=idempotency_key),
+            return_id=return_id)
 
-    async def _message(self, argv: list[str]) -> str | None:
-        """A successful CLI send can have no output; posts still require an id."""
-        out = await lark_cli.run(argv)
-        if not out:
-            return None
-        try:
-            data = json.loads(out)
-        except ValueError:
-            raise lark_cli.LarkCliError(f"lark-cli printed something that is not JSON: {out[:200]!r}") from None
-        if not isinstance(data, dict):
-            raise lark_cli.LarkCliError("lark-cli printed JSON that is not an object")
-        if data.get("ok") is False:
-            raise lark_cli.LarkCliError(str((data.get("error") or {}).get("message") or "lark-cli answered ok: false"))
-        return lark_cli.sent_message_id(data)
+    async def _message(self, argv: list[str], *, return_id: bool) -> str | None:
+        """Only posts and status messages read the id from successful CLI output."""
+        if return_id:
+            return lark_cli.sent_message_id(await lark_cli.run_json(argv))
+        await lark_cli.run(argv)
+        return None
 
     async def edit(self, message_id: str, *, text: str) -> None:
         await lark_cli.run(lark_cli.edit_command(message_id, text=text, profile=self._profile))

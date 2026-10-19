@@ -9,7 +9,7 @@ import logging
 import math
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -182,37 +182,51 @@ class _Parts:
     started: float
     total: int
     parts: dict[int, bytes] = field(default_factory=dict)
+    size: int = 0
 
 
 class _Fragments:
     def __init__(self) -> None:
         self._groups: OrderedDict[str, _Parts] = OrderedDict()
+        self._bytes = 0
+
+    def _discard(self, key: str) -> None:
+        self._bytes -= self._groups.pop(key).size
 
     def add(self, frame: Frame) -> bytes | None:
         now = time.monotonic()
         for key, group in list(self._groups.items()):
             if now - group.started >= 5:
-                del self._groups[key]
+                self._discard(key)
         total, seq = int(frame.header("sum") or "1"), int(frame.header("seq") or "0")
-        if total < 1 or not 0 <= seq < total:
+        if not 1 <= total <= 64 or not 0 <= seq < total:
             raise ValueError("invalid frame fragment index")
         if total == 1:
             return frame.payload
+        if not frame.payload:
+            raise ValueError("frame fragment payload is empty")
         key = frame.header("message_id")
         if not key:
             raise ValueError("frame fragments have no message id")
         group = self._groups.get(key)
         if group is None or group.total != total:
+            if group is not None:
+                self._discard(key)
             group = self._groups[key] = _Parts(now, total)
+        added = len(frame.payload) - len(group.parts.get(seq, b""))
         group.parts[seq] = frame.payload
-        while len(self._groups) > 32:
-            self._groups.popitem(last=False)
-        if sum(map(len, group.parts.values())) > _MAX_BYTES:
-            self._groups.pop(key, None)
+        group.size += added
+        self._bytes += added
+        if group.size > _MAX_BYTES:
+            self._discard(key)
             raise ValueError("assembled frame is too large")
+        while len(self._groups) > 32 or self._bytes > 2 * _MAX_BYTES:
+            self._discard(next(iter(self._groups)))
+        if key not in self._groups:
+            return None
         if len(group.parts) != total:
             return None
-        self._groups.pop(key, None)
+        self._discard(key)
         return b"".join(group.parts[index] for index in range(total))
 
 
@@ -257,14 +271,22 @@ def _interval(value: Any, default: float = 120) -> float:
     return default
 
 
+@dataclass
+class StreamStats:
+    dropped: int = 0
+
+
 async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
-                        ping_interval: float | None = None) -> AsyncIterator[dict[str, Any]]:
+                        ping_interval: float | None = None,
+                        admit: Callable[[dict], bool] | None = None,
+                        stats: StreamStats | None = None) -> AsyncIterator[dict[str, Any]]:
     """Yield messages from one connection, acknowledging frames before delivery."""
     url, config = await api.stream_endpoint()
     service = int(parse_qs(urlsplit(url).query)["service_id"][0])
     interval = _interval(ping_interval if ping_interval is not None else config.get("PingInterval"))
     seen = seen if seen is not None else SeenEvents()
-    events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+    stats = stats if stats is not None else StreamStats()
+    events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=100)
     changed = asyncio.Event()
 
     async def ping(socket: ClientConnection) -> None:
@@ -313,7 +335,17 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
                 if event is None:
                     logger.debug("Lark stream ignored a non-message event")
                 elif seen.first(event["event_id"], event["message_id"]):
-                    events.put_nowait(event)
+                    if admit is not None and not admit(event):
+                        event = {key: event[key] for key in (
+                            "type", "event_id", "message_id", "chat_id", "chat_type", "sender_id",
+                            "sender_type", "mentions", "message_type")}
+                        event["content"] = ""
+                    try:
+                        events.put_nowait(event)
+                    except asyncio.QueueFull:
+                        stats.dropped += 1
+                        if stats.dropped == 1 or stats.dropped % 100 == 0:
+                            logger.warning("Lark stream event queue is full; dropped %d events", stats.dropped)
                 else:
                     logger.debug("Lark stream ignored a duplicate event")
             except (ValueError, TypeError, AttributeError):
@@ -336,7 +368,8 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             logger.info("Lark stream disconnected")
-            events.put_nowait(None)
+            if not asyncio.current_task().cancelling():
+                await events.put(None)
 
     connection = asyncio.create_task(run())
     try:

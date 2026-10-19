@@ -13,6 +13,8 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from random import uniform as _reconnect_jitter
+from time import monotonic
 from typing import Any
 
 from ..bus import MessageBus
@@ -61,8 +63,10 @@ class LarkChannelAdapter(ChannelAdapter):
         bot_open_id: str = "",
         transport: LarkTransport | None = None,
         channel_type: str = "lark",
+        backoff: bool = False,
     ) -> None:
         self._channel_type = channel_type
+        self._backoff = backoff
         self._transport = transport if transport is not None else CliTransport(profile)
         self._allowlist = allowlist  # open_ids
         self._profile = profile  # lark-cli's --profile; "" for its active one
@@ -162,12 +166,13 @@ class LarkChannelAdapter(ChannelAdapter):
         return receipt
 
     async def _answer(self, correlation_id: str, *, text: str | None = None,
-                      markdown: str | None = None) -> str | None:
+                      markdown: str | None = None, return_id: bool = False) -> str | None:
         """Answer the triggering group message, or send to its direct chat."""
         message_id = self._group_message.get(correlation_id)
         if message_id is not None:
-            return await self._transport.reply(message_id, text=text, markdown=markdown)
-        return await self._transport.send(chat_id=self._correlation_chat[correlation_id], text=text, markdown=markdown)
+            return await self._transport.reply(message_id, text=text, markdown=markdown, return_id=return_id)
+        return await self._transport.send(chat_id=self._correlation_chat[correlation_id], text=text, markdown=markdown,
+                                          return_id=return_id)
 
     async def _send_reply(self, correlation_id: str, text: str) -> DeliveryReceipt:
         """Answer a group message with a Markdown reply to it."""
@@ -179,12 +184,14 @@ class LarkChannelAdapter(ChannelAdapter):
         return DeliveryReceipt(channel=self.channel_type, success=True)
 
     async def _send_target(self, target: NotifyTarget, text: str, *,
-                           idempotency_key: str | None = None) -> str | None:
+                           idempotency_key: str | None = None, return_id: bool = False) -> str | None:
         """Send Markdown to a user or to a group mentioning the requester."""
         if target.kind is TargetKind.USER:
-            return await self._transport.send(user_id=target.id, markdown=text, idempotency_key=idempotency_key)
+            return await self._transport.send(user_id=target.id, markdown=text, idempotency_key=idempotency_key,
+                                              return_id=return_id)
         body = f"{mention(target.mention)} {text}" if target.mention else text
-        return await self._transport.send(chat_id=target.id, markdown=body, idempotency_key=idempotency_key)
+        return await self._transport.send(chat_id=target.id, markdown=body, idempotency_key=idempotency_key,
+                                          return_id=return_id)
 
     async def _send_notice(self, target: NotifyTarget, text: str) -> DeliveryReceipt:
         """Send a task's end notice as Markdown, like an answer: to a user in a direct message, or to a group chat
@@ -205,7 +212,7 @@ class LarkChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
 
     async def _send_status(self, correlation_id: str, text: str) -> str | None:
-        return await self._answer(correlation_id, text=text)
+        return await self._answer(correlation_id, text=text, return_id=True)
 
     async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
         await self._transport.edit(message_id, text=text)
@@ -229,9 +236,10 @@ class LarkChannelAdapter(ChannelAdapter):
         message per ``idempotency_key`` within an hour, so a post retried after a lost answer is not sent twice."""
         try:
             if reply_to:
-                message_id = await self._transport.reply(reply_to, markdown=text, idempotency_key=idempotency_key)
+                message_id = await self._transport.reply(reply_to, markdown=text, idempotency_key=idempotency_key,
+                                                         return_id=True)
             else:
-                message_id = await self._send_target(target, text, idempotency_key=idempotency_key)
+                message_id = await self._send_target(target, text, idempotency_key=idempotency_key, return_id=True)
         except LarkCliError as exc:
             logger.warning("%s: a post to %s failed: %s", self.channel_id, target.id, exc)
             return PostReceipt(False, error=str(exc),
@@ -259,23 +267,40 @@ class LarkChannelAdapter(ChannelAdapter):
 
     async def _event_collector_loop(self) -> None:
         """Restart each ended or broken event stream after a delay."""
+        failures = 0
         while self._running:
+            started = monotonic()
+            self._stream_yielded = False
             try:
                 await self._run_event_consumer()
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("%s event collector crashed, restarting in %ss", self.channel_id, self._RESTART_SECONDS)
+                if self._backoff:
+                    logger.exception("%s event collector crashed", self.channel_id)
+                else:
+                    logger.exception("%s event collector crashed, restarting in %ss", self.channel_id, self._RESTART_SECONDS)
             else:
-                if self._running:
+                if self._running and not self._backoff:
                     logger.warning("%s event consumer stopped; starting it again in %ss", self.channel_id, self._RESTART_SECONDS)
-            await asyncio.sleep(self._RESTART_SECONDS)
+            delay = self._RESTART_SECONDS
+            if self._backoff:
+                if self._stream_yielded or monotonic() - started >= 6 * self._RESTART_SECONDS:
+                    failures = 0
+                else:
+                    # Five failures reach the 30x cap; keep the exponent bounded after that.
+                    failures = min(failures + 1, 5)
+                delay *= min(2 ** failures, 30) * _reconnect_jitter(0.5, 1.0)
+            if self._running and self._backoff:
+                logger.warning("%s event consumer stopped; starting it again in %ss", self.channel_id, delay)
+            await asyncio.sleep(delay)
 
     async def _run_event_consumer(self) -> None:
         """Handle one event stream; a malformed event does not stop its connection."""
         events = self._transport.events()
         try:
             async for event in events:
+                self._stream_yielded = True
                 if not self._running:
                     break
                 try:
