@@ -24,9 +24,10 @@ async def _never(call: Any) -> dict[str, Any]:
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name=SEARCH,
-        description="Search the operator's knowledge vault (Markdown notes): every word of query, in any case, "
-                    "in a note's path or text. Up to limit paths (relative to the vault), most hits first, each "
-                    "with a snippet. Each vault call re-checks that this task's project still has the vault on.",
+        description="Search the operator's knowledge vault (Markdown notes) for the words of query, in any case, in a "
+                    "note's path or text: the notes with the most of the words first, then the most hits. Up to "
+                    "limit paths (relative to the vault), each with a snippet. Each vault call re-checks that this "
+                    "task's project still has the vault on.",
         schema={"type": "object", "required": ["query"], "additionalProperties": False, "properties": {
             "query": {"type": "string", "minLength": 1},
             "limit": {"type": "integer", "minimum": 1, "maximum": 30},

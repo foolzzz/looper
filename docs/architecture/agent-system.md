@@ -1759,7 +1759,10 @@ The tools are Looper's MCP tools, the same on every runtime.
 - **The setting** (`system_settings` key `knowledge_vault`, Settings →
   Knowledge vault, `GET`/`PUT /api/knowledge-vault`, the Manager's
   `looper_settings` action `knowledge_vault`, which the user confirms):
-  `path` (absolute, an existing directory, stored resolved), `writable`
+  `path` (absolute, an existing directory, stored resolved; every folder on
+  the way to it must be one the server's user may pass, as the writes walk
+  it from `/`, and the vault itself readable and searchable, which is
+  checked when the setting is saved), `writable`
   (folders inside it, each an existing directory, neither a link nor below
   one, so a link is refused when the setting is saved; empty: read only) and `rules_file` (a file inside it, optional).
   It is checked again whenever it is read: a vault that no longer holds (its
@@ -1777,8 +1780,8 @@ The tools are Looper's MCP tools, the same on every runtime.
   layer `vault`) say the tools exist in one line; with the vault off, or the
   setting unset, the prompts are byte-for-byte as before.
 - **Reading.** `looper_vault_search` (`query`, `limit` 1 to 30, default 10):
-  Markdown files whose path or text holds every word of the query, in any
-  case, most hits first, with a snippet; it follows no link, skips names
+  Markdown files whose path or text holds any word of the query, in any
+  case, those with the most of its words first, then the most hits, with a snippet; it follows no link, skips names
   starting with `.` (`.git`, `.obsidian`, Looper's temporary files) and files
   over 512 KiB, and stops at 10,000 files, 32 MiB or 5 s (`truncated`).
   `looper_vault_read` (`path`): a UTF-8 text file's first 64 KiB and the

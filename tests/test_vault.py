@@ -136,8 +136,10 @@ def test_search_all_words_order_limits_and_omissions(config: vault.VaultConfig) 
     (config.path / "linked-dir").symlink_to(config.path / "mine", target_is_directory=True)
     (config.path / "big.md").write_text("alpha beta" + "x" * vault.SEARCH_FILE_MAX_BYTES)
     result = asyncio.run(vault.search(config, "ALPHA beta", 2))
-    assert result["matches"] == 3
+    assert result["matches"] == 4  # only.md has one of the words
     assert [r["path"] for r in result["results"]] == ["alpha.md", "second.md"]
+    everything = asyncio.run(vault.search(config, "ALPHA beta"))["results"]
+    assert [r["path"] for r in everything][-1] == "only.md" and everything[-1]["words"] == 1
     assert result["results"][0]["hits"] == 60
     assert all(len(r["snippet"]) <= 200 for r in result["results"])
     assert not result["truncated"]
@@ -300,9 +302,10 @@ def test_tool_descriptions_and_guides_are_the_model_contract(config: vault.Vault
     from looper.agents.ops import vault as tools
 
     assert [t.description for t in tools.TOOLS] == [
-        "Search the operator's knowledge vault (Markdown notes): every word of query, in any case, in a note's "
-        "path or text. Up to limit paths (relative to the vault), most hits first, each with a snippet. "
-        "Each vault call re-checks that this task's project still has the vault on.",
+        "Search the operator's knowledge vault (Markdown notes) for the words of query, in any case, in a note's "
+        "path or text: the notes with the most of the words first, then the most hits. Up to limit paths (relative "
+        "to the vault), each with a snippet. Each vault call re-checks that this task's project still has the vault "
+        "on.",
         "Read a file of the knowledge vault by its path (relative to the vault): its text (the first 64 KiB) "
         "and the sha256 of the whole file, which looper_vault_write needs to change it.",
         "Write a Markdown note (its whole text) in a writable folder of the knowledge vault. expected_sha256: "
@@ -790,3 +793,94 @@ def test_an_ancestor_of_the_root_swapped_for_a_link_during_the_write_is_refused(
             moved.rename(ancestor)
     assert swapped and caught.value.code is ErrorCode.FORBIDDEN
     assert not (elsewhere / "vault/codex-mem/new.md").exists()
+
+
+_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+def test_a_vault_behind_a_folder_the_server_cannot_pass_is_a_400_when_saved(tmp_path: Path) -> None:
+    from looper.agents.projects import HTTP_400, RequestError
+
+    locked = tmp_path / "locked"
+    (locked / "vault/codex-mem").mkdir(parents=True)
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(RequestError) as caught:
+            asyncio.run(vault.update_settings({"path": str(locked / "vault"), "writable": ["codex-mem"]}))
+    finally:
+        locked.chmod(0o755)
+    assert caught.value.status == HTTP_400
+    assert "every folder above the vault must be readable by the server user" in str(caught.value)
+
+
+# Whether this system opens a folder with search permission alone (O_SEARCH on macOS, O_PATH on Linux).
+_PASS_ONLY = bool(getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0))
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+def test_a_vault_behind_a_folder_the_server_may_pass_but_not_list(tmp_path: Path) -> None:
+    passable = tmp_path / "passable"
+    (passable / "vault/codex-mem").mkdir(parents=True)
+    passable.chmod(0o111)
+    try:
+        if not _PASS_ONLY:  # the folder must be readable as well: refused when saved
+            with pytest.raises(ValueError, match="every folder above the vault must be readable"):
+                vault.check_config({"path": str(passable / "vault"), "writable": ["codex-mem"]})
+            return
+        config = vault.check_config({"path": str(passable / "vault"), "writable": ["codex-mem"]})
+        result = write(config)
+    finally:
+        passable.chmod(0o755)
+    assert result["path"] == "codex-mem/new.md" and (passable / "vault/codex-mem/new.md").read_text() == "new note"
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+@pytest.mark.parametrize("mode", [0o600, 0o300], ids=["not searchable", "not readable"])
+def test_a_vault_the_server_cannot_search_or_list_is_a_400_when_saved(tmp_path: Path, mode: int) -> None:
+    from looper.agents.projects import HTTP_400, RequestError
+
+    root = tmp_path / "vault"
+    (root / "codex-mem").mkdir(parents=True)
+    root.chmod(mode)
+    try:
+        with pytest.raises(RequestError) as caught:
+            asyncio.run(vault.update_settings({"path": str(root), "writable": ["codex-mem"]}))
+    finally:
+        root.chmod(0o755)
+    assert caught.value.status == HTTP_400
+    assert "the vault itself readable and searchable" in str(caught.value)
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root passes every folder whatever its permissions")
+def test_a_writable_folder_the_server_cannot_pass_is_a_400_when_saved(tmp_path: Path) -> None:
+    from looper.agents.projects import HTTP_400, RequestError
+
+    root = tmp_path / "vault"
+    (root / "notes/agents").mkdir(parents=True)
+    (root / "notes").chmod(0o600)
+    try:
+        with pytest.raises(RequestError) as caught:
+            asyncio.run(vault.update_settings({"path": str(root), "writable": ["notes/agents"]}))
+    finally:
+        (root / "notes").chmod(0o755)
+    assert caught.value.status == HTTP_400
+
+
+def test_search_ranks_more_distinct_words_above_more_hits(config: vault.VaultConfig) -> None:
+    (config.path / "mine/repeats.md").write_text("alpha " * 50)
+    (config.path / "mine/both.md").write_text("alpha beta")
+    result = asyncio.run(vault.search(config, "alpha beta"))
+    assert [r["path"] for r in result["results"]][:2] == ["mine/both.md", "mine/repeats.md"]
+    assert [(r["words"], r["hits"]) for r in result["results"]][:2] == [(2, 2), (1, 50)]
+
+
+
+def test_search_finds_a_note_that_lacks_some_of_the_words(config: vault.VaultConfig) -> None:
+    # A Planner's real query: the note says "Staging listens on port …", never "server".
+    (config.path / "codex-mem/projects").mkdir()
+    (config.path / "codex-mem/projects/calc.md").write_text("# calc\n\n- Staging listens on port 47613.\n")
+    (config.path / "mine/other.md").write_text("A port of call.\n")
+    result = asyncio.run(vault.search(config, "calc staging server port"))
+    assert [r["path"] for r in result["results"]] == ["codex-mem/projects/calc.md", "mine/other.md"]
+    assert result["results"][0]["words"] == 3
