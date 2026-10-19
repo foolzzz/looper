@@ -3336,11 +3336,14 @@ dashboard files; `/api/agent/v1/`, including `OPTIONS`, requires each agent's ow
 `/api/` paths, including unknown paths and `OPTIONS`, answer only the operator.
 Only dashboard `OPTIONS` requests return 204 without authentication.
 At startup it creates a missing runtime root with mode 0700 and checks that
-the directory is owned by the current user and not writable by others
-(an existing 0755 or group-writable directory is allowed). Before connecting to the database,
+the directory is owned by the current user and not writable by group or others
+(an existing 0755 directory is allowed; `looper service install` creates the
+runtime root 0700). Before connecting to the database,
 it reads or creates `<runtime root>/operator-token`, a private file (mode 0600).
-It opens the file without following symlinks, checks its owner, type and
-permissions with `fstat`, and reads through that same descriptor. An unsafe
+It opens the file without following symlinks and without blocking (a FIFO in
+its place cannot hang the start), checks with `fstat` that it is a regular
+file of the current user with mode 0600, and reads through that same
+descriptor. An unsafe
 directory or file refuses startup with a repair message; permissions are never
 changed automatically. Operator requests send that
 token as `Authorization: Bearer <token>` or the cookie `looper_operator_<port>`.
