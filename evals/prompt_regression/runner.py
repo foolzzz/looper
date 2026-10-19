@@ -828,7 +828,7 @@ def run(
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
                        real_claude=real_claude, real_reviewer=any(task.real_reviewer for task in tasks))
-        (root / "runtime").mkdir()
+        (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:
             home.mkdir()

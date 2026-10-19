@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -422,15 +423,17 @@ def test_token_is_created_private_and_kept(tmp_path: Path) -> None:
 
 def test_unsafe_runtime_root_is_refused(tmp_path: Path) -> None:
     tmp_path.chmod(0o777)
-    with pytest.raises(operator_auth.OperatorTokenError, match="not writable by others"):
+    with pytest.raises(operator_auth.OperatorTokenError, match="not writable by group or others"):
         operator_auth.ensure_token(tmp_path)
     assert not operator_auth.token_path(tmp_path).exists()
 
 
-def test_group_writable_runtime_root_is_used(tmp_path: Path) -> None:
-    """A umask of 002 (per-user groups) makes every new directory group-writable."""
+def test_group_writable_runtime_root_is_refused(tmp_path: Path) -> None:
+    """Another member of the group could put something else in the token file's place."""
     tmp_path.chmod(0o775)
-    assert operator_auth.ensure_token(tmp_path) == operator_auth.read_token(tmp_path)
+    with pytest.raises(operator_auth.OperatorTokenError, match="not writable by group or others"):
+        operator_auth.ensure_token(tmp_path)
+    assert not operator_auth.token_path(tmp_path).exists()
 
 
 def test_runtime_root_owner_is_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -545,6 +548,28 @@ def test_token_must_be_a_regular_file(tmp_path: Path, kind: str) -> None:
         path.mkdir()
     with pytest.raises(operator_auth.OperatorTokenError):
         operator_auth.ensure_token(tmp_path)
+
+
+def test_a_fifo_in_the_token_files_place_is_refused_without_blocking(tmp_path: Path) -> None:
+    path = operator_auth.token_path(tmp_path)
+    os.mkfifo(path, 0o600)
+    outcome: list[BaseException | str] = []
+
+    def ensure() -> None:
+        try:
+            outcome.append(operator_auth.ensure_token(tmp_path))
+        except BaseException as exc:  # noqa: BLE001 - handed to the test thread
+            outcome.append(exc)
+
+    thread = threading.Thread(target=ensure, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    if thread.is_alive():  # a blocking open waits for a writer: give it one so the thread ends
+        os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+        thread.join(timeout=5)
+        pytest.fail("opening the token file blocked on a FIFO")
+    assert isinstance(outcome[0], operator_auth.OperatorTokenError)
+    assert "not a regular file" in str(outcome[0])
 
 
 def test_missing_token_is_not_created_by_reader(tmp_path: Path) -> None:

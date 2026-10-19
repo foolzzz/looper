@@ -540,6 +540,7 @@ def install(host: Host, *, label: str = DEFAULT_LABEL, port: int = DEFAULT_PORT,
     settled = settle_runtime_root(_absolute_root(host, runtime_root), home=host.home)
     if settled.root != _absolute_root(host, runtime_root):
         spec = build_spec(host, label=label, port=port, runtime_root=settled.root, extra_env=extra_env)
+    settled.root.mkdir(mode=0o700, parents=True, exist_ok=True)  # private before logs/ under it (operator_auth)
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     write_private(mgr.unit_path, mgr.render(spec))
     mgr.stop()

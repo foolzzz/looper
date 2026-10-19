@@ -20,6 +20,8 @@ from pathlib import Path
 from .request_guard import hostname, is_loopback
 
 TOKEN_FILE = "operator-token"
+# Non-blocking, so a FIFO in the file's place can't hang the start before fstat refuses it.
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 COOKIE_PREFIX = "looper_operator_"
 LOGIN_CODE_TTL_SECONDS = 300
 LOGIN_CODE_REFUSAL = ("this sign-in link is not valid: it was used already, has expired (after 5 minutes) or is wrong; "
@@ -49,13 +51,11 @@ def ensure_token(runtime_root: Path) -> str:
         info = os.fstat(dir_fd)
         if info.st_uid != os.getuid():
             raise OperatorTokenError(f"the runtime root {runtime_root} is owned by uid {info.st_uid}, not you")
-        # Group write is left alone: with a umask of 002 (per-user groups) every directory gets it, and a file
-        # someone else put in its place fails the owner check below.
-        if info.st_mode & 0o002:
+        if info.st_mode & 0o022:
             raise OperatorTokenError(f"the runtime root {runtime_root} must be owned by you and not writable by "
-                                     f"others (chmod o-w {runtime_root})")
+                                     f"group or others (chmod go-w {runtime_root})")
         try:
-            fd = os.open(TOKEN_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            fd = os.open(TOKEN_FILE, _READ_FLAGS, dir_fd=dir_fd)
         except FileNotFoundError:
             tmp = f".{TOKEN_FILE}-{secrets.token_hex(16)}.tmp"
             created = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
@@ -73,14 +73,14 @@ def ensure_token(runtime_root: Path) -> str:
                     pass  # another server made it
             finally:
                 os.unlink(tmp, dir_fd=dir_fd)
-            fd = os.open(TOKEN_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            fd = os.open(TOKEN_FILE, _READ_FLAGS, dir_fd=dir_fd)
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OperatorTokenError(f"operator credential {path} is not a regular file; {remedy}")
         if info.st_uid != os.getuid():
             raise OperatorTokenError(f"operator credential {path} is owned by uid {info.st_uid}, not you; {remedy}")
-        if info.st_mode & 0o077:
-            raise OperatorTokenError(f"operator credential {path} must be private (chmod 600 {path})")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise OperatorTokenError(f"operator credential {path} must have mode 0600 (chmod 600 {path})")
         if info.st_size > 4096:
             raise OperatorTokenError(f"operator credential is not a token; {remedy}")
         data = b""
