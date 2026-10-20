@@ -29,22 +29,23 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 from ... import child_env
+from ..run_usage import Usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter,
     RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
+from .pricing import usage_event
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
     from ..profile_registry import ProviderSpec
-    from ..run_usage import Usage
     from . import ResidentSession
 
 _PROBE_TIMEOUT_SEC = 10.0
@@ -276,10 +277,13 @@ class PiRuntime(RuntimeAdapter):
         return f"Tool: {tool_name}"
 
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
-        self._refuse()
+        """Tokens priced from this process's modelUsage by Launch.price, never pi's model catalog costs."""
+        return RunCost(usage, self.cost_source(provider))
 
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
-        self._refuse()
+        from .. import claude_cli
+
+        return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
 
     def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
         """Inject the project's files once; pi's own context-file discovery stays disabled."""
@@ -314,6 +318,16 @@ def _opaque_diagnostic(value: Any) -> Any:
     return "***" if isinstance(value, str) else value
 
 
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _pi_usage(raw: Mapping[str, Any]) -> Usage:
+    """Pi separates uncached input and cache tokens; output already includes reasoning."""
+    return Usage(input_tokens=_count(raw.get("input")), output_tokens=_count(raw.get("output")),
+                 cache_read_tokens=_count(raw.get("cacheRead")), cache_creation_tokens=_count(raw.get("cacheWrite")))
+
+
 @dataclass
 class PiStream:
     """One Pi run as internal stream-json events, with final messages and settled as authorities.
@@ -331,6 +345,7 @@ class PiStream:
     _last_error: str | None = None
     _protocol_error: str | None = None
     _settled: bool = False
+    _model_usage: dict[str, Usage] = field(default_factory=dict)
 
     _DROPPED: ClassVar[frozenset[str]] = frozenset({
         "agent_start", "agent_end", "turn_start", "turn_end", "message_start", "message_update",
@@ -388,19 +403,58 @@ class PiStream:
             if role == "assistant":
                 if not isinstance(message.get("content"), list):
                     return self._invalid_record()
-                return [self._assistant(message)]
+                assistant = self._assistant(message)
+                usage = self._usage(message.get("usage"), model=message.get("model"))
+                if usage:
+                    tokens = usage[0]["usage"]
+                    assistant["message"]["usage"] = {
+                        "input_tokens": tokens["input_tokens"], "output_tokens": tokens["output_tokens"],
+                        "cache_read_input_tokens": tokens["cache_read_tokens"],
+                        "cache_creation_input_tokens": tokens["cache_creation_tokens"],
+                    }
+                return [assistant, *usage]
             if role == "toolResult":
                 return [{"type": "user", **self._base(), "message": {"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": str(message.get("toolCallId") or ""),
-                     "content": _message_text(message.get("content")), "is_error": bool(message.get("isError"))}]}}]
+                     "content": _message_text(message.get("content")), "is_error": bool(message.get("isError"))}]}},
+                    *self._usage(message.get("usage"), parent_tool_use_id=str(message.get("toolCallId") or ""))]
             if role in ("user", "system"):
                 return []  # Input already supplied by Looper.
+        if kind == "compaction_end":
+            return self._compaction(raw)
         if kind == "agent_settled":
             if not isinstance(raw.get("aborted"), bool):
                 self._protocol_error = "pi emitted agent_settled without a boolean aborted flag"
             self._settled = True
             return [self._result(aborted=raw.get("aborted") is True)]
         return self._diagnostic(raw)
+
+    def _usage(self, raw: Any, *, model: Any = None, **extra: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw, Mapping):
+            return []
+        name = model if isinstance(model, str) and model else self.model or "pi"
+        tokens = _pi_usage(raw)
+        self._model_usage[name] = self._model_usage.get(name, Usage()).plus(tokens)
+        return [usage_event(name, tokens, **self._base(), **extra)]
+
+    def _compaction(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+        # Keep the attempt/retry diagnostics, including unsuccessful attempts, with opaque strings redacted.
+        events = self._diagnostic(raw)
+        result = raw.get("result")
+        if not isinstance(result, Mapping) or raw.get("aborted") is not False or raw.get("errorMessage"):
+            return events
+        metadata: dict[str, Any] = {}
+        reason = raw.get("reason")
+        if reason in ("manual", "threshold", "overflow"):
+            metadata["trigger"] = "manual" if reason == "manual" else "auto"
+        for source, target in (("tokensBefore", "pre_tokens"), ("estimatedTokensAfter", "post_tokens")):
+            value = result.get(source)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                metadata[target] = value
+        events.append({"type": "system", "subtype": "compact_boundary", **self._base(),
+                       "compact_metadata": metadata})
+        events.extend(self._usage(result.get("usage")))
+        return events
 
     def _assistant(self, message: Mapping[str, Any]) -> dict[str, Any]:
         blocks: list[dict[str, Any]] = []
@@ -425,6 +479,11 @@ class PiStream:
             "role": "assistant", "model": message.get("model") or self.model, "content": blocks}}
 
     def _result(self, *, aborted: bool) -> dict[str, Any]:
+        model_usage = {model: {
+            "inputTokens": tokens.input_tokens, "outputTokens": tokens.output_tokens,
+            "cacheReadInputTokens": tokens.cache_read_tokens,
+            "cacheCreationInputTokens": tokens.cache_creation_tokens,
+        } for model, tokens in self._model_usage.items()}
         error = self._protocol_error
         if not error and aborted:
             error = "the pi run was aborted"
@@ -432,9 +491,9 @@ class PiStream:
             error = self._last_error or f"the pi run ended without a completed assistant: {self._last_stop or 'missing'}"
         if error:
             return {"type": "result", "subtype": "error_during_execution", "is_error": True,
-                    **self._base(), "result": "", "errors": [error]}
+                    **self._base(), "modelUsage": model_usage, "result": "", "errors": [error]}
         return {"type": "result", "subtype": "success", "is_error": False,
-                **self._base(), "result": self._last_text}
+                **self._base(), "modelUsage": model_usage, "result": self._last_text}
 
 
 def runtime_notes() -> str:

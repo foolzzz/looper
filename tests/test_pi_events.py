@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 
 from looper.agents.runtimes.pi import PiRuntime, PiStream, edited_paths
+from looper.agents.run_usage import Usage, compaction, request_context, run_usage
+from looper.agents.runtimes.pricing import event_usage
 
 PI = PiRuntime()
 FIXTURES = Path(__file__).parent / "fixtures" / "pi_json"
@@ -248,6 +250,99 @@ def test_unknown_message_roles_are_kept_as_redacted_diagnostics() -> None:
 def test_message_model_falls_back_to_the_configured_model() -> None:
     events = _parse(_wire(_assistant(model=None), SETTLED))
     assert events[0]["message"]["model"] == "configured-model"
+
+
+def test_usage_counts_final_requests_nested_work_and_compaction_even_when_cancelled() -> None:
+    events = _fixture("compaction")
+    usage = [event_usage(event) for event in events if event["type"] == "usage"]
+    assert usage == [
+        ("test-model", Usage(input_tokens=100, output_tokens=10, cache_read_tokens=40, cache_creation_tokens=8)),
+        ("configured-model", Usage(input_tokens=20, output_tokens=3, cache_read_tokens=5, cache_creation_tokens=2)),
+        ("configured-model", Usage(input_tokens=30, output_tokens=4, cache_read_tokens=10, cache_creation_tokens=1)),
+        ("test-model", Usage(input_tokens=50, output_tokens=6, cache_read_tokens=20, cache_creation_tokens=0)),
+        ("test-model", Usage(input_tokens=7, output_tokens=2, cache_read_tokens=3, cache_creation_tokens=0)),
+    ]
+    result, = _results(events)
+    assert result["is_error"] is True
+    assert result["modelUsage"] == {
+        "test-model": {"inputTokens": 157, "outputTokens": 18, "cacheReadInputTokens": 63,
+                       "cacheCreationInputTokens": 8},
+        "configured-model": {"inputTokens": 50, "outputTokens": 7, "cacheReadInputTokens": 15,
+                             "cacheCreationInputTokens": 3},
+    }
+    total = Usage()
+    for _, tokens in usage:
+        total = total.plus(tokens)
+    assert run_usage(result) == total == Usage(input_tokens=207, output_tokens=25,
+                                               cache_read_tokens=78, cache_creation_tokens=11)
+    assert [compaction(event) for event in events if compaction(event) is not None] == [
+        {"trigger": "auto", "pre_tokens": 150, "post_tokens": 32}]
+    diagnostics = [event["event"] for event in events if event.get("subtype") == "pi_event"
+                   and event["event"]["type"] == "compaction_end"]
+    assert [event["aborted"] for event in diagnostics] == [False, False, True]
+    assert diagnostics[0]["willRetry"] is True
+    assert "summary" not in json.dumps([event for event in events if event.get("subtype") == "compact_boundary"])
+
+
+@pytest.mark.parametrize("value", [None, -1, True, False, "12", 1.5, [], {}, float("inf"), float("nan")])
+def test_invalid_usage_counts_cannot_become_negative_or_inflate_output(value: Any) -> None:
+    events = _parse(_wire(_assistant(usage={"input": value, "output": value, "cacheRead": value,
+                                           "cacheWrite": value, "reasoning": 100, "totalTokens": 100}), SETTLED))
+    usage, = [event for event in events if event["type"] == "usage"]
+    assert event_usage(usage)[1] == Usage(input_tokens=0, output_tokens=0,
+                                         cache_read_tokens=0, cache_creation_tokens=0)
+    assert run_usage(_results(events)[0]) == event_usage(usage)[1]
+
+
+def test_missing_usage_is_not_invented_and_partial_usage_keeps_reported_counts() -> None:
+    events = _parse(_wire(_assistant(), _assistant(usage=None),
+                          _assistant(usage={"input": 2, "output": 0}), SETTLED))
+    usage, = [event for event in events if event["type"] == "usage"]
+    assert event_usage(usage)[1] == Usage(input_tokens=2, output_tokens=0,
+                                         cache_read_tokens=0, cache_creation_tokens=0)
+    assert run_usage(_results(events)[0]) == event_usage(usage)[1]
+    assistants = [event for event in events if event["type"] == "assistant"]
+    assert request_context(assistants[0]) is None
+    assert request_context(assistants[-1]) == 2
+
+
+@pytest.mark.parametrize("reason", ["manual", "threshold", "overflow"])
+def test_successful_compaction_maps_trigger_and_context_without_assistant_output(reason: str) -> None:
+    events = _parse(_wire(_assistant("Final."), {"type": "compaction_end", "reason": reason,
+                          "result": {"tokensBefore": 100, "estimatedTokensAfter": 20},
+                          "aborted": False, "willRetry": False}, SETTLED))
+    boundary, = [event for event in events if event.get("subtype") == "compact_boundary"]
+    assert compaction(boundary) == {"trigger": "manual" if reason == "manual" else "auto",
+                                    "pre_tokens": 100, "post_tokens": 20}
+    assert _results(events)[0]["result"] == "Final."
+    assert not [event for event in events if event["type"] == "usage"]
+
+
+@pytest.mark.parametrize("fields", [
+    {"aborted": True, "result": {"usage": {"input": 100}}},
+    {"aborted": False, "errorMessage": "Synthetic failure."},
+    {"aborted": False, "result": None, "willRetry": True},
+    {"result": {}}, {"aborted": "false", "result": {}},
+])
+def test_failed_aborted_or_malformed_compaction_only_keeps_diagnostics(fields: dict[str, Any]) -> None:
+    event, = PiStream().translate({"type": "compaction_end", "reason": "overflow", **fields})
+    assert event["subtype"] == "pi_event"
+
+
+def test_omp_compaction_is_not_a_pi_boundary_or_usage_source() -> None:
+    event, = PiStream().translate({"type": "auto_compaction_end", "aborted": False,
+                                  "result": {"tokensBefore": 100, "usage": {"input": 99}}})
+    assert event["subtype"] == "pi_event"
+
+
+def test_process_usage_does_not_import_session_totals_or_leak_to_the_next_process() -> None:
+    data = _wire({"type": "session", "id": "resumed-session", "usage": {"input": 9999}},
+                 _assistant(usage={"input": 2, "output": 1}),
+                 {"type": "agent_end", "messages": [_assistant(usage={"input": 9999})["message"]]}, SETTLED)
+    for _ in range(2):
+        events = _parse(data)
+        assert run_usage(_results(events)[0]).input_tokens == 2
+        assert len([event for event in events if event["type"] == "usage"]) == 1
 
 
 @pytest.mark.parametrize(("name", "arguments", "summary", "paths"), [
