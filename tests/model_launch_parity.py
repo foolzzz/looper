@@ -63,6 +63,184 @@ CODEX_CATALOG = {"name": "capture-codex", "context_window": 128000,
                  "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1,
                  "efforts": ["high", "low"]}
 CODEX_TOTALS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd")
+OMP_LEGACY_REVISION = CLAUDE_LEGACY_REVISION
+OMP_CATALOG = {**CODEX_CATALOG, "name": "capture-omp[1m]", "context_window": 1_000_000}
+OMP_CASES = {
+    "responses-default": (["openai-responses"], "", [OMP_CATALOG], "high", "replace"),
+    "chat-proxy": (["openai-chat"], "https://proxy.example.test/chat/v1/",
+                   [{**OMP_CATALOG, "efforts": []}], "", "append"),
+    "messages-open": (["anthropic-messages"], "", [], "", "replace"),
+    "priority-all": (["anthropic-messages", "openai-chat", "openai-responses"],
+                     "https://proxy.example.test/responses/", [{**OMP_CATALOG, "efforts": None}],
+                     "low", "append"),
+    "priority-chat": (["anthropic-messages", "openai-chat"], "", [OMP_CATALOG], "high", "replace"),
+    "responses-open": (["openai-responses"], "https://proxy.example.test/exact/v1/", [], "low", "append"),
+}
+
+
+@contextmanager
+def omp_capture_root() -> Any:
+    """Lease a stable temporary root; preserve content-addressed adapter paths."""
+    root = Path("/tmp/looper-omp-launch-parity-v2")
+    with root.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        root.mkdir(mode=0o700)
+        try:
+            yield root
+        finally:
+            shutil.rmtree(root)
+
+
+def omp_environment(root: Path) -> dict[str, str]:
+    """Synthetic inherited settings, including directories the adapter must unset."""
+    return {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
+            "PI_CONFIG_DIR": str(root / "inherited-config"),
+            "XDG_CONFIG_HOME": str(root / "xdg"),
+            "CLAUDE_CONFIG_DIR": str(root / "synthetic-login"),
+            "LOOPER_PROVIDER_API_KEY": "sk-test-inherited"}
+
+
+def omp_executable(root: Path) -> str:
+    from fake_claude import fake_claude
+
+    (root / "bin").mkdir(exist_ok=True)
+    return fake_claude(root / "bin/omp", '''import json, os, sys
+args = sys.argv[1:]
+assert args[:3] == ['-p', '--mode', 'json'], args
+message = sys.stdin.read()
+assert message
+session = 'sess-capture-omp'
+if '--session-dir' in args:
+    directory = args[args.index('--session-dir') + 1]
+    with open(os.path.join(directory, '2026-10-14T00-00-00-000Z_' + session + '.jsonl'), 'w') as stream:
+        stream.write('{}')
+reply = json.dumps({'status':'completed', 'summary':'ok', 'passed':True, 'findings':[]})
+for event in [
+    {'type':'session', 'version':3, 'id':session, 'cwd':os.getcwd()},
+    {'type':'agent_start'},
+    {'type':'message_end', 'message':{'role':'assistant', 'stopReason':'stop', 'model':'capture-omp[1m]',
+      'usage':{'input':60, 'output':10, 'cacheRead':40, 'cacheWrite':0},
+      'content':[{'type':'text', 'text':reply}]}},
+    {'type':'agent_end', 'messages':[], 'isTerminal':True},
+]:
+    print(json.dumps(event), flush=True)
+''')
+
+
+def omp_legacy_source(checkout: Path) -> dict[str, str]:
+    source = claude_legacy_source(checkout)
+    result = subprocess.run(["git", "-C", str(checkout), "rev-parse",
+                             "HEAD:looper/agents/runtimes/omp.py"],
+                            capture_output=True, text=True, timeout=10, check=True)
+    return {**source, "adapter_blob": result.stdout.strip()}
+
+
+def generate_omp_baseline(checkout: Path, output: Path) -> None:
+    """Only the clean patched v2 interpreter and disposable SQL can produce expected."""
+    checkout = checkout.resolve()
+    source = omp_legacy_source(checkout)
+    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
+        raise LegacyBaselineUnavailable("OMP baseline requires a disposable test database")
+    interpreter = checkout / ".venv/bin/python"
+    if not interpreter.is_file():
+        raise LegacyBaselineUnavailable("OMP baseline requires the old checkout's test venv")
+    result = subprocess.run(
+        [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout),
+         "--runtime", "omp", "--capture"], cwd=checkout, capture_output=True, text=True,
+        timeout=180, check=True,
+    )
+    baseline = json.loads(result.stdout)
+    if baseline["source"] != source or baseline["captures"].keys() != OMP_CASES.keys():
+        raise LegacyBaselineUnavailable("legacy OMP capture returned inconsistent source or cases")
+    for records in baseline["captures"].values():
+        if len(records) != 4:
+            raise LegacyBaselineUnavailable("OMP capture requires all four real tiers")
+        for record in records:
+            _fields(record, FIELDS)
+    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+            stream.close()
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+async def _capture_legacy_omp(checkout: Path) -> dict[str, Any]:
+    source = omp_legacy_source(checkout)
+    sys.path[:0] = [str(checkout), str(checkout / "tests")]
+    import asyncpg
+    import looper
+    import agent_launch_parity as tiers
+    from looper.agents.runtimes import adapter
+    from looper.db import agent_sessions, connection
+
+    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
+            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
+        raise LegacyBaselineUnavailable("legacy OMP capture imported a different checkout")
+    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
+    if not dsn:
+        raise LegacyBaselineUnavailable("OMP baseline requires a disposable test database")
+    captures = {}
+    for case, (protocols, url, catalog, effort, mode) in OMP_CASES.items():
+        schema = f"looper_omp_baseline_{uuid.uuid4().hex}"
+        admin = await asyncpg.connect(dsn, timeout=10)
+        pool = None
+        try:
+            await admin.execute(f'CREATE SCHEMA "{schema}"')
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
+                                            server_settings={"search_path": schema}, command_timeout=15)
+            await connection.ensure_schema(pool)
+            connection._pool = pool
+            await tiers.seed_projects(pool)
+            with omp_capture_root() as root:
+                executable = omp_executable(root)
+                runtime = adapter("omp")
+                await pool.execute(
+                    "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
+                    "VALUES ('rt-omp', 'omp', 'omp', $1, $2, true)", executable,
+                    sorted(capability.value for capability in runtime.capabilities))
+                await pool.execute(
+                    "INSERT INTO llm_providers (id, name, auth, protocols, base_url, models, env) "
+                    "VALUES ('prov-capture', 'capture', 'api_key', $1, $2, $3::jsonb, $4::jsonb)",
+                    protocols, url, json.dumps(catalog), json.dumps([{"key": "CAPTURE_SETTING", "value": "provider"}]))
+                await pool.execute("INSERT INTO llm_provider_secrets VALUES ('prov-capture', 'sk-test-capture')")
+                await pool.execute(
+                    "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) "
+                    "VALUES ('profile-capture', 'capture', 'rt-omp', 'prov-capture', 'capture-omp[1m]', $1)",
+                    effort or None)
+                await pool.execute(
+                    "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
+                    "VALUES ('system', 'profile-capture', 0.5, $1::jsonb)",
+                    json.dumps([{"key": "CAPTURE_SETTING", "value": "settings"}]))
+                for role in ("manager", "planner", "worker", "reviewer"):
+                    await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
+                                       "VALUES ('role', $1, $2)", role, mode)
+
+                async def state(index: int) -> dict[str, Any]:
+                    rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
+                                            "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                    if len(rows) != index + 1 or rows[-1]["status"] != "completed":
+                        raise LegacyBaselineUnavailable("OMP tier did not persist a completed run")
+                    owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+                    session = await agent_sessions.get_session(owner) if index < 2 else {
+                        "session_id": rows[-1]["session_id"]}
+                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+
+                with patch.dict(os.environ, omp_environment(root), clear=True):
+                    await tiers.seed_rest("unconfigured", root)
+                    records = await capture_omp_tiers(root, read_state=state)
+                    captures[case] = [normalize(record, root=root) for record in records]
+        finally:
+            connection._pool = None
+            if pool is not None:
+                await pool.close()
+            try:
+                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            finally:
+                await admin.close()
+    return {"source": source, "captures": captures}
 
 
 @contextmanager
@@ -807,6 +985,79 @@ async def capture_codex_tiers(
     return records
 
 
+async def capture_omp_tiers(
+    root: Path, *, read_state: Callable[[int], Awaitable[dict[str, Any]]], timeout: float = 45,
+) -> list[dict[str, Any]]:
+    """Observe generated OMP files and SQL readback through the four real tiers.
+
+    The selected API is read from models.yml, including legacy multi-protocol
+    precedence. Neither the capture nor its comparator resolves a protocol.
+    """
+    import agent_launch_parity as tiers
+    from looper.agents import claude_cli
+    from looper.agents.runtimes import adapter
+    from itertools import count
+
+    runtime = adapter("omp")
+    environment = runtime.environment
+    launches: list[Any] = []
+    states: list[dict[str, Any]] = []
+
+    def observe(launch: Any) -> dict[str, str]:
+        result = environment(launch)
+        launches.append(launch)
+        return result
+
+    def inspect(argv: list[str], env: dict[str, str], cwd: str) -> dict[str, Any]:
+        launch = launches[-1]
+        home = Path(env["HOME"])
+        models_text = (home / ".omp/agent/models.yml").read_text("utf-8")
+        overlay_text = Path(argv[argv.index("--config") + 1]).read_text("utf-8")
+        models = json.loads(models_text)["providers"]["looper"]
+        prompt_flag = "--system-prompt" if "--system-prompt" in argv else "--append-system-prompt"
+        mcp = home / "plugins/looper/.mcp.json"
+        return {"unset": list(runtime.bind_provider(launch.profile.provider, launch.model, launch.effort).unset),
+                "config": {"models_yml": models_text, "overlay": overlay_text, "api": models["api"],
+                           "model": launch.model, "effort": launch.effort,
+                           "catalog": _public_data([asdict(entry) for entry in launch.profile.provider.catalog])},
+                "prompt": Path(argv[argv.index(prompt_flag) + 1]).read_text("utf-8"),
+                "permissions": {"read_only": launch.read_only,
+                                "tools": argv[argv.index("--tools") + 1] if "--tools" in argv else None,
+                                "approvalMode": json.loads(overlay_text)["tools"]["approvalMode"]},
+                "isolation": {"HOME": str(home), "overlay": json.loads(overlay_text),
+                              "natives_target": os.readlink(home / ".omp/natives")},
+                "mcp": mcp.read_text("utf-8") if mcp.exists() else None,
+                "login_target": None}
+
+    async def exercise() -> None:
+        executable = str(root / "bin/omp")
+        tiers._work_dir(root, tiers.PROJECT_A).mkdir(parents=True, exist_ok=True)
+        for index, role in enumerate(("manager", "planner", "worker", "reviewer")):
+            if role == "manager":
+                await tiers._manager(executable, root)
+            elif role == "planner":
+                await tiers._planner(executable, root, tiers.PROJECT_A)
+            else:
+                await tiers._worker(executable, root, tiers.PROJECT_A, verify=role == "reviewer")
+            states.append(_json_copy(await read_state(index)))
+
+    def readback(index: int) -> dict[str, Any]:
+        _fields(states[index], frozenset({"session", "totals"}))
+        launch = launches[index]
+        return {**states[index], "price": {"source": launch.cost_source.value,
+                                          "catalog": _public_data([asdict(entry) for entry in
+                                                                   launch.profile.provider.catalog])},
+                "cap": launch.max_budget_usd}
+
+    ids = count(1)
+    with patch.object(runtime, "environment", observe), \
+            patch.object(claude_cli, "uuid4", lambda: uuid.UUID(int=next(ids))):
+        records = await capture(root, exercise, inspect_launch=inspect, readback=readback, timeout=timeout)
+    if [launch.role.value for launch in launches] != ["manager", "planner", "worker", "reviewer"] or len(records) != 4:
+        raise ValueError("OMP capture did not observe all four real tiers' adapter launches")
+    return records
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -814,13 +1065,15 @@ if __name__ == "__main__":
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--capture", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--runtime", choices=("claude", "codex"), default="claude")
+    parser.add_argument("--runtime", choices=("claude", "codex", "omp"), default="claude")
     options = parser.parse_args()
     if options.capture:
-        driver = _capture_legacy_codex if options.runtime == "codex" else _capture_legacy_claude
+        driver = {"claude": _capture_legacy_claude, "codex": _capture_legacy_codex,
+                  "omp": _capture_legacy_omp}[options.runtime]
         print(json.dumps(asyncio.run(driver(options.checkout.resolve()))))
     elif options.output is None:
         parser.error("--output is required")
     else:
-        generate = generate_codex_baseline if options.runtime == "codex" else generate_claude_baseline
+        generate = {"claude": generate_claude_baseline, "codex": generate_codex_baseline,
+                    "omp": generate_omp_baseline}[options.runtime]
         generate(options.checkout, options.output)

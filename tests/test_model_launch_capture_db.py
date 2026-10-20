@@ -28,6 +28,177 @@ import model_launch_parity as parity
 
 FIXTURE = Path(__file__).parent / "fixtures/model_launch_parity_v2_claude.json"
 CODEX_FIXTURE = FIXTURE.with_name("model_launch_parity_v2_codex.json")
+OMP_FIXTURE = FIXTURE.with_name("model_launch_parity_v2_omp.json")
+
+
+@pytest.mark.parametrize("case", ["responses-default", "chat-proxy", "messages-open",
+                                  "priority-all", "priority-chat", "responses-open"])
+def test_omp_capture_observes_all_four_real_tiers(
+    case: str, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    from looper.agents import agent_settings, profile_registry as registry
+    from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
+    from looper.db import profile_registry as db_registry
+    from unittest.mock import AsyncMock
+
+    protocols, url, catalog, effort, mode = parity.OMP_CASES[case]
+    with parity.omp_capture_root() as root:
+        executable = parity.omp_executable(root)
+        provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
+        profile_type = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
+        provider = provider_type(
+            "prov-capture", "capture", AuthKind.API_KEY,
+            frozenset(ApiProtocol(value) for value in protocols), base_url=url,
+            catalog=tuple(registry.CatalogModel(**entry) for entry in catalog),
+            api_key="sk-test-capture", env=(("CAPTURE_SETTING", "provider"),),
+        )
+        profile = profile_type("profile-capture", "capture",
+                               registry.RuntimeSpec("rt-omp", "omp", "omp", executable,
+                                                    adapter("omp").capabilities),
+                               provider, "capture-omp[1m]", effort or None)
+        original = agent_settings.resolve
+        monkeypatch.setattr(agent_settings, "resolve",
+                            lambda *a, **kw: replace(original(*a, **kw), profile=profile))
+        monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-capture"))
+        agent_db.list_layers.return_value = [
+            {"scope": "system", "role": None, "env": [{"key": "CAPTURE_SETTING", "value": "settings"}],
+             "run_budget_usd": 0.5},
+            *({"scope": "role", "role": role, "system_prompt_mode": mode, "env": []}
+              for role in ("manager", "planner", "worker", "reviewer")),
+        ]
+        projects = [{"id": pid, "name": name, "background": background, "description": "", "work_dir": ""}
+                    for pid, (name, background) in tiers.PROJECTS.items()]
+        agent_db.list_projects.return_value = projects
+        agent_db.get_task_project.side_effect = lambda _: projects[0]
+        save = agent_db.save_session.side_effect
+
+        async def save_session(owner: str, *args: Any, **kwargs: Any) -> None:
+            await save(owner, *args, **kwargs)
+            agent_db.store.sessions[owner]["provider_id"] = kwargs.get("provider_id")
+
+        agent_db.save_session.side_effect = save_session
+
+        async def state(index: int) -> dict[str, Any]:
+            owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+            finished = agent_db.finish_record.call_args_list[index].kwargs
+            return {"session": copy.deepcopy(agent_db.store.sessions[owner]) if index < 2 else
+                    {"session_id": finished["session_id"]},
+                    "totals": {key: finished.get(key) for key in parity.CODEX_TOTALS}}
+
+        with monkeypatch.context() as env:
+            env.setattr("os.environ", parity.omp_environment(root))
+            asyncio.run(tiers.seed_rest("unconfigured", root))
+            captures = asyncio.run(parity.capture_omp_tiers(root, read_state=state))
+        assert len(captures) == agent_db.finish_record.call_count == 4
+        expected_api = ("openai-responses" if "openai-responses" in protocols else
+                        "openai-completions" if "openai-chat" in protocols else "anthropic-messages")
+        for index, record in enumerate(captures):
+            assert record.keys() == parity.FIELDS
+            models = json.loads(record["config"]["models_yml"])["providers"]["looper"]
+            settings = json.loads(record["config"]["overlay"])
+            assert models["api"] == record["config"]["api"] == expected_api
+            assert models["baseUrl"] == (url or ("https://api.anthropic.com" if
+                                                   expected_api == "anthropic-messages" else
+                                                   "https://api.openai.com/v1"))
+            model = models["models"][0]
+            assert model["id"] == model["name"] == record["config"]["model"] == "capture-omp[1m]"
+            assert model.get("contextWindow") == (catalog[0]["context_window"] if catalog else None)
+            assert model["reasoning"] == (not catalog or catalog[0]["efforts"] != [])
+            assert ("compat" in model) == (expected_api == "openai-responses")
+            assert settings["modelRoles"] == dict.fromkeys(
+                ("default", "smol", "slow", "plan", "vision"), "looper/capture-omp[1m]")
+            assert settings["retry"] == {"modelFallback": False}
+            assert record["env"]["CAPTURE_SETTING"] == "provider"
+            assert record["env"]["LOOPER_PROVIDER_API_KEY"] == "sk-test-capture"
+            assert "PI_CONFIG_DIR" in record["unset"]
+            assert record["prompt"] and record["first_input"]
+            assert record["permissions"]["read_only"] == (index == 1)
+            assert record["login_target"] is None
+            assert record["totals"]["input_tokens"] == 60
+            assert record["totals"]["output_tokens"] == 10
+            assert record["totals"]["cache_read_tokens"] == 40
+            assert record["price"]["source"] == "provider_price" and record["cap"] == 0.5
+            if catalog:
+                assert record["totals"]["cost_usd"] == pytest.approx(0.000062)
+            else:
+                assert record["totals"]["cost_usd"] is None
+            assert ("--system-prompt" in record["argv"]) == (mode == "replace")
+        parity.assert_parity(captures, copy.deepcopy(captures), expected_root=root, actual_root=root)
+        for index in range(4):
+            for key, value in (("api", "mutated-protocol"), ("baseUrl", "https://changed.example.test/")):
+                mutated = copy.deepcopy(captures)
+                models = json.loads(mutated[index]["config"]["models_yml"])
+                old = json.dumps(key) + ": " + json.dumps(models["providers"]["looper"][key])
+                new = json.dumps(key) + ": " + json.dumps(value)
+                models["providers"]["looper"][key] = value
+                text = mutated[index]["config"]["models_yml"]
+                assert text.count(old) == 1
+                mutated[index]["config"]["models_yml"] = text.replace(old, new)
+                assert json.loads(mutated[index]["config"]["models_yml"]) == models
+                with pytest.raises(AssertionError, match="models_yml"):
+                    parity.assert_parity(captures, mutated, expected_root=root, actual_root=root)
+        assert OMP_FIXTURE.is_file(), "generate the OMP baseline on the patched v2 checkout with a disposable DB"
+        pinned = json.loads(OMP_FIXTURE.read_text())
+        parity.assert_parity(pinned["captures"][case], captures, expected_root=root, actual_root=root)
+
+
+def test_omp_baseline_requires_clean_patched_source(tmp_path: Path) -> None:
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="checkout"):
+        parity.omp_legacy_source(tmp_path / "missing")
+    output = tmp_path / "baseline.json"
+    output.write_text("previous baseline\n")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.generate_omp_baseline(Path(__file__).resolve().parents[1], output)
+    assert output.read_text() == "previous baseline\n"
+
+
+def test_omp_fixture_records_patched_source() -> None:
+    pinned = json.loads(OMP_FIXTURE.read_text())
+    assert pinned["source"]["revision"] == parity.OMP_LEGACY_REVISION
+    repository = Path(__file__).resolve().parents[1]
+    for key, expression in {"tree": "{revision}^{{tree}}",
+                            "adapter_blob": "{revision}:looper/agents/runtimes/omp.py",
+                            "registry_blob": "{revision}:looper/agents/profile_registry.py"}.items():
+        result = subprocess.run(["git", "-C", str(repository), "rev-parse",
+                                 expression.format(revision=parity.OMP_LEGACY_REVISION)],
+                                check=True, capture_output=True, text=True, timeout=10)
+        assert pinned["source"][key] == result.stdout.strip()
+    assert pinned["captures"].keys() == parity.OMP_CASES.keys()
+    assert all(len(records) == 4 for records in pinned["captures"].values())
+
+
+def test_omp_generation_preserves_output_without_database_or_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parity, "omp_legacy_source", lambda _: {})
+    monkeypatch.delenv("LOOPER_TEST_DATABASE_URL", raising=False)
+    output = tmp_path / "baseline.json"
+    output.write_text("previous baseline\n")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="database"):
+        parity.generate_omp_baseline(tmp_path, output)
+    monkeypatch.setenv("LOOPER_TEST_DATABASE_URL", "postgresql://synthetic.invalid/disposable")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="venv"):
+        parity.generate_omp_baseline(tmp_path, output)
+    assert output.read_text() == "previous baseline\n"
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
+                    reason="legacy SQL capture needs a disposable LOOPER_TEST_DATABASE_URL")
+def test_old_omp_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "legacy"
+    subprocess.run(["git", "clone", "--shared", "--no-checkout", str(repository), str(checkout)],
+                   check=True, capture_output=True, timeout=15)
+    subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", parity.OMP_LEGACY_REVISION],
+                   check=True, capture_output=True, timeout=15)
+    venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
+    packages = checkout / ".venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    (packages / "test-dependencies.pth").write_text("\n".join(site.getsitepackages()) + "\n")
+    original = OMP_FIXTURE.read_bytes()
+    output = tmp_path / "captured.json"
+    parity.generate_omp_baseline(checkout, output)
+    assert json.loads(output.read_text()) == json.loads(original)
+    assert OMP_FIXTURE.read_bytes() == original
 
 
 @pytest.mark.parametrize("case", ["key-default", "key-proxy", "login-home", "login-codex-home"])
@@ -396,6 +567,10 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
     assert codex_source["revision"] == parity.CODEX_LEGACY_REVISION
     assert codex_source["tree"] == source["tree"]
     assert codex_source["adapter_blob"] != source["adapter_blob"]
+    omp_source = parity.omp_legacy_source(checkout)
+    assert omp_source["revision"] == parity.OMP_LEGACY_REVISION
+    assert omp_source["tree"] == source["tree"]
+    assert omp_source["adapter_blob"] not in (source["adapter_blob"], codex_source["adapter_blob"])
     # A verified checkout alone cannot manufacture persisted session/totals.
     # Failure must preserve any existing output rather than partially refresh it.
     output = tmp_path / "baseline.json"
@@ -413,6 +588,13 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
         assert child.returncode != 0
         assert "requires a disposable test database" in child.stderr
         assert not child.stdout
+        omp_child = subprocess.run(
+            [sys.executable, "-I", parity.__file__, "--checkout", str(checkout), "--runtime", "omp", "--capture"],
+            cwd=checkout, capture_output=True, text=True, timeout=15,
+        )
+        assert omp_child.returncode != 0
+        assert "OMP baseline requires a disposable test database" in omp_child.stderr
+        assert not omp_child.stdout
     assert output.read_text() == "previous baseline\n"
     adapter = checkout / "looper/agents/runtimes/claude_code.py"
     adapter.write_text(adapter.read_text() + "\n# synthetic adapter mutation\n")
@@ -424,11 +606,18 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.codex_legacy_source(checkout)
     git("-C", str(checkout), "restore", "looper/agents/runtimes/codex.py")
+    omp = checkout / "looper/agents/runtimes/omp.py"
+    omp.write_text(omp.read_text() + "\n# synthetic OMP adapter mutation\n")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.omp_legacy_source(checkout)
+    git("-C", str(checkout), "restore", "looper/agents/runtimes/omp.py")
     git("-C", str(checkout), "checkout", "--detach", "95c399431")
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.claude_legacy_source(checkout)
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.codex_legacy_source(checkout)
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.omp_legacy_source(checkout)
 
 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
