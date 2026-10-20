@@ -1,6 +1,6 @@
-"""pi's identity, safe probes and API-key provider configuration (RFC sections 1, 3 and 6).
+"""pi's identity, private launch commands and API-key configuration (RFC sections 1, 2, 3 and 6).
 
-The launch, sessions and stream are refused. Capabilities stay empty. A probe
+Sessions and stream are refused. Capabilities stay empty. A probe
 runs only ``--version`` and ``--help``, offline, in temporary directories.
 Provider requests are checked with installed pi 1.3 against a local fake
 Responses service and, separately, an injected fetch transport.
@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -211,13 +213,8 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
 
 @pytest.mark.parametrize("call", [
     lambda: PI.prompt_blocks(None, "prompt"),  # type: ignore[arg-type]
-    lambda: PI.isolation_args("."),
-    lambda: PI.launch_args(None),  # type: ignore[arg-type]
-    lambda: PI.environment(None),  # type: ignore[arg-type]
     lambda: PI.resident_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3),  # type: ignore[arg-type]
     lambda: PI.resume_args("session"),
-    lambda: PI.run_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3,  # type: ignore[arg-type]
-                           session_dir=Path("sessions")),
     lambda: PI.resident_session("manager"),
     lambda: PI.parse(None),  # type: ignore[arg-type]
     lambda: PI.tool_summary("read", {}),
@@ -251,6 +248,151 @@ def _provider(**fields: Any) -> ProviderSpec:
 def _launch(provider: ProviderSpec, model: str = "selected", effort: str = "high") -> Launch:
     profile = AgentProfile("agent-pi", "pi/test", RuntimeSpec("rt-pi", "pi", "pi"), provider, model, effort)
     return Launch(AgentSettings(profile=profile))
+
+
+def _command(tmp_path: Path, launch: Launch | None = None, session_dir: Path | None = None) -> list[str]:
+    prompt = tmp_path / ".local" / "prompts" / "prompt.md"
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("Looper prompt")
+    return PI.run_command("pi", cwd=tmp_path, prompt_file=prompt, launch=launch or _launch(_provider()),
+                          session_dir=session_dir)
+
+
+def _command_env(command: list[str]) -> dict[str, str]:
+    assert command[0] == "env"
+    return dict(arg.split("=", 1) for arg in command[1:] if "=" in arg)
+
+
+def test_json_launch_uses_pi_flags_and_private_directories(tmp_path: Path) -> None:
+    command = _command(tmp_path)
+    env = _command_env(command)
+    args = command[command.index("pi") + 1:]
+    assert args == [
+        "-p", "--mode", "json", "--offline", "--no-approve", "--no-context-files", "--no-extensions",
+        "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes",
+        "--provider", "looper", "--model", "selected", "--thinking", "high",
+        "--append-system-prompt", str(tmp_path / ".local/prompts/prompt.md"), "--no-session",
+    ]
+    assert not {"--config", "--no-ui", "-e"} & set(args)
+    assert "PI_SHELL_PREFIX" not in env
+    home = Path(env["HOME"])
+    assert home.parent == tmp_path / ".local/pi/homes"
+    assert env["PI_CODING_AGENT_DIR"] == str(home / "agent")
+    assert Path(env["PI_CODING_AGENT_SESSION_DIR"]).parent == tmp_path / ".local/pi/sessions"
+    assert KEY not in repr(command) + "".join(p.read_text() for p in home.rglob("*.json"))
+    for path in (home.parent.parent, home.parent, home, home / "agent",
+                 Path(env["PI_CODING_AGENT_SESSION_DIR"])):
+        assert path.stat().st_mode & 0o777 == 0o700
+    for name in ("settings.json", "models.json"):
+        assert (home / "agent" / name).stat().st_mode & 0o777 == 0o600
+    settings = json.loads((home / "agent/settings.json").read_text())
+    assert settings["cacheWarming"] == "off"
+    assert settings["enableAnalytics"] is settings["enableInstallTelemetry"] is False
+    assert settings["defaultProjectTrust"] == "never"
+    for resource in ("packages", "extensions", "skills", "prompts", "themes"):
+        assert settings[resource] == []
+
+
+def test_same_configuration_reuses_home_but_never_a_default_session(tmp_path: Path) -> None:
+    first = _command_env(_command(tmp_path))
+    settings = Path(first["PI_CODING_AGENT_DIR"]) / "settings.json"
+    before = settings.stat()
+    second = _command_env(_command(tmp_path))
+    assert first["HOME"] == second["HOME"]
+    assert (settings.stat().st_ino, settings.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert first["PI_CODING_AGENT_SESSION_DIR"] != second["PI_CODING_AGENT_SESSION_DIR"]
+    for env in (first, second):
+        assert not Path(env["PI_CODING_AGENT_SESSION_DIR"]).is_relative_to(env["HOME"])
+
+
+@pytest.mark.parametrize("fields", [{"base_url": "https://other.invalid/v1"}, {"api_key": "different-key"}])
+def test_different_provider_configuration_gets_a_separate_home(tmp_path: Path, fields: dict[str, str]) -> None:
+    first = _command_env(_command(tmp_path))
+    second = _command_env(_command(tmp_path, _launch(_provider(**fields))))
+    assert first["HOME"] != second["HOME"]
+
+
+def test_explicit_sessions_are_private_and_outside_the_shared_home(tmp_path: Path) -> None:
+    sessions = [tmp_path / ".local/pi/sessions" / owner for owner in ("worker-a", "worker-b")]
+    commands = [_command(tmp_path, session_dir=path) for path in sessions]
+    assert _command_env(commands[0])["HOME"] == _command_env(commands[1])["HOME"]
+    for path, command in zip(sessions, commands):
+        assert command[-2:] == ["--session-dir", str(path)]
+        assert "--no-session" not in command
+        assert _command_env(command)["PI_CODING_AGENT_SESSION_DIR"] == str(path)
+        assert path.stat().st_mode & 0o777 == 0o700
+    with pytest.raises(RuntimeUnsupported, match="session"):
+        _command(tmp_path, session_dir=Path(_command_env(commands[0])["HOME"]) / "sessions")
+
+
+def test_concurrent_home_publication_is_complete_and_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.runtimes.pi import models_json, settings_json, write_home
+
+    rename = os.rename
+    published: list[Path] = []
+    barrier = threading.Barrier(8)
+
+    def publish(source: Path, target: Path) -> None:
+        for name in ("models.json", "settings.json"):
+            assert json.loads((source / "agent" / name).read_text())
+        assert not (source / "agent/sessions").exists()
+        barrier.wait(timeout=10)
+        rename(source, target)
+        published.append(target)
+
+    monkeypatch.setattr("looper.agents.runtimes.pi.os.rename", publish)
+    launch = _launch(_provider())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        homes = list(pool.map(lambda _: write_home(tmp_path, models_json(launch), settings_json(),
+                                                  binding_sha256=launch.binding_sha256), range(8)))
+    assert len(set(homes)) == len(published) == 1
+    assert list(homes[0].parent.iterdir()) == [homes[0]]
+
+
+def test_a_failed_home_write_publishes_nothing_and_can_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.runtimes.pi import models_json, settings_json, write_home
+
+    launch = _launch(_provider())
+    with monkeypatch.context() as patch:
+        replace_file = os.replace
+        def fail(*args: object) -> None:
+            if Path(args[1]).name == "settings.json":
+                raise OSError("disk full")
+            replace_file(*args)
+        patch.setattr("looper.agents.runtimes.pi.os.replace", fail)
+        with pytest.raises(OSError, match="disk full"):
+            write_home(tmp_path, models_json(launch), settings_json(), binding_sha256=launch.binding_sha256)
+    assert list((tmp_path / "pi/homes").iterdir()) == []
+    home = write_home(tmp_path, models_json(launch), settings_json(), binding_sha256=launch.binding_sha256)
+    assert json.loads((home / "agent/models.json").read_text())
+
+
+@pytest.mark.parametrize("umask", [0o000, 0o777])
+def test_private_permissions_do_not_depend_on_the_server_umask(tmp_path: Path, umask: int) -> None:
+    from looper.agents.runtimes.pi import models_json, settings_json, write_home
+
+    launch = _launch(_provider())
+    previous = os.umask(umask)
+    try:
+        home = write_home(tmp_path, models_json(launch), settings_json(), binding_sha256=launch.binding_sha256)
+    finally:
+        os.umask(previous)
+    for path in (tmp_path / "pi", home.parent, home, home / "agent"):
+        assert path.stat().st_mode & 0o777 == 0o700
+    for name in ("models.json", "settings.json"):
+        assert (home / "agent" / name).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("source", ["provider", "role"])
+@pytest.mark.parametrize("name", ["HOME", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR", "PI_CONFIG_FILES",
+                                  "PI_SHELL_PREFIX", "PI_OFFLINE", "PI_FUTURE_PATH", "LOOPER_AGENT_TOKEN",
+                                  "LOOPER_PROVIDER_API_KEY"])
+def test_explicit_environment_cannot_override_isolation(source: str, name: str) -> None:
+    launch = _launch(_provider(env=((name, "override"),)) if source == "provider" else _provider())
+    if source == "role":
+        launch = replace(launch, settings=replace(launch.settings, env=((name, "override"),)))
+    with pytest.raises(RuntimeUnsupported, match=name):
+        launch.environment()
 
 
 @pytest.mark.parametrize(("protocols", "api"), [

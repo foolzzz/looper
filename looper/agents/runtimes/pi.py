@@ -1,10 +1,10 @@
-"""The pi runtime's identity, provider binding and safe probe.
+"""The pi runtime's identity, provider binding, private homes and safe probe.
 
 pi is a fifth runtime type (the pi runtime RFC, sections 1, 3 and 6). Registering
-it discovers ``rt-pi`` when ``pi`` is on PATH. This module does not launch a
-run, keep a session or speak to a model: those paths raise
-``RuntimeUnsupported`` until they exist. There is no pi login and no schema
-change.
+it discovers ``rt-pi`` when ``pi`` is on PATH. Launch commands use private,
+content-addressed homes and separate session directories. Sessions, streams
+and the tool bridge are not implemented yet, so capabilities stay empty.
+There is no pi login and no schema change.
 
 A probe runs only ``--version`` and ``--help``, in a temporary home, agent
 directory and session directory, offline, with a 10 second deadline. 1.3.0 is
@@ -18,16 +18,21 @@ capability is that bridge only, not a general MCP client.
 from __future__ import annotations
 
 import asyncio
+import errno
+import hashlib
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 from ... import child_env
+from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter,
     RuntimeUnsupported,
@@ -78,8 +83,20 @@ PROBE_HELP_TOKENS = (
     "--session-dir",
     "--session",
 )
-# What would point the probe at the operator's own directories. HOME is replaced; the XDG homes are not passed.
-_HIDDEN_DIRS = ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
+HOME_LAYOUT_ID = "pi-home/v1"
+# Keep shells in the private HOME as well: nested runtimes must not discover personal logins.
+_HIDDEN_DIRS = ("HOME", *(name for name in child_env.SYSTEM if name.startswith("XDG_")))
+_PI_ENV = {
+    "PI_OFFLINE": "1", "PI_TELEMETRY": "0", "PI_SKIP_VERSION_CHECK": "1",
+}
+_PI_DIRS = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
+# pi's bash tool adds these after launch, even when none came from the parent environment.
+_PI_SHELL_METADATA = ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL")
+_PLATFORM_ENV = ("LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", KEY_ENV)
+_ISOLATION_FLAGS = (
+    "--offline", "--no-approve", "--no-context-files", "--no-extensions", "--no-mcp",
+    "--no-skills", "--no-prompt-templates", "--no-themes",
+)
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
@@ -92,7 +109,7 @@ class _ProbeFailure(Exception):
 
 
 class PiRuntime(RuntimeAdapter):
-    """pi's type. Probes work; a run does not, until the rest of the runtime exists."""
+    """pi's type; launch construction is available, execution capabilities remain gated."""
 
     type = "pi"
     label = "pi"
@@ -102,8 +119,10 @@ class PiRuntime(RuntimeAdapter):
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT})
     # API keys only. pi's own /login and OAuth are not providers Looper binds.
     auth_kinds = frozenset({AuthKind.API_KEY})
-    isolation_id = "pi-home/v0"
-    provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV})
+    isolation_id = HOME_LAYOUT_ID
+    provider_env_owned: ClassVar[frozenset[str]] = frozenset({
+        *_PI_DIRS, *_PI_ENV, *_PLATFORM_ENV, "PI_SHELL_PREFIX", "PI_CONFIG_FILES", "PI_CONFIG_DIR",
+    })
 
     def capabilities_for(self, version: str | None) -> frozenset[Capability]:
         """Nothing is advertised yet, whatever ``version`` the probe read.
@@ -164,11 +183,12 @@ class PiRuntime(RuntimeAdapter):
         self._refuse()
 
     def isolation_args(self, cwd: str | Path) -> list[str]:
-        self._refuse()
+        return list(_ISOLATION_FLAGS)
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
         """Pin the private provider and selected model; the API key goes only in the child environment."""
         _check_provider(provider, model)
+        _check_explicit_env(provider.env)
         assert provider.api_key is not None  # checked above; ProviderBinding.env contains strings only
         if effort and effort not in THINKING_LEVELS:
             raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(THINKING_LEVELS)}, or empty")
@@ -178,10 +198,15 @@ class PiRuntime(RuntimeAdapter):
         )
 
     def launch_args(self, launch: Launch) -> list[str]:
-        self._refuse()
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
+        return ["-p", "--mode", "json", *_ISOLATION_FLAGS, *binding.args]
 
     def environment(self, launch: Launch) -> dict[str, str]:
-        self._refuse()
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
+        _check_explicit_env(launch.env)
+        visible = {**child_env.inherited(), **dict(launch.env), **dict(binding.env)}
+        # HOME and the two directory bindings need the prompt/session paths; run_command sets them via env.
+        return {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV}
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -192,7 +217,29 @@ class PiRuntime(RuntimeAdapter):
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                     max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
-        self._refuse()
+        # Validate role/provider overrides before creating anything. max_turns has no pi CLI equivalent.
+        self.environment(launch)
+        local = Path(prompt_file).absolute().parent.parent
+        home = write_home(local, models_json(launch), settings_json(tuple(name for name, _ in launch.profile.provider.env)),
+                          binding_sha256=launch.binding_sha256)
+        sessions = local / "pi" / "sessions"
+        _private_dir(sessions)
+        if session_dir is None:
+            session = Path(tempfile.mkdtemp(prefix="run-", dir=sessions))
+            session.chmod(0o700)
+        else:
+            session = Path(session_dir).absolute()
+            if session.resolve().is_relative_to((local / "pi" / "homes").resolve()):
+                raise RuntimeUnsupported("pi session directories must be outside shared homes")
+            _private_dir(session)
+        prompt_flag = ("--system-prompt" if launch.system_prompt_mode is SystemPromptMode.REPLACE
+                       else "--append-system-prompt")
+        return [
+            "env", f"HOME={home}", f"PI_CODING_AGENT_DIR={home / 'agent'}",
+            f"PI_CODING_AGENT_SESSION_DIR={session}", executable, *self.launch_args(launch),
+            prompt_flag, str(prompt_file),
+            *(["--no-session"] if session_dir is None else ["--session-dir", str(session)]),
+        ]
 
     def resident_session(self, label: str) -> ResidentSession:
         self._refuse()
@@ -263,11 +310,80 @@ def models_json(launch: Launch) -> dict[str, Any]:
                                         "api": api, "models": [model]}}}
 
 
+def _check_explicit_env(entries: tuple[tuple[str, str], ...]) -> None:
+    for name, _ in entries:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise RuntimeUnsupported("pi environment variable names must be shell identifiers")
+        if name in _HIDDEN_DIRS or name.startswith(("PI_", "LOOPER_", "LOOPX_")):
+            raise RuntimeUnsupported(f"pi owns {name}; provider and role environments cannot override it")
+
+
+def _isolated_env(visible: Mapping[str, str]) -> dict[str, str]:
+    dropped = {*_HIDDEN_DIRS, *child_env.RUNTIMES}
+    return {name: value for name, value in visible.items()
+            if name not in dropped and not name.startswith(("PI_", "LOOPER_", "LOOPX_"))}
+
+
+def settings_json(provider_names: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Disable background spending/discovery; shell children keep private HOME without run credentials."""
+    cleared = sorted({*_PLATFORM_ENV, *_PI_DIRS, *_PI_ENV, *_PI_SHELL_METADATA, *child_env.RUNTIMES, *provider_names})
+    return {
+        "cacheWarming": "off", "enableAnalytics": False, "enableInstallTelemetry": False,
+        "defaultProjectTrust": "never",
+        "packages": [], "extensions": [], "skills": [], "prompts": [], "themes": [],
+        "shellCommandPrefix": "unset " + " ".join(shlex.quote(name) for name in cleared) + ";",
+    }
+
+
+def _private_dir(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Publish a complete 0600 file; failed writes leave no temporary file behind."""
+    fd, building = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(text)
+        os.replace(building, path)
+    finally:
+        Path(building).unlink(missing_ok=True)
+
+
+def write_home(local: Path, models: Mapping[str, Any], settings: Mapping[str, Any], *, binding_sha256: str) -> Path:
+    """Atomically publish reusable configuration, with no per-run session state in the home."""
+    files = {name: json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+             for name, value in (("models.json", models), ("settings.json", settings))}
+    key = hashlib.sha256(json.dumps([HOME_LAYOUT_ID, binding_sha256, files], sort_keys=True).encode()).hexdigest()
+    root = local / "pi"
+    homes = root / "homes"
+    for path in (root, homes):
+        _private_dir(path)
+    target = homes / key
+    if target.is_dir():
+        return target
+    building = Path(tempfile.mkdtemp(prefix=".building-", dir=homes))
+    try:
+        building.chmod(0o700)
+        _private_dir(building / "agent")
+        for name, text in files.items():
+            _write_private(building / "agent" / name, text)
+        try:
+            os.rename(building, target)
+        except OSError as exc:
+            # Another process may have published the identical complete directory first.
+            if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not target.is_dir():
+                raise
+    finally:
+        shutil.rmtree(building, ignore_errors=True)
+    return target
+
+
 def _probe_env(home: Path, agent: Path, session: Path) -> dict[str, str]:
     """A child's environment pointed at the probe's directories, offline, without the operator's pi paths or logins."""
-    dropped = set(_HIDDEN_DIRS) | set(child_env.RUNTIMES)
-    env = {key: value for key, value in child_env.inherited().items()
-           if key not in dropped and not key.startswith("PI_")}
+    env = _isolated_env(child_env.inherited())
     env.update({
         "HOME": str(home),
         "PI_CODING_AGENT_DIR": str(agent),
