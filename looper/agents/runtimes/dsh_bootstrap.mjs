@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 // The required runner is the single startup boundary for Looper's contributions.
-export async function createBootstrap({ executable, text, mcp = [] }) {
+export async function createBootstrap({ executable, text, mcp = [], readOnly = false, omissions = [] }) {
   const require = createRequire(realpathSync(executable));
   const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)).href);
   const runner = await load('dsh-headless');
@@ -18,6 +18,13 @@ export async function createBootstrap({ executable, text, mcp = [] }) {
   // Export the registration difference, never a prefix-based permission. The guard consumes this exact set.
   const platformTools = new Set();
   const diagnostics = [];
+  const guard = ctx => {
+    if (!readOnly) return;
+    // Snapshot the validated registration difference; exported diagnostics cannot widen permissions.
+    const allowed = new Set(['read', 'glob', 'grep', ...platformTools]);
+    ctx.tools.guard(execution => allowed.has(execution.name) ? undefined :
+      'LOOPER_READ_ONLY: tool is not allowed in a read-only run');
+  };
   const registerPrompt = ctx => ctx.systemPrompt.section({ name: 'looper', order: 20000, text, interpolate: false });
   const resolveRefs = refs => Object.fromEntries(Object.entries(refs ?? {}).map(([key, reference]) => {
     if (!Object.hasOwn(process.env, reference)) throw new Error('Missing run MCP environment reference');
@@ -26,12 +33,13 @@ export async function createBootstrap({ executable, text, mcp = [] }) {
   return {
     name: runner.name,
     Config: runner.Config,
-    inject: [...new Set([...runner.inject, ...(client?.inject ?? []), 'systemPrompt'])],
+    inject: [...new Set([...runner.inject, ...(client?.inject ?? []), 'systemPrompt', ...(readOnly ? ['tools'] : [])])],
     platformTools,
     diagnostics,
     apply: client ? async function apply(ctx, config) {
       platformTools.clear();
       diagnostics.length = 0;
+      diagnostics.push(...omissions.map(row => ({serverName: row.name, status: 'omitted', reason: row.reason})));
       const names = new Set();
       for (const server of mcp) {
         if (names.has(server.serverName)) throw new Error('Duplicate MCP serverName');
@@ -42,6 +50,11 @@ export async function createBootstrap({ executable, text, mcp = [] }) {
       for (const server of [...mcp].sort((a, b) => Number(b.serverName === 'looper') - Number(a.serverName === 'looper'))) {
         const { envRefs, headerRefs, requiredTools, expectedTools, toolGroups, ...options } = server;
         const own = server.serverName === 'looper';
+        if (readOnly && !own) {
+          diagnostics.push({ serverName: server.serverName, status: 'omitted',
+            reason: 'external MCP omitted in a read-only run' });
+          continue;
+        }
         try {
           const before = new Set(ctx.tools.view().visible.keys());
           const resolved = client.Config({ ...options, env: resolveRefs(envRefs), headers: resolveRefs(headerRefs),
@@ -65,9 +78,11 @@ export async function createBootstrap({ executable, text, mcp = [] }) {
           ctx.logger.warn(`Optional MCP server ${server.serverName} failed to become ready`);
         }
       }
+      guard(ctx);
       registerPrompt(ctx);
       return runner.apply(ctx, config);
     } : function apply(ctx, config) {
+      guard(ctx);
       registerPrompt(ctx);
       return runner.apply(ctx, config);
     },

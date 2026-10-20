@@ -438,7 +438,10 @@ def test_dsh_mcp_translation_keeps_stdio_and_secrets_in_child_environment(tmp_pa
     env = dsh.environment(launch, home)
     assert env[own["envRefs"]["LOOPER_AGENT_URL"]] == "http://127.0.0.1:19999"
     assert env[own["envRefs"]["LOOPER_AGENT_TOKEN"]] == "fresh-run-token"
-    assert env[catalog["headerRefs"]["Authorization"]] == "Bearer catalog-secret"
+    if launch.read_only:
+        assert catalog["headerRefs"]["Authorization"] not in env
+    else:
+        assert env[catalog["headerRefs"]["Authorization"]] == "Bearer catalog-secret"
     assert all("SECRET" in reference for reference in translated.env)
     for secret in ("fresh-run-token", "catalog-secret"):
         assert secret not in repr(translated)
@@ -1351,6 +1354,10 @@ def test_installed_dsh_probe_and_patch_composition_without_boot(tmp_path):
     assert configs["agent-default-model"] == {"provider": "deepseek-official", "model": "deepseek-flash"}
     assert configs["llm-deepseek"]["baseURL"] == PROVIDER.base_url
     assert configs["tools"] == {"mode": "native"}
+    assert configs["sandbox-policy"] == {"mode": "danger-full-access", "workspaceRoot": str(tmp_path)}
+    assert configs["approval"] == {"policy": "never"}
+    assert "@deepseek-ai/dsh-fs-sandbox" in done.stdout and "@deepseek-ai/dsh-bash-sandbox" in done.stdout
+    assert "@deepseek-ai/dsh-fs-local" not in done.stdout and "@deepseek-ai/dsh-bash-local" not in done.stdout
     assert {"credentials", "llm-pi-ai", "session-log-deepseek", "plugin-package-inventory-deepseek",
             "session-telemetry-otel", "web-search-deepseek", "agent-instructions"} <= disabled
 
@@ -1615,12 +1622,17 @@ def test_dsh_consult_refuses_an_active_source_and_accepts_it_after_exit(tmp_path
     asyncio.run(asyncio.wait_for(check(), 8))
 
 
-def test_dsh_consult_remains_disabled_until_the_read_only_guard_is_available(tmp_path):
+def test_dsh_consult_uses_permissions_without_advertising_native_read_tools(tmp_path):
     runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
-    with pytest.raises(RuntimeUnsupported, match="guard"):
-        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
-                                session_id=sid, session_dir=directory, fork_dir=tmp_path / "fork")
-    assert not (tmp_path / "fork").exists()
+    from looper.agents.runtimes import Capability, ReadOnly
+
+    assert runtime.read_only is ReadOnly.PERMISSIONS
+    assert Capability.READ_TOOLS not in runtime.capabilities
+    consult = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+                                      session_id=sid, session_dir=directory, fork_dir=tmp_path / "fork")
+    assert consult[-3:] == ["--session-id", sid, "-"]
+    module = Path(consult[consult.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
+    assert '"readOnly": true' in module
 
 
 def test_dsh_failed_native_restore_cleans_the_fork_and_preserves_source(tmp_path, monkeypatch):
@@ -1689,3 +1701,225 @@ def test_finished_dsh_room_worker_keeps_its_home_and_opening_session_id(tmp_path
     seen = json.loads((tmp_path / "seen.json").read_text())
     assert Path(seen["dsh_home"]) == kept / "dsh"
     assert agent_db.finish_record.call_args.kwargs["session_id"] == "stand-in-session"
+
+
+# This uses the installed official registry and tool definitions, not a guard mock.
+# Only the MCP peer and downstream delegation/job executors are disposable canaries.
+_DSH_GUARD_PROBE = r'''
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {realpathSync, writeFileSync, readFileSync, existsSync, unlinkSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const require = createRequire(realpathSync(process.argv[2]));
+const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)));
+const {Context} = await load('cordis');
+const {createBootstrap} = await import(process.argv[3]);
+const options = JSON.parse(readFileSync(process.argv[4], 'utf8'));
+const ctx = new Context();
+let effects = 0;
+const canary = () => { effects++; writeFileSync('escaped.txt', 'mutation'); throw Error('canary executed'); };
+const provide = (name, value) => ctx.reflect.provide(name, value);
+await ctx.plugin((await load('dsh-session')).default).await();
+await ctx.plugin((await load('dsh-session-projection')).default).await();
+provide('workingDirectory', {get() {return process.cwd();}, async ensure() {return process.cwd();}});
+await ctx.plugin((await load('dsh-system-prompt')).default, {}).await();
+await ctx.plugin((await load('dsh-tools')).default, {mode: 'native'}).await();
+await ctx.plugin((await load('dsh-sandbox-policy')).default,
+  {mode: 'danger-full-access', workspaceRoot: process.cwd()}).await();
+await ctx.plugin((await load('dsh-fs-sandbox')).default, {}).await();
+await ctx.plugin((await load('dsh-subprocess-local')).default, {}).await();
+for (const name of ['dsh-tool-fs', 'dsh-tool-fs-search']) {
+  const module = await load(name);
+  await ctx.plugin(module, name === 'dsh-tool-fs-search' ? {sampleOverCapGlobResults: false} : {}).await();
+}
+provide('shell', {sandboxMode: 'danger-full-access', execute: canary});
+provide('shellEnv', {resolve() {return {};}});
+await ctx.plugin(await load('dsh-tool-bash'), {enableRunInBackground: false}).await();
+provide('workflowEngine', {run: canary});
+await ctx.plugin(await load('dsh-tool-workflow'), {}).await();
+provide('jobs', {attachController() {}, events: {subscribe() {}}, list() {return [];}, kill: canary, output: canary});
+await ctx.plugin(await load('dsh-tool-jobs'), {}).await();
+provide('subagents', {resolveMaxDepth() {}, getProvider() {
+  return {name: 'canary', capabilities: {}, inheritsParentContext: false};
+}});
+await ctx.plugin(await load('dsh-tool-subagent'), {provider: 'canary', maxDepth: 'provider-managed'}).await();
+const {defineTool} = await load('dsh-tools');
+for (const name of ['mcp__looper__read', 'mcp__catalog__read', 'mcp__looper__unexpected', 'future_mutator']) {
+  ctx.tools.register(defineTool({name, description: 'Spoof or future tool', parameters: {},
+    output: {schema: {type: 'string'}}, async execute() {canary(); return '';} }));
+}
+let agent;
+if (options.consult) {
+  const session = ctx.sessions.create('writable-worker', {meta: {cwd: process.cwd()}});
+  (await load('dsh-sandbox-policy')).setSandboxMode(session, 'danger-full-access');
+  agent = {id: session.id, session, ctx};
+}
+const call = (name, args = {}) => ctx.tools.execute({callId: `call-${name}`, name,
+  arguments: args, agent, signal: new AbortController().signal});
+try {
+  // Positive control: the very same official write definition really creates a file before policy.
+  const args = {file_path: 'control.txt', content: 'positive control'};
+  const written = await call('write', args);
+  assert.equal(written.isError, false, JSON.stringify(written));
+  assert.equal(readFileSync('control.txt', 'utf8'), args.content);
+  unlinkSync('control.txt');
+  if (options.consult) {
+    // Persist and restore with the official backend/reader. The saved writable mode must not win.
+    await ctx.plugin(await load('dsh-session-persistence-jsonl'), {root: process.cwd() + '/native-worker'}).await();
+    const handle = await ctx.sessionPersistence.create(agent.session.header);
+    await handle.append(Array.from({length: agent.session.seq}, (_, seq) => agent.session.eventAt(seq)));
+    await handle.close();
+    const reader = await ctx.sessionPersistence.open(agent.id, 'read');
+    const stored = await reader.read();
+    const {Session} = await load('dsh-session');
+    agent.session = Session.fromRestore(agent.id, stored.events, reader.header,
+      reader.inheritedEventCount, stored.eventState);
+    await reader.close();
+    assert.equal(ctx.sandboxPolicy.resolve({session: agent.session}).mode, 'danger-full-access');
+  }
+  writeFileSync('source.txt', 'needle\n');
+  const plugin = await createBootstrap(options);
+  // The real runner stops before stdin/model startup; the guard and MCP must already be installed.
+  await assert.rejects(async () => plugin.apply(ctx, {}), /appExit/);
+  assert.ok(plugin.platformTools.size > 0);
+  // A late allow listener cannot overrule the monotonic guard.
+  ctx.on('tools/pre-execute', () => Promise.resolve({kind: 'allow'}));
+  for (const [name, args] of [['read', {file_path: 'source.txt'}],
+      ['glob', {pattern: '*.txt'}], ['grep', {pattern: 'needle'}]]) {
+    const result = await call(name, args);
+    assert.equal(result.isError, false, JSON.stringify({name, result}));
+    assert.match(JSON.stringify(result.content), name === 'read' ? /needle/ : /source.txt/);
+  }
+  for (const name of plugin.platformTools) {
+    const result = await call(name);
+    assert.equal(result.isError, false, JSON.stringify({name, result}));
+    assert.match(JSON.stringify(result.content), /platform called/);
+  }
+  plugin.platformTools.add('future_mutator'); // The exported set is diagnostic, not mutable authority.
+  const denied = [];
+  for (const [name, args] of [
+      ['write', {file_path: 'control.txt', content: 'positive control'}],
+      ['edit', {file_path: 'source.txt', old_string: 'needle', new_string: 'changed'}],
+      ['bash', {command: 'touch escaped.txt', description: 'mutation'}],
+      ['run_code', {code: 'return await tools.write({file_path:"escaped.txt",content:"x"})', description: 'mutation'}],
+      ['subagent', {prompt: 'write escaped.txt'}],
+      ['workflow', {script: 'return 1', meta: {name: 'mutation'}}],
+      ['job_list', {}], ['job_output', {job_id: 'job'}], ['job_kill', {job_id: 'job'}],
+      ['mcp__looper__read', {}], ['mcp__catalog__read', {}], ['mcp__looper__unexpected', {}],
+      ['future_mutator', {}]]) {
+    // Even a presentation switch must not bypass the execution guard.
+    ctx.tools.defaultMode = name === 'run_code' ? 'ptc' : 'native';
+    // Prove these are registered tools, so UNKNOWN_TOOL cannot masquerade as a guard pass.
+    assert.ok(ctx.tools.get(name), name);
+    const result = await call(name, args);
+    assert.equal(result.isError, true, JSON.stringify({name, result}));
+    assert.match(result.content[0].text, /LOOPER_READ_ONLY/);
+    denied.push({type: 'tool_call', callId: `call-${name}`, tool: name, input: args},
+      {type: 'tool_result', callId: `call-${name}`, status: 'error', result: result.content[0].text});
+  }
+  assert.equal(effects, 0);
+  assert.equal(existsSync('control.txt'), false);
+  assert.equal(existsSync('escaped.txt'), false);
+  assert.equal(readFileSync('source.txt', 'utf8'), 'needle\n');
+  assert.equal(existsSync('external-started.txt'), false);
+  assert.ok(plugin.diagnostics.some(row => row.serverName === 'catalog' && row.status === 'omitted'));
+  console.log(JSON.stringify(denied));
+} finally {
+  await ctx.fiber.dispose();
+}
+'''
+
+
+@pytest.mark.parametrize("consult", [False, True], ids=["planner", "worker-consult"])
+def test_dsh_official_registry_refuses_mutations_before_dispatch(tmp_path, consult):
+    from looper.agents.runtimes import dsh
+
+    executable = shutil.which("dsh")
+    if executable is None:
+        pytest.skip("Installed DSH is required for execution guard validation")
+    launch = _run_launch(tmp_path, role="worker" if consult else "planner")
+    launch = replace(launch, consult=consult)
+    # Use the exact platform contract recorded by this run, including optional room/vault groups.
+    platform = dsh._platform_tools(launch.role.value)
+    names = platform["expectedTools"]
+    peer = tmp_path / "mcp-peer.py"
+    peer.write_text('''import json, sys
+names = json.loads(sys.argv[1])
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    method = request["method"]
+    result = ({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+               "serverInfo": {"name": "disposable-platform", "version": "1"}} if method == "initialize" else
+              {"tools": [{"name": name, "description": "Platform tool", "inputSchema":
+                          {"type": "object", "properties": {}}} for name in names]} if method == "tools/list" else
+              {"content": [{"type": "text", "text": "platform called"}]})
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+''')
+    external = {"serverName": "catalog", "transport": "stdio", "command": sys.executable,
+                "args": ["-c", "from pathlib import Path; Path('external-started.txt').touch()"]}
+    own = {"serverName": "looper", "transport": "stdio", "command": sys.executable,
+           "args": [str(peer), json.dumps(names)], **platform}
+    options = {"executable": executable, "text": "read-only probe", "readOnly": True,
+               "consult": consult, "mcp": [external, own]}
+    if consult:
+        # An ended writable run's opaque snapshot is copied; only its new overlay supplies policy.
+        runtime, worker, stand_in, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+        before = _tree_bytes(directory)
+        argv = runtime.consult_command(stand_in, cwd=tmp_path, prompt_file=prompt,
+                                       launch=replace(worker, consult=True), session_id=sid,
+                                       session_dir=directory, fork_dir=tmp_path / "consult-fork")
+        module = Path(argv[argv.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
+        assert '"readOnly": true' in module
+        assert _tree_bytes(directory) == before
+    config = tmp_path / "probe.json"
+    config.write_text(json.dumps(options))
+    done = _node(tmp_path, _DSH_GUARD_PROBE, executable, Path(dsh.__file__).with_name("dsh_bootstrap.mjs").as_uri(), config)
+    assert done.returncode == 0, done.stdout + done.stderr
+    if consult:
+        assert _tree_bytes(directory) == before
+    records = json.loads(done.stdout.splitlines()[-1])
+    stream = dsh.DshStream()
+    for record in records:
+        stream.translate(record)
+    denials = runtimes.adapter("dsh").permission_denials(stream._result(0))
+    assert len(denials) == len(records) // 2
+    assert {d["tool"] for d in denials} >= {"write", "edit", "bash", "run_code", "subagent", "workflow"}
+
+
+def test_dsh_read_only_omits_external_mcp_and_records_reason_without_its_secrets(tmp_path):
+    from looper.agents.runtimes import dsh
+
+    launch = _run_launch(tmp_path, role="planner")
+    source = Path(launch.library.mcp_config)
+    config = json.loads(source.read_text())
+    config["mcpServers"]["catalog"] = {"command": "external-command", "env": {"TOKEN": "external-secret"}}
+    source.write_text(json.dumps(config))
+    translated = dsh.mcp_config(launch.library, read_only=True)
+    assert [s["serverName"] for s in translated.servers] == ["looper"]
+    assert "external-secret" not in translated.env.values()
+    record = runtimes.adapter("dsh").launch_record(launch)
+    assert record["runtime_catalog"]["skipped"] == [
+        {"name": "catalog", "reason": "external MCP omitted in a read-only run"}]
+    assert "external-secret" not in json.dumps(record)
+
+
+def test_dsh_denials_require_a_paired_error_with_the_exact_guard_reason(tmp_path):
+    from looper.agents.runtimes import dsh
+
+    stream = dsh.DshStream()
+    reason = "Error: LOOPER_READ_ONLY: tool is not allowed in a read-only run"
+    for record in [
+        {"type": "tool_result", "callId": "orphan", "status": "error", "result": reason},
+        {"type": "tool_call", "callId": "ordinary", "tool": "bash", "input": {"command": "false"}},
+        {"type": "tool_result", "callId": "ordinary", "status": "error", "result": "Error: command failed"},
+        {"type": "tool_call", "callId": "ok", "tool": "read", "input": {}},
+        {"type": "tool_result", "callId": "ok", "status": "completed", "result": reason},
+        {"type": "tool_call", "callId": "denied", "tool": "bash", "input": {"command": "touch x"}},
+        {"type": "tool_result", "callId": "denied", "status": "error", "result": reason},
+        {"type": "tool_result", "callId": "denied", "status": "error", "result": reason},
+    ]:
+        stream.translate(record)
+    runtime = runtimes.adapter("dsh")
+    assert runtime.permission_denials(stream._result(0)) == [{"tool": "bash", "input": "touch x", "id": "denied"}]

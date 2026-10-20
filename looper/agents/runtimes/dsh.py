@@ -47,6 +47,7 @@ MODEL_MAP = {
 
 HOME_LAYOUT_ID = "dsh-home/v1"
 SUPPORTED_VERSION = "0.2.1-rc.2"
+READ_ONLY_DENIAL = "Error: LOOPER_READ_ONLY: tool is not allowed in a read-only run"
 _PROBE_TIMEOUT_SEC = 10.0
 # The private paths and provider overlay are authoritative, even over explicit settings/provider env.
 _DIRECTORY_VARS = frozenset({
@@ -89,6 +90,8 @@ class DshStream:
     _cancelled: bool = field(default=False, init=False)
     _execution_seen: bool = field(default=False, init=False)
     _startup_rejected: bool = field(default=False, init=False)
+    _tool_calls: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _permission_denials: list[dict[str, str]] = field(default_factory=list, init=False)
 
     _DIAGNOSTIC_LIMIT: ClassVar[int] = 8
     _DIAGNOSTIC_BYTES: ClassVar[int] = 2048
@@ -231,11 +234,18 @@ class DshStream:
             return self._assistant({"type": kind, "thinking" if kind == "thinking" else "text": raw["text"]}, flags)
         if kind == "tool_call" and isinstance(raw.get("callId"), str) and isinstance(raw.get("tool"), str):
             if "input" in raw or flags:
+                self._tool_calls[raw["callId"]] = {"tool_name": raw["tool"], "tool_use_id": raw["callId"],
+                                                  "tool_input": raw.get("input")}
                 # Invalid JSON arguments remain a string in headless; a bounded event can omit input.
                 return self._assistant({"type": "tool_use", "id": raw["callId"], "name": raw["tool"],
                                         "input": raw.get("input")}, flags)
         if kind == "tool_result" and isinstance(raw.get("callId"), str) and raw.get("status") in ("completed", "error"):
             if isinstance(raw.get("result"), str) or flags:
+                call = self._tool_calls.pop(raw["callId"], None)
+                if call and raw["status"] == "error" and raw.get("result") == READ_ONLY_DENIAL and not flags:
+                    from ..claude_cli import permission_denials
+
+                    self._permission_denials.extend(permission_denials({"permission_denials": [call]}))
                 return [{"type": "user", **self._base(), **flags, "message": {"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": raw["callId"], "content": raw.get("result"),
                      "is_error": raw["status"] == "error", **flags}]}}]
@@ -262,6 +272,7 @@ class DshStream:
         return {"type": "result", "subtype": "error_during_execution" if errors else "success",
                 "is_error": bool(errors), "result": self._final if self._final is not None else "",
                 **self._base(), "stop_reason": self._reason, **({"errors": errors} if errors else {}),
+                "permission_denials": list(self._permission_denials),
                 "modelUsage": {self.model or "dsh": {
                     wire: value for name, wire in zip(_USAGE_FIELDS, (
                         "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"))
@@ -284,6 +295,7 @@ class DshRuntime(RuntimeAdapter):
     run_input = False
     resident_transport = ResidentTransport.PER_TURN
     can_replace_system_prompt = False
+    read_only = ReadOnly.PERMISSIONS
 
     def capabilities_for(self, version: str | None) -> frozenset[Capability]:
         return self.capabilities if version == SUPPORTED_VERSION else frozenset()
@@ -465,6 +477,9 @@ class DshRuntime(RuntimeAdapter):
             return f"{tool_name}: {str(tool_input.get('path') or tool_input.get('pattern') or '')[:80]}"
         return f"Tool: {tool_name}"
 
+    def permission_denials(self, result_event: dict[str, Any] | None) -> list[dict[str, str]]:
+        return list((result_event or {}).get("permission_denials") or [])
+
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
         return RunCost(usage, self.cost_source(provider))
 
@@ -474,8 +489,11 @@ class DshRuntime(RuntimeAdapter):
         return budget_error(result_event) if (result_event or {}).get(SOFT_CAP) else None
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
+        mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
         return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit"},
-                "usage_complete": False, "cost_basis": "observed"}
+                "usage_complete": False, "cost_basis": "observed",
+                **({"runtime_catalog": {"runtime": self.type, "skipped": list(mcp.omissions)}}
+                   if mcp and mcp.omissions else {})}
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         return [PromptBlock("Default prompt", "runtime", None, "DSH's default prompt (not shown; append only)"),
@@ -688,9 +706,10 @@ def bootstrap_files(executable: str, looper_prompt: str, launch: Launch, *,
     except OSError:
         raise RuntimeUnsupported("DSH bootstrap requires an installed executable") from None
     module = Path(__file__).with_name("dsh_bootstrap.mjs").resolve().as_uri()
-    mcp = mcp_config(launch.library, role=launch.role.value)
+    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
     options = json.dumps({"executable": str(anchor), "text": _prompt_text(looper_prompt, launch, cwd=cwd),
-                          "mcp": mcp.servers if mcp else []},
+                          "mcp": mcp.servers if mcp else [], "readOnly": launch.read_only,
+                          "omissions": mcp.omissions if mcp else []},
                          ensure_ascii=False)
     return {"looper-bootstrap.mjs": f"import {{ createBootstrap }} from {json.dumps(module)};\n"
             f"export const {{ name, Config, inject, apply, platformTools, diagnostics }} = "
@@ -712,6 +731,7 @@ class DshMcpConfig:
 
     servers: tuple[dict[str, Any], ...]
     env: dict[str, str] = field(repr=False)
+    omissions: tuple[dict[str, str], ...] = ()
 
 
 def _platform_tools(role: str) -> dict[str, Any]:
@@ -738,7 +758,7 @@ def _platform_tools(role: str) -> dict[str, Any]:
     return {"requiredTools": sorted(required), "expectedTools": sorted(allowed), "toolGroups": groups}
 
 
-def mcp_config(library: AgentLibrary, *, role: str | None = None) -> DshMcpConfig:
+def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: bool = False) -> DshMcpConfig:
     """Translate the catalog's MCP map without persisting env/header values or mistaking the agent API for MCP.
 
     References are stable across token rotation; every child gets freshly read run values, including on resume.
@@ -764,11 +784,15 @@ def mcp_config(library: AgentLibrary, *, role: str | None = None) -> DshMcpConfi
         raise RuntimeUnsupported("DSH MCP configuration requires the Looper stdio bridge") from None
     values: dict[str, str] = {}
     translated = []
+    omissions = []
     platform = _platform_tools(role or library.role or "")
     for index, (name, server) in enumerate(sorted(servers.items(), key=lambda item: item[0] != "looper")):
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name) or not isinstance(server, dict):
             raise RuntimeUnsupported("DSH MCP server has an invalid name or configuration")
         own = name == "looper"
+        if read_only and not own:
+            omissions.append({"name": name, "reason": "external MCP omitted in a read-only run"})
+            continue
         transport = server.get("type", "stdio" if server.get("command") else "http")
         config: dict[str, Any] = {"serverName": name}
         if transport == "stdio" and isinstance(server.get("command"), str) and server["command"]:
@@ -800,7 +824,7 @@ def mcp_config(library: AgentLibrary, *, role: str | None = None) -> DshMcpConfi
         if own:
             config.update(platform)
         translated.append(config)
-    return DshMcpConfig(tuple(translated), values)
+    return DshMcpConfig(tuple(translated), values, tuple(omissions))
 
 
 @dataclass(frozen=True)
@@ -829,7 +853,7 @@ def environment(launch: Launch, home: DshHome) -> dict[str, str]:
 def _launch_environment(launch: Launch) -> dict[str, str]:
     binding = bind_provider(launch.profile.provider, launch.model, launch.effort)
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
-    mcp = mcp_config(launch.library, role=launch.role.value)
+    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
     return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
             **(mcp.env if mcp else {})}
 
