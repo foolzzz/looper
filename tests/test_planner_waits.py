@@ -7,17 +7,23 @@ The Planner's Claude is a stand-in (``planner_claude``); the Workers are a stand
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from looper.agents import waits
-from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
+from looper.agents.tiers import planner as planner_module
 from looper.agents.tiers.planner import PlannerAgent
 from looper.agents.waits import (
-    GithubPrCheck, ReadyWhen, Wait, WaitLimits, WaitSpec, WaitState, WaitView,
+    GithubPrCheck, ReadyWhen, Wait, WaitLimits, WaitOutcome, WaitSpec, WaitState, WaitView,
 )
-from tests.test_planner_agent import WORK_OK, _project, activity, always, decide, drive, plan, step
+from tests.test_planner_agent import WORK_OK, _project, activity, always, decide, drive, plan, reply, step
 
 TOPIC = "Author pushes fixes"
 CHECK = {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}
@@ -64,6 +70,12 @@ def _step(h: Any, key: str) -> Any:
     if plan_ is None:
         return None
     return next((s for s in plan_.steps if s.label == key), None)
+
+
+def _wait_state(h: Any, key: str) -> Any:
+    """``key``'s wait state, or None until that step exists (``until`` polls before the plan does)."""
+    step = _step(h, key)
+    return step.wait.state if step is not None and step.wait is not None else None
 
 
 def _stored_steps(agent_db: Any) -> dict[str, dict[str, Any]]:
@@ -323,3 +335,390 @@ def test_a_failed_task_names_an_open_wait_as_not_over(planner_claude: Any, agent
     final = h.final()
     assert final is not None and final.payload["status"] == "failed"
     assert "- w1 (a wait not over)" in final.payload["summary"]
+
+
+def _cancel(step_id: str, resolution: str) -> dict[str, str]:
+    return {"id": step_id, "action": "cancel", "resolution": resolution}
+
+
+def _hold_after(first: str) -> Any:
+    """Answer ``first`` and keep every later Worker running."""
+
+    def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
+        return WORK_OK if envelope.payload.get("step_key") == first else None
+
+    return outcome
+
+
+async def _wake(h: Any, kind: MessageType = MessageType.WAIT_EVENT) -> None:
+    await h.bus.publish(MessageEnvelope.create(
+        source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=kind,
+        payload={"task_id": "t1"}, correlation_id="corr-1",
+    ))
+
+
+def _closed(agent_db: Any, key: str) -> list[dict[str, Any]]:
+    step_id = _stored_steps(agent_db)[key]["id"]
+    return [entry for entry in agent_db.store.journal["t1"]
+            if entry["kind"] == "wait_closed" and entry["step_id"] == step_id]
+
+
+def test_a_ready_wait_verifies_itself_and_its_resolution_reaches_the_next_step(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    resolution = "x" * 400
+    claude = planner_claude(plan(wait_step("w1"), step("s2", "w1")))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        turns = len(claude.turns())
+        _stored_wait(agent_db, "w1").update(state="ready", outcome="ready", resolution=resolution)
+        await _wake(h)
+        await h.until(lambda: any(item.payload.get("step_key") == "s2" for item in h.work_items))
+        assert len(claude.turns()) == turns
+
+    h = drive(claude, _hold, scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"], stored["resolution"]) == ("done", "ready", resolution)
+    assert isinstance(stored["closed_at"], datetime)
+    finished = _step(h, "w1")
+    assert finished.status == "verified" and finished.result == {"status": "ready", "summary": resolution}
+    assert finished.wait.outcome is WaitOutcome.READY and finished.wait.state is WaitState.DONE
+    assert _closed(agent_db, "w1")[0]["summary"] == f"wait done (ready): {resolution}"
+    assert f"Wait w1 ready: {'x' * 299}…" in activity(agent_db)
+    (item,) = [entry for entry in h.work_items if entry.payload["step_key"] == "s2"]
+    assert item.payload["dependencies"] == [{"step": "w1", "summary": resolution, "changed_files": []}]
+    assert not any("[WAIT]" in turn["text"] for turn in claude.turns())
+
+
+def test_a_resumed_wait_keeps_its_outcome_and_does_not_ask_the_model(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    claude = planner_claude(plan(wait_step("w1"), step("s2", "w1")))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        turns = len(claude.turns())
+        _stored_wait(agent_db, "w1").update(state="ready", outcome="resumed", resolution="the user said go")
+        await _wake(h)
+        await h.until(lambda: any(item.payload.get("step_key") == "s2" for item in h.work_items))
+        assert len(claude.turns()) == turns
+
+    h = drive(claude, _hold, scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"], stored["resolution"]) == ("done", "resumed", "the user said go")
+    assert _step(h, "w1").result == {"status": "ready", "summary": "the user said go"}
+    assert _step(h, "w1").wait.outcome is WaitOutcome.RESUMED
+    assert "Wait w1 resumed by the user" in activity(agent_db)
+    assert not any(line.startswith("Wait w1 ready:") for line in activity(agent_db))
+    assert _closed(agent_db, "w1")[0]["summary"] == "wait done (resumed): the user said go"
+    assert not any("[WAIT]" in turn["text"] for turn in claude.turns())
+
+
+def test_a_finished_step_keeps_its_result_when_a_stale_ready_row_arrives(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1"), step("s2")),
+        decide("accept", waits=[_cancel("w1", "no longer needed")]),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held and _stored_steps(agent_db).get("w1", {}).get("status") == "verified")
+        assert _step(h, "w1").result == {"status": "cancelled", "summary": "Cancelled: no longer needed"}
+        assert len(_closed(agent_db, "w1")) == 1
+        _stored_wait(agent_db, "w1").update(state="ready", outcome="ready", resolution="CI passed late")
+        await _wake(h)
+        await h.until(lambda: _stored_wait(agent_db, "w1")["state"] == "done"
+                      and _stored_wait(agent_db, "w1")["resolution"] == "CI passed late")
+
+    h = drive(claude, _hold_after("s1"), scenario)
+
+    assert _step(h, "w1").result == {"status": "cancelled", "summary": "Cancelled: no longer needed"}
+    assert _step(h, "w1").status == "verified"
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"], stored["resolution"]) == ("done", "ready", "CI passed late")
+    assert len(_closed(agent_db, "w1")) == 1
+    assert _closed(agent_db, "w1")[0]["summary"] == "wait done (cancelled): no longer needed"
+    assert not any(line.startswith("Wait w1 ready:") for line in activity(agent_db))
+
+
+def test_a_decision_cancels_a_pending_wait_before_the_replan_drops_it(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1", "s1"), step("s2", "s1")),
+        decide("replan", reason="the wait is moot", steps=[step("s3")],
+               waits=[_cancel("w1", "s1 made it unnecessary")]),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _stored_steps(agent_db).get("w1", {}).get("status") == "verified")
+
+    h = drive(claude, _hold_after("s1"), scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"], stored["resolution"]) == ("done", "cancelled", "s1 made it unnecessary")
+    assert isinstance(stored["closed_at"], datetime)
+    assert _stored_steps(agent_db)["w1"]["status"] == "verified"
+    assert _stored_steps(agent_db)["w1"]["result"] == {
+        "status": "cancelled", "summary": "Cancelled: s1 made it unnecessary"}
+    assert _stored_steps(agent_db)["s1"]["status"] == "verified"
+    assert _stored_steps(agent_db)["s2"]["status"] == "skipped"
+    assert "s3" in _stored_steps(agent_db)
+    assert _closed(agent_db, "w1")[0]["summary"] == "wait done (cancelled): s1 made it unnecessary"
+    assert "Wait w1 cancelled: s1 made it unnecessary" in activity(agent_db)
+    assert h.final() is None
+
+
+def test_cancelling_a_gate_does_not_skip_cancelling_a_wait(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "user_gates": "on"}
+    claude = planner_claude(
+        plan(step("s1"), GATE, wait_step("w1")),
+        decide("accept", gates=[{"id": "g1", "action": "cancel", "resolution": "s1 answered"}],
+               waits=[_cancel("w1", "s1 answered the wait")]),
+    )
+    h = drive(claude, always(WORK_OK))
+
+    final = h.final()
+    assert final is not None and final.payload["status"] == "completed"
+    gate = next(iter(agent_db.store.gates["t1"].values()))
+    assert gate["state"] == "cancelled"
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"]) == ("done", "cancelled")
+    assert _stored_steps(agent_db)["w1"]["status"] == "verified"
+    assert _stored_steps(agent_db)["w1"]["result"]["summary"] == "Cancelled: s1 answered the wait"
+
+
+def test_a_chat_reply_cancels_a_pending_wait_before_it_replans(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1", "s1")),
+        reply({"reply": "dropping it", "action": "replan", "steps": [step("s3")],
+               "waits": [_cancel("w1", "chat dropped it")]}),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held and _step(h, "w1").wait.state is WaitState.PENDING)
+        await h.say("drop the wait")
+        await h.until(lambda: _stored_steps(agent_db).get("w1", {}).get("status") == "verified")
+        # stop() kills whatever is still running, so the worker has to still be held here.
+        assert h.held and _step(h, "s1").status == "dispatched"
+
+    h = drive(claude, _hold, scenario)
+
+    assert _step(h, "s1").status == "dispatched"
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"], stored["resolution"]) == ("done", "cancelled", "chat dropped it")
+    assert _stored_steps(agent_db)["w1"]["status"] == "verified"
+    assert _stored_steps(agent_db)["w1"]["result"]["summary"] == "Cancelled: chat dropped it"
+
+
+def test_a_restart_keeps_an_open_wait_and_cancels_a_pending_one_before_the_replan(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    failed_at = datetime(2026, 10, 19, 8, tzinfo=timezone.utc)
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w_open"), wait_step("w_pending", "s1")),
+        reply({"reply": "go on", "action": "replan", "steps": [step("s3")],
+               "waits": [_cancel("w_pending", "restart dropped it")]}),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held and _step(h, "w_open").wait.state is WaitState.WAITING)
+        stored = _stored_wait(agent_db, "w_open")
+        deadline = stored["deadline_at"]
+        stored["failures"], stored["failed_at"] = 2, failed_at
+        await h.planner.stop()
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        await h.bus.publish(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+            payload={"requirement": "build the calc package", "goal_id": "g1", "work_dir": str(h.work_dir),
+                     "project_id": "proj-1", "restart": RestartMode.CONTINUE.value, "ended": "stopped"},
+            correlation_id="corr-1"))
+        await h.until(lambda: _stored_steps(agent_db).get("w_pending", {}).get("status") == "verified")
+        opened = _step(h, "w_open").wait
+        assert opened.state is WaitState.WAITING and opened.deadline_at == deadline
+        assert opened.failures == 0 and opened.failed_at is None
+
+    h = drive(claude, _hold, scenario)
+
+    opened = _stored_wait(agent_db, "w_open")
+    assert opened["state"] == "waiting" and opened["failures"] == 0 and opened["failed_at"] is None
+    assert _stored_steps(agent_db)["w_open"]["status"] == "waiting"
+    assert (_stored_wait(agent_db, "w_pending")["state"], _stored_wait(agent_db, "w_pending")["outcome"]) == (
+        "done", "cancelled")
+    assert _stored_steps(agent_db)["w_pending"]["status"] == "verified"
+    open_id = _stored_steps(agent_db)["w_open"]["id"]
+    assert not any(entry["step_id"] == open_id and "put it back to not started" in entry["summary"]
+                   for entry in agent_db.store.journal["t1"])
+    assert h.planner._plan is not None  # the restarted planner is the one the scenario left running
+
+
+def test_a_room_reply_cancels_a_pending_wait_before_it_replans(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending: list[dict[str, Any]] = []
+
+    async def planner_pending(task_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in pending]
+
+    async def planner_delivered(task_id: str, ids: list[int]) -> None:
+        pending.clear()
+
+    room = SimpleNamespace(planner_reply=AsyncMock(return_value={"id": 9}), wake_planner_after=Mock())
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1", "s1")),
+        reply({"reply": "dropped", "action": "replan", "steps": [step("s3")],
+               "waits": [_cancel("w1", "the room ended it")]}),
+    )
+
+    async def scenario(h: Any) -> None:
+        # The room is on without a platform token: start() only issues one when ops is set.
+        monkeypatch.setattr(PlannerAgent, "_room", property(lambda self: room))
+        monkeypatch.setattr(planner_module.db_room, "planner_pending", planner_pending)
+        monkeypatch.setattr(planner_module.db_room, "planner_delivered", planner_delivered)
+        await h.start()
+        await h.until(lambda: h.held and _step(h, "w1").wait.state is WaitState.PENDING)
+        pending.append({"id": 1, "sender_seat": "worker@s1", "kind": "question", "body": "stop waiting",
+                        "audience_all": True})
+        await _wake(h, MessageType.ROOM_MESSAGE)
+        await h.until(lambda: _stored_steps(agent_db).get("w1", {}).get("status") == "verified")
+
+    h = drive(claude, _hold, scenario)
+
+    assert _step(h, "s1").status == "dispatched"
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"], stored["resolution"]) == ("done", "cancelled", "the room ended it")
+    assert _stored_steps(agent_db)["w1"]["status"] == "verified"
+
+
+def test_a_replan_skips_a_pending_wait_it_drops(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1", "s1"), wait_step("w2")),
+        decide("replan", reason="the pending wait is moot", steps=[step("s3")]),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _stored_steps(agent_db).get("w1", {}).get("status") == "skipped")
+
+    h = drive(claude, _hold_after("s1"), scenario)
+
+    assert _step(h, "w1").wait.state is WaitState.SKIPPED
+    assert _stored_wait(agent_db, "w1")["state"] == "skipped"
+    assert _stored_wait(agent_db, "w1")["outcome"] is None
+    assert _step(h, "w2").wait.state is WaitState.WAITING
+    assert _stored_steps(agent_db)["w2"]["status"] == "waiting"
+
+
+def test_claude_stops_when_the_task_only_waits_and_stays_while_work_runs(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_module, "GATE_IDLE_STOP_SEC", 0)
+    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 0.05)
+    claude = planner_claude(plan(wait_step("w1")))
+    stopped = "Planner Claude Code stopped while the task only waits; the next turn resumes its session"
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: stopped in activity(agent_db))
+
+    drive(claude, _hold, scenario)
+
+    assert len(claude.argvs()) == 1
+
+
+def test_claude_stays_while_a_step_runs_and_a_wait_is_open(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_module, "GATE_IDLE_STOP_SEC", 0)
+    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 0.02)
+    claude = planner_claude(plan(step("s1"), wait_step("w1")))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held and _step(h, "w1").wait.state is WaitState.WAITING)
+        await asyncio.sleep(0.3)
+
+    drive(claude, _hold, scenario)
+
+    assert not any("stopped while the task only waits" in line for line in activity(agent_db))
+    assert not any("stopped while the task waits" in line for line in activity(agent_db))
+    assert len(claude.argvs()) == 1
+
+
+@pytest.mark.parametrize("state", ["timed_out", "cancel_requested"])
+def test_a_wait_that_is_not_ready_is_left_for_later(planner_claude: Any, agent_db: Any, state: str) -> None:
+    claude = planner_claude(plan(wait_step("w1")))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        turns = len(claude.turns())
+        _stored_wait(agent_db, "w1").update(state=state)
+        await _wake(h)
+        await asyncio.sleep(0.05)
+        assert len(claude.turns()) == turns
+
+    h = drive(claude, _hold, scenario)
+
+    assert _stored_wait(agent_db, "w1")["state"] == state
+    assert _step(h, "w1").wait.state is WaitState.WAITING
+    assert _step(h, "w1").status == "waiting"
+    assert not any("[WAIT]" in turn["text"] for turn in claude.turns())
+
+
+def test_a_wait_read_that_fails_is_logged_and_the_wait_stays(
+    planner_claude: Any, agent_db: Any, caplog: Any,
+) -> None:
+    claude = planner_claude(plan(wait_step("w1")))
+    agent_db.for_planner.side_effect = RuntimeError("db down")
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        await _wake(h)
+        await asyncio.sleep(0.05)
+
+    with caplog.at_level(logging.WARNING, logger="looper.agents.tiers.planner"):
+        drive(claude, _hold, scenario)
+
+    assert _stored_wait(agent_db, "w1")["state"] == "waiting"
+    assert "cannot read its waits" in caplog.text
+
+
+def test_a_ready_row_for_an_unknown_step_is_skipped(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(plan(wait_step("w1"), step("s2", "w1")))
+    original = agent_db.for_planner.side_effect
+
+    async def rows(task_id: str, **kwargs: Any) -> list[dict[str, Any]]:
+        found = await original(task_id, **kwargs)
+        return [{"step_id": "step-missing", "state": "ready", "outcome": "ready", "resolution": "ghost"}, *found]
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        agent_db.for_planner.side_effect = rows
+        _stored_wait(agent_db, "w1").update(state="ready", outcome="ready", resolution="real")
+        await _wake(h)
+        await h.until(lambda: any(item.payload.get("step_key") == "s2" for item in h.work_items))
+
+    h = drive(claude, _hold, scenario)
+
+    assert _stored_wait(agent_db, "w1")["state"] == "done"
+    assert _step(h, "w1").result == {"status": "ready", "summary": "real"}
+    assert not any(item.payload.get("step_key") == "ghost" for item in h.work_items)

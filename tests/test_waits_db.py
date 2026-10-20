@@ -7,9 +7,11 @@ Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import asyncpg
 import pytest
 
 from tests.test_ops_tasks_db import _project, _task
@@ -65,7 +67,7 @@ def test_planner_write_expect_keeps_a_row_someone_else_moved(monkeypatch: pytest
 
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
-        await _plan_with_wait(pool, state="ready")
+        await _plan_with_wait(pool, state="ready", outcome="ready")
         await plans.save("task-a", waits=[_wait(state="waiting", expect=["timed_out"])], pool=pool)
         assert (await waits.get("task-a", "w1", pool=pool))["state"] == "ready"
         await plans.save("task-a", waits=[_wait(state="done", outcome="ready", expect=["ready"],
@@ -94,7 +96,8 @@ def test_due_waits_are_waiting_due_and_in_active_tasks(monkeypatch: pytest.Monke
         for name, status, state, spec, due_at, next_check_at, deadline_at in cases:
             await _task(pool, name, status, project)
             await _plan_with_wait(pool, name, f"step-{name}", state=state, spec=spec, due_at=due_at,
-                                  next_check_at=next_check_at, deadline_at=deadline_at)
+                                  next_check_at=next_check_at, deadline_at=deadline_at,
+                                  outcome="ready" if state in ("ready", "done") else None)
         rows = await waits.due(NOW, ["running"], pool=pool)
         assert {r["task_id"] for r in rows} == {"check", "deadline", "time"}
         assert all((r["work_dir"], r["project_id"], r["step_key"]) == ("/w", project["id"], "w1") for r in rows)
@@ -118,10 +121,10 @@ def test_check_record_and_move_only_apply_in_the_expected_state(monkeypatch: pyt
         row = await waits.get("task-a", "w1", pool=pool)
         assert (row["checks"], row["last_output"], row["last_error"], row["baseline"], row["last_checked_at"]) == (
             2, "retry", "exit 1", {"head": "abc"}, NOW)
-        assert await waits.move("step-w1", to="ready", expect=["timed_out"], pool=pool) is None
+        assert await waits.move("step-w1", to="ready", expect=["timed_out"], outcome="ready", pool=pool) is None
         assert (await waits.get("task-a", "w1", pool=pool))["state"] == "waiting"
-        moved = await waits.move("step-w1", to="ready", resolution="CI passed", pool=pool)
-        assert (moved["state"], moved["resolution"]) == ("ready", "CI passed")
+        moved = await waits.move("step-w1", to="ready", resolution="CI passed", outcome="ready", pool=pool)
+        assert (moved["state"], moved["outcome"], moved["resolution"]) == ("ready", "ready", "CI passed")
         assert await waits.move("step-w1", to="cancel_requested", pool=pool) is None
         assert not await waits.record_check("step-w1", at=NOW, result="ready", output="late", error="",
                                             next_check_at=None, baseline={"head": "late"}, pool=pool)
@@ -194,5 +197,104 @@ def test_project_wait_commands_round_trip_through_execution_fields(monkeypatch: 
                                               pool=pool)
         row = await projects.get_project(project["id"], pool=pool)
         assert row["wait_commands"] is None and not ProjectExecution.from_row(row).wait_commands_on
+
+    _run(test, monkeypatch)
+
+
+def test_ready_requires_an_outcome_and_other_open_states_cannot_carry_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import plans, waits
+
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        with pytest.raises(asyncpg.CheckViolationError) as rejected:
+            await _plan_with_wait(pool, state="ready")
+        assert rejected.value.constraint_name == "task_waits_outcome_done"
+        with pytest.raises(ValueError, match="outcome"):
+            await waits.move("step-w1", to="ready", pool=pool)
+        with pytest.raises(ValueError, match="outcome"):
+            await waits.move("step-w1", to="ready", outcome="", pool=pool)
+
+        for outcome in ("ready", "resumed"):
+            task_id, step_id = f"task-{outcome}", f"step-{outcome}"
+            await _task(pool, task_id, "running", project)
+            await _plan_with_wait(pool, task_id, step_id, state="waiting")
+            moved = await waits.move(step_id, to="ready", outcome=outcome, resolution=f"became {outcome}", pool=pool)
+            assert moved is not None
+            assert (moved["state"], moved["outcome"], moved["resolution"]) == ("ready", outcome, f"became {outcome}")
+
+        for state in ("pending", "waiting", "timed_out", "cancel_requested", "failed", "skipped"):
+            await _task(pool, f"task-{state}", "running", project)
+            with pytest.raises(asyncpg.CheckViolationError) as rejected:
+                await _plan_with_wait(pool, f"task-{state}", f"step-{state}", state=state, outcome="ready")
+            assert rejected.value.constraint_name == "task_waits_outcome_done"
+        await _task(pool, "task-done-open", "running", project)
+        with pytest.raises(asyncpg.CheckViolationError) as rejected:
+            await _plan_with_wait(pool, "task-done-open", "step-done-open", state="done")
+        assert rejected.value.constraint_name == "task_waits_outcome_done"
+        await _task(pool, "task-done", "running", project)
+        await _plan_with_wait(pool, "task-done", "step-done", state="done", outcome="cancelled",
+                              resolution="stopped", closed_at=NOW)
+        done = await plans.load("task-done", pool=pool)
+        assert done is not None and done["waits"]["step-done"]["outcome"] == "cancelled"
+
+    _run(test, monkeypatch)
+
+
+def test_a_ready_move_race_lets_only_one_side_win(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import waits
+
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _plan_with_wait(pool, state="waiting")
+
+        async def go(outcome: str) -> dict[str, Any] | None:
+            return await waits.move("step-w1", to="ready", outcome=outcome, resolution=outcome, pool=pool)
+
+        ready, resumed = await asyncio.gather(go("ready"), go("resumed"))
+        winners = [row for row in (ready, resumed) if row is not None]
+        assert len(winners) == 1 and [ready, resumed].count(None) == 1
+        stored = await waits.get("task-a", "w1", pool=pool)
+        assert stored["state"] == "ready" and stored["outcome"] == winners[0]["outcome"]
+        assert stored["outcome"] in ("ready", "resumed") and stored["resolution"] == stored["outcome"]
+
+    _run(test, monkeypatch)
+
+
+_OLD_OUTCOME = """
+ALTER TABLE task_waits DROP CONSTRAINT IF EXISTS task_waits_outcome_done;
+ALTER TABLE task_waits ADD CONSTRAINT task_waits_outcome_done
+    CHECK ((outcome IS NOT NULL) = (state = 'done'));
+"""
+
+
+def test_an_old_schema_backfills_ready_rows_and_repeated_setup_keeps_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import connection, waits
+
+        await pool.execute(_OLD_OUTCOME)
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'task_waits_outcome_ready'")
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _plan_with_wait(pool, state="ready")
+        assert (await waits.get("task-a", "w1", pool=pool))["outcome"] is None
+
+        await connection.ensure_schema(pool)
+        row = await waits.get("task-a", "w1", pool=pool)
+        assert (row["state"], row["outcome"]) == ("ready", "ready")
+        with pytest.raises(asyncpg.CheckViolationError) as rejected:
+            await pool.execute("UPDATE task_waits SET outcome = NULL WHERE step_id = 'step-w1'")
+        assert rejected.value.constraint_name == "task_waits_outcome_done"
+        with pytest.raises(asyncpg.CheckViolationError) as rejected:
+            await pool.execute("UPDATE task_waits SET state = 'waiting', outcome = 'ready' WHERE step_id = 'step-w1'")
+        assert rejected.value.constraint_name == "task_waits_outcome_done"
+        kept = await waits.get("task-a", "w1", pool=pool)
+        assert (kept["state"], kept["outcome"]) == ("ready", "ready")
+
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval(
+            "SELECT count(*) FROM schema_migrations WHERE name = 'task_waits_outcome_ready'") == 1
+        assert (await waits.get("task-a", "w1", pool=pool))["outcome"] == "ready"
 
     _run(test, monkeypatch)

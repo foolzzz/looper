@@ -137,12 +137,20 @@ async def record_check(step_id: str, *, at: datetime, result: str, output: str, 
 
 
 async def move(step_id: str, *, to: str, expect: Sequence[str] = ("waiting",), resolution: str | None = None,
-               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, Any] | None:
-    """Move the loop's or the user's wait only from an expected state; the updated row, or None when it moved first."""
+               outcome: str | None = None, pool: asyncpg.Pool | asyncpg.Connection | None = None
+               ) -> dict[str, Any] | None:
+    """Move the loop's or the user's wait only from an expected state; the updated row, or None when it moved first.
+
+    Moving to ``ready`` needs an ``outcome`` (``ready`` or ``resumed``): the service or the user says which, and
+    the same update stores it. Any other state stores no outcome.
+    """
+    if to == "ready" and not outcome:
+        raise ValueError("moving a wait to ready needs an outcome")
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        "UPDATE task_waits SET state = $2, resolution = COALESCE($4, resolution), updated_at = now() "
-        "WHERE step_id = $1 AND state = ANY($3::text[]) RETURNING *", step_id, to, list(expect), resolution)
+        "UPDATE task_waits SET state = $2, outcome = $5, resolution = COALESCE($4, resolution), updated_at = now() "
+        "WHERE step_id = $1 AND state = ANY($3::text[]) RETURNING *",
+        step_id, to, list(expect), resolution, outcome if to == "ready" else None)
     return _wait(row) if row else None
 
 

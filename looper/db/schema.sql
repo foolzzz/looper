@@ -1206,10 +1206,23 @@ CREATE TABLE IF NOT EXISTS task_waits (
     closed_at        TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT task_waits_outcome_done CHECK ((outcome IS NOT NULL) = (state = 'done'))
+    -- A ready wait already carries the outcome the service or the user gave it; done keeps one too.
+    CONSTRAINT task_waits_outcome_done CHECK ((outcome IS NOT NULL) = (state IN ('ready', 'done')))
 );
 CREATE INDEX IF NOT EXISTS idx_task_waits_task ON task_waits (task_id);
 CREATE INDEX IF NOT EXISTS idx_task_waits_due ON task_waits (next_check_at) WHERE state = 'waiting';
+-- Once (ready waits carry an outcome): older databases allowed an outcome only when the wait was done.
+-- Drop that check before backfilling ready rows, which it forbids an outcome on.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_waits_outcome_ready') THEN
+        ALTER TABLE task_waits DROP CONSTRAINT IF EXISTS task_waits_outcome_done;
+        UPDATE task_waits SET outcome = 'ready' WHERE state = 'ready' AND outcome IS NULL;
+        ALTER TABLE task_waits ADD CONSTRAINT task_waits_outcome_done
+            CHECK ((outcome IS NOT NULL) = (state IN ('ready', 'done')));
+        INSERT INTO schema_migrations (name) VALUES ('task_waits_outcome_ready');
+    END IF;
+END $$;
 -- A gate step's gate. The Planner writes all but first_reply_at, which the user's first message sets with the
 -- state's move from 'open' to 'discussing', and the reminders' columns; a closed gate ('passed', 'cancelled',
 -- 'skipped') stays closed. agenda: [{id, question, options, status, answer}]. summary: what a gate that passed

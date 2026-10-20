@@ -228,6 +228,18 @@ class _PlanStore:
     async def gate_thread(self, step_id: str, **_: object) -> list[dict[str, Any]]:
         return [dict(m) for m in self.gate_messages if m["step_id"] == step_id]
 
+    async def waits_for_planner(self, task_id: str, **_: object) -> list[dict[str, Any]]:
+        """Ready, timed-out and cancel-requested waits, as ``db.waits.for_planner`` lists them, in plan order."""
+        steps = self.steps.get(task_id, {})
+        rows = []
+        for step_id, row in self.waits.get(task_id, {}).items():
+            if row.get("state") not in ("ready", "timed_out", "cancel_requested"):
+                continue
+            step = steps.get(step_id, {})
+            rows.append({**copy.deepcopy(row), "step_key": step.get("key", ""), "step_index": step.get("index", 0),
+                         "depends_on": list(step.get("depends_on") or [])})
+        return sorted(rows, key=lambda row: (row["step_index"], row["step_id"]))
+
     async def add_gate_message(self, task_id: str, label: str, message: Any, **_: object) -> tuple[Any, Any]:
         """The user writes ``message`` in the task's gate ``label``, as ``user_gates.add_user_message`` adds it."""
         gate = await self.get_gate(task_id, label)
@@ -568,8 +580,9 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         setattr(db, name, mock)
     # The Planner imports this one by name rather than through its module.
     monkeypatch.setattr(planner_module, "update_task_phase", db.update_task_phase)
-    # Agent tests never ask the loop which waits are ready; that read stays off the real database.
-    db.for_planner = AsyncMock(return_value=[])
+    # Agent tests never ask the loop which waits are ready; that read stays off the real database and on the
+    # in-memory rows (a copy, so a delivery cannot change the stored row before its save).
+    db.for_planner = AsyncMock(side_effect=store.waits_for_planner)
     monkeypatch.setattr(db_waits, "for_planner", db.for_planner)
     return db
 
