@@ -27,6 +27,7 @@ import {
   type ProviderLogin,
   type Registry,
   type Runtime,
+  type RuntimeType,
   type SelfCheck,
 } from "@/lib/api";
 import { LOGIN_HELP, PLANNED_RUNTIMES, RUNTIME_TYPES, loginUsable, roleLabel } from "@/lib/runtime-catalog";
@@ -40,11 +41,12 @@ function runtimeType(registry: Registry, runtime: Runtime | undefined) {
   return registry.runtime_types.find((t) => t.type === runtime?.type);
 }
 
-/** Whether `provider` can serve `runtime`: a protocol in common, and an OAuth provider only for the runtime type
+/** Whether `provider` can serve `runtime`: a protocol and model in common, and OAuth only for the runtime type
  * whose login it is. The server checks the same (and more) when the Agent Profile is saved. */
 function pairs(registry: Registry, runtime: Runtime | undefined, provider: Provider): boolean {
   const type = runtimeType(registry, runtime);
   if (!type || !provider.protocols.some((p) => type.protocols.includes(p))) return false;
+  if (type.supported_models && provider.models.length && !modelsFor(provider, type).length) return false;
   if (provider.auth === "oauth") return type.auth_kinds.includes("oauth") && provider.oauth_runtime_type === type.type;
   return type.auth_kinds.includes("api_key");
 }
@@ -55,12 +57,20 @@ function firstProvider(registry: Registry, runtime: Runtime | undefined): string
   return (fitting.find((p) => p.auth === "oauth") ?? fitting[0])?.provider_id ?? "";
 }
 
-/** A model the provider lists: the current one if it is there, else its first. A provider that lists none takes
- * any model; a runtime login that suggests some (Codex's) starts from its first unless the current one is one. */
-function fittingModel(provider: Provider | undefined, current: string): string {
-  if (provider?.models.length) return provider.models.some((m) => m.name === current) ? current : provider.models[0].name;
-  const suggested = provider?.suggested_models ?? [];
-  return suggested.length && !suggested.includes(current) ? suggested[0] : current;
+/** The provider catalog intersected with the runtime's exact ids, when it restricts models. */
+function modelsFor(provider: Provider | undefined, type: RuntimeType | undefined): string[] {
+  return (provider?.models ?? []).map((m) => m.name)
+    .filter((name) => !type?.supported_models || type.supported_models.includes(name));
+}
+
+function suggestionsFor(provider: Provider | undefined, type: RuntimeType | undefined): string[] {
+  return type?.supported_models ?? provider?.suggested_models ?? [];
+}
+
+/** Keep an eligible selection; otherwise use the first catalog model or runtime/login suggestion. */
+function fittingModel(provider: Provider | undefined, current: string, type: RuntimeType | undefined): string {
+  const models = provider?.models.length ? modelsFor(provider, type) : suggestionsFor(provider, type);
+  return models.length && !models.includes(current) ? models[0] : current;
 }
 
 /** Agent teams for a profile on `runtime` that does not say: on for Claude Code, whose feature they are, off for
@@ -167,7 +177,7 @@ export function AgentProfileForm({
       name: profile?.name ?? "",
       runtime_id: runtime?.runtime_id ?? "",
       provider_id: providerId,
-      model: profile?.model ?? fittingModel(provider, ""),
+      model: profile?.model ?? fittingModel(provider, "", runtimeType(registry, runtime)),
       effort: profile?.effort ?? "",
       agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
       custom_prompt: profile?.custom_prompt ?? "",
@@ -180,6 +190,8 @@ export function AgentProfileForm({
   const runtime = registry.runtimes.find((r) => r.runtime_id === draft.runtime_id);
   const type = runtimeType(registry, runtime);
   const provider = registry.providers.find((p) => p.provider_id === draft.provider_id);
+  const models = modelsFor(provider, type);
+  const suggested = suggestionsFor(provider, type);
   const fitting = registry.providers.filter((p) => pairs(registry, runtime, p));
   const ownLogins = fitting.filter((p) => p.auth === "oauth");
   const keyProviders = fitting.filter((p) => p.auth === "api_key");
@@ -196,7 +208,7 @@ export function AgentProfileForm({
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
     set({ runtime_id: runtimeId, provider_id: providerId,
-          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model),
+          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model, runtimeType(registry, next)),
           agent_teams: agentTeams });
   };
   const chooseProvider = (providerId: string) => {
@@ -205,7 +217,7 @@ export function AgentProfileForm({
       return;
     }
     set({ provider_id: providerId,
-          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model) });
+          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model, type) });
   };
 
   const save = async (e?: React.FormEvent) => {
@@ -274,16 +286,16 @@ export function AgentProfileForm({
           <label htmlFor={`${id}-model`} className={LABEL}>Model *</label>
           {provider?.models.length ? (
             <select id={`${id}-model`} value={draft.model} onChange={(e) => set({ model: e.target.value })} className={`${SELECT} font-mono`}>
-              {provider.models.map((m) => (
-                <option key={m.name} value={m.name}>{m.name}</option>
+              {models.map((name) => (
+                <option key={name} value={name}>{name}</option>
               ))}
             </select>
           ) : (
             <>
-              <Input id={`${id}-model`} value={draft.model} onChange={(e) => set({ model: e.target.value })} placeholder={provider?.suggested_models[0] ?? "sonnet"} list={provider?.suggested_models.length ? `${id}-suggested` : undefined} spellCheck={false} autoCapitalize="none" className="font-mono" />
-              {provider?.suggested_models.length ? (
+              <Input id={`${id}-model`} value={draft.model} onChange={(e) => set({ model: e.target.value })} placeholder={suggested[0] ?? "sonnet"} list={suggested.length ? `${id}-suggested` : undefined} spellCheck={false} autoCapitalize="none" className="font-mono" />
+              {suggested.length ? (
                 <datalist id={`${id}-suggested`}>
-                  {provider.suggested_models.map((m) => (
+                  {suggested.map((m) => (
                     <option key={m} value={m} />
                   ))}
                 </datalist>
@@ -302,6 +314,7 @@ export function AgentProfileForm({
         </div>
         <p className="text-[11px] text-muted-foreground sm:col-span-2" data-testid="prompt-mode-per-role">
           The system prompt mode (append to the runtime&apos;s default or replace it) is set per role in Settings → Roles.
+          {type?.replace_system_prompt_refusal && <> {type.replace_system_prompt_refusal}.</>}
         </p>
         {teams && (
           <div className="space-y-1 sm:col-span-2">
@@ -338,8 +351,10 @@ export function AgentProfileForm({
         )}
         <p>
           {provider?.models.length
-            ? `${provider.name} lists ${provider.models.map((m) => m.name).join(", ")}.`
-            : provider?.suggested_models.length
+            ? `${provider.name} lists ${models.join(", ")}.`
+            : type?.supported_models
+              ? `Supported models: ${type.supported_models.join(", ")}.`
+              : provider?.suggested_models.length
               ? `Any model the login offers, such as ${provider.suggested_models.slice(0, 3).join(", ")}.`
               : "The model as the runtime takes it: an alias such as sonnet or a full name."}{" "}
           Runs of this profile use this effort; to run a role with another effort, select or create a profile

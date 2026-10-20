@@ -2414,6 +2414,8 @@ export interface RuntimeType {
   /** The roles its capabilities let it run. */
   roles: AgentRole[];
   auth_kinds: ProviderAuth[];
+  /** Exact accepted model ids, or null when the provider's catalog is unrestricted by the runtime. */
+  supported_models: string[] | null;
   can_replace_system_prompt: boolean;
   replace_system_prompt_refusal: string | null;
 }

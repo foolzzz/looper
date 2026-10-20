@@ -26,6 +26,22 @@ PROVIDER = ProviderSpec("gateway", "Messages gateway", AuthKind.API_KEY,
                         base_url="https://gateway.example/anthropic/v1/", api_key="test-dsh-key")
 
 
+def test_registry_exposes_exact_dsh_models_and_replace_refusal():
+    from looper.agents.profile_registry import type_view
+    from looper.agents.runtimes.dsh import MODEL_MAP
+
+    view = type_view(runtimes.adapter("dsh"))
+    assert view["supported_models"] == sorted(MODEL_MAP)
+    assert set(view["supported_models"]) == set(MODELS)
+    assert view["auth_kinds"] == ["api_key"]
+    assert view["protocols"] == ["anthropic-messages"]
+    assert view["can_replace_system_prompt"] is False
+    assert view["replace_system_prompt_refusal"] == runtimes.replace_refusal(runtimes.adapter("dsh"))
+    for name, adapter in runtimes.ADAPTERS.items():
+        if name != "dsh":
+            assert type_view(adapter)["supported_models"] is None
+
+
 def _register_prompt_runtime(monkeypatch):
     """Use the executable adapter's prompt hooks in the existing preview checks."""
     from looper.agents.runtimes import dsh

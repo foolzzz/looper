@@ -291,6 +291,7 @@ class DshRuntime(RuntimeAdapter):
     capabilities = frozenset({Capability.RUN, Capability.MCP, Capability.RESIDENT_SESSION, Capability.RESUME})
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     auth_kinds = frozenset({AuthKind.API_KEY})
+    supported_models = frozenset(MODEL_MAP)
     isolation_id = HOME_LAYOUT_ID
     provider_env_owned = frozenset({KEY_ENV, *_DIRECTORY_VARS})
     run_input = False

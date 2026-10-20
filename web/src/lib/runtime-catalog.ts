@@ -17,6 +17,7 @@ export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
   codex: { kind: "CLI", title: "Codex CLI", install: "npm install -g @openai/codex" },
   omp: { kind: "CLI", title: "OMP CLI" },
   grok: { kind: "CLI", title: "Grok CLI" },
+  dsh: { kind: "CLI", title: "DSH CLI", install: "npm install -g @deepseek-ai/dsh@0.2.1-rc.2" },
 };
 
 /** How the operator checks a runtime's own login on the server's machine, and signs in again (`how`: with what). */

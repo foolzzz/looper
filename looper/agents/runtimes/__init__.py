@@ -236,6 +236,8 @@ class RuntimeAdapter(ABC):
     protocols: ClassVar[frozenset[ApiProtocol]]
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]
+    # Exact model ids when this runtime restricts them; None leaves the provider's catalog authoritative.
+    supported_models: ClassVar[frozenset[str] | None] = None
     isolation_id: ClassVar[str]  # names its isolation flags in each run's record
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.
