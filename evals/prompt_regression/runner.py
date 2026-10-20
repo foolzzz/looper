@@ -49,6 +49,7 @@ from typing import Any
 from looper import ops_config
 from looper.agents import operator_auth
 from looper.agents.project_execution import ProjectExecution
+from looper.agents.provider_presets import api_models
 
 from . import metrics
 from . import tasks as task_list
@@ -1010,7 +1011,7 @@ class ProviderChoice:
     """A provider an eval registers from a preset's Anthropic-format API, and the model its agent runs."""
 
     preset: str
-    model: str | None = None  # None: the preset's first model
+    model: str | None = None  # None: the first model of the API this provider is built from
     base_url: str | None = None  # None: the preset's (another, such as a logging proxy in front of it)
     api_key: str | None = field(default=None, repr=False)
 
@@ -1025,11 +1026,12 @@ def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
     api_entry = next((a for a in preset["apis"] if "anthropic-messages" in a["protocols"]), None)
     if api_entry is None:
         raise EvalError(f"preset {choice.preset!r} has no Anthropic-format API for Claude Code")
+    models = api_models(preset, api_entry)
     provider = api.post("/api/providers", {
         "name": preset["name"], "protocols": ["anthropic-messages"], "auth": "api_key", "api_key": choice.api_key,
-        "base_url": choice.base_url or api_entry["base_url"], "models": preset["models"], "env": preset["env"],
+        "base_url": choice.base_url or api_entry["base_url"], "models": models, "env": preset["env"],
     })["provider"]
-    model = choice.model or preset["models"][0]["name"]
+    model = choice.model or models[0]["name"]
     answer = api.post("/api/agent-profiles", {"name": f"claude-code/{preset['name']}/{model}",
                                               "runtime_id": "rt-claude-code", "provider_id": provider["provider_id"],
                                               "model": model})

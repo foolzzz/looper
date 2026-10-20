@@ -218,7 +218,9 @@ async def _deleting_profile(call: Call) -> str | None:
 async def _providers(call: Call) -> dict[str, Any]:
     arguments = call.arguments
     if arguments["action"] == "list":
-        return {"providers": [_provider_listed(p) for p in (await _registry())["providers"]]}
+        registry = await _registry()
+        return {"providers": [_provider_listed(p) for p in registry["providers"]],
+                "provider_presets": registry["provider_presets"]}
     _required(arguments, "register", "name", "protocols")
     data: dict[str, Any] = {"name": arguments["name"], "protocols": arguments["protocols"], "auth": "api_key",
                             "base_url": arguments.get("base_url"),
@@ -226,7 +228,7 @@ async def _providers(call: Call) -> dict[str, Any]:
                             "env": [{"key": key, "value": value} for key, value in (arguments.get("env") or {}).items()]}
     answer = await answered(profile_registry.create_provider(data))
     provider = _provider_listed(answer["provider"])
-    return {"provider": provider, "note": KEY_NOTE.format(name=provider["name"])}
+    return {"provider": provider, "warnings": answer["warnings"], "note": KEY_NOTE.format(name=provider["name"])}
 
 
 # --- looper_catalog ---

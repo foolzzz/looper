@@ -3354,7 +3354,7 @@ class PlannerAgent:
                                          autonomous=self._autonomous_turns(plan, command, system_prompt, launch),
                                          price=launch.price)
             except OSError as exc:
-                error = f"cannot start Claude Code: {exc}"
+                error = f"cannot start {launch.runtime.label}: {exc}"
                 recorder = self._recorder(plan, f"{brief}\n\n{message}" if brief else message, process)
                 await recorder.start()
                 await recorder.finish(output_text=None, result_event=None, error=error)
@@ -3464,7 +3464,10 @@ class PlannerAgent:
             elif over_cap:
                 error = over_cap
             elif result_event.get("is_error") or result_event.get("subtype") != "success":
-                error = f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})"
+                detail = process.launch.runtime.failure_detail(result_event, launch=process.launch,
+                                                               command=process.command)
+                error = (f"{label} turn did not succeed: {detail}"[:500] if detail else
+                         f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
             elif not final_text.strip():
                 error = f"{label} returned an empty reply"
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved

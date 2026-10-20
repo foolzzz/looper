@@ -235,6 +235,7 @@ def judge_result(
     is_verify: bool,
     started_at: datetime | None = None,
     runtime_label: str = "Claude Code",
+    failure_detail: str | None = None,
 ) -> dict[str, Any]:
     """Decide a step's outcome from Claude's stream-json ``result`` event.
 
@@ -246,10 +247,12 @@ def judge_result(
     """
     failed = _verify_failed if is_verify else _work_failed
     if result_event is None:
-        return failed(f"{runtime_label} ended without a result event")
+        return failed(f"{runtime_label} run did not succeed: {failure_detail}"[:500] if failure_detail else
+                      f"{runtime_label} ended without a result event")
     if result_event.get("is_error") or result_event.get("subtype") != "success":
         subtype = result_event.get("subtype") or "error"
-        return failed(budget_error(result_event) or f"{runtime_label} run did not succeed ({subtype})")
+        return failed(budget_error(result_event) or (f"{runtime_label} run did not succeed: {failure_detail}"[:500]
+                      if failure_detail else f"{runtime_label} run did not succeed ({subtype})"))
     text = str(result_event.get("result") or "")
     if is_verify:
         verdict = extract_report(text, "passed")
@@ -935,7 +938,7 @@ class WorkerPool:
                     wp.process = process
             except OSError as exc:
                 logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
-                error = f"Cannot start Claude Code: {exc}"
+                error = f"Cannot start {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error}
@@ -1099,8 +1102,10 @@ class WorkerPool:
                 and not result_event.get("is_error")
                 and result_event.get("subtype") == "success"
             )
+            detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=process.pid)
+                      if not result_ok else None)
             # A run stopped at its spend cap exits non-zero too; its result says why.
-            if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None:
+            if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None and not detail:
                 stderr = ""
                 if process.stderr:
                     stderr_bytes = await process.stderr.read()
@@ -1109,14 +1114,14 @@ class WorkerPool:
                 await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error, "stderr": stderr[:500]}
-            if return_code != 0:
+            if return_code != 0 and result_ok:
                 logger.warning(
                     "worker %s: Claude exited %d but produced a successful result; judging the result",
                     worker_id, return_code,
                 )
 
             outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
-                                              started_at=started_at, runtime_label=runtime.label)
+                                              started_at=started_at, runtime_label=runtime.label, failure_detail=detail)
             if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
                 places = []
                 for item in elsewhere:

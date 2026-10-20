@@ -3,6 +3,7 @@ import { act } from "react";
 import { type Root, createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetailRoute } from "@/pages/task-detail";
+import { TasksPage } from "@/pages/tasks";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -108,6 +109,35 @@ describe("TaskDetailRoute", () => {
     await act(async () => root.render(<TaskDetailRoute taskId="task-b" onBack={() => {}} />));
     expect(container.textContent).not.toContain("Build the A parser.");
     release();
+  });
+
+  it("opens a dashboard discussion link on its task and focuses the requested gate", async () => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    const closed = (step: string) => ({
+      step, step_id: step, state: "passed", waiting_on: null, topic: `Topic ${step}`,
+      agenda: [], summary: { decisions: [], assumptions: [], open: [] }, plan_change: null,
+      channel_posts: null, closed_at: null,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-a")) return Response.json({ ...detail("task-a"),
+        gates: [closed("choice"), closed("later")],
+        steps: [{ id: "choice", step_key: "choice", kind: "gate", step_index: 0, status: "verified", instruction: "Decide", depends_on: [] }],
+      });
+      if (url === "/api/tasks") return Response.json({ tasks: [], counts: {}, next_before: null });
+      return Response.json(answer(url));
+    }));
+    try {
+      await act(async () => root.render(<TasksPage sub="task-a?gate=choice" />));
+      await settle();
+      const target = container.querySelector<HTMLDetailsElement>("#gate-choice");
+      expect(target?.open).toBe(true);
+      expect(document.activeElement).toBe(target!.querySelector("summary"));
+      expect(scroll).toHaveBeenCalled();
+      expect(container.textContent).toContain("Build the A parser.");
+    } finally {
+      scroll.mockRestore();
+    }
   });
 
   it("clears the mounted room and reads from zero after Start over", async () => {

@@ -1216,10 +1216,11 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   alias stays unpriced, since the provider's environment may map it to a
   model of its own.
   Presets (`provider_presets.py`: GLM on BigModel and on Z.ai, DeepSeek, Kimi
-  on Moonshot China and international, and the local CLIProxyAPI) fill a new
-  provider from one of a vendor's APIs (Anthropic-format for Claude Code, or
-  OpenAI-format), its common models with their background model, and the
-  extra environment its Claude Code guide sets; the user adds the key.
+  on Moonshot China and international, OpenCode Zen, a local CLIProxyAPI and a
+  local Sub2API) fill a new provider from one of a vendor's APIs
+  (Anthropic-format for Claude Code, or OpenAI-format), its common models with
+  their background model, and the extra environment its Claude Code guide sets;
+  the user adds the key.
 - **Agent Profiles** (`agent_profiles`): a name, a runtime, a provider, a
   model, the effort its runs use (none: the runtime's own; no layer sets one)
   and, for a Claude Code runtime only, whether its runs have agent teams (`agent_teams`, on by default for Claude Code profiles;
