@@ -67,6 +67,31 @@ async def save_session(
     )
 
 
+async def other_live_task_has_session(
+    session_id: str, task_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> bool:
+    """Whether a live task other than ``task_id`` stores ``session_id`` on its Planner (``planner-<id>``).
+
+    Live is ``tasks.ACTIVE_STATUSES``. A restored schedule run uses this so two Planners do not continue one
+    native session after reset has cleared the schedule's holder.
+    """
+    from .tasks import ACTIVE_STATUSES
+
+    if not session_id:
+        return False
+    pool = pool or get_pool()
+    return bool(await pool.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM tasks t
+            JOIN agent_sessions s ON s.agent_id = 'planner-' || t.id
+            WHERE t.id <> $1 AND s.session_id = $2 AND t.status = ANY($3::text[])
+        )
+        """,
+        task_id, session_id, list(ACTIVE_STATUSES),
+    ))
+
+
 async def saved_sessions(*, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[tuple[str, str | None]]:
     """``(agent_id, runtime_type)`` of every agent with a saved session to resume."""
     pool = pool or get_pool()

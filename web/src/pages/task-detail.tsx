@@ -1979,6 +1979,9 @@ function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               <span className="text-xs text-muted-foreground">{taskId}</span>
               {task && taskStatusBadge(task.status)}
               {task && <ScheduledBadge task={task} />}
+              {task?.continues_schedule_session && (
+                <span className="text-xs text-muted-foreground">continues the schedule&apos;s Planner session</span>
+              )}
               {task && isActiveTask(task) && task.phase && task.phase !== task.status && phaseBadge(task.phase, true)}
               {task && (
                 <TaskProjectControl

@@ -1681,6 +1681,25 @@ END $$;
 -- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION CHECK (budget_usd > 0);
+-- One Planner conversation across non-parallel schedule runs. The holder prevents an in-flight run from
+-- writing a session back after reset; deleting its task leaves the conversation available for the next run.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedule_planner_session') THEN
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_id TEXT;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_totals JSONB NOT NULL DEFAULT '{}';
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_runtime TEXT;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_provider TEXT;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_profile TEXT;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS planner_session_since TIMESTAMPTZ;
+        ALTER TABLE tasks ADD COLUMN IF NOT EXISTS continues_schedule_session BOOLEAN NOT NULL DEFAULT false;
+        INSERT INTO schema_migrations (name) VALUES ('schedule_planner_session');
+    END IF;
+END $$;
+-- The storage label a task took when it claimed the schedule conversation (planner-schedule-<id>). NULL until
+-- then. Reset clears the schedule's holder and does not clear this: an in-flight run keeps its directory.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planner_session_label TEXT;
 -- Who is told when the task ends (agents/task_notice.py): chat_id, the Telegram chat id, the Lark sender's open_id
 -- or the Lark group's id; NULL for a task asked for elsewhere (the web chat, the dashboard). chat_kind says which:
 -- 'user', a person, told in a direct message, or 'chat', a chat; chat_mention is who the notice @-mentions there

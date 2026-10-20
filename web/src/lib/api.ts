@@ -49,6 +49,7 @@ export interface TaskInfo {
   /** The schedule that created the task; null for any other task (and once that schedule is deleted). */
   schedule_id: string | null;
   schedule_name: string | null;
+  continues_schedule_session: boolean;
 }
 
 /** The agents that work on one task; their runs make up its cost. */
@@ -871,6 +872,15 @@ export interface ScheduleRunInfo {
 }
 
 export interface ScheduleInfo {
+  planner_session: {
+    active: boolean;
+    runtime: string | null;
+    profile: string | null;
+    last_task_id: string | null;
+    last_task_title: string | null;
+    /** When the stored session began, in contrast to schedule edits. */
+    updated_at: string | null;
+  };
   schedule_id: string;
   project_id: string;
   project_name: string;
@@ -1062,6 +1072,11 @@ export async function updateSchedule(scheduleId: string, fields: ScheduleUpdate)
 export async function deleteSchedule(scheduleId: string): Promise<void> {
   await scheduleCall("DELETE", scheduleUrl(scheduleId), "delete schedule");
   notifyProjectsChanged();
+}
+
+/** Clear the stored Planner session. A run in progress keeps its own session without writing it back. */
+export function resetSchedulePlannerSession(scheduleId: string): Promise<{ cleared: boolean }> {
+  return scheduleCall("POST", `${scheduleUrl(scheduleId)}/reset-planner-session`, "reset Planner session");
 }
 
 /** Run now, also while disabled: the run is running, queued, skipped_overlap, or failed with its error. */
