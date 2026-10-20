@@ -211,13 +211,13 @@ def test_key_capture_exception_is_not_forwarded(monkeypatch, capsys):
 
 @pytest.mark.parametrize("command,selector,case", [
     ("task-basic", "--tasks", "single_step,dependent_steps"),
-    ("task-review", "--tasks", "reviewed_step"),
+    ("task-review", "--tasks", "reviewed_step,planner_plan_file"),
     ("manager", "--dialogs", "status"),
 ])
 def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, case, tmp_path):
     argv = launcher.eval_argv(command, PG, tmp_path)
     assert argv[:3] == [sys.executable, "-m", "evals.prompt_regression"]
-    for option, expected in {"--mode": "real", "--jobs": "1", "--reps": "2" if command == "task-basic" else "1",
+    for option, expected in {"--mode": "real", "--jobs": "1", "--reps": "1" if command == "manager" else "2",
                              "--max-budget-usd": "0.50", "--total-cap-usd": "4", selector: case,
                              "--timeout" if command == "manager" else "--task-timeout": "300"}.items():
         assert argv[argv.index(option) + 1] == expected
@@ -293,10 +293,69 @@ def test_basic_acceptance_accepts_observed_runtime_and_order():
     assert launcher.basic_evidence_gaps([basic_row()]) == []
 
 
-@pytest.mark.parametrize("problem", ["missing_sample", "duplicate_rep", "runtime", "contract", "timeout"])
-def test_basic_execute_rejects_incomplete_or_invalid_success_rows(problem, tmp_path, monkeypatch):
+def review_row(case="reviewed_step", rep=1):
+    row = basic_row(case, rep)
+    row["reviews"] = 1 if case == "reviewed_step" else 0
+    for run in row["runtime_evidence"]:
+        run.update(status="completed", report_valid=True, verdict_passed=None)
+    if case == "reviewed_step":
+        row["runtime_evidence"].append({**row["runtime_evidence"][-1], "role": "reviewer",
+                                       "verdict_passed": True})
+    return row
+
+
+@pytest.mark.parametrize("problem", ["missing_reviewer", "failed_reviewer", "invalid_verdict", "not_passed",
+                                   "planner_write", "missing_worker", "invalid_worker", "runtime", "contract"])
+def test_review_acceptance_requires_execution_and_parsed_verdict(problem):
+    row = review_row()
+    if problem == "missing_reviewer":
+        row["runtime_evidence"].pop()
+    elif problem == "failed_reviewer":
+        row["runtime_evidence"][-1]["status"] = "failed"
+    elif problem == "invalid_verdict":
+        row["runtime_evidence"][-1]["report_valid"] = False
+    elif problem == "not_passed":
+        row["runtime_evidence"][-1]["verdict_passed"] = False
+    elif problem == "planner_write":
+        row["planner_modified_files"] = 1
+    elif problem == "missing_worker":
+        row["runtime_evidence"].pop(1)
+    elif problem == "invalid_worker":
+        row["runtime_evidence"][1]["report_valid"] = False
+    elif problem == "runtime":
+        row["runtime_evidence"][-1]["runtime"] = "claude-code"
+    else:
+        row["contract_violations"]["total"] = 1
+    assert launcher.review_evidence_gaps([row])
+
+
+def test_review_acceptance_accepts_both_cases_and_explained_guard_denials():
+    rows = [review_row(case) for case in ("reviewed_step", "planner_plan_file")]
+    rows[-1]["planner_denials"] = 1
+    rows[-1]["runtime_evidence"][0]["permission_denials"] = [
+        {"id": "denied-write", "tool": "write"}]
+    assert launcher.review_evidence_gaps(rows) == []
+
+
+def test_review_execute_rejects_aggregate_pass_without_reviewer_evidence(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "ARTIFACTS", tmp_path)
-    rows = [basic_row(case, rep) for case in ("single_step", "dependent_steps") for rep in (1, 2)]
+    async def run(argv, **kwargs):
+        out_dir = Path(argv[argv.index("--out-dir") + 1])
+        rows = [basic_row(case, rep) for case in ("reviewed_step", "planner_plan_file") for rep in (1, 2)]
+        (out_dir / "test-real.json").write_text(json.dumps({"tasks": rows}))
+        return launcher.ProcessResult(0, b"", b"")
+    monkeypatch.setattr(launcher, "run_process", run)
+    summary, code = launcher.execute("task-review", PG, "synthetic-private-key", None)
+    assert code != 0 and summary["evidence_gaps"]
+    assert summary["effective_system_prompt_mode"] is None
+
+
+@pytest.mark.parametrize("command", ["task-basic", "task-review"])
+@pytest.mark.parametrize("problem", ["missing_sample", "duplicate_rep", "runtime", "contract", "timeout"])
+def test_execute_rejects_incomplete_or_invalid_success_rows(command, problem, tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "ARTIFACTS", tmp_path)
+    factory = review_row if command == "task-review" else basic_row
+    rows = [factory(case, rep) for case in launcher.CASES[command].split(",") for rep in (1, 2)]
     if problem == "missing_sample":
         rows.pop()
     elif problem == "duplicate_rep":
@@ -312,7 +371,7 @@ def test_basic_execute_rejects_incomplete_or_invalid_success_rows(problem, tmp_p
         (out_dir / "test-real.json").write_text(json.dumps({"tasks": rows}))
         return launcher.ProcessResult(0, b"", b"")
     monkeypatch.setattr(launcher, "run_process", run)
-    summary, code = launcher.execute("task-basic", PG, "synthetic-private-key", None)
+    summary, code = launcher.execute(command, PG, "synthetic-private-key", None)
     assert code != 0
     assert summary["status"] != "pass"
 
@@ -380,15 +439,15 @@ def test_execute_uses_only_eval_key_env_and_ignored_private_root(command, tmp_pa
         assert Path(env["TMPDIR"]).is_relative_to(out_dir)
         rows_key = "dialogs" if command == "manager" else "tasks"
         (out_dir / "test-real.json").write_text(json.dumps({rows_key: [
-            basic_row(case, rep)
+            (review_row if command == "task-review" else basic_row)(case, rep)
             for case in launcher.CASES[command].split(",")
-            for rep in range(1, 3 if command == "task-basic" else 2)], "total_cost_usd": 0.1}))
+            for rep in range(1, 2 if command == "manager" else 3)], "total_cost_usd": 0.1}))
         return launcher.ProcessResult(0, b"private eval output", b"private diagnostic")
     monkeypatch.setattr(launcher, "run_process", run)
     summary, code = launcher.execute(command, PG, "synthetic-private-key", tmp_path / "missing-baseline.json")
     assert code == 0
     assert summary["baseline"]["comparable"] is False
-    assert summary["outcomes"]["pass"] == (4 if command == "task-basic" else 1)
+    assert summary["outcomes"]["pass"] == (1 if command == "manager" else 4)
     for path in (tmp_path / "artifacts").rglob("*"):
         if path.is_file():
             assert "synthetic-private-key" not in path.read_text()

@@ -601,12 +601,30 @@ def task_metrics(
                 command.pop(0)
         finals = [row.get("event", row) for row in events.get(int(record["id"]), [])
                   if row.get("event", row).get("type") == "result"]
+        name = role(record)
+        text = result_text(events.get(int(record["id"]), []))
+        report_valid = None if name not in ("worker", "reviewer") or text is None else not report_violation(
+            text, is_verify=name == "reviewer")
+        verdict = extract_report(text, "passed") if name == "reviewer" and report_valid else None
+        tool_calls = []
+        for row in events.get(int(record["id"]), []):
+            event = row.get("event", row)
+            message = event.get("message")
+            if event.get("type") == "assistant" and isinstance(message, Mapping):
+                tool_calls.extend({"id": block.get("id"), "name": block.get("name")}
+                                  for block in message.get("content") or []
+                                  if isinstance(block, Mapping) and block.get("type") == "tool_use")
         runtime_evidence.append({
-            "role": role(record), "runtime": ((metadata.get("profile") or {}).get("runtime") or {}).get("type"),
+            "role": name, "runtime": ((metadata.get("profile") or {}).get("runtime") or {}).get("type"),
             "executable": Path(command[0]).name if command else None,
             "system_prompt_mode": metadata.get("system_prompt_mode"),
             "session_present": bool(record.get("session_id")),
             "root_usage_complete": finals[-1].get("root_usage_complete") if finals else None,
+            "status": record.get("status"), "report_valid": report_valid,
+            "verdict_passed": verdict.get("passed") if verdict else None,
+            "tool_calls": tool_calls,
+            "permission_denials": [{key: denial[key] for key in ("id", "tool") if key in denial}
+                                   for denial in metadata.get("permission_denials") or []],
         })
     return {
         "status": status,

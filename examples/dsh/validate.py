@@ -9,7 +9,7 @@
 eval 产物固定在 ignored evals/runs/dsh/；smoke 的临时根随服务清理，
 stdout 仅有脱敏汇总。smoke 严格检查 room consult，费用未知导致的拒绝不算通过。
 
-每次启动 jobs=1；task-basic 两 case 各 reps=2，其余 reps=1。
+每次启动 jobs=1；task-basic、task-review 各两 case、各 reps=2，manager reps=1。
 每 run $0.50 软上限、总观测 $4、任务/对话
 300 秒、外层 20 分钟（另有清理宽限）；不是硬账单上限。辅助费用 coverage
 未知。jobs=1 不执行 case budget，本入口不传它，也不承诺每 case $2。
@@ -50,7 +50,8 @@ from evals.prompt_regression import compare  # noqa: E402
 
 SPEC = Path(__file__).with_name("agent-spec.json")
 ARTIFACTS = ROOT / "evals" / "runs" / "dsh"
-CASES = {"task-basic": "single_step,dependent_steps", "task-review": "reviewed_step", "manager": "status"}
+CASES = {"task-basic": "single_step,dependent_steps", "task-review": "reviewed_step,planner_plan_file",
+         "manager": "status"}
 OUTER_TIMEOUT = 20 * 60
 ROLES = ("manager", "planner", "worker", "reviewer")
 STAGE_TIMEOUT = 300
@@ -195,7 +196,7 @@ def eval_argv(command: str, pg_url: str, out_dir: Path) -> list[str]:
     return [sys.executable, "-m", "evals.prompt_regression", "dialogs" if manager else "run",
             "--mode", "real", "--register-agent", str(SPEC), "--pg-url", pg_url,
             "--dialogs" if manager else "--tasks", CASES[command], "--jobs", "1", "--reps",
-            "2" if command == "task-basic" else "1",
+            "1" if manager else "2",
             "--max-budget-usd", f"{RUN_SOFT_CAP_USD:.2f}", "--total-cap-usd", str(TOTAL_OBSERVED_CAP_USD),
             "--timeout" if manager else "--task-timeout", str(STAGE_TIMEOUT), "--out-dir", str(out_dir)]
 
@@ -276,6 +277,23 @@ def basic_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return gaps
 
 
+def review_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gaps = basic_evidence_gaps(rows)
+    for row in rows:
+        workers = [run for run in row.get("runtime_evidence") or [] if run.get("role") == "worker"]
+        if not any(run.get("status") == "completed" and run.get("report_valid") is True for run in workers):
+            gaps.append({"id": row.get("id"), "rep": row.get("rep"),
+                         "reasons": ["缺少 Worker 实际完成且契约可解析的报告"]})
+        if row.get("id") != "reviewed_step":
+            continue
+        reviewers = [run for run in row.get("runtime_evidence") or [] if run.get("role") == "reviewer"]
+        if not any(run.get("status") == "completed" and run.get("report_valid") is True and
+                   run.get("verdict_passed") is True for run in reviewers):
+            gaps.append({"id": row.get("id"), "rep": row.get("rep"),
+                         "reasons": ["缺少 Reviewer 实际完成且契约可解析的通过报告"]})
+    return gaps
+
+
 def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple[dict[str, Any], int]:
     # Fixed ignored destination: callers cannot redirect real artifacts into tracked paths.
     ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -287,7 +305,7 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     # Do not inherit operator runtime/provider/ops configuration or credentials.
     env = isolated_env(home, temporary, key)
     cases = tuple(CASES[command].split(","))
-    reps = 2 if command == "task-basic" else 1
+    reps = 1 if command == "manager" else 2
     try:
         base = json.loads(baseline.read_text()) if baseline else None
     except (OSError, ValueError):
@@ -299,8 +317,9 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     run = json.loads(paths[0].read_text()) if len(paths) == 1 else {}
     summary = summarize(run, cases, reps=reps)
     summary["baseline"] = baseline_check
-    summary["evidence_gaps"] = basic_evidence_gaps(compare.rows(run)) if command == "task-basic" else []
-    if command == "task-basic":
+    evidence_checks = {"task-basic": basic_evidence_gaps, "task-review": review_evidence_gaps}
+    summary["evidence_gaps"] = evidence_checks[command](compare.rows(run)) if command in evidence_checks else []
+    if command in evidence_checks:
         summary["effective_system_prompt_mode"] = None if summary["evidence_gaps"] or not run.get("tasks") else "append"
     if summary["baseline"]["comparable"]:
         # The comparison stays private, including the input baseline's provenance.

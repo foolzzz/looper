@@ -425,7 +425,26 @@ def test_task_metrics_preserve_actual_runtime_and_unknown_usage(tmp_path):
     result = metrics.task_metrics(detail={"status": "completed"}, activity=[], records=[record],
         events={}, changes={}, work_dir=tmp_path, check_problem=None, expect={}, now=0)
     assert result["runtime_evidence"] == [{"role": "planner", "runtime": "dsh", "executable": "dsh",
-        "system_prompt_mode": "append", "session_present": True, "root_usage_complete": None}]
+        "system_prompt_mode": "append", "session_present": True, "root_usage_complete": None,
+        "status": "completed", "report_valid": None, "verdict_passed": None,
+        "tool_calls": [], "permission_denials": []}]
+
+
+@pytest.mark.parametrize("text,valid,passed", [('{"passed": true}', True, True),
+    ('{"passed": false}', True, False), ('{"passed": "yes"}', False, None), ('no verdict', False, None)])
+def test_task_metrics_preserve_reviewer_contract_and_tool_evidence(tmp_path, text, valid, passed):
+    record = _record(1, "reviewer-step")
+    record["metadata"]["permission_denials"] = [{"id": "denied", "tool": "write", "input": '{"path":"PLAN.md"}'}]
+    events = [{"event": {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "read-1", "name": "read", "input": {"path": "config.json"}}]}}},
+        *_result(text)]
+    result = metrics.task_metrics(detail={"status": "completed"}, activity=[], records=[record],
+        events={1: events}, changes={}, work_dir=tmp_path, check_problem=None, expect={}, now=0)
+    evidence = result["runtime_evidence"][0]
+    assert evidence["report_valid"] is valid
+    assert evidence["verdict_passed"] is passed
+    assert evidence["tool_calls"] == [{"id": "read-1", "name": "read"}]
+    assert evidence["permission_denials"] == [{"id": "denied", "tool": "write"}]
 
 
 @pytest.mark.parametrize("end,expected", [("2026-10-13T10:00:04+00:00", "verified"),
