@@ -554,6 +554,30 @@ def test_queued_command_is_not_dispatched_after_state_changes(
     asyncio.run(test())
 
 
+@pytest.mark.parametrize("status", [None, "stopped", "failed", "completed", "cancelled", "init", "waiting"])
+def test_timeout_notice_rechecks_task_status(monkeypatch: pytest.MonkeyPatch, status: str | None) -> None:
+    from looper.agents.message import MessageType
+
+    async def test() -> None:
+        task = {"status": status, "origin_channel_id": "channel-telegram", "chat_kind": "chat",
+                "chat_id": "chat-1", "title": "A task"}
+        monkeypatch.setattr(wait_service.db_tasks, "get_task", AsyncMock(return_value=task if status else None))
+        notice = AsyncMock()
+        monkeypatch.setattr(wait_service.db_waits, "set_notice", notice)
+        bus = AsyncMock()
+        service = wait_service.WaitService(bus=bus, has_planner=lambda _: False)
+        await service._notify_timeout({"task_id": "task-a", "step_id": "step-w1", "topic": "CI finishes"}, 60)
+        if status == "waiting":
+            bus.publish.assert_awaited_once()
+            assert bus.publish.await_args.args[0].message_type is MessageType.CHAT_NOTICE
+            notice.assert_awaited_once_with("step-w1", "sent")
+        else:
+            bus.publish.assert_not_awaited()
+            notice.assert_not_awaited()
+
+    asyncio.run(test())
+
+
 @pytest.mark.parametrize(("queued", "result", "earliest", "deadline", "moved_to"), [
     (True, CheckResult.READY, 60, 1200, "ready"),
     (True, CheckResult.NOT_READY, 1200, 60, "timed_out"),

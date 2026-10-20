@@ -330,6 +330,61 @@ def test_stopped_tasks_are_untouched_with_active_positive_control(
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("result", [waits.CheckResult.READY, waits.CheckResult.NOT_READY])
+def test_task_stopped_during_check_cannot_move_or_notify(
+    monkeypatch: pytest.MonkeyPatch, result: waits.CheckResult,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _open(pool, check=_check(), maximum=60)
+        await pool.execute("UPDATE tasks SET origin_channel_id = 'channel-telegram', "
+                           "chat_kind = 'chat', chat_id = 'chat-1' WHERE id = 'task-a'")
+        await pool.execute("UPDATE task_waits SET baseline = $1::jsonb WHERE task_id = 'task-a'",
+                           json.dumps({"head": "old-head", "comments": 0}))
+        checked = []
+
+        async def check(*args: Any, **kwargs: Any) -> Any:
+            checked.append(True)
+            await pool.execute("UPDATE tasks SET status = 'stopped' WHERE id = 'task-a'")
+            return result, "checked", "", {"resolution": "Ready.", "exit_code": 0}
+
+        monkeypatch.setattr(service, "run_github_pr", check)
+        bus = Bus()
+        assert await _loop(bus).run_once(clock=lambda: NOW + timedelta(seconds=60)) == 0
+        row = await _row()
+        assert checked == [True] and row["checks"] == 1
+        assert (row["state"], row["outcome"], row["notice"], row["resolution"]) == ("waiting", None, None, "")
+        assert not bus.messages and not await activity.list_activity("task-a")
+
+    _run(test, monkeypatch)
+
+
+def test_task_stopped_after_timeout_move_is_not_notified(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        for task_id in ("task-a", "task-control"):
+            await _open(pool, task_id=task_id, earliest=7200, maximum=3600)
+            await pool.execute("UPDATE tasks SET origin_channel_id = 'channel-telegram', "
+                               "chat_kind = 'chat', chat_id = $1 WHERE id = $1", task_id)
+        insert = activity.insert_activity
+
+        async def stop_before_notice(**kwargs: Any) -> Any:
+            inserted = await insert(**kwargs)
+            if kwargs["task_id"] == "task-a":
+                assert (await _row())["state"] == "timed_out"
+                await pool.execute("UPDATE tasks SET status = 'stopped' WHERE id = 'task-a'")
+            return inserted
+
+        monkeypatch.setattr(activity, "insert_activity", stop_before_notice)
+        bus = Bus()
+        loop = service.WaitService(bus=bus, has_planner=lambda _: False)
+        assert await loop.run_once(clock=lambda: NOW + timedelta(hours=1)) == 2
+        assert (await _row())["notice"] is None
+        assert (await _row("task-control"))["notice"] == "sent"
+        (notice,) = bus.messages
+        assert notice.message_type is MessageType.CHAT_NOTICE and notice.payload["chat"] == "task-control"
+
+    _run(test, monkeypatch)
+
+
 def test_no_planner_leaves_ready_in_database(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         await _open(pool, earliest=60)

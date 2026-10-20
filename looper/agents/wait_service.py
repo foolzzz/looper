@@ -513,7 +513,9 @@ class WaitService:
 
     async def _notify_timeout(self, row: Mapping[str, Any], seconds: int) -> None:
         task_id = row["task_id"]
-        task = await db_tasks.get_task(task_id) or {}
+        task = await db_tasks.get_task(task_id)
+        if task is None or task["status"] not in db_tasks.ACTIVE_STATUSES:
+            return
         channel, target = notify_channel(task.get("origin_channel_id")), NotifyTarget.from_columns(task)
         notice = "dashboard"
         if channel is not None and target is not None:

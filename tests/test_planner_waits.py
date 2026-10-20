@@ -615,6 +615,55 @@ def test_restart_preserves_wait_moves_after_loading_the_plan(
     drive(claude, _hold, scenario)
 
 
+@pytest.mark.parametrize("action", ["none", "replan"])
+def test_restart_resets_a_failed_wait_before_deciding_and_runs_its_dependents(
+    planner_claude: Any, agent_db: Any, action: str,
+) -> None:
+    restart = [reply({"reply": "try again", "action": action,
+                      **({"steps": [step("s2", "w1")]} if action == "replan" else {})})]
+    if action == "replan":
+        # w1 is pending again, so replacing pending steps must include it. Before the fix the first
+        # reply was accepted with w1 marked started, then dropped it and crashed resolving s2's dependency.
+        restart.append(reply({"reply": "keep the wait too", "action": "replan",
+                              "steps": [wait_step("w1"), step("s2", "w1")]}))
+    claude = planner_claude(plan(wait_step("w1"), step("s2", "w1")),
+                            _wait_reply("fail", reason="the check cannot succeed"), *restart, decide("accept"))
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.finished()
+        previous = dict(_stored_wait(agent_db, "w1"))
+        assert previous["state"] == "failed" and previous["closed_at"] is not None
+        assert not h.work_items
+        await h.planner.stop()
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        h.statuses.clear()
+        saved = agent_db.save_plan.await_count
+        await h.planner._restart_plan(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+            payload={"ended": "failed"}, correlation_id="corr-restart"))
+        reset = next(row for call in agent_db.save_plan.await_args_list[saved:]
+                     for row in call.kwargs.get("waits") or () if row["step_id"] == previous["step_id"])
+        assert reset["state"] == "pending" and reset["opened_at"] is None and reset["closed_at"] is None
+        stored = _stored_wait(agent_db, "w1")
+        assert stored["state"] == "waiting" and _stored_steps(agent_db)["w1"]["status"] == "waiting"
+        assert stored["closed_at"] is None and stored["failed_at"] is None and stored["failures"] == 0
+        assert stored["outcome"] is None and stored["resolution"] == "" and stored["extensions"] == 0
+        assert stored["opened_at"] > previous["opened_at"] and stored["spec"] == previous["spec"]
+        assert not h.work_items
+        _arm(agent_db, "w1", "ready", outcome="ready", resolution="Ready after restarting.")
+        await _wake(h)
+        final = await h.finished()
+        assert final.payload["status"] == "completed"
+
+    h = drive(claude, always(WORK_OK), scenario)
+    assert [item.payload["step_key"] for item in h.work_items] == ["s2"]
+    assert _stored_wait(agent_db, "w1")["state"] == "done"
+    assert _stored_steps(agent_db)["s2"]["status"] == "verified"
+
+
 def test_opening_a_command_wait_keeps_its_command_out_of_activity_and_journal(
     planner_claude: Any, agent_db: Any,
 ) -> None:

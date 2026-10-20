@@ -160,6 +160,30 @@ def test_check_record_and_move_only_apply_in_the_expected_state(monkeypatch: pyt
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("status", ["stopped", "failed", "completed", "cancelled", "init"])
+@pytest.mark.parametrize(("to", "outcome"), [("timed_out", None), ("ready", "ready"),
+                                            ("ready", "resumed"), ("cancel_requested", None)])
+def test_wait_moves_require_an_active_task(
+    monkeypatch: pytest.MonkeyPatch, status: str, to: str, outcome: str | None,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import tasks, waits
+
+        project = await _project(pool)
+        for task_id, task_status in (("inactive", status), ("active", "waiting")):
+            await _task(pool, task_id, task_status, project)
+            await _plan_with_wait(pool, task_id, f"step-{task_id}", state="waiting")
+        before = await waits.get("inactive", "w1", pool=pool)
+        assert await waits.move("step-inactive", to=to, outcome=outcome,
+                                resolution="late result", pool=pool) is None
+        assert await waits.get("inactive", "w1", pool=pool) == before
+        assert (await tasks.get_task("inactive", pool=pool))["status"] == status
+        moved = await waits.move("step-active", to=to, outcome=outcome, pool=pool)
+        assert moved is not None and (moved["state"], moved["outcome"]) == (to, outcome)
+
+    _run(test, monkeypatch)
+
+
 @pytest.mark.parametrize(("output", "expected"), [
     ("old" + "x" * 2048, "x" * 2048),
     ("等" * 1000, "\ufffd\ufffd" + "等" * 680),

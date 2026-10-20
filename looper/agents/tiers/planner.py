@@ -2602,7 +2602,7 @@ class PlannerAgent:
         entries = [entry for step in merged if (entry := self._accepted_entry(plan, step)) is not None]
         entries += [self._restart_entry(step) for step in unfinished]
         # A gate that waits for the user keeps waiting, with its discussion. An open wait keeps its state and
-        # deadline; a restart only clears the failed [WAIT] turns.
+        # deadline; a failed wait starts over. Failed [WAIT] turns are cleared below.
         again = [s for s in plan.steps
                  if s.gate is None and not (s.wait is not None and s.wait.state.open)
                  and s.status not in ("verified", "skipped") and (s.status != "pending" or s.started)]
@@ -2610,6 +2610,9 @@ class PlannerAgent:
             step.status, step.worker_id, step.reviewer_id = "pending", None, None
             step.review_stage, step.review_position = None, None
             step.started_at = None  # its next dispatch starts it again: the time the task was stopped does not count
+            if step.wait is not None:
+                # Its wait and step must agree that it has not started before the [RESTART] replan is checked.
+                step.wait = Wait(step.wait.spec)
         waiting = plan.waiting_gates()
         for step in waiting:
             assert step.gate is not None
