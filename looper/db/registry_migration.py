@@ -67,6 +67,9 @@ async def apply(conn: asyncpg.Connection) -> None:
         raise ValueError('registry conversion requires the schema transaction')
     await conn.execute('LOCK TABLE agent_runtimes, llm_providers, llm_provider_secrets, agent_profiles, '
                        'agent_sessions, schedules IN SHARE ROW EXCLUSIVE MODE')
+    # A dry-run may have cached SELECT * on this connection before expand
+    # added columns. asyncpg cannot retry an invalid plan inside this transaction.
+    await conn.reload_schema_state()
     result = plan(await _read_snapshot(conn))
     if not result.applicable:
         logger.error('registry conversion blocked: %s', json.dumps(result.report, sort_keys=True))

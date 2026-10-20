@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 import model_launch_parity as parity
+import agent_launch_parity as tiers
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -33,6 +34,42 @@ def pinned(runtime: str) -> dict[str, Any]:
     baseline = json.loads((FIXTURES / f"model_launch_parity_v2_{runtime}.json").read_text())
     assert baseline["source"]["revision"] == parity.CLAUDE_LEGACY_REVISION
     assert baseline["captures"].keys() == CASES[runtime].keys()
+    # Like the two older parity gates, account explicitly for the declared
+    # Manager model-tool contract change without refreshing the v2 fixtures.
+    def updated_prompt(text):
+        return tiers.model_registry_contract({"manager": {"system_prompt": text}})["manager"]["system_prompt"]
+
+    for case, records in baseline["captures"].items():
+        manager_launches = 2 if runtime in {"codex", "grok"} else 1
+        if runtime == "grok" and parity.GROK_CASES[case][0]:
+            manager_launches = 4  # refused ACP plus fallback on both turns
+        for record in records[:manager_launches]:
+            old_agent = record["config"].get("agent_md")
+            old_hash = hashlib.sha256(record["prompt"].encode()).hexdigest()
+            record["prompt"] = updated_prompt(record["prompt"])
+            new_hash = hashlib.sha256(record["prompt"].encode()).hexdigest()
+            for field in {"codex": ("agents_md",), "grok": ("agent_md", "acp_agent_md")}.get(runtime, ()):
+                if record["config"][field]:
+                    record["config"][field] = updated_prompt(record["config"][field])
+            if runtime == "codex":
+                record["config"]["toml"] = record["config"]["toml"].replace(
+                    f"instructions/{old_hash}.md", f"instructions/{new_hash}.md")
+            if runtime == "omp":
+                flag = "--system-prompt" if "--system-prompt" in record["argv"] else "--append-system-prompt"
+                at = record["argv"].index(flag) + 1
+                assert Path(record["argv"][at]).name == f"{old_hash}.md"
+                record["argv"][at] = str(Path(record["argv"][at]).with_name(f"{new_hash}.md"))
+            if runtime == "grok" and "--agent" in record["argv"]:
+                # The fallback's agent operand retains the content-addressed
+                # run home, even though HOME is the stable resident session.
+                # Pin its v2 address formula and verify the old address first.
+                def agent_home_hash(agent):
+                    named = f"grok-home/v1\n{record['config']['toml']}\0\0{record['login_target']}\0{agent}"
+                    return hashlib.sha256(named.replace("<root>", "/tmp/looper-grok-launch-parity-v2").encode()).hexdigest()
+                at = record["argv"].index("--agent") + 1
+                path = Path(record["argv"][at])
+                assert path.parent.name == agent_home_hash(old_agent)
+                record["argv"][at] = str(path.parent.with_name(agent_home_hash(record["config"]["agent_md"])) / path.name)
     return baseline["captures"]
 
 
