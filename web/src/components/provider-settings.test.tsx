@@ -88,4 +88,27 @@ it.each([
   expect(bodies[0].protocols).toEqual(api.protocols);
   expect(bodies[0].base_url).toBe(api.base_url);
   expect(bodies[0].env).toEqual(api.protocols.includes("anthropic-messages") ? preset.env : []);
+  expect(container.querySelector("form")).toBeNull();
+});
+
+it("shows a [1m] warning from the save and keeps the form open until it is read", async () => {
+  const warning = "models glm-5.3[1m] and glm-5.3-flash[1m] carry a context suffix: this is a Claude Code "
+    + "convention; other runtimes send these names verbatim to the API, which may reject them.";
+  vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.body) bodies.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({ provider: {}, warnings: [warning] }), { status: 200 });
+  }));
+  await act(async () => root.render(<ProvidersSection adding />));
+  await act(async () => container.querySelector("form")!.dispatchEvent(
+    new Event("submit", { bubbles: true, cancelable: true }),
+  ));
+  const status = container.querySelector('[role="status"]');
+  expect(status?.textContent).toContain("Saved, with a warning");
+  expect(status?.textContent).toContain("glm-5.3-flash[1m]");
+  expect(status?.textContent).toContain("Claude Code convention");
+  expect(container.querySelector('form[aria-label="Add a provider"]')).not.toBeNull();
+  const ok = [...container.querySelectorAll("button")].find((button) => button.textContent === "OK");
+  expect(ok).toBeTruthy();
+  await act(async () => ok!.click());
+  expect(container.querySelector("form")).toBeNull();
 });

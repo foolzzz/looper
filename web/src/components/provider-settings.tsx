@@ -206,6 +206,7 @@ function providerBody(draft: ProviderDraft, provider: Provider | null, registry:
 function ProviderForm({ provider, registry, onDone }: { provider: Provider | null; registry: Registry; onDone: () => void }) {
   const id = useId();
   const [draft, setDraft] = useState<ProviderDraft>(() => providerDraft(provider, registry));
+  const [warnings, setWarnings] = useState<string[]>([]);
   const action = useAction();
   const set = (change: Partial<ProviderDraft>) => setDraft((d) => ({ ...d, ...change }));
   const setModel = (index: number, change: Partial<ModelDraft>) =>
@@ -216,8 +217,15 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     const body = providerBody(draft, provider, registry);
-    const done = await action.run(() => (provider ? updateProvider(provider.provider_id, body) : createProvider(body)));
-    if (done) onDone();
+    let answer: { provider: Provider; warnings: string[] } | null = null;
+    const done = await action.run(async () => {
+      answer = provider ? await updateProvider(provider.provider_id, body) : await createProvider(body);
+    });
+    const result = answer as { provider: Provider; warnings: string[] } | null;
+    if (!done || !result) return;
+    // Saved. A warning (a [1m] name another runtime would send verbatim) stays until it is read.
+    if (result.warnings.length) setWarnings(result.warnings);
+    else onDone();
   };
 
   const [presetKey, setPresetKey] = useState("");
@@ -406,7 +414,18 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
         </p>
       </div>
 
-      <FormFooter error={action.error} busy={action.busy} submit={provider ? "Save" : "Add provider"} onCancel={onDone} />
+      {warnings.length > 0 && (
+        <div role="status" className="space-y-1 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+          <p className="font-medium">Saved, with a warning:</p>
+          {warnings.map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+          <Button type="button" size="sm" variant="outline" onClick={onDone}>OK</Button>
+        </div>
+      )}
+      {!warnings.length && (
+        <FormFooter error={action.error} busy={action.busy} submit={provider ? "Save" : "Add provider"} onCancel={onDone} />
+      )}
     </form>
   );
 }

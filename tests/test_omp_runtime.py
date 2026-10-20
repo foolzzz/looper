@@ -591,7 +591,7 @@ sys.stdin.read()
 def emit(event):
     print(json.dumps(event), flush=True)
 emit({'type': 'session', 'id': 'failed-session'})
-message = {'role': 'assistant', 'stopReason': 'error', 'content': []}
+message = {'role': 'assistant', 'stopReason': 'error', 'content': globals().get('CONTENT', [])}
 error = ERROR + '\nAuthorization: Bearer private-header-value\napi_key="private-field-value" ' + os.environ['LOOPER_PROVIDER_API_KEY']
 if SOURCE == 'event':
     message.update(errorStatus=400, errorMessage=error)
@@ -635,6 +635,47 @@ def test_planner_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.
             assert agent_db.finish_record.call_args.kwargs["error"] == reason
         finally:
             await planner._claude.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("source", ["event", "log"])
+@pytest.mark.parametrize("with_text", [False, True])
+def test_manager_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                           agent_db: Any, source: str, with_text: bool) -> None:
+    """An OMP provider error is the turn's failure, including when assistant text already arrived."""
+    from unittest.mock import AsyncMock
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    prefix = f"ERROR = {API_ERROR!r}\nSOURCE = {source!r}\n"
+    if with_text:
+        prefix += "CONTENT = [{'type': 'text', 'text': 'partial answer'}]\n"
+    executable = fake_claude(tmp_path / "omp", prefix + _FAILED_OMP)
+    launch = _launch(executable=executable, provider=_provider(api_key="opaque-provider-secret"))
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    manager._session_loaded, manager._clean_start = True, True
+    monkeypatch.setattr(manager, "_load_db_config", AsyncMock())
+    monkeypatch.setattr(manager, "_load_agent_settings", AsyncMock(return_value=launch.settings))
+    monkeypatch.setattr(manager, "_send_status", AsyncMock())
+
+    async def run() -> None:
+        try:
+            with pytest.raises(RuntimeError) as caught:
+                await asyncio.wait_for(manager._run_turn("hello", MessageEnvelope.create(
+                    source=channel_address("web"), target=MANAGER_ADDRESS,
+                    message_type=MessageType.USER_MESSAGE, payload={"text": "hello"})), 5)
+            reason = str(caught.value)
+            assert reason.startswith("OMP turn did not succeed: HTTP 400 " + API_ERROR)
+            assert len(reason) <= 500
+            assert "partial answer" not in reason
+            assert not any(secret in reason for secret in (
+                "opaque-provider-secret", "private-header-value", "private-field-value", "wrong run", "earlier error"))
+            recorded = agent_db.finish_record.call_args.kwargs
+            assert recorded["error"] == reason and recorded["status"] == "failed"
+            assert recorded["output_text"] == ("partial answer" if with_text else None)
+        finally:
+            await manager._claude.stop()
 
     asyncio.run(run())
 

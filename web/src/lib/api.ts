@@ -2657,11 +2657,14 @@ export function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
   return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "re-detect runtime");
 }
 
-export function createProvider(fields: ProviderFields): Promise<{ provider: Provider }> {
+export function createProvider(fields: ProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
   return registryCall("POST", "/providers", fields, "add provider");
 }
 
-export function updateProvider(providerId: string, fields: ProviderFields): Promise<{ provider: Provider }> {
+export function updateProvider(
+  providerId: string,
+  fields: ProviderFields,
+): Promise<{ provider: Provider; warnings: string[] }> {
   return registryCall("PUT", `/providers/${encodeURIComponent(providerId)}`, fields, "update provider");
 }
 

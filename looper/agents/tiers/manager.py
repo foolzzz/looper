@@ -810,13 +810,21 @@ class ManagerAgent:
             exited = result_event is None
             # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
             over_cap = launch.runtime.budget_error(result_event)
-            replied = not exited and not over_cap and bool(final_text)
+            # is_error fails the turn. Assistant text already streamed stays on the record; the chat gets
+            # failure_detail (an OMP HTTP 400, for example).
+            failed: str | None = None
+            if result_event is not None and not over_cap and result_event.get("is_error"):
+                detail = launch.runtime.failure_detail(result_event, launch=launch, command=command)
+                label = launch.runtime.label
+                failed = (f"{label} turn did not succeed: {detail}"[:500] if detail else
+                          f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
+            replied = failed is None and not exited and not over_cap and bool(final_text)
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
             # keeps what it spent.
             await recorder.finish(
                 output_text=final_text or None,
                 result_event=result_event,
-                error=over_cap or (None if replied else (
+                error=over_cap or failed or (None if replied else (
                     f"no reply (exit code {turn.exit_code})" if exited else "no reply"
                 )),
                 usage=turn.usage,
@@ -842,6 +850,8 @@ class ManagerAgent:
 
         if over_cap:
             raise RuntimeError(over_cap)
+        if failed:
+            raise RuntimeError(failed)
         if not replied:
             raise RuntimeError(
                 f"Claude Code 没有返回内容（退出码 {turn.exit_code}）" if exited else "Claude Code 没有返回内容"
