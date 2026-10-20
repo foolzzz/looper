@@ -63,10 +63,12 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from .profile_registry import (
-    BUILTIN_PROFILE, PRICE_FIELDS, AgentProfile, ResolvedAgentProfile, ResolvedModel, builtin_resolved_profile,
+    BUILTIN_PROFILE, PRICE_FIELDS, AgentProfile, ModelSpec, ResolvedAgentProfile, ResolvedModel,
+    builtin_resolved_profile,
 )
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
@@ -507,6 +509,8 @@ class AgentSettings:
     # Why the profile cannot run this role (its runtime and provider no longer pair, or the runtime lacks a
     # capability the role needs): the run fails with it rather than run another profile.
     profile_error: str | None = field(default=None, compare=False)
+    # Raw model settings for this run; effective fallback prices are never saved as overrides.
+    pricing_catalog: tuple[ModelSpec, ...] = ()
 
     @property
     def resolved_model(self) -> ResolvedModel:
@@ -747,6 +751,21 @@ async def load_agent_settings(
         settings, problem = await _with_api_key(settings)
     elif problem is None:
         problem = await _login_problem(settings.profile)
+    if (problem is None and isinstance(settings.profile, ResolvedAgentProfile)
+            and Launch(settings).cost_source is CostSource.PROVIDER_PRICE):
+        from ..db import profile_registry
+
+        selected = settings.resolved_model.model
+        try:
+            models = await profile_registry.list_models(provider_id=selected.provider_id)
+            catalog = tuple(ModelSpec.from_entry({name: row[name] for name in ModelSpec.__dataclass_fields__})
+                            for row in models if row["provider_id"] == selected.provider_id
+                            and row["protocol"] == selected.protocol.value)
+            settings = replace(settings, pricing_catalog=catalog)
+        except Exception as exc:
+            logger.warning("cannot read model prices for provider %s (%s)", selected.provider_id,
+                           type(exc).__name__)
+            problem = f"cannot read the run's model prices ({type(exc).__name__})"
     return replace(settings, profile_error=problem)
 
 
@@ -927,6 +946,8 @@ class Launch:
         effective = None if model is None else [
             model.model.name, model.model.protocol.value, model.model.context_window, model.model.efforts,
             model.model.background_model, model.endpoint.base_url, model.endpoint.use_runtime_default,
+            [[entry.id, entry.name, entry.catalog_order, *[getattr(entry, name) for name in PRICE_FIELDS]]
+             for entry in self.settings.pricing_catalog],
             # Resident sessions retain their pricer until restarted; refresh it for the next turn as well.
             [getattr(model.model, name) for name in PRICE_FIELDS],
         ]
@@ -942,12 +963,16 @@ class Launch:
         """Where the run's spend figure comes from with its provider (``RuntimeAdapter.cost_source``)."""
         return self.runtime.cost_source(self.profile.provider)
 
-    @property
+    @cached_property
     def price(self) -> Price | None:
         """What prices the run's tokens at its provider's prices; None when its runtime's own figure is used."""
         from .runtimes.pricing import pricer
 
-        return pricer(self.profile.provider) if self.cost_source is CostSource.PROVIDER_PRICE else None
+        if self.cost_source is not CostSource.PROVIDER_PRICE:
+            return None
+        if isinstance(self.profile, ResolvedAgentProfile):
+            return pricer(self.settings.resolved_model, catalog=self.settings.pricing_catalog)
+        return pricer(self.profile.provider)
 
     @property
     def env_sha256(self) -> str | None:
