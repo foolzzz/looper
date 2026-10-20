@@ -1174,8 +1174,15 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   safe preflight and the pending real-model acceptance. The CLI has no DSH
   flags: PATH discovery and existing Profile selection suffice. Dashboard,
   Telegram and Lark share the same Manager/runtime adapter; DSH channel checks
-  use stand-ins, with no real account sends. Real-model acceptance remains
-  pending.
+  use stand-ins, with no real account sends. Existing task eval artifacts cover
+  the four task cases at two repetitions each. Manager acceptance remains
+  pending: existing real dialog artifacts have four passing samples with
+  continuous Manager Sessions and successful MCP reads/create/start calls.
+  The acceptance checker now allows the newly started Planner to await its
+  first Session, while retaining dsh/append checks for every role. Rechecking
+  those artifacts finds no evidence gaps; a fresh run remains blocked at
+  process-tree preflight. Explicit run-token rotation, a comparable append
+  baseline and complete auxiliary billing remain unverified.
 - **Grok** (`looper/agents/runtimes/grok.py`, xAI's `grok` CLI, verified
   against Grok 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md))
   runs headless `grok --prompt-file /dev/stdin --output-format

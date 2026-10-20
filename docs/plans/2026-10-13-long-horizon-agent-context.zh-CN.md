@@ -761,7 +761,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 
 - **DSH 四角色运行时**（本分支实现，待真实验收，未标已交付）：Profile 支持 DeepSeek Messages、精确模型和 effort；private homes、逐轮 Session、append only、只读 guard、平台 MCP stdio 桥及 catalog 加载/省略见 [dsh RFC](../architecture/rfcs/dsh-runtime-v0.zh-CN.md)，不改变 Claude/OMP/pi。文档切片的定向离线回归为 75 passed、1 skipped（未配置 disposable PG），不等于四角色真实闭环通过；installed 包完整 bootstrap/resume/guard 验证未在本切片重跑，结果分级见 RFC §9。
-  [validate.py 的安全入口](../../evals/README.md#dsh-validation)提供无 key、无数据库连接的 preflight，以及待执行的 `task-basic`、`task-review`、`manager`、`smoke --real`；本地精确版本/help 探测通过，但完整 preflight 因 sandbox 禁止 `ps` 而失败。真实模型、API/DB 四角色与 consult 读回、两轮费用、有效 append 的 Claude/OMP 对照及辅助费用覆盖仍待验收。单并发不执行 case budget，root observed cost 不代表完整账单。CLI 无专属参数，Dashboard/Telegram/Lark 共用 adapter；DSH 渠道只用替身，未真发。更广的 reps=2 任务/对话集和 UI 浏览器验收仍需独立证据。
+  [validate.py 的安全入口](../../evals/README.md#dsh-validation)保留无 key、无数据库连接的 preflight。既有 smoke 已通过两任务、四角色、consult 和 API/DB 回读；`task-basic`、`task-review` 既有产物各 4 pass、无 fail/error/skipped。Manager 既有真实产物亦为 4 pass：MCP 读回、确认建任务/开始和同一 Session 连续三轮均有证据；修复已启动 Planner 尚无 Session 导致的误报后，回读 evidence gaps 为空，launcher 回归 116 passed、1 skipped（未配置 disposable PG）。本次指定真实命令仍因 sandbox 禁止进程树观察而 exit 2，显式 token 轮换真实验收保持待完成；root 用量未知比例 20%，观测金额未知。没有可比 append 基线，辅助费用仍未知；无 busy steer、append only 限制不变。CLI 无专属参数，Dashboard/Telegram/Lark 共用 adapter，未真发；本次未启动服务，UI 截图未取得。main/open PR 远端查询失败，本地 main 已分叉，pi 集成冲突尚未排除；不据此标为已交付。
 
 - **定时任务共用 Planner 会话**（本分支实现，待集成验证）：按会话 RFC 第 14 节，在一次性数据库、端口和 runtime root 上用真实 Claude（sonnet）验证首轮只在对话中记下的事实能在第二轮取回、重置后的第三轮不再记得；补相关 Planner haiku/opus 与 Manager haiku/opus xhigh 的定向真实评测。真实模型路径及评测尚未运行，替身验证不替代真实模型验证。
 

@@ -6,7 +6,7 @@
 
 在 Claude Code、Codex、Grok、OMP 旁新增 `dsh`（DeepSeek Harness），Manager、Planner、Worker、Reviewer 都可选择它。保留并行接入的 pi；不迁移已有 Profile，不改现有默认运行时。本文记录实现契约；能力说明见 [agent-system](../agent-system.md#runtimes-llm-providers-and-agent-profiles)，验收证据与缺口见 §9，实现不等于真实模型验收通过。
 
-文档切片已对照本地 `origin/main`（`822688981`），合并这几份文档中 provider 预设和管家工具的更新。远端 fetch 受共享 Git 元数据写权限限制，open PR 查询因网络不可用失败，**远端最新 main 与重复工作仍需要验证**；这不是已完成分支合并的声明。
+收尾对照本地 `origin/main`（`ba86f4500`）：当前分支与它分别有 21 / 48 个独有提交，尚未集成；本次包含未提交改动的逐文件三方文本预演仍发现 `looper/agents/tiers/manager.py` 冲突。对本地 `codex/pi-runtime` 的同样检查发现 11 个文件冲突，涉及 consult、room、runtime 注册、Manager、打包、测试及前端 catalog；尚未解决。本地 main 未见 pi runtime；远端 main 和 open PR 查询因网络不可用失败，**远端最新 main、重复工作与最终集成仍需要验证**；这不是已完成分支合并的声明。
 
 证据来自已安装 npm 包的 README、组成 patch 与发布的 JavaScript。下表路径均指对应版本的 npm 包内容；链接便于在其他机器定位同一文档，不依赖本机安装绝对路径。
 
@@ -191,14 +191,16 @@ CLI 的 serve/PATH 探测已泛化，无新专属参数。Telegram/Lark 与 Dash
 | 范围 | 结果 | 证据与限制 |
 |---|---|---|
 | runtime / launcher / consult / registry 回归 | **passed**：397 passed，85.77 秒，无 skipped | smoke 通过后，在新建数据库上运行 `tests/test_dsh_runtime.py tests/test_dsh_validation.py tests/test_room_consult.py tests/test_profile_registry_db.py`；数据库随后删除。新增健康检查、无 MCP consult、完整/缺失 usage、实际安装包请求计数与只读 guard、模型可见生命周期说明、审计 owner 回读回归；关键新增用例先确认修复前失败。 |
+| Manager 收尾定向回归 | **passed**：launcher 116 passed、1 skipped | 新增用例先复现已启动 Planner 尚无 Session 导致 Manager 误报，再修复检查范围；覆盖整条 launcher 汇总路径，仍拒绝 Manager 缺失/更换 Session、失败及任一角色非 dsh/append。skipped 是未配置 disposable PG 的真实 serve 回读；离线结果不证明真实 token 更新通过。 |
 | disposable serve/tiers/MCP 的 PG 集成 | **passed** | 独立数据库上的真实 serve/tiers/MCP 回归通过；新增断言逐条核对审计 command 中的 owner 与实际子进程 home。真实 smoke 另外完成两任务、四角色及 consult 的 API/DB 回读。 |
 | 规划阶段已记录的 installed 包检查 | **passed（既有记录，本切片未重跑 dump）** | 已安装版本和包文档/代码只读核对；临时私有 home 下 `--help`、`--version`、headless/acp `--dump-config` exit 0。配置 dump 不证明 bootstrap、MCP、resume 或模型可用。 |
 | installed 包离线探测 | **passed** | 本次 smoke 的 preflight 通过精确版本 `0.2.1-rc.2`、help、checkout 和进程树观察检查；此前 sandbox 拒绝 `ps` 的环境阻碍已解除。 |
 | installed 包离线 bootstrap / resume / guard | **passed（指定 runtime 套件内的范围）**；独立完整套件未重跑 | [test_dsh_runtime.py](../../../tests/test_dsh_runtime.py)的实际安装包回归验证 guard、恢复和无 MCP consult：一次源请求加三次 consult root 请求，计费 33 input / 15 output token，无额外网络调用；源 Session 不变。未完整重跑 [test_dsh_installed.py](../../../tests/test_dsh_installed.py)，不宣称其全部案例通过。 |
 | 文档命令 help 与 preflight 负例 | **passed（既有记录；launcher 回归亦通过）**：6 个 help exit 0、缺 URL exit 2 | 顶层及 `preflight/task-basic/task-review/manager/smoke` 的 help 均通过；缺 disposable URL 被拒且 `real_validation=untested`。本次真实 smoke 也已通过完整 preflight，未绕过进程树检查。 |
 | 真实 `smoke` | **passed** | `status=pass`、`tasks=2`、`manager_turns=2`、`database_readback=true`、`outer_timeout=false`；root 观测金额 $0.0209028。阶段 300 秒、外层 20 分钟均未提高；费用辅助覆盖仍未知。 |
-| 真实 `task-basic` | **blocked，4 个样本仍为 gap** | 验收入口已修正为 `single_step,dependent_steps` 各 reps=2，并检查每角色实际 dsh 启动、有效 append、Session、契约违规、Planner 写文件与 API 依赖运行时间。新增负例先失败，修复后相关离线定向检查 79 passed；实际命令在进程树观察 preflight 被执行环境拒绝，exit 2，未进入 key 捕获、PG 或模型调用，不能记 pass。已有 Claude baseline 缺有效 append 证据，未修改 baseline 或提高预算。 |
-| 真实 `task-review` / `manager` 与完整评测 | **untested，待验收** | 已通过的四角色/consult smoke 不覆盖 §9 第 6 项更广的 reps=2 集合；这些入口及有效 append 的 Claude/OMP 对照仍待验收，不能据 smoke 宣称完整交付。 |
+| 真实 `task-basic` | **passed（既有产物回读，本切片未重跑）**：4 pass / 0 fail / 0 error / 0 skipped | `single_step,dependent_steps` 各 reps=2；每角色 dsh/append/Session、契约、Planner 写入和依赖顺序的 evidence gaps 为空。产物的金额汇总为零，但 root token 非零，不能把它当免费或完整费用证据；有效 append 基线仍缺失。 |
+| 真实 `task-review` | **passed（既有产物回读，本切片未重跑）**：4 pass / 0 fail / 0 error / 0 skipped | `reviewed_step,planner_plan_file` 各 reps=2；Worker 报告、独立 Reviewer 通过及 Planner 不写文件的检查通过。只读 guard 拒绝有记录；辅助费用和基线可比性仍有缺口。 |
+| 真实 `manager` 与完整评测 | **既有产物回读：4 pass / 0 fail / 0 error / 0 skipped；本次重新运行 blocked，尚未交付** | `status,confirm_create_start` 各 reps=2；status 成功 MCP 读回，确认建任务/开始工具操作成功，建任务对话 Manager 三轮均 completed 且同一 Session。原入口误将刚启动且 Session 尚空的 Planner 判为 Manager 证据缺失，修复后回读 evidence gaps 为空；全部运行的 root 用量未知比例 20%，观测金额仍未知。指定真实命令本次仍在进程树 preflight 被 sandbox 拒绝（exit 2），未调用模型；显式 token 轮换真实验收仍待完成。金额软上限仍为本卡独立 $4，未提额。 |
 | UI 浏览器、真实渠道和费用完整性 | **untested，待验收** | Dashboard/Telegram/Lark 共用 adapter；渠道仅替身，未真发。浏览器截图/build 本切片未重跑；有效 append 的 Claude/OMP 对照、官方 reader 与 root observed cost 的真实对账、summary/search/child/consult 费用覆盖均未知。 |
 
 排障时实际复现了任务超时、consult 启动/费用拒绝及审计回读失败；修复后上述完整 smoke 通过。原始阻塞是依赖 Claude 的健康检查误重启并取消 Reviewer；后续发现并修复无 MCP consult、受限 consult 计费、Worker 等待未来 Reviewer 的循环和审计 command 的 owner 不符。官方 Session reader 仍为 unavailable（9 个 owner 不可读），未宣称完整费用对账通过；其他未执行范围仍保持 untested。CLI 无专属参数，Dashboard、Telegram、Lark 的共享入口无需新增渠道参数或发送逻辑。

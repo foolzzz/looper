@@ -191,7 +191,7 @@ def test_empty_failed_or_noisy_key_capture_is_private(stdout, code, timed_out, m
 def test_key_is_captured_only_in_memory(monkeypatch, capsys):
     async def run(argv, **kwargs):
         assert argv == ["zsh", "-ic", 'printf %s "$DEEPSEEK_API_KEY"']
-        assert kwargs["timeout"] == 10
+        assert kwargs["timeout"] == launcher.KEY_CAPTURE_TIMEOUT == 30
         return launcher.ProcessResult(0, b"synthetic-private-key", b"ignored startup diagnostic", False)
     monkeypatch.setattr(launcher, "run_process", run)
     assert launcher.read_key() == "synthetic-private-key"
@@ -212,12 +212,12 @@ def test_key_capture_exception_is_not_forwarded(monkeypatch, capsys):
 @pytest.mark.parametrize("command,selector,case", [
     ("task-basic", "--tasks", "single_step,dependent_steps"),
     ("task-review", "--tasks", "reviewed_step,planner_plan_file"),
-    ("manager", "--dialogs", "status"),
+    ("manager", "--dialogs", "status,confirm_create_start"),
 ])
 def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, case, tmp_path):
     argv = launcher.eval_argv(command, PG, tmp_path)
     assert argv[:3] == [sys.executable, "-m", "evals.prompt_regression"]
-    for option, expected in {"--mode": "real", "--jobs": "1", "--reps": "1" if command == "manager" else "2",
+    for option, expected in {"--mode": "real", "--jobs": "1", "--reps": "2",
                              "--max-budget-usd": "0.50", "--total-cap-usd": "4", selector: case,
                              "--timeout" if command == "manager" else "--task-timeout": "300"}.items():
         assert argv[argv.index(option) + 1] == expected
@@ -233,6 +233,123 @@ def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, cas
     assert "api_key" not in spec["provider"]
     assert spec["agent"]["model"] == "deepseek-flash"
     assert spec["agent"]["effort"] == "high"
+
+
+def manager_row(case="confirm_create_start", rep=1):
+    return {"id": case, "rep": rep, "outcome": "pass", "turns": [
+        {"calls": ["looper_tasks:ok"]} if case == "status" else {"calls": []},
+        *([] if case == "status" else [{"calls": ["looper_task_create:ok"]},
+                                      {"calls": ["looper_task_control:ok"]}])],
+        "runtime_evidence": [{"role": "manager", "runtime": "dsh", "executable": "dsh",
+            "system_prompt_mode": "append", "session_id": "one-session", "status": "completed",
+            "root_usage_complete": True, "tokens": {"input_tokens": 10, "output_tokens": 2},
+            "observed_cost_usd": .01} for _ in range(1 if case == "status" else 3)]}
+
+
+@pytest.mark.parametrize("problem", ["none", "missing", "runtime", "session", "missing_session", "mode", "mcp", "failed"])
+def test_manager_acceptance_requires_runtime_session_and_mcp_evidence(problem):
+    row = manager_row()
+    if problem == "missing":
+        row["runtime_evidence"].clear()
+    elif problem == "runtime":
+        row["runtime_evidence"][0]["runtime"] = "claude-code"
+    elif problem == "session":
+        row["runtime_evidence"][1]["session_id"] = "new-session"
+    elif problem == "missing_session":
+        row["runtime_evidence"][1]["session_id"] = None
+    elif problem == "mode":
+        row["runtime_evidence"][0]["system_prompt_mode"] = "replace"
+    elif problem == "mcp":
+        row["turns"][1]["calls"] = []
+    elif problem == "failed":
+        row["runtime_evidence"][0]["status"] = "failed"
+    assert bool(launcher.manager_evidence_gaps([row])) is (problem != "none")
+
+
+@pytest.mark.parametrize("problem", ["none", "runtime", "executable", "mode"])
+def test_manager_acceptance_allows_started_planner_without_session(problem):
+    row = manager_row()
+    planner = {"role": "planner", "runtime": "dsh", "executable": "dsh",
+               "system_prompt_mode": "append", "session_id": None, "status": "running",
+               "root_usage_complete": None, "observed_cost_usd": None,
+               "tokens": {"input_tokens": None, "output_tokens": None}}
+    if problem == "runtime":
+        planner["runtime"] = "claude-code"
+    elif problem == "executable":
+        planner["executable"] = "claude"
+    elif problem == "mode":
+        planner["system_prompt_mode"] = "replace"
+    row["runtime_evidence"].append(planner)
+    assert bool(launcher.manager_evidence_gaps([row])) is (problem != "none")
+
+
+def test_manager_execute_accepts_completed_dialog_with_started_planner(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "ARTIFACTS", tmp_path)
+
+    async def run(argv, **kwargs):
+        out_dir = Path(argv[argv.index("--out-dir") + 1])
+        rows = [manager_row(case, rep) for case in ("status", "confirm_create_start") for rep in (1, 2)]
+        for row in rows:
+            if row["id"] == "confirm_create_start":
+                row["runtime_evidence"].append({"role": "planner", "runtime": "dsh", "executable": "dsh",
+                    "system_prompt_mode": "append", "session_id": None, "status": "running",
+                    "root_usage_complete": None, "observed_cost_usd": None})
+        (out_dir / "test-real.json").write_text(json.dumps({"dialogs": rows}))
+        return launcher.ProcessResult(0, b"", b"")
+
+    monkeypatch.setattr(launcher, "run_process", run)
+    summary, code = launcher.execute("manager", PG, "synthetic-private-key", None)
+    assert code == 0 and summary["status"] == "pass"
+    assert summary["evidence_gaps"] == []
+    assert summary["effective_system_prompt_mode"] == "append"
+    assert summary["outcomes"] == {"pass": 4, "fail": 0, "error": 0, "skipped": 0, "untested": 0}
+    assert summary["root_usage_unknown_fraction"] == .2
+
+
+def test_manager_execute_does_not_accept_dialog_success_without_runtime_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "ARTIFACTS", tmp_path)
+    async def run(argv, **kwargs):
+        out_dir = Path(argv[argv.index("--out-dir") + 1])
+        rows = [manager_row(case, rep) for case in ("status", "confirm_create_start") for rep in (1, 2)]
+        rows[0]["runtime_evidence"] = []
+        (out_dir / "test-real.json").write_text(json.dumps({"dialogs": rows}))
+        return launcher.ProcessResult(0, b"", b"")
+    monkeypatch.setattr(launcher, "run_process", run)
+    summary, code = launcher.execute("manager", PG, "synthetic-private-key", None)
+    assert code != 0 and summary["evidence_gaps"]
+    assert summary["effective_system_prompt_mode"] is None
+
+
+def test_dialog_runtime_readback_keeps_unknown_usage_and_omits_private_command():
+    from evals.prompt_regression import dialogs
+
+    class Api:
+        def get(self, path, **kwargs):
+            if path == "/api/llm-records":
+                return {"records": [{"id": 1}] if not kwargs.get("offset") else []}
+            if path.endswith("/events"):
+                return {"events": [{"seq": 1, "event": {"type": "result", "observed_cost_usd": .02,
+                                                        "root_usage_complete": False}}]}
+            return {"record": {"id": 1, "agent_id": "manager", "session_id": "continued",
+                "status": "completed", "input_tokens": 10, "output_tokens": None,
+                "metadata": {"command": ["env", "PRIVATE=synthetic-secret", "/bin/dsh"],
+                    "system_prompt_mode": "append", "profile": {"runtime": {"type": "dsh"}}}}}
+
+    rows = dialogs.runtime_evidence(Api())
+    assert rows[0]["session_id"] == "continued"
+    assert rows[0]["executable"] == "dsh"
+    assert rows[0]["tokens"]["output_tokens"] is None
+    assert rows[0]["root_usage_complete"] is False
+    assert rows[0]["observed_cost_usd"] == .02
+    assert "synthetic-secret" not in json.dumps(rows)
+
+
+def test_manager_summary_preserves_unknown_usage_ratio_and_observed_spend():
+    rows = [manager_row("status", rep) for rep in (1, 2)]
+    rows[1]["runtime_evidence"][0]["root_usage_complete"] = False
+    summary = launcher.summarize({"dialogs": rows, "total_cost_usd": 0}, ("status",), reps=2)
+    assert summary["root_usage_unknown_fraction"] == .5
+    assert summary["observed_cost_usd"] == .02
 
 
 def test_basic_summary_keeps_missing_repetitions_as_gaps():
@@ -439,15 +556,15 @@ def test_execute_uses_only_eval_key_env_and_ignored_private_root(command, tmp_pa
         assert Path(env["TMPDIR"]).is_relative_to(out_dir)
         rows_key = "dialogs" if command == "manager" else "tasks"
         (out_dir / "test-real.json").write_text(json.dumps({rows_key: [
-            (review_row if command == "task-review" else basic_row)(case, rep)
+            (manager_row if command == "manager" else review_row if command == "task-review" else basic_row)(case, rep)
             for case in launcher.CASES[command].split(",")
-            for rep in range(1, 2 if command == "manager" else 3)], "total_cost_usd": 0.1}))
+            for rep in (1, 2)], "total_cost_usd": 0.1}))
         return launcher.ProcessResult(0, b"private eval output", b"private diagnostic")
     monkeypatch.setattr(launcher, "run_process", run)
     summary, code = launcher.execute(command, PG, "synthetic-private-key", tmp_path / "missing-baseline.json")
     assert code == 0
     assert summary["baseline"]["comparable"] is False
-    assert summary["outcomes"]["pass"] == (1 if command == "manager" else 4)
+    assert summary["outcomes"]["pass"] == 4
     for path in (tmp_path / "artifacts").rglob("*"):
         if path.is_file():
             assert "synthetic-private-key" not in path.read_text()

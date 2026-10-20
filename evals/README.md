@@ -309,8 +309,12 @@ external channels and starts its own server away from 8767. It checks two
 Manager turns, two tasks, all four roles, room consults and API/DB readback.
 Channel stand-ins do not establish Telegram/Lark delivery to real accounts.
 
-The eval commands select `single_step`, `reviewed_step` and Manager `status`,
-respectively, each at `jobs=1`, `reps=1`. Each invocation sets a $0.50 per-run
+The eval commands select `single_step,dependent_steps`,
+`reviewed_step,planner_plan_file` and Manager `status,confirm_create_start`,
+respectively, each at `jobs=1`, `reps=2`. Manager results include actual launch,
+Session and root usage readback plus the existing per-turn tool audit. Missing
+evidence cannot establish acceptance; repeated MCP success alone does not
+prove a changed run token was applied. Each invocation sets a $0.50 per-run
 soft cap, a $4 total observed-spend cap, 300 seconds per task/dialog (per stage
 for smoke), and 20 minutes outside the workflow plus cleanup grace. With one
 job, **`--case-budget-usd` is not enforced**; the launcher does not pass it or

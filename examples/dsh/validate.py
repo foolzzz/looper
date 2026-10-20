@@ -9,7 +9,7 @@
 eval 产物固定在 ignored evals/runs/dsh/；smoke 的临时根随服务清理，
 stdout 仅有脱敏汇总。smoke 严格检查 room consult，费用未知导致的拒绝不算通过。
 
-每次启动 jobs=1；task-basic、task-review 各两 case、各 reps=2，manager reps=1。
+每次启动 jobs=1；task-basic、task-review、manager 各两 case、各 reps=2。
 每 run $0.50 软上限、总观测 $4、任务/对话
 300 秒、外层 20 分钟（另有清理宽限）；不是硬账单上限。辅助费用 coverage
 未知。jobs=1 不执行 case budget，本入口不传它，也不承诺每 case $2。
@@ -51,9 +51,10 @@ from evals.prompt_regression import compare  # noqa: E402
 SPEC = Path(__file__).with_name("agent-spec.json")
 ARTIFACTS = ROOT / "evals" / "runs" / "dsh"
 CASES = {"task-basic": "single_step,dependent_steps", "task-review": "reviewed_step,planner_plan_file",
-         "manager": "status"}
+         "manager": "status,confirm_create_start"}
 OUTER_TIMEOUT = 20 * 60
 ROLES = ("manager", "planner", "worker", "reviewer")
+KEY_CAPTURE_TIMEOUT = 30  # an interactive zsh can take ~10 s to start on a loaded machine
 STAGE_TIMEOUT = 300
 RUN_SOFT_CAP_USD = .50
 TOTAL_OBSERVED_CAP_USD = 4
@@ -181,7 +182,7 @@ def preflight(pg_url: str | None) -> dict[str, Any]:
 def read_key() -> str:
     # Never check=True, log CompletedProcess, or expose the exception's captured output.
     try:
-        result = asyncio.run(run_process(["zsh", "-ic", 'printf %s "$DEEPSEEK_API_KEY"'], timeout=10,
+        result = asyncio.run(run_process(["zsh", "-ic", 'printf %s "$DEEPSEEK_API_KEY"'], timeout=KEY_CAPTURE_TIMEOUT,
                                          env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")}))
         key = result.stdout.decode("utf-8").strip()
         if result.returncode or result.timed_out or not key or len(key) > 512 or any(c.isspace() for c in key):
@@ -196,7 +197,7 @@ def eval_argv(command: str, pg_url: str, out_dir: Path) -> list[str]:
     return [sys.executable, "-m", "evals.prompt_regression", "dialogs" if manager else "run",
             "--mode", "real", "--register-agent", str(SPEC), "--pg-url", pg_url,
             "--dialogs" if manager else "--tasks", CASES[command], "--jobs", "1", "--reps",
-            "1" if manager else "2",
+            "2",
             "--max-budget-usd", f"{RUN_SOFT_CAP_USD:.2f}", "--total-cap-usd", str(TOTAL_OBSERVED_CAP_USD),
             "--timeout" if manager else "--task-timeout", str(STAGE_TIMEOUT), "--out-dir", str(out_dir)]
 
@@ -239,7 +240,15 @@ def summarize(run: dict[str, Any], cases: tuple[str, ...], *, reps: int = 1) -> 
     cost = run.get("total_cost_usd")
     if not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
         cost = None
+    evidence = [record for row in rows for record in row.get("runtime_evidence") or []]
+    if "dialogs" in run:
+        observed = [record.get("observed_cost_usd") for record in evidence
+                    if type(record.get("observed_cost_usd")) in (int, float) and
+                    math.isfinite(record["observed_cost_usd"]) and record["observed_cost_usd"] >= 0]
+        cost = sum(observed) if observed else None
     return {"outcomes": outcomes, "cases": per_case, "sample_gaps": sample_gaps,
+            "root_usage_unknown_fraction": (sum(record.get("root_usage_complete") is not True
+                                                 for record in evidence) / len(evidence)) if evidence else None,
             "observed_cost_usd": cost, "aborted": bool(run.get("aborted")),
             "per_run_soft_cap_usd": RUN_SOFT_CAP_USD, "total_observed_cap_usd": TOTAL_OBSERVED_CAP_USD,
             "auxiliary_cost_coverage": "unknown", "hard_billing_cap": False,
@@ -294,6 +303,33 @@ def review_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return gaps
 
 
+def manager_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gaps = []
+    for row in rows:
+        reasons = []
+        evidence = row.get("runtime_evidence") or []
+        managers = [run for run in evidence if run.get("role") == "manager"]
+        expected = 1 if row.get("id") == "status" else 3
+        # Starting the task can leave its Planner awaiting its first result/Session.
+        if len(managers) != expected or any(
+            run.get("runtime") != "dsh" or run.get("executable") != "dsh" or
+            run.get("system_prompt_mode") != "append" for run in evidence
+        ) or any(run.get("status") != "completed" or not run.get("session_id") for run in managers):
+            reasons.append("缺少每轮实际 dsh/append/Session 成功证据")
+        if managers and len({run.get("session_id") for run in managers}) != 1:
+            reasons.append("Manager 对话未续接同一 Session")
+        turns = row.get("turns") or []
+        if row.get("id") == "status":
+            if not turns or not any(call.endswith(":ok") for call in turns[0].get("calls", [])):
+                reasons.append("status 缺少成功 MCP 读回")
+        elif len(turns) != 3 or "looper_task_create:ok" not in turns[1].get("calls", []) or \
+                "looper_task_control:ok" not in turns[2].get("calls", []):
+            reasons.append("确认建任务或开始缺少成功工具操作证据")
+        if reasons:
+            gaps.append({"id": row.get("id"), "rep": row.get("rep"), "reasons": reasons})
+    return gaps
+
+
 def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple[dict[str, Any], int]:
     # Fixed ignored destination: callers cannot redirect real artifacts into tracked paths.
     ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -305,7 +341,7 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     # Do not inherit operator runtime/provider/ops configuration or credentials.
     env = isolated_env(home, temporary, key)
     cases = tuple(CASES[command].split(","))
-    reps = 1 if command == "manager" else 2
+    reps = 2
     try:
         base = json.loads(baseline.read_text()) if baseline else None
     except (OSError, ValueError):
@@ -317,10 +353,11 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     run = json.loads(paths[0].read_text()) if len(paths) == 1 else {}
     summary = summarize(run, cases, reps=reps)
     summary["baseline"] = baseline_check
-    evidence_checks = {"task-basic": basic_evidence_gaps, "task-review": review_evidence_gaps}
+    evidence_checks = {"task-basic": basic_evidence_gaps, "task-review": review_evidence_gaps,
+                       "manager": manager_evidence_gaps}
     summary["evidence_gaps"] = evidence_checks[command](compare.rows(run)) if command in evidence_checks else []
     if command in evidence_checks:
-        summary["effective_system_prompt_mode"] = None if summary["evidence_gaps"] or not run.get("tasks") else "append"
+        summary["effective_system_prompt_mode"] = None if summary["evidence_gaps"] or not compare.rows(run) else "append"
     if summary["baseline"]["comparable"]:
         # The comparison stays private, including the input baseline's provenance.
         (out_dir / "comparison.md").write_text(compare.markdown(run, base), encoding="utf-8")
