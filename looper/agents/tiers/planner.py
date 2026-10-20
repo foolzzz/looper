@@ -1221,7 +1221,7 @@ class PlannerAgent:
         wait.opened_at, wait.due_at, wait.deadline_at, wait.next_check_at = (
             opened_at, due_at, deadline_at, next_check_at)
         step.status = wait.state.step_status
-        text = describe(wait.spec, effective_every(wait.spec, waits.limits()))
+        text = describe(wait.spec, effective_every(wait.spec, waits.limits()), include_command=False)
         entry = JournalEntry(step.step_id, step.label, journal.clip(
             f"wait opened: {wait.topic} ({text})", journal.SUMMARY_MAX_CHARS),
             kind=JournalKind.WAIT_OPENED)
@@ -2611,9 +2611,11 @@ class PlannerAgent:
         for step in open_waits:
             assert step.wait is not None
             step.wait.failures, step.wait.failed_at = 0, None
+        # The loop or the user may have moved a wait since _load_plan; never replace that transition.
         await self._save(plan, *merged, *again, *waiting, *open_waits, plan_row=True, entries=entries, gate_messages=[
             self._looper_message(step, MessageKind.RESUMED, "The task was restarted; this gate still waits for you.")
-            for step in waiting])
+            for step in waiting], expect={step.step_id: [step.wait.state.value] for step in open_waits
+                                         if step.wait is not None})
         await update_task_phase(self._task_id, "executing")
         kept = sum(1 for s in plan.steps if s.status == "verified")
         await self._activity("phase", f"Task restarted from its plan: {kept} accepted step(s) kept"

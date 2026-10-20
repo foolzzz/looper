@@ -534,7 +534,7 @@ def run_task(
             changes=_without(changed_files(before, snapshot(work_dir)),
                              merged_by_looper(work_dir, task_id) if step_workspaces else set()),
             work_dir=work_dir,
-            check_problem=task.check(work_dir),
+            check_problem=task.check(work_dir) or (task.flow_check(detail, records, events) if task.flow_check else None),
             expect=task.expect,
             disciplines=task.disciplines,
             # The gates the runner ended because the Planner asked again after the script ran out.

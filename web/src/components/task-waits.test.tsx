@@ -2,8 +2,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WaitPanel } from "@/components/task-waits";
-import type { TaskWait } from "@/lib/api";
+import { TaskWaits, WaitPanel } from "@/components/task-waits";
+import type { TaskDetail, TaskGroup, TaskWait } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -30,7 +30,7 @@ describe("wait panel", () => {
     container.remove();
     vi.unstubAllGlobals();
   });
-  const show = (item: TaskWait) => act(async () => root.render(<WaitPanel taskId="task-a" wait={item} onChanged={changed} />));
+  const show = (item: TaskWait) => act(async () => root.render(<WaitPanel taskId="task-a" active wait={item} onChanged={changed} />));
   const button = (text: string) => [...container.querySelectorAll("button")].find((b) => b.textContent === text)!;
 
   it.each<TaskWait["state"]>(["pending", "waiting", "ready", "timed_out", "cancel_requested", "done", "failed", "skipped"])(
@@ -43,6 +43,18 @@ describe("wait panel", () => {
       }
     },
   );
+
+  it.each<[string, TaskGroup, boolean]>([
+    ["waiting", "in_progress", true], ["waiting_user", "needs_you", true],
+    ["completed", "completed", false], ["cancelled", "cancelled", false],
+    ["failed", "attention", false], ["stopped", "attention", false],
+  ])("offers actions only while the task is active (%s)", async (status, group, active) => {
+    const task = { task_id: "task-a", status, group, waits: [wait()] } as TaskDetail;
+    await act(async () => root.render(<TaskWaits task={task} onChanged={changed} />));
+    expect(Boolean(button("Resume now"))).toBe(active);
+    expect(Boolean(button("Cancel"))).toBe(active);
+    expect(container.textContent).toContain("Wait for the PR");
+  });
 
   it("shows checks, timing, errors and escaped output in a closed disclosure", async () => {
     await show(wait({ check: { type: "command", command: "test -f ready" }, every_seconds: 600,

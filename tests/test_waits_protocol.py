@@ -7,7 +7,9 @@ import json
 import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -660,3 +662,149 @@ def test_pending_gate_and_wait_cannot_swap_kinds(original: str) -> None:
                    waits={"w1": WaitView(WaitState.PENDING)} if original == "wait" else {})
     with pytest.raises(ProtocolError, match=f"step w1 is a {original}; use a new id"):
         parse_chat(reply({"reply": "ok", "action": "replan", "steps": [step() if original == "gate" else gate]}), view)
+
+
+def test_manager_wait_settings_read_confirmation_update_and_reset(
+    settings: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents.ops import Turn
+    from looper.agents.ops import settings as ops_settings
+    from looper.agents.ops.service import ManagerOps
+
+    monkeypatch.setattr(ops_settings.db_profiles, "list_profiles", AsyncMock(return_value=[]))
+    monkeypatch.setattr(ops_settings.db_roles, "list_configs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(ops_settings, "_read", AsyncMock(return_value={"system": {"values": {}}, "roles": {}}))
+    monkeypatch.setattr(ops_settings.scheduler_settings, "settings_view", AsyncMock(return_value={}))
+    monkeypatch.setattr(ops_settings.vault, "settings_view", AsyncMock(return_value={
+        "configured": False, "path": None, "writable": [], "rules_file": None, "problem": None}))
+    monkeypatch.setattr(ManagerOps, "_record", AsyncMock())
+
+    async def run() -> None:
+        ops = ManagerOps(SimpleNamespace(), url="http://127.0.0.1:9", token="test")
+        initial = await waits.settings_view()
+        answer = await ops.call("looper_settings", {"action": "view"})
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["waits"] == initial
+        for index, values in enumerate(({"max_wait_seconds": 600, "min_check_seconds": 60},
+                                         {"max_wait_seconds": None, "min_check_seconds": None})):
+            before = await waits.settings_view()
+            turn = Turn(channel="lark", chat="chat", message_id=f"ask-{index}")
+            ops.begin_turn(turn)
+            asked = await ops.call("looper_settings", {"action": "waits", "waits": values})
+            assert asked["status"] == "needs_confirmation", asked
+            assert await waits.settings_view() == before
+            assert "等待" in turn.blocks[0] and "→" in turn.blocks[0]
+            for name, value in values.items():
+                assert str(before[name]["value"]) in turn.blocks[0]
+                assert str(before[name]["default"] if value is None else value) in turn.blocks[0]
+            ops.end_turn(turn)
+            confirm = Turn(channel="lark", chat="chat", message_id=f"confirm-{index}")
+            ops.begin_turn(confirm)
+            answer = await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})
+            assert answer["status"] == "ok", answer
+            assert {change["setting"] for change in answer["result"]["changes"]} == set(values)
+            await waits.load()
+            for name, value in values.items():
+                assert getattr(waits.limits(), name) == (before[name]["default"] if value is None else value)
+            ops.end_turn(confirm)
+        assert settings == {}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("values", [{}, {"unknown": 1}, {"min_check_seconds": True},
+                                  {"max_wait_seconds": 59}, {"max_wait_seconds": 60, "min_check_seconds": 61}])
+def test_manager_wait_settings_validate_before_confirmation(
+    settings: dict[str, str], monkeypatch: pytest.MonkeyPatch, values: dict[str, Any],
+) -> None:
+    from looper.agents.ops import Turn
+    from looper.agents.ops.service import ManagerOps
+
+    monkeypatch.setattr(ManagerOps, "_record", AsyncMock())
+
+    async def run() -> None:
+        ops = ManagerOps(SimpleNamespace(), url="http://127.0.0.1:9", token="test")
+        turn = Turn(channel="telegram", chat="chat", message_id="ask")
+        ops.begin_turn(turn)
+        answer = await ops.call("looper_settings", {"action": "waits", "waits": values})
+        assert answer["status"] == "error" and answer["error"]["code"] == "invalid", answer
+        assert not turn.blocks and settings == {}
+
+    asyncio.run(run())
+
+
+def test_manager_task_returns_wait_conditions_and_each_step_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.ops import tasks as ops_tasks
+    from looper.agents.ops.service import ManagerOps
+    from looper.db import llm_records, waits as db_waits
+
+    check = {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}
+    monkeypatch.setattr(ops_tasks.db_tasks, "get_task_with_steps", AsyncMock(return_value={
+        "id": "task-a", "name": "wait task", "status": "waiting", "steps": [
+            {"step_key": "s1", "kind": "work", "status": "verified"},
+            {"step_key": "w1", "kind": "wait", "status": "waiting"}]}))
+    monkeypatch.setattr(db_waits, "list_for_task", AsyncMock(return_value=[{
+        "step_id": "step-w1", "step_key": "w1", "state": "waiting", "topic": "Author pushes fixes",
+        "spec": {"check": check, "every_seconds": 600}, "depends_on": ["s1"], "last_result": "not_ready",
+        "opened_at": datetime(2026, 10, 20, 12, tzinfo=timezone.utc)}]))
+    monkeypatch.setattr(ops_tasks.db_roles, "current", AsyncMock(return_value=[]))
+    monkeypatch.setattr(ops_tasks.db_user_gates, "list_for_task", AsyncMock(return_value=[]))
+    monkeypatch.setattr(ops_tasks, "agents_view", AsyncMock(return_value={"roles": {}}))
+    monkeypatch.setattr(llm_records, "task_costs", AsyncMock(return_value={}))
+    monkeypatch.setattr(ManagerOps, "_record", AsyncMock())
+
+    async def run() -> None:
+        ops = ManagerOps(SimpleNamespace(), url="http://127.0.0.1:9", token="test")
+        answer = await ops.call("looper_tasks", {"action": "get", "task_id": "task-a"})
+        assert answer["status"] == "ok", answer
+        result = answer["result"]
+        assert [(s["step"], s["kind"]) for s in result["steps"]] == [("s1", "work"), ("w1", "wait")]
+        (wait,) = result["waits"]
+        assert (wait["step"], wait["state"], wait["check"], wait["every_seconds"], wait["last_result"],
+                wait["depends_on"]) == ("w1", "waiting", check, 600, "not_ready", ["s1"])
+        assert wait["opened_at"] == "2026-10-20T12:00:00+00:00"
+
+    asyncio.run(run())
+
+
+def test_activity_wait_description_omits_command_but_keeps_timing() -> None:
+    spec = WaitSpec("deployment ready", 3600, check=CommandCheck("test -f sensitive-token"))
+    assert describe(spec, 600, include_command=False) == "command every 10 min; at most 1 h"
+    assert "test -f sensitive-token" in describe(spec, 600)
+
+
+@pytest.mark.parametrize("status", ["failed", "stopped", "completed", "cancelled", "waiting", "executing"])
+@pytest.mark.parametrize("action", ["resume", "cancel"])
+def test_wait_actions_refuse_ended_tasks_before_writing(
+    monkeypatch: pytest.MonkeyPatch, status: str, action: str,
+) -> None:
+    from looper.agents import wait_service
+    from looper.agents.message import channel_address
+    from looper.agents.projects import RequestError
+
+    monkeypatch.setattr(wait_service.db_tasks, "get_task", AsyncMock(return_value={"status": status}))
+    row = {"step_id": "step-w1", "step_key": "w1", "state": "waiting", "topic": "Author pushes fixes", "spec": {}}
+    monkeypatch.setattr(wait_service.db_waits, "get", AsyncMock(return_value=row))
+    move = AsyncMock(return_value={"state": "ready" if action == "resume" else "cancel_requested"})
+    activity = AsyncMock()
+    bus = SimpleNamespace(publish=AsyncMock())
+    monkeypatch.setattr(wait_service.db_waits, "move", move)
+    monkeypatch.setattr(wait_service.db_activity, "insert_activity", activity)
+
+    async def run() -> None:
+        if status in ("waiting", "executing"):
+            answer = await getattr(wait_service, action)("task-a", "w1", has_planner=True, bus=bus,
+                                                         source=channel_address("web"))
+            assert answer["wait"]["state"] == ("ready" if action == "resume" else "cancel_requested")
+            move.assert_awaited_once()
+            activity.assert_awaited_once()
+            bus.publish.assert_awaited_once()
+            return
+        with pytest.raises(RequestError, match="task has ended"):
+            await getattr(wait_service, action)("task-a", "w1", has_planner=True, bus=bus,
+                                                source=channel_address("web"))
+        move.assert_not_awaited()
+        activity.assert_not_awaited()
+        bus.publish.assert_not_awaited()
+
+    asyncio.run(run())

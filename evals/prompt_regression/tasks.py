@@ -23,12 +23,14 @@ import json
 import subprocess
 import sys
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .metrics import Discipline
+from looper.agents.tiers.worker import extract_report
+
+from .metrics import Discipline, result_text, role, timestamp
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,9 @@ class EvalTask:
     # Opt the project into the run's one disposable knowledge vault and check this task's committed notes.
     vault: bool = False
     vault_check: Callable[[Path, list[str]], str | None] | None = None
+    # Task-specific checks of the actual API steps, run records and reports, beyond aggregate flow counts.
+    flow_check: Callable[[Mapping[str, Any], list[Mapping[str, Any]],
+                          Mapping[int, list[Mapping[str, Any]]]], str | None] | None = None
 
     @property
     def real_reviewer(self) -> bool:
@@ -114,6 +119,61 @@ def _equals(name: str, expected: str) -> Callable[[Path], str | None]:
 
 def _exists(name: str) -> Callable[[Path], str | None]:
     return lambda work_dir: None if (work_dir / name).is_file() else f"{name} is missing"
+
+
+def _review_files(work_dir: Path) -> str | None:
+    for name in ("findings.md", "rereview.md"):
+        if not _read(work_dir, name):
+            return f"{name} is missing or empty"
+    return None
+
+
+def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
+                   events: Mapping[int, list[Mapping[str, Any]]]) -> str | None:
+    """Bind the requested PR wait to the Workers that actually delivered each review."""
+    expected = {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                "ready_when": "head_changed"}
+    waits = [wait for wait in detail.get("waits") or []
+             if all((wait.get("check") or {}).get(key) == value for key, value in expected.items())]
+    if not waits:
+        return "no head-change wait for example-org/demo-service#12"
+    needs = {step["id"]: step.get("depends_on") or [] for step in detail.get("steps") or []}
+
+    def upstream(step_id: str, ancestor: str) -> bool:
+        seen, todo = set(), list(needs.get(step_id, []))
+        while todo:
+            current = todo.pop()
+            if current == ancestor:
+                return True
+            if current not in seen:
+                seen.add(current)
+                todo.extend(needs.get(current, []))
+        return False
+
+    delivered: dict[str, list[Mapping[str, Any]]] = {"findings.md": [], "rereview.md": []}
+    for record in records:
+        if role(record) != "worker" or record.get("status") != "completed":
+            continue
+        text = result_text(events.get(int(record["id"]), []))
+        report = extract_report(text, "status") if text is not None else None
+        if report is not None and report.get("status") == "completed":
+            for name in delivered:
+                if name in (report.get("changed_files") or {}):
+                    delivered[name].append(record)
+    for wait in waits:
+        opened, closed = timestamp(wait.get("opened_at")), timestamp(wait.get("closed_at"))
+        if wait.get("state") != "done" or opened is None or closed is None:
+            continue
+        for first in delivered["findings.md"]:
+            for second in delivered["rereview.md"]:
+                first_step = (first.get("metadata") or {}).get("step_id")
+                second_step = (second.get("metadata") or {}).get("step_id")
+                ended, started = timestamp(first.get("finished_at")), timestamp(second.get("created_at"))
+                if (first_step and second_step and first_step != second_step and ended is not None
+                        and started is not None and ended <= opened <= closed <= started
+                        and upstream(wait["step_id"], first_step) and upstream(second_step, wait["step_id"])):
+                    return None
+    return "reviews were not delivered by separate Workers before and after the requested PR wait"
 
 
 def _numbers_and_sum(work_dir: Path) -> str | None:
@@ -277,7 +337,8 @@ TASKS: tuple[EvalTask, ...] = (
                     "`gh pr diff 12 --repo example-org/demo-service` and write your findings to findings.md. "
                     "The author will push fixes to the pull request after your review; once a new commit is "
                     "pushed, review the pull request again and write the result to rereview.md.",
-        check=_all(_exists("findings.md"), _exists("rereview.md")),
+        check=_review_files,
+        flow_check=_rereview_flow,
         gh_pr_diffs={"example-org/demo-service#12": _PR_DIFF},
         wait_resume_after_s=5,
         expect={"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1},

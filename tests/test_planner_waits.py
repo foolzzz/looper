@@ -576,6 +576,64 @@ def test_a_restart_keeps_an_open_wait_and_cancels_a_pending_one_before_the_repla
     assert h.planner._plan is not None  # the restarted planner is the one the scenario left running
 
 
+@pytest.mark.parametrize(("state", "outcome"), [
+    ("ready", "resumed"), ("cancel_requested", None), ("timed_out", None),
+])
+def test_restart_preserves_wait_moves_after_loading_the_plan(
+    planner_claude: Any, agent_db: Any, state: str, outcome: str | None,
+) -> None:
+    claude = planner_claude(plan(wait_step("w1")))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        await h.planner.stop()
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        refresh = h.planner._refresh_project
+        observed = []
+
+        async def race(plan_: Any) -> None:
+            await refresh(plan_)
+            # The restart holds a waiting snapshot; a user or the loop moves the persisted row meanwhile.
+            assert plan_.steps[0].wait.state is WaitState.WAITING
+            _stored_wait(agent_db, "w1").update(state=state, outcome=outcome, resolution="concurrent move")
+
+        async def ask(*args: Any, **kwargs: Any) -> None:
+            stored = _stored_wait(agent_db, "w1")
+            observed.append((stored["state"], stored["outcome"], stored["resolution"]))
+            assert observed[-1] == (state, outcome, "concurrent move")
+
+        h.planner._refresh_project = race
+        h.planner._ask = ask
+        await h.planner._restart_plan(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+            payload={"ended": "stopped"}, correlation_id="corr-1"))
+        assert len(observed) == 1
+
+    drive(claude, _hold, scenario)
+
+
+def test_opening_a_command_wait_keeps_its_command_out_of_activity_and_journal(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    secret = "PRIVATE_COMMAND_TOKEN"
+    command = f"test -n {secret}"
+    agent_db.get_task_project.return_value = {**_project(), "wait_commands": "on"}
+    claude = planner_claude(plan(wait_step(check={"type": "command", "command": command})))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING
+                      and any(line.startswith("Wait w1 opened:") for line in activity(agent_db)))
+
+    drive(claude, _hold, scenario)
+    assert _stored_wait(agent_db, "w1")["spec"]["check"]["command"] == command
+    assert secret not in "\n".join(activity(agent_db))
+    assert secret not in "\n".join(entry["summary"] for entry in agent_db.store.journal["t1"])
+
+
 def test_a_room_reply_cancels_a_pending_wait_before_it_replans(
     planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

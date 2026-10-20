@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Hourglass } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cancelWait, resumeWait, type TaskDetail, type TaskWait } from "@/lib/api";
+import { cancelWait, isActiveTask, resumeWait, type TaskDetail, type TaskWait } from "@/lib/api";
 import { useAction } from "@/lib/use-action";
 import { WAIT_STATES, waitAnchor, waitCheckText } from "@/lib/waits";
 
@@ -61,7 +61,9 @@ function WaitActions({ taskId, wait, onChanged }: { taskId: string; wait: TaskWa
   );
 }
 
-export function WaitPanel({ taskId, wait, onChanged }: { taskId: string; wait: TaskWait; onChanged: () => void }) {
+export function WaitPanel({ taskId, active, wait, onChanged }: {
+  taskId: string; active: boolean; wait: TaskWait; onChanged: () => void;
+}) {
   const facts = [
     ["Opened", wait.opened_at], ["Earliest resume", wait.due_at], ["Deadline", wait.deadline_at],
     ["Next check", wait.next_check_at], ["Last checked", wait.last_checked_at], ["Closed", wait.closed_at],
@@ -106,7 +108,7 @@ export function WaitPanel({ taskId, wait, onChanged }: { taskId: string; wait: T
           </details>
         )}
         {wait.resolution && <p className="break-words text-sm whitespace-pre-wrap">{wait.resolution}</p>}
-        {wait.state === "waiting" && <WaitActions taskId={taskId} wait={wait} onChanged={onChanged} />}
+        {active && wait.state === "waiting" && <WaitActions taskId={taskId} wait={wait} onChanged={onChanged} />}
         {(wait.state === "timed_out" || wait.state === "cancel_requested") && (
           <p className="text-sm text-muted-foreground">The Planner decides what happens next</p>
         )}
@@ -117,5 +119,5 @@ export function WaitPanel({ taskId, wait, onChanged }: { taskId: string; wait: T
 
 export function TaskWaits({ task, onChanged }: { task: TaskDetail; onChanged: () => void }) {
   if (!task.waits?.length) return null;
-  return <div className="space-y-3">{task.waits.map((wait) => <WaitPanel key={wait.step_id} taskId={task.task_id} wait={wait} onChanged={onChanged} />)}</div>;
+  return <div className="space-y-3">{task.waits.map((wait) => <WaitPanel key={wait.step_id} taskId={task.task_id} active={isActiveTask(task)} wait={wait} onChanged={onChanged} />)}</div>;
 }

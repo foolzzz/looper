@@ -119,12 +119,8 @@ async def settings_view() -> dict[str, Any]:
                    "source": _sources.get(name, "built-in")} for name in _KEYS}
 
 
-async def update(body: Mapping[str, Any]) -> dict[str, Any]:
-    """Store and apply one or both limits (null: the built-in); a refused body changes nothing.
-
-    Reading the current limits, the cross-field check, the store and the refresh share one lock, and the store
-    is one transaction, so two updates cannot leave ``min_check_seconds`` above ``max_wait_seconds``.
-    """
+def checked(body: Mapping[str, Any]) -> dict[str, int | None]:
+    """Validate a change against the current limits without storing it (also used before confirmation)."""
     if not isinstance(body, Mapping):
         raise ValueError("wait settings must be an object")
     if unknown := [key for key in body if key not in _KEYS]:
@@ -132,11 +128,21 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if not body:
         raise ValueError(f"give at least one of {', '.join(_KEYS)} (null: the built-in)")
     values = {name: None if raw is None else _seconds(raw, name) for name, raw in body.items()}
+    after = {name: (getattr(WaitLimits(), name) if values[name] is None else values[name])
+             if name in values else getattr(_limits, name) for name in _KEYS}
+    if after["min_check_seconds"] > after["max_wait_seconds"]:
+        raise ValueError("min_check_seconds must not exceed max_wait_seconds")
+    return values
+
+
+async def update(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Store and apply one or both limits (null: the built-in); a refused body changes nothing.
+
+    Reading the current limits, the cross-field check, the store and the refresh share one lock, and the store
+    is one transaction, so two updates cannot leave ``min_check_seconds`` above ``max_wait_seconds``.
+    """
     async with _settings_lock():
-        after = {name: (getattr(WaitLimits(), name) if values[name] is None else values[name])
-                 if name in values else getattr(_limits, name) for name in _KEYS}
-        if after["min_check_seconds"] > after["max_wait_seconds"]:
-            raise ValueError("min_check_seconds must not exceed max_wait_seconds")
+        values = checked(body)
         await db_settings.put_settings({_KEYS[name]: None if value is None else str(value)
                                         for name, value in values.items()})
         await load()
@@ -305,11 +311,12 @@ def _duration(seconds: int) -> str:
     return f"{seconds} s"
 
 
-def describe(spec: WaitSpec, every: int | None) -> str:
-    """The check, earliest time and maximum wait as a turn or activity describes them."""
+def describe(spec: WaitSpec, every: int | None, *, include_command: bool = True) -> str:
+    """Describe check and timing; activity and journal callers omit command text with ``include_command=False``."""
     parts = []
     if spec.check is not None:
-        parts.append(spec.check.describe() + (f" every {_duration(every)}" if every is not None else ""))
+        check = "command" if isinstance(spec.check, CommandCheck) and not include_command else spec.check.describe()
+        parts.append(check + (f" every {_duration(every)}" if every is not None else ""))
     if spec.not_before is not None:
         parts.append("until " + spec.not_before.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     elif spec.not_before_seconds:

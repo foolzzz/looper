@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,7 +15,7 @@ from looper.agents import waits
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.message import MessageType, channel_address, planner_address
 from looper.db import activity, plans, waits as db_waits
-from tests.test_ops_tasks_db import _project, _task
+from tests.test_ops_tasks_db import _Chat, _project, _task
 from tests.test_usage_api_db import DSN, _run, _Writer
 from tests.test_waits_db import NOW, SPEC, _plan_with_wait, _wait
 
@@ -132,7 +133,7 @@ def test_user_moves_wait_and_only_wakes_an_existing_planner(
 
 
 @pytest.mark.parametrize("action", ["resume", "cancel"])
-@pytest.mark.parametrize("case", ["no_task", "no_label", "completed", "cancelled", "timed_out",
+@pytest.mark.parametrize("case", ["no_task", "no_label", "completed", "cancelled", "task_failed", "stopped", "timed_out",
                                   "cancel_requested", "pending", "ready", "done", "failed", "skipped", "race"])
 def test_refused_moves_leave_no_activity_or_wakeup(
     monkeypatch: pytest.MonkeyPatch, action: str, case: str,
@@ -145,8 +146,8 @@ def test_refused_moves_leave_no_activity_or_wakeup(
             task_id, expected = "task-missing", 404
         elif case == "no_label":
             label, expected = "missing", 404
-        elif case in ("completed", "cancelled"):
-            await pool.execute("UPDATE tasks SET status = $1", case)
+        elif case in ("completed", "cancelled", "task_failed", "stopped"):
+            await pool.execute("UPDATE tasks SET status = $1", "failed" if case == "task_failed" else case)
         elif case == "race":
             move = db_waits.move
 
@@ -227,5 +228,80 @@ def test_settings_values_defaults_sources_reset_and_validation(monkeypatch: pyte
         assert status == 200 and reset == initial
         await waits.load()
         assert await waits.settings_view() == initial
+
+    _run(test, monkeypatch)
+
+
+def test_manager_reads_changes_and_resets_wait_limits_only_after_confirmation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(waits, "_limits", waits.WaitLimits())
+    monkeypatch.setattr(waits, "_sources", {})
+
+    async def test(pool: Any) -> None:
+        chat = _Chat(tmp_path)
+        initial = (await _api("GET", "/api/wait-settings"))[1]
+        (view,) = await chat.say("查看设置", ("looper_settings", {"action": "view"}))
+        assert view["status"] == "ok", view
+        assert view["result"]["waits"] == initial
+        for values, expected in (({"max_wait_seconds": 600, "min_check_seconds": 60}, (600, 60)),
+                                  ({"max_wait_seconds": None, "min_check_seconds": None},
+                                   (waits.DEFAULT_MAX_WAIT_SECONDS, waits.DEFAULT_MIN_CHECK_SECONDS))):
+            before = await waits.settings_view()
+            (asked,) = await chat.say("修改等待设置", ("looper_settings", {"action": "waits", "waits": values}))
+            assert asked["status"] == "needs_confirmation", asked
+            assert await waits.settings_view() == before
+            block = chat.turns[-1].blocks[0]
+            assert "等待" in block and "→" in block
+            for name, value in values.items():
+                assert str(before[name]["value"]) in block
+                assert str(before[name]["default"] if value is None else value) in block
+            (answer,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
+            assert answer["status"] == "ok", answer
+            assert {change["setting"] for change in answer["result"]["changes"]} == set(values)
+            await waits.load()
+            assert (waits.limits().max_wait_seconds, waits.limits().min_check_seconds) == expected
+            assert (await _api("GET", "/api/wait-settings"))[1] == await waits.settings_view()
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("values", [{}, {"unknown": 1}, {"min_check_seconds": True},
+                                  {"max_wait_seconds": 59}, {"min_check_seconds": 9},
+                                  {"max_wait_seconds": 60, "min_check_seconds": 61}])
+def test_manager_refuses_invalid_wait_limits_before_asking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, values: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(waits, "_limits", waits.WaitLimits())
+    monkeypatch.setattr(waits, "_sources", {})
+
+    async def test(pool: Any) -> None:
+        chat = _Chat(tmp_path)
+        before = await waits.settings_view()
+        (answer,) = await chat.say("修改等待设置", ("looper_settings", {"action": "waits", "waits": values}))
+        assert answer["status"] == "error" and answer["error"]["code"] == "invalid", answer
+        assert not chat.turns[-1].blocks
+        assert await waits.settings_view() == before
+
+    _run(test, monkeypatch)
+
+
+def test_manager_task_detail_includes_wait_conditions_states_and_step_kinds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        check = {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "checks_finished"}
+        await _open(pool, spec={**SPEC, "check": check, "every_seconds": 600}, next_check_at=NOW)
+        await db_waits.record_check("step-w1", at=NOW, result="not_ready", output="pending", error="",
+                                   next_check_at=NOW + timedelta(seconds=600))
+        chat = _Chat(tmp_path)
+        (answer,) = await chat.say("查看等待条件", ("looper_tasks", {"action": "get", "task_id": "task-a"}))
+        assert answer["status"] == "ok", answer
+        detail = answer["result"]
+        assert [(step["step"], step["kind"]) for step in detail["steps"]] == [("s1", "work"), ("w1", "wait")]
+        expected = (await _api("GET", "/api/tasks/task-a"))[1]["waits"]
+        assert detail["waits"] == expected
+        assert detail["waits"][0]["check"] == check
+        assert detail["waits"][0]["state"] == "waiting"
 
     _run(test, monkeypatch)

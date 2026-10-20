@@ -274,6 +274,8 @@ def test_command_result_output_environment_and_working_directory(
         assert row["last_result"] == ("ready" if code == 0 else "not_ready")
         assert len(row["last_output"].encode()) == 2048
         assert row["last_output"].endswith("inherited-marker\nfiltered\n")
+        assert "inherited-marker" not in row["resolution"]
+        assert row["resolution"] == ("Ready: the command exited 0." if code == 0 else "")
         assert (tmp_path / "ran").read_text() == str(tmp_path)
         assert "PRIVATE_OUTPUT" not in caplog.text and command not in caplog.text
         assert "private-secret" not in caplog.text and "inherited-marker" not in caplog.text
@@ -478,6 +480,49 @@ def test_one_row_failure_does_not_block_others_and_checks_are_bounded(
         counts = [int((await _row(f"task-{n}"))["checks"]) for n in range(9)]
         assert sum(counts) == 8 and counts.count(0) == 1
         assert "step-task-" in caplog.text and "PRIVATE_ROW_ERROR" not in caplog.text
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize(("wait_state", "task_status"), [
+    ("ready", "waiting"), ("cancel_requested", "waiting"), ("timed_out", "waiting"),
+    ("waiting", "stopped"), ("waiting", "failed"), ("waiting", "completed"),
+    ("waiting", "cancelled"),
+])
+def test_queued_check_rereads_wait_and_task_before_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, wait_state: str, task_status: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        for task_id in ("task-a", "task-control"):
+            project = await _open(pool, task_id=task_id, directory=tmp_path,
+                                  check=waits.CommandCheck(f"touch {task_id}"))
+            await projects.update_project(project["id"], execution={"wait_commands": "on"})
+        loop = _loop()
+        loop._semaphore = asyncio.Semaphore(1)
+        await loop._semaphore.acquire()
+        listed = asyncio.Event()
+        due = db_waits.due
+
+        async def selected(*args: Any, **kwargs: Any) -> Any:
+            rows = await due(*args, **kwargs)
+            listed.set()
+            return rows
+
+        monkeypatch.setattr(db_waits, "due", selected)
+        running = asyncio.create_task(loop.run_once(NOW))
+        try:
+            await asyncio.wait_for(listed.wait(), 2)
+            await pool.execute("UPDATE tasks SET status = $2 WHERE id = $1", "task-a", task_status)
+            if wait_state != "waiting":
+                await db_waits.move("step-task-a", to=wait_state,
+                                    outcome="resumed" if wait_state == "ready" else None)
+        finally:
+            loop._semaphore.release()
+        await asyncio.wait_for(running, 5)
+        assert not (tmp_path / "task-a").exists(), "the queued check ran after its wait or task ended"
+        assert (await _row())["checks"] == 0
+        assert (tmp_path / "task-control").is_file()
+        assert (await _row("task-control"))["checks"] == 1
 
     _run(test, monkeypatch)
 

@@ -13,6 +13,8 @@ only records that baseline.
 
 Output is the last ``OUTPUT_MAX_BYTES`` of the combined stream, decoded with
 invalid bytes replaced. The database caps it again when the row is written.
+Command output is bounded while streaming; the structured GitHub view has a
+1 MiB capture limit and returns an error if it exceeds that limit.
 Only check identifiers, result and exit code are logged; output and command text stay out.
 """
 
@@ -49,6 +51,8 @@ _JSON_FIELDS = "headRefOid,state,comments,reviews,statusCheckRollup"
 _UNFINISHED_STATES = frozenset({"PENDING", "EXPECTED"})
 _POLL_SEC = 0.05
 _DRAIN_SEC = 2.0
+# Keep enough structured data to parse an ordinary PR view, but never buffer an unbounded response.
+_GITHUB_VIEW_MAX_BYTES = 1024 * 1024
 
 Outcome = tuple[CheckResult, str, str, dict[str, Any]]
 
@@ -56,7 +60,7 @@ Outcome = tuple[CheckResult, str, str, dict[str, Any]]
 def wait_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """A wait on the task page, including its persisted check spec and latest result."""
     spec = row["spec"]
-    return {
+    view = {
         "step": row.get("step_key"), "step_id": row["step_id"], "state": row["state"],
         "outcome": row.get("outcome"), "topic": row["topic"], "check": spec.get("check"),
         "every_seconds": spec.get("every_seconds"),
@@ -66,6 +70,8 @@ def wait_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "last_error": row.get("last_error") or "", "resolution": row.get("resolution") or "",
         "depends_on": list(row.get("depends_on") or []),
     }
+    # Keep the same timestamp format through HTTP and the Manager's tool serializer.
+    return {key: value.isoformat() if isinstance(value, datetime) else value for key, value in view.items()}
 
 
 async def waits_view(task_id: str) -> list[dict[str, Any]]:
@@ -93,7 +99,7 @@ async def _user_move(task_id: str, label: str, *, cancel: bool, has_planner: boo
     current = await db_waits.get(task_id, label)
     if current is None:
         raise RequestError("404 Not Found", f"task {task_id} has no wait {label}")
-    if db_tasks.task_group(task.get("status")) in (db_tasks.TaskGroup.COMPLETED, db_tasks.TaskGroup.CANCELLED):
+    if task.get("status") not in db_tasks.ACTIVE_STATUSES:
         raise RequestError("409 Conflict", "the task has ended: its waits no longer take user actions")
     state = waits.WaitState(current["state"])
     if state is not waits.WaitState.WAITING:
@@ -161,15 +167,21 @@ async def _exited(process: asyncio.subprocess.Process, timeout: float) -> bool:
 
 
 async def _capture(process: asyncio.subprocess.Process, timeout: float,
-                   stop: Callable[[], Awaitable[None]]) -> tuple[bytes, bool]:
-    """The combined stream, and whether ``stop`` had to end ``process``."""
+                   stop: Callable[[], Awaitable[None]], *,
+                   max_bytes: int = OUTPUT_MAX_BYTES) -> tuple[bytes, bool, bool]:
+    """A bounded tail of the combined stream, whether it timed out, and whether it overflowed."""
     assert process.stdout is not None
     data = bytearray()
+    overflowed = False
 
     async def drain() -> None:
+        nonlocal overflowed
         assert process.stdout is not None
         while chunk := await process.stdout.read(65536):
             data.extend(chunk)
+            if len(data) > max_bytes:
+                overflowed = True
+                del data[:-max_bytes]
 
     reader = asyncio.ensure_future(drain())
     try:
@@ -187,7 +199,7 @@ async def _capture(process: asyncio.subprocess.Process, timeout: float,
                 # A killed process can reset the pipe. The bytes already read are the output.
                 if not timed_out:
                     raise
-        return bytes(data), timed_out
+        return bytes(data), timed_out, overflowed
     except asyncio.CancelledError:
         # Stopping the service must reap the in-flight check as well as its loop.
         try:
@@ -327,13 +339,18 @@ async def run_github_pr(check: GithubPrCheck, baseline: Mapping[str, Any] | None
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except OSError:
         return _done(CheckResult.ERROR, "", "the check could not start", _extra())
-    data, timed_out = await _capture(process, CHECK_TIMEOUT_SEC, lambda: _kill(process))
+    data, timed_out, overflowed = await _capture(
+        process, CHECK_TIMEOUT_SEC, lambda: _kill(process), max_bytes=_GITHUB_VIEW_MAX_BYTES)
     output = _tail(data)
     if timed_out:
         return _done(CheckResult.ERROR, output, _timeout_error(), _extra())
     code = process.returncode
     if code != 0:
         return _done(CheckResult.ERROR, output, f"gh exited {code}", _extra(exit_code=code))
+    if overflowed:
+        return _done(CheckResult.ERROR, output,
+                     f"the pull request view exceeds the {_GITHUB_VIEW_MAX_BYTES}-byte limit",
+                     _extra(exit_code=code))
     assert code is not None
     return _from_view(check, baseline, data, code)
 
@@ -349,12 +366,12 @@ async def run_command(check: CommandCheck, work_dir: str | os.PathLike[str], *, 
     if not project_allows:
         return _done(CheckResult.ERROR, "", "wait_commands is off", _extra())
     try:
-        process = await asyncio.create_subprocess_shell(
-            check.command, cwd=work_dir, env=child_env.inherited(), stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        process = await proc_tree.spawn(
+            "/bin/sh", "-c", check.command, cwd=work_dir, stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except OSError:
         return _done(CheckResult.ERROR, "", "the check could not start", _extra())
-    data, timed_out = await _capture(process, CHECK_TIMEOUT_SEC, lambda: _end_command(process))
+    data, timed_out, _ = await _capture(process, CHECK_TIMEOUT_SEC, lambda: _end_command(process))
     output = _tail(data)
     if timed_out:
         return _done(CheckResult.ERROR, output, _timeout_error(), _extra())
@@ -414,7 +431,14 @@ class WaitService:
     async def _run_row(self, row: Mapping[str, Any], now: datetime) -> int:
         async with self._semaphore:
             try:
-                return await self._run_wait(row, now)
+                # The queue may outlive a user action, a Planner transition or the task itself.
+                current = await db_waits.get(row["task_id"], row["step_key"])
+                task = await db_tasks.get_task(row["task_id"])
+                if (current is None or current["step_id"] != row["step_id"]
+                        or current["state"] != waits.WaitState.WAITING.value
+                        or task is None or task["status"] not in db_tasks.ACTIVE_STATUSES):
+                    return 0
+                return await self._run_wait({**current, "work_dir": task["work_dir"]}, now)
             except Exception:
                 # Exceptions may contain command output or notice text. Only the row's id belongs in the log.
                 logger.warning("wait step %s failed; trying again later", row["step_id"])
@@ -448,9 +472,8 @@ class WaitService:
                 await db_activity.insert_activity(task_id=task_id, worker="planner", kind="phase",
                                                   summary=f"Wait {row['step_key']} check failed: {error[:200]}")
             if result is CheckResult.READY and row["due_at"] <= now:
-                resolution = extra["resolution"] + (f"\n{output}" if output else "")
                 moved = await db_waits.move(step_id, to="ready", expect=("waiting",), outcome="ready",
-                                            resolution=resolution)
+                                            resolution=extra["resolution"])
                 if moved is None:
                     return 0
         elif check is None and row["due_at"] <= now:

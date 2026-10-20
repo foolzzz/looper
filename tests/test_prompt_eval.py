@@ -949,6 +949,59 @@ def test_wait_expectations(expect: dict[str, int], observed: dict[str, int], pro
     assert metrics.flow_problems(expect, observed) == problems
 
 
+@pytest.mark.parametrize("filename", ["findings.md", "rereview.md"])
+def test_rereview_rejects_empty_review_files(tmp_path: Path, filename: str) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    for name in ("findings.md", "rereview.md"):
+        (tmp_path / name).write_text("The loop skips the last value.\n")
+    (tmp_path / filename).write_text(" \n\t")
+    assert task.check(tmp_path) is not None
+
+
+def _rereview_flow() -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+    detail = {"steps": [
+        {"id": "review", "depends_on": []},
+        {"id": "wait", "depends_on": ["review"]},
+        {"id": "rereview", "depends_on": ["wait"]},
+    ], "waits": [{"step_id": "wait", "state": "done", "opened_at": "2026-10-13T10:00:06+00:00",
+                  "closed_at": "2026-10-13T10:00:10+00:00",
+                  "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                            "ready_when": "head_changed"}}]}
+    records = [_record(1, "worker-initial", step_id="review"),
+               _record(2, "worker-second", step_id="rereview", start="2026-10-13T10:00:11+00:00",
+                       end="2026-10-13T10:00:15+00:00")]
+    events = {i: _result(json.dumps({"status": "completed", "changed_files": {filename: "written"}}))
+              for i, filename in ((1, "findings.md"), (2, "rereview.md"))}
+    return detail, records, events
+
+
+@pytest.mark.parametrize("fault", [None, "repo", "number", "ready_when", "unrelated_wait", "initial_not_upstream",
+                                  "early_rereview", "same_worker", "not_opened", "missing_report"])
+def test_rereview_checks_the_requested_pr_and_actual_review_dependency(fault: str | None) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    detail, records, events = _rereview_flow()
+    wait = detail["waits"][0]
+    if fault in {"repo", "number", "ready_when"}:
+        wait["check"][fault] = {"repo": "other/repo", "number": 99, "ready_when": "merged"}[fault]
+    elif fault == "unrelated_wait":
+        detail["steps"][2]["depends_on"] = ["review"]
+        detail["steps"].append({"id": "unrelated", "depends_on": ["wait"]})
+    elif fault == "initial_not_upstream":
+        detail["steps"][1]["depends_on"] = []
+    elif fault == "early_rereview":
+        records[1]["created_at"] = "2026-10-13T10:00:07+00:00"
+    elif fault == "same_worker":
+        events[1] = _result(json.dumps({"status": "completed", "changed_files": {
+            "findings.md": "written", "rereview.md": "written"}}))
+        del events[2]
+    elif fault == "not_opened":
+        wait["opened_at"] = None
+    elif fault == "missing_report":
+        del events[2]
+    assert task.flow_check is not None
+    assert (task.flow_check(detail, records, events) is None) is (fault is None)
+
+
 @pytest.mark.parametrize("fixture", [False, True])
 def test_gh_stub_answers_views_and_fixture_diffs_and_refuses_other_commands(tmp_path: Path, fixture: bool) -> None:
     task = next(t for t in TASKS if t.id == "wait_pr_rereview")
@@ -1014,12 +1067,22 @@ def test_a_failed_resume_is_not_recorded_and_a_later_poll_can_retry(monkeypatch:
     assert not runner.resume_waits(api, task, "t1", detail, {}, now=2.0)
 
 
-def test_run_task_polls_waits_and_records_successful_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("fault", [None, "wrong_pr", "unrelated_wait"])
+def test_run_task_polls_waits_and_records_successful_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
     task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), check=lambda _: None)
-    wait = {"step": "w1", "step_id": "wait-1", "state": "waiting", "opened_at": "1970-01-01T00:01:40Z",
-            "check": {"type": "github_pr"}}
-    final = {"status": "completed", "waits": [{**wait, "state": "done", "outcome": "resumed"}],
-             "steps": [{"id": "wait-1", "step_key": "w1"}, {"id": "s2", "depends_on": ["wait-1"]}]}
+    final, records, events = _rereview_flow()
+    final["status"] = "completed"
+    final["waits"][0].update(step="w1", opened_at="1970-01-01T00:01:40Z", closed_at="1970-01-01T00:01:45Z")
+    if fault == "wrong_pr":
+        final["waits"][0]["check"]["number"] = 99
+    elif fault == "unrelated_wait":
+        final["steps"][2]["depends_on"] = ["review"]
+        final["steps"].append({"id": "unrelated", "depends_on": ["wait"]})
+    records[0].update(created_at="1970-01-01T00:01:30Z", finished_at="1970-01-01T00:01:35Z")
+    records[1].update(created_at="1970-01-01T00:01:46Z", finished_at="1970-01-01T00:01:50Z")
+    wait = {**final["waits"][0], "state": "waiting", "closed_at": None}
     details = iter([{"status": "waiting", "waits": [wait]}, {"status": "waiting", "waits": [wait]}, final, final])
     posted: list[tuple[str, Any]] = []
 
@@ -1031,14 +1094,19 @@ def test_run_task_polls_waits_and_records_successful_resumes(tmp_path: Path, mon
         if path == "/api/tasks/t1":
             return next(details)
         if path == "/api/llm-records":
-            return {"records": []}
+            return {"records": records}
+        if path.startswith("/api/llm-records/"):
+            return {"events": events[int(path.split("/")[-2])]}
         assert path == "/api/tasks/t1/activity"
         return {"activity": []}
 
     monkeypatch.setattr(runner.time, "time", lambda: 104.0)
     result = runner.run_task(SimpleNamespace(post=post, get=get), task, tmp_path, timeout=10, poll=0,
                              clock_offset=1.0)
-    assert result["outcome"] == "pass" and result["wait_dependents"] == 1
+    assert result["outcome"] == ("pass" if fault is None else "fail")
+    assert result["wait_dependents"] == 1
+    if fault is not None:
+        assert result["problems"]  # aggregate counts pass; only the task-specific flow check rejects this
     assert result["wait_resumes"] == {"w1": 105.0}
     assert [path for path, _ in posted] == ["/api/tasks/create", "/api/tasks/start", "/api/tasks/t1/waits/w1/resume"]
 

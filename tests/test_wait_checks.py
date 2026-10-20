@@ -16,12 +16,15 @@ import signal
 import subprocess
 import sys
 import time
+import tracemalloc
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import proc_tree
+from looper.agents import proc_tree, wait_service
 from looper.agents.waits import (
     OUTPUT_MAX_BYTES, CheckResult, CommandCheck, GithubPrCheck, ReadyWhen,
 )
@@ -379,3 +382,162 @@ def test_logs_omit_command_text_and_output(tmp_path: Path, caplog: pytest.LogCap
     text = caplog.text
     assert OUTPUT_MARKER not in text
     assert COMMAND_MARKER not in text
+
+
+def test_command_output_memory_is_bounded_while_streaming(tmp_path: Path) -> None:
+    command = shlex.join([sys.executable, "-c",
+                          "import os; [os.write(1, b'x' * 65536) for _ in range(256)]; os.write(1, b'END')"])
+    tracemalloc.start()
+    try:
+        result, output, error, _ = asyncio.run(run_command(CommandCheck(command), tmp_path, project_allows=True))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result is CheckResult.READY and error == ""
+    assert output == "x" * (OUTPUT_MAX_BYTES - 3) + "END"
+    # The child produces 16 MiB; the parent's retained output must not grow with it.
+    assert peak < 2 * 1024 * 1024
+
+
+def test_github_oversized_view_fails_with_bounded_memory(tmp_path: Path) -> None:
+    script = tmp_path / "gh"
+    script.write_text(f"#!{sys.executable}\nimport os\n"
+                      "[os.write(1, b'x' * 65536) for _ in range(256)]\n"
+                      "os.write(1, b'END')\n")
+    script.chmod(0o755)
+    tracemalloc.start()
+    try:
+        result, output, error, extra = asyncio.run(
+            run_github_pr(_check(ReadyWhen.HEAD_CHANGED), None, gh=str(script)))
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result is CheckResult.ERROR
+    assert error == "the pull request view exceeds the 1048576-byte limit"
+    assert extra["baseline"] is None and extra["resolution"] == ""
+    assert output == "x" * (OUTPUT_MAX_BYTES - 3) + "END"
+    assert peak < 4 * 1024 * 1024
+
+
+@pytest.mark.parametrize("finish", ["exit", "cancel"])
+def test_command_is_recorded_until_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str,
+) -> None:
+    async def test() -> None:
+        records = tmp_path / "process-records"
+        records.mkdir()
+        monkeypatch.setattr(proc_tree, "_records", records)
+        monkeypatch.setattr(proc_tree, "_server", (os.getpid(), "current-server"))
+        # Process identity comes from the OS; keep this test runnable when the sandbox denies ps.
+        monkeypatch.setattr(proc_tree, "_start_time", lambda _pid: "check-started")
+        entered = asyncio.Event()
+        capture = wait_service._capture
+        observed: list[asyncio.subprocess.Process] = []
+
+        async def observed_capture(process: asyncio.subprocess.Process, *args: Any, **kwargs: Any) -> Any:
+            observed.append(process)
+            entered.set()
+            return await capture(process, *args, **kwargs)
+
+        monkeypatch.setattr(wait_service, "_capture", observed_capture)
+        command = CommandCheck("sleep 30" if finish == "cancel" else "sleep 0.2")
+        task = asyncio.create_task(run_command(command, tmp_path, project_allows=True))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            process = observed[0]
+            path = records / f"{process.pid}.json"
+            assert path.is_file(), "a running check must be available to the next startup sweep"
+            record = json.loads(path.read_text())
+            assert record["pid"] == process.pid and record["server_pid"] == os.getpid()
+            if finish == "cancel":
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if proc_tree._forgetting:
+                await asyncio.gather(*proc_tree._forgetting)
+            assert not path.exists() and process.pid not in proc_tree._recorded
+            assert process.returncode is not None
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            for process in observed:
+                if process.returncode is None:
+                    await wait_service._end_command(process)
+
+    asyncio.run(test())
+
+
+@pytest.mark.parametrize(("wait_state", "task_status"), [
+    ("ready", "waiting"), ("cancel_requested", "waiting"), ("timed_out", "waiting"),
+    ("waiting", "stopped"), ("waiting", "failed"), ("waiting", "completed"),
+    ("waiting", "cancelled"),
+])
+def test_queued_command_is_not_dispatched_after_state_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wait_state: str, task_status: str,
+) -> None:
+    """Exercise the semaphore race without PostgreSQL; a second queued command is a positive control."""
+    async def test() -> None:
+        rows = [{"task_id": name, "step_id": "step-" + name, "step_key": "w1", "state": "waiting"}
+                for name in ("changed", "control")]
+        current = {row["task_id"]: dict(row) for row in rows}
+        tasks = {name: {"status": "waiting", "work_dir": str(tmp_path)} for name in current}
+        selected = asyncio.Event()
+
+        async def due(*_args: Any, **_kwargs: Any) -> Any:
+            selected.set()
+            return rows
+
+        async def get(task_id: str, *_args: Any) -> Any:
+            return current[task_id]
+
+        async def get_task(task_id: str) -> Any:
+            return tasks[task_id]
+
+        monkeypatch.setattr(wait_service.db_waits, "due", due)
+        monkeypatch.setattr(wait_service.db_waits, "get", get)
+        monkeypatch.setattr(wait_service.db_tasks, "get_task", get_task)
+        service = wait_service.WaitService(bus=None, has_planner=lambda _: False)
+        service._semaphore = asyncio.Semaphore(1)
+
+        async def execute(row: Any, _now: Any) -> int:
+            result, _, _, _ = await run_command(
+                CommandCheck(f"touch {row['task_id']}"), tmp_path, project_allows=True)
+            return int(result is CheckResult.READY)
+
+        monkeypatch.setattr(service, "_run_wait", execute)
+        await service._semaphore.acquire()
+        pending = asyncio.create_task(service.run_once(datetime.now(timezone.utc)))
+        try:
+            await asyncio.wait_for(selected.wait(), 2)
+            current["changed"]["state"] = wait_state
+            tasks["changed"]["status"] = task_status
+        finally:
+            service._semaphore.release()
+        assert await asyncio.wait_for(pending, 5) == 1
+        assert not (tmp_path / "changed").exists()
+        assert (tmp_path / "control").is_file()
+
+    asyncio.run(test())
+
+
+def test_ready_command_keeps_output_out_of_the_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.waits import WaitSpec
+
+    async def test() -> None:
+        spec = WaitSpec("deployment ready", 3600, check=CommandCheck(f"printf {OUTPUT_MARKER}"), every_seconds=600)
+        now = datetime.now(timezone.utc)
+        row = {"step_id": "step-w1", "task_id": "task-a", "step_key": "w1", "topic": spec.topic,
+               "spec": spec.row(), "next_check_at": now, "due_at": now, "work_dir": str(tmp_path),
+               "last_result": None}
+        recorded = AsyncMock(return_value=True)
+        moved = AsyncMock(return_value={"state": "ready"})
+        monkeypatch.setattr(wait_service, "_commands_allowed", AsyncMock(return_value=True))
+        monkeypatch.setattr(wait_service.db_waits, "record_check", recorded)
+        monkeypatch.setattr(wait_service.db_waits, "move", moved)
+        service = wait_service.WaitService(bus=None, has_planner=lambda _: False)
+        assert await service._run_wait(row, now) == 1
+        assert recorded.await_args.kwargs["output"] == OUTPUT_MARKER
+        assert moved.await_args.kwargs["resolution"] == "Ready: the command exited 0."
+        assert OUTPUT_MARKER not in moved.await_args.kwargs["resolution"]
+
+    asyncio.run(test())
