@@ -10,6 +10,7 @@ once; every time comes from the caller, so tests can set the clock.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -19,6 +20,7 @@ import asyncpg
 
 from .connection import get_pool
 from .llm_records import TASK_RUN, _TASK_ROLE
+from . import agent_sessions, tasks
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
@@ -77,12 +79,21 @@ async def _task_limits(db: Db, schedule_ids: list[str]) -> dict[str, dict[str, i
 async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, Any]]:
     ids = [row["id"] for row in rows]
     overrides, limits = await _overrides(db, ids), await _task_limits(db, ids)
-    return [{**dict(row), "profile_overrides": overrides[row["id"]], "task_limits": limits[row["id"]]}
-            for row in rows]
+    views = [{**dict(row), "profile_overrides": overrides[row["id"]], "task_limits": limits[row["id"]]}
+             for row in rows]
+    for row in views:
+        if "planner_session_task_title" in row and row.get("planner_session_task_id"):
+            row["planner_session_task_title"] = tasks.task_name(
+                title=row["planner_session_task_title"], goal_id=row["planner_session_task_goal_id"],
+                requirement=row["planner_session_task_requirement"], task_id=row["planner_session_task_id"])
+    return views
 
 
 # A schedule's row with its project's name.
-_WITH_PROJECT = "SELECT s.*, p.name AS project_name FROM schedules s JOIN projects p ON p.id = s.project_id"
+_WITH_PROJECT = ("SELECT s.*, p.name AS project_name, t.title AS planner_session_task_title, "
+                 "t.goal_id AS planner_session_task_goal_id, t.requirement AS planner_session_task_requirement "
+                 "FROM schedules s JOIN projects p ON p.id = s.project_id "
+                 "LEFT JOIN tasks t ON t.id = s.planner_session_task_id")
 
 
 async def get_schedule(schedule_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
@@ -166,6 +177,71 @@ async def lock_schedule(conn: asyncpg.Connection, schedule_id: str) -> dict[str,
     """The schedule, its row locked until the transaction ends."""
     row = await conn.fetchrow("SELECT * FROM schedules WHERE id = $1 FOR UPDATE", schedule_id)
     return (await _with_overrides(conn, [row]))[0] if row else None
+
+
+async def claim_planner_session(task_id: str) -> dict[str, Any] | None:
+    """Claim a new plan's schedule conversation, copying it atomically into the task's session.
+
+    None for an ordinary task or a deleted schedule. A refused claim contains only its reason, never the stored
+    conversation; a parallel run cannot read or overwrite it. Reset takes this same schedule row lock.
+    """
+    async with get_pool().acquire() as conn, conn.transaction():
+        schedule_id = await conn.fetchval("SELECT schedule_id FROM tasks WHERE id = $1", task_id)
+        if not schedule_id:
+            return None
+        row = await lock_schedule(conn, schedule_id)
+        if row is None:
+            return None
+        if row["overlap"] == "parallel":
+            return {"claimed": False, "reason": "parallel"}
+        holder = row["planner_session_task_id"]
+        if holder and holder != task_id and await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1 AND status = ANY($2::text[]))",
+            holder, [*tasks.ACTIVE_STATUSES, tasks.READY],
+        ):
+            return {"claimed": False, "reason": "another active task holds it"}
+        totals = row["planner_session_totals"]
+        totals = json.loads(totals) if isinstance(totals, str) else dict(totals or {})
+        await agent_sessions.save_session(
+            f"planner-{task_id}", row["planner_session_id"], totals,
+            runtime_type=row["planner_session_runtime"], provider_id=row["planner_session_provider"],
+            profile_id=row["planner_session_profile"], pool=conn,
+        )
+        await conn.execute("UPDATE schedules SET planner_session_task_id = $2 WHERE id = $1", schedule_id, task_id)
+        previous = await conn.fetchrow(
+            "SELECT status, summary, error FROM schedule_runs WHERE schedule_id = $1 AND finished_at IS NOT NULL "
+            "AND task_id IS DISTINCT FROM $2 ORDER BY finished_at DESC, id DESC LIMIT 1", schedule_id, task_id,
+        )
+        return {"claimed": True, "session_id": row["planner_session_id"], "session_totals": totals,
+                "runtime_type": row["planner_session_runtime"], "provider_id": row["planner_session_provider"],
+                "profile_id": row["planner_session_profile"], "previous": dict(previous) if previous else None}
+
+
+async def save_planner_session(task_id: str, session_id: str | None, totals: Mapping[str, Any], *,
+                               runtime_type: str | None, provider_id: str | None, profile_id: str | None) -> None:
+    """Write through only while this task holds the schedule, and never in parallel mode."""
+    await get_pool().execute(
+        "UPDATE schedules s SET planner_session_id = $1, planner_session_totals = $2::jsonb, "
+        "planner_session_runtime = $3, planner_session_provider = $4, planner_session_profile = $5, "
+        "planner_session_since = CASE WHEN s.planner_session_id IS DISTINCT FROM $1 THEN now() "
+        "ELSE s.planner_session_since END FROM tasks t "
+        "WHERE t.id = $6 AND s.id = t.schedule_id AND s.planner_session_task_id = $6 AND s.overlap <> 'parallel'",
+        session_id, json.dumps(dict(totals)), runtime_type, provider_id, profile_id, task_id,
+    )
+
+
+async def reset_planner_session(schedule_id: str) -> bool | None:
+    """Clear stored runtime state under the claim lock; None if absent, otherwise whether an id was cleared."""
+    async with get_pool().acquire() as conn, conn.transaction():
+        row = await lock_schedule(conn, schedule_id)
+        if row is None:
+            return None
+        await conn.execute(
+            "UPDATE schedules SET planner_session_id = NULL, planner_session_totals = '{}'::jsonb, "
+            "planner_session_runtime = NULL, planner_session_provider = NULL, planner_session_profile = NULL, "
+            "planner_session_task_id = NULL, planner_session_since = NULL WHERE id = $1", schedule_id,
+        )
+        return row["planner_session_id"] is not None
 
 
 async def lock_next_due(conn: asyncpg.Connection, now: datetime, *, skip: list[str]) -> dict[str, Any] | None:

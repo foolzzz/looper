@@ -14,6 +14,7 @@ import {
   fetchScheduleRuns,
   fetchSchedules,
   previewSchedule,
+  resetSchedulePlannerSession,
   runSchedule,
   updateSchedule,
   type Project,
@@ -120,6 +121,73 @@ export function ScheduleTime({ iso, timeZone, className }: { iso: string; timeZo
     <time dateTime={iso} className={className}>
       {formatInZone(iso, timeZone)}
     </time>
+  );
+}
+
+/** The stored session stays visible for parallel schedules too, until explicitly reset. */
+export function PlannerSessionStatus({ schedule }: { schedule: ScheduleInfo }) {
+  const session = schedule.planner_session;
+  return (
+    <p className="basis-full text-xs text-muted-foreground">
+      {session.active ? (
+        <>
+          Planner session: continuing since {formatInZone(session.updated_at, schedule.timezone)}
+          {session.last_task_id && (
+            <>
+              {", last used by run "}
+              <a
+                href={`#tasks/${encodeURIComponent(session.last_task_id)}`}
+                className="rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                {session.last_task_title || session.last_task_id}
+              </a>
+            </>
+          )}
+        </>
+      ) : "Planner session: none yet"}
+    </p>
+  );
+}
+
+export function ResetPlannerSession({ schedule, onReset }: {
+  schedule: ScheduleInfo;
+  onReset: (schedule: ScheduleInfo) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const reset = async () => {
+    if (!confirm(`Reset the Planner session for ${schedule.name}? The next run starts a new session. A run in progress keeps its own session until it ends and will not write it back.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      await resetSchedulePlannerSession(schedule.schedule_id);
+      try {
+        onReset(await fetchSchedule(schedule.schedule_id));
+      } catch (err) {
+        setError(`Planner session reset; could not refresh the schedule: ${errorText(err)}`);
+      }
+    } catch (err) {
+      setError(`Could not reset the Planner session: ${errorText(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={reset}
+        disabled={busy}
+        aria-label={`Reset Planner session: ${schedule.name}`}
+        className="h-11 sm:h-8"
+      >
+        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+        Reset Planner session
+      </Button>
+      {error && <p role="alert" className="basis-full text-xs text-destructive">{error}</p>}
+    </>
   );
 }
 
@@ -1532,7 +1600,7 @@ export function ProjectSchedulesSection({
                       {next.charAt(0).toUpperCase() + next.slice(1)} · {schedule.description}
                     </span>
                     <LastRun schedule={schedule} />
-                    <span className="ml-auto flex items-center gap-2">
+                    <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
                       <label className="flex h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:h-9">
                         <Switch
                           checked={enabled}
@@ -1558,7 +1626,9 @@ export function ProjectSchedulesSection({
                         )}
                         Run now
                       </Button>
-                    </span>
+                      <ResetPlannerSession schedule={schedule} onReset={put} />
+                    </div>
+                    <PlannerSessionStatus schedule={schedule} />
                     {notices[sid] && <NoticeText notice={notices[sid]} />}
                   </>
                 }

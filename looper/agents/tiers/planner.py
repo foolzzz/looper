@@ -112,6 +112,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from ..scheduler import continuing_run_preface
 from .. import vault
 from ..vault import VaultConfig
 from ..ops.vault import planner_guide
@@ -192,6 +193,7 @@ from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projec
 from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
 from ...db import role_templates as db_templates, task_roles as db_roles, tasks as db_tasks
 from ...db import user_gates as db_user_gates
+from ...db import schedules as db_schedules
 from ...db import room as db_room
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
@@ -768,6 +770,9 @@ class PlannerAgent:
         self._roles: dict[str, RoleKind] | None = None
         # Whether a schedule started the task (it runs unattended, so it opens no gate), as its project was last read.
         self._scheduled = False
+        self._schedule_session_id: str | None = None
+        self._schedule_previous: Mapping[str, Any] | None = None
+        self._schedule_session_writes = True
         self._idle_task: asyncio.Task[Any] | None = None
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
@@ -940,6 +945,7 @@ class PlannerAgent:
             await self._claude.stop()
         self._pending_switch = self._pending_handoff = None
         await self._save(plan, plan_row=True)
+        await self._claim_schedule_session(plan)
         await self._save_session(plan)
 
         problem = _prepare_work_dir(plan.work_dir)
@@ -2769,6 +2775,11 @@ class PlannerAgent:
                                                session_provider=plan.session_provider)
         if switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
+            if self._schedule_session_id:
+                self._schedule_session_id = None
+                message = self._plan_message(plan, await self._template_lines(plan))
+                await self._activity("phase", ("Schedule Planner session replaced: the stored session cannot be "
+                                              f"resumed ({switch.describe()}); this run starts fresh")[:500])
             await self._switch_session(plan, switch, settings.timeout_seconds)
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
@@ -2817,6 +2828,11 @@ class PlannerAgent:
             # Claude never started the saved session: it no longer exists, and resuming it again would fail
             # every turn. The Planner continues in a new session, which the resume brief starts.
             await self._activity("error", f"Warning: Planner {exc}")
+            if self._schedule_session_id:
+                self._schedule_session_id = None
+                message = self._plan_message(plan, await self._template_lines(plan))
+                await self._activity("phase", ("Schedule Planner session replaced: the stored session could not be "
+                                              f"resumed ({exc}); this run starts fresh")[:500])
             await self._claude.stop()
             await self._drop_session(plan, session_switch.session_lost(
                 f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
@@ -2878,6 +2894,11 @@ class PlannerAgent:
                 error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise _SessionNotResumed(error)
+
+            if resuming and resuming == self._schedule_session_id and plan.session_id == resuming:
+                await db_tasks.set_continues_schedule_session(self._task_id, True)
+                self._schedule_session_id = None
+                await self._activity("phase", "Continuing the schedule's Planner session")
 
             result_event = turn.result_event
             final_text = str((result_event or {}).get("result") or "")
@@ -3176,7 +3197,8 @@ class PlannerAgent:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
                                 "later one changes it)")
-        return "\n".join([
+        return ((continuing_run_preface(self._task_id, self._schedule_previous) + "\n\n")
+                if self._schedule_session_id and self._schedule_session_id == plan.session_id else "") + "\n".join([
             "[PLAN] Plan the task in the Task section of your instructions"
             + (", with the supplements below." if added else "."),
             *(["", *added] if added else []),
@@ -3889,12 +3911,44 @@ class PlannerAgent:
         except Exception:
             logger.exception("failed to save the plan of task %s", self._task_id)
 
+    async def _claim_schedule_session(self, plan: TaskPlan) -> None:
+        """Only a new non-parallel schedule plan borrows the stored conversation."""
+        self._schedule_session_id, self._schedule_previous = None, None
+        self._schedule_session_writes = False
+        if not self._scheduled:
+            return
+        try:
+            await db_tasks.set_continues_schedule_session(self._task_id, False)
+            claimed = await db_schedules.claim_planner_session(self._task_id)
+            if not claimed:
+                return
+            if not claimed["claimed"]:
+                note = ("Schedule Planner session left as stored: this run overlaps (parallel) and starts fresh"
+                        if claimed["reason"] == "parallel" else
+                        f"Schedule Planner session not claimed: {claimed['reason']}; this run starts fresh")
+                await self._activity("phase", note)
+                return
+            self._schedule_session_writes = True
+            plan.session_id = self._schedule_session_id = claimed["session_id"]
+            plan.session_totals = Usage.from_dict(claimed["session_totals"])
+            plan.session_runtime, plan.session_provider = claimed["runtime_type"], claimed["provider_id"]
+            plan.session_profile = claimed["profile_id"]
+            self._schedule_previous = claimed["previous"]
+        except Exception as exc:
+            logger.exception("failed to claim the schedule session of %s", self.agent_id)
+            await self._activity("phase", f"Schedule Planner session not claimed: {exc}; this run starts fresh"[:500])
+
     async def _save_session(self, plan: TaskPlan) -> None:
         """Save the Planner's Claude session and its running totals."""
         try:
             await db_agent_sessions.save_session(self.agent_id, plan.session_id, plan.session_totals.to_dict(),
                                                  runtime_type=plan.session_runtime, provider_id=plan.session_provider,
                                                  profile_id=plan.session_profile)
+            if self._scheduled and self._schedule_session_writes:
+                await db_schedules.save_planner_session(
+                    self._task_id, plan.session_id, plan.session_totals.to_dict(),
+                    runtime_type=plan.session_runtime, provider_id=plan.session_provider,
+                    profile_id=plan.session_profile)
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
 

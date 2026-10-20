@@ -393,6 +393,7 @@ class AgentHTTPServer:
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
     _RE_PROJECT_SCHEDULES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/schedules$")
     _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
+    _RE_SCHEDULE_RESET_SESSION = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/reset-planner-session$")
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
     _RE_SCHEDULE_RUNS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/runs$")
     _RE_SCHEDULE_NOTIFICATIONS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/notifications$")
@@ -503,6 +504,8 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_SCHEDULE.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: schedules.delete_schedule(m.group(1)))
+        elif (m := self._RE_SCHEDULE_RESET_SESSION.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: schedules.reset_planner_session(m.group(1)))
         elif (m := self._RE_SCHEDULE_RUN.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._run_schedule_now(m.group(1)))
         elif (m := self._RE_SCHEDULE_RUNS.match(path)) and method == "GET":
@@ -928,6 +931,7 @@ class AgentHTTPServer:
                     # The schedule that created it (null for any other task, or once the schedule is deleted).
                     "schedule_id": t.get("schedule_id"),
                     "schedule_name": t.get("schedule_name"),
+                    "continues_schedule_session": t.get("continues_schedule_session", False),
                     # What the task's Planner, Workers and Reviewers spent so far.
                     "cost": costs.get(t.get("id", "")),
                 })
@@ -1483,6 +1487,7 @@ class AgentHTTPServer:
             "own_budget_usd": raw.get("budget_usd"),
             "schedule_id": raw.get("schedule_id"),
             "schedule_name": raw.get("schedule_name"),
+            "continues_schedule_session": raw.get("continues_schedule_session", False),
             "created_at": raw.get("created_at"),
             "updated_at": raw.get("updated_at"),
             "completed_at": raw.get("completed_at"),

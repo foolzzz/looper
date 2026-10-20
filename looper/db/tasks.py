@@ -292,6 +292,11 @@ async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[st
     return _task(row)
 
 
+async def set_continues_schedule_session(task_id: str, continues: bool) -> None:
+    """Whether this run actually resumed the schedule's claimed Planner conversation."""
+    await get_pool().execute("UPDATE tasks SET continues_schedule_session = $2 WHERE id = $1", task_id, continues)
+
+
 def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
     columns as lists."""
