@@ -60,7 +60,9 @@ async def list_layers(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
         f"l.max_concurrency, l.boundaries, l.system_prompt_mode, "
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = l.profile_id) AS profile "
-        "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1",
+        "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1 "
+        "ORDER BY array_position(ARRAY['system', 'role', 'project', 'role_project'], l.scope), "
+        "l.project_id NULLS FIRST, array_position(ARRAY['manager', 'planner', 'worker', 'reviewer'], l.role)",
         project_id,
     )
     layers = [_row(r) for r in rows]
@@ -69,10 +71,12 @@ async def list_layers(
             f"SELECT COALESCE(t.role, c.role) AS role, t.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} "
             "WHERE a.id = t.profile_id) AS profile, c.max_concurrency "
             "FROM (SELECT * FROM task_profile_overrides WHERE task_id = $1) t "
-            "FULL JOIN (SELECT * FROM task_concurrency_limits WHERE task_id = $1) c ON c.role = t.role", task_id,
+            "FULL JOIN (SELECT * FROM task_concurrency_limits WHERE task_id = $1) c ON c.role = t.role "
+            "ORDER BY COALESCE(t.role, c.role)", task_id,
         )
         task_rows = {r["role"]: {"scope": "task", "task_id": task_id, **_row(r)} for r in overrides}
-        for r in await pool.fetch("SELECT role, system_prompt_mode FROM task_system_prompt_modes WHERE task_id = $1",
+        for r in await pool.fetch("SELECT role, system_prompt_mode FROM task_system_prompt_modes "
+                                  "WHERE task_id = $1 ORDER BY role",
                                   task_id):
             task_rows.setdefault(r["role"], {"scope": "task", "task_id": task_id, "role": r["role"]})[
                 "system_prompt_mode"] = r["system_prompt_mode"]
@@ -81,7 +85,7 @@ async def list_layers(
             f"SELECT CASE WHEN c.step_id IS NULL THEN 'planner_task' ELSE 'planner_step' END AS scope, c.role, "
             f"c.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
             f"{_PLANNER_CHOICES} WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2) "
-            f"AND {_CHOICE_ALLOWED}",
+            f"AND {_CHOICE_ALLOWED} ORDER BY c.step_id IS NOT NULL, c.step_id, c.role",
             task_id, step_id,
         )
         layers += [{"task_id": task_id, **_row(r)} for r in chosen]

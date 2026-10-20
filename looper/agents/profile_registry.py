@@ -7,9 +7,10 @@ holds an immutable provider/name/protocol identity and its model settings.
 runtime compatibility. ``AgentProfile`` references a model id and runtime,
 with effort, agent teams and custom prompt as its only runtime options.
 
-The v2 persistence and launch functions below still use ``LegacyProviderSpec``
-and ``LegacyAgentProfile`` until the database and runtime migrations switch
-them. ``CatalogModel`` describes their old embedded model catalog. API keys
+Registry reads use the normalized account, endpoint and model tables. The v2
+write and launch functions still use ``LegacyProviderSpec`` and
+``LegacyAgentProfile`` until their migrations switch them. ``CatalogModel``
+also adapts saved model settings for the existing cost calculation. API keys
 remain separate from stored account metadata and are omitted from reprs.
 
 The built-ins exist on every installation and are read-only: the
@@ -706,11 +707,11 @@ def runtime_spec(row: Mapping[str, Any]) -> RuntimeSpec:
                        frozenset(Capability(c) for c in row["capabilities"] or () if c in known))
 
 
-def provider_spec(row: Mapping[str, Any]) -> LegacyProviderSpec:
-    """A provider row (``llm_providers``, or the fields of one) as what a profile is checked with."""
-    return LegacyProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
-                        frozenset(ApiProtocol(p) for p in row["protocols"]), row["oauth_runtime_type"],
-                        row["base_url"], _catalog(row["models"]), _env(row.get("env")))
+def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
+    """An account's public fields, never its separately stored API key."""
+    return ProviderSpec(row["id"], row["name"], VendorType(row["vendor_type"]), AuthKind(row["auth"]),
+                        row.get("oauth_runtime_type"), _env(row.get("env")), row.get("max_concurrency"),
+                        builtin=bool(row.get("builtin")))
 
 
 def servable_roles(capabilities: Iterable[Any]) -> list[str]:
@@ -773,16 +774,50 @@ def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]
     adapter = runtimes.ADAPTERS.get(row["oauth_runtime_type"] or "")
     oauth = row["auth"] == AuthKind.OAUTH.value and adapter is not None
     return {
-        "provider_id": row["id"], "name": row["name"], "protocols": list(row["protocols"]), "auth": row["auth"],
-        "oauth_runtime_type": row["oauth_runtime_type"], "base_url": row["base_url"],
-        "models": catalog_entries(row["models"]),
+        "provider_id": row["id"], "name": row["name"], "vendor_type": row["vendor_type"], "auth": row["auth"],
+        "oauth_runtime_type": row["oauth_runtime_type"], "endpoints": [dict(e) for e in row["endpoints"]],
         "suggested_models": list(adapter.login_models) if oauth and adapter else [],
         "login": dict(logins[adapter.type]) if oauth and adapter and adapter.type in (logins or {}) else None,
         "env": list(row.get("env") or []), "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
-        "profile_count": row.get("profile_count", 0), "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "model_count": row.get("model_count", 0), "profile_count": row.get("profile_count", 0),
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
+
+
+def model_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A callable model's identity, settings and usage, without account secrets."""
+    return {
+        "model_id": row["id"], "provider_id": row["provider_id"], "provider_name": row["provider_name"],
+        "protocol": row["protocol"], **{name: row[name] for name in MODEL_FIELDS},
+        "catalog_order": row["catalog_order"], "builtin": row["builtin"],
+        "profile_count": row["profile_count"], "endpoint": dict(row["endpoint"]),
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+    }
+
+
+def vendor_types_view() -> list[dict[str, Any]]:
+    """Creation suggestions only: no saved model or account is resolved from presets."""
+    from .provider_presets import vendor_defaults
+
+    result = []
+    for vendor in VendorType:
+        defaults = vendor_defaults(vendor, provider_id="draft")
+        adapter = runtimes.ADAPTERS.get(vendor.oauth_runtime_type or "")
+        models = [{"name": m.name, "protocol": m.protocol.value,
+                   **{name: getattr(m, name) for name in MODEL_FIELDS[1:]}} for m in defaults.models]
+        if adapter is not None and vendor.login_protocol is not None:
+            models = [{"name": name, "protocol": vendor.login_protocol.value} for name in adapter.login_models]
+        result.append({
+            "vendor_type": vendor.value, "auth": vendor.auth_kind.value,
+            "oauth_runtime_type": vendor.oauth_runtime_type,
+            "endpoints": [{"protocol": e.protocol.value, "base_url": e.base_url,
+                           "use_runtime_default": e.use_runtime_default} for e in defaults.endpoints],
+            "suggested_models": models,
+            "env": [{"key": key, "value": value} for key, value in defaults.env],
+            "requires_url_confirmation": defaults.requires_url_confirmation,
+        })
+    return result
 
 
 def _login_modules() -> dict[str, Any]:
@@ -865,19 +900,38 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}
 
 
+def _cost_profile(row: Mapping[str, Any]) -> LegacyAgentProfile:
+    """Adapt the exact normalized model to the existing cost/warning calculation.
+
+    No provider catalog or preset participates: only this model's saved settings
+    and endpoint can affect the cost source and price overrides.
+    """
+    profile = AgentProfile.from_row(row)
+    model, account, endpoint = row["model"], row["provider"], row["endpoint"]
+    provider = LegacyProviderSpec(
+        account["id"], account["name"], AuthKind(account["auth"]),
+        frozenset({ApiProtocol(model["protocol"])}), account.get("oauth_runtime_type"),
+        endpoint["base_url"], (CatalogModel.from_entry(model),), _env(account.get("env")))
+    return LegacyAgentProfile(profile.id, profile.name, profile.runtime, provider, model["name"],
+                              profile.effort, profile.agent_teams, profile.custom_prompt)
+
+
 def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) -> dict[str, Any]:
-    """An Agent Profile, the roles its runtime can run and where it is selected (``used_by``: the layers, each
-    ``{scope, role, project_id, project_name}``, how many tasks and schedules chose it, and the projects whose
-    Planners may choose it; ``db.profile_usage``)."""
-    spec = LegacyAgentProfile.from_row(row)
+    """An Agent Profile's saved model and derived account, roles, usage and cost warnings."""
+    spec = AgentProfile.from_row(row)
+    cost_profile = _cost_profile(row)
+    model, provider = row["model"], row["provider"]
     return {
-        "profile_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
+        "profile_id": row["id"], "name": row["name"], "model_id": row["model_id"], "effort": row.get("effort"),
+        "model": {"model_id": model["id"], "name": model["name"], "protocol": model["protocol"],
+                  "provider_id": model["provider_id"]},
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
-        "provider_id": row["provider_id"], "provider_name": row["provider_name"], "builtin": row["builtin"],
-        "agent_teams": spec.agent_teams,
-        "custom_prompt": spec.custom_prompt,
+        "provider_id": provider["id"], "provider_name": provider["name"], "builtin": row["builtin"],
+        "provider": {"provider_id": provider["id"], "name": provider["name"],
+                     "vendor_type": provider["vendor_type"], "auth": provider["auth"]},
+        "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
         "roles": servable_roles(spec.runtime.capabilities), "used_by": dict(used_by),
-        "cost": cost_basis(spec),
+        "cost": cost_basis(cost_profile), "warnings": profile_warnings(cost_profile),
     }
 
 
@@ -910,10 +964,9 @@ def _limits() -> dict[str, Any]:
 
 
 async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
-    """The runtime types this version has, and every runtime, provider and Agent Profile (with where it is used)."""
+    """Runtime/vendor types and saved runtimes, accounts, models and profiles, with usage counts."""
     from ..db import profile_registry as db
 
-    from .provider_presets import presets_view
     from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
 
     uses = await db.profile_usage()
@@ -924,7 +977,8 @@ async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
         "runtimes": [runtime_view(r, server_claude=server_claude) for r in await db.list_runtimes()],
         "providers": [provider_view(r, logins) for r in providers],
         "profiles": [profile_view(r, uses.get(r["id"], NOT_USED)) for r in await db.list_profiles()],
-        "provider_presets": presets_view(),
+        "models": [model_view(r) for r in await db.list_models()],
+        "vendor_types": vendor_types_view(),
         "prices": {"as_of": PRICES_AS_OF, "sources": list(PRICE_SOURCES),
                    "models": {name: price.view() for name, price in BUILTIN_PRICES.items()}},
         "limits": _limits(),
@@ -1215,7 +1269,7 @@ async def _profile_answer(profile_id: str) -> dict[str, Any]:
     row = await _existing_profile(profile_id)
     uses = await db.profile_usage(profile_id)
     return {"profile": profile_view(row, uses.get(profile_id, NOT_USED)),
-            "warnings": profile_warnings(LegacyAgentProfile.from_row(row))}
+            "warnings": profile_warnings(_cost_profile(row))}
 
 
 async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:

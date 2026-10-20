@@ -19,17 +19,41 @@ import asyncpg
 
 from .connection import get_pool
 
-# The columns of an Agent Profile row joined with its runtime and provider, as one JSON object (also inside a layer).
-PROFILE_JSON = (
-    "json_build_object('id', a.id, 'name', a.name, 'model', a.model, 'effort', a.effort, 'builtin', a.builtin, "
-    "'agent_teams', a.agent_teams, 'custom_prompt', a.custom_prompt, "
-    "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
-    "'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, 'provider_auth', p.auth, "
-    "'provider_protocols', p.protocols, 'provider_oauth_runtime_type', p.oauth_runtime_type, "
-    "'provider_base_url', p.base_url, 'provider_models', p.models, 'provider_env', p.env)"
+# Only account metadata is joined here; the launch path reads keys separately.
+_PROVIDER_JSON = (
+    "json_build_object('id', p.id, 'name', p.name, 'vendor_type', p.vendor_type, 'auth', p.auth, "
+    "'oauth_runtime_type', p.oauth_runtime_type, 'env', p.env, 'max_concurrency', p.max_concurrency, "
+    "'builtin', p.builtin)"
 )
-PROFILE_JOIN = ("agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
-                "JOIN llm_providers p ON p.id = a.provider_id")
+PROFILE_JSON = (
+    "json_build_object('id', a.id, 'name', a.name, 'model_id', a.model_id, 'effort', a.effort, "
+    "'builtin', a.builtin, 'agent_teams', a.agent_teams, 'custom_prompt', a.custom_prompt, "
+    "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
+    "'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, "
+    f"'provider', {_PROVIDER_JSON}, 'model', to_jsonb(m), 'endpoint', to_jsonb(e))"
+)
+PROFILE_JOIN = (
+    "agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
+    "JOIN llm_models m ON m.id = a.model_id JOIN llm_providers p ON p.id = m.provider_id "
+    "JOIN llm_provider_endpoints e ON e.provider_id = m.provider_id AND e.protocol = m.protocol"
+)
+
+# Correlated counts avoid multiplying profiles by the number of endpoints/models.
+_PROVIDER_SELECT = (
+    "SELECT p.*, EXISTS (SELECT 1 FROM llm_provider_secrets s WHERE s.provider_id = p.id) AS api_key_set, "
+    "(SELECT count(*) FROM llm_models m WHERE m.provider_id = p.id) AS model_count, "
+    "(SELECT count(*) FROM agent_profiles a JOIN llm_models m ON m.id = a.model_id "
+    "WHERE m.provider_id = p.id) AS profile_count, "
+    "COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.protocol) FROM llm_provider_endpoints e "
+    "WHERE e.provider_id = p.id), '[]'::jsonb) AS endpoints FROM llm_providers p "
+)
+_MODEL_SELECT = (
+    "SELECT m.*, p.name AS provider_name, "
+    f"{_PROVIDER_JSON} AS provider, to_jsonb(e) AS endpoint, "
+    "(SELECT count(*) FROM agent_profiles a WHERE a.model_id = m.id) AS profile_count "
+    "FROM llm_models m JOIN llm_providers p ON p.id = m.provider_id "
+    "JOIN llm_provider_endpoints e ON e.provider_id = m.provider_id AND e.protocol = m.protocol "
+)
 
 
 def new_id(prefix: str) -> str:
@@ -41,7 +65,7 @@ def _json(value: Any) -> Any:
 
 
 def _provider(row: asyncpg.Record) -> dict[str, Any]:
-    return {**dict(row), "models": _json(row["models"]), "env": _json(row["env"])}
+    return {**dict(row), "endpoints": _json(row["endpoints"]), "env": _json(row["env"])}
 
 
 # --- Runtimes ---
@@ -51,7 +75,7 @@ async def list_runtimes(*, pool: asyncpg.Pool | asyncpg.Connection | None = None
     pool = pool or get_pool()
     rows = await pool.fetch(
         "SELECT r.*, (SELECT count(*) FROM agent_profiles a WHERE a.runtime_id = r.id) AS profile_count "
-        "FROM agent_runtimes r ORDER BY r.builtin DESC, r.name"
+        "FROM agent_runtimes r ORDER BY r.builtin DESC, r.name, r.id"
     )
     return [dict(r) for r in rows]
 
@@ -94,12 +118,7 @@ async def update_runtime(runtime_id: str, probe: Mapping[str, Any], *, pool: asy
 async def list_providers(*, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
     """Every provider, with ``api_key_set`` in place of its key."""
     pool = pool or get_pool()
-    rows = await pool.fetch(
-        "SELECT p.*, s.provider_id IS NOT NULL AS api_key_set, "
-        "(SELECT count(*) FROM agent_profiles a WHERE a.provider_id = p.id) AS profile_count "
-        "FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id "
-        "ORDER BY p.builtin DESC, p.name"
-    )
+    rows = await pool.fetch(_PROVIDER_SELECT + "ORDER BY p.builtin DESC, p.name, p.id")
     return [_provider(r) for r in rows]
 
 
@@ -107,14 +126,32 @@ async def get_provider(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Connect
                        ) -> dict[str, Any] | None:
     """A provider, with ``api_key_set`` in place of its key."""
     pool = pool or get_pool()
-    row = await pool.fetchrow(
-        "SELECT p.*, s.provider_id IS NOT NULL AS api_key_set FROM llm_providers p "
-        "LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id WHERE p.id = $1", provider_id,
-    )
+    row = await pool.fetchrow(_PROVIDER_SELECT + "WHERE p.id = $1", provider_id)
     return _provider(row) if row else None
 
 
-async def get_api_key(provider_id: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+def _model_row(row: asyncpg.Record) -> dict[str, Any]:
+    return {**dict(row), "provider": _json(row["provider"]), "endpoint": _json(row["endpoint"])}
+
+
+async def list_models(*, provider_id: str | None = None,
+                      pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """Models in saved catalog order, each with its exact account/endpoint and usage count."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        _MODEL_SELECT + "WHERE $1::text IS NULL OR m.provider_id = $1 "
+        "ORDER BY p.builtin DESC, p.name, p.id, m.catalog_order, m.name, m.protocol, m.id", provider_id)
+    return [_model_row(row) for row in rows]
+
+
+async def get_model(model_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                    ) -> dict[str, Any] | None:
+    pool = pool or get_pool()
+    row = await pool.fetchrow(_MODEL_SELECT + "WHERE m.id = $1", model_id)
+    return _model_row(row) if row else None
+
+
+async def get_api_key(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str | None:
     """A provider's API key, for the launch that uses it; None without one."""
     pool = pool or get_pool()
     return await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1", provider_id)
@@ -183,8 +220,8 @@ async def list_profiles(*, pool: asyncpg.Pool | asyncpg.Connection | None = None
     """Every Agent Profile (or those of one provider) as ``PROFILE_JSON`` objects."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        f"SELECT {PROFILE_JSON} AS profile FROM {PROFILE_JOIN} WHERE $1::text IS NULL OR a.provider_id = $1 "
-        "ORDER BY a.builtin DESC, a.name", provider_id,
+        f"SELECT {PROFILE_JSON} AS profile FROM {PROFILE_JOIN} WHERE $1::text IS NULL OR p.id = $1 "
+        "ORDER BY a.builtin DESC, a.name, a.id", provider_id,
     )
     return [_json(r["profile"]) for r in rows]
 
@@ -193,7 +230,7 @@ async def login_profile_count(runtime_type: str, *, pool: asyncpg.Pool | asyncpg
     """How many Agent Profiles use the own login (an OAuth provider) of ``runtime_type`` runtimes."""
     pool = pool or get_pool()
     return int(await pool.fetchval(
-        "SELECT count(*) FROM agent_profiles a JOIN llm_providers p ON p.id = a.provider_id "
+        f"SELECT count(*) FROM {PROFILE_JOIN} "
         "WHERE p.auth = 'oauth' AND p.oauth_runtime_type = $1", runtime_type))
 
 
