@@ -1,13 +1,16 @@
 """Install a fresh wheel and cold-start real pi outside the checkout, using only local HTTP services."""
 from __future__ import annotations
 
+import fcntl
 import http.client
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import time
 import zipfile
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -19,6 +22,75 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE = "looper/agents/runtimes/pi_extension/looper.ts"
+
+
+@pytest.mark.parametrize("kind", ["responses", "deepseek"])
+@pytest.mark.parametrize("parent_exits", [True, False])
+def test_eval_deadline_kills_term_ignoring_child(tmp_path: Path, kind: str, parent_exits: bool) -> None:
+    """The deadline must clean the group even when its leader exits on SIGTERM."""
+    from fake_claude import fake_claude
+
+    scripts = tmp_path / "examples/pi"
+    scripts.mkdir(parents=True)
+    for name in ("eval-common.sh", f"eval-{kind}.sh"):
+        shutil.copy2(ROOT / "examples/pi" / name, scripts / name)
+    shutil.copytree(ROOT / "evals/agents", tmp_path / "evals/agents")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    child = '''
+import fcntl, os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open('child.lock', 'w') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    Path('child.pid').write_text(str(os.getpid()))
+    time.sleep(60)
+'''
+    fake_claude(bindir / "uv", f'''
+import os, signal, subprocess, sys
+from pathlib import Path
+def terminate(*_):
+    Path('parent.terminated').write_text('SIGTERM')
+    sys.exit(0)
+signal.signal(signal.SIGTERM, terminate if {parent_exits!r} else signal.SIG_IGN)
+Path('parent.pid').write_text(str(os.getpid()))
+subprocess.Popen([sys.executable, '-c', {child!r}],
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).wait()
+''')
+    env = {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "HOME": str(tmp_path / "home"),
+           "PI_EVAL_API_KEY": "test-only-key", "DEEPSEEK_API_KEY": "test-only-key",
+           "PI_EVAL_BASE_URL": "http://127.0.0.1:9/v1", "PI_EVAL_TOTAL_CAP_USD": "2.5",
+           "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "2",
+           "LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/disposable_eval"}
+    started = time.monotonic()
+    try:
+        done = subprocess.run(["bash", str(scripts / f"eval-{kind}.sh")], cwd=tmp_path, env=env,
+                              capture_output=True, text=True, timeout=10)
+        assert done.returncode == 124, done.stdout + done.stderr
+        assert time.monotonic() - started < 8
+        assert (tmp_path / "child.pid").is_file(), "child must be ready before the deadline"
+        if parent_exits:
+            assert (tmp_path / "parent.terminated").read_text() == "SIGTERM"
+        gaps = (tmp_path / f".local/pi-eval-{kind}/gaps.txt").read_text()
+        assert "gap: deadline: stopped before the runner finished" in gaps
+        # A kernel-held lock proves the child has died, including on systems
+        # where an orphan's zombie PID remains until the system reaps it.
+        with (tmp_path / "child.lock").open() as lock:
+            until = time.monotonic() + 2
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < until, "SIGTERM-ignoring child survived the deadline"
+                    time.sleep(0.02)
+    finally:
+        parent = tmp_path / "parent.pid"
+        if parent.exists():
+            try:
+                os.killpg(int(parent.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize("kind", ["responses", "deepseek"])

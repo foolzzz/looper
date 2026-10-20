@@ -190,11 +190,13 @@ except subprocess.TimeoutExpired:
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        pass
+    # The leader may exit on SIGTERM while its children keep running.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
     raise SystemExit(124)
 raise SystemExit(code if code is not None else 1)
 PY
