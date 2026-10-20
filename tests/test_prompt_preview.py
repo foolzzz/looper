@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -21,7 +22,9 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worke
 
     profile = replace(BUILTIN_PROFILE, custom_prompt="  My profile identity  ",
                       runtime=replace(BUILTIN_PROFILE.runtime, type=runtime,
-                                      capabilities=adapter(runtime).capabilities),
+                                      # Rendering is testable before pi's execution capabilities are enabled.
+                                      capabilities=(frozenset(Capability) if runtime == "pi"
+                                                    else adapter(runtime).capabilities)),
                       provider=replace(BUILTIN_PROFILE.provider,
                                        auth=AuthKind.OAUTH if runtime == "grok" else AuthKind.API_KEY,
                                        protocols=frozenset(ApiProtocol), oauth_runtime_type=runtime))
@@ -41,7 +44,7 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worke
     return module, profile, layers
 
 
-@pytest.mark.parametrize("runtime", ["claude-code", "codex", "grok", "omp"])
+@pytest.mark.parametrize("runtime", ["claude-code", "codex", "grok", "omp", "pi"])
 @pytest.mark.parametrize("mode", ["append", "replace"])
 @pytest.mark.parametrize("role", ["planner", "worker", "reviewer", "manager"])
 def test_preview_uses_profile_harness_contract_and_runtime_blocks(monkeypatch, runtime, mode, role):
@@ -99,10 +102,11 @@ def test_preview_manager_has_no_project_context(monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["append", "replace"])
-def test_preview_omp_includes_project_instructions_without_writes(monkeypatch, tmp_path, mode):
+@pytest.mark.parametrize("runtime", ["omp", "pi"])
+def test_preview_includes_project_instructions_without_writes(monkeypatch, tmp_path, mode, runtime):
     from looper.agents.runtimes import omp
 
-    module, profile, _ = _dependencies(monkeypatch, "omp", mode)
+    module, profile, _ = _dependencies(monkeypatch, runtime, mode)
     (tmp_path / "AGENTS.md").write_text("Project instruction: report verification evidence.")
     # Keep this standalone fixture independent of the checkout containing pytest's temp directory.
     monkeypatch.setattr(omp, "outside_repository", lambda cwd: True)
@@ -162,6 +166,48 @@ plugin.apply({systemPrompt: {section(value) {console.log(JSON.stringify(value.te
 ''', dsh.bootstrap_entry(home)["name"])
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == text
+
+
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_pi_preview_matches_the_final_prompt_file(monkeypatch, tmp_path, mode):
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.runtimes import SystemPromptMode
+
+    module, profile, _ = _dependencies(monkeypatch, "pi", mode)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("Project instruction: preserve the repository boundary.")
+    monkeypatch.setattr(module.db_projects, "get_project", AsyncMock(return_value={
+        "id": "proj-demo", "name": "Demo", "work_dir": str(tmp_path)}))
+    monkeypatch.setattr(module.db_documents, "list_documents", AsyncMock(return_value=[]))
+    prompts = []
+    build = module.build_system_prompt
+
+    def capture(**kwargs):
+        prompt = build(**kwargs)
+        prompts.append(prompt)
+        return prompt
+
+    monkeypatch.setattr(module, "build_system_prompt", capture)
+    result = asyncio.run(module.preview(profile.id, "worker", "proj-demo"))
+    launch = Launch(AgentSettings(
+        profile=replace(profile, provider=replace(profile.provider, api_key="test-only",
+                                                  base_url="http://localhost.invalid/v1")),
+        system_prompt_mode=SystemPromptMode(mode)), role=AgentType.WORKER)
+    command = launch.runtime.run_command("pi", cwd=tmp_path, launch=launch,
+                                         prompt_file=prompts[0].write_file(tmp_path / "runtime"))
+    flag = "--system-prompt" if mode == "replace" else "--append-system-prompt"
+    written = Path(command[command.index(flag) + 1]).read_bytes()
+    preview = "".join(block["text"] or "" for block in result["blocks"] if block["owner"] == "looper")
+    assert preview.encode("utf-8") == written
+
+
+@pytest.mark.parametrize("role,expected", [("manager", "replace"), ("planner", "replace"),
+                                           ("worker", "append"), ("reviewer", "append")])
+def test_pi_preview_keeps_role_default_prompt_modes(monkeypatch, role, expected):
+    module, profile, _ = _dependencies(monkeypatch, "pi", None, role)
+    result = asyncio.run(module.preview(profile.id, role))
+    assert result["system_prompt_mode"] == expected
+    assert result["role_system_prompt_mode"] == expected
 
 
 @pytest.mark.parametrize("role", ["", "bad", "Worker"])

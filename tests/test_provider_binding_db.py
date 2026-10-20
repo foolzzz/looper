@@ -80,6 +80,52 @@ MAPPED = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "CLA
           "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL")
 
 
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_pi_bridge_reads_the_materialized_scoped_library_after_loading_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, role: str,
+) -> None:
+    from looper.agents.agent_settings import AgentType, Launch, load_agent_settings
+    from looper.agents.library import load_installed
+    from looper.agents.ops.planner import PlannerOps
+    from looper.agents.ops.service import ManagerOps
+    from tests.test_profile_registry_db import _runtime
+
+    async def _test(pool: Any) -> None:
+        runtime_id = await _runtime("pi")
+        # Exercise binding independently of Pi's capability rollout gate.
+        await pool.execute("UPDATE agent_runtimes SET capabilities = $1 WHERE id = $2",
+                           ["run", "resident_session", "resume", "mcp", "read_tools"], runtime_id)
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "pi-key", "protocols": ["openai-responses"], "auth": "api_key", "api_key": KEY,
+            "base_url": "https://provider.example.invalid/v1", "models": [{"name": "selected"}],
+        }))["provider"]["provider_id"]
+        profile = (await _ok("POST", "/api/agent-profiles", {
+            "name": "pi-test", "runtime_id": runtime_id, "provider_id": provider, "model": "selected",
+        }))["profile"]["profile_id"]
+        await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile})
+        settings = await load_agent_settings(role)
+        assert settings.profile_error is None
+        library = await load_installed(tmp_path, role)
+        url = "http://127.0.0.1:19321"
+        if role == "manager":
+            token = "manager-scoped-token"
+            library = await ManagerOps(None, url=url, token=token).library_with_server(library, tmp_path)
+        else:
+            ops = PlannerOps(None, url=url)
+            token = ops.issue(await _task(tmp_path))
+            library = await ops.library_with_server(library, tmp_path, token)
+        launch = Launch(settings=settings, library=library, role=AgentType(role))
+        assert not {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN"} & dict(launch.env).keys()
+        environment = launch.environment()
+        assert environment["LOOPER_AGENT_URL"] == url
+        assert environment["LOOPER_AGENT_TOKEN"] == token
+        assert not {"LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN"} & environment.keys()
+        assert token not in json.dumps(launch.record())
+        assert url not in json.dumps(launch.record())
+
+    _run(_test, monkeypatch)
+
+
 # --- The binding ---
 
 

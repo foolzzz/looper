@@ -1,10 +1,10 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办；**v2.6.0 已发布（2026-10-14）**。
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；M9g Pi 运行时的适配器、界面和假 provider 闭环已在本分支实现，真实 Responses、DeepSeek 与 Claude 对照未验证；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办；**v2.6.0 已发布（2026-10-14）**。
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-19
+- **最近更新：** 2026-10-20
 
 ## 1. 工作方式
 
@@ -52,6 +52,7 @@
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付（looper #70） | M9c |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
+| M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -526,6 +527,17 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 登录照 Codex 的 P1：链接、运行后和启动时检查分叉；链接代码抽成两种登录共用的 `runtimes/linked_login.py`；刷新怎样
     写回未核实（不强制刷新操作者的 token）。
 
+#### M9g Pi 运行时
+
+- **范围：** pi CLI（最低 1.3.0）支持四类角色，只接 API key 的 `openai-responses` 与 `openai-chat`；私有 home、精确会话续接、自有 HTTP 工具桥、Dashboard 与 Profile、CLI 沿 registry（[pi 运行时 RFC](../architecture/rfcs/pi-runtime-v0.zh-CN.md)）。
+- **验收：** 安装后的真实 pi 配假的本地 Chat Completions provider，在一次性数据库上跑通四角色、只读工具、用量、引导和取消；Settings → Agent Runtimes 有一张无头浏览器截图。真实 Responses、真实 DeepSeek 和 Claude CLI 对照未跑。
+- **核实后确定的做法**（细节和仍开放的核实项写在 pi 运行时 RFC）：
+  - Worker、Reviewer 一次 JSON 进程（房间外 `--no-session`）；Manager、Planner 逐轮 JSON 进程，精确 `--session <file>` 续接（`ResidentPi`）；需要引导的 Worker 用 `--mode rpc`，不带 `-p`，也不带 OMP 的 `--no-ui`；
+  - 只读（Planner 与咨询）为 `--tools read,grep,find,ls,mcp__looper__*`；普通运行保留 pi 默认的 read/bash/edit/write，另加桥工具；工具名单不是操作系统沙箱；
+  - 项目说明由 Looper 注入（每目录 `AGENTS.md`，否则 `CLAUDE.md`，`Delivery.INJECTED`，每文件 32 KiB），`--no-context-files` 关掉 pi 自己的发现；catalog 里非 looper 的 MCP、skill、插件记入 `runtime_catalog.skipped`；
+  - 密钥只在 `LOOPER_PROVIDER_API_KEY`，`models.json` 写 `"apiKey": "$LOOPER_PROVIDER_API_KEY"`；catalog cost 四项为 0，Looper 按 provider 价格计费，软上限在 usage 边界停进程树；
+  - Telegram、Lark 协议不改。安装后的 serve 里 `telegram`、`lark`、`lark_bot` 存在且禁用。没有发送替身渠道消息，也没有真实测试消息。
+
 #### M9d SDK 运行时与 norma
 
 - **范围：** 在适配器接口上接 SDK 类运行时；norma SDK 就绪后接入，验证它的双协议。范围在 M9a–M9c 之后再细化。
@@ -679,6 +691,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-19 | 运维配置文件与子进程环境（本 PR）：部署设置改到 `<runtime root>/ops/server.toml`（默认 `~/.looper/ops/server.toml`；`looper serve`、`doctor`、`config export`、`config import`、`config init-ops`、`service install` 可用 `--config` 指向别处），由 `looper/ops_config.py` 在命令开始时读一次。键是 `[database] url`、`[server]` 的 `host`、`port`、`public_url`、`log_level`（debug、info、warning、error）、`[backup]` 的 `pg_dump` 与 `command`（argv 数组，填入 `{dbname}` 和 `{user}`）、`[operator_notes] root`（绝对路径）。文件不做插值、include，也不展开 `~`；未知键、类型不对或值不合法时命令停下，报错只点名键、不写出值。必须是普通文件（不能是符号链接），属主为当前用户、权限 0600，所在目录也属该用户且为 0700；Looper 原子写入。改文件后重启服务才生效。每一项的优先级：显式命令行旗标、文件、仅本版本仍读的旧变量（先是环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、`LOOPER_BACKUP_CMD`、`LOOPER_OPERATOR_NOTES_ROOT` 及其 `LOOPX_*` 同名，笔记根目录没有 `LOOPX_` 名，再用 checkout 的 `.env`）、最后是内置默认。用到旧变量时打弃用警告，只点名变量、不写出值，下一版删除。数据库 URL 不再有默认值：没有时 `looper serve`、doctor、config import 和 export 不启动，并提示跑 `looper config init-ops` 或改文件。runtime root 是 `--runtime-root`，否则是弃用并警告的 `LOOPER_RUNTIME_ROOT`（`LOOPX_RUNTIME_ROOT` 同样），否则 `~/.looper`；文件里不写它。`.env` 不再注入 Looper 的环境，只从中读上述旧设置，其余键（例如渠道 token 变量）忽略并在警告里点名；渠道密钥放在自己的 Settings 字段（存数据库）或服务环境（`looper service install --env NAME`）。已有安装迁一次：`looper config init-ops` 按当时生效的值写出 0600 的文件，已有文件拒绝覆盖；什么都没配时写入旧默认 `postgresql://localhost:5432/loopx` 并说明。然后从 shell 和 `.env` 去掉旧变量，用了服务的再跑一次 `looper service install`；在此之前 `looper serve` 仍按变量工作，只是有警告。`looper service install` 的单元运行 `looper serve --config <运维文件绝对路径> --runtime-root <根目录绝对路径>`，只有给 install 传了 `--port`，或以前的单元带了 `--port` 而文件没写端口时才加 `--port`；没有运维文件，或某项设置仍来自环境变量时拒绝。不再复制每一个 `LOOPER_*`、`LOOPX_*`、`ANTHROPIC_*`、`LARK_*`：复制 PATH、TZ、区域、代理和 CA 证书变量、各运行时的目录和登录（`child_env.RUNTIMES`）、`LOOPER_TELEGRAM_BOT_TOKEN`（本版本也复制 `LOOPX_TELEGRAM_BOT_TOKEN`），以及每个 `--env NAME`；报告点名不再复制的变量。`--env` 带运维变量时拒绝。重装替换旧单元，旧单元里的数据库 URL 随之消失；单元仍是 0600（里面可以有 API key）。服务启动的每个进程（agent 的运行时和它们起的 MCP 服务器、定时任务的门、探针、git、ps、lark-cli）从 `looper/child_env.py` 的允许名单起步（系统、区域、XDG、SSH agent、git 身份和配置、代理和证书、运行时自己的登录变量），再加上 Looper 为该子进程设置的（provider 绑定、agent 设置里的变量、MCP 令牌、门的运行变量）。数据库 URL（新旧名字）、`PGPASSWORD`、任何 `LOOPER_*` 或 `LOOPX_*` 以及其他变量都不传。数据库备份用自己的环境（这份再加上 libpq 的 `PG*` 和 Docker 的变量，pg_dump 的 `PGPASSWORD` 从 URL 取出）。agent 还要的变量从设置里的环境变量给（Settings 或项目层）。这只是不把秘密放进子进程环境，不是沙箱：agent 以服务的用户运行，有 shell 的仍能读该用户能读的文件，包括运维文件、操作者令牌、`.env` 和服务单元；隔开需要另一个系统用户或沙箱，这次没做。验证：针对性测试；在一次性的 runtime root 上由 `looper config init-ops` 起一个真实的 `looper serve`；替身 agent 的环境里没有数据库 URL。 |
 | 2026-10-19 | 知识库（looper #239，v2.12.0，设计见 [RFC](../architecture/rfcs/obsidian-knowledge-v0.zh-CN.md)）：系统设置 `knowledge_vault`（目录、可写目录、规则文件）加项目开关 `vault`（默认关），开着时任务的规划者、Worker 和 Reviewer 有 `looper_vault_search`、`looper_vault_read`、`looper_vault_write` 三个与运行时无关的 MCP 工具，读整个知识库、只写可写目录，每次写入是知识库仓库里只含这一篇笔记的一次提交，记在任务动态里；任务完成或失败时规划者按知识库的规则文件做一次 `[VAULT]` 收尾。写入从 `/` 起按目录 fd 逐层打开、不跟随符号链接，用线程锁串行，sha256 比对冲突，git 用字面路径、超时结束整个进程组、动态里不带 git 输出；没配置或项目关着时提示词逐字节不变（有测试），真实运行与评测结果见 PR。 |
 | 2026-10-19 | 定时任务共用 Planner 会话（[RFC](../architecture/rfcs/schedule-planner-session-v0.zh-CN.md)，本分支实现，待集成验证）：非并行运行认领同一条会话，每次仍建独立任务，写穿由 holder 校验保护，用户重置后进行中的运行保留自己的会话且不能写回；四种回退各记录原因，续接首轮增加用户消息说明，系统提示不变。认领或续接的运行另外把这一轮需求原文放进 PLAN 用户消息（标题 “This run's requirement (kept in the conversation for later runs):”，与 Task 节同一限度截断），否则续接会话看不到只写在 Task 节里的前置检查输出；非定时任务和并行运行的 PLAN 消息逐字节不变。API 返回不含会话 id 的状态与任务续接标志，项目定时任务行显示状态并提供确认重置，Manager 沿用 high 确认，配置导出不含会话、导入不恢复会话。纯逻辑与 Planner 运行时替身 14 项通过，并行写穿保护变异被测试检出并已恢复；数据库 14 项、前端测试与构建受执行环境限制尚未运行，holder/reset 的数据库变异、真实 Claude 记忆及定向评测待补（§5.4）。 |
+| 2026-10-20 | Pi 运行时（M9g，本分支 PR #252）：第五种适配器 `pi`（最低 1.3.0）跑 Manager、Planner、Worker、Reviewer，只接 API key 的 `openai-responses` 与 `openai-chat`，私有 home 与精确 `--session` 续接，平台工具走自有 HTTP 桥，花费用 provider 价格并在 usage 边界执行软上限。验证：安装后的真实 pi 配假 Chat Completions provider，在一次性数据库上完成四角色会话、只读工具、用量、引导和取消，并在模型请求前拒绝缺 key、不支持协议和错误桥 token；Settings 的 Agent Runtimes 截图看到已探测的 Pi CLI 1.3.0 与四角色。真实 Responses、真实 DeepSeek 和 Claude CLI 对照未跑（对照 0/48，失败 0，未验证 48，因为缺少 API key）；脚本形状测试和数据库跳过的 pytest 留在缺口里（§5.2、§5.4，pi RFC）。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -734,6 +747,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **Manager 自己动手做小活（looper #88 的真实对话发现）**：haiku 收到「创建一个 hello.txt」这类一句话的小活时没有走任务流程，直接用自己的工具在 Manager 的工作目录里写了文件（Manager 有全部工具、不需确认）；要不要在 role prompt 里限定 Manager 不亲自改文件，或收窄它的工具，待定。
 - **OMP 运行时的已知差距（M9e）**：运行中的 OMP Worker 的引导已改走 `--mode rpc`（`interruptMode` 设 `wait`，探测到版本和 rpc 才启用，见 Worker 引导 RFC）；omp 的 `task` 工具找子 agent 定义时从工作目录一路往上找 `.omp/agents`，过了仓库根也不停，工作目录在操作者家目录下时会读到 `~/.omp/agents`（如果有），Looper 关不掉，只能整个去掉 `task` 工具；工作目录不在 git 仓库里时关掉了向上查找的发现来源，工作目录自己的 `AGENTS.md`、`CLAUDE.md`、`.omp/` 等也不读；后台请求（skill 描述压缩成路由提示、压缩摘要）不在事件流里，不计入花费和单次上限；每个新进程的首个请求基本不命中提示缓存（评测里未缓存输入 101k，Codex 约 60k），可以试 `--prompt-cache-key`；每个 runtime root 第一次运行要解压约 167 MB 的原生库（`omp/natives`）。
 - **Grok 运行时的已知差距（M9f）**：运行中的 Grok Worker 不能被引导（headless 只读一次提示，ACP 的 `grok agent stdio` 没有声明运行中追加输入的扩展，未采用），规划者的消息只能留给这一步的决策轮；Grok 没有花费上限参数，花费只在一轮结束时报，所以单次上限停不住 Grok 的运行（注册时警告，任务上限照算）；Grok 把登录刷新写回 `auth.json` 的方式没有核实（闭源，维护者决定不强制刷新真实 token），靠每次运行后和启动时的分叉检查兜底；压缩事件的字段、子 agent 的响应是否出现在流里没有实跑触发；Grok 一直保存会话（没有不存的选项），一次运行的会话随它的家目录一天后删掉；被结束时正在跑的工具调用不在事件流里；只做了 Grok 自己的登录，API key provider（`[model.<id>]` 的 `api_backend`）未接。
+- **Pi 运行时的已知差距（M9g）**：嵌套再启动 `pi` 的隔离没有实跑（子 shell 的 `unset` 前缀已用 `/bin/sh -c` 核对，子 shell 保持私有 HOME）；全部生产工具 schema 没有逐个普查（代表性富 schema 已被 pi 接受）；thinking 是否被模型钳制没有在真实模型上检查；服务崩溃后按保存的会话再起没有单独实跑（假 pi 单测和安装后的假 provider 覆盖同一 serve 内的续接，以及新的 `ResidentPi` 重新加载已存 id）；没有加 RPC `abort`/`clear_queue`。真实协议和 Claude 对照见第 5.4 节。替身渠道消息没有发送。
 
 - **Reviewer 看不到重试时补充的说明（2026-10-15，告警分诊定时任务的影子运行发现；✅ looper #183：评审请求带上这一步的全部重试说明，评审任务一节标为规划者对这一步的修改）**：Planner 决定重试一个步骤时写给 Worker 的补充说明（例如放宽的边界、只需补齐某个输出），Reviewer 看不到，它按原始的步骤说明评审。结果是 Worker 照补充说明做了，评审却判不通过，整步作废、重新规划，或者多重试几次。重试时应把 Planner 的补充说明一并交给 Reviewer。
 - ~~**定时任务里 Planner 的花费占比高**~~（✅ looper #210）：定时任务早已可以按角色指定 Agent Profile（`profile_overrides`，含 `planner`，不写则用项目的）；这次让界面和管家的 `looper_schedules` 工具说明点明可以给 Planner 选更低强度的 Profile，文档建议重复性定时任务这样做，默认不变、不会悄悄改已有定时任务的 Planner。跨运行的 Planner 会话续接见 §5.0 的定时任务会话项。
@@ -764,6 +778,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   [validate.py 的安全入口](../../evals/README.md#dsh-validation)保留无 key、无数据库连接的 preflight。既有 smoke 已通过两任务、四角色、consult 和 API/DB 回读；`task-basic`、`task-review` 既有产物各 4 pass、无 fail/error/skipped。Manager 既有真实产物亦为 4 pass：MCP 读回、确认建任务/开始和同一 Session 连续三轮均有证据；修复已启动 Planner 尚无 Session 导致的误报后，回读 evidence gaps 为空，launcher 回归 116 passed、1 skipped（未配置 disposable PG）。本次指定真实命令仍因 sandbox 禁止进程树观察而 exit 2，显式 token 轮换真实验收保持待完成；root 用量未知比例 20%，观测金额未知。没有可比 append 基线，辅助费用仍未知；无 busy steer、append only 限制不变。CLI 无专属参数，Dashboard/Telegram/Lark 共用 adapter，未真发；本次未启动服务，UI 截图未取得。main/open PR 远端查询失败，本地 main 已分叉，pi 集成冲突尚未排除；不据此标为已交付。
 
 - **定时任务共用 Planner 会话**（本分支实现，待集成验证）：按会话 RFC 第 14 节，在一次性数据库、端口和 runtime root 上用真实 Claude（sonnet）验证首轮只在对话中记下的事实能在第二轮取回、重置后的第三轮不再记得；补相关 Planner haiku/opus 与 Manager haiku/opus xhigh 的定向真实评测。真实模型路径及评测尚未运行，替身验证不替代真实模型验证。
+- **Pi 的真实协议与 Claude 对照（M9g）**：`examples/pi/eval-responses.sh`、`examples/pi/eval-deepseek.sh` 和 `examples/pi/eval-prompt-comparison.sh` 已写好。真实 Responses 和真实 DeepSeek 都没有跑。假 `uv` 下的命令、预算和缺口边界测试 83 项通过，只证明脚本形状。Claude CLI 对照在缺少 API key 时退出：48 个真实用例通过 0、失败 0、未验证 48，基线保持原样。合成 SSE 上两种协议的未缓存 input 口径已核对，真实账单对账没有做。评测脚本仍把 steering、worker 会话续接、取消进程树、Responses 的 strict/optional 原始请求读回、`operator_notes_stale` 和 `schedule_*` 标为未验证。数据库不可用时跳过的 pytest 留在缺口里。
 
 - **飞书、Telegram 的真实流量**：飞书私聊的收发已经实测过（2026-10-15，维护者给自己的飞书机器人发私聊，收到消息并以 Markdown 回复）。收到消息时的「Get」表情和单条状态消息的原地编辑也已实测（2026-10-15，维护者在真实飞书里看到表情出现、同一条状态消息原地更新）。任务被接受时的「任务已分解为 N 个步骤」、各条进度消息和恰好一条任务结束通知也已在真实飞书里验证（2026-10-15）；那次看到的顺序和格式问题（结束通知排在最后一条进度之前、Markdown 原样露出、链接点不开、标题是英文需求）由 #122 修复。飞书群聊（只响应 @ 机器人的消息、回复引用原消息、结束通知发回群并 @ 发起人）只用替身 lark-cli 和 `--dry-run` 验证过，待维护者把机器人拉进群实测：群里 @ 机器人时事件的 `mentions` 是否带机器人的 open_id、应用收群消息需要开哪个权限、Markdown 里的 `<at user_id>` 是否显示成 @。Telegram 仍只用本地替身验证过（M1.7、#26）。
 - ~~**agent teams**~~（已覆盖，looper #80）：Looper 从未下发 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`，它在 `--setting-sources project` 隔离之前随操作者的个人设置进来，之后仍会随从 Claude Code shell 启动的服务继承进来；现在由 Agent Profile 的 `agent_teams` 决定（Claude Code profile 默认开），真实运行见第 4 节台账，已知差距见第 5.2 节。

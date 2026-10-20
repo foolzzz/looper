@@ -818,12 +818,14 @@ adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
   write). Verified with Codex 0.162.0 through a local API-key provider, in
   a run and a resumed turn: the MCP tool ran, `README.md` was read, and
   writing `made.txt` failed with the working tree unchanged.
-- **`tools`** (OMP, Grok): the run starts with the tools that read and no
+- **`tools`** (OMP, Grok, Pi): the run starts with the tools that read and no
   shell or write tool: OMP `--tools read,glob,grep`, Grok
-  `--tools read_file,grep,list_dir`. Nothing is refused, so nothing is
+  `--tools read_file,grep,list_dir`, Pi
+  `--tools read,grep,find,ls,mcp__looper__*`. Nothing is refused, so nothing is
   recorded. The MCP tools stay (OMP 18.4.3 through the home's MCP plugin,
   verified with a stub server in a run and a resumed turn; Grok through
-  `use_tool`). Such a Planner cannot run `git diff`, tests or any other
+  `use_tool`; Pi through the packaged HTTP bridge, named `mcp__looper__*`).
+  Such a Planner cannot run `git diff`, tests or any other
   command, and OMP's web search and sub-agent tools are not available to it.
 - **`check`** (a runtime that can do neither; none ships now): the command is
   unchanged, and the Planner compares its task directory's git
@@ -989,8 +991,9 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
   are materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
-  `OmpRuntime` and `GrokRuntime` (`codex`, `omp`, `grok`, below) translate
-  them at launch; Codex and OMP keep the Manager's and a Planner's session
+  `OmpRuntime`, `GrokRuntime` and `PiRuntime` (`codex`, `omp`, `grok`, `pi`,
+  below) translate
+  them at launch; Codex, OMP and Pi keep the Manager's and a Planner's session
   with one process per turn (`runtimes/per_turn.py`), Grok with one process
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
   Capabilities:
@@ -1001,9 +1004,12 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
   `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
   `compaction_events`; Grok has `run`, `resident_session`, `resume`, `mcp`,
-  `compaction_events` and `cost_report`). Codex and OMP list `steer` when
+  `compaction_events` and `cost_report`; Pi has `run`, `resident_session`,
+  `resume`, `steer`, `read_tools`, `compaction_events` and `mcp` when the
+  probe accepts version 1.3.0 or newer and every required help flag, and none
+  otherwise. Pi's `mcp` is the Looper platform bridge only). Codex and OMP list `steer` when
   their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
-  Claude Code and Grok do not.
+  Claude Code and Grok do not. Pi's `steer` is in that probed set.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
@@ -1119,7 +1125,7 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   runtime `omp` (`rt-omp`) when `omp` is on its PATH. When it starts,
   `read_only_copies` removes the OMP homes no running process names and the
   session directories (`codex/sessions/<agent>`, `omp/sessions/<agent>`,
-  `grok/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
+  `grok/sessions/<agent>`, `pi/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
   is not of that runtime.
 - **DSH** (`looper/agents/runtimes/dsh.py`, DeepSeek Harness
   `@deepseek-ai/dsh` **0.2.1-rc.2**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
@@ -1242,6 +1248,103 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   the provider. The login's state is whether its file is there (`stat`,
   never read), in the provider's view and in the `grok_login` self-check,
   skipped while no Agent Profile uses the login.
+- **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
+  verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
+  runs Manager, Planner, Worker and Reviewer. A Worker or Reviewer is
+  `pi -p --mode json`; a Worker that can steer drops `-p` and uses
+  `--mode rpc` (`pi_steer`), without OMP's `--no-ui`. Providers are API keys
+  only, speaking `openai-responses` or `openai-chat` (pi's
+  `openai-completions`). Both declared, Responses wins. A missing key, a
+  missing `base_url`, OAuth, Anthropic, an unknown protocol, or a model
+  absent from a non-empty catalog is refused before launch. The provider
+  name is not matched by substring, and the registered `base_url` is passed
+  through unchanged. Pi's `/login` and OAuth are not bound. Each process
+  runs with `HOME` set to a home of Looper's own, `pi/homes/<sha256>` (one
+  per set of generated settings, shared by its runs; directories 0700, the
+  files 0600), named on its command line
+  (`env HOME=... PI_CODING_AGENT_DIR=<home>/agent
+  PI_CODING_AGENT_SESSION_DIR=<session> pi ... --offline --no-approve
+  --no-context-files --no-extensions --no-mcp --no-skills
+  --no-prompt-templates --no-themes -e <packaged looper.ts> --provider looper
+  --model <id>`). Sessions stay outside the home, in
+  `pi/sessions/<owner>`. The probe is `--version` then `--help` in a
+  temporary home, agent directory and session directory, 10 seconds, and no
+  model. `models.json` holds only the chosen model: `input` `["text"]`, a
+  `contextWindow` only when the catalog has one, reasoning from the
+  catalog's efforts (empty efforts set reasoning false), and cost four
+  fields at 0 so pi's catalog prices are unused. The key is only
+  `LOOPER_PROVIDER_API_KEY`, and the file's `apiKey` is the interpolation
+  `$LOOPER_PROVIDER_API_KEY`. There is no `--api-key`. Responses sets
+  `compat.supportsStrictMode` so optional tool parameters stay optional and
+  the request sends `strict: false`; Chat Completions omit that compat.
+  Output limits and a context window the catalog omits stay pi's defaults.
+  A local pi 1.3 model-runtime readback, with no live model call, still
+  reported a positive context window and max tokens; those figures are the
+  defaults, not the model's capacity. `--thinking` is one of `off`,
+  `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and is omitted when
+  empty. Whether a model clamps that value is unchecked on a live model.
+  The environment starts from `child_env.inherited()` plus the explicit
+  bindings, drops other runtimes' homes and external `PI_*`, `LOOPER_*` and
+  `LOOPX_*` overrides, and sets `PI_OFFLINE=1`, `PI_TELEMETRY=0` and
+  `PI_SKIP_VERSION_CHECK=1`. Provider and role variables cannot override the
+  isolation. `settings.json` turns cache warming, analytics and telemetry
+  off, sets project trust to never, and leaves packages, extensions, skills,
+  prompts and themes empty. Its `shellCommandPrefix` unsets the platform and
+  bridge variables, the pi directories, pi's shell metadata, the other
+  runtimes' homes and the provider's variable names, so a child shell keeps
+  the private `HOME` and does not receive the run's credentials. The prefix
+  is checked by running it under `/bin/sh -c`. A nested `pi` was not
+  launched. `--no-context-files` stays on: Looper injects project
+  instructions itself (`AGENTS.md`, else `CLAUDE.md`, one file per
+  directory, `Delivery.INJECTED`, the existing 32 KiB truncation). Project
+  `.pi`, `SYSTEM.md`, skills, themes, prompt templates and catalog MCP
+  servers and plugins stay unloaded. `launch_record` writes
+  `runtime_catalog.skipped` for non-looper MCP servers, skills and plugins.
+  Knowledge still follows the existing index. The bridge is the packaged
+  `pi_extension/looper.ts`, loaded by pi's TypeScript loader. Before the
+  model it GETs `/api/agent/v1/tools` with the bearer token and registers
+  each tool as `mcp__looper__<name>`; `execute` POSTs
+  `/api/agent/v1/ops/<name>`. No proxy, no redirects, no automatic POST
+  retry. Timeouts are 120 seconds, and a room inbox wait uses
+  `max(120, wait_seconds + 20)`. Credentials come only from
+  `library.mcp_config`'s `mcpServers.looper.env` (`LOOPER_AGENT_URL`,
+  `LOOPER_AGENT_TOKEN`). A missing `looper` entry means no platform tools; a
+  partial entry fails before launch. An invalid URL binding makes the real
+  pi CLI exit non-zero (`Failed to load extension`) before a model call. A
+  representative rich schema (`$defs`, enum, required,
+  additionalProperties, nested) is preserved and accepted by pi. A census of
+  every production tool schema was not run. Tokens stay out of argv, the
+  prompt, the home files and the records. A Planner or a consult passes
+  `--tools read,grep,find,ls,mcp__looper__*`. A normal run keeps pi's
+  default read, bash, edit and write tools plus the bridge. A Reviewer is
+  left on that default. The allowlist is not an OS sandbox (`read_only` is
+  `tools`). Append is `--append-system-prompt` and replace is
+  `--system-prompt`, the same generated file, with runtime notes: the final
+  message is the reply, and platform tools use `mcp__looper__`. A Worker or
+  Reviewer outside a room is one `--no-session` process, its prompt on stdin,
+  which then closes. In a room the run gets its own `--session-dir`. The
+  Manager and a Planner run one JSON process per turn (`ResidentPi`) with
+  `--session-dir pi/sessions/<agent>` and, after the first turn, the exact
+  `--session <file>` of the unique match in that directory. `--resume`,
+  `--session-id` and `--continue` are unused. A missing, ambiguous, partial,
+  symlinked, other-owner or bad-header session starts no session and follows
+  the existing session-lost and handoff path. Usage counts each assistant
+  `message_end.usage`, an optional nested usage on a tool result, and a
+  successful compaction once. `input` is the uncached input; cache read and
+  cache write stay separate; output already includes reasoning. A resident
+  turn adds only this process's new usage. Looper prices that usage with the
+  provider prices (`provider_price` for an API key). An unknown price stays
+  null, and a catalog cost of 0 leaves the price to Looper. The soft cap
+  stops the process tree when a usage event crosses it and leaves a request
+  already in flight to finish. Cache warming is off. A Worker steer uses
+  `PiChannel`: `start` returns after sending setup, and events wait for the
+  `get_state` and `set_steering_mode(one-at-a-time)` ACKs before the prompt.
+  A steer is accepted only on a queued ACK. Cancel and the soft cap use the
+  process tree. `looper serve` registers `pi` (`rt-pi`) when `pi` is on its
+  PATH, and `read_only_copies` reclaims pi homes no running process names.
+  Settings → Agent Runtimes and Agent Profiles show Pi, with no login help.
+  The CLI follows the registry. Telegram and Lark keep their protocols. What
+  has run, and what is still open, is in the pi runtime RFC.
 - **Runtimes** (`agent_runtimes`) are built in, never registered by hand: one
   per type found on the server's PATH (`rt-<type>`, named after its type;
   Claude Code's `rt-claude-code` comes with the schema and runs the server's
@@ -1300,7 +1403,7 @@ profile `claude-code/opus` (`BUILTIN_PROFILE`), which a role runs when nothing
 selects another. A profile is refused when it is created or changed if its
 runtime and provider share no protocol, an OAuth provider is paired with
 another runtime type, the runtime cannot take that kind of provider yet
-(Claude Code and Codex take their own login and API keys, OMP API keys only), or the
+(Claude Code and Codex take their own login and API keys, OMP and Pi take API keys only), or the
 provider lists models and not this one; a profile whose model or background
 model has no full price is registered with a warning (its runs record tokens
 only and no spend cap applies to them), and every profile shows how its runs
@@ -1341,7 +1444,7 @@ resident process whose binding changed (provider, key, endpoint) is started
 again.
 
 **System prompt mode.** The mode is `append` (Looper's prompt is added to the runtime's default one) or `replace`
-(it takes the default prompt's place). On **every runtime** (Claude Code, Codex, Grok and OMP) it is a role's setting,
+(it takes the default prompt's place). On **every runtime** (Claude Code, Codex, Grok, OMP and Pi) it is a role's setting,
 `system_prompt_mode` on the role layer (`PUT /api/agent-settings/roles/<role>`; a null or empty value unsets it). The
 built-in values are `replace` for the Manager and the Planner and `append` for every other launch: Workers, Reviewers,
 the seats of Planner-defined roles, consults and a launch with no role (`agent_settings.BUILTIN_SYSTEM_PROMPT_MODE`). The
@@ -1352,7 +1455,7 @@ which wins over the built-in value; the task's `agents` view gives each role's e
 appends, and the Manager has no task level. Only a role layer takes it: the shared defaults, a project and a role in a
 project refuse it (400). An Agent Profile has no mode of its own. A runtime whose adapter cannot replace (the typed
 `can_replace_system_prompt` capability, exposed by `/api/registry` with `replace_system_prompt_refusal`) always gets
-`append`; today all four adapters can replace. `Launch.system_prompt_mode` is the role's value on any runtime (append with
+`append`; today all five adapters can replace. `Launch.system_prompt_mode` is the role's value on any runtime (append with
 no role). Configuration export and import carry the role layers' value; an older export's profile `system_prompt_mode`
 is accepted and ignored, with a note. The schema adds the layer column once, and while `agent_profiles.system_prompt_mode`
 still exists, sets the Worker's and the Reviewer's role layer to `replace` where their effective profile (the role layer's,
@@ -1366,6 +1469,7 @@ appended on Codex, Grok or OMP now replaces unless its role layer says `append`.
 | Codex | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
 | Grok | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
 | OMP | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
+| Pi | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
 
 Codex and Grok include their runtime notes with Looper's prompt in either
 mode. Replacement keeps the runtime's tools and project instruction loading;
@@ -3257,20 +3361,23 @@ before.
   starts, sends the questions to the Planner (`no_session`). Looper resumes
   a fork of it (Claude
   Code `--resume <id> --fork-session`; Codex and OMP a copy of the session
-  the run kept; Grok a home of its own holding a copy of that one session
+  the run kept; Pi a copy of that session file, resumed with `--session`;
+  Grok a home of its own holding a copy of that one session
   from the run's home, resumed with `--fork-session`, and removed afterwards),
   read only (`Launch.consult`: Claude Code has only `Read`, `Glob` and `Grep`,
   allowed without prompts; Bash and writing tools are refused, and MCP tools
   have no allow rule in manual mode with no prompts; not verified on a real
   run yet. Codex has its read-only sandbox; OMP `--tools read,glob,grep`;
-  Grok `--tools read_file,grep,list_dir`), with the run's system prompt and
+  Grok `--tools read_file,grep,list_dir`; Pi
+  `--tools read,grep,find,ls,mcp__looper__*`), with the run's system prompt and
   `CONSULT_CONTRACT` in place of its contract and a `[CONSULT]` turn listing
   the questions (their bodies share 20,000 characters) and the seat's earlier
   consult answers. Claude Code, Codex and Grok run where the step ran. OMP's
   reading tools are not verified on a real run; it runs in a detached checkout
-  of the task directory's branch, removed afterwards. The checkout keeps writes
+  of the task directory's branch, removed afterwards. Pi uses that checkout too.
+  A live-model Pi consult was not run. The checkout keeps writes
   out of the task directory and `wrote_files` catches changes inside it, dropping
-  the answers. It is not a sandbox: OMP runs as the operator's user, so a write
+  the answers. It is not a sandbox: OMP and Pi run as the operator's user, so a write
   outside it (another path or the home directory) is neither prevented nor
   detected. The checkout and fork are removed even when preparing or running
   the consult fails. Claude Code ignores `fork_dir`: it keeps the fork in its
@@ -3322,12 +3429,14 @@ before.
   `rate_limited` (a new error code) or `invalid`. A run keeps at most 5 watches;
   they end with it. The Planner is held to the length and the task's total
   only.
-- **Kept sessions.** A Codex or OMP run in a room keeps its session, for the
+- **Kept sessions.** A Codex, OMP or Pi run in a room keeps its session, for the
   consults: Codex in a home of its own
   (`.local/codex/run-sessions/<task>/<run>`, given the run home's
   configuration as a resident session's is, without `--ephemeral`; the
   Codex login check looks at these homes too), OMP with `--session-dir
-  .local/omp/run-sessions/<task>/<run>` in place of `--no-session`. They go
+  .local/omp/run-sessions/<task>/<run>` in place of `--no-session`, Pi with
+  `--session-dir .local/pi/run-sessions/<task>/<run>` in place of
+  `--no-session`. They go
   when the task is planned anew or deleted, and when the server starts after
   it ended a week ago (`RUN_SESSIONS_KEPT_DAYS`). Claude Code keeps every
   run's session itself.
@@ -3704,7 +3813,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Schedules** (`#schedules`, below Runs in the sidebar): every project's schedules from `GET /api/schedules`, re-read every 10 s, grouped by project (each group with how many of the project's schedules are on and a link to the project's Schedules tab to add or edit one). A filter bar above it: Project (All, or any project) and Status (All, Enabled, Disabled), which combine and are kept in the address (`#schedules?project=<id>&enabled=true|false`, so a link and a reload keep them; an unknown value is All), filtered in the page; while one is set it says "Showing K of N" with Clear filters, and when nothing matches the list says so, with Clear filters. Each row shows the name (opening its detail view), the rule in words, the next run in the schedule's zone (or Disabled), the last run's status, time and task, "Failing" or "No success lately" while an alert is on, and today's spend (against the daily budget when set); a disabled schedule is dimmed (a dashed edge, a muted name). Beside it, the enable switch (`PUT /api/schedules/:id` with `enabled`: the switch shows the new value while it saves, then "Turned on" or "Turned off"; a refusal puts it back and says why) Run now (its answer, as on the project tab) and Delete schedule, which asks inline first ("Delete <name>? Its tasks stay.", as on the project tab) and takes the row out of the list. Loading, empty and error states, and a failed refresh keeps the last list with the error. **A schedule** (`#schedules/<id>`): back to all schedules; its name, project (a link), rule in words, the switch, Run now, "Edit on the project" (its row on the project's Schedules tab, where it is edited) and Delete schedule (the same inline confirmation; once it is deleted, back to all schedules); the next run, the last run with the alerts, and today's spend against the daily budget; its settings (rule and cron, time zone, work directory, gate and its timeout, notify and to whom, the budgets per run and per day, run timeout, overlap and catch-up, the Agent Profiles it sets, by name) with the requirement folded; and the run history, the same as on the project tab. Re-read every 10 s; an unknown id says it was not found.
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its row in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper supplied (the runtime's built-in system prompt is not included): its title shows the prompt's size, its short sha256, an `isolated` badge and, for replace runs, `replaced default`, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested, and, for a Claude Code runtime, an "Agent teams" checkbox, checked by default); **Roles** (`roles`: a line naming the roles the server has, then a collapsible row for the Shared defaults (the system layer, which the dashboard calls the shared defaults wherever it names a value's source) and one per role, all closed at first and any number open. Wherever the dashboard names an Agent Profile (these summaries, its dropdowns), it adds " · <effort>" when the profile has an effort its name does not end with already. A closed row is a one-line summary: for the Shared defaults the number of roles, the Agent Profile, spend cap and how many environment variables are set; for a role its job, the Agent Profile in effect and whether it is shared or its own, the Workers' or Reviewers' default limit per task, and "Disabled" or "unsaved" when so. An open role has "Overrides for this role" (its layer, each field saying what applies now and from which layer, with the Workers' "Workers at once in each task (default)" or the Reviewers' "Reviewers at once in each task (default)") and "Role prompt and limits" (the role prompt as one text, with a line saying it is the role layer that Looper combines at launch with the harness, project, task and reply format into the system prompt a run's history shows, reset to the recommended one, max turns, timeout, enabled, and the note that every agent has every tool with `--dangerously-skip-permissions`); closing a row keeps its unsaved edits, and `#settings/roles/<role>` or `#settings/roles/shared` opens that row and scrolls to it); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
+- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP or Pi) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested, and, for a Claude Code runtime, an "Agent teams" checkbox, checked by default); **Roles** (`roles`: a line naming the roles the server has, then a collapsible row for the Shared defaults (the system layer, which the dashboard calls the shared defaults wherever it names a value's source) and one per role, all closed at first and any number open. Wherever the dashboard names an Agent Profile (these summaries, its dropdowns), it adds " · <effort>" when the profile has an effort its name does not end with already. A closed row is a one-line summary: for the Shared defaults the number of roles, the Agent Profile, spend cap and how many environment variables are set; for a role its job, the Agent Profile in effect and whether it is shared or its own, the Workers' or Reviewers' default limit per task, and "Disabled" or "unsaved" when so. An open role has "Overrides for this role" (its layer, each field saying what applies now and from which layer, with the Workers' "Workers at once in each task (default)" or the Reviewers' "Reviewers at once in each task (default)") and "Role prompt and limits" (the role prompt as one text, with a line saying it is the role layer that Looper combines at launch with the harness, project, task and reply format into the system prompt a run's history shows, reset to the recommended one, max turns, timeout, enabled, and the note that every agent has every tool with `--dangerously-skip-permissions`); closing a row keeps its unsaved edits, and `#settings/roles/<role>` or `#settings/roles/shared` opens that row and scrolls to it); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
 
 ### Real-Time Updates
 

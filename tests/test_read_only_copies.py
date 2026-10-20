@@ -5,7 +5,9 @@ knowledge are written once under a content hash; a change writes a new
 directory. At server start the ones neither the current content (what every
 role in every project loads) nor a running process uses are removed, and so
 are the session directories of resident agents whose saved session is not of
-that runtime. The database is stubbed; the running processes are real.
+that runtime. The database is stubbed; the running processes are real. Where
+the operating system disallows ``ps``, their launch arguments supply the
+command lines instead.
 """
 
 from __future__ import annotations
@@ -49,6 +51,18 @@ class _Content:
         self.schedules: list[dict[str, Any]] = []
         self.session_labels: list[tuple[str, str | None]] = []  # live tasks' persisted Planner storage labels
         self.fail = False
+        self.processes: list[subprocess.Popen] = []
+        self.real_command_lines = read_only_copies.command_lines
+
+        def command_lines() -> list[str]:
+            try:
+                return self.real_command_lines()
+            except OSError as exc:
+                if not isinstance(exc.__cause__, PermissionError):
+                    raise
+                return [subprocess.list2cmdline(process.args) for process in self.processes if process.poll() is None]
+
+        monkeypatch.setattr(read_only_copies, "command_lines", command_lines)
 
         async def list_projects(**_: Any) -> list[dict[str, Any]]:
             if self.fail:
@@ -179,6 +193,7 @@ def test_a_copy_a_running_process_mounts_or_links_into_is_kept_until_it_exits(
 
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--plugin-dir", str(personal),
                               "--plugin-dir", skills_plugin, "--add-dir", knowledge_set])
+    content.processes.append(agent)
     try:
         deadline = time.monotonic() + 10
         while not any(str(personal) in line for line in read_only_copies.command_lines()):
@@ -211,6 +226,7 @@ def test_an_mcp_config_a_running_process_mounts_or_the_next_run_uses_is_kept(
 
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--mcp-config", str(mounted),
                               "--strict-mcp-config"])
+    content.processes.append(agent)
     try:
         deadline = time.monotonic() + 10
         while not any(str(mounted) in line for line in read_only_copies.command_lines()):
@@ -236,6 +252,7 @@ def test_a_process_that_mounts_a_whole_knowledge_directory_keeps_every_set_in_it
     second = _hashed(asyncio.run(load_knowledge(tmp_path, calc, str(tmp_path))).add_dirs[0])
     content.projects = []
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--add-dir", str(first.parent)])
+    content.processes.append(agent)
     try:
         deadline = time.monotonic() + 10
         while not any(str(first.parent) in line for line in read_only_copies.command_lines()):
@@ -254,6 +271,7 @@ def test_nothing_is_reclaimed_when_the_processes_or_the_content_cannot_be_read(
 ) -> None:
     _library_item(tmp_path, "retired", "Retired skill.")
     if unreadable == "processes":
+        monkeypatch.setattr(read_only_copies, "command_lines", content.real_command_lines)
         monkeypatch.setattr(read_only_copies.subprocess, "run", lambda *_, **__: (_ for _ in ()).throw(
             FileNotFoundError("ps")))
     else:
@@ -262,16 +280,30 @@ def test_nothing_is_reclaimed_when_the_processes_or_the_content_cannot_be_read(
     assert len(hashed_directories(tmp_path)) == 1
 
 
-def test_an_omp_home_is_kept_while_a_running_process_names_it(tmp_path: Path, content: _Content) -> None:
-    from looper.agents.runtimes.omp import write_home
+@pytest.mark.parametrize("runtime", ["omp", "pi"])
+def test_a_private_home_is_kept_while_a_running_process_names_it(
+    tmp_path: Path, content: _Content, runtime: str,
+) -> None:
+    from looper.agents.runtimes import omp, pi
 
     local = tmp_path.absolute() / ".local"
-    used, idle = write_home(local, {"providers": {}}, {"a": 1}, None), write_home(local, {"providers": {}}, {"b": 2}, None)
+    if runtime == "pi":
+        used = pi.write_home(local, {"providers": {}}, {"a": 1}, binding_sha256="test")
+        idle = pi.write_home(local, {"providers": {}}, {"b": 2}, binding_sha256="test")
+        reference = f"HOME={used}"
+    else:
+        used = omp.write_home(local, {"providers": {}}, {"a": 1}, None)
+        idle = omp.write_home(local, {"providers": {}}, {"b": 2}, None)
+        reference = str(used / "looper.yml")
     assert set(hashed_directories(tmp_path)) == {used, idle}
-    natives = local / "omp" / "natives"
+    other = local / "grok" / "homes" / _sha("other-runtime") / "state"
+    other.parent.mkdir(parents=True)
+    other.write_text("other runtime state")
+    natives = local / runtime / "natives"
     (natives / "18.4.3").mkdir(parents=True)
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-p", "--config",
-                              str(used / "looper.yml")])
+                              reference])
+    content.processes.append(agent)
     try:
         deadline = time.monotonic() + 10
         while not any(str(used) in line for line in read_only_copies.command_lines()):
@@ -283,24 +315,58 @@ def test_an_omp_home_is_kept_while_a_running_process_names_it(tmp_path: Path, co
         agent.wait()
     assert asyncio.run(reclaim_unused(tmp_path)) == [used]
     assert (natives / "18.4.3").is_dir()  # the native library the homes share stays
+    assert other.read_text() == "other runtime state"
 
 
+def test_a_pi_home_stays_after_env_has_execed_the_agent(tmp_path: Path, content: _Content) -> None:
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+    from looper.agents.runtimes import ApiProtocol, AuthKind
+
+    launch = Launch(AgentSettings(profile=AgentProfile(
+        "pi-test", "pi-test", RuntimeSpec("pi", "pi", "pi"),
+        ProviderSpec("test", "test", auth=AuthKind.API_KEY, api_key="test-key",
+                     protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}), base_url="https://pi.example.invalid/v1"),
+        "selected")))
+    prompt = tmp_path / ".local" / "prompts" / "test.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("instructions")
+    sessions = tmp_path / ".local" / "pi" / "sessions" / "worker"
+    command = launch.runtime.run_command("pi", cwd=tmp_path, prompt_file=prompt, launch=launch, session_dir=sessions)
+    home = Path(command[1].removeprefix("HOME="))
+    # env replaces itself with pi, so only pi's argv remains visible to ps.
+    agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *command[5:]])
+    content.processes.append(agent)
+    try:
+        assert agent.poll() is None
+        assert asyncio.run(reclaim_unused(tmp_path)) == []
+        assert (home / "agent" / "models.json").is_file()
+    finally:
+        agent.kill()
+        agent.wait()
+    assert asyncio.run(reclaim_unused(tmp_path)) == [home, sessions]
+
+
+@pytest.mark.parametrize("runtime", ["omp", "pi"])
 def test_a_session_directory_stays_while_its_agent_saved_a_session_of_that_runtime(
-    tmp_path: Path, content: _Content,
+    tmp_path: Path, content: _Content, runtime: str,
 ) -> None:
     local = tmp_path.absolute() / ".local"
     directories = {name: local / runtime / "sessions" / owner for name, (runtime, owner) in {
-        "omp-manager": ("omp", "manager"), "omp-planner": ("omp", "planner-task-1"),
-        "omp-gone": ("omp", "planner-task-9"), "codex-planner": ("codex", "planner-task-2"),
-        "switched": ("codex", "planner-task-1"), "running": ("omp", "planner-task-3"),
+        "manager": (runtime, "manager"), "planner": (runtime, "planner-task-1"),
+        "gone": (runtime, "planner-task-9"), "codex-planner": ("codex", "planner-task-2"),
+        "switched": ("codex", "planner-task-1"), "running": (runtime, "planner-task-3"),
+        "other": ("unmanaged", "planner-task-9"),
     }.items()}
     for directory in directories.values():
-        (directory / "state").mkdir(parents=True)
-    # The Manager and task-1's Planner resume OMP sessions, task-2's Planner a Codex one; task-9 is gone, and
-    # task-1's Planner moved from Codex to OMP. Task-3's Planner has no saved session, but a turn is running.
-    content.sessions = [("manager", "omp"), ("planner-task-1", "omp"), ("planner-task-2", "codex")]
+        directory.mkdir(parents=True)
+        (directory / "state").write_text("saved conversation")
+    # The Manager and task-1's Planner resume on this runtime; task-2 stays on Codex, task-9 is gone, and
+    # task-1 moved away from Codex. Task-3 has no saved session, but a turn is running.
+    content.sessions = [("manager", runtime), ("planner-task-1", runtime), ("planner-task-2", "codex")]
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--session-dir",
                               str(directories["running"])])
+    content.processes.append(agent)
     try:
         deadline = time.monotonic() + 10
         while not any(str(directories["running"]) in line for line in read_only_copies.command_lines()):
@@ -310,8 +376,9 @@ def test_a_session_directory_stays_while_its_agent_saved_a_session_of_that_runti
     finally:
         agent.kill()
         agent.wait()
-    assert sorted(removed) == sorted([directories["omp-gone"], directories["switched"]])
-    assert all(directories[name].is_dir() for name in ("omp-manager", "omp-planner", "codex-planner", "running"))
+    assert sorted(removed) == sorted([directories["gone"], directories["switched"]])
+    assert all((directories[name] / "state").read_text() == "saved conversation"
+               for name in ("manager", "planner", "codex-planner", "running", "other"))
 
 
 def test_saved_schedule_sessions_keep_their_runtime_directories(tmp_path: Path, content: _Content, monkeypatch):
@@ -324,10 +391,11 @@ def test_saved_schedule_sessions_keep_their_runtime_directories(tmp_path: Path, 
         {"id": "sched-b", "planner_session_id": "saved-b", "planner_session_runtime": "omp",
          "planner_session_task_id": None, "overlap": "parallel"},
         {"id": "sched-c", "planner_session_id": "saved-c", "planner_session_runtime": "grok"},
+        {"id": "sched-pi", "planner_session_id": "saved-pi", "planner_session_runtime": "pi"},
         {"id": "sched-reset", "planner_session_id": None, "planner_session_runtime": "codex"},
     ]
     directories = {}
-    for runtime in read_only_copies.SESSION_RUNTIMES:
+    for runtime in ("codex", "omp", "grok", "pi"):
         for schedule in content.schedules:
             directory = (tmp_path / ".local" / runtime / "sessions" /
                          session_dir_name(f"planner-schedule-{schedule['id']}"))
@@ -335,7 +403,10 @@ def test_saved_schedule_sessions_keep_their_runtime_directories(tmp_path: Path, 
             (directory / "state").write_text("saved conversation")
             directories[runtime, schedule["id"]] = directory
     monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
-    kept = {directories["codex", "sched/a"], directories["omp", "sched-b"], directories["grok", "sched-c"]}
+    # A live task still owns this storage after its schedule's saved session was reset.
+    content.session_labels = [("planner-schedule-sched-reset", "pi")]
+    kept = {directories["codex", "sched/a"], directories["omp", "sched-b"], directories["grok", "sched-c"],
+            directories["pi", "sched-pi"], directories["pi", "sched-reset"]}
     removed = asyncio.run(reclaim_unused(tmp_path))
     assert set(removed) == set(directories.values()) - kept
     assert all((directory / "state").read_text() == "saved conversation" for directory in kept)

@@ -53,7 +53,7 @@ Planner's session by resuming it on every turn (``per_turn.PerTurnSession``);
 Grok keeps one process for it over ACP (``grok_acp``), per turn when it cannot.
 
 The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
-(``omp``), ``grok`` (``grok``) and ``dsh`` (``dsh``).
+(``omp``), ``grok`` (``grok``), ``dsh`` (``dsh``) and ``pi`` (``pi``).
 """
 
 from __future__ import annotations
@@ -430,9 +430,10 @@ def _adapters() -> dict[str, RuntimeAdapter]:
     from .dsh import DshRuntime
     from .grok import GrokRuntime
     from .omp import OmpRuntime
+    from .pi import PiRuntime
 
-    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(),
-                                                 DshRuntime())}
+    return {adapter.type: adapter for adapter in (
+        ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), DshRuntime(), PiRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

@@ -84,11 +84,12 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
         <Fact label="Version">
           {runtime?.version ? (
             <span className="font-mono">{runtime.version}</span>
-          ) : runtime?.probe_error ? (
-            <span className="text-warning">{runtime.probe_error}</span>
-          ) : (
+          ) : !runtime?.probe_error ? (
             <span className="text-muted-foreground">{runtime ? "not checked yet: Re-detect" : "not found"}</span>
-          )}
+          ) : null}
+          {runtime?.probe_error ? (
+            <span className="text-warning">{runtime.version ? " · " : ""}{runtime.probe_error}</span>
+          ) : null}
           {runtime?.probed_at && (
             <span className="text-muted-foreground"> · checked {new Date(runtime.probed_at).toLocaleString()}</span>
           )}

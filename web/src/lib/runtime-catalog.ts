@@ -18,6 +18,7 @@ export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
   omp: { kind: "CLI", title: "OMP CLI" },
   grok: { kind: "CLI", title: "Grok CLI" },
   dsh: { kind: "CLI", title: "DSH CLI", install: "npm install -g @deepseek-ai/dsh@0.2.1-rc.2" },
+  pi: { kind: "CLI", title: "Pi CLI", install: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent" },
 };
 
 /** How the operator checks a runtime's own login on the server's machine, and signs in again (`how`: with what). */

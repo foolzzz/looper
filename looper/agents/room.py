@@ -1136,7 +1136,7 @@ def _commit_exists(work_dir: str | None, commit: str) -> bool | None:
 
 # The runtime types that keep a run's session only when told where (``RuntimeAdapter.run_command``'s
 # ``session_dir``); Claude Code keeps every run's session in its own place.
-SESSION_KEEPING_RUNTIMES = ("codex", "omp", "dsh")
+SESSION_KEEPING_RUNTIMES = ("codex", "omp", "dsh", "pi")
 RUN_SESSIONS = "run-sessions"
 # How long the kept sessions of a task that ended stay (the server's start removes older ones).
 RUN_SESSIONS_KEPT_DAYS = 7

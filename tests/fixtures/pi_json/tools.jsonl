@@ -1,0 +1,17 @@
+{"type":"session","version":3,"id":"test-session","cwd":"workspace"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":"Read sample.txt."}}
+{"type":"message_end","message":{"role":"user","content":"Read sample.txt."}}
+{"type":"message_start","message":{"role":"assistant","content":[],"stopReason":"pending"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"partial duplicate","partial":{"role":"assistant","content":[{"type":"text","text":"partial duplicate"}]}}}
+{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"snapshot duplicate"}]},"assistantMessageEvent":{"type":"toolcall_end","toolCall":{"type":"toolCall","id":"call-read","name":"read","arguments":{"path":"sample.txt"}}}}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","stopReason":"toolUse","content":[{"type":"text","text":"Checking the file."},{"type":"thinking","thinking":"Read before editing.","thinkingSignature":"synthetic-replay-metadata"},{"type":"toolCall","id":"call-read","name":"read","arguments":{"path":"sample.txt"}}]}}
+{"type":"tool_execution_start","toolCallId":"call-read","toolName":"read","args":{"path":"sample.txt"}}
+{"type":"tool_execution_update","toolCallId":"call-read","toolName":"read","partialResult":{"content":[{"type":"text","text":"partial duplicate"}]}}
+{"type":"tool_execution_end","toolCallId":"call-read","toolName":"read","result":{"content":[{"type":"text","text":"duplicate result"}]},"isError":false}
+{"type":"message_end","message":{"role":"toolResult","toolCallId":"call-read","toolName":"read","content":[{"type":"text","text":"first line"},{"type":"text","text":"second line"}],"isError":false}}
+{"type":"turn_end","message":{"role":"assistant","content":[]},"toolResults":[]}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","stopReason":"stop","content":[{"type":"text","text":"Done."}]}}
+{"type":"agent_end","messages":[{"role":"assistant","model":"test-model","stopReason":"stop","content":[{"type":"text","text":"Done."}]}],"willRetry":false}
+{"type":"agent_settled","aborted":false}
