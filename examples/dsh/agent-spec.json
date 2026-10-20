@@ -6,7 +6,7 @@
     "protocols": ["anthropic-messages"],
     "base_url": "https://api.deepseek.com/anthropic",
     "api_key_env": "LOOPER_EVAL_API_KEY",
-    "models": ["deepseek-flash"]
+    "models": [{"name": "deepseek-flash"}]
   },
   "agent": {
     "name": "dsh-validation/deepseek-flash",

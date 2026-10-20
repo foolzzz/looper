@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ def ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(launcher, "probe_dsh", lambda: None)
 
 
-@pytest.mark.parametrize("argv", [["--help"], ["preflight", "--help"], ["task-basic", "--help"]])
+@pytest.mark.parametrize("argv", [["--help"], ["preflight", "--help"], ["task-basic", "--help"], ["smoke", "--help"]])
 def test_help_has_no_side_effects(argv, monkeypatch, capsys):
     def forbidden(*args, **kwargs):
         pytest.fail("help read credentials or started a process")
@@ -89,11 +90,36 @@ def test_matching_version_still_needs_working_help_and_process_observation(ready
         launcher.probe_dsh()
 
 
-@pytest.mark.parametrize("command", ["task-basic", "task-review", "manager"])
+@pytest.mark.parametrize("command", ["task-basic", "task-review", "manager", "smoke"])
 def test_real_commands_require_explicit_opt_in(command, monkeypatch, capsys):
     monkeypatch.setattr(launcher, "read_key", lambda: pytest.fail("read key without --real"))
+    monkeypatch.setattr(launcher, "probe_dsh", lambda: pytest.fail("probed dsh without --real"))
     assert launcher.main([command, "--disposable-pg-url", PG]) == 2
     assert "--real" in capsys.readouterr().out
+
+
+def test_smoke_outer_timeout_never_reports_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "ARTIFACTS", tmp_path)
+    async def run(argv, *, env, timeout, capture):
+        assert "synthetic-private-key" not in " ".join(argv)
+        assert env["LOOPER_EVAL_API_KEY"] == "synthetic-private-key"
+        assert "LOOPER_DATABASE_URL" not in env
+        assert timeout == launcher.OUTER_TIMEOUT
+        return launcher.ProcessResult(0, b'{"status":"pass"}', b"private", True)
+    monkeypatch.setattr(launcher, "run_process", run)
+    summary, code = launcher.smoke(PG, "synthetic-private-key")
+    assert code != 0 and summary["status"] == "error"
+    assert summary["outer_timeout"] is True
+
+
+def test_smoke_process_failure_keeps_observed_cost_and_stage(monkeypatch):
+    async def run(*args, **kwargs):
+        return launcher.ProcessResult(1, json.dumps({"status": "error", "stage": "room_consult",
+            "observed_cost_usd": .03, "auxiliary_cost_coverage": "unknown"}).encode(), b"private")
+    monkeypatch.setattr(launcher, "run_process", run)
+    summary, code = launcher.smoke(PG, "synthetic-private-key")
+    assert code != 0 and summary["status"] == "error"
+    assert summary["observed_cost_usd"] == .03 and summary["stage"] == "room_consult"
 
 
 @pytest.mark.parametrize("stdout,code,timed_out", [(b"", 0, False), (b" \n", 0, False),
@@ -153,6 +179,15 @@ def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, cas
     assert "api_key" not in spec["provider"]
     assert spec["agent"]["model"] == "deepseek-flash"
     assert spec["agent"]["effort"] == "high"
+
+
+def test_agent_spec_provider_passes_registry_validation():
+    from looper.agents import profile_registry
+
+    spec = json.loads(launcher.SPEC.read_text())
+    provider = {key: value for key, value in spec["provider"].items() if key != "api_key_env"}
+    fields, _ = profile_registry._provider_fields(provider, None)
+    assert spec["agent"]["model"] in {model["name"] for model in fields["models"]}
 
 
 def test_summary_distinguishes_all_outcomes_and_missing_rows():
@@ -240,3 +275,395 @@ def test_outer_timeout_cleans_owned_descendants(tmp_path):
     if heartbeat.read_text() != stopped:
         os.kill(pid, signal.SIGKILL)
         pytest.fail("launcher left its child running")
+
+
+def _serve_smoke_stand_in(mode):
+    """Process-level API/DB peer for the smoke orchestrator, not a model eval.
+
+    The real serve/tiers/MCP fixture is exercised separately when PG is available.
+    This peer makes errors deterministic at each workflow boundary.
+    """
+    from http.server import BaseHTTPRequestHandler
+    from io import BytesIO
+    from looper.agents.operator_auth import ensure_token
+    from looper.agents.runtimes.dsh import DshRuntime
+
+    # Exercise discovery through smoke's executable wrapper, including the
+    # stand-in driver's adjacent script, before answering any API request.
+    assert DshRuntime().probe("dsh").capabilities
+
+    port, root = int(sys.argv[1]), Path(sys.argv[2])
+    ensure_token(root)
+    state_path = root / "peer.json"
+    state = {"records": [], "sessions": [], "consults": [], "calls": []}
+    messages, profiles, projects, tasks, roles = [], {}, {}, {}, {}
+
+    def record(agent, task=""):
+        from looper.agents.runtimes.dsh import DshHome
+        role = agent.split("-", 1)[0]
+        session = "session-shared" if mode == "owner" else "session-" + agent
+        if role == "consult":
+            session = "session-worker-" + task
+        owner = root / "owners" / agent
+        command = ["env", *(f"{k}={v}" for k, v in DshHome(owner, owner).paths.items()),
+                   "dsh", "--profile", "headless", "--patch", str(owner / "configs" / "hash" / "looper.yml"), "-"]
+        row = {"id": len(state["records"]) + 1, "agent_id": agent, "task_id": task,
+               "session_id": session, "status": "completed", "model": "deepseek-flash",
+               "input_tokens": 10, "output_tokens": 4, "cache_read_tokens": 7,
+               "cache_creation_tokens": 2, "cost_usd": None,
+               "metadata": {"profile": {"id": "profile", "runtime": {"type": "dsh"},
+                                         "provider": {"id": "provider"}}, "system_prompt_mode": "append",
+                            "command": command}}
+        state["records"].append(row)
+        if role in ("manager", "planner") and not any(s["agent_id"] == agent for s in state["sessions"]):
+            state["sessions"].append({"agent_id": agent, "session_id": session, "runtime_type": "dsh",
+                                      "provider_id": "provider", "profile_id": "profile"})
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.reply("GET")
+
+        def do_POST(self):
+            self.reply("POST")
+
+        def do_PUT(self):
+            self.reply("PUT")
+
+        def reply(self, method):
+            from urllib.parse import urlsplit
+            path = urlsplit(self.path).path
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+            state["calls"].append([method, path])  # never persist the provider request body
+            result = {}
+            status = 200
+            if path == "/api/channel-configs":
+                result = {"configs": [{"enabled": mode == "channels"}]}
+            elif path == "/api/registry":
+                result = {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
+                          "providers": []}
+            elif path == "/api/providers":
+                assert body["api_key"] == "<memory-only>"
+                result = {"provider": {"provider_id": "provider"}}
+            elif path == "/api/agent-profiles":
+                assert body["runtime_id"] == "rt-dsh"
+                profiles.update(body, profile_id="profile")
+                result = {"profile": profiles}
+                if mode == "profile":
+                    status = 500
+            elif path.startswith("/api/agent-settings/roles/"):
+                assert body["run_budget_usd"] == .5
+                roles[path.rsplit("/", 1)[1]] = {"values": body}
+            elif path == "/api/agent-settings":
+                result = {"roles": roles}
+            elif path == "/api/chat/send":
+                record("manager")
+                if mode != "manager-timeout":
+                    messages.append({"message_id": body["message_id"] + ":reply", "role": "assistant",
+                                     "content": "private transcript /synthetic/private/project"})
+            elif path == "/api/chat/messages":
+                result = {"messages": messages}
+            elif path == "/api/projects":
+                project = "project-" + str(len(projects) + 1)
+                projects[project] = body
+                result = {"project_id": project}
+            elif path == "/api/tasks/create":
+                task = "task-" + str(len(tasks) + 1)
+                tasks[task] = body
+                result = {"task_id": task}
+            elif path.endswith("/start"):
+                task = path.split("/")[3]
+                work = Path(projects[tasks[task]["project_id"]]["work_dir"])
+                (work / "delivery.txt").write_text("delivered by disposable DSH\n")
+                for agent in (f"planner-{task}", f"worker-{task}", f"reviewer-{task}", f"planner-{task}", f"consult-{task}"):
+                    record(agent, task)
+                state["consults"].append({"task_id": task, "state": "answered",
+                    "source_record": state["records"][-4]["id"], "consult_run": "consult-" + task})
+                if mode == "task":
+                    status = 500
+            elif path.endswith("/room"):
+                result = {"consults": {"answered": 0 if mode == "consult" else 1,
+                                      "list": [{"state": "failed" if mode == "consult" else "answered"}]}}
+            elif path.startswith("/api/tasks/"):
+                result = {"status": "running" if mode == "task-timeout" else "completed"}
+            elif path == "/api/llm-records":
+                result = {"records": [{"id": r["id"]} for r in state["records"]]}
+            elif path.endswith("/events"):
+                result = {"events": [{"seq": 1, "event": {"type": "result", "is_error": False,
+                    "observed_cost_usd": .6 if mode == "budget" else .000008442}}]}
+            elif path.startswith("/api/llm-records/"):
+                row = dict(state["records"][int(path.rsplit("/", 1)[1]) - 1])
+                if mode == "readback":
+                    row["status"] = "failed"
+                result = {"record": row}
+            state_path.write_text(json.dumps(state))
+            wire = json.dumps(result).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(wire)))
+            self.end_headers()
+            self.wfile.write(wire)
+
+    (root / "pid").write_text(str(os.getpid()))
+    # File IPC lets the real serve lifecycle run even where the sandbox refuses
+    # loopback sockets. Only this synthetic peer uses this transport.
+    peer = root / "ipc"
+    peer.mkdir()
+    for number in range(10000):
+        request_path = peer / f"request-{number}.json"
+        while not request_path.exists():
+            time.sleep(.005)
+        request = json.loads(request_path.read_text())
+        handler = Handler.__new__(Handler)
+        handler.path = request["path"]
+        payload = json.dumps(request["body"]).encode()
+        handler.headers = {"Content-Length": str(len(payload))}
+        handler.rfile, handler.wfile = BytesIO(payload), BytesIO()
+        status = []
+        handler.send_response = status.append
+        handler.send_header = lambda *args: None
+        handler.end_headers = lambda: None
+        handler.reply(request["method"])
+        response = peer / f"response-{number}.json"
+        temporary = response.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"status": status[0], "body": json.loads(handler.wfile.getvalue())}))
+        temporary.replace(response)
+
+
+@pytest.fixture
+def smoke_peer(tmp_path, monkeypatch):
+    from evals.prompt_regression import runner
+    from tests.dsh_runtime_stand_in import install
+
+    # Reuse the four-role fixture's isolated binaries; the API peer never invokes
+    # a real runtime or provider, including during discovery.
+    bin_dir, _ = install(tmp_path)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("LOOPER_EVAL_API_KEY", "synthetic-private-key")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    owned = []
+    original_popen = subprocess.Popen
+
+    def popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        owned.append(process)
+        return process
+
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+
+    @contextmanager
+    def database(url):
+        assert url == PG
+        yield "postgresql://synthetic-disposable", 0
+
+    monkeypatch.setattr(runner, "fresh_database", database)
+    original_wait = launcher._wait
+    monkeypatch.setattr(launcher, "_wait", lambda *a, **kw: original_wait(*a, **kw, timeout=.3))
+    monkeypatch.setattr(launcher, "_session_accounting", lambda *a: {"coverage": "unknown", "reader": "untested"})
+
+    def run(mode):
+        root = tmp_path / "workflow"
+        root.mkdir()
+
+        class ProcessApi:
+            def __init__(self, base_url):
+                self.base_url, self.token, self.timeout = base_url, None, 2
+                self.number = 0
+
+            def request(self, method, path, body=None, **query):
+                number = self.number
+                self.number += 1
+                peer = root / "runtime" / "ipc"
+                deadline = time.monotonic() + 2
+                while not peer.exists():
+                    if time.monotonic() > deadline:
+                        raise runner.EvalError("synthetic peer did not start")
+                    time.sleep(.005)
+                # Exercise credential registration in memory; the process peer
+                # receives only a marker, never a credential in an IPC file.
+                if path == "/api/providers":
+                    assert body["api_key"] == "synthetic-private-key"
+                    body = {**body, "api_key": "<memory-only>"}
+                request = peer / f"request-{number}.json"
+                temporary = request.with_suffix(".tmp")
+                temporary.write_text(json.dumps({"method": method, "path": path, "body": body or {}}))
+                temporary.replace(request)
+                response = peer / f"response-{number}.json"
+                while not response.exists():
+                    if time.monotonic() > deadline:
+                        raise runner.EvalError("synthetic API timed out")
+                    time.sleep(.005)
+                reply = json.loads(response.read_text())
+                if reply["status"] != 200:
+                    raise runner.EvalError("synthetic API failed")
+                return reply["body"]
+
+            get = lambda self, path, **kw: self.request("GET", path, **kw)
+            post = lambda self, path, body: self.request("POST", path, body)
+            put = lambda self, path, body: self.request("PUT", path, body)
+
+        monkeypatch.setattr(runner, "Api", ProcessApi)
+        monkeypatch.setattr(runner, "free_port", lambda: 49152 + int.from_bytes(os.urandom(2)) % 16000)
+        script = ("from tests.test_dsh_validation import _serve_smoke_stand_in; "
+                  f"_serve_smoke_stand_in({mode!r})")
+        monkeypatch.setattr(runner, "_SERVE", script)
+        def readback(url):
+            assert url == "postgresql://synthetic-disposable"
+            state = json.loads((root / "runtime" / "peer.json").read_text())
+            if mode == "database":
+                state["sessions"][0]["session_id"] = "wrong-session"
+            return {"records": [{k: v for k, v in r.items() if k != "metadata"} for r in state["records"]],
+                    "sessions": state["sessions"], "consults": state["consults"]}
+        monkeypatch.setattr(launcher, "_smoke_database", readback)
+        result = launcher._smoke_workflow(PG, root)
+        assert owned and (root / "runtime" / "pid").exists()  # positive control: serve really ran
+        assert all(p.poll() is not None for p in owned)
+        return result, root
+    return run
+
+
+def test_smoke_process_peer_completes_four_roles_resume_and_readback(smoke_peer):
+    (summary, code), root = smoke_peer("ok")
+    assert code == 0 and summary["status"] == "pass"
+    assert summary["roles"] == list(launcher.ROLES)
+    assert summary["manager_turns"] == 2 and summary["tasks"] == 2
+    assert summary["database_readback"] is True
+    assert summary["auxiliary_cost_coverage"] == "unknown"
+    assert summary["observed_cost_usd"] == pytest.approx(12 * .000008442)
+    assert summary["hard_billing_cap"] is False
+    wire = json.dumps(summary)
+    for private in (str(root), "synthetic-private-key", "private transcript", "/synthetic/private"):
+        assert private not in wire
+    for path in root.rglob("*"):
+        if path.is_file():
+            assert "synthetic-private-key" not in path.read_text()
+
+
+@pytest.mark.parametrize("mode,stage", [
+    ("channels", "serve"), ("profile", "profile"), ("manager-timeout", "manager"),
+    ("task", "tasks"), ("task-timeout", "tasks"), ("consult", "room_consult"),
+    ("readback", "api_readback"), ("database", "db_readback"), ("budget", "manager"),
+    ("owner", "api_readback"),
+])
+def test_smoke_process_peer_failure_reaps_serve_and_never_passes(smoke_peer, mode, stage):
+    (summary, code), _ = smoke_peer(mode)
+    assert code != 0 and summary["status"] == "error"
+    assert summary["stage"] == stage
+    assert summary["timeout"] is mode.endswith("timeout")
+    if mode == "budget":
+        assert summary["observed_cost_usd"] == .6
+
+
+def test_session_reader_peer_counts_children_and_summary_usage_separately(tmp_path, monkeypatch):
+    from looper.agents.runtimes.dsh import DshRuntime
+
+    # Only synthetic public-module peers are imported by Node, never installed
+    # dsh, its persistence or a model. The reader must use the official seam.
+    if not launcher.shutil.which("node"):
+        pytest.skip("Node is required for the Session reader process peer")
+    executable = tmp_path / "dsh.mjs"
+    executable.write_text("// synthetic installation anchor\n")
+    owner = tmp_path / "runtime" / "owner"
+    (owner / "dsh" / "sessions").mkdir(parents=True)
+    modules = {
+        "cordis": "export class Context {async dispose() {}}",
+        "dsh-token-meter": "export class TokenMeter {constructor(ctx) {}}",
+        "dsh-session-projection": """export class SessionProjectionRegistry {
+          constructor(ctx) {ctx.sessionProjections = this;}
+          stateOf(session) {return {totals: {uncachedInputTokens: session.id === 'root' ? 10 : 3,
+            outputTokens: 4, cacheReadTokens: 7, cacheWriteTokens: 2}};}
+        }""",
+        "dsh-session": "export class Session {static fromRestore(id) {return {id};}}",
+        "dsh-session-persistence-jsonl": """export async function apply(ctx, {root}) {
+          if (!root.endsWith('/dsh/sessions')) throw Error('wrong private root');
+          ctx.sessionPersistence = {
+            async list() {return [{header: {id: 'root'}}, {header: {id: 'child', parentSession: 'root'}}];},
+            async open(id, access) {
+              if (access !== 'read') throw Error('reader took write ownership');
+              return {inheritedEventCount: 0, async close() {}, async read() {return {eventState: 'owned',
+                events: id === 'child' ? [{type: 'compaction/summary', data: {usage: {
+                  inputTokens: 5, outputTokens: 2, cacheReadTokens: 1, cacheWriteTokens: 0,
+                  private: '/synthetic/private/transcript'}}}] : []};}};
+            }
+          };
+        }""",
+    }
+    for name, source in modules.items():
+        package = tmp_path / "node_modules" / "@deepseek-ai" / name
+        package.mkdir(parents=True)
+        (package / "package.json").write_text(json.dumps({"type": "module", "exports": "./index.mjs"}))
+        (package / "index.mjs").write_text(source)
+    original_which = launcher.shutil.which
+    monkeypatch.setattr(launcher.shutil, "which", lambda name: str(executable) if name == "dsh" else original_which(name))
+    monkeypatch.setattr(DshRuntime, "kept_session_dir", lambda self, command: owner)
+    records = [{"metadata": {"command": []}}, {"metadata": {"command": []}}]
+    summary = launcher._session_accounting(records, tmp_path / "runtime")
+    assert summary["reader"] == "observed"
+    assert summary["root_sessions"] == summary["child_sessions"] == summary["summary_requests"] == 1
+    assert summary["coverage"] == "unknown"
+    assert summary["token_meter_includes_summaries"] is False
+    assert summary["root_observed_cost_usd"] == pytest.approx(.000008442)
+    assert summary["child_observed_cost_usd"] == pytest.approx(.000006342)
+    assert summary["summary_observed_cost_usd"] == pytest.approx(.000003906)
+    assert "/synthetic/private" not in json.dumps(summary)
+
+
+def test_session_reader_failure_keeps_coverage_unknown(tmp_path, monkeypatch):
+    from looper.agents.runtimes.dsh import DshRuntime
+    monkeypatch.setattr(launcher.shutil, "which", lambda _: "/synthetic/dsh")
+    monkeypatch.setattr(DshRuntime, "kept_session_dir", lambda *a: tmp_path / "owner")
+    async def failed(*args, **kwargs):
+        return launcher.ProcessResult(7, b"private transcript", b"private path")
+    monkeypatch.setattr(launcher, "run_process", failed)
+    result = launcher._session_accounting([{"metadata": {}}], tmp_path)
+    assert result["reader"] == "unavailable" and result["coverage"] == "unknown"
+    assert "private" not in json.dumps(result)
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
+                    reason="disposable PostgreSQL is required for the real serve/tiers readback")
+def test_smoke_real_serve_stand_in_keeps_the_room_consult_gap_visible(tmp_path, monkeypatch):
+    """Reuse the four-role DB fixture. Its current script has no room consult;
+    completing the task alone must never make this stricter smoke pass.
+    """
+    from evals.prompt_regression import runner
+    from tests.dsh_runtime_stand_in import install, read_calls
+
+    bin_dir, state = install(tmp_path)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("LOOPER_EVAL_API_KEY", "synthetic-private-key")
+    original_database = runner.fresh_database
+    original_popen = subprocess.Popen
+    snapshots, owned = [], []
+
+    @contextmanager
+    def database(url):
+        with original_database(url) as created:
+            try:
+                yield created
+            finally:
+                snapshots.append(launcher._smoke_database(created[0]))
+
+    def popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        owned.append(process)
+        return process
+
+    monkeypatch.setattr(runner, "fresh_database", database)
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+    root = tmp_path / "workflow"
+    root.mkdir()
+    summary, code = launcher._smoke_workflow(os.environ["LOOPER_TEST_DATABASE_URL"], root)
+    assert code != 0 and summary["status"] == "error" and summary["stage"] == "room_consult"
+    assert owned and all(process.poll() is not None for process in owned)
+    calls = read_calls(state)
+    assert {row["role"] for row in calls} == set(launcher.ROLES)
+    managers = sorted((r for r in calls if r["role"] == "manager"), key=lambda r: r["turn"])
+    assert [r["resumed"] for r in managers] == [False, True]
+    assert len({r["session"] for r in managers}) == 1
+    rows = snapshots[0]["records"]
+    assert {r["session_id"] for r in rows} == {r["session"] for r in calls}
+    assert all(r["status"] == "completed" for r in rows)
+    assert "synthetic-private-key" not in json.dumps(snapshots, default=str)
