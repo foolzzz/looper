@@ -232,6 +232,8 @@ _CONTINUE = {"mode": "continue"}
     ("pending", "stop", (MessageType.TASK_STOP, {})),
     ("waiting_user", "stop", (MessageType.TASK_STOP, {})),  # a user gate waits: the task still runs
     ("waiting_user", "restart", "conflict"),
+    ("waiting", "stop", (MessageType.TASK_STOP, {})),  # a wait holds it: the task still runs
+    ("waiting", "restart", "conflict"),
     ("init", "stop", "conflict"),
     # A restart goes on from the saved plan, and runs at once.
     ("stopped", "restart", (MessageType.TASK_RESTART, _CONTINUE)),
