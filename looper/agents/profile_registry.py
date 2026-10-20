@@ -1,28 +1,16 @@
 """Runtimes, LLM providers and Agent Profiles: what they are, how they are checked, and their API (RFC decision 10).
 
-An **Agent Profile** is a runtime, an LLM provider and a model, with a default
-effort and, on Claude Code, whether its runs have agent teams (on unless turned
-off, ``default_agent_teams``); a running agent (the Manager, a Planner, a step's Worker) runs the
-profile its role selects. A **runtime** is a runtime type
-(an adapter in ``looper.agents.runtimes``) found on this machine: the
-executable it runs and what its probe found (``<executable> --version``, never
-a model call). Runtimes are built in, never registered by hand: one per type
-whose executable is on the server's PATH (``detect_runtime``). A runtime row
-of another kind, registered by hand before, stays read-only while a profile
-uses it (the schema drops the unused ones once). A **provider** is where an
-agent's requests go: the protocols it serves (``anthropic-messages``,
-``openai-responses``, ``openai-chat``), its ``base_url``, its model catalog
-(each model's context window, prices, effort levels and the background model
-its runtime's side requests use, each unknown until given), environment
-variables of its own for the runs that use it (``env``), how many runs it takes
-at once (``max_concurrency``, none for no limit) and how it authenticates: a
-runtime type's own login (``oauth``, bound to that type) or an API key, which
-is stored apart (``llm_provider_secrets``), shown as ``***`` and read only
-when a run starts (``agent_settings.load_agent_settings``). A run is priced at
-its provider's prices, the catalog's or else the built-in table's
-(``runtimes.pricing``), unless its runtime reports the right figure itself;
-the concurrency limit is stored and checked only. Presets
-(``provider_presets``) fill a new provider for a known vendor.
+A ``ProviderSpec`` is an account: its typed vendor, authentication, environment
+and concurrency limit. ``Endpoint`` holds one account/protocol URL; ``ModelSpec``
+holds an immutable provider/name/protocol identity and its model settings.
+``ResolvedModel`` joins that model to its exact endpoint and account and checks
+runtime compatibility. ``AgentProfile`` references a model id and runtime,
+with effort, agent teams and custom prompt as its only runtime options.
+
+The v2 persistence and launch functions below still use ``LegacyProviderSpec``
+and ``LegacyAgentProfile`` until the database and runtime migrations switch
+them. ``CatalogModel`` describes their old embedded model catalog. API keys
+remain separate from stored account metadata and are omitted from reprs.
 
 The built-ins exist on every installation and are read-only: the
 ``claude-code`` runtime (the server's configured ``claude``), the
@@ -36,7 +24,7 @@ too once ``looper serve`` finds its executable on PATH
 (``register_found_runtimes``), or Re-detect does (``probe_runtime``):
 ``codex`` for Codex, ``omp`` for OMP, ``grok`` for Grok.
 
-A profile is checked when it is created or changed, and again when a provider
+A legacy profile is checked when it is created or changed, and again when a provider
 it uses changes (``check_pairing``):
 
 - its runtime's type is one this version can run;
@@ -60,12 +48,13 @@ import asyncio
 import math
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields, replace
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from . import runtimes
 from .model_names import parse_model_name
-from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported
+from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported, VendorType
 
 NAME_MAX_CHARS = 240
 EXECUTABLE_MAX_CHARS = 1_000
@@ -132,7 +121,9 @@ class CatalogModel:
 
 
 @dataclass(frozen=True)
-class ProviderSpec:
+class LegacyProviderSpec:
+    """The v2 provider shape, retained only for the pre-migration persistence and launch path."""
+
     id: str
     name: str
     auth: AuthKind
@@ -155,18 +146,20 @@ class ProviderSpec:
 
 
 @dataclass(frozen=True)
-class AgentProfile:
+class LegacyAgentProfile:
+    """The v2 resolved profile, retained until model references are migrated."""
+
     id: str
     name: str
     runtime: RuntimeSpec
-    provider: ProviderSpec
+    provider: LegacyProviderSpec
     model: str
     effort: str | None = None  # its default effort; a layer's effort wins
     agent_teams: bool = False  # Claude Code's agent teams in its runs (runtimes.claude_code)
     custom_prompt: str = ""
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> AgentProfile:
+    def from_row(cls, row: Mapping[str, Any]) -> LegacyAgentProfile:
         """A profile from ``db.profile_registry.PROFILE_JSON``."""
         known = {c.value for c in Capability}
         return cls(
@@ -176,7 +169,7 @@ class AgentProfile:
             runtime=RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
                                 row.get("runtime_executable") or "",
                                 frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known)),
-            provider=ProviderSpec(
+            provider=LegacyProviderSpec(
                 row["provider_id"], row["provider_name"], AuthKind(row["provider_auth"]),
                 frozenset(ApiProtocol(p) for p in row.get("provider_protocols") or ()),
                 row.get("provider_oauth_runtime_type"), row.get("provider_base_url") or "",
@@ -202,10 +195,209 @@ def _env(raw: Any) -> tuple[tuple[str, str], ...]:
 
 
 BUILTIN_RUNTIME = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", runtimes.CLAUDE_CODE.capabilities)
-BUILTIN_PROVIDER = ProviderSpec("prov-claude-subscription", "claude-subscription", AuthKind.OAUTH,
+BUILTIN_PROVIDER = LegacyProviderSpec("prov-claude-subscription", "claude-subscription", AuthKind.OAUTH,
                                 frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), "claude-code")
-BUILTIN_PROFILE = AgentProfile("agent-claude-code-opus", "claude-code/opus", BUILTIN_RUNTIME, BUILTIN_PROVIDER,
+BUILTIN_PROFILE = LegacyAgentProfile("agent-claude-code-opus", "claude-code/opus", BUILTIN_RUNTIME, BUILTIN_PROVIDER,
                                "opus", agent_teams=True)
+
+
+# The v3 declarations below do not carry the v2 provider catalog or resolved
+# profile fields. Persistence and runtime binding switch in subsequent slices.
+
+
+def _entry_values(cls: type, entry: Mapping[str, Any]) -> dict[str, Any]:
+    values = _fields(dict(entry) if isinstance(entry, Mapping) else entry,
+                     (item.name for item in fields(cls)))
+    for item in fields(cls):
+        if item.default is MISSING and item.default_factory is MISSING and item.name not in values:
+            raise RegistryError(f"missing required field {item.name!r}")
+    return values
+
+
+def _typed_enum(enum: type, raw: Any, what: str) -> Any:
+    try:
+        return enum(raw)
+    except (ValueError, TypeError):
+        raise RegistryError(f"{what} must be one of {', '.join(value.value for value in enum)}") from None
+
+
+@dataclass(frozen=True)
+class ProviderSpec:
+    """One account. Endpoints and models have their own identities and lifetimes."""
+
+    id: str
+    name: str
+    vendor_type: VendorType
+    auth: AuthKind
+    oauth_runtime_type: str | None = None
+    env: tuple[tuple[str, str], ...] = ()
+    max_concurrency: int | None = None
+    api_key: str | None = field(default=None, repr=False, compare=False)
+    builtin: bool = False
+
+    def __post_init__(self) -> None:
+        vendor = _typed_enum(VendorType, self.vendor_type, "vendor_type")
+        auth = _typed_enum(AuthKind, self.auth, "auth")
+        if auth is not vendor.auth_kind or self.oauth_runtime_type != vendor.oauth_runtime_type:
+            raise RegistryError("auth and oauth_runtime_type must match vendor_type")
+        if auth is AuthKind.OAUTH and self.api_key is not None:
+            raise RegistryError("a login provider cannot store an API key")
+        object.__setattr__(self, "vendor_type", vendor)
+        object.__setattr__(self, "auth", auth)
+        object.__setattr__(self, "name", entry_name(self.name, "provider"))
+        object.__setattr__(self, "max_concurrency", _max_concurrency(self.max_concurrency))
+        if self.api_key is not None:
+            object.__setattr__(self, "api_key", _api_key(self.api_key))
+        if not isinstance(self.env, (tuple, list)) or any(
+                not isinstance(entry, (tuple, list)) or len(entry) != 2 for entry in self.env):
+            raise RegistryError("env must contain key/value pairs")
+        env = _provider_env([{"key": key, "value": value} for key, value in self.env])
+        object.__setattr__(self, "env", _env(env))
+
+    @classmethod
+    def from_entry(cls, entry: Mapping[str, Any]) -> ProviderSpec:
+        values = _entry_values(cls, entry)
+        if "env" in values:
+            values = {**values, "env": _env(_provider_env(values["env"]))}
+        return cls(**values)
+
+    def updated(self, **changes: Any) -> ProviderSpec:
+        _fields(changes, ("name", "env", "max_concurrency", "api_key"))
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """One provider's URL for exactly one API. An empty URL needs account context."""
+
+    provider_id: str
+    protocol: ApiProtocol
+    base_url: str
+    use_runtime_default: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "protocol", _typed_enum(ApiProtocol, self.protocol, "protocol"))
+        if not isinstance(self.base_url, str):
+            raise RegistryError("base_url must be a string")
+        object.__setattr__(self, "base_url", _base_url(self.base_url))
+        if not isinstance(self.use_runtime_default, bool) or self.use_runtime_default and self.base_url:
+            raise RegistryError("use_runtime_default must be boolean and requires an empty base_url")
+
+    @classmethod
+    def from_entry(cls, entry: Mapping[str, Any]) -> Endpoint:
+        return cls(**_entry_values(cls, entry))
+
+    def check_provider(self, provider: ProviderSpec) -> None:
+        if self.provider_id != provider.id:
+            raise RegistryError("endpoint and provider must belong to the same account")
+        if provider.auth is AuthKind.OAUTH:
+            if self.protocol is not provider.vendor_type.login_protocol or self.base_url or self.use_runtime_default:
+                raise RegistryError("a login endpoint must use its runtime's protocol and CLI-managed URL")
+        elif not self.base_url and not self.use_runtime_default:
+            raise RegistryError("an API-key endpoint needs an explicit base_url")
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """A single, exact callable model; the provider/name/protocol identity is immutable."""
+
+    id: str
+    provider_id: str
+    name: str
+    protocol: ApiProtocol
+    context_window: int | None = None
+    input_usd_per_mtok: float | None = None
+    output_usd_per_mtok: float | None = None
+    cache_read_usd_per_mtok: float | None = None
+    cache_write_usd_per_mtok: float | None = None
+    efforts: tuple[str, ...] | None = None
+    background_model: str | None = None
+    catalog_order: int = 0
+    builtin: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "protocol", _typed_enum(ApiProtocol, self.protocol, "protocol"))
+        values = {name: getattr(self, name) for name in MODEL_FIELDS}
+        if isinstance(values["efforts"], tuple):
+            values["efforts"] = list(values["efforts"])
+        checked = _models([values])[0]
+        for name, value in checked.items():
+            object.__setattr__(self, name, tuple(value) if name == "efforts" and value is not None else value)
+        if isinstance(self.catalog_order, bool) or not isinstance(self.catalog_order, int) or self.catalog_order < 0:
+            raise RegistryError("catalog_order must be a non-negative integer")
+
+    @classmethod
+    def from_entry(cls, entry: Mapping[str, Any]) -> ModelSpec:
+        return cls(**_entry_values(cls, entry))
+
+    def updated(self, **changes: Any) -> ModelSpec:
+        _fields(changes, (*MODEL_FIELDS[1:], "catalog_order"))
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    """A model joined to its own account and exact protocol endpoint, without fallback."""
+
+    model: ModelSpec
+    provider: ProviderSpec
+    endpoint: Endpoint
+
+    def __post_init__(self) -> None:
+        if self.model.provider_id != self.provider.id or self.model.protocol is not self.endpoint.protocol:
+            raise RegistryError("model, provider and endpoint references must match")
+        self.endpoint.check_provider(self.provider)
+
+    def check_runtime(self, runtime: RuntimeSpec) -> None:
+        adapter = _runtime_type(runtime.type)
+        if self.model.protocol not in adapter.protocols:
+            raise RegistryError("runtime does not support the model's exact protocol")
+        if self.provider.auth not in adapter.auth_kinds:
+            raise RegistryError("runtime does not support the provider's auth kind")
+        if self.provider.auth is AuthKind.OAUTH and self.provider.oauth_runtime_type != runtime.type:
+            raise RegistryError("a login provider can only use its own runtime")
+
+
+@dataclass(frozen=True)
+class AgentProfile:
+    """A runtime and model reference, with only the profile's three runtime options."""
+
+    id: str
+    name: str
+    runtime: RuntimeSpec
+    model_id: str
+    effort: str | None = None
+    agent_teams: bool = False
+    custom_prompt: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", entry_name(self.name, "Agent Profile"))
+        if not isinstance(self.model_id, str) or not self.model_id or _CONTROL.search(self.model_id):
+            raise RegistryError("an Agent Profile needs a model_id")
+        object.__setattr__(self, "effort", _effort(self.effort))
+        _agent_teams(self.agent_teams)
+        check_agent_teams(self.runtime, self.agent_teams)
+        object.__setattr__(self, "custom_prompt", _custom_prompt(self.custom_prompt))
+
+    @classmethod
+    def from_entry(cls, entry: Mapping[str, Any]) -> AgentProfile:
+        return cls(**_entry_values(cls, entry))
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> AgentProfile | LegacyAgentProfile:
+        # The v2 database remains readable until the schema migration is applied.
+        if "model_id" not in row:
+            return LegacyAgentProfile.from_row(row)
+        known = {c.value for c in Capability}
+        runtime = RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
+                              row.get("runtime_executable") or "",
+                              frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known))
+        return cls(row["id"], row["name"], runtime, row["model_id"], row.get("effort"),
+                   row.get("agent_teams", False), row.get("custom_prompt", ""))
+
+    def record(self) -> dict[str, Any]:
+        return {"id": self.id, "name": self.name, "model_id": self.model_id, "custom_prompt": self.custom_prompt,
+                "runtime": {"id": self.runtime.id, "name": self.runtime.name, "type": self.runtime.type}}
 
 
 # --- Validation: each raises RegistryError ---
@@ -264,18 +456,36 @@ def _base_url(raw: Any) -> str:
     if raw is None:
         return ""
     url = raw.strip() if isinstance(raw, str) else None
-    if url is None or len(url) > BASE_URL_MAX_CHARS or (url and not re.match(r"https?://[^\s/]+", url)) \
-            or (url and _CONTROL.search(url)):
+    if url is None or len(url) > BASE_URL_MAX_CHARS or _CONTROL.search(raw) \
+            or (url and re.search(r"\s", url)):
         raise RegistryError(f"base_url must be an http:// or https:// URL of at most {BASE_URL_MAX_CHARS} "
                             "characters, or empty for the protocol's own endpoint")
+    if not url:
+        return url
+    try:
+        parsed = urlsplit(url)
+        valid = parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+        parsed.port  # Validate numeric port and range; urlsplit does not do it eagerly.
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RegistryError("base_url must be a valid http:// or https:// URL")
+    credential_fields = {"key", "apikey", "token", "apitoken", "accesstoken", "refreshtoken", "authtoken",
+                         "sessiontoken", "authorization", "auth", "secret", "secretkey", "clientsecret",
+                         "password", "credential", "credentials", "signature", "sig", "xapikey", "xgoogapikey",
+                         "xamzcredential", "xamzsignature", "xamzsecuritytoken"}
+    if parsed.username is not None or parsed.password is not None or parsed.fragment \
+            or any(re.sub(r"[-_.]", "", name).lower() in credential_fields
+                   for name, _ in parse_qsl(parsed.query, keep_blank_values=True)):
+        raise RegistryError("base_url must not contain credentials or fragments; use the separate api_key field")
     return url
 
 
 def _price(raw: Any, field: str) -> float | None:
     if raw is None:
         return None
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) \
-            or not 0 <= raw <= PRICE_MAX_USD:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 <= raw <= PRICE_MAX_USD \
+            or not math.isfinite(raw):
         raise RegistryError(f"{field} must be US dollars per million tokens, from 0 to {PRICE_MAX_USD}, or null")
     return float(raw)
 
@@ -389,7 +599,7 @@ def _listed(values: Iterable[Any]) -> str:
     return ", ".join(sorted(getattr(v, "value", str(v)) for v in values))
 
 
-def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> None:
+def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str) -> None:
     """Refuse a profile of ``runtime``, ``provider`` and ``model`` that could not run (the module's rules)."""
     try:
         adapter = runtimes.adapter(runtime.type)
@@ -445,7 +655,7 @@ def _custom_prompt(raw: Any) -> str:
     return text
 
 
-def check_roles(profile: AgentProfile, roles: Iterable[str]) -> None:
+def check_roles(profile: LegacyAgentProfile, roles: Iterable[str]) -> None:
     """Refuse ``profile`` for a role its runtime lacks a capability for."""
     adapter = runtimes.ADAPTERS.get(profile.runtime.type)
     for role in roles:
@@ -461,14 +671,14 @@ def check_roles(profile: AgentProfile, roles: Iterable[str]) -> None:
 _SCOPE_ROLES = {"system": tuple(runtimes.ROLE_CAPABILITIES), "project": ("planner", "worker", "reviewer")}
 
 
-async def check_selection(profile_id: str, roles: Iterable[str]) -> AgentProfile:
+async def check_selection(profile_id: str, roles: Iterable[str]) -> LegacyAgentProfile:
     """The Agent Profile ``profile_id``, refused when it cannot run one of ``roles``."""
     from ..db import profile_registry as db
 
     row = await db.get_profile(profile_id) if isinstance(profile_id, str) else None
     if row is None:
         raise RegistryError(f"no Agent Profile {profile_id!r}: give the profile_id of a registered one")
-    profile = AgentProfile.from_row(row)
+    profile = LegacyAgentProfile.from_row(row)
     if profile.runtime.type not in runtimes.ADAPTERS:
         raise RegistryError(f"Agent Profile {profile.name!r} runs on a {profile.runtime.type!r} runtime, which this "
                             "version cannot run")
@@ -496,9 +706,9 @@ def runtime_spec(row: Mapping[str, Any]) -> RuntimeSpec:
                        frozenset(Capability(c) for c in row["capabilities"] or () if c in known))
 
 
-def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
+def provider_spec(row: Mapping[str, Any]) -> LegacyProviderSpec:
     """A provider row (``llm_providers``, or the fields of one) as what a profile is checked with."""
-    return ProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
+    return LegacyProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
                         frozenset(ApiProtocol(p) for p in row["protocols"]), row["oauth_runtime_type"],
                         row["base_url"], _catalog(row["models"]), _env(row.get("env")))
 
@@ -589,7 +799,7 @@ async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str,
     return {kind: await module.login_view() for kind, module in _login_modules().items() if kind in types}
 
 
-def cost_basis(profile: AgentProfile) -> dict[str, Any]:
+def cost_basis(profile: LegacyAgentProfile) -> dict[str, Any]:
     """How a profile's runs are priced: by its runtime (``runtime``), or by Looper at its provider's prices
     (``provider_price``), with the models of its runs that have no full price (``unpriced``: those runs record
     tokens only and no spend cap applies to them); ``equivalent`` when the figure is what a subscription's usage
@@ -610,7 +820,7 @@ def cost_basis(profile: AgentProfile) -> dict[str, Any]:
     return {"source": source.value, "equivalent": profile.provider.auth is AuthKind.OAUTH, "unpriced": unpriced}
 
 
-def cost_warnings(profile: AgentProfile) -> list[str]:
+def cost_warnings(profile: LegacyAgentProfile) -> list[str]:
     """What registering ``profile`` should warn about: models it would run without a full price, and a runtime
     whose own cost figure no per-run cap can stop (``RuntimeAdapter.runtime_cost_capped``)."""
     warnings = [f"model {model!r} has no full price with provider {profile.provider.name!r} (input, output, cache "
@@ -633,7 +843,7 @@ def _context_suffix_warnings(models: Iterable[str]) -> list[str]:
             "context_window in the provider's catalog"]
 
 
-def provider_warnings(provider: ProviderSpec) -> list[str]:
+def provider_warnings(provider: LegacyProviderSpec) -> list[str]:
     """An API without Anthropic messages cannot rely on Claude Code interpreting its catalog's suffixes."""
     if ApiProtocol.ANTHROPIC_MESSAGES in provider.protocols:
         return []
@@ -641,7 +851,7 @@ def provider_warnings(provider: ProviderSpec) -> list[str]:
                                     for name in (model.name, model.background_model) if name)
 
 
-def profile_warnings(profile: AgentProfile) -> list[str]:
+def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
     """Warnings about this profile's prices and the model names its runtime sends."""
     warnings = cost_warnings(profile)
     if profile.runtime.type != runtimes.CLAUDE_CODE.type:
@@ -659,7 +869,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) 
     """An Agent Profile, the roles its runtime can run and where it is selected (``used_by``: the layers, each
     ``{scope, role, project_id, project_name}``, how many tasks and schedules chose it, and the projects whose
     Planners may choose it; ``db.profile_usage``)."""
-    spec = AgentProfile.from_row(row)
+    spec = LegacyAgentProfile.from_row(row)
     return {
         "profile_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
@@ -866,7 +1076,7 @@ async def _check_provider_profiles(conn: Any, provider: Mapping[str, Any]) -> No
 
     spec = provider_spec(provider)
     for row in await db.list_profiles(pool=conn, provider_id=provider["id"]):
-        profile = AgentProfile.from_row(row)
+        profile = LegacyAgentProfile.from_row(row)
         try:
             check_pairing(profile.runtime, spec, profile.model)
         except RegistryError as exc:
@@ -963,7 +1173,7 @@ async def _existing_profile(profile_id: str) -> dict[str, Any]:
     return row
 
 
-async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, ProviderSpec]:
+async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, LegacyProviderSpec]:
     from ..db import profile_registry as db
 
     runtime = await db.get_runtime(runtime_id) if isinstance(runtime_id, str) else None
@@ -1005,7 +1215,7 @@ async def _profile_answer(profile_id: str) -> dict[str, Any]:
     row = await _existing_profile(profile_id)
     uses = await db.profile_usage(profile_id)
     return {"profile": profile_view(row, uses.get(profile_id, NOT_USED)),
-            "warnings": profile_warnings(AgentProfile.from_row(row))}
+            "warnings": profile_warnings(LegacyAgentProfile.from_row(row))}
 
 
 async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
@@ -1041,7 +1251,7 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
         fields["agent_teams"] = default_agent_teams(runtime)
     check_pairing(runtime, provider, model)
     check_agent_teams(runtime, fields.get("agent_teams", bool(row.get("agent_teams"))))
-    check_roles(AgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),
+    check_roles(LegacyAgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),
                 await _selected_roles(profile_id))
     try:
         await db.update_profile(profile_id, fields)

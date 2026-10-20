@@ -92,6 +92,42 @@ class AuthKind(str, Enum):
     API_KEY = "api_key"
 
 
+class VendorType(str, Enum):
+    """An account's vendor, independent of its display name and endpoint URLs."""
+
+    GLM_BIGMODEL = "glm-bigmodel"
+    GLM_ZAI = "glm-zai"
+    DEEPSEEK = "deepseek"
+    KIMI_MOONSHOT_CN = "kimi-moonshot-cn"
+    KIMI_MOONSHOT = "kimi-moonshot"
+    CPA = "cpa"
+    OPENCODE = "opencode"
+    SUB2API = "sub2api"
+    CLAUDE_SUBSCRIPTION = "claude-subscription"
+    CODEX_LOGIN = "codex-login"
+    GROK_LOGIN = "grok-login"
+    CUSTOM = "custom"
+
+    @property
+    def oauth_runtime_type(self) -> str | None:
+        return _LOGIN_VENDORS.get(self, (None, None))[0]
+
+    @property
+    def login_protocol(self) -> ApiProtocol | None:
+        return _LOGIN_VENDORS.get(self, (None, None))[1]
+
+    @property
+    def auth_kind(self) -> AuthKind:
+        return AuthKind.OAUTH if self.oauth_runtime_type else AuthKind.API_KEY
+
+
+_LOGIN_VENDORS = {
+    VendorType.CLAUDE_SUBSCRIPTION: ("claude-code", ApiProtocol.ANTHROPIC_MESSAGES),
+    VendorType.CODEX_LOGIN: ("codex", ApiProtocol.OPENAI_RESPONSES),
+    VendorType.GROK_LOGIN: ("grok", ApiProtocol.OPENAI_RESPONSES),
+}
+
+
 class Capability(str, Enum):
     """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
 
