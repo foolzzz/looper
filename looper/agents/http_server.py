@@ -571,6 +571,8 @@ class AgentHTTPServer:
         elif (m := self._RE_RUNTIME_PROBE.match(path)) and method == "POST":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.probe_runtime(
                 m.group(1), server_claude=self._claude_bin))
+        elif path == "/api/providers" and method == "GET":
+            await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
         elif path == "/api/providers" and method == "POST":
             await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_provider(
                 projects.json_object(body)))
@@ -581,6 +583,9 @@ class AgentHTTPServer:
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
         elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
+        elif path == "/api/models" and method == "GET":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.list_models(
+                provider_id=query.get("provider_id") or None, runtime_id=query.get("runtime_id") or None))
         elif (m := self._RE_PROFILE_PROMPT_PREVIEW.match(path)) and method == "GET":
             await self._handle_registry(writer, HTTP_200, lambda: prompt_preview.preview(
                 m.group(1), query.get("role", ""), query.get("project_id") or None))

@@ -833,6 +833,7 @@ def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]
         "login": dict(logins[adapter.type]) if oauth and adapter and adapter.type in (logins or {}) else None,
         "env": list(row.get("env") or []), "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
+        "endpoint_count": len(row["endpoints"]),
         "model_count": row.get("model_count", 0), "profile_count": row.get("profile_count", 0),
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
@@ -883,7 +884,8 @@ def vendor_types_view() -> list[dict[str, Any]]:
             "vendor_type": vendor.value, "auth": vendor.auth_kind.value,
             "oauth_runtime_type": vendor.oauth_runtime_type,
             "endpoints": [{"protocol": e.protocol.value, "base_url": e.base_url,
-                           "use_runtime_default": e.use_runtime_default} for e in defaults.endpoints],
+                           "use_runtime_default": e.use_runtime_default}
+                          for e in sorted(defaults.endpoints, key=lambda e: e.protocol.value)],
             "suggested_models": models,
             "env": [{"key": key, "value": value} for key, value in defaults.env],
             "requires_url_confirmation": defaults.requires_url_confirmation,
@@ -1155,6 +1157,15 @@ async def _existing_provider(provider_id: str, conn: Any = None) -> dict[str, An
     if row is None:
         raise RegistryNotFound(f"no provider {provider_id!r}")
     return row
+
+
+async def list_providers() -> dict[str, Any]:
+    """Saved accounts with login state and usage counts, using the registry's public view."""
+    from ..db import profile_registry as db
+
+    providers = await db.list_providers()
+    logins = await _logins(providers)
+    return {"providers": [provider_view(row, logins) for row in providers]}
 
 
 def _provider_fields(data: Mapping[str, Any], current: Mapping[str, Any] | None) -> tuple[dict[str, Any], Any]:
