@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import stat
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -20,6 +21,161 @@ MODELS = ("deepseek-flash", "deepseek-flash[1m]", "deepseek-v4-pro", "deepseek-v
 PROVIDER = ProviderSpec("gateway", "Messages gateway", AuthKind.API_KEY,
                         frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
                         base_url="https://gateway.example/anthropic/v1/", api_key="test-dsh-key")
+
+
+def _register_prompt_runtime(monkeypatch):
+    """Expose only the unfinished adapter's prompt hooks, without registering a runnable DSH."""
+    from looper.agents.runtimes import dsh
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+    class PromptRuntime(dsh.DshRuntime, ClaudeCodeRuntime):
+        pass
+
+    runtime = PromptRuntime()
+    monkeypatch.setitem(runtimes.ADAPTERS, "dsh", runtime)
+    return runtime
+
+
+def _prompt_launch(monkeypatch, custom=""):
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.profile_registry import BUILTIN_PROFILE
+
+    runtime = _register_prompt_runtime(monkeypatch)
+    profile = replace(BUILTIN_PROFILE, custom_prompt=custom, model="deepseek-flash", provider=PROVIDER,
+                      runtime=replace(BUILTIN_PROFILE.runtime, type=runtime.type))
+    return Launch(AgentSettings(profile=profile), role=AgentType.WORKER)
+
+
+def _node(tmp_path, script, *args):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for DSH bootstrap validation")
+    return subprocess.run([node, "--input-type=module", "-", *map(str, args)], input=script,
+                          cwd=tmp_path, capture_output=True, text=True, timeout=20)
+
+
+@pytest.mark.parametrize("custom", ["", 'Profile {{unknown}} 中文 "identity"\nsecond line'])
+def test_dsh_bootstrap_preserves_literal_prompt_and_delegates_after_registration(tmp_path, monkeypatch, custom):
+    from looper.agents.runtimes import dsh
+
+    # An exports-only package at the detected executable's installation anchor.
+    package = tmp_path / "installation" / "node_modules" / "@deepseek-ai" / "dsh-headless"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"type": "module", "exports": "./runner.mjs"}))
+    (package / "runner.mjs").write_text('''
+export const name = 'headless-runner';
+export const Config = { runnerSchema: true };
+export const inject = ['agentDefaultModel', 'agents', 'sessions'];
+export function apply(ctx, config) {
+  if (ctx.sections.length !== 1) throw new Error('runner started before section registration');
+  if (config !== ctx.expectedConfig) throw new Error('runner config was changed');
+  ctx.started++;
+  return ctx.result;
+}
+''')
+    executable = tmp_path / "installation" / "bin" / "dsh"
+    executable.parent.mkdir()
+    executable.touch()
+    symlink = tmp_path / "detected-dsh"
+    symlink.symlink_to(executable)
+    launch = _prompt_launch(monkeypatch, custom)
+    body = '  {{unknown}} "quoted" \'single\' \\ path\n中文🙂\n`literal ${value}`\r\nlast line\n'
+    text = custom + "\n\n" + body if custom else body
+    home = dsh.write_home(tmp_path / "local", dsh.bootstrap_files(str(symlink), text, launch))
+    entry = dsh.bootstrap_entry(home)
+    assert entry["id"] == "headless-runner"  # required entry, never a separate optional plugin
+    assert set(entry) == {"id", "name"}  # preserve the official config and headlessStartup injection
+    done = _node(tmp_path, '''
+import assert from 'node:assert/strict';
+const plugin = await import(process.argv[2]);
+assert.equal(plugin.name, 'headless-runner');
+assert.deepEqual(plugin.Config, {runnerSchema: true});
+assert.deepEqual(plugin.inject, ['agentDefaultModel', 'agents', 'sessions', 'systemPrompt']);
+const ctx = { sections: [], started: 0, expectedConfig: {task: '-', json: true, sessionId: 'saved'},
+              result: Promise.resolve('delegated') };
+ctx.systemPrompt = {section(section) { ctx.sections.push(section); }};
+assert.equal(plugin.apply(ctx, ctx.expectedConfig), ctx.result);
+assert.equal(ctx.started, 1);
+assert.equal(ctx.sections[0].name, 'looper');
+assert.equal(ctx.sections[0].order, 20000);
+assert.equal(ctx.sections[0].interpolate, false);
+assert.equal(ctx.sections[0].complete, undefined);
+const broken = {...ctx, started: 0, systemPrompt: {section() {throw new Error('registration failed');}}};
+assert.throws(() => plugin.apply(broken, ctx.expectedConfig), /registration failed/);
+assert.equal(broken.started, 0);
+console.log(JSON.stringify(ctx.sections[0]));
+''', entry["name"])
+    assert done.returncode == 0, done.stderr
+    section = json.loads(done.stdout)
+    assert section["text"] == dsh._prompt_text(text, launch)
+    assert section["text"].endswith(body)
+    if custom:
+        assert section["text"].startswith(custom + "\n\n# Runtime notes")
+        assert section["text"].count(custom) == 1
+    assert not (home.root / "node_modules").exists()
+
+
+def test_dsh_bootstrap_rejects_unavailable_installation(tmp_path, monkeypatch):
+    from looper.agents.runtimes import dsh
+
+    launch = _prompt_launch(monkeypatch)
+    for executable in (tmp_path / "missing-dsh", tmp_path):
+        with pytest.raises(RuntimeUnsupported, match="installed executable"):
+            dsh.bootstrap_files(str(executable), "literal prompt", launch)
+
+
+def test_dsh_bootstrap_rejects_incompatible_official_exports(tmp_path, monkeypatch):
+    from looper.agents.runtimes import dsh
+
+    package = tmp_path / "node_modules" / "@deepseek-ai" / "dsh-headless"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text('{"type":"module","exports":"./index.mjs"}')
+    (package / "index.mjs").write_text("export const name='headless-runner', Config={}, inject={};")
+    executable = tmp_path / "dsh"
+    executable.touch()
+    home = dsh.write_home(tmp_path / "local", dsh.bootstrap_files(str(executable), "prompt",
+                                                                  _prompt_launch(monkeypatch)))
+    done = _node(tmp_path, '''
+import assert from 'node:assert/strict';
+await assert.rejects(import(process.argv[2]), /Unsupported DSH headless exports/);
+''', dsh.bootstrap_entry(home)["name"])
+    assert done.returncode == 0, done.stderr
+
+
+def test_dsh_bootstrap_imports_official_exports_and_renders_literal_text(tmp_path, monkeypatch):
+    from looper.agents.runtimes import dsh
+
+    executable = shutil.which("dsh")
+    if executable is None:
+        pytest.skip("Installed DSH is required to verify official exports")
+    launch = _prompt_launch(monkeypatch)
+    home = dsh.write_home(tmp_path / "local", dsh.bootstrap_files(executable, '{{unknown}}\n中文 "quote"', launch))
+    done = _node(tmp_path, '''
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {realpathSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const require = createRequire(realpathSync(process.argv[3]));
+const official = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-headless')));
+assert.equal(official.name, 'headless-runner');
+assert.equal(typeof official.Config, 'function');
+assert.equal(typeof official.apply, 'function');
+assert.ok(Array.isArray(official.inject));
+const plugin = await import(process.argv[2]);
+assert.equal(plugin.Config, official.Config);
+assert.deepEqual(plugin.inject, [...official.inject, 'systemPrompt']);
+let section;
+// The real apply fails before reading stdin or starting a model when appExit is absent.
+assert.throws(() => plugin.apply({systemPrompt: {section(value) {section = value;}}, get() {}}, {}), /appExit/);
+assert.equal(section.interpolate, false);
+const {renderPrompt} = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-system-prompt')));
+const assembly = {sections: [section], contexts: [], tools: [], variables: {}};
+assert.equal(renderPrompt(assembly), section.text);
+assert.throws(() => renderPrompt({...assembly, sections: [{...section, interpolate: true}]}), /unknown/);
+console.log(JSON.stringify(section));
+''', dsh.bootstrap_entry(home)["name"], executable)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["text"] == dsh._prompt_text('{{unknown}}\n中文 "quote"', launch)
 
 
 @pytest.fixture

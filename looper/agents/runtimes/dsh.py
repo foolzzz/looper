@@ -1,4 +1,4 @@
-"""DSH provider policy and private owner homes; the executable adapter is not registered yet."""
+"""DSH provider policy, private owner homes and literal prompts; the executable adapter is not registered yet."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, ClassVar
 from uuid import uuid4
 
 from ... import child_env
-from . import ApiProtocol, AuthKind, ProviderBinding, RuntimeUnsupported
+from . import (
+    ApiProtocol, AuthKind, PromptBlock, ProviderBinding, RuntimeAdapter, RuntimeUnsupported, instructions,
+    runtime_prompt_text,
+)
+from .instructions import Delivery, InstructionFile
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -39,6 +43,61 @@ _DIRECTORY_VARS = frozenset({
     "PI_CONFIG_FILES", "AGENTS_HOME", "AGENT_HOME", "AGENT_DIR", "AGENT_DIRS",
 })
 _OWNED_PREFIXES = ("DSH_", "XDG_", "DEEPSEEK_", "ANTHROPIC_", "OPENAI_")
+
+
+class DshRuntime(RuntimeAdapter):
+    """Prompt hooks for the future executable adapter; deliberately abstract and unregistered."""
+
+    type = "dsh"
+    label = "DSH"
+    can_replace_system_prompt = False
+
+    def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
+        return [PromptBlock("Default prompt", "runtime", None, "DSH's default prompt (not shown; append only)"),
+                PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch, cwd=cwd),
+                            "literal system prompt section (order 20000)")]
+
+    def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
+        # Native agent-instructions discovery is disabled by the managed overlay.
+        return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
+            cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+
+
+def runtime_notes() -> str:
+    return ("# Runtime notes (DSH)\n\n"
+            "Looper runs you through DSH. Put the complete reply or report requested by Looper's instructions "
+            "in your final message; Looper reads only that final message.")
+
+
+def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
+    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label)
+               if cwd is not None else "")
+    return runtime_prompt_text(launch, looper_prompt, runtime_notes(), project, keep_empty=False)
+
+
+def bootstrap_files(executable: str, looper_prompt: str, launch: Launch, *,
+                    cwd: str | Path | None = None) -> dict[str, str]:
+    """An immutable entry module, resolved from the detected installation, never the private home's npm tree.
+
+    Config and launcher-provided task/session/json values stay owned by the official headless runner.
+    Both launch materialization and preview use ``_prompt_text``; JSON encodes text without interpolation.
+    """
+    try:
+        anchor = Path(shutil.which(executable) or executable).resolve(strict=True)
+        if not anchor.is_file():
+            raise OSError
+    except OSError:
+        raise RuntimeUnsupported("DSH bootstrap requires an installed executable") from None
+    module = Path(__file__).with_name("dsh_bootstrap.mjs").resolve().as_uri()
+    options = json.dumps({"executable": str(anchor), "text": _prompt_text(looper_prompt, launch, cwd=cwd)},
+                         ensure_ascii=False)
+    return {"looper-bootstrap.mjs": f"import {{ createBootstrap }} from {json.dumps(module)};\n"
+            f"export const {{ name, Config, inject, apply }} = await createBootstrap({options});\n"}
+
+
+def bootstrap_entry(home: DshHome) -> dict[str, str]:
+    """Patch only the required runner's module; retain its config and headlessStartup dependency."""
+    return {"id": "headless-runner", "name": (home.config / "looper-bootstrap.mjs").as_uri()}
 
 
 def _external_environment(values: Mapping[str, str]) -> dict[str, str]:

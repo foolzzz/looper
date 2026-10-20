@@ -394,3 +394,20 @@ def test_system_prompt_refusal_names_the_unsupported_runtime() -> None:
         can_replace_system_prompt = False
 
     assert replace_refusal(StandIn()) == "the Stand-in runtime cannot replace its default system prompt"
+
+
+@pytest.mark.parametrize("role", list(AgentType))
+def test_dsh_effective_append_preserves_saved_replace_and_other_runtime_defaults(monkeypatch, role):
+    from looper.agents.agent_settings import BUILTIN_SYSTEM_PROMPT_MODE, resolve
+    from tests.test_dsh_runtime import _prompt_launch
+
+    original = dict(BUILTIN_SYSTEM_PROMPT_MODE)
+    launch = _prompt_launch(monkeypatch)
+    settings = replace(resolve(role, {}), profile=launch.profile, system_prompt_mode=SystemPromptMode.REPLACE)
+    launch = replace(launch, settings=settings, role=role)
+    assert not launch.runtime.can_replace_system_prompt
+    assert launch.system_prompt_mode is SystemPromptMode.APPEND
+    assert settings.system_prompt_mode is SystemPromptMode.REPLACE
+    assert replace_refusal(launch.runtime) == "the DSH runtime cannot replace its default system prompt"
+    assert BUILTIN_SYSTEM_PROMPT_MODE == original
+    assert _launch("claude-code", SystemPromptMode.REPLACE).system_prompt_mode is SystemPromptMode.REPLACE
