@@ -144,12 +144,7 @@ def generate_omp_baseline(checkout: Path, output: Path) -> None:
     interpreter = checkout / ".venv/bin/python"
     if not interpreter.is_file():
         raise LegacyBaselineUnavailable("OMP baseline requires the old checkout's test venv")
-    result = subprocess.run(
-        [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout),
-         "--runtime", "omp", "--capture"], cwd=checkout, capture_output=True, text=True,
-        timeout=180, check=True,
-    )
-    baseline = json.loads(result.stdout)
+    baseline = json.loads(_run_legacy_capture(checkout, interpreter, "omp"))
     if baseline["source"] != source or baseline["captures"].keys() != OMP_CASES.keys():
         raise LegacyBaselineUnavailable("legacy OMP capture returned inconsistent source or cases")
     for records in baseline["captures"].values():
@@ -302,6 +297,207 @@ for event in [
 ''')
 
 
+
+GROK_LEGACY_REVISION = CLAUDE_LEGACY_REVISION
+GROK_CATALOG = {**CODEX_CATALOG, "name": "grok-4.7", "efforts": ["low", "xhigh"]}
+# ACP refusal is supplied by the stand-in executable, never by changing the
+# runtime's transport, configuration, permissions or budget policy.
+GROK_CASES = {
+    "acp-known": (False, 0.01, "low", "replace", True),
+    "acp-unknown": (False, 0, "", "append", False),
+    "fallback-known": (True, 0.02, "xhigh", "replace", False),
+    "fallback-unknown": (True, 0, "low", "append", True),
+}
+
+
+@contextmanager
+def grok_capture_root() -> Any:
+    """Keep content-addressed filenames significant across old and new captures."""
+    root = Path("/tmp/looper-grok-launch-parity-v2")
+    with root.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        root.mkdir(mode=0o700)
+        try:
+            yield root
+        finally:
+            shutil.rmtree(root)
+
+
+def grok_environment(root: Path, *, explicit_home: bool) -> dict[str, str]:
+    login_home = root / ("login" if explicit_home else "home/.grok")
+    login_home.mkdir(parents=True)
+    (login_home / "auth.json").write_text('{"token":"synthetic-login-secret"}\n')
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
+                   "XAI_API_KEY": "sk-test-inherited", "GROK_CODE_XAI_API_KEY": "sk-test-inherited",
+                   "GROK_AUTH": "synthetic-token", "GROK_CONFIG": str(root / "inherited.toml"),
+                   "XDG_CONFIG_HOME": str(root / "xdg"),
+                   "CLAUDE_CONFIG_DIR": str(root / "synthetic-claude")}
+    if explicit_home:
+        environment["GROK_HOME"] = str(login_home)
+    return environment
+
+
+def grok_executable(root: Path, *, cost: float, fallback: bool) -> str:
+    """Use the checkout's existing ACP/headless protocol stand-ins without models."""
+    import ast
+    import agent_launch_parity as tiers
+    from fake_claude import fake_claude
+    from fake_grok_acp import FAKE_ACP
+
+    # Read the standalone protocol body without importing a test module (whose
+    # module-level profiles belong to the checkout's own schema).
+    module = ast.parse(Path(tiers.__file__).with_name("test_grok_runtime.py").read_text())
+    headless = next(ast.literal_eval(node.value) for node in module.body
+                    if isinstance(node, ast.Assign) and any(
+                        isinstance(name, ast.Name) and name.id == "_FAKE_GROK" for name in node.targets))
+    reply = json.dumps({"status": "completed", "summary": "ok", "passed": True, "findings": []})
+    # Replace mode leaves rules/looper.md empty (the prompt is the agent file).
+    # The stand-in still has to finish; it must not require the harness separator.
+    prompt_line = ("prompt = open(os.path.join(home, 'rules', 'looper.md')).read()"
+                   ".partition('\\n\\n---\\n\\n')[2].splitlines()[0]")
+    safe_prompt = ("prompt = (open(os.path.join(home, 'rules', 'looper.md')).read()"
+                   ".partition('\\n\\n---\\n\\n')[2].splitlines() or [''])[0]")
+    text_line = "text = f'{prompt} | {message} | turn {turns}'"
+    cost_line = "'total_cost_usd': 0,"
+    answer_line = 'answer = f\'{rules_line()} | {text} | turn {state["turns"]}\''
+    usage_line = "usage(1, 100, 40, 5, 100000000)"
+    for source, needle in ((headless, prompt_line), (headless, text_line), (headless, cost_line),
+                           (FAKE_ACP, answer_line), (FAKE_ACP, usage_line)):
+        if needle not in source:
+            raise RuntimeError("Grok stand-in protocol no longer matches the capture contract")
+    headless = headless.replace(prompt_line, safe_prompt).replace(text_line, f"text = {reply!r}")
+    headless = headless.replace(cost_line, f"'total_cost_usd': {cost!r},")
+    acp = FAKE_ACP.replace(answer_line, f"answer = {reply!r}")
+    acp = acp.replace(usage_line, f"usage(1, 100, 40, 5, {int(round(cost * 10**10))})")
+    prefix = "import os, sys\n" + ("os.environ['FAKE_ACP_DEAD'] = '1'\n" if fallback else "")
+    body = prefix + f"src = {acp!r} if 'agent' in sys.argv[1:] else {headless!r}\nexec(compile(src, 'fake', 'exec'))\n"
+    (root / "bin").mkdir()
+    return fake_claude(root / "bin/grok", body)
+
+
+def grok_legacy_source(checkout: Path) -> dict[str, str]:
+    source = claude_legacy_source(checkout)
+    result = subprocess.run(["git", "-C", str(checkout), "rev-parse",
+                             "HEAD:looper/agents/runtimes/grok.py"],
+                            capture_output=True, text=True, timeout=10, check=True)
+    acp = subprocess.run(["git", "-C", str(checkout), "rev-parse",
+                          "HEAD:looper/agents/runtimes/grok_acp.py"],
+                         capture_output=True, text=True, timeout=10, check=True)
+    try:
+        subprocess.run(["git", "-C", str(checkout), "diff", "--exit-code", "HEAD", "--",
+                        "tests/fake_grok_acp.py", "tests/test_grok_runtime.py"],
+                       capture_output=True, text=True, timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LegacyBaselineUnavailable("cannot verify old Grok checkout revision") from exc
+    return {**source, "adapter_blob": result.stdout.strip(), "acp_blob": acp.stdout.strip()}
+
+
+def generate_grok_baseline(checkout: Path, output: Path) -> None:
+    """Generate expected exclusively in the verified old interpreter and SQL store."""
+    checkout = checkout.resolve()
+    source = grok_legacy_source(checkout)
+    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
+        raise LegacyBaselineUnavailable("Grok baseline requires a disposable test database")
+    interpreter = checkout / ".venv/bin/python"
+    if not interpreter.is_file():
+        raise LegacyBaselineUnavailable("Grok baseline requires the old checkout's test venv")
+    baseline = json.loads(_run_legacy_capture(checkout, interpreter, "grok"))
+    if baseline["source"] != source or baseline["captures"].keys() != GROK_CASES.keys():
+        raise LegacyBaselineUnavailable("legacy Grok capture returned inconsistent source or cases")
+    for case, records in baseline["captures"].items():
+        if len(records) != (10 if GROK_CASES[case][0] else 6):
+            raise LegacyBaselineUnavailable("Grok capture requires four tiers and two resumed turns")
+        for record in records:
+            _fields(record, FIELDS)
+    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+            stream.close()
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+async def _capture_legacy_grok(checkout: Path) -> dict[str, Any]:
+    source = grok_legacy_source(checkout)
+    sys.path[:0] = [str(checkout), str(checkout / "tests")]
+    import asyncpg
+    import looper
+    import agent_launch_parity as tiers
+    from looper.db import agent_sessions, connection
+
+    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
+            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
+        raise LegacyBaselineUnavailable("legacy Grok capture imported a different checkout")
+    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
+    if not dsn:
+        raise LegacyBaselineUnavailable("Grok baseline requires a disposable test database")
+    captures = {}
+    for case, (fallback, cost, effort, mode, explicit_home) in GROK_CASES.items():
+        schema = f"looper_grok_baseline_{uuid.uuid4().hex}"
+        admin = await asyncpg.connect(dsn, timeout=10)
+        pool = None
+        try:
+            await admin.execute(f'CREATE SCHEMA "{schema}"')
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
+                                            server_settings={"search_path": schema}, command_timeout=15)
+            await connection.ensure_schema(pool)
+            connection._pool = pool
+            await tiers.seed_projects(pool)
+            with grok_capture_root() as root:
+                executable = grok_executable(root, cost=cost, fallback=fallback)
+                # The patched v2 schema ships Claude Code only. Grok is registered
+                # when its executable is found (rt-<type>), which this capture supplies.
+                from looper.agents.runtimes import adapter as runtime_adapter
+                grok = runtime_adapter("grok")
+                await pool.execute(
+                    "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
+                    "VALUES ('rt-grok', 'grok', 'grok', $1, $2, true)",
+                    executable, sorted(capability.value for capability in grok.capabilities),
+                )
+                await pool.execute(
+                    "INSERT INTO llm_providers (id, name, auth, protocols, oauth_runtime_type, base_url, models, env) "
+                    "VALUES ('prov-capture', 'capture', $1, ARRAY['openai-responses'], $2, $3, $4::jsonb, $5::jsonb)",
+                    "oauth", "grok", "", json.dumps([GROK_CATALOG]),
+                    json.dumps([{"key": "CAPTURE_SETTING", "value": "provider"}]))
+                await pool.execute(
+                    "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) "
+                    "VALUES ('profile-capture', 'capture', 'rt-grok', 'prov-capture', 'grok-4.7', $1)",
+                    effort or None)
+                await pool.execute(
+                    "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
+                    "VALUES ('system', 'profile-capture', 0.005, $1::jsonb)",
+                    json.dumps([{"key": "CAPTURE_SETTING", "value": "settings"}]))
+                for role in ("manager", "planner", "worker", "reviewer"):
+                    await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
+                                       "VALUES ('role', $1, $2)", role, mode)
+
+                async def read_state(index: int) -> dict[str, Any]:
+                    rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
+                                            "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                    if len(rows) != index + 1 or rows[-1]["status"] != "completed":
+                        raise LegacyBaselineUnavailable("Grok tier did not persist a completed run")
+                    owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+                    session = await agent_sessions.get_session(owner) if index < 4 else {
+                        "session_id": rows[-1]["session_id"]}
+                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+
+                with patch.dict(os.environ, grok_environment(root, explicit_home=explicit_home), clear=True):
+                    await tiers.seed_rest("unconfigured", root)
+                    records = await capture_grok_tiers(root, read_state=read_state)
+                    captures[case] = [normalize(record, root=root) for record in records]
+        finally:
+            connection._pool = None
+            if pool is not None:
+                await pool.close()
+            try:
+                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            finally:
+                await admin.close()
+    return {"source": source, "captures": captures}
+
+
 def codex_legacy_source(checkout: Path) -> dict[str, str]:
     source = claude_legacy_source(checkout)
     result = subprocess.run(["git", "-C", str(checkout), "rev-parse",
@@ -319,12 +515,7 @@ def generate_codex_baseline(checkout: Path, output: Path) -> None:
     interpreter = checkout / ".venv/bin/python"
     if not interpreter.is_file():
         raise LegacyBaselineUnavailable("Codex baseline requires the old checkout's test venv")
-    result = subprocess.run(
-        [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout),
-         "--runtime", "codex", "--capture"], cwd=checkout, capture_output=True, text=True,
-        timeout=180, check=True,
-    )
-    baseline = json.loads(result.stdout)
+    baseline = json.loads(_run_legacy_capture(checkout, interpreter, "codex"))
     if baseline["source"] != source or baseline["captures"].keys() != CODEX_CASES.keys():
         raise LegacyBaselineUnavailable("legacy Codex capture returned inconsistent source or cases")
     for records in baseline["captures"].values():
@@ -438,6 +629,56 @@ class LegacyBaselineUnavailable(RuntimeError):
     """A baseline cannot be generated from the required, patched v2 source."""
 
 
+_CAPTURE_ERROR_TAIL = 4000
+_DSN_TEXT = re.compile(r"postgres(?:ql)?://\S+", re.IGNORECASE)
+_KEY_TEXT = re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]+")
+_ASSIGNED_SECRET = re.compile(
+    r"(?i)(token|password|secret|api[_-]?key|authorization)(\s*[:=]\s*)(\S+)"
+)
+
+
+def _process_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
+def _redact_process_text(text: str) -> str:
+    """Keep a capture failure diagnosable without echoing credentials."""
+    redacted = _DSN_TEXT.sub("postgresql://<redacted>", text)
+    redacted = _KEY_TEXT.sub("sk-<redacted>", redacted)
+    redacted = _ASSIGNED_SECRET.sub(r"\1\2<redacted>", redacted)
+    redacted = redacted.replace("synthetic-login-secret", "<redacted>")
+    if len(redacted) > _CAPTURE_ERROR_TAIL:
+        redacted = redacted[-_CAPTURE_ERROR_TAIL:]
+    return redacted
+
+
+def _run_legacy_capture(checkout: Path, interpreter: Path, runtime: str | None = None) -> str:
+    """Run ``--capture`` in the old interpreter and keep its stderr when it fails.
+
+    ``check=True`` turns a non-zero exit into ``CalledProcessError`` whose
+    string form omits stderr, which hides why a patched checkout could not
+    reproduce the pinned contract.
+    """
+    command = [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout)]
+    if runtime is not None:
+        command.extend(("--runtime", runtime))
+    command.append("--capture")
+    label = runtime or "claude"
+    try:
+        result = subprocess.run(
+            command, cwd=checkout, capture_output=True, text=True, timeout=180, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = _redact_process_text(_process_text(exc.stderr) or _process_text(exc.stdout))
+        raise LegacyBaselineUnavailable(f"legacy {label} capture timed out: {detail}") from exc
+    if result.returncode != 0:
+        detail = _redact_process_text(result.stderr or "")
+        raise LegacyBaselineUnavailable(f"legacy {label} capture exited {result.returncode}: {detail}")
+    return result.stdout
+
+
 def claude_legacy_source(checkout: Path) -> dict[str, str]:
     """Verify a clean old checkout; return public provenance, never local paths.
 
@@ -479,11 +720,7 @@ def generate_claude_baseline(checkout: Path, output: Path) -> None:
     interpreter = checkout / ".venv/bin/python"
     if not interpreter.is_file():
         raise LegacyBaselineUnavailable("Claude baseline requires the old checkout's test venv")
-    result = subprocess.run(
-        [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout), "--capture"],
-        cwd=checkout, capture_output=True, text=True, timeout=180, check=True,
-    )
-    baseline = json.loads(result.stdout)
+    baseline = json.loads(_run_legacy_capture(checkout, interpreter))
     if baseline["source"] != source or baseline["captures"].keys() != CLAUDE_CASES.keys():
         raise LegacyBaselineUnavailable("legacy capture returned inconsistent source or cases")
     for records in baseline["captures"].values():
@@ -1058,6 +1295,130 @@ async def capture_omp_tiers(
     return records
 
 
+async def capture_grok_tiers(
+    root: Path, *, read_state: Callable[[int], Awaitable[dict[str, Any]]], timeout: float = 45,
+) -> list[dict[str, Any]]:
+    """Capture ACP and actual ACP refusal through the four real tier entry points.
+
+    Keep every subprocess, including failed ACP initialization before a per-turn
+    fallback. Both attempts read back the completed tier call's persisted state;
+    no state is invented for an ACP process that never started a model turn.
+    Capture unchanged config bytes and login targets at process creation, then
+    read each turn's state before its owner saves the next turn's totals.
+    """
+    import agent_launch_parity as tiers
+    from looper.agents.runtimes import adapter
+    from looper.agents.runtimes.grok_acp import AcpGrok
+
+    runtime = adapter("grok")
+    environment = runtime.environment
+    launches: list[Any] = []
+    states: list[dict[str, Any]] = []
+    launch_indices: list[int] = []
+    requests: list[list[dict[str, Any]]] = []
+    send = AcpGrok._send
+
+    def observe(launch: Any) -> dict[str, str]:
+        result = environment(launch)
+        launches.append(launch)
+        return result
+
+    async def observe_send(session: Any, message: dict[str, Any]) -> None:
+        # Record the actual request before the real transport sends it. The
+        # generic first_input remains the exact initialize bytes, as contracted.
+        requests[-1].append(_json_copy(message))
+        await send(session, message)
+
+    def inspect(argv: list[str], env: dict[str, str], cwd: str) -> dict[str, Any]:
+        launch = launches[-1]
+        provider = launch.profile.provider
+        protocols = provider.protocols & runtime.protocols
+        if len(protocols) != 1:
+            raise ValueError("Grok capture requires one actual protocol")
+        launch_indices.append(len(launches) - 1)
+        requests.append([])
+        home = Path(env["GROK_HOME"])
+        text = (home / "config.toml").read_text("utf-8")
+        config = tomllib.loads(text)
+        login = home / "auth.json"
+        if not login.is_symlink():
+            raise ValueError("Grok login must be a symlink, never a copied credential")
+        rules = (home / "rules/looper.md").read_text("utf-8")
+        # Replace mode leaves the rules file empty and puts Looper's prompt in
+        # the agent file the process is actually started with.
+        if rules.strip():
+            prompt = rules
+        elif "--agent-profile" in argv:
+            prompt = Path(argv[argv.index("--agent-profile") + 1]).read_text("utf-8")
+        elif "--agent" in argv:
+            prompt = Path(argv[argv.index("--agent") + 1]).read_text("utf-8")
+        else:
+            prompt = rules
+        return {"unset": list(runtime.bind_provider(provider, launch.model, launch.effort).unset),
+                "config": {"toml": text, "acp_requests": None, "protocol": next(iter(protocols)).value,
+                           "model": launch.model, "effort": launch.effort,
+                           "catalog": _public_data([asdict(entry) for entry in provider.catalog]),
+                           "agent_md": (home / "agent.md").read_text("utf-8") if (home / "agent.md").exists() else None,
+                           "acp_agent_md": (home / "acp-agent.md").read_text("utf-8")
+                           if "agent" in argv and (home / "acp-agent.md").exists() else None},
+                "prompt": prompt,
+                "permissions": {"read_only": launch.read_only,
+                                "always_approve": "--always-approve" in argv,
+                                "tools": argv[argv.index("--tools") + 1] if "--tools" in argv else None},
+                "isolation": {"GROK_HOME": str(home), "HOME": env["HOME"],
+                              "config": config,
+                              "shared_targets": {name: os.readlink(home / name) for name in ("bundled", "docs")}},
+                "mcp": config.get("mcp_servers"), "login_target": os.readlink(login)}
+
+    async def exercise() -> None:
+        from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+
+        executable = str(root / "bin/grok")
+        tiers._work_dir(root, tiers.PROJECT_A).mkdir(parents=True, exist_ok=True)
+        planner = PlannerAgent(task_id=tiers.TASKS[tiers.PROJECT_A], runtime_root=root / "runtime",
+                               claude_bin=executable)
+        plan = TaskPlan(plan_id="plan-parity", goal_id="", requirement=tiers.REQUIREMENT,
+                        work_dir=str(tiers._work_dir(root, tiers.PROJECT_A)), project_id=tiers.PROJECT_A)
+        planner._plan = plan
+        await planner._refresh_project(plan)
+        for index, role in enumerate(("manager", "manager", "planner", "planner", "worker", "reviewer")):
+            if role == "manager":
+                await tiers._manager(executable, root)
+            elif role == "planner":
+                try:
+                    await planner._run_turn(planner._plan_message(plan))
+                finally:
+                    await planner._claude.stop()
+            else:
+                await tiers._worker(executable, root, tiers.PROJECT_A, verify=role == "reviewer")
+            states.append(_json_copy(await read_state(index)))
+
+    def readback(index: int) -> dict[str, Any]:
+        index = launch_indices[index]
+        _fields(states[index], frozenset({"session", "totals"}))
+        launch = launches[index]
+        return {**states[index], "price": {"source": launch.cost_source.value,
+                                          "catalog": _public_data([asdict(entry) for entry in
+                                                                   launch.profile.provider.catalog])},
+                "cap": launch.max_budget_usd}
+
+    from itertools import count
+    from looper.agents import claude_cli
+
+    ids = count(1)
+    with patch.object(runtime, "environment", observe), patch.object(AcpGrok, "_send", observe_send), \
+            patch.object(claude_cli, "uuid4", lambda: uuid.UUID(int=next(ids))):
+        records = await capture(root, exercise, inspect_launch=inspect, readback=readback, timeout=timeout)
+    if ([launch.role.value for launch in launches] !=
+            ["manager", "manager", "planner", "planner", "worker", "reviewer"] or len(launch_indices) != len(records) or
+            set(launch_indices) != set(range(6))):
+        raise ValueError("Grok capture did not observe all four real tiers and resumed launches")
+    for record, sent in zip(records, requests):
+        if "agent" in record["argv"]:
+            record["config"]["acp_requests"] = sent
+    return records
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1065,15 +1426,15 @@ if __name__ == "__main__":
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--capture", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--runtime", choices=("claude", "codex", "omp"), default="claude")
+    parser.add_argument("--runtime", choices=("claude", "codex", "omp", "grok"), default="claude")
     options = parser.parse_args()
     if options.capture:
         driver = {"claude": _capture_legacy_claude, "codex": _capture_legacy_codex,
-                  "omp": _capture_legacy_omp}[options.runtime]
+                  "omp": _capture_legacy_omp, "grok": _capture_legacy_grok}[options.runtime]
         print(json.dumps(asyncio.run(driver(options.checkout.resolve()))))
     elif options.output is None:
         parser.error("--output is required")
     else:
         generate = {"claude": generate_claude_baseline, "codex": generate_codex_baseline,
-                    "omp": generate_omp_baseline}[options.runtime]
+                    "omp": generate_omp_baseline, "grok": generate_grok_baseline}[options.runtime]
         generate(options.checkout, options.output)

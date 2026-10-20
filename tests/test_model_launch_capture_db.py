@@ -30,6 +30,219 @@ FIXTURE = Path(__file__).parent / "fixtures/model_launch_parity_v2_claude.json"
 CODEX_FIXTURE = FIXTURE.with_name("model_launch_parity_v2_codex.json")
 OMP_FIXTURE = FIXTURE.with_name("model_launch_parity_v2_omp.json")
 
+GROK_FIXTURE = FIXTURE.with_name("model_launch_parity_v2_grok.json")
+
+
+@pytest.mark.parametrize("case", ["acp-known", "acp-unknown", "fallback-known", "fallback-unknown"])
+def test_grok_capture_observes_real_tiers_login_resume_and_cost(
+    case: str, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    from looper.agents import agent_settings, profile_registry as registry
+    from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
+
+    fallback, cost, effort, mode, explicit_home = parity.GROK_CASES[case]
+    with parity.grok_capture_root() as root:
+        executable = parity.grok_executable(root, cost=cost, fallback=fallback)
+        provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
+        profile_type = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
+        provider = provider_type(
+            "prov-capture", "capture", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}),
+            oauth_runtime_type="grok", catalog=(registry.CatalogModel(**parity.GROK_CATALOG),),
+            env=(("CAPTURE_SETTING", "provider"),),
+        )
+        profile = profile_type("profile-capture", "capture",
+                               registry.RuntimeSpec("rt-grok", "grok", "grok", executable,
+                                                    adapter("grok").capabilities),
+                               provider, "grok-4.7", effort or None)
+        original = agent_settings.resolve
+        monkeypatch.setattr(agent_settings, "resolve",
+                            lambda *a, **kw: replace(original(*a, **kw), profile=profile))
+        agent_db.list_layers.return_value = [
+            {"scope": "system", "role": None, "env": [{"key": "CAPTURE_SETTING", "value": "settings"}],
+             "run_budget_usd": 0.005},
+            *({"scope": "role", "role": role, "system_prompt_mode": mode, "env": []}
+              for role in ("manager", "planner", "worker", "reviewer")),
+        ]
+        projects = [{"id": pid, "name": name, "background": background, "description": "", "work_dir": ""}
+                    for pid, (name, background) in tiers.PROJECTS.items()]
+        agent_db.list_projects.return_value = projects
+        agent_db.get_task_project.side_effect = lambda _: projects[0]
+        save = agent_db.save_session.side_effect
+
+        async def save_session(owner: str, *args: Any, **kwargs: Any) -> None:
+            await save(owner, *args, **kwargs)
+            agent_db.store.sessions[owner]["provider_id"] = kwargs.get("provider_id")
+
+        agent_db.save_session.side_effect = save_session
+
+        async def state(index: int) -> dict[str, Any]:
+            owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+            finished = agent_db.finish_record.call_args_list[index].kwargs
+            assert finished["status"] == "completed"
+            return {"session": copy.deepcopy(agent_db.store.sessions[owner]) if index < 4 else
+                    {"session_id": finished["session_id"]},
+                    "totals": {key: finished.get(key) for key in parity.CODEX_TOTALS}}
+
+        with monkeypatch.context() as env:
+            env.setattr("os.environ", parity.grok_environment(root, explicit_home=explicit_home))
+            asyncio.run(tiers.seed_rest("unconfigured", root))
+            captures = asyncio.run(parity.capture_grok_tiers(root, read_state=state))
+        assert agent_db.finish_record.call_count == 6
+        assert len(captures) == (10 if fallback else 6)
+        completed = [record for record in captures if not (fallback and "agent" in record["argv"])]
+        assert len(completed) == 6
+        for index, record in enumerate(completed):
+            assert record.keys() == parity.FIELDS
+            assert record["config"]["protocol"] == "openai-responses"
+            assert record["config"]["model"] == "grok-4.7"
+            assert record["config"]["effort"] == effort
+            assert record["config"]["catalog"][0]["context_window"] == 128000
+            assert record["env"]["CAPTURE_SETTING"] == "provider"
+            assert record["env"]["GROK_MEMORY"] == "0"
+            assert {"XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH", "GROK_CONFIG"} <= set(record["unset"])
+            assert not {"XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH"} & record["env"].keys()
+            assert record["login_target"] == str(root / ("login" if explicit_home else "home/.grok") / "auth.json")
+            assert "synthetic-login-secret" not in json.dumps(record)
+            assert record["prompt"] and record["first_input"]
+            assert record["permissions"]["read_only"] == (index in (2, 3))
+            assert record["price"]["source"] == "runtime"
+            assert record["cap"] == 0.005
+            assert record["totals"]["input_tokens"] == 60
+            assert record["totals"]["output_tokens"] == 5
+            assert record["totals"]["cache_read_tokens"] == 40
+            assert record["totals"]["cache_creation_tokens"] == 0
+            assert record["totals"]["cost_usd"] == (cost or None)
+            assert "--max-budget-usd" not in record["argv"]
+            if index < 4:
+                assert record["session"]["runtime_type"] == "grok"
+                totals = record["session"]["session_totals"]
+                turns = 2 if index % 2 else 1
+                assert totals["output_tokens"] == 5 * turns
+                assert totals["input_tokens"] == 60 * turns
+                assert totals["cache_read_tokens"] == 40 * turns
+                assert totals.get("cost_usd") == (cost * turns if cost else None)
+                if fallback:
+                    assert ("--resume" in record["argv"]) == (index in (1, 3))
+                else:
+                    assert "agent" in record["argv"] and record["argv"][-1] == "stdio"
+                    assert json.loads(record["first_input"])["method"] == "initialize"
+                    requests = record["config"]["acp_requests"]
+                    methods = [request.get("method") for request in requests]
+                    assert methods == ["initialize", "session/load" if index % 2 else "session/new", "session/prompt"]
+                    prompt = requests[-1]["params"]["prompt"][0]["text"]
+                    if index < 2:
+                        assert "What can you do?" in prompt
+                    else:
+                        # A Planner turn points at the Task section. The requirement
+                        # stays in the instructions; only a schedule run repeats it here.
+                        assert "[PLAN] Plan the task in the Task section" in prompt
+                        assert tiers.REQUIREMENT in record["prompt"]
+                    if index % 2:
+                        assert requests[1]["params"]["sessionId"] == record["session"]["session_id"]
+        assert completed[0]["session"]["session_id"] == completed[1]["session"]["session_id"]
+        assert completed[2]["session"]["session_id"] == completed[3]["session"]["session_id"]
+        parity.assert_parity(captures, copy.deepcopy(captures), expected_root=root, actual_root=root)
+        for index in range(len(captures)):
+            for key, value in (("protocol", "openai-chat"),
+                               ("toml", captures[index]["config"]["toml"] +
+                                '\nbase_url = "https://changed.example.test/"\n')):
+                mutated = copy.deepcopy(captures)
+                mutated[index]["config"][key] = value
+                with pytest.raises(AssertionError, match=key):
+                    parity.assert_parity(captures, mutated, expected_root=root, actual_root=root)
+        assert GROK_FIXTURE.is_file(), "generate Grok expected on patched v2 with a disposable DB"
+        pinned = json.loads(GROK_FIXTURE.read_text())
+        parity.assert_parity(pinned["captures"][case], captures, expected_root=root, actual_root=root)
+
+
+@pytest.mark.parametrize("oauth_runtime", [None, "codex", "grok"])
+def test_grok_capture_rejects_api_keys(oauth_runtime: str | None) -> None:
+    from looper.agents import profile_registry as registry
+    from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, adapter
+
+    provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
+    provider = provider_type("key", "synthetic", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_RESPONSES}),
+                             oauth_runtime_type=oauth_runtime, api_key="sk-test-capture")
+    with pytest.raises(RuntimeUnsupported, match="own login only"):
+        adapter("grok").bind_provider(provider, "grok-4.7", "low")
+
+
+def test_grok_generation_requires_clean_old_source_database_and_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="checkout"):
+        parity.grok_legacy_source(tmp_path / "missing")
+    output = tmp_path / "baseline.json"
+    output.write_text("previous baseline\n")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.generate_grok_baseline(Path(__file__).resolve().parents[1], output)
+    monkeypatch.setattr(parity, "grok_legacy_source", lambda _: {})
+    monkeypatch.delenv("LOOPER_TEST_DATABASE_URL", raising=False)
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="database"):
+        parity.generate_grok_baseline(tmp_path, output)
+    monkeypatch.setenv("LOOPER_TEST_DATABASE_URL", "postgresql://synthetic.invalid/disposable")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="venv"):
+        parity.generate_grok_baseline(tmp_path, output)
+    assert output.read_text() == "previous baseline\n"
+
+
+def test_legacy_capture_failure_reports_redacted_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = (
+        "Traceback (most recent call last):\n"
+        "postgresql://postgres:secret-pass@127.0.0.1/looper_test refused\n"
+        "token=synthetic-login-secret sk-test-capture\n"
+        "capture failed\n"
+    )
+
+    def fail(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 1, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(parity.subprocess, "run", fail)
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="legacy grok capture exited 1") as raised:
+        parity._run_legacy_capture(tmp_path, tmp_path / "python", "grok")
+    message = str(raised.value)
+    assert "capture failed" in message
+    assert "secret-pass" not in message
+    assert "synthetic-login-secret" not in message
+    assert "sk-test-capture" not in message
+    assert "postgresql://<redacted>" in message
+
+
+def test_grok_fixture_records_patched_source() -> None:
+    pinned = json.loads(GROK_FIXTURE.read_text())
+    assert pinned["source"]["revision"] == parity.GROK_LEGACY_REVISION
+    repository = Path(__file__).resolve().parents[1]
+    for key, path in {"tree": "^{tree}", "adapter_blob": ":looper/agents/runtimes/grok.py",
+                      "acp_blob": ":looper/agents/runtimes/grok_acp.py",
+                      "registry_blob": ":looper/agents/profile_registry.py"}.items():
+        result = subprocess.run(["git", "-C", str(repository), "rev-parse", parity.GROK_LEGACY_REVISION + path],
+                                check=True, capture_output=True, text=True, timeout=10)
+        assert pinned["source"][key] == result.stdout.strip()
+    assert pinned["captures"].keys() == parity.GROK_CASES.keys()
+    assert all(len(records) == (10 if parity.GROK_CASES[case][0] else 6)
+               for case, records in pinned["captures"].items())
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
+                    reason="legacy SQL capture needs a disposable LOOPER_TEST_DATABASE_URL")
+def test_old_grok_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "legacy"
+    subprocess.run(["git", "clone", "--shared", "--no-checkout", str(repository), str(checkout)],
+                   check=True, capture_output=True, timeout=15)
+    subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", parity.GROK_LEGACY_REVISION],
+                   check=True, capture_output=True, timeout=15)
+    venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
+    packages = checkout / ".venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    (packages / "test-dependencies.pth").write_text("\n".join(site.getsitepackages()) + "\n")
+    original = GROK_FIXTURE.read_bytes()
+    output = tmp_path / "captured.json"
+    parity.generate_grok_baseline(checkout, output)
+    assert json.loads(output.read_text()) == json.loads(original)
+    assert GROK_FIXTURE.read_bytes() == original
+
 
 @pytest.mark.parametrize("case", ["responses-default", "chat-proxy", "messages-open",
                                   "priority-all", "priority-chat", "responses-open"])
@@ -571,6 +784,10 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
     assert omp_source["revision"] == parity.OMP_LEGACY_REVISION
     assert omp_source["tree"] == source["tree"]
     assert omp_source["adapter_blob"] not in (source["adapter_blob"], codex_source["adapter_blob"])
+    grok_source = parity.grok_legacy_source(checkout)
+    assert grok_source["revision"] == parity.GROK_LEGACY_REVISION
+    assert grok_source["tree"] == source["tree"]
+    assert grok_source["adapter_blob"] not in (source["adapter_blob"], codex_source["adapter_blob"])
     # A verified checkout alone cannot manufacture persisted session/totals.
     # Failure must preserve any existing output rather than partially refresh it.
     output = tmp_path / "baseline.json"
@@ -595,6 +812,13 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
         assert omp_child.returncode != 0
         assert "OMP baseline requires a disposable test database" in omp_child.stderr
         assert not omp_child.stdout
+        grok_child = subprocess.run(
+            [sys.executable, "-I", parity.__file__, "--checkout", str(checkout), "--runtime", "grok", "--capture"],
+            cwd=checkout, capture_output=True, text=True, timeout=15,
+        )
+        assert grok_child.returncode != 0
+        assert "Grok baseline requires a disposable test database" in grok_child.stderr
+        assert not grok_child.stdout
     assert output.read_text() == "previous baseline\n"
     adapter = checkout / "looper/agents/runtimes/claude_code.py"
     adapter.write_text(adapter.read_text() + "\n# synthetic adapter mutation\n")
@@ -611,6 +835,13 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.omp_legacy_source(checkout)
     git("-C", str(checkout), "restore", "looper/agents/runtimes/omp.py")
+    for relative in ("looper/agents/runtimes/grok.py", "looper/agents/runtimes/grok_acp.py",
+                     "tests/fake_grok_acp.py", "tests/test_grok_runtime.py"):
+        path = checkout / relative
+        path.write_text(path.read_text() + "\n# synthetic Grok mutation\n")
+        with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+            parity.grok_legacy_source(checkout)
+        git("-C", str(checkout), "restore", relative)
     git("-C", str(checkout), "checkout", "--detach", "95c399431")
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.claude_legacy_source(checkout)
@@ -618,6 +849,8 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
         parity.codex_legacy_source(checkout)
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.omp_legacy_source(checkout)
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.grok_legacy_source(checkout)
 
 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
