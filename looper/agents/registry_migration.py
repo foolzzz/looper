@@ -22,8 +22,7 @@ from uuid import UUID, uuid5
 from .profile_registry import (
     MODEL_FIELDS, SECRET_MASK, AgentProfile, CatalogModel, Endpoint, LegacyProviderSpec,
     ModelSpec, ProviderSpec, RegistryError, ResolvedModel,
-    RuntimeSpec, _models,
-    provider_spec,
+    RuntimeSpec, _env, _models,
 )
 from .provider_presets import PRESETS
 from .runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType
@@ -141,12 +140,28 @@ class ConversionPlan:
                 and all(r[key] == 0 for key in ("unresolved_profiles", "binding_mismatches", "pricing_mismatches")))
 
 
+def _binding_provider(provider: LegacyProviderSpec, name: str, protocol: ApiProtocol) -> LegacyProviderSpec:
+    """Project a legacy choice to the exact model input required by v3 adapters."""
+    entry = provider.catalog_model(name)
+    if entry is None and provider.catalog:
+        raise RegistryError("model outside legacy catalog")
+    return replace(provider, protocols=frozenset({protocol}), catalog=(entry or CatalogModel(name),))
+
+
 def _launch_inputs(runtime: RuntimeSpec, provider: LegacyProviderSpec, row: Mapping[str, Any],
-                   protocol: ApiProtocol, actual_url: str | None) -> tuple[Any, ...]:
+                   protocol: ApiProtocol, actual_url: str | None, *,
+                   resolved: ResolvedModel | None = None) -> tuple[Any, ...]:
     # Missing credentials are not permission to discover a key or login. A
     # local sentinel compares binding structure while preserving missingness.
     adapter = ADAPTERS[runtime.type]
-    binding = adapter.bind_provider(replace(provider, api_key=provider.api_key or "migration-static-missing"),
+    if resolved is None and runtime.type == "omp":
+        from .runtimes.omp import API_NAMES
+
+        # The old OMP selected its own priority, independently of conversion
+        # rules. Keep that baseline so a changed conversion is detectable.
+        protocol = next(p for p, _ in API_NAMES if p in provider.protocols)
+    bound = resolved.binding_provider() if resolved is not None else _binding_provider(provider, row["model"], protocol)
+    binding = adapter.bind_provider(replace(bound, api_key=bound.api_key or "migration-static-missing"),
                                     row["model"], row.get("effort") or "")
     config = None
     if runtime.type == "omp":
@@ -154,7 +169,15 @@ def _launch_inputs(runtime: RuntimeSpec, provider: LegacyProviderSpec, row: Mapp
 
         # Pure config generation also checks the old multi-protocol selection;
         # binding flags alone do not contain OMP's API or context window.
-        config = models_yml(SimpleNamespace(profile=SimpleNamespace(provider=provider), model=row["model"]))
+        if resolved is None:
+            entry, = bound.catalog
+            model = ModelSpec("migration-static", provider.id, entry.name, protocol,
+                              **{k: getattr(entry, k) for k in MODEL_FIELDS[1:]})
+            account = ProviderSpec(provider.id, provider.name, VendorType.CUSTOM, AuthKind.API_KEY,
+                                   env=provider.env, api_key=provider.api_key)
+            resolved = ResolvedModel(model, account, Endpoint(provider.id, protocol, provider.base_url,
+                                                            use_runtime_default=not provider.base_url))
+        config = models_yml(SimpleNamespace(settings=SimpleNamespace(resolved_model=resolved), model=row["model"]))
     entry = provider.catalog_model(row["model"])
     return (runtime, protocol, provider.auth, provider.oauth_runtime_type, actual_url,
             provider.base_url, provider.api_key, dict(provider.env),
@@ -177,8 +200,11 @@ def snapshot(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, A
         try:
             runtime = runtime_by_id[row["runtime_id"]]
             saved = account_by_id[row["provider_id"]]
-            account = replace(provider_spec({"oauth_runtime_type": None, "base_url": "", "models": [], **saved}),
-                              api_key=_saved_key(saved.get("api_key")))
+            account = LegacyProviderSpec(
+                saved["id"], saved["name"], AuthKind(saved["auth"]), frozenset(_protocols(saved)),
+                saved.get("oauth_runtime_type"), saved.get("base_url", ""),
+                tuple(CatalogModel.from_entry(entry) for entry in _models(saved.get("models", []))),
+                _env(saved.get("env")), _saved_key(saved.get("api_key")))
             protocol = next(p for p in rules.protocol_priority[runtime.type] if p in account.protocols)
             actual_url = account.base_url or (rules.default_urls.get((runtime.type, protocol))
                                               if account.auth is AuthKind.API_KEY else None)
@@ -241,7 +267,8 @@ def plan(old: LegacySnapshot) -> ConversionPlan:
                    "agent_teams": profile.agent_teams, "custom_prompt": profile.custom_prompt}
             actual_url = endpoint.base_url or converted.default_urls.get((account.id, model.protocol))
             try:
-                binding = _launch_inputs(profile.runtime, target, row, model.protocol, actual_url)
+                resolved = ResolvedModel(model, account, endpoint)
+                binding = _launch_inputs(profile.runtime, target, row, model.protocol, actual_url, resolved=resolved)
                 same_binding = identity in old.bindings and old.bindings[identity] == binding
             except (RuntimeUnsupported, RegistryError, KeyError, ValueError, TypeError):
                 same_binding = False
@@ -565,8 +592,10 @@ def _merge_accounts(result: Conversion, rows: Mapping[str, Mapping[str, Any]],
                           env=a.env, api_key=a.api_key)
             try:
                 adapter = ADAPTERS[profile.runtime.type]
-                first = adapter.bind_provider(old, model.name, profile.effort or "")
-                second = adapter.bind_provider(new, model.name, profile.effort or "")
+                first = adapter.bind_provider(_binding_provider(old, model.name, model.protocol),
+                                              model.name, profile.effort or "")
+                second = adapter.bind_provider(_binding_provider(new, model.name, model.protocol),
+                                               model.name, profile.effort or "")
             except (RuntimeUnsupported, KeyError):
                 return {}, {RetentionReason.LAUNCH_MISMATCH}
             if first.args != second.args or dict(first.env) != dict(second.env) or set(first.unset) != set(second.unset):

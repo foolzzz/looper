@@ -2,11 +2,14 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
-from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import (
+    MODEL_FIELDS, CatalogModel, Endpoint, LegacyProviderSpec, ModelSpec, ProviderSpec, ResolvedModel, RuntimeSpec,
+)
 from looper.agents.registry_migration import LEGACY_RULES, MigrationBlocked, convert
 from looper.agents.runtimes import ApiProtocol as P, AuthKind, VendorType
 from looper.agents.runtimes import codex, omp
@@ -25,6 +28,22 @@ def profile(runtime="omp", **changes):
 
 
 RUNTIMES = [RuntimeSpec(f"rt-{name}", name, name) for name in ("omp", "claude-code", "codex", "grok")]
+
+
+def launch_for(provider, model, runtime):
+    """Build the exact resolved input consumed by current runtime config writers."""
+    from looper.agents.runtimes import ADAPTERS
+
+    entry = provider.catalog_model(model) or CatalogModel(model)
+    protocol, = provider.protocols
+    account = ProviderSpec(provider.id, provider.name, VendorType.CUSTOM, provider.auth,
+                           env=provider.env, api_key=provider.api_key)
+    resolved = ResolvedModel(
+        ModelSpec("model-test", account.id, model, protocol, **{k: getattr(entry, k) for k in MODEL_FIELDS[1:]}),
+        account, Endpoint(account.id, protocol, provider.base_url, use_runtime_default=not provider.base_url))
+    return SimpleNamespace(profile=SimpleNamespace(provider=resolved.binding_provider()), model=model, effort="high",
+                           settings=SimpleNamespace(resolved_model=resolved), runtime=ADAPTERS[runtime],
+                           library=SimpleNamespace(mcp_config=None))
 
 
 REPORT_FIELDS = {
@@ -144,6 +163,24 @@ def test_static_binding_comparison_checks_omp_generated_api_not_only_flags():
     assert result.report["binding_mismatches"] == 1
 
 
+@pytest.mark.parametrize("runtime,protocol", [("claude-code", P.ANTHROPIC_MESSAGES),
+                                             ("omp", P.OPENAI_CHAT), ("codex", P.OPENAI_RESPONSES)])
+def test_preflight_projects_the_selected_model_without_losing_legacy_catalog(runtime, protocol):
+    from looper.agents.registry_migration import plan, snapshot
+
+    account = provider(protocols=[protocol], vendor_type="custom", api_key="synthetic-key", models=[
+        {"name": "unused", "input_usd_per_mtok": 9},
+        {"name": "selected", "context_window": 4096, "efforts": ["high"], "input_usd_per_mtok": 2},
+    ])
+    old = snapshot(RUNTIMES, [account], [profile(runtime, model="selected")])
+    assert old.bindings
+    assert isinstance(old.pricing["agent-test"], LegacyProviderSpec)
+    assert old.pricing["agent-test"].models == ("unused", "selected")
+    result = plan(old)
+    assert result.applicable
+    assert result.report["binding_mismatches"] == result.report["pricing_mismatches"] == 0
+
+
 def test_missing_profile_identity_is_unresolved_and_invalid_empty_input_cannot_apply():
     from looper.agents.registry_migration import plan, snapshot
 
@@ -168,8 +205,11 @@ def run(account=None, profiles=None, **kwargs):
 def test_omp_uses_the_old_priority_not_input_or_enum_order(protocols, expected):
     result = run(provider(protocols=protocols))
     assert result.models[result.profiles["agent-test"].model_id].protocol is expected
-    old = LegacyProviderSpec("prov-test", "account", AuthKind.API_KEY, frozenset(protocols))
-    assert dict(omp.API_NAMES)[expected] == omp.provider_api(old)
+    model = result.models[result.profiles["agent-test"].model_id]
+    bound = LegacyProviderSpec("prov-test", "account", AuthKind.API_KEY, frozenset({model.protocol}),
+                               base_url="https://example.invalid/v1")
+    config = omp.models_yml(launch_for(bound, model.name, "omp"))
+    assert config["providers"]["looper"]["api"] == dict(omp.API_NAMES)[expected]
 
 
 def test_default_rules_match_patched_adapter_constants():
@@ -626,9 +666,6 @@ def test_all_unmerged_model_natural_keys_map_to_their_original_ids():
 @pytest.mark.parametrize("runtime,protocol", [("claude-code", P.ANTHROPIC_MESSAGES),
                                              ("omp", P.OPENAI_CHAT), ("codex", P.OPENAI_RESPONSES)])
 def test_merged_profiles_keep_real_legacy_binding_and_generated_config(runtime, protocol):
-    from types import SimpleNamespace
-
-    from looper.agents.profile_registry import CatalogModel
     from looper.agents.runtimes import ADAPTERS
 
     catalog = [{"name": "model", "context_window": 4096, "efforts": [], "background_model": "helper"}]
@@ -652,9 +689,8 @@ def test_merged_profiles_keep_real_legacy_binding_and_generated_config(runtime, 
                                catalog=(CatalogModel.from_entry({key: getattr(model, key) for key in catalog[0]}),))
     adapter = ADAPTERS[runtime]
     assert adapter.bind_provider(before, "model", "high") == adapter.bind_provider(after, "model", "high")
-    old_launch = SimpleNamespace(profile=SimpleNamespace(provider=before), model="model", effort="high",
-                                 library=SimpleNamespace(mcp_config=None))
-    new_launch = SimpleNamespace(**{**vars(old_launch), "profile": SimpleNamespace(provider=after)})
+    old_launch = launch_for(before, "model", runtime)
+    new_launch = launch_for(after, "model", runtime)
     if runtime == "omp":
         assert omp.models_yml(old_launch) == omp.models_yml(new_launch)
     elif runtime == "codex":

@@ -3,7 +3,9 @@
 **The file** is one JSON document, ``format: looper-config/v3``. A v1 file
 (``looper-config/v1``, or ``loopx-config/v1`` from before the rename to Looper)
 is read too, as the same file under its older names (``_from_v1``): its Agent
-Profiles were ``agents``, and a layer named its profile ``agent``. Every catalog
+Profiles were ``agents``, and a layer named its profile ``agent``. V1 is first
+renamed to v2; v2 registry objects then use the same pure converter as the
+database migration, before v3 natural-key matching. Every catalog
 file is UTF-8 text (acquiring an item refuses binary files), so JSON holds it
 as it is, and one readable file can be checked before it is shared. Its
 sections:
@@ -91,6 +93,7 @@ from typing import Any
 
 FORMAT = "looper-config/v3"
 # v1, and v1 under its name from before the rename to Looper (LoopX): read as v2 (``_from_v1``), never written.
+V2_FORMAT = "looper-config/v2"
 V1_FORMATS = ("looper-config/v1", "loopx-config/v1")
 # What the file holds in place of a secret value it leaves out.
 PLACEHOLDER = {"secret": "omitted"}
@@ -560,12 +563,12 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
         raise ConfigFileError(f"cannot read {label}: {exc.strerror or exc}") from None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ConfigFileError(f"{label} is not a Looper configuration file: {exc}") from None
-    if not isinstance(data, dict) or data.get("format") not in (FORMAT, *V1_FORMATS):
+    if not isinstance(data, dict) or data.get("format") not in (FORMAT, V2_FORMAT, *V1_FORMATS):
         found = data.get("format") if isinstance(data, dict) else None
-        raise ConfigFileError(f"{label} is not a {FORMAT} or {V1_FORMATS[0]} file (format: {found!r})")
+        raise ConfigFileError(f"{label} is not a {FORMAT}, {V2_FORMAT} or {V1_FORMATS[0]} file (format: {found!r})")
     profiles = "agents" if data["format"] in V1_FORMATS else "profiles"
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
-                          ("projects", list), ("runtimes", list), ("providers", list), (profiles, list)):
+                          ("projects", list), ("runtimes", list), ("providers", list), (profiles, list), ("models", list)):
         if section in data and not isinstance(data[section], kind):
             raise ConfigFileError(f"{section} must be a JSON {'object' if kind is dict else 'list'}")
     for section in ("layers", "roles"):
@@ -851,6 +854,7 @@ class _Target:
     runtimes: dict[str, dict[str, Any]] = field(default_factory=dict)  # by name
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    models: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
     schedules: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))  # by project id
 
     @classmethod
@@ -874,6 +878,7 @@ class _Target:
             target.role_templates[row["project_id"]][row["template_key"]] = row
         target.runtimes = {row["name"]: row for row in await db.read_runtimes(conn)}
         target.providers = {row["name"]: row for row in await db.read_providers(conn)}
+        target.models = {(row["provider"], row["name"], row["protocol"]): row for row in await db.read_models(conn)}
         target.profiles = {row["name"]: row for row in await db.read_profiles(conn)}
         from ..db.schedules import list_schedules
 
@@ -924,38 +929,76 @@ class _Importer:
         self.min_interval: int | None = None  # the file's, once read
         self.repointed_schedules: list[str] = []
         self.role_text_limits: dict[str, int] = {}  # by project id: how long its roles' texts may be
-        # Runtimes, providers and Agent Profiles by name, stored and from the file: their ids ("new:..." in a
-        # preview) and what a profile is checked with.
-        from .profile_registry import provider_spec, runtime_spec
+        from .profile_registry import (Endpoint, ModelSpec, ResolvedModel, builtin_resolved_profile,
+                                       provider_spec, runtime_spec)
 
+        builtin = builtin_resolved_profile()
         self.runtimes = {name: (row["id"], runtime_spec(row)) for name, row in target.runtimes.items()}
+        self.runtimes.setdefault(builtin.runtime.name, (builtin.runtime.id, builtin.runtime))
+        self.builtin_runtimes = {spec.type: (identity, spec) for name, (identity, spec) in self.runtimes.items()
+                                 if name not in target.runtimes or target.runtimes[name]["builtin"]}
         self.providers = {name: (row["id"], provider_spec(row)) for name, row in target.providers.items()}
-        self.profiles: dict[str, tuple[str, Any]] = {}
-        from .profile_registry import BUILTIN_PROFILE
-
-        # The built-ins are on every installation, a new database too once the import applies its schema.
-        self.runtimes.setdefault(BUILTIN_PROFILE.runtime.name, (BUILTIN_PROFILE.runtime.id, BUILTIN_PROFILE.runtime))
-        # The built-in runtime of each type here, which a runtime of the file that is not here maps to.
-        self.builtin_runtimes = {BUILTIN_PROFILE.runtime.type: (BUILTIN_PROFILE.runtime.id, BUILTIN_PROFILE.runtime)}
-        for name, row in target.runtimes.items():
-            if row["builtin"]:
-                self.builtin_runtimes[row["type"]] = self.runtimes[name]
-        self.providers.setdefault(BUILTIN_PROFILE.provider.name,
-                                  (BUILTIN_PROFILE.provider.id, BUILTIN_PROFILE.provider))
-        self.profiles[BUILTIN_PROFILE.name] = (BUILTIN_PROFILE.id, BUILTIN_PROFILE)
+        self.providers.setdefault(builtin.resolved_model.provider.name,
+                                  (builtin.resolved_model.provider.id, builtin.resolved_model.provider))
+        self.endpoints = {(name, e["protocol"]): Endpoint(identity, e["protocol"], e["base_url"],
+                                                        e.get("use_runtime_default", False))
+                          for name, row in target.providers.items() for e in row["endpoints"]
+                          for identity in [row["id"]]}
+        self.endpoints.setdefault((builtin.provider.name, builtin.resolved_model.model.protocol.value),
+                                  builtin.resolved_model.endpoint)
+        self.models = {}
+        for key, row in target.models.items():
+            model = ModelSpec.from_entry({k: row[k] for k in ModelSpec.__dataclass_fields__})
+            self.models[key] = ResolvedModel(model, self.providers[key[0]][1], self.endpoints[(key[0], key[2])])
+        self.models.setdefault((builtin.provider.name, builtin.model, builtin.resolved_model.model.protocol.value),
+                               builtin.resolved_model)
+        self.profiles = {builtin.name: (builtin.id, builtin)}
         for name, row in target.profiles.items():
-            if row["runtime"] in self.runtimes and row["provider"] in self.providers:
-                self.profiles[name] = (row["id"], self._profile_spec(row["id"], name, row["runtime"],
-                                                                     row["provider"], row["model"], row["effort"],
-                                                                     row["agent_teams"],
-                                                                     row.get("custom_prompt", "")))
+            key = (row["provider"], row["model"], row["protocol"])
+            self.profiles[name] = (row["id"], self._profile_spec(
+                row["id"], name, row["runtime"], key, row["effort"], row["agent_teams"], row.get("custom_prompt", "")))
+        self.blocked_runtimes: set[str] = set()
+        self.blocked_providers: set[str] = set()
+        self.blocked_models: set[tuple[str, str, str]] = set()
+        self.blocked_profiles: set[str] = set()
+        self.seen_registry: dict[str, set[Any]] = defaultdict(set)
 
-    def _profile_spec(self, profile_id: str, name: str, runtime: str, provider: str, model: str,
+    def _profile_spec(self, profile_id: str, name: str, runtime: str, model_key: tuple[str, str, str],
                       effort: str | None, agent_teams: bool, custom_prompt: str = "") -> Any:
-        from .profile_registry import AgentProfile
+        from .profile_registry import ResolvedAgentProfile
 
-        return AgentProfile(profile_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort,
-                            agent_teams, custom_prompt)
+        resolved = self.models[model_key]
+        return ResolvedAgentProfile(profile_id, name, self.runtimes[runtime][1], resolved.model.id, effort,
+                                    agent_teams, custom_prompt, resolved_model=resolved)
+
+    def _unique(self, section: str, key: Any) -> None:
+        if key in self.seen_registry[section]:
+            raise _Skip("duplicate natural key in the file")
+        self.seen_registry[section].add(key)
+
+    def registry_entries(self, section: str, entries: Sequence[Any]) -> list[Any]:
+        """Reject every occurrence of an ambiguous natural key before writing."""
+        def key(entry: Any) -> Any:
+            if not isinstance(entry, Mapping):
+                return None
+            fields = ("provider", "name", "protocol") if section == "models" else ("name",)
+            values = tuple(entry.get(k) for k in fields)
+            if not all(isinstance(v, str) for v in values):
+                return None
+            return values if section == "models" else tuple(v.strip() for v in values)
+
+        counts = Counter(key(entry) for entry in entries)
+        duplicates = {identity for identity, count in counts.items() if identity is not None and count > 1}
+        for identity in sorted(duplicates):
+            label = " / ".join(identity)
+            self.record(section, label, Action.SKIPPED, reason="duplicate natural key in the file")
+            if section == "models":
+                self.blocked_models.add(identity)
+            elif section == "providers":
+                self.blocked_providers.add(label)
+            else:
+                self.blocked_profiles.add(label)
+        return [entry for entry in entries if key(entry) not in duplicates]
 
     def record(self, section: str, key: str, action: Action, fields: Sequence[str] = (), reason: str = "") -> None:
         self.plan.changes.append(Change(section, key, action, tuple(fields), reason))
@@ -994,6 +1037,7 @@ class _Importer:
                 raise _Skip(f"runtimes are built in, and {runtime.label} ({runtime.default_executable}) is not on "
                             "this machine: install it, then Re-detect it in Settings, Agent Runtimes")
         except _Skip as exc:
+            self.blocked_runtimes.add(label)
             self.record("runtimes", label, Action.SKIPPED, reason=str(exc))
             return
         if row is not None:
@@ -1003,127 +1047,306 @@ class _Importer:
         self.plan.notes.append(f"runtime {name}: runtimes are built in; its Agent Profiles run on the built-in "
                                f"{self.runtimes[name][1].name} runtime here")
 
-    async def provider(self, entry: Any) -> None:
-        from .profile_registry import RegistryError, _provider_fields, catalog_entries, provider_spec
+    def legacy(self, data: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Normalize only this file's old objects, then use the schema converter.
 
-        raw = entry if isinstance(entry, Mapping) else {}
-        label = str(raw.get("name"))
+        Target credentials fill omitted keys in memory. Target accounts are
+        never candidates for opportunistic account merging.
+        """
+        from . import registry_migration as migration
+        from .profile_registry import RegistryError, default_agent_teams, entry_name
+
+        runtimes = list({spec.id: spec for _, spec in self.runtimes.values()}.values())
+        accounts, rows, sources = {}, [], {}
+        for entry in data.get("providers", []):
+            label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
+            try:
+                entry = _mapping(entry, "a legacy provider")
+                name = entry_name(entry.get("name"), "provider")
+                if name in sources:
+                    raise _Skip("duplicate natural key in the file")
+                sources[name] = entry
+                unknown = set(entry) - {"name", "api_key", *_PROVIDER_FIELDS}
+                if unknown:
+                    raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
+                stored = self.target.providers.get(name, {})
+                row = {"id": stored.get("id", f"file:provider:{name}"), "oauth_runtime_type": None,
+                       "base_url": "", "models": [], "env": [], "max_concurrency": None, **entry}
+                if is_placeholder(row.get("api_key")):
+                    row["api_key"] = stored.get("api_key")
+                migration.convert(runtimes, [row], [])
+                accounts[name] = row
+            except (RegistryError, _Skip) as exc:
+                self.blocked_providers.add(label)
+                self.record("providers", label, Action.SKIPPED, reason=str(exc))
+        profile_sources = {}
+        for entry in data.get("profiles", []):
+            label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
+            try:
+                entry = _mapping(entry, "a legacy Agent Profile")
+                name = entry_name(entry.get("name"), "Agent Profile")
+                if name in profile_sources:
+                    raise _Skip("duplicate natural key in the file")
+                profile_sources[name] = entry
+                if "system_prompt_mode" in entry:
+                    self.plan.notes.append(f"profiles {name}: its system_prompt_mode is ignored; set the mode per role")
+                unknown = set(entry) - {"name", "runtime", "provider", "model", "effort", "agent_teams",
+                                        "custom_prompt", "system_prompt_mode"}
+                if unknown:
+                    raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
+                runtime = self.runtimes.get(_string(entry.get("runtime"), "runtime", required=True))
+                provider = _string(entry.get("provider"), "provider", required=True)
+                if runtime is None or entry["runtime"] in self.blocked_runtimes:
+                    raise _Skip("no valid runtime here or in the file")
+                if provider in self.blocked_providers:
+                    raise _Skip("provider was skipped")
+                if provider not in accounts:
+                    # Legacy exports omit built-in accounts. Only explicitly
+                    # referenced target accounts enter, protected from merging.
+                    stored = self.target.providers.get(provider)
+                    if stored is not None:
+                        endpoints = stored["endpoints"]
+                        urls = {e["base_url"] for e in endpoints}
+                        if len(urls) != 1:
+                            raise _Skip("legacy profile needs an explicit model protocol on this target")
+                        row = {"id": stored["id"], "name": provider, "vendor_type": stored["vendor_type"],
+                               "auth": stored["auth"], "oauth_runtime_type": stored["oauth_runtime_type"],
+                               "protocols": [e["protocol"] for e in endpoints], "base_url": next(iter(urls)),
+                               "env": stored["env"], "api_key": stored["api_key"], "models": [], "builtin": True}
+                    elif provider in self.providers and self.providers[provider][1].builtin:
+                        spec = self.providers[provider][1]
+                        row = {"id": spec.id, "name": spec.name, "vendor_type": spec.vendor_type.value,
+                               "auth": spec.auth.value, "oauth_runtime_type": spec.oauth_runtime_type,
+                               "protocols": [spec.vendor_type.login_protocol.value], "base_url": "", "builtin": True}
+                    else:
+                        raise _Skip("no provider here or in the file")
+                    accounts[provider] = row
+                stored_profile = self.target.profiles.get(name, {})
+                row = {"id": stored_profile.get("id", f"file:profile:{name}"), "name": name,
+                       "runtime_id": runtime[0], "provider_id": accounts[provider]["id"],
+                       "model": entry.get("model"), "effort": entry.get("effort"),
+                       "agent_teams": entry.get("agent_teams", default_agent_teams(runtime[1])),
+                       "custom_prompt": entry.get("custom_prompt", "")}
+                migration.convert(runtimes, [accounts[provider]], [row])
+                rows.append(row)
+            except (RegistryError, _Skip) as exc:
+                self.blocked_profiles.add(label)
+                self.record("profiles", label, Action.SKIPPED, reason=str(exc))
+        converted = migration.convert(runtimes, list(accounts.values()), rows)
+        for name, row in accounts.items():
+            canonical = converted.provider_map[row["id"]]
+            if canonical != row["id"]:
+                self.plan.notes.append(f"providers {name}: converted to {converted.providers[canonical].name}")
+        providers = []
+        for spec in converted.providers.values():
+            if spec.name not in sources or spec.name in self.blocked_providers:
+                continue
+            endpoints = [{"protocol": p.value, "base_url": e.base_url,
+                          "use_runtime_default": e.use_runtime_default}
+                         for (pid, p), e in converted.endpoints.items() if pid == spec.id]
+            source = sources[spec.name]
+            providers.append(provider_entry({"name": spec.name, "vendor_type": spec.vendor_type.value,
+                "auth": spec.auth.value, "oauth_runtime_type": spec.oauth_runtime_type,
+                "env": [{"key": k, "value": v} for k, v in spec.env], "max_concurrency": spec.max_concurrency,
+                "endpoints": endpoints, "api_key": source.get("api_key")}, True))
+        models = []
+        from dataclasses import asdict
+
+        for spec in converted.models.values():
+            provider = converted.providers[spec.provider_id].name
+            key = (provider, spec.name, spec.protocol.value)
+            if provider not in sources and key in self.models:
+                continue
+            models.append(model_entry({**asdict(spec), "provider": provider}))
+        profiles = []
+        for spec in converted.profiles.values():
+            if spec.name in self.blocked_profiles:
+                continue
+            model = converted.models[spec.model_id]
+            provider = converted.providers[model.provider_id].name
+            profiles.append({"name": spec.name, "runtime": spec.runtime.name, "effort": spec.effort,
+                             "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
+                             "model": {"provider": provider, "name": model.name, "protocol": model.protocol.value}})
+        return {**data, "format": FORMAT, "providers": providers, "models": models, "profiles": profiles}
+
+    async def provider(self, entry: Any) -> None:
+        from .profile_registry import Endpoint, ProviderSpec, RegistryError, ResolvedModel
+        from ..db import config_transfer as db
+
+        label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
         try:
             entry = _mapping(entry, "a provider")
-            unknown = sorted(set(entry) - {"name", "api_key", *_PROVIDER_FIELDS})
+            unknown = set(entry) - {"name", "vendor_type", "auth", "oauth_runtime_type", "endpoints", "env",
+                                    "max_concurrency", "api_key"}
             if unknown:
-                raise _Skip(f"unknown field {unknown[0]!r}")
-            try:
-                fields, _ = _provider_fields({k: entry.get(k) for k in ("name", *_PROVIDER_FIELDS)}, None)
-            except RegistryError as exc:
-                raise _Skip(str(exc)) from None
-            label = name = fields["name"]
-            row = self.target.providers.get(name)
-            if row is not None and row["builtin"]:
-                raise _Skip("a built-in provider has this name here")
-            key = entry.get("api_key")
-            missing = False
-            if is_placeholder(key):
-                key = row["api_key"] if row is not None else None
-                missing = key is None
-            elif key is not None and (not isinstance(key, str) or not key.strip()):
-                raise _Skip("api_key must be the key, the secret placeholder or null")
-            if fields["auth"] == "oauth" and (key is not None or missing):
-                raise _Skip("an OAuth provider takes no api_key")
-        except _Skip as exc:
-            self.record("providers", label, Action.SKIPPED, reason=str(exc))
-            return
-        new = {**{k: fields[k] for k in _PROVIDER_FIELDS}, "api_key": key}
-        current = {**{k: row[k] for k in _PROVIDER_FIELDS}, "protocols": list(row["protocols"]),
-                   "models": catalog_entries(row["models"]), "api_key": row["api_key"]} if row is not None else None
-        action = self.outcome("providers", name, current, _differs(new, current, (*_PROVIDER_FIELDS, "api_key")))
-        provider_id = row["id"] if row is not None else f"new:{name}"
-        if self.apply and action in (Action.ADDED, Action.CHANGED):
-            from ..db import config_transfer as db
+                raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
+            from .profile_registry import entry_name
 
-            provider_id = await db.write_provider(self.conn, row["id"] if row is not None else None, fields, key)
-        if missing:
-            self.plan.need_secret.append(NeededSecret("providers", name, ("api_key",),
-                                                      _stored("provider", provider_id)))
-        self.providers[name] = (provider_id, provider_spec({**fields, "id": provider_id}))
+            label = entry_name(entry.get("name"), "provider")
+            self._unique("providers", label)
+            row = self.target.providers.get(label)
+            if row and row["builtin"] or label in self.providers and row is None:
+                raise _Skip("a built-in provider has this name here")
+            provider_id = row["id"] if row else f"new:{label}"
+            key = entry.get("api_key")
+            missing = is_placeholder(key) and not (row or {}).get("api_key")
+            if is_placeholder(key):
+                key = (row or {}).get("api_key")
+            fields = {k: v for k, v in entry.items() if k not in ("endpoints", "api_key")}
+            spec = ProviderSpec.from_entry({**fields, "id": provider_id, "api_key": key})
+            label = spec.name
+            if row and row["vendor_type"] != spec.vendor_type.value:
+                raise _Skip("vendor_type conflicts with the existing provider")
+            raw_endpoints = _mapping(entry.get("endpoints"), "endpoints")
+            if not raw_endpoints:
+                raise _Skip("a provider needs an endpoint")
+            endpoints = {}
+            for protocol, raw in raw_endpoints.items():
+                raw = _mapping(raw, "an endpoint")
+                unknown = set(raw) - {"base_url", "use_runtime_default"}
+                if unknown:
+                    raise _Skip(f"unknown endpoint field {sorted(unknown)[0]!r}")
+                endpoint = Endpoint.from_entry({"provider_id": provider_id, "protocol": protocol, **raw})
+                endpoint.check_provider(spec)
+                endpoints[protocol] = endpoint
+            # Preserve endpoints absent from the file. A changed endpoint must
+            # prove every existing profile keeps its launch semantics.
+            combined = {protocol: endpoint for (name, protocol), endpoint in self.endpoints.items() if name == label}
+            combined.update(endpoints)
+            for name, (_, profile) in self.profiles.items():
+                old = profile.resolved_model
+                if old.provider.id != provider_id:
+                    continue
+                resolved = ResolvedModel(old.model, spec, combined[old.model.protocol.value])
+                resolved.check_runtime(profile.runtime)
+                if resolved.endpoint != old.endpoint or resolved.provider.env != old.provider.env:
+                    raise _Skip(f"endpoint or environment conflicts with Agent Profile {name!r}")
+            values = {"name": spec.name, "vendor_type": spec.vendor_type.value, "auth": spec.auth.value,
+                      "oauth_runtime_type": spec.oauth_runtime_type,
+                      "env": [{"key": k, "value": v} for k, v in spec.env],
+                      "max_concurrency": spec.max_concurrency,
+                      "endpoints": [{"protocol": e.protocol.value, "base_url": e.base_url,
+                                     "use_runtime_default": e.use_runtime_default} for e in combined.values()]}
+            current = None if row is None else {**{k: row[k] for k in values if k != "endpoints"},
+                        "endpoints": [{k: e.get(k, False) for k in ("protocol", "base_url", "use_runtime_default")}
+                                      for e in row["endpoints"]], "api_key": row["api_key"]}
+            values["endpoints"].sort(key=lambda e: e["protocol"])
+            if current:
+                current["endpoints"].sort(key=lambda e: e["protocol"])
+            action = self.outcome("providers", label, current, _differs({**values, "api_key": key}, current,
+                                                                       (*values, "api_key")))
+            if self.apply and action in (Action.ADDED, Action.CHANGED):
+                provider_id = await db.write_provider(self.conn, row["id"] if row else None, values, key)
+            from dataclasses import replace
+
+            spec = replace(spec, id=provider_id)
+            self.providers[label] = (provider_id, spec)
+            self.endpoints.update({(label, p): replace(e, provider_id=provider_id) for p, e in combined.items()})
+            # Refresh models before subsequent profile/model validation.
+            for model_key, resolved in list(self.models.items()):
+                if model_key[0] == label:
+                    self.models[model_key] = ResolvedModel(resolved.model, spec, self.endpoints[(label, model_key[2])])
+            if missing:
+                self.plan.need_secret.append(NeededSecret("providers", label, ("api_key",), _stored("provider", provider_id)))
+        except (RegistryError, _Skip) as exc:
+            self.blocked_providers.add(label)
+            self.record("providers", label, Action.SKIPPED, reason=str(exc))
+
+    async def model(self, entry: Any) -> None:
+        from .profile_registry import MODEL_FIELDS, ModelSpec, RegistryError, ResolvedModel
+        from ..db import config_transfer as db
+
+        key = (None, None, None)
+        label = str(entry)
+        try:
+            entry = _mapping(entry, "a model")
+            key = tuple(_string(entry.get(k), k, required=True) for k in ("provider", "name", "protocol"))
+            label = " / ".join(str(k) for k in key)
+            self._unique("models", key)
+            provider, name, protocol = key
+            if provider in self.blocked_providers or provider not in self.providers:
+                raise _Skip(f"no imported provider {provider!r}")
+            if (provider, protocol) not in self.endpoints:
+                raise _Skip(f"no endpoint for protocol {protocol!r}")
+            row = self.target.models.get(key)
+            if (row and row["builtin"]) or (key in self.models and row is None):
+                raise _Skip("a built-in model has this natural key here")
+            model = ModelSpec.from_entry({"id": row["id"] if row else f"new:{label}",
+                                         "provider_id": self.providers[provider][0],
+                                         **{k: v for k, v in entry.items() if k != "provider"}})
+            resolved = ResolvedModel(model, self.providers[provider][1], self.endpoints[(provider, protocol)])
+            for _, profile in self.profiles.values():
+                if profile.model_id == model.id:
+                    resolved.check_runtime(profile.runtime)
+            values = {k: getattr(model, k) for k in (*MODEL_FIELDS, "provider_id", "protocol", "catalog_order")}
+            values["protocol"] = model.protocol.value
+            values["efforts"] = list(model.efforts) if model.efforts is not None else None
+            current = {k: row[k] for k in values} if row else None
+            action = self.outcome("models", label, current, _differs(values, current, values))
+            if self.apply and action in (Action.ADDED, Action.CHANGED):
+                from dataclasses import replace
+
+                model_id = await db.write_model(self.conn, row["id"] if row else None, values)
+                resolved = ResolvedModel(replace(model, id=model_id), resolved.provider, resolved.endpoint)
+            self.models[key] = resolved
+        except (RegistryError, _Skip) as exc:
+            self.blocked_models.add(key)
+            self.record("models", label, Action.SKIPPED, reason=str(exc))
 
     async def profile(self, entry: Any) -> None:
-        from .profile_registry import RegistryError, _agent_teams, _custom_prompt, _effort, _model, \
-            check_agent_teams, check_pairing, default_agent_teams, entry_name
+        from .profile_registry import RegistryError, entry_name, default_agent_teams
 
-        raw = entry if isinstance(entry, Mapping) else {}
-        label = str(raw.get("name"))
+        label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
         try:
             entry = _mapping(entry, "an Agent Profile")
-            unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort", "agent_teams",
-                                           "system_prompt_mode", "custom_prompt"})
+            unknown = set(entry) - {"name", "runtime", "model", "effort", "agent_teams", "custom_prompt"}
             if unknown:
-                raise _Skip(f"unknown field {unknown[0]!r}")
-            if "system_prompt_mode" in entry:
-                self.plan.notes.append(f"profiles {raw.get('name')}: its system_prompt_mode is ignored; the mode is "
-                                       "set per role (Settings → Roles) and applies to every runtime")
-            try:
-                name = label = entry_name(entry.get("name"), "agent")
-                values = {"runtime": entry.get("runtime"), "provider": entry.get("provider"),
-                          "model": _model(entry.get("model")), "effort": _effort(entry.get("effort")),
-                          "agent_teams": _agent_teams(entry["agent_teams"]) if "agent_teams" in entry else None,
-                          "custom_prompt": _custom_prompt(entry.get("custom_prompt", ""))}
-            except RegistryError as exc:
-                raise _Skip(str(exc)) from None
-            if values["runtime"] not in self.runtimes:
-                raise _Skip(f"no runtime {values['runtime']!r} here or in the file")
-            values["runtime"] = self.runtimes[values["runtime"]][1].name  # the one it runs on here
-            if values["agent_teams"] is None:  # a file from before agent teams: the default of the runtime here
-                values["agent_teams"] = default_agent_teams(self.runtimes[values["runtime"]][1])
-            if values["provider"] not in self.providers:
-                raise _Skip(f"no provider {values['provider']!r} here or in the file")
+                raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
+            name = label = entry_name(entry.get("name"), "Agent Profile")
+            self._unique("profiles", name)
+            runtime = _string(entry.get("runtime"), "runtime", required=True)
+            if runtime in self.blocked_runtimes or runtime not in self.runtimes:
+                raise _Skip(f"no runtime {runtime!r} here or in the file")
+            ref = _mapping(entry.get("model"), "model reference")
+            if set(ref) != {"provider", "name", "protocol"} or any(not isinstance(v, str) for v in ref.values()):
+                raise _Skip("model needs provider, exact name and protocol")
+            key = (ref["provider"], ref["name"], ref["protocol"])
+            if key not in self.models or key in self.blocked_models or key[0] in self.blocked_providers:
+                raise _Skip("no valid model here or in the file")
             row = self.target.profiles.get(name)
-            if row is not None and row["builtin"]:
+            if row and row["builtin"] or name in self.profiles and row is None:
                 raise _Skip("a built-in Agent Profile has this name here")
-            spec = self._profile_spec(row["id"] if row else f"new:{name}", name, values["runtime"],
-                                      values["provider"], values["model"], values["effort"], values["agent_teams"],
-                                      values["custom_prompt"])
-            try:
-                check_pairing(spec.runtime, spec.provider, spec.model)
-                check_agent_teams(spec.runtime, spec.agent_teams)
-            except RegistryError as exc:
-                raise _Skip(str(exc)) from None
-        except _Skip as exc:
+            spec = self._profile_spec(row["id"] if row else f"new:{name}", name, runtime, key,
+                                      entry.get("effort"), entry.get("agent_teams", default_agent_teams(self.runtimes[runtime][1])),
+                                      entry.get("custom_prompt", ""))
+            spec.resolved_model.check_runtime(spec.runtime)
+            values = {"runtime": spec.runtime.name, "provider": key[0], "model": key[1], "protocol": key[2],
+                      "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt}
+            current = {k: row[k] for k in values} if row else None
+            action = self.outcome("profiles", name, current, _differs(values, current, values))
+            profile_id = spec.id
+            if self.apply and action in (Action.ADDED, Action.CHANGED):
+                profile_id = await self._write_profile(row["id"] if row else None, name, spec)
+            self.profiles[name] = (profile_id, spec)
+        except (RegistryError, _Skip) as exc:
+            self.blocked_profiles.add(label)
             self.record("profiles", label, Action.SKIPPED, reason=str(exc))
-            return
-        current = {k: row[k] for k in values} if row is not None else None
-        action = self.outcome("profiles", name, current, _differs(values, current, values))
-        profile_id = spec.id
-        if self.apply and action in (Action.ADDED, Action.CHANGED):
-            profile_id = await self._write_profile(row["id"] if row else None, name, spec)
-        self.profiles[name] = (profile_id, spec)
 
     async def _write_profile(self, profile_id: str | None, name: str, spec: Any) -> str:
         from ..db import config_transfer as db
 
         return await db.write_profile(self.conn, profile_id, {
-            "name": name, "runtime_id": spec.runtime.id, "provider_id": spec.provider.id, "model": spec.model,
-            "effort": spec.effort, "agent_teams": spec.agent_teams,
-            "custom_prompt": spec.custom_prompt})
+            "name": name, "runtime_id": spec.runtime.id, "model_id": spec.model_id,
+            "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt})
 
     async def _layer_profile(self, name: str | None, scope: str, role: str | None) -> str | None:
-        """The id of the layer's Agent Profile (``new:...`` in a preview); a model's profile from a file before
-        Agent Profiles is added like the upgrade adds it."""
-        from .profile_registry import BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, RegistryError, check_roles, \
-            default_agent_teams
+        """Resolve only a valid named profile; an omitted or invalid model never selects a default."""
+        from .profile_registry import RegistryError, check_roles
 
         if name is None:
             return None
-        if name not in self.profiles and name.startswith(_MODEL_PROFILE_PREFIX) \
-                and BUILTIN_RUNTIME.name in self.runtimes and BUILTIN_PROVIDER.name in self.providers:
-            runtime, provider = self.runtimes[BUILTIN_RUNTIME.name], self.providers[BUILTIN_PROVIDER.name]
-            spec = AgentProfile(f"new:{name}", name, runtime[1], provider[1], name[len(_MODEL_PROFILE_PREFIX):],
-                                agent_teams=default_agent_teams(runtime[1]))
-            self.record("profiles", name, Action.ADDED)
-            profile_id = await self._write_profile(None, name, spec) if self.apply else spec.id
-            self.profiles[name] = (profile_id, spec)
-        if name not in self.profiles:
-            raise _Skip(f"no Agent Profile {name!r} here or in the file")
+        if name in self.blocked_profiles or name not in self.profiles:
+            raise _Skip(f"no valid Agent Profile {name!r} here or in the file")
         profile_id, spec = self.profiles[name]
         roles = {"system": ("manager", "planner", "worker", "reviewer"),
                  "project": ("planner", "worker", "reviewer")}.get(scope, (role,))
@@ -1225,11 +1448,8 @@ class _Importer:
         """Add a profile the effort conversion takes; its id (``new:...`` in a preview)."""
         from dataclasses import replace
 
-        from .profile_registry import AgentProfile
-
         base = derived.base
-        spec = AgentProfile(f"new:{derived.name}", derived.name, base.runtime, base.provider, base.model,
-                            derived.effort, base.agent_teams, base.custom_prompt)
+        spec = replace(base, id=f"new:{derived.name}", name=derived.name, effort=derived.effort)
         self.record("profiles", derived.name, Action.ADDED)
         profile_id = await self._write_profile(None, derived.name, spec) if self.apply else spec.id
         self.profiles[derived.name] = (profile_id, replace(spec, id=profile_id))
@@ -1594,9 +1814,10 @@ class _Importer:
                     items.append(item_id)
             profile_id = None
             if profile is not None:
-                if profile not in self.profiles:
-                    self.plan.notes.append(f"{label}role template {key}: no Agent Profile {profile!r} here or in "
-                                           "the file; imported without one")
+                if profile in self.blocked_profiles or profile not in self.profiles:
+                    self.record(section, f"{label}{key}", Action.SKIPPED,
+                                reason=f"no valid Agent Profile {profile!r} here or in the file")
+                    continue
                 else:
                     try:
                         check_roles(self.profiles[profile][1], (kind.agent.value,))
@@ -1670,7 +1891,7 @@ class _Importer:
             if role not in TASK_PROFILE_ROLES:
                 raise _Skip(f"profiles: a schedule chooses the Agent Profile of its {', '.join(TASK_PROFILE_ROLES)} "
                             f"only, not {role!r}")
-            if not isinstance(name, str) or name not in self.profiles:
+            if not isinstance(name, str) or name in self.blocked_profiles or name not in self.profiles:
                 raise _Skip(f"profiles.{role}: no Agent Profile {name!r} here or in the file")
             profile_id, spec = self.profiles[name]
             try:
@@ -1749,11 +1970,24 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
                 "the database schema is older than this Looper; start `looper serve` once (it backs the database up "
                 "before changing the schema), then import again")
         await ensure_schema(conn)
+        # Take the same locks as registry writes before reading target rows.
+        # The outer apply transaction uses READ COMMITTED, so a lock wait
+        # cannot leave conversion on a snapshot from before another writer.
+        await conn.execute("LOCK TABLE llm_providers, llm_provider_endpoints, llm_models, agent_profiles "
+                           "IN SHARE ROW EXCLUSIVE MODE")
+    if data.get("format") in V1_FORMATS and "agents" in data:
+        data = _from_v1(data)
     importer = _Importer(conn, await _Target.read(conn), apply)
     for entry in data.get("runtimes", []):
         await importer.runtime(entry)
+    data = {**data, **{section: importer.registry_entries(section, data.get(section, []))
+                      for section in ("providers", "models", "profiles")}}
+    if data.get("format") in (*V1_FORMATS, V2_FORMAT):
+        data = importer.legacy(data)
     for entry in data.get("providers", []):
         await importer.provider(entry)
+    for entry in data.get("models", []):
+        await importer.model(entry)
     for entry in data.get("profiles", []):
         await importer.profile(entry)
     settings = data.get("settings", {})
@@ -1801,7 +2035,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
 async def run_import(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
     """Preview ``data`` in a read-only transaction, or apply it in one transaction, on ``conn``: what both
     ``looper config import`` and the dashboard's import run."""
-    async with conn.transaction(readonly=not apply):
+    async with conn.transaction(isolation="read_committed" if apply else "repeatable_read", readonly=not apply):
         return await import_config(conn, data, apply=apply)
 
 

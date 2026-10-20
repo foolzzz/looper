@@ -251,7 +251,7 @@ async def write_provider(conn: asyncpg.Connection, provider_id: str | None, valu
     """Add a provider (``provider_id`` None) or replace one's fields; ``api_key`` (None: none) replaces its key."""
     from .profile_registry import insert_provider, update_provider
 
-    fields = {k: values[k] for k in ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "env",
+    fields = {k: values[k] for k in ("name", "vendor_type", "auth", "oauth_runtime_type", "endpoints", "env",
                                      "max_concurrency")}
     if provider_id is None:
         return await insert_provider(conn, fields, api_key)
@@ -261,22 +261,24 @@ async def write_provider(conn: asyncpg.Connection, provider_id: str | None, valu
 
 async def write_profile(conn: asyncpg.Connection, profile_id: str | None, values: Mapping[str, Any]) -> str:
     """Add an Agent Profile (``profile_id`` None) or replace its settings; returns its id."""
+    from .profile_registry import insert_profile, update_profile
+
     if profile_id is None:
-        profile_id = f"agent-{uuid.uuid4().hex[:12]}"
-        await conn.execute(
-            "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, custom_prompt) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-            profile_id, values["name"], values["runtime_id"], values["provider_id"], values["model"],
-            values["effort"], values["agent_teams"], values.get("custom_prompt", ""),
-        )
-    else:
-        await conn.execute(
-            "UPDATE agent_profiles SET runtime_id = $2, provider_id = $3, model = $4, effort = $5, agent_teams = $6, "
-            "custom_prompt = $7, updated_at = now() WHERE id = $1",
-            profile_id, values["runtime_id"], values["provider_id"], values["model"], values["effort"],
-            values["agent_teams"], values.get("custom_prompt", ""),
-        )
+        return await insert_profile(values, pool=conn)
+    await update_profile(profile_id, values, pool=conn)
     return profile_id
+
+
+async def write_model(conn: asyncpg.Connection, model_id: str | None, values: Mapping[str, Any]) -> str:
+    """Upsert a model by the identity already matched by the importer."""
+    from .profile_registry import insert_model, update_model
+
+    if model_id is None:
+        return await insert_model(conn, values)
+    settings = {k: v for k, v in values.items() if k not in ("provider_id", "name", "protocol")}
+    await update_model(conn, model_id, settings)
+    await conn.execute("UPDATE llm_models SET catalog_order = $2 WHERE id = $1", model_id, values["catalog_order"])
+    return model_id
 
 
 async def write_role(conn: asyncpg.Connection, role: str, values: Mapping[str, Any], *, exists: bool) -> None:
