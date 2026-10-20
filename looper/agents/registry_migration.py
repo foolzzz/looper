@@ -2,7 +2,7 @@
 
 Callers normalize file names to legacy row ids before calling ``convert``.
 No database, runtime discovery, credentials lookup or vendor defaults are used.
-Account merging is a separate step: this conversion retains every account id.
+Accounts merge only when their saved inputs prove launch and pricing equivalence.
 Profile metadata not represented by AgentProfile (builtin, timestamps) stays
 on the caller's original row; only its provider/model reference is replaced.
 """
@@ -11,17 +11,21 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from enum import Enum
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID, uuid5
 
 from .profile_registry import (
-    MODEL_FIELDS, AgentProfile, Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedModel,
+    MODEL_FIELDS, SECRET_MASK, AgentProfile, CatalogModel, Endpoint, LegacyProviderSpec,
+    ModelSpec, ProviderSpec, RegistryError, ResolvedModel,
     RuntimeSpec, _models,
 )
 from .provider_presets import PRESETS
-from .runtimes import ApiProtocol, AuthKind, VendorType
+from .runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType
+from .runtimes.pricing import base_model, model_price
 
 
 # Persisted identity contract: never change this namespace or the key encoding.
@@ -68,6 +72,20 @@ LEGACY_RULES = LegacyRules(
 )
 
 
+class RetentionReason(str, Enum):
+    UNKNOWN_VENDOR = "unknown_vendor"
+    MISSING_KEY = "missing_key"
+    DIFFERENT_KEY = "different_key"
+    VENDOR_CONFLICT = "vendor_conflict"
+    ENDPOINT_CONFLICT = "endpoint_conflict"
+    ENV_CONFLICT = "env_conflict"
+    MODEL_PRICING_CONFLICT = "model_pricing_conflict"
+    FINITE_CONCURRENCY = "finite_concurrency"
+    PROTECTED_ACCOUNT = "protected_account"
+    LAUNCH_MISMATCH = "launch_mismatch"
+    CREATION_ORDER_UNKNOWN = "creation_order_unknown"
+
+
 @dataclass
 class Conversion:
     providers: dict[str, ProviderSpec] = field(default_factory=dict)
@@ -77,6 +95,10 @@ class Conversion:
     # Endpoint's v3 contract stores empty URL + flag. Retain the verified
     # actual addresses separately for callers' binding equivalence checks.
     default_urls: dict[tuple[str, ApiProtocol], str] = field(default_factory=dict)
+    provider_map: dict[str, str] = field(default_factory=dict)
+    # Exactly the five non-secret fields of the migration history snapshot.
+    model_map: dict[tuple[str, str, ApiProtocol], tuple[str, str]] = field(default_factory=dict)
+    retained: dict[str, tuple[RetentionReason, ...]] = field(default_factory=dict)
     report: dict[str, int] = field(default_factory=dict)
 
 
@@ -161,7 +183,7 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
                 "id": identity, "name": row["name"], "vendor_type": _vendor(row, protocols),
                 "auth": row["auth"], "oauth_runtime_type": row.get("oauth_runtime_type"),
                 "env": row.get("env", []), "max_concurrency": row.get("max_concurrency"),
-                "api_key": row.get("api_key"), "builtin": row.get("builtin", False),
+                "api_key": _saved_key(row.get("api_key")), "builtin": row.get("builtin", False),
             })
             result.providers[identity] = account
             catalogs[identity] = _models(row.get("models", []))
@@ -206,7 +228,7 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
 
         def add(account_id: str, entry: Mapping[str, Any], protocol: ApiProtocol, order: int) -> None:
             key = (account_id, entry["name"], protocol)
-            identity = f"model-{uuid5(MODEL_NAMESPACE, json.dumps(key, ensure_ascii=True, separators=(',', ':')))}"
+            identity = _model_id(*key)
             model = ModelSpec(identity, account_id, entry["name"], protocol,
                               **{k: entry.get(k) for k in MODEL_FIELDS if k != "name"}, catalog_order=order,
                               builtin=result.providers[account_id].builtin)
@@ -239,9 +261,208 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
     except (RegistryError, ValueError, TypeError, KeyError):
         # Legacy validators can quote an invalid name; callers get only a code.
         raise MigrationBlocked("invalid_legacy_value") from None
-    result.report = {"providers_before": len(provider_rows), "providers_after": len(result.providers),
-                     "endpoints_after": len(result.endpoints), "models_after": len(result.models),
-                     "profiles_before": len(profile_rows), "profiles_after": len(result.profiles),
-                     "profiles_mapped": len(result.profiles), "models_from_open_catalog": open_count,
-                     "legacy_default_endpoints": len(result.default_urls), "unresolved_profiles": 0}
+    _merge_accounts(result, provider_rows, catalogs)
+    result.report.update({"providers_before": len(provider_rows), "providers_after": len(result.providers),
+                          "endpoints_after": len(result.endpoints), "models_after": len(result.models),
+                          "profiles_before": len(profile_rows), "profiles_after": len(result.profiles),
+                          "profiles_mapped": len(result.profiles), "models_from_open_catalog": open_count,
+                          "legacy_default_endpoints": len(result.default_urls), "unresolved_profiles": 0})
     return result
+
+
+def _saved_key(value: Any) -> str | None:
+    # An omitted export secret and a masked API response are not credentials.
+    if value is None or value == {"secret": "omitted"} or value == SECRET_MASK \
+            or isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def _model_id(provider_id: str, name: str, protocol: ApiProtocol) -> str:
+    key = (provider_id, name, protocol)
+    return f"model-{uuid5(MODEL_NAMESPACE, json.dumps(key, ensure_ascii=True, separators=(',', ':')))}"
+
+
+def _created_at(row: Mapping[str, Any]) -> datetime | None:
+    value = row.get("created_at")
+    if value is None:
+        return None  # File entries without creation metadata tie by id.
+    try:
+        date = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return date.replace(tzinfo=timezone.utc) if date.tzinfo is None else date.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _catalog_models(models: Iterable[ModelSpec]) -> tuple[CatalogModel, ...]:
+    return tuple(CatalogModel.from_entry({name: getattr(model, name) for name in MODEL_FIELDS})
+                 for model in sorted(models, key=lambda m: (m.catalog_order, m.name)))
+
+
+def _same_prices(before: tuple[CatalogModel, ...], after: tuple[CatalogModel, ...]) -> bool:
+    # model_price is piecewise: exact names, then the FIRST normalized match,
+    # then builtin prices. One non-exact representative per base covers every
+    # remaining date/context/case variant, including runtime-reported helpers.
+    names = {model.name for model in (*before, *after)}
+    probes = set(names)
+    for base in {base_model(name) for name in names}:
+        index = 0
+        while (probe := f"{base}-{index:08d}") in names:
+            index += 1
+        probes.add(probe)
+    old = LegacyProviderSpec("", "", AuthKind.API_KEY, frozenset(), catalog=before)
+    new = replace(old, catalog=after)
+    return all(model_price(old, name) == model_price(new, name) for name in probes)
+
+
+def _merge_accounts(result: Conversion, rows: Mapping[str, Mapping[str, Any]],
+                    catalogs: Mapping[str, list[dict[str, Any]]]) -> None:
+    """Prove each proposed union against ALL original members before mutating.
+
+    This is only an in-memory conversion. Persistence callers must apply the
+    returned reference maps, secret ownership and session references atomically.
+    No credential fingerprints or secret-based grouping leave this function.
+    """
+    original_providers = dict(result.providers)
+    original_endpoints = dict(result.endpoints)
+    original_models = dict(result.models)
+    original_profiles = dict(result.profiles)
+    members: dict[str, list[str]] = {}
+    dates = {identity: _created_at(row) for identity, row in rows.items()}
+
+    def intrinsic(identity: str) -> set[RetentionReason]:
+        account = result.providers[identity]
+        reasons = set()
+        if rows[identity].get("created_at") is not None and dates[identity] is None:
+            reasons.add(RetentionReason.CREATION_ORDER_UNKNOWN)
+        if account.builtin or account.auth is AuthKind.OAUTH:
+            reasons.add(RetentionReason.PROTECTED_ACCOUNT)
+        if account.vendor_type is VendorType.CUSTOM:
+            reasons.add(RetentionReason.UNKNOWN_VENDOR)
+        if account.auth is AuthKind.API_KEY and not account.api_key:
+            reasons.add(RetentionReason.MISSING_KEY)
+        if account.max_concurrency is not None:
+            reasons.add(RetentionReason.FINITE_CONCURRENCY)
+        return reasons
+
+    def proposal(left: str, right: str) -> tuple[dict[tuple[str, ApiProtocol], ModelSpec],
+                                                set[RetentionReason]]:
+        a, b = result.providers[left], result.providers[right]
+        reasons = intrinsic(left) | intrinsic(right)
+        if reasons:
+            return {}, reasons
+        if a.vendor_type is not b.vendor_type:
+            return {}, {RetentionReason.VENDOR_CONFLICT}
+        # Compare the saved secrets themselves only in memory, never hashes.
+        if rows[left].get("api_key") != rows[right].get("api_key"):
+            return {}, {RetentionReason.DIFFERENT_KEY}
+        if (dates[left] is None) != (dates[right] is None):
+            return {}, {RetentionReason.CREATION_ORDER_UNKNOWN}
+        if dict(a.env) != dict(b.env):
+            return {}, {RetentionReason.ENV_CONFLICT}
+        for protocol in ApiProtocol:
+            first = result.endpoints.get((left, protocol))
+            second = result.endpoints.get((right, protocol))
+            if first and second and (first.base_url, first.use_runtime_default,
+                                     result.default_urls.get((left, protocol))) != (
+                    second.base_url, second.use_runtime_default, result.default_urls.get((right, protocol))):
+                return {}, {RetentionReason.ENDPOINT_CONFLICT}
+        combined = {(m.name, m.protocol): m for m in result.models.values() if m.provider_id == left}
+        for model in sorted((m for m in result.models.values() if m.provider_id == right),
+                            key=lambda m: (m.protocol, m.catalog_order, m.name)):
+            key = (model.name, model.protocol)
+            if existing := combined.get(key):
+                if any(getattr(existing, name) != getattr(model, name) for name in MODEL_FIELDS):
+                    return {}, {RetentionReason.MODEL_PRICING_CONFLICT}
+            else:
+                order = max((m.catalog_order for m in combined.values() if m.protocol is model.protocol),
+                            default=-1) + 1
+                combined[key] = replace(model, id=_model_id(left, model.name, model.protocol),
+                                        provider_id=left, catalog_order=order)
+        affected = [*members[left], *members[right]]
+        for identity in affected:
+            before = tuple(CatalogModel.from_entry(entry) for entry in catalogs[identity])
+            for account_id, protocol in original_endpoints:
+                if account_id == identity and not _same_prices(
+                        before, _catalog_models(m for m in combined.values() if m.protocol is protocol)):
+                    return {}, {RetentionReason.MODEL_PRICING_CONFLICT}
+        for profile in original_profiles.values():
+            model = original_models[profile.model_id]
+            if model.provider_id not in affected:
+                continue
+            account = original_providers[model.provider_id]
+            # Codex includes the account's display name in config.toml. A
+            # changed name is not an allowed normalization of generated config.
+            if profile.runtime.type == "codex" and account.name != a.name:
+                return {}, {RetentionReason.LAUNCH_MISMATCH}
+            endpoint = original_endpoints[(account.id, model.protocol)]
+            old = LegacyProviderSpec(account.id, account.name, account.auth,
+                                     frozenset(p for pid, p in original_endpoints if pid == account.id),
+                                     account.oauth_runtime_type, endpoint.base_url,
+                                     tuple(CatalogModel.from_entry(entry) for entry in catalogs[account.id]),
+                                     account.env, account.api_key)
+            # The target resolver binds the model's exact protocol, never the
+            # union's protocol priority. The rest of the launch inputs stay on
+            # the unchanged profile/runtime; all model settings matched above.
+            new = replace(old, id=left, name=a.name, protocols=frozenset({model.protocol}),
+                          catalog=_catalog_models(m for m in combined.values() if m.protocol is model.protocol),
+                          env=a.env, api_key=a.api_key)
+            try:
+                adapter = ADAPTERS[profile.runtime.type]
+                first = adapter.bind_provider(old, model.name, profile.effort or "")
+                second = adapter.bind_provider(new, model.name, profile.effort or "")
+            except (RuntimeUnsupported, KeyError):
+                return {}, {RetentionReason.LAUNCH_MISMATCH}
+            if first.args != second.args or dict(first.env) != dict(second.env) or set(first.unset) != set(second.unset):
+                return {}, {RetentionReason.LAUNCH_MISMATCH}
+        return combined, set()
+
+    order = sorted(rows, key=lambda identity: (dates[identity] is None,
+                                               dates[identity] or datetime.max.replace(tzinfo=timezone.utc), identity))
+    result.provider_map = {identity: identity for identity in rows}
+    for identity in order:
+        members[identity] = [identity]
+        for canonical in list(members):
+            if canonical == identity:
+                continue
+            combined, reasons = proposal(canonical, identity)
+            if reasons:
+                continue
+            result.models = {key: model for key, model in result.models.items()
+                             if model.provider_id not in {canonical, identity}}
+            result.models.update((model.id, model) for model in combined.values())
+            for key, endpoint in list(result.endpoints.items()):
+                if key[0] == identity:
+                    result.endpoints.setdefault((canonical, key[1]), replace(endpoint, provider_id=canonical))
+                    del result.endpoints[key]
+                    if key in result.default_urls:
+                        result.default_urls.setdefault((canonical, key[1]), result.default_urls.pop(key))
+            members[canonical].extend(members.pop(identity))
+            for old_id in members[canonical]:
+                result.provider_map[old_id] = canonical
+            del result.providers[identity]
+            break
+
+    # Local retained-account reasons contain ids and typed codes only. Public
+    # reports expose counts, never account names, endpoints or comparison data.
+    reasons_by_id = {identity: intrinsic(identity) for identity in members}
+    remaining = list(members)
+    for index, left in enumerate(remaining):
+        for right in remaining[index + 1:]:
+            _, reasons = proposal(left, right)
+            reasons_by_id[left].update(reasons)
+            reasons_by_id[right].update(reasons)
+    result.retained = {identity: tuple(sorted(reasons, key=lambda reason: reason.value))
+                       for identity, reasons in reasons_by_id.items() if reasons}
+    targets = {(m.provider_id, m.name, m.protocol): m.id for m in result.models.values()}
+    for model in original_models.values():
+        canonical = result.provider_map[model.provider_id]
+        result.model_map[(model.provider_id, model.name, model.protocol)] = (
+            canonical, targets[(canonical, model.name, model.protocol)])
+    for identity, profile in original_profiles.items():
+        model = original_models[profile.model_id]
+        result.profiles[identity] = replace(profile, model_id=result.model_map[
+            (model.provider_id, model.name, model.protocol)][1])
+    result.report["providers_merged"] = len(rows) - len(result.providers)
+    for reason in RetentionReason:
+        result.report[f"retained_{reason.value}"] = sum(reason in reasons for reasons in result.retained.values())

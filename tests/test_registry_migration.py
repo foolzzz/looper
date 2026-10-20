@@ -243,3 +243,291 @@ def test_duplicate_ids_are_not_silently_overwritten(kind):
         convert(RUNTIMES * (2 if kind == "runtime" else 1),
                 [provider()] * (2 if kind == "provider" else 1),
                 [profile()] * (2 if kind == "profile" else 1))
+
+
+# Account merging uses only synthetic credentials and never touches persistence.
+def merge_account(identity="prov-a", **changes):
+    return provider(**{"id": identity, "name": identity, "base_url": "https://api.deepseek.com",
+                       "protocols": [P.OPENAI_CHAT, P.OPENAI_RESPONSES], "api_key": "synthetic-key",
+                       "created_at": "2026-01-01T00:00:00Z", **changes})
+
+
+def merge_pair(left=None, right=None, profiles=()):
+    return convert(RUNTIMES, [merge_account() if left is None else left,
+                             merge_account("prov-b") if right is None else right], profiles)
+
+
+@pytest.mark.parametrize("left_key,right_key,reason", [
+    ("synthetic-key", "synthetic-key", None),
+    ("synthetic-key", "other-synthetic-key", "different_key"),
+    (None, None, "missing_key"), ("", "", "missing_key"), ("  ", "  ", "missing_key"),
+    (None, "synthetic-key", "missing_key"),
+    ({"secret": "omitted"}, {"secret": "omitted"}, "missing_key"),
+    ("***", "***", "missing_key"),
+    ({"secret": "omitted"}, "synthetic-key", "missing_key"),
+    ("***", "synthetic-key", "missing_key"),
+    ("synthetic-key", " synthetic-key ", "different_key"),
+])
+def test_only_saved_nonempty_equal_keys_prove_account_identity(left_key, right_key, reason):
+    from looper.agents.registry_migration import RetentionReason
+
+    result = merge_pair(merge_account(api_key=left_key), merge_account("prov-b", api_key=right_key))
+    if reason is None:
+        assert result.provider_map == {"prov-a": "prov-a", "prov-b": "prov-a"}
+        assert set(result.providers) == {"prov-a"}
+        assert not result.retained
+    else:
+        assert result.provider_map == {"prov-a": "prov-a", "prov-b": "prov-b"}
+        assert all(RetentionReason(reason) in result.retained[p] for p in result.providers)
+        assert result.report[f"retained_{reason}"] == 2
+
+
+@pytest.mark.parametrize("changes,reason", [
+    ({"base_url": "https://unrecognized.invalid"}, "unknown_vendor"),
+    ({"vendor_type": "custom"}, "unknown_vendor"),
+    ({"vendor_type": "glm-zai"}, "vendor_conflict"),
+    ({"base_url": "https://api.deepseek.com/", "vendor_type": "deepseek"}, "endpoint_conflict"),
+    ({"base_url": "https://api.deepseek.com/v1", "vendor_type": "deepseek"}, "endpoint_conflict"),
+    ({"base_url": "https://api.deepseek.com?route=other", "vendor_type": "deepseek"}, "endpoint_conflict"),
+    ({"env": [{"key": "EXTRA_SETTING", "value": "different"}]}, "env_conflict"),
+    ({"builtin": True}, "protected_account"),
+])
+def test_unproven_equivalence_retains_original_ids_and_typed_reasons(changes, reason):
+    from looper.agents.registry_migration import RetentionReason
+
+    result = merge_pair(right=merge_account("prov-b", **changes))
+    assert set(result.providers) == {"prov-a", "prov-b"}
+    assert RetentionReason(reason) in result.retained["prov-b"]
+    assert all(isinstance(r, RetentionReason) for reasons in result.retained.values() for r in reasons)
+
+
+@pytest.mark.parametrize("left_limit,right_limit", [(1, None), (None, 1), (2, 2), (2, 3)])
+def test_any_finite_limit_keeps_independent_scheduling_pools(left_limit, right_limit):
+    result = merge_pair(merge_account(max_concurrency=left_limit),
+                        merge_account("prov-b", max_concurrency=right_limit))
+    assert len(result.providers) == 2
+    assert "finite_concurrency" in result.retained["prov-b"]
+    assert [p.max_concurrency for p in result.providers.values()] == [left_limit, right_limit]
+
+
+@pytest.mark.parametrize("right_url,merged", [("", True), ("https://api.openai.com/v1", False)])
+def test_endpoint_default_flag_is_part_of_equivalence(right_url, merged):
+    result = merge_pair(merge_account(base_url="", vendor_type="deepseek"),
+                        merge_account("prov-b", base_url=right_url, vendor_type="deepseek"))
+    assert len(result.providers) == (1 if merged else 2)
+    if not merged:
+        assert "endpoint_conflict" in result.retained["prov-b"]
+
+
+def test_different_protocol_endpoints_coexist_and_profiles_keep_old_protocol_choice():
+    left = merge_account(protocols=[P.ANTHROPIC_MESSAGES], base_url="https://api.deepseek.com/anthropic")
+    right = merge_account("prov-b")
+    rows = [profile("claude-code", provider_id="prov-a"),
+            profile(id="agent-omp", provider_id="prov-b")]
+    original = deepcopy((left, right, rows))
+    result = merge_pair(left, right, rows)
+    assert (left, right, rows) == original
+    assert result.provider_map == {"prov-a": "prov-a", "prov-b": "prov-a"}
+    assert len(result.endpoints) == 3
+    for row, protocol in zip(rows, (P.ANTHROPIC_MESSAGES, P.OPENAI_RESPONSES)):
+        target_provider, target_model = result.model_map[(row["provider_id"], row["model"], protocol)]
+        assert target_provider == "prov-a"
+        assert result.profiles[row["id"]].model_id == target_model
+        assert result.models[target_model].protocol is protocol
+        assert result.models[target_model].provider_id == target_provider
+    assert result.report["providers_merged"] == 1
+
+
+def test_env_order_is_irrelevant_but_values_must_be_equal():
+    env = [{"key": "FIRST", "value": "1"}, {"key": "SECOND", "value": "2"}]
+    assert len(merge_pair(merge_account(env=env), merge_account("prov-b", env=env[::-1])).providers) == 1
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("context_window", 4096), ("background_model", "helper"), ("efforts", []),
+    ("efforts", ["high", "low"]), ("input_usd_per_mtok", 1), ("output_usd_per_mtok", 2),
+    ("cache_read_usd_per_mtok", 0), ("cache_write_usd_per_mtok", 3),
+])
+def test_every_overlapping_model_setting_must_match(setting, value):
+    result = merge_pair(merge_account(models=[{"name": "model"}]),
+                        merge_account("prov-b", models=[{"name": "model", setting: value}]))
+    assert len(result.providers) == 2
+    assert "model_pricing_conflict" in result.retained["prov-b"]
+
+
+@pytest.mark.parametrize("same_prices,merged", [(False, False), (True, True)])
+def test_normalized_pricing_retains_legacy_first_candidate_order(same_prices, merged):
+    models = [{"name": "Model[1m]", "input_usd_per_mtok": 1},
+              {"name": "model-20261001", "input_usd_per_mtok": 1 if same_prices else 9}]
+    result = merge_pair(merge_account(models=models), merge_account("prov-b", models=models[::-1]))
+    assert len(result.providers) == (1 if merged else 2)
+    if not merged:
+        assert "model_pricing_conflict" in result.retained["prov-b"]
+
+
+def test_union_cannot_add_an_exact_or_normalized_price_override_to_another_account():
+    result = merge_pair(merge_account(models=[{"name": "first"}]),
+                        merge_account("prov-b", models=[{"name": "model", "input_usd_per_mtok": 9}]))
+    assert len(result.providers) == 2
+    assert "model_pricing_conflict" in result.retained["prov-b"]
+
+
+def test_union_preserves_distinct_models_and_maps_duplicate_natural_keys():
+    result = merge_pair(merge_account(models=[{"name": "shared"}, {"name": "left"}]),
+                        merge_account("prov-b", models=[{"name": "shared"}, {"name": "right"}]))
+    assert len(result.providers) == 1
+    for protocol in (P.OPENAI_CHAT, P.OPENAI_RESPONSES):
+        assert result.model_map[("prov-a", "shared", protocol)] == result.model_map[("prov-b", "shared", protocol)]
+        models = sorted((m for m in result.models.values() if m.protocol is protocol),
+                        key=lambda m: m.catalog_order)
+        assert [m.name for m in models] == ["shared", "left", "right"]
+        assert len({m.catalog_order for m in models}) == 3
+    assert len(result.model_map) == 8
+
+
+@pytest.mark.parametrize("left_date,right_date,canonical", [
+    ("2026-01-02T00:00:00Z", "2026-01-01T00:00:00Z", "prov-b"),
+    ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "prov-a"),
+    ("2026-01-01T01:00:00+01:00", "2026-01-01T00:00:00Z", "prov-a"),
+    (None, None, "prov-a"),
+])
+def test_canonical_is_oldest_then_id_independent_of_input_order(left_date, right_date, canonical):
+    left = merge_account(created_at=left_date)
+    right = merge_account("prov-b", created_at=right_date)
+    forward = merge_pair(left, right)
+    backward = merge_pair(right, left)
+    assert forward == backward
+    assert set(forward.providers) == {canonical}
+    assert forward.providers[canonical].name == canonical
+
+
+@pytest.mark.parametrize("runtime,protocol", [("claude-code", P.ANTHROPIC_MESSAGES),
+                                               ("codex", P.OPENAI_RESPONSES), ("grok", P.OPENAI_RESPONSES)])
+def test_login_accounts_keep_fixed_identity(runtime, protocol):
+    left = provider(id="login-a", auth="oauth", oauth_runtime_type=runtime, base_url="", protocols=[protocol],
+                    builtin=True)
+    right = {**left, "id": "login-b", "builtin": False}
+    result = convert(RUNTIMES, [left, right], [])
+    assert result.provider_map == {"login-a": "login-a", "login-b": "login-b"}
+    assert all("protected_account" in result.retained[p] for p in result.providers)
+
+
+def test_codex_generated_provider_name_change_prevents_merge():
+    result = merge_pair(profiles=[profile("codex", provider_id="prov-b")])
+    assert len(result.providers) == 2
+    assert "launch_mismatch" in result.retained["prov-b"]
+
+
+def test_migration_diagnostics_contain_no_secrets_fingerprints_or_equivalence_groups(capsys, caplog):
+    import hashlib
+
+    secret = "synthetic-secret-never-report"
+    result = merge_pair(merge_account(api_key=secret), merge_account("prov-b", api_key=secret))
+    captured = capsys.readouterr()
+    exposed = repr(result) + repr(result.report) + captured.out + captured.err + caplog.text
+    assert secret not in exposed
+    assert hashlib.sha256(secret.encode()).hexdigest() not in exposed
+    assert not any("group" in key or "hash" in key or "key" in key for key in vars(result))
+    assert all(isinstance(value, int) for value in result.report.values())
+
+
+@pytest.mark.parametrize("accounts", [
+    [merge_account("prov-c"), merge_account("prov-b"), merge_account()],
+    [merge_account(), merge_account("prov-b"), merge_account("prov-c")],
+])
+def test_three_equivalent_accounts_have_total_maps_without_dangling_references(accounts):
+    rows = [profile(id=f"agent-{row['id']}", provider_id=row["id"]) for row in accounts]
+    result = convert(RUNTIMES, accounts, rows)
+    assert result.provider_map == {row["id"]: "prov-a" for row in accounts}
+    assert len(result.models) == 1
+    assert len(result.model_map) == 3
+    assert len({row.model_id for row in result.profiles.values()}) == 1
+    assert next(iter(result.models.values())).provider_id == "prov-a"
+    assert all(pid == "prov-a" for pid, _ in result.endpoints)
+    assert result.report["providers_merged"] == 2
+
+
+def test_union_checks_original_members_and_cannot_bridge_conflicting_endpoints():
+    accounts = [merge_account(protocols=[P.ANTHROPIC_MESSAGES], base_url="https://api.deepseek.com/anthropic"),
+                merge_account("prov-b", protocols=[P.OPENAI_CHAT]),
+                merge_account("prov-c", protocols=[P.OPENAI_CHAT], vendor_type="deepseek",
+                              base_url="https://proxy.invalid")]
+    result = convert(RUNTIMES, accounts, [])
+    assert result.provider_map == {"prov-a": "prov-a", "prov-b": "prov-a", "prov-c": "prov-c"}
+    assert result.endpoints[("prov-a", P.OPENAI_CHAT)].base_url == "https://api.deepseek.com"
+    assert "endpoint_conflict" in result.retained["prov-c"]
+
+
+def test_disjoint_protocols_keep_their_own_model_settings_prices_and_catalog_order():
+    left = merge_account(protocols=[P.ANTHROPIC_MESSAGES], base_url="https://api.deepseek.com/anthropic",
+                         models=[{"name": "Model[1m]", "input_usd_per_mtok": 1}, {"name": "helper"}])
+    right = merge_account("prov-b", protocols=[P.OPENAI_CHAT],
+                          models=[{"name": "Model[1m]", "input_usd_per_mtok": 9, "efforts": []}])
+    result = merge_pair(left, right)
+    assert len(result.providers) == 1
+    for old, protocol in ((left, P.ANTHROPIC_MESSAGES), (right, P.OPENAI_CHAT)):
+        for order, entry in enumerate(old["models"]):
+            _, identity = result.model_map[(old["id"], entry["name"], protocol)]
+            model = result.models[identity]
+            assert model.catalog_order == order
+            assert model.input_usd_per_mtok == entry.get("input_usd_per_mtok")
+
+
+@pytest.mark.parametrize("dates", [(None, "2026-01-01T00:00:00Z"), ("not-a-time", "not-a-time")])
+def test_unprovable_creation_order_keeps_accounts(dates):
+    result = merge_pair(merge_account(created_at=dates[0]), merge_account("prov-b", created_at=dates[1]))
+    assert len(result.providers) == 2
+    assert "creation_order_unknown" in result.retained["prov-b"]
+
+
+def test_only_remaining_independent_accounts_receive_retention_reasons():
+    accounts = [merge_account(), merge_account("prov-b"), merge_account("prov-c", api_key="other-key")]
+    result = convert(RUNTIMES, accounts, [])
+    assert result.provider_map == {"prov-a": "prov-a", "prov-b": "prov-a", "prov-c": "prov-c"}
+    assert set(result.retained) == {"prov-a", "prov-c"}
+    assert result.report["retained_different_key"] == 2
+
+
+def test_all_unmerged_model_natural_keys_map_to_their_original_ids():
+    result = merge_pair(merge_account(models=[{"name": "model"}]),
+                        merge_account("prov-b", api_key="other-key", models=[{"name": "model"}]))
+    for model in result.models.values():
+        assert result.model_map[(model.provider_id, model.name, model.protocol)] == (model.provider_id, model.id)
+
+
+@pytest.mark.parametrize("runtime,protocol", [("claude-code", P.ANTHROPIC_MESSAGES),
+                                             ("omp", P.OPENAI_CHAT), ("codex", P.OPENAI_RESPONSES)])
+def test_merged_profiles_keep_real_legacy_binding_and_generated_config(runtime, protocol):
+    from types import SimpleNamespace
+
+    from looper.agents.profile_registry import CatalogModel
+    from looper.agents.runtimes import ADAPTERS
+
+    catalog = [{"name": "model", "context_window": 4096, "efforts": [], "background_model": "helper"}]
+    url = "https://api.deepseek.com/anthropic" if protocol is P.ANTHROPIC_MESSAGES else "https://api.deepseek.com"
+    left = merge_account(protocols=[protocol], models=catalog, base_url=url)
+    right = merge_account("prov-b", protocols=[protocol], models=catalog, base_url=url)
+    # A canonical Codex profile retains the name embedded in its config.toml;
+    # Claude/OMP profiles can move from a differently named account.
+    selected = left if runtime == "codex" else right
+    row = profile(runtime, provider_id=selected["id"], model="model")
+    result = merge_pair(left, right, [row])
+    assert len(result.providers) == 1
+    before = LegacyProviderSpec(selected["id"], selected["name"], AuthKind.API_KEY, frozenset({protocol}),
+                                base_url=selected["base_url"], api_key=selected["api_key"],
+                                catalog=tuple(CatalogModel.from_entry(m) for m in catalog))
+    model = result.models[result.profiles[row["id"]].model_id]
+    account = result.providers[model.provider_id]
+    after = LegacyProviderSpec(account.id, account.name, account.auth, frozenset({model.protocol}),
+                               base_url=result.endpoints[(account.id, model.protocol)].base_url,
+                               api_key=account.api_key, env=account.env,
+                               catalog=(CatalogModel.from_entry({key: getattr(model, key) for key in catalog[0]}),))
+    adapter = ADAPTERS[runtime]
+    assert adapter.bind_provider(before, "model", "high") == adapter.bind_provider(after, "model", "high")
+    old_launch = SimpleNamespace(profile=SimpleNamespace(provider=before), model="model", effort="high",
+                                 library=SimpleNamespace(mcp_config=None))
+    new_launch = SimpleNamespace(**{**vars(old_launch), "profile": SimpleNamespace(provider=after)})
+    if runtime == "omp":
+        assert omp.models_yml(old_launch) == omp.models_yml(new_launch)
+    elif runtime == "codex":
+        assert codex.config_toml(old_launch) == codex.config_toml(new_launch)
