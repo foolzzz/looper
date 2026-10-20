@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -19,13 +19,15 @@ from uuid import uuid4
 from ... import child_env
 from ..run_usage import Usage
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ResidentSession, ResidentTransport, RunCost,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ResidentTransport, RunCost,
     RuntimeAdapter, RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
+from .per_turn import PerTurnSession
 from .pricing import RunSpend, usage_event
 
 if TYPE_CHECKING:
+    from ..claude_cli import CapStop, ResidentTurn
     from ..agent_settings import Launch
     from ..library import AgentLibrary
     from ..profile_registry import ProviderSpec
@@ -72,6 +74,8 @@ class DshStream:
 
     model: str | None = None
     session_id: str | None = None
+    process: asyncio.subprocess.Process | None = field(default=None, repr=False)
+    require_session: bool = False
     usage: Usage = field(default_factory=Usage, init=False)
     _steps: set[tuple[int, int]] = field(default_factory=set, init=False)
     _open_steps: set[tuple[int, int] | None] = field(default_factory=set, init=False)
@@ -81,6 +85,8 @@ class DshStream:
     _errors: list[str] = field(default_factory=list, init=False)
     _diagnostics: int = field(default=0, init=False)
     _cancelled: bool = field(default=False, init=False)
+    _execution_seen: bool = field(default=False, init=False)
+    _startup_rejected: bool = field(default=False, init=False)
 
     _DIAGNOSTIC_LIMIT: ClassVar[int] = 8
     _DIAGNOSTIC_BYTES: ClassVar[int] = 2048
@@ -92,6 +98,8 @@ class DshStream:
     async def events(self, stdout: asyncio.StreamReader, *,
                      process: asyncio.subprocess.Process | None = None) -> AsyncIterator[dict[str, Any]]:
         from ..claude_cli import iter_lines
+
+        process = process or self.process
 
         def invalid_constant(value: str) -> None:
             raise ValueError(f"Invalid JSON constant: {value}")
@@ -130,6 +138,7 @@ class DshStream:
         return text.encode("utf-8", errors="replace")[:self._DIAGNOSTIC_BYTES].decode("utf-8", errors="ignore")
 
     def _error(self, message: str) -> None:
+        self._startup_rejected = False
         if len(self._errors) < self._DIAGNOSTIC_LIMIT:
             self._errors.append(self._bounded(message))
 
@@ -179,6 +188,9 @@ class DshStream:
     def translate(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
         """Project one committed record. Only ``events`` publishes a terminal result."""
         kind = raw.get("type")
+        if kind in ("text", "thinking", "tool_call", "tool_result", "final") or (
+                kind == "status" and raw.get("phase") in ("turn_start", "step_start", "step_end", "turn_end")):
+            self._execution_seen = True
         flags = {"truncated": True} if raw.get("truncated") is True else {}
         if kind == "final":
             if not isinstance(raw.get("text"), str):
@@ -191,7 +203,9 @@ class DshStream:
                 self._error("DSH final is truncated")
             return []
         if kind == "error":
+            rejected = self.session_id is None and not self._execution_seen and not self._errors and not flags
             self._error(str(raw.get("message") or "DSH error event without a message"))
+            self._startup_rejected = rejected
             return self._diagnostic(raw, limited=True)
         if kind == "status":
             phase = raw.get("phase")
@@ -239,6 +253,8 @@ class DshStream:
             errors.append(f"DSH process failed with exit code {returncode}")
         if self._final is None:
             errors.append("DSH stream ended without final")
+        if self.require_session and self.session_id is None:
+            errors.append("DSH stream ended without an opening session")
         if not self._reason or self._reason.get("kind") != "completed":
             errors.append("DSH turn did not complete: " + self._bounded(json.dumps(self._reason, ensure_ascii=False)))
         return {"type": "result", "subtype": "error_during_execution" if errors else "success",
@@ -253,12 +269,12 @@ class DshStream:
 
 
 class DshRuntime(RuntimeAdapter):
-    """One process per run. Resident continuity is enabled only after its session implementation lands."""
+    """One process per turn, with isolated, resumable owner Sessions."""
 
     type = "dsh"
     label = "DSH"
     default_executable = "dsh"
-    capabilities = frozenset({Capability.RUN, Capability.MCP})
+    capabilities = frozenset({Capability.RUN, Capability.MCP, Capability.RESIDENT_SESSION, Capability.RESUME})
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     auth_kinds = frozenset({AuthKind.API_KEY})
     isolation_id = HOME_LAYOUT_ID
@@ -319,11 +335,15 @@ class DshRuntime(RuntimeAdapter):
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                     max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        owner = str(Path(session_dir).absolute()) if session_dir is not None else uuid4().hex
+        return self._command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch, owner=owner)
+
+    def _command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                 owner: str) -> list[str]:
         self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         if launch.read_only:
             raise RuntimeUnsupported("DSH read-only runs require the execution guard")
         local = Path(prompt_file).absolute().parent.parent
-        owner = str(Path(session_dir).absolute()) if session_dir is not None else uuid4().hex
         files = bootstrap_files(executable, Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
         # Resolve the required runner from an already-published immutable bundle. The final patch includes
         # its absolute module URI and policy, so either change selects a new bundle under the same owner.
@@ -340,13 +360,14 @@ class DshRuntime(RuntimeAdapter):
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
-        raise RuntimeUnsupported("DSH resident sessions are not implemented yet")
+        # Immutable launch inputs are shared; ResidentDsh materializes them under its full owner label.
+        return self._command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch, owner="resident-launch")
 
     def resume_args(self, session_id: str) -> list[str]:
         return ["--session-id", session_id]
 
-    def resident_session(self, label: str) -> ResidentSession:
-        raise RuntimeUnsupported("DSH resident sessions are not implemented yet")
+    def resident_session(self, label: str) -> ResidentDsh:
+        return ResidentDsh(label=label)
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
                     session_dir: Path | None = None) -> DshChannel:
@@ -382,8 +403,7 @@ class DshRuntime(RuntimeAdapter):
         return budget_error(result_event) if (result_event or {}).get(SOFT_CAP) else None
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
-        return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit",
-                                   "resident_session": "not implemented"},
+        return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit"},
                 "usage_complete": False, "cost_basis": "observed"}
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
@@ -395,6 +415,81 @@ class DshRuntime(RuntimeAdapter):
         # Native agent-instructions discovery is disabled by the managed overlay.
         return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
             cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+
+
+class ResidentDsh(PerTurnSession):
+    """Each owner resumes only the id emitted by DSH, using fresh immutable launch inputs each turn."""
+
+    runtime_label = "DSH"
+
+    @property
+    def command(self) -> list[str]:
+        return self._turn_argv() if self.started else []
+
+    def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
+        index = 1
+        while index < len(command) and "=" in command[index]:
+            index += 1
+        paths = dict(arg.split("=", 1) for arg in command[1:index])
+        if command[:1] != ["env"] or "DSH_HOME" not in paths or "HOME" not in paths or index == len(command):
+            raise ValueError("a resident DSH command requires env and private HOME/DSH_HOME paths")
+        session = None
+        if "--session-id" in command[index + 1:]:
+            resume_index = command.index("--session-id", index + 1)
+            if resume_index + 1 >= len(command) or not command[resume_index + 1]:
+                raise ValueError("DSH resume requires an existing session id")
+            session = command[resume_index + 1]
+            command = command[:resume_index] + command[resume_index + 2:]
+        if command[-1:] != ["-"] or "--patch" not in command[index + 1:]:
+            raise ValueError("a resident DSH command requires a patch and stdin task")
+        patch_index = command.index("--patch", index + 1) + 1
+        source = Path(command[patch_index])
+        files = {"looper-bootstrap.mjs": (source.parent / "looper-bootstrap.mjs").read_text(encoding="utf-8")}
+        local = Path(paths["DSH_HOME"]).parent.parents[2]
+        patch = json.loads(source.read_text(encoding="utf-8"))
+        cwd = next(item["config"]["workspaceRoot"] for item in patch if item.get("id") == "sandbox-policy")
+        # A saved Session can carry its original cwd. Keep another workspace's logs unreachable on resume.
+        owner = json.dumps([self._label, cwd], ensure_ascii=False)
+        bootstrap = write_home(local, files, owner=owner)
+        patch[-1]["insert"][0]["name"] = bootstrap_entry(bootstrap)["name"]
+        home = write_home(local, {**files, "looper.yml": json.dumps(patch, ensure_ascii=False)}, owner=owner)
+        base = ["env", *(f"{name}={home.paths.get(name, value)}" for name, value in paths.items()), *command[index:]]
+        base[patch_index] = str(home.config / "looper.yml")
+        return base, session, command[index]
+
+    def _turn_argv(self) -> list[str]:
+        # --session-id adopts an existing Session; it cannot allocate a new one.
+        return [*self._base[:-1], *(["--session-id", self._session] if self._session else []), "-"]
+
+    def _stream(self) -> DshStream:
+        patch = json.loads(Path(self._base[self._base.index("--patch") + 1]).read_text(encoding="utf-8"))
+        model = next(item["config"]["model"] for item in patch if item.get("id") == "agent-default-model")
+        self._turn_stream = DshStream(model=model, process=self._process, require_session=True)
+        return self._turn_stream
+
+    def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
+        from ..run_usage import run_usage
+
+        own = run_usage(result_event, price=self._price)
+        self._totals = self._totals.plus(own)
+        return own
+
+    def _turn_ended(self, *, new_session: bool) -> None:
+        stream = self._turn_stream
+        self._ended = stream._result(stream.process.returncode)["is_error"] if stream.process is not None else True
+
+    async def run_turn(self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *,
+                       tag: Any = None, stop: Callable[[], CapStop | None] | None = None) -> ResidentTurn:
+        turn = await super().run_turn(text, on_event, tag=tag, stop=stop)
+        # Missing opening metadata does not prove a turn was safe to replay after model/tool execution.
+        if not turn.session_started and (self._turn_stream._execution_seen or not self._turn_stream._startup_rejected):
+            raise RuntimeError("DSH turn ended without an opening session; input cannot be safely replayed")
+        return turn
+
+    async def stop(self, *, kill: bool = False) -> None:
+        if self._process is not None and hasattr(self, "_turn_stream"):
+            self._turn_stream.cancel()
+        await super().stop(kill=kill)
 
 
 class DshChannel:

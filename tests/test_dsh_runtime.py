@@ -902,6 +902,208 @@ def _run_prompt_file(tmp_path):
     return prompt
 
 
+def _resident_dsh_stand_in(tmp_path):
+    """An opaque test store; this deliberately knows nothing about DSH's durable log format."""
+    from fake_claude import fake_claude
+
+    return fake_claude(tmp_path / "resident-dsh", '''
+import json, os, pathlib, sys, uuid
+args = sys.argv[1:]
+text = sys.stdin.read()
+home = pathlib.Path(os.environ['DSH_HOME'])
+store = home / 'opaque-test-store'
+sessions = json.loads(store.read_text()) if store.exists() else {}
+sid = args[args.index('--session-id') + 1] if '--session-id' in args else None
+with (home / 'calls').open('a') as log:
+    log.write(json.dumps({'args': args, 'text': text, 'pid': os.getpid()}) + '\\n')
+if sid and (sid not in sessions or sessions[sid]['cwd'] != os.getcwd()):
+    print(json.dumps({'type': 'error', 'message': 'unknown session or cwd'}), flush=True)
+    sys.exit(7)
+sid = sid or str(uuid.uuid4())
+sessions.setdefault(sid, {'cwd': os.getcwd(), 'turns': []})['turns'].append(text)
+store.write_text(json.dumps(sessions))
+if text == 'silent-exit':
+    sys.exit(7)
+if text == 'malformed':
+    print('not JSON', flush=True)
+    sys.exit(7)
+if text == 'error-final':
+    print(json.dumps({'type': 'error', 'message': 'failed'}), flush=True)
+    print(json.dumps({'type': 'final', 'text': 'possibly executed'}), flush=True)
+    sys.exit(7)
+if text != 'no-opening':
+    print(json.dumps({'type': 'session', 'sessionId': sid, 'cwd': os.getcwd()}), flush=True)
+if text == 'unfinished':
+    print(json.dumps({'type': 'tool_call', 'callId': 'write-1', 'tool': 'write', 'input': {}}), flush=True)
+    sys.exit(7)
+if text == 'hang':
+    import signal, subprocess, time
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+    (home / 'child-pid').write_text(str(child.pid))
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(60)
+print(json.dumps({'type': 'status', 'phase': 'step_end', 'turn': len(sessions[sid]['turns']), 'step': 1,
+                  'usage': {'inputTokens': 10, 'outputTokens': 4, 'cacheReadTokens': 7, 'cacheWriteTokens': 2}}))
+print(json.dumps({'type': 'status', 'phase': 'turn_end', 'reason': {'kind': 'completed'}}))
+print(json.dumps({'type': 'final', 'text': text}))
+''')
+
+
+def test_dsh_resident_owners_resume_opening_id_and_count_only_new_tokens(tmp_path):
+    from looper.agents.run_usage import Usage
+
+    executable = _resident_dsh_stand_in(tmp_path)
+    runtime = runtimes.adapter("dsh")
+    launch = _run_launch(tmp_path, role="manager")
+    command = runtime.resident_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
+
+    async def check():
+        owners = [runtime.resident_session(label) for label in ("manager", "planner-a", "planner-b")]
+        sessions, homes = [], []
+        for owner in owners:
+            await owner.start(command, cwd=str(tmp_path), signature="a", env=launch.environment())
+            seen = []
+
+            async def record(event):
+                seen.append(event)
+
+            first = await owner.run_turn("first", record)
+            sid = first.result_event["session_id"]
+            second = await owner.run_turn("second", record)
+            assert second.result_event["session_id"] == sid
+            own = Usage(input_tokens=10, output_tokens=4, cache_read_tokens=7, cache_creation_tokens=2)
+            assert first.usage == second.usage == own
+            assert owner.totals == own.plus(own)
+            assert [e["session_id"] for e in seen if e.get("subtype") == "init"] == [sid, sid]
+            home = Path(next(arg.partition("=")[2] for arg in owner.command if arg.startswith("DSH_HOME=")))
+            calls = [json.loads(line) for line in (home / "calls").read_text().splitlines()]
+            assert "--session-id" not in calls[0]["args"]
+            assert calls[1]["args"][-3:] == ["--session-id", sid, "-"]
+            assert calls[0]["pid"] != calls[1]["pid"]
+            sessions.append(sid)
+            homes.append(home)
+            await owner.stop()
+        assert len(set(sessions)) == len(set(homes)) == 3
+
+    asyncio.run(asyncio.wait_for(check(), 10))
+
+
+@pytest.mark.parametrize("message", ["unfinished", "complete", "silent-exit", "malformed", "no-opening", "error-final"])
+def test_dsh_resident_failure_and_missing_session_are_not_success(tmp_path, message):
+    executable = _resident_dsh_stand_in(tmp_path)
+    runtime = runtimes.adapter("dsh")
+    launch = _run_launch(tmp_path, role="manager")
+    command = runtime.resident_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
+    if message == "complete":
+        command += runtime.resume_args("not-a-session")
+
+    async def check():
+        owner = runtime.resident_session("manager")
+        await owner.start(command, cwd=str(tmp_path), signature="a", env=launch.environment())
+        events = []
+
+        async def record(event):
+            events.append(event)
+
+        # An explicit startup rejection is safe to replace; silence or corrupt output is not proof of that.
+        if message in ("silent-exit", "malformed", "no-opening", "error-final"):
+            with pytest.raises(RuntimeError, match="cannot be safely replayed"):
+                await owner.run_turn(message, record)
+            assert _dsh_result(events)["is_error"]
+        else:
+            turn = await owner.run_turn(message, record)
+            assert turn.result_event["is_error"]
+            assert turn.session_started is (message == "unfinished")
+        assert owner.stale("a")
+        home = Path(next(arg.partition("=")[2] for arg in owner.command if arg.startswith("DSH_HOME=")))
+        assert len((home / "calls").read_text().splitlines()) == 1  # never replay the input here
+        await owner.stop()
+
+    asyncio.run(asyncio.wait_for(check(), 5))
+
+
+def test_dsh_resident_stop_ends_running_process_tree_after_stdin_eof(tmp_path, monkeypatch):
+    from looper.agents import proc_tree
+
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.1)
+    executable = _resident_dsh_stand_in(tmp_path)
+    runtime = runtimes.adapter("dsh")
+    launch = _run_launch(tmp_path, role="manager")
+    command = runtime.resident_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
+
+    async def check():
+        owner = runtime.resident_session("manager")
+        await owner.start(command, cwd=str(tmp_path), signature="a", env=launch.environment())
+        home = Path(next(arg.partition("=")[2] for arg in owner.command if arg.startswith("DSH_HOME=")))
+        events = []
+
+        async def record(event):
+            events.append(event)
+
+        running = asyncio.create_task(owner.run_turn("hang", record))
+        try:
+            while not (home / "child-pid").exists():
+                await asyncio.sleep(0.01)
+            parent, child = owner.pid, int((home / "child-pid").read_text())
+            assert parent is not None
+            await owner.stop()
+            turn = await running
+            assert turn.result_event["is_error"]
+            assert not owner.started
+            for pid in (parent, child):
+                assert pid not in proc_tree._snapshot()
+            assert not any(e.get("subtype") == "success" for e in events)
+        finally:
+            await owner.stop()
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(check(), 8))
+
+
+def test_dsh_resident_does_not_open_an_old_cwd_session(tmp_path):
+    runtime = runtimes.adapter("dsh")
+    executable = _resident_dsh_stand_in(tmp_path)
+    launch = _run_launch(tmp_path, role="manager")
+    prompt = _run_prompt_file(tmp_path)
+    other = tmp_path / "other-project"
+    other.mkdir()
+
+    async def check():
+        owner = runtime.resident_session("manager")
+        command = runtime.resident_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch)
+        await owner.start(command, cwd=str(tmp_path), signature="a", env=launch.environment())
+        turn = await owner.run_turn("first", lambda event: asyncio.sleep(0))
+        session = turn.result_event["session_id"]
+        old_home = next(arg for arg in owner.command if arg.startswith("DSH_HOME="))
+        await owner.stop()
+        command = runtime.resident_command(executable, cwd=other, prompt_file=prompt, launch=launch)
+        await owner.start(command + runtime.resume_args(session), cwd=str(other), signature="b", env=launch.environment())
+        # CWD is part of the storage identity: even a CLI that adopts saved cwd cannot open the old log.
+        assert next(arg for arg in owner.command if arg.startswith("DSH_HOME=")) != old_home
+        turn = await owner.run_turn("second", lambda event: asyncio.sleep(0))
+        assert not turn.session_started and turn.result_event["is_error"]
+        await owner.stop()
+
+    asyncio.run(asyncio.wait_for(check(), 5))
+
+
+def test_dsh_resident_missing_executable_does_not_start_or_replay(tmp_path):
+    runtime = runtimes.adapter("dsh")
+    executable = _resident_dsh_stand_in(tmp_path)
+    launch = _run_launch(tmp_path, role="manager")
+    command = runtime.resident_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
+    Path(executable).unlink()
+
+    async def check():
+        owner = runtime.resident_session("manager")
+        with pytest.raises(OSError, match="not found"):
+            await owner.start(command, cwd=str(tmp_path), signature="a", env=launch.environment())
+        assert not owner.started and owner.pid is None
+
+    asyncio.run(asyncio.wait_for(check(), 5))
+
+
 def test_dsh_is_registered_with_only_implemented_capabilities():
     from looper.agents.runtimes import Capability, ResidentTransport
     from looper.agents.runtimes.dsh import DshRuntime
@@ -909,11 +1111,12 @@ def test_dsh_is_registered_with_only_implemented_capabilities():
     runtime = runtimes.adapter("dsh")
     assert isinstance(runtime, DshRuntime)
     assert runtime.default_executable == "dsh"
-    assert runtime.capabilities == frozenset({Capability.RUN, Capability.MCP})
+    assert runtime.capabilities == frozenset({Capability.RUN, Capability.MCP,
+                                              Capability.RESIDENT_SESSION, Capability.RESUME})
     assert not runtime.run_input and not runtime.can_replace_system_prompt
     assert runtime.resident_transport is ResidentTransport.PER_TURN
-    with pytest.raises(RuntimeUnsupported, match="resident"):
-        runtime.resident_session("owner")
+    from looper.agents.runtimes.dsh import ResidentDsh
+    assert isinstance(runtime.resident_session("owner"), ResidentDsh)
     assert runtime.resume_args("saved") == ["--session-id", "saved"]
 
 

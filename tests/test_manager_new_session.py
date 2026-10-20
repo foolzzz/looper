@@ -4,9 +4,9 @@ Looper answers a message that is exactly ``/new`` itself, never Claude: the
 Manager stops its resident Claude and drops the saved session, so the next
 message starts a new session without ``--resume`` and without the resume
 brief a new session otherwise gets. The reset is recorded as a run and
-confirmed in the chat it came from. Claude is a stand-in throughout
-(``_resident``, which here also logs each user turn it reads), and the
-database is ``agent_db``'s in-memory one.
+confirmed in the chat it came from. Claude and DSH use real subprocess
+stand-ins; DSH reads one turn per process and owns its opaque session state.
+The database is ``agent_db``'s in-memory one.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import asyncio
 import json
 import tempfile
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -143,6 +144,245 @@ async def _until(check: Callable[[], bool], timeout: float = 10.0) -> None:
     while not check():
         assert loop.time() < deadline, "timed out"
         await asyncio.sleep(0.02)
+
+
+def _dsh_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, *, fail_second: bool = False,
+                 opening_before_failure: bool = True) -> SimpleNamespace:
+    """A real headless process per turn, persisting only its own opaque Session state."""
+    from unittest.mock import AsyncMock
+
+    from fake_claude import fake_claude
+    from looper.agents.tiers import manager as module
+    from tests.test_dsh_runtime import _dsh_step, _run_launch
+
+    observed = tmp_path / "dsh-turns.jsonl"
+    executable = fake_claude(tmp_path / "manager-dsh", f'''
+import json, os, pathlib, sys, uuid
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+home = pathlib.Path(os.environ['DSH_HOME'])
+state_file = home / 'stand-in-state.json'
+state = json.loads(state_file.read_text()) if state_file.exists() else {{}}
+saved = args[args.index('--session-id') + 1] if '--session-id' in args else None
+session = saved or uuid.uuid4().hex
+missing = saved is not None and saved not in state
+turn = state.get(session, 0) + 1
+patch = pathlib.Path(args[args.index('--patch') + 1])
+with open({str(observed)!r}, 'a') as output:
+    output.write(json.dumps({{'argv': args, 'prompt': prompt, 'home': str(home),
+                             'session': session, 'patch': str(patch), 'executed': not missing,
+                             'bootstrap': (patch.parent / 'looper-bootstrap.mjs').read_text(),
+                             'token': os.environ.get('LOOPER_DSH_MCP_SECRET_0_ENV_0')}}) + '\\n')
+if missing:
+    print(json.dumps({{'type': 'error', 'message': 'Session not found'}}), flush=True)
+    sys.exit(4)
+state[session] = turn
+state_file.write_text(json.dumps(state))
+if not ({fail_second!r} and turn == 2) or {opening_before_failure!r}:
+    print(json.dumps({{'type': 'session', 'sessionId': session}}), flush=True)
+if {fail_second!r} and turn == 2:
+    print(json.dumps({{'type': 'tool_call', 'callId': 'write-once', 'tool': 'write',
+                      'input': {{'path': 'side-effect'}}}}), flush=True)
+    sys.exit(7)
+for record in [{_dsh_step()!r},
+               {{'type': 'status', 'phase': 'turn_end', 'reason': {{'kind': 'completed'}}}},
+               {{'type': 'final', 'text': f'dsh turn {{turn}}: ' + prompt.rpartition('\\n\\n')[2]}}]:
+    print(json.dumps(record), flush=True)
+''')
+    launch = _run_launch(tmp_path, role="manager")
+    profile = replace(launch.profile, runtime=replace(launch.profile.runtime, executable=executable))
+    state = SimpleNamespace(settings=replace(launch.settings, profile=profile), library=launch.library,
+                            observed=observed)
+    # The generic legacy store predates provider persistence; retain it for restart compatibility checks.
+    save_session = agent_db.save_session.side_effect
+
+    async def save_with_provider(*args: Any, provider_id: str | None = None, **kwargs: Any) -> None:
+        await save_session(*args, **kwargs)
+        agent_db.store.sessions[args[0]]["provider_id"] = provider_id
+
+    agent_db.save_session.side_effect = save_with_provider
+    monkeypatch.setattr(module, "load_agent_settings", AsyncMock(side_effect=lambda *_: state.settings))
+    monkeypatch.setattr(module, "load_installed", AsyncMock(side_effect=lambda *_: state.library))
+    return state
+
+
+def _dsh_turns(state: SimpleNamespace) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in state.observed.read_text().splitlines()]
+
+
+def test_dsh_manager_persists_opening_session_and_resumes_after_restart_and_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    state = _dsh_manager(tmp_path, monkeypatch, agent_db)
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        queue = bus.get_queue(WEB.agent_id)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        try:
+            await manager._handle(_web("first", 0))
+            opening = _dsh_turns(state)[0]
+            assert agent_db.store.sessions["manager"]["session_id"] == opening["session"]
+            await manager.stop()
+            manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+            manager._bus = bus
+            await manager._handle(_web("second", 1))
+            await manager._handle(_web("/new", 2))
+            await manager._handle(_web("fresh", 3))
+            replies = [e.payload["text"] for e in _drain(queue) if e.message_type == MessageType.AGENT_REPLY]
+            assert replies == ["dsh turn 1: first", "dsh turn 2: second", NEW_SESSION_REPLY, "dsh turn 1: fresh"]
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+    first, second, fresh = _dsh_turns(state)
+    assert _flag(first["argv"], "--session-id") is None
+    assert _flag(second["argv"], "--session-id") == first["session"]
+    assert _flag(fresh["argv"], "--session-id") is None
+    assert fresh["session"] != first["session"]
+    assert first["home"] == second["home"] == fresh["home"]
+    records = [call.kwargs for call in agent_db.finish_record.await_args_list if call.kwargs.get("input_tokens")]
+    assert len(records) == 3
+    assert [record["input_tokens"] for record in records] == [10, 10, 10]
+    assert [record["output_tokens"] for record in records] == [4, 4, 4]
+
+
+def test_dsh_manager_reconfiguration_resumes_same_owner_with_new_overlay_and_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.service import server_config
+
+    state = _dsh_manager(tmp_path, monkeypatch, agent_db)
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        queue = bus.get_queue(WEB.agent_id)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        try:
+            await manager._handle(_web("before", 0))
+            state.settings = replace(state.settings, profile=replace(
+                state.settings.profile, model="deepseek-v4-pro", custom_prompt="NEW {{literal}} PROMPT"))
+            config = tmp_path / "rotated-mcp.json"
+            config.write_text(json.dumps({"mcpServers": {
+                "looper": server_config("http://127.0.0.1:19999", "rotated-test-token"),
+            }}))
+            state.library = AgentLibrary(mcp_config=str(config), role="manager")
+            await manager._handle(_web("after", 1))
+            replies = [e.payload["text"] for e in _drain(queue) if e.message_type == MessageType.AGENT_REPLY]
+            assert replies == ["dsh turn 1: before", "dsh turn 2: after"]
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+    first, second = _dsh_turns(state)
+    assert _flag(second["argv"], "--session-id") == first["session"]
+    assert second["home"] == first["home"]
+    assert second["patch"] != first["patch"]
+    assert "NEW {{literal}} PROMPT" in second["bootstrap"]
+    assert "deepseek-v4-pro" in Path(second["patch"]).read_text()
+    assert (first["token"], second["token"]) == ("test-run-token", "rotated-test-token")
+    assert agent_db.store.sessions["manager"]["session_id"] == first["session"]
+
+
+@pytest.mark.parametrize("opening_before_failure", [True, False], ids=["opening-seen", "tool-without-opening"])
+def test_dsh_manager_does_not_replay_turn_after_tool_call_without_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, opening_before_failure: bool,
+) -> None:
+    state = _dsh_manager(tmp_path, monkeypatch, agent_db, fail_second=True,
+                         opening_before_failure=opening_before_failure)
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        try:
+            await manager._handle(_web("first", 0))
+            # A restored owner takes the tier's saved-session recovery path, where replay could duplicate tools.
+            await manager.stop()
+            manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+            manager._bus = bus
+            await manager._handle(_web("write exactly once", 1))
+            assert len(_dsh_turns(state)) == 2
+            await manager._handle(_web("recover", 2))
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+    turns = _dsh_turns(state)
+    assert len(turns) == 3
+    assert sum("write exactly once" in turn["prompt"] for turn in turns) == 1
+    assert _flag(turns[2]["argv"], "--session-id") == turns[0]["session"]
+
+
+@pytest.mark.parametrize(("runtime", "provider"), [("dsh", "previous-provider"),
+                                                    ("claude-code", "prov-claude-subscription")])
+def test_dsh_manager_replaces_saved_session_from_another_provider_or_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, runtime: str, provider: str,
+) -> None:
+    state = _dsh_manager(tmp_path, monkeypatch, agent_db)
+    agent_db.store.sessions["manager"] = {
+        "session_id": "previous-session", "session_totals": {"input_tokens": 999},
+        "runtime_type": runtime, "profile_id": "previous-profile", "provider_id": provider,
+    }
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        try:
+            await manager._handle(_web("continue", 0))
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+    (turn,) = _dsh_turns(state)
+    assert _flag(turn["argv"], "--session-id") is None
+    assert "[RESUME] This is a new session (agent changed" in turn["prompt"]
+    assert agent_db.store.sessions["manager"]["session_id"] == turn["session"]
+    assert agent_db.store.sessions["manager"]["session_totals"]["input_tokens"] == 10
+
+
+def test_dsh_manager_replaces_missing_session_with_fresh_session_and_resume_brief(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    state = _dsh_manager(tmp_path, monkeypatch, agent_db)
+    agent_db.store.sessions["manager"] = {
+        "session_id": "missing-session", "session_totals": {"input_tokens": 999},
+        "runtime_type": "dsh", "profile_id": state.settings.profile.id,
+        "provider_id": state.settings.profile.provider.id,
+    }
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        queue = bus.get_queue(WEB.agent_id)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        try:
+            await manager._handle(_web("continue once", 0))
+            replies = [e.payload["text"] for e in _drain(queue) if e.message_type == MessageType.AGENT_REPLY]
+            assert replies == ["dsh turn 1: continue once"]
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+    attempt, fresh = _dsh_turns(state)
+    assert _flag(attempt["argv"], "--session-id") == "missing-session"
+    assert _flag(fresh["argv"], "--session-id") is None
+    assert (attempt["executed"], fresh["executed"]) == (False, True)
+    assert "[RESUME] This is a new session (session lost:" in fresh["prompt"]
+    assert fresh["prompt"].endswith("continue once")
+    assert attempt["home"] == fresh["home"]
+    saved = agent_db.store.sessions["manager"]
+    assert saved["session_id"] == fresh["session"] != "missing-session"
+    assert saved["session_totals"]["input_tokens"] == 10
 
 
 @pytest.mark.usefixtures("agent_db")
