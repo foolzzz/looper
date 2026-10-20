@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from looper.agents.ops import Turn
+from looper.agents.provider_presets import PRESETS
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
 from tests.test_task_agents_db import _call, _concurrency_chat
 from tests.test_usage_api_db import DSN, _run, _run_record
@@ -211,6 +212,77 @@ def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter
             "action": "register", "name": "other", "protocols": ["anthropic-messages"],
             "env": {"OTHER_API_TOKEN": "x"}}))
         assert _error(refused) == "invalid" and "looks like a credential" in refused["error"]["message"]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize(("preset", "api"), [(preset, api) for preset in PRESETS for api in preset.apis])
+def test_registering_a_provider_from_a_preset_is_read_back_with_its_api_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preset: Any, api: Any,
+) -> None:
+    async def test(pool: Any) -> None:
+        (answer,) = await _Chat(tmp_path).say("用预设登记 provider", ("looper_providers", {
+            "action": "register", "preset": preset.id, "api": api.protocols[-1].value}))
+        assert answer["status"] == "ok", answer
+        (stored,) = [p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == preset.name]
+        assert stored["protocols"] == [protocol.value for protocol in api.protocols]
+        assert stored["base_url"] == api.base_url
+        assert [{key: model[key] for key in ("name", "context_window", "background_model")}
+                for model in stored["models"]] == [
+                    {"name": model.name, "context_window": model.context_window,
+                     "background_model": model.background_model} for model in preset.models_for(api)]
+        assert stored["env"] == [{"key": key, "value": value} for key, value in preset.env]
+        assert stored["api_key"] is None
+
+    _run(test, monkeypatch)
+
+
+def test_provider_preset_explicit_overrides_win(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        (answer,) = await _Chat(tmp_path).say("覆盖预设字段", ("looper_providers", {
+            "action": "register", "preset": "glm-bigmodel", "api": "anthropic-messages",
+            "name": "custom", "protocols": ["openai-chat"], "base_url": "https://example.com/v1",
+            "models": ["custom-model"], "env": {"API_TIMEOUT_MS": "1234"}}))
+        assert answer["status"] == "ok", answer
+        (stored,) = [p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "custom"]
+        assert stored["protocols"] == ["openai-chat"]
+        assert stored["base_url"] == "https://example.com/v1"
+        assert [model["name"] for model in stored["models"]] == ["custom-model"]
+        assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "1234"}]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize(("arguments", "message"), [
+    ({"preset": "unknown", "api": "openai-chat"}, "unknown preset 'unknown'"),
+    ({"preset": "deepseek"}, "api is required"),
+    ({"preset": "deepseek", "api": "unknown"}, "unknown API"),
+])
+def test_invalid_provider_presets_are_refused_without_registering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: dict[str, Any], message: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        before = await pool.fetchval("SELECT count(*) FROM llm_providers")
+        (answer,) = await _Chat(tmp_path).say("登记 provider", ("looper_providers", {
+            "action": "register", **arguments}))
+        assert _error(answer) == "invalid" and message in answer["error"]["message"], answer
+        if arguments["preset"] == "unknown":
+            assert all(preset.id in answer["error"]["message"] for preset in PRESETS)
+        assert await pool.fetchval("SELECT count(*) FROM llm_providers") == before
+
+    _run(test, monkeypatch)
+
+
+def test_provider_list_includes_available_presets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        (answer,) = await _Chat(tmp_path).say("列出 providers 和预设", ("looper_providers", {"action": "list"}))
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["presets"] == (await _ok("GET", "/api/registry"))["provider_presets"]
+        deepseek = next(preset for preset in answer["result"]["presets"] if preset["preset_id"] == "deepseek")
+        assert deepseek["name"] == "deepseek"
+        assert deepseek["apis"][1]["protocols"] == ["openai-responses", "openai-chat"]
+        assert deepseek["apis"][1]["base_url"] == "https://api.deepseek.com"
+        assert [model["name"] for model in deepseek["apis"][1]["models"]] == ["deepseek-flash", "deepseek-v4-pro"]
 
     _run(test, monkeypatch)
 

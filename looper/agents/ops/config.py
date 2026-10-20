@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ...db import llm_records as db_llm_records, projects as db_projects
-from .. import catalog, profile_registry, projects
+from .. import catalog, profile_registry, projects, provider_presets
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..projects import RequestError, project_name
 from ..tiers.journal import clip
@@ -218,12 +218,28 @@ async def _deleting_profile(call: Call) -> str | None:
 async def _providers(call: Call) -> dict[str, Any]:
     arguments = call.arguments
     if arguments["action"] == "list":
-        return {"providers": [_provider_listed(p) for p in (await _registry())["providers"]]}
-    _required(arguments, "register", "name", "protocols")
-    data: dict[str, Any] = {"name": arguments["name"], "protocols": arguments["protocols"], "auth": "api_key",
-                            "base_url": arguments.get("base_url"),
-                            "models": [{"name": model} for model in arguments.get("models") or ()],
-                            "env": [{"key": key, "value": value} for key, value in (arguments.get("env") or {}).items()]}
+        return {"providers": [_provider_listed(p) for p in (await _registry())["providers"]],
+                "presets": provider_presets.presets_view()}
+    data: dict[str, Any] = {"auth": "api_key", "base_url": None, "models": [], "env": []}
+    if arguments.get("preset") is not None:
+        preset = next((p for p in provider_presets.PRESETS if p.id == arguments["preset"]), None)
+        if preset is None:
+            ids = ", ".join(p.id for p in provider_presets.PRESETS)
+            raise OpError(ErrorCode.INVALID, f"unknown preset {arguments['preset']!r}; there are: {ids}")
+        _required(arguments, "register", "api")
+        api = next((api for api in preset.view()["apis"] if arguments["api"] in api["protocols"]), None)
+        if api is None:
+            protocols = ", ".join(protocol.value for api in preset.apis for protocol in api.protocols)
+            raise OpError(ErrorCode.INVALID, f"unknown API {arguments['api']!r} for preset {preset.id!r}; "
+                                             f"choose a protocol: {protocols}")
+        data.update(name=preset.name, **api)
+        data["env"] = [{"key": key, "value": value} for key, value in preset.env]
+    data.update(_given(arguments, ("name", "protocols", "base_url")))
+    if arguments.get("models") is not None:
+        data["models"] = [{"name": model} for model in arguments["models"]]
+    if arguments.get("env") is not None:
+        data["env"] = [{"key": key, "value": value} for key, value in arguments["env"].items()]
+    _required(data, "register", "name", "protocols")
     answer = await answered(profile_registry.create_provider(data))
     provider = _provider_listed(answer["provider"])
     return {"provider": provider, "note": KEY_NOTE.format(name=provider["name"])}
@@ -423,11 +439,15 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_providers",
         description="LLM providers: list (with whether each has its API key); register one, without its key. Never "
-                    "take or pass a key: the user enters it on the dashboard.",
+                    "take or pass a key: the user enters it on the dashboard. List also includes provider presets "
+                    "with APIs and models.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
                 "action": {"type": "string", "enum": ["list", "register"]},
+                "preset": {"type": "string", "description": "Preset id from list; api selects its API, and explicit "
+                           "fields override its defaults."},
+                "api": {"type": "string", "description": "A protocol of the preset's chosen API (required with preset)."},
                 "name": {"type": "string", "minLength": 1},
                 "protocols": {"type": "array", "description": "Of anthropic-messages, openai-responses, openai-chat."},
                 "base_url": {"type": "string", "description": "http(s) URL; leave out for the protocol's own."},
