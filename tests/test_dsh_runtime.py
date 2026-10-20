@@ -1,8 +1,9 @@
-"""DeepSeek policy, without registering an executable DSH adapter."""
+"""DSH policy, headless launch and stream lifecycle through real subprocesses."""
 
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -26,14 +27,10 @@ PROVIDER = ProviderSpec("gateway", "Messages gateway", AuthKind.API_KEY,
 
 
 def _register_prompt_runtime(monkeypatch):
-    """Expose only the unfinished adapter's prompt hooks, without registering a runnable DSH."""
+    """Use the executable adapter's prompt hooks in the existing preview checks."""
     from looper.agents.runtimes import dsh
-    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
 
-    class PromptRuntime(dsh.DshRuntime, ClaudeCodeRuntime):
-        pass
-
-    runtime = PromptRuntime()
+    runtime = dsh.DshRuntime()
     monkeypatch.setitem(runtimes.ADAPTERS, "dsh", runtime)
     return runtime
 
@@ -286,11 +283,8 @@ def test_dsh_uses_protocol_and_model_instead_of_vendor_heuristics(dsh_policy):
     check_pairing(RuntimeSpec("test", "test", dsh_policy.type), provider, "deepseek-v4-pro[1m]")
 
 
-def test_dsh_policy_does_not_register_a_runtime_or_change_other_pairings():
-    from looper.agents.runtimes import dsh  # noqa: F401
-
-    with pytest.raises(RuntimeUnsupported):
-        runtimes.adapter("dsh")
+def test_dsh_registration_does_not_change_other_pairings():
+    assert runtimes.adapter("dsh").type == "dsh"
     # A default hook must leave existing runtime/model/effort combinations alone.
     check_pairing(RuntimeSpec("claude", "claude", "claude-code"), PROVIDER, "other-model", "xhigh")
 
@@ -856,3 +850,387 @@ def test_dsh_waits_for_process_exit_after_stdout_eof_before_publishing_result(tm
             await asyncio.gather(reader, return_exceptions=True)
 
     asyncio.run(asyncio.wait_for(check(), 5))
+
+
+def _run_launch(tmp_path, *, budget=None, role="worker"):
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.service import server_config
+    from looper.agents.profile_registry import AgentProfile
+
+    runtime = runtimes.adapter("dsh")
+    source = tmp_path / "mcp.json"
+    source.write_text(json.dumps({"mcpServers": {
+        "looper": server_config("http://127.0.0.1:19999", "test-run-token"),
+    }}))
+    profile = AgentProfile("dsh-test", "DSH test", RuntimeSpec("dsh-test", "DSH", "dsh", "", runtime.capabilities),
+                           PROVIDER, "deepseek-flash", "high")
+    return Launch(AgentSettings(profile=profile, max_budget_usd=budget),
+                  AgentLibrary(mcp_config=str(source), role=role), role=AgentType(role))
+
+
+def _headless_stand_in(tmp_path, *, usage=DSH_STEP_USAGE, exit_code=0, hang=False, final=None):
+    from fake_claude import fake_claude
+
+    records = [{"type": "session", "sessionId": "stand-in-session"}, _dsh_step(usage=usage),
+               {"type": "status", "phase": "turn_end", "reason": {"kind": "completed"}},
+               {"type": "final", "text": final or json.dumps({"status": "completed", "changed_files": {},
+                                                               "summary": "stand-in result"})}]
+    return fake_claude(tmp_path / "dsh-stand-in", f'''
+import json, os, pathlib, sys, time
+prompt = sys.stdin.buffer.read()  # The real CLI waits for EOF, not just the first line.
+pathlib.Path({str(tmp_path / 'seen.json')!r}).write_text(json.dumps({{
+    'argv': sys.argv[1:], 'prompt': prompt.decode(), 'pid': os.getpid(),
+    'home': os.environ['HOME'], 'dsh_home': os.environ['DSH_HOME'],
+}}))
+for record in {records!r}:
+    print(json.dumps(record), flush=True)
+# Exercise stderr backpressure before EOF as well as completed-but-still-running children.
+sys.stderr.write('x' * 200000)
+sys.stderr.flush()
+if {hang!r}:
+    time.sleep(60)
+sys.exit({exit_code})
+''')
+
+
+def _run_prompt_file(tmp_path):
+    directory = tmp_path / ".local" / "prompts"
+    directory.mkdir(parents=True, exist_ok=True)
+    prompt = directory / "test.md"
+    prompt.write_text("Literal {{unknown}} 中文 system prompt")
+    return prompt
+
+
+def test_dsh_is_registered_with_only_implemented_capabilities():
+    from looper.agents.runtimes import Capability, ResidentTransport
+    from looper.agents.runtimes.dsh import DshRuntime
+
+    runtime = runtimes.adapter("dsh")
+    assert isinstance(runtime, DshRuntime)
+    assert runtime.default_executable == "dsh"
+    assert runtime.capabilities == frozenset({Capability.RUN, Capability.MCP})
+    assert not runtime.run_input and not runtime.can_replace_system_prompt
+    assert runtime.resident_transport is ResidentTransport.PER_TURN
+    with pytest.raises(RuntimeUnsupported, match="resident"):
+        runtime.resident_session("owner")
+    assert runtime.resume_args("saved") == ["--session-id", "saved"]
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_dsh_real_launch_reads_full_stdin_eof_and_validates_exit(tmp_path, exit_code):
+    runtime = runtimes.adapter("dsh")
+    executable = _headless_stand_in(tmp_path, exit_code=exit_code)
+    launch = _run_launch(tmp_path)
+    prompt_file = _run_prompt_file(tmp_path)
+    command = runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt_file, launch=launch,
+                                  max_turns=3, session_dir=tmp_path / "kept")
+    argv = command[command.index(executable) + 1:]
+    assert argv[:3] == ["--profile", "headless", "--patch"]
+    assert argv[-2:] == ["--json", "-"] and "--session-id" not in argv
+    assert "--max-turns" not in argv
+    assert "max_turns" in json.dumps(runtime.launch_record(launch))
+    patch = Path(argv[3])
+    assert "test-dsh-key" not in patch.read_text() and "test-run-token" not in patch.read_text()
+
+    async def run():
+        from looper.agents import proc_tree
+
+        process = await proc_tree.spawn(*command, cwd=tmp_path, env=launch.environment(),
+                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE)
+        channel = runtime.run_channel(process, launch=launch, cwd=tmp_path)
+        try:
+            await channel.start("first line\n中文 second line")
+            with pytest.raises(RuntimeError):
+                await channel.send("too late")
+            events = [event async for event in channel.events()]
+            assert process.returncode == exit_code
+            return events
+        finally:
+            await proc_tree.end(process, label="test DSH")
+
+    events = asyncio.run(asyncio.wait_for(run(), 5))
+    result = _dsh_result(events)
+    assert result["is_error"] is (exit_code != 0)
+    seen = json.loads((tmp_path / "seen.json").read_text())
+    assert seen["prompt"] == "first line\n中文 second line\n"
+    assert Path(seen["home"]).is_relative_to(tmp_path / ".local" / "dsh" / "owners")
+    assert result["session_id"] == "stand-in-session" and result["cost_basis"] == "observed"
+    assert result["observed_cost_usd"] == pytest.approx(0.000008442)
+    assert result["usage_complete"] is False
+
+
+def test_dsh_runs_get_unique_homes_and_kept_owner_survives_config_changes(tmp_path):
+    runtime = runtimes.adapter("dsh")
+    launch = _run_launch(tmp_path)
+    executable = _headless_stand_in(tmp_path)
+    prompt = _run_prompt_file(tmp_path)
+
+    def home(session_dir=None):
+        command = runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch,
+                                      session_dir=session_dir)
+        return next(arg for arg in command if arg.startswith("DSH_HOME="))
+
+    assert home() != home()
+    first = home(tmp_path / "keep")
+    prompt.write_text("updated prompt")
+    assert home(tmp_path / "keep") == first
+    assert home(tmp_path / "another") != first
+
+
+@pytest.mark.parametrize("verify", [False, True])
+@pytest.mark.parametrize("mode", ["success", "exit", "cap", "unknown", "partial-no-cap"])
+def test_worker_and_reviewer_read_back_dsh_stand_in_results(tmp_path, monkeypatch, agent_db, verify, mode):
+    from unittest.mock import AsyncMock
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.tiers import worker
+
+    final = json.dumps({"passed": True, "findings": [], "summary": "review result"} if verify else
+                       {"status": "completed", "changed_files": {}, "summary": "work result"})
+    executable = _headless_stand_in(tmp_path, final=final, exit_code=7 if mode == "exit" else 0,
+                                   usage=None if mode in ("unknown", "partial-no-cap") else DSH_STEP_USAGE,
+                                   hang=mode in ("cap", "unknown"))
+    launch = _run_launch(tmp_path, budget=0.000001 if mode == "cap" else 1 if mode in ("success", "unknown") else None,
+                         role="reviewer" if verify else "worker")
+    settings = replace(launch.settings, profile=replace(launch.profile,
+                       runtime=replace(launch.profile.runtime, executable=executable)))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
+    monkeypatch.setattr(worker, "load_installed", AsyncMock(return_value=launch.library))
+    envelope = MessageEnvelope.create(source=planner_address("test"), target=worker_address("test"),
+                                      message_type=MessageType.VERIFY_REQUEST if verify else MessageType.WORK_ITEM,
+                                      payload={"task_id": "step", "instruction": "run", "context": {"work_dir": str(tmp_path)}})
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+    outcome = asyncio.run(asyncio.wait_for(pool._execute(envelope, is_verify=verify), 8))
+    success = mode in ("success", "partial-no-cap")
+    if verify and not success:
+        assert outcome.get("passed") is False or outcome.get("status") == "failed"
+    else:
+        assert (outcome.get("passed") if verify else outcome.get("status") == "completed") is success
+    if success:
+        assert outcome["summary"] == ("review result" if verify else "work result")
+    else:
+        assert mode != "unknown" or "budget" in json.dumps(outcome).lower()
+    recorded = agent_db.finish_record.call_args.kwargs
+    assert recorded["cost_usd"] is None  # Observed root cost never becomes the total bill.
+    assert recorded["session_id"] == "stand-in-session"
+    if success:
+        assert recorded["output_text"] == final
+    if mode in ("cap", "unknown"):
+        pid = json.loads((tmp_path / "seen.json").read_text())["pid"]
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_dsh_channel_timeout_or_cancel_reaps_process(tmp_path, cancel):
+    from looper.agents import proc_tree
+
+    runtime = runtimes.adapter("dsh")
+    executable = _headless_stand_in(tmp_path, hang=True)
+    launch = _run_launch(tmp_path)
+    command = runtime.run_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
+
+    async def run():
+        process = await proc_tree.spawn(*command, cwd=tmp_path, env=launch.environment(),
+                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE)
+        channel = runtime.run_channel(process, launch=launch, cwd=tmp_path)
+        await channel.start("test")
+        ready = asyncio.Event()
+        results = []
+
+        async def read():
+            async for event in channel.events():
+                if event["type"] == "system":
+                    ready.set()
+                if event["type"] == "result":
+                    results.append(event)
+
+        task = asyncio.create_task(read())
+        try:
+            await asyncio.wait_for(ready.wait(), 3)
+            if cancel:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(task, 0.05)
+            assert process.returncode is not None and not results
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await proc_tree.end(process, label="test DSH")
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("version,code,help_code", [("0.2.1-rc.2", 0, 0), ("0.2.1-rc.3", 0, 0),
+                                                  ("unreadable", 0, 0), ("0.2.1-rc.2", 3, 0),
+                                                  ("0.2.1-rc.2", 0, 2)])
+def test_dsh_probe_is_isolated_and_pins_the_verified_version(tmp_path, monkeypatch, version, code, help_code):
+    from fake_claude import fake_claude
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ambient-key-must-not-be-read")
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "operator"))
+    seen = tmp_path / "probe.jsonl"
+    executable = fake_claude(tmp_path / "dsh-probe", f'''
+import json, os, pathlib, sys
+assert not os.environ.get('DEEPSEEK_API_KEY')
+for name in ('HOME', 'DSH_HOME', 'DSH_AGENTS_HOME'):
+    assert not any(pathlib.Path(os.environ[name]).iterdir())
+with open({str(seen)!r}, 'a') as f:
+    f.write(json.dumps({{'argv': sys.argv[1:], 'home': os.environ['HOME']}}) + '\\n')
+if sys.argv[1:] == ['--version']:
+    print({version!r})
+    sys.exit({code})
+assert sys.argv[1:] == ['--help']
+print('--profile --patch --json --session-id')
+sys.exit({help_code})
+''')
+    probe = runtimes.adapter("dsh").probe(executable)
+    supported = version == "0.2.1-rc.2" and code == 0 and help_code == 0
+    assert (probe.error is None) is supported
+    assert bool(probe.capabilities) is supported
+    if supported:
+        assert probe.version == version
+    calls = [json.loads(line) for line in seen.read_text().splitlines()]
+    assert all(not Path(call["home"]).exists() for call in calls)
+    if supported:
+        assert [call["argv"] for call in calls] == [["--version"], ["--help"]]
+
+
+def test_dsh_probe_missing_and_timeout_are_diagnostic(tmp_path, monkeypatch):
+    from looper.agents.runtimes import dsh
+
+    assert "not found" in runtimes.adapter("dsh").probe(str(tmp_path / "missing")).error
+    calls = []
+
+    def timeout(command, **kwargs):
+        calls.append(kwargs)
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(dsh.subprocess, "run", timeout)
+    result = runtimes.adapter("dsh").probe("dsh")
+    assert result.error and not result.capabilities
+    assert calls[0]["timeout"] == 10
+
+
+def test_installed_dsh_probe_and_patch_composition_without_boot(tmp_path):
+    """Dumping verifies composition only: it neither boots the runner nor certifies MCP/model startup."""
+    executable = shutil.which("dsh")
+    if executable is None:
+        pytest.skip("Installed DSH is required for composition validation")
+    runtime = runtimes.adapter("dsh")
+    probe = runtime.probe(executable)
+    if probe.version != "0.2.1-rc.2":
+        pytest.skip("Composition is verified only against DSH 0.2.1-rc.2")
+    assert probe.error is None
+    launch = _run_launch(tmp_path)
+    command = runtime.run_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
+    command = [*command[:command.index("--json")], "--dump-config"]
+    env = launch.environment()
+    env.pop("DEEPSEEK_API_KEY", None)
+    done = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10)
+    assert done.returncode == 0, done.stderr
+    assert "looper-bootstrap.mjs" in done.stdout and "headlessStartup" in done.stdout
+    assert "test-dsh-key" not in done.stdout and "test-run-token" not in done.stdout
+    patch = json.loads(Path(command[command.index("--patch") + 1]).read_text())
+    configs = {row["id"]: row["config"] for row in patch if "config" in row}
+    disabled = {row["id"] for row in patch if row.get("disabled")}
+    assert configs["agent-default-model"] == {"provider": "deepseek-official", "model": "deepseek-flash"}
+    assert configs["llm-deepseek"]["baseURL"] == PROVIDER.base_url
+    assert configs["tools"] == {"mode": "native"}
+    assert {"credentials", "llm-pi-ai", "session-log-deepseek", "plugin-package-inventory-deepseek",
+            "session-telemetry-otel", "web-search-deepseek", "agent-instructions"} <= disabled
+
+
+def test_official_loader_activates_only_the_inserted_required_runner(tmp_path):
+    """The official patch matcher cannot rename modules; its loader must select the final entry per id."""
+    executable = shutil.which("dsh")
+    if executable is None:
+        pytest.skip("Installed DSH is required for loader validation")
+    launch = _run_launch(tmp_path)
+    command = runtimes.adapter("dsh").run_command(executable, cwd=tmp_path,
+                                                  prompt_file=_run_prompt_file(tmp_path), launch=launch)
+    patch_file = Path(command[command.index("--patch") + 1])
+    (tmp_path / "original.mjs").write_text("export function apply() { throw new Error('original runner activated'); }")
+    (tmp_path / "replacement.mjs").write_text("export function apply(ctx, config) { ctx.seen.push(config); }")
+    done = _node(tmp_path, '''
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {realpathSync, readFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const require = createRequire(realpathSync(process.argv[2]));
+const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)));
+const {Context} = await load('cordis');
+const {default: Loader} = await load('cordis-plugin-loader');
+const {applyEntryPatches} = await load('cordis-plugin-include');
+const rows = JSON.parse(readFileSync(process.argv[3], 'utf8'));
+const patch = rows.at(-1);
+const source = {id: 'headless-runner', name: pathToFileURL(process.cwd() + '/original.mjs').href};
+const replacement = patch.insert[0];
+assert.equal(replacement.id, source.id);
+assert.deepEqual(replacement.inject, ['headlessStartup']);
+assert.deepEqual(replacement.config, {
+  task: {__jsExpr: 'ctx.headlessStartup.task'}, sessionId: {__jsExpr: 'ctx.headlessStartup.sessionId'},
+  json: {__jsExpr: 'ctx.headlessStartup.json'},
+});
+const warnings = [];
+const rowsComposed = applyEntryPatches([source], [patch], (...args) => warnings.push(args));
+assert.deepEqual(warnings, []);
+// Replace the two modules with local counting plugins; all id selection, dependency and config evaluation
+// still run through the actual installed loader, without starting MCP or an LLM.
+rowsComposed.at(-1).name = pathToFileURL(process.cwd() + '/replacement.mjs').href;
+const ctx = new Context();
+ctx.seen = [];
+ctx.reflect.provide('headlessStartup', {task: '-', sessionId: 'saved', json: true});
+await ctx.plugin(Loader, {baseUrl: pathToFileURL(process.cwd() + '/').href}).await();
+await ctx.loader.root.update(rowsComposed);
+await ctx.loader.await();
+await ctx.loader.store['headless-runner'].fiber.await();
+assert.equal(ctx.seen.length, 1);
+assert.deepEqual(ctx.seen[0], {task: '-', sessionId: 'saved', json: true});
+assert.equal(Object.keys(ctx.loader.store).length, 1);
+await ctx.fiber.dispose();
+''', executable, patch_file)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+@pytest.mark.parametrize("runtime_type", ["claude-code", "omp"])
+def test_existing_worker_runtime_still_accepts_success_before_nonzero_teardown(
+    tmp_path, monkeypatch, agent_db, runtime_type,
+):
+    """DSH's stricter exit validation is confined to its channel; existing teardown policy stays intact."""
+    from fake_claude import fake_claude
+    from unittest.mock import AsyncMock
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.tiers import worker
+
+    text = json.dumps({"status": "completed", "changed_files": {}, "summary": "legacy result"})
+    if runtime_type == "claude-code":
+        records = [{"type": "result", "subtype": "success", "is_error": False, "result": text}]
+    else:
+        records = [{"type": "session", "id": "legacy-session"},
+                   {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": text}],
+                                                           "stopReason": "stop", "usage": {}}},
+                   {"type": "agent_end", "messages": []}]
+    executable = fake_claude(tmp_path / "legacy-stand-in", f'''
+import json, sys
+sys.stdin.readline()
+for record in {records!r}:
+    print(json.dumps(record), flush=True)
+sys.exit(7)
+''')
+    launch = _run_launch(tmp_path)
+    runtime = runtimes.adapter(runtime_type)
+    settings = replace(launch.settings, profile=replace(launch.profile, runtime=replace(
+        launch.profile.runtime, type=runtime_type, executable=executable, capabilities=runtime.capabilities)))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
+    envelope = MessageEnvelope.create(source=planner_address("test"), target=worker_address("legacy"),
+                                      message_type=MessageType.WORK_ITEM,
+                                      payload={"task_id": "step", "instruction": "run", "context": {"work_dir": str(tmp_path)}})
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+    outcome = asyncio.run(asyncio.wait_for(pool._execute(envelope), 5))
+    assert outcome["status"] == "completed" and outcome["summary"] == "legacy result"

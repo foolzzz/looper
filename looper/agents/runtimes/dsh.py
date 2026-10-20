@@ -1,4 +1,4 @@
-"""DSH provider policy, private owner homes and literal prompts; the executable adapter is not registered yet."""
+"""DSH headless runs, provider policy, private owner homes and literal prompts."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
@@ -18,11 +19,11 @@ from uuid import uuid4
 from ... import child_env
 from ..run_usage import Usage
 from . import (
-    ApiProtocol, AuthKind, PromptBlock, ProviderBinding, RuntimeAdapter, RuntimeUnsupported, instructions,
-    runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ResidentSession, ResidentTransport, RunCost,
+    RuntimeAdapter, RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
-from .pricing import usage_event
+from .pricing import RunSpend, usage_event
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -41,6 +42,8 @@ MODEL_MAP = {
 }
 
 HOME_LAYOUT_ID = "dsh-home/v1"
+SUPPORTED_VERSION = "0.2.1-rc.2"
+_PROBE_TIMEOUT_SEC = 10.0
 # The private paths and provider overlay are authoritative, even over explicit settings/provider env.
 _DIRECTORY_VARS = frozenset({
     "HOME", *child_env.RUNTIMES,
@@ -63,7 +66,7 @@ class DshStream:
     Fields follow the installed ``dsh-headless/json-stream`` projection, not Session's durable log.
     ``final`` is lossless answer text, even on failure. It is never itself success evidence.
     The caller owns process cleanup, timeout and stderr draining; without ``process`` this parser
-    fails closed. The executable adapter/channel and resident integration are not registered yet.
+    fails closed. The executable channel supplies its process handle.
     Consumers must keep an empty result empty; ``answer_text``'s generic fallback would reuse progress.
     """
 
@@ -250,11 +253,138 @@ class DshStream:
 
 
 class DshRuntime(RuntimeAdapter):
-    """Prompt hooks for the future executable adapter; deliberately abstract and unregistered."""
+    """One process per run. Resident continuity is enabled only after its session implementation lands."""
 
     type = "dsh"
     label = "DSH"
+    default_executable = "dsh"
+    capabilities = frozenset({Capability.RUN, Capability.MCP})
+    protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
+    auth_kinds = frozenset({AuthKind.API_KEY})
+    isolation_id = HOME_LAYOUT_ID
+    provider_env_owned = frozenset({KEY_ENV, *_DIRECTORY_VARS})
+    run_input = False
+    resident_transport = ResidentTransport.PER_TURN
     can_replace_system_prompt = False
+
+    def capabilities_for(self, version: str | None) -> frozenset[Capability]:
+        return self.capabilities if version == SUPPORTED_VERSION else frozenset()
+
+    def probe(self, executable: str) -> Probe:
+        """Check only CLI availability, without booting plugins or making a model request."""
+        with tempfile.TemporaryDirectory(prefix="looper-dsh-probe-") as temporary:
+            root = Path(temporary)
+            paths = {name: str(root / name.lower()) for name in (
+                "HOME", "DSH_HOME", "DSH_AGENTS_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+                "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_DIRS", "XDG_DATA_DIRS")}
+            for path in paths.values():
+                Path(path).mkdir(mode=0o700)
+            env = {**_external_environment(child_env.inherited()), **paths}
+            version = None
+            for flag in ("--version", "--help"):
+                try:
+                    done = subprocess.run([executable, flag], capture_output=True, text=True, check=False,
+                                          env=env, cwd=root, timeout=_PROBE_TIMEOUT_SEC)
+                except FileNotFoundError:
+                    return Probe(None, frozenset(), f"{executable!r} was not found")
+                except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+                    return Probe(version, frozenset(), f"DSH {flag} did not run: {type(exc).__name__}")
+                output = (done.stdout or done.stderr).strip()
+                if done.returncode != 0 or not output:
+                    return Probe(version, frozenset(), f"DSH {flag} failed (exit code {done.returncode})")
+                if flag == "--version":
+                    first = output.splitlines()[0].strip()
+                    match = re.fullmatch(r"(?:(?:@deepseek-ai/)?dsh\s+)?v?(\d+\.\d+\.\d+(?:-[\w.]+)?)", first)
+                    version = match[1] if match else first[:200]
+                    if version != SUPPORTED_VERSION:
+                        return Probe(version, frozenset(), f"Unsupported DSH version; expected {SUPPORTED_VERSION}")
+            return Probe(version, self.capabilities)
+
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+        validate_provider(provider, model, effort)
+
+    def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
+        return bind_provider(provider, model, effort)
+
+    def isolation_args(self, cwd: str | Path) -> list[str]:
+        return []  # Isolation is the command's private paths and immutable patch.
+
+    def launch_args(self, launch: Launch) -> list[str]:
+        self.bind_provider(launch.profile.provider, launch.model, launch.effort)
+        return ["--profile", "headless"]
+
+    def environment(self, launch: Launch) -> dict[str, str]:
+        # The command's env wrapper supplies owner paths, as with OMP. Never cache mutable run state here.
+        return _launch_environment(launch)
+
+    def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        self.bind_provider(launch.profile.provider, launch.model, launch.effort)
+        if launch.read_only:
+            raise RuntimeUnsupported("DSH read-only runs require the execution guard")
+        local = Path(prompt_file).absolute().parent.parent
+        owner = str(Path(session_dir).absolute()) if session_dir is not None else uuid4().hex
+        files = bootstrap_files(executable, Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
+        # Resolve the required runner from an already-published immutable bundle. The final patch includes
+        # its absolute module URI and policy, so either change selects a new bundle under the same owner.
+        bootstrap = write_home(local, files, owner=owner)
+        runner = {**bootstrap_entry(bootstrap), "inject": ["headlessStartup"],
+                  "config": {name: {"__jsExpr": f"ctx.headlessStartup.{name}"}
+                             for name in ("task", "sessionId", "json")}}
+        # In rc.2 a patch's name is a match guard, not a replacement. Inserting the same stable id
+        # selects its last definition in EntryGroup.update; only this required runner is activated.
+        patch = [*_launch_patch(launch, cwd), {"insert": [runner]}]
+        home = write_home(local, {**files, "looper.yml": json.dumps(patch, ensure_ascii=False)}, owner=owner)
+        return ["env", *(f"{name}={value}" for name, value in home.paths.items()), executable,
+                *self.launch_args(launch), "--patch", str(home.config / "looper.yml"), "--json", "-"]
+
+    def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                         max_turns: int = 0) -> list[str]:
+        raise RuntimeUnsupported("DSH resident sessions are not implemented yet")
+
+    def resume_args(self, session_id: str) -> list[str]:
+        return ["--session-id", session_id]
+
+    def resident_session(self, label: str) -> ResidentSession:
+        raise RuntimeUnsupported("DSH resident sessions are not implemented yet")
+
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None) -> DshChannel:
+        return DshChannel(self, process, launch=launch)
+
+    async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
+        if stdin.is_closing():
+            raise RuntimeError("DSH reads one prompt per run; it cannot accept another turn")
+        stdin.write((text if text.endswith("\n") else text + "\n").encode("utf-8"))
+        await stdin.drain()
+        stdin.close()
+
+    def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
+        # Without a process handle parsing deliberately cannot certify a successful exit.
+        return DshStream(model=model).events(stdout)
+
+    def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
+        # Headless may report malformed tool input as a string; never let activity rendering kill the run.
+        if not isinstance(tool_input, dict):
+            return f"Tool: {tool_name}"
+        if tool_name in ("bash", "shell"):
+            return f"Running: {str(tool_input.get('command') or '')[:80]}"
+        if tool_name in ("read", "write", "edit", "glob", "grep"):
+            return f"{tool_name}: {str(tool_input.get('path') or tool_input.get('pattern') or '')[:80]}"
+        return f"Tool: {tool_name}"
+
+    def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
+        return RunCost(usage, self.cost_source(provider))
+
+    def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
+        from ..claude_cli import SOFT_CAP, budget_error
+
+        return budget_error(result_event) if (result_event or {}).get(SOFT_CAP) else None
+
+    def launch_record(self, launch: Launch) -> dict[str, Any]:
+        return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit",
+                                   "resident_session": "not implemented"},
+                "usage_complete": False, "cost_basis": "observed"}
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         return [PromptBlock("Default prompt", "runtime", None, "DSH's default prompt (not shown; append only)"),
@@ -265,6 +395,84 @@ class DshRuntime(RuntimeAdapter):
         # Native agent-instructions discovery is disabled by the managed overlay.
         return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
             cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+
+
+class DshChannel:
+    """A headless run publishes success only after EOF and exit; its owner can still timeout or cancel it."""
+
+    def __init__(self, runtime: DshRuntime, process: asyncio.subprocess.Process, *, launch: Launch) -> None:
+        self._runtime, self._process = runtime, process
+        self._stream = DshStream(model=launch.model)
+        self._spend = RunSpend(launch.profile.provider, launch.model, launch.max_budget_usd)
+
+    async def start(self, prompt: str) -> None:
+        assert self._process.stdin is not None
+        await self._runtime.write_turn(self._process.stdin, prompt)
+
+    async def send(self, text: str, *, uuid: str | None = None) -> None:
+        raise RuntimeError("DSH cannot accept a user turn while a run is active")
+
+    def end_input(self) -> None:
+        if self._process.stdin is not None and not self._process.stdin.is_closing():
+            self._process.stdin.close()
+
+    async def events(self) -> AsyncIterator[dict[str, Any]]:
+        from .. import proc_tree
+        from ..claude_cli import soft_cap_result
+        from .per_turn import stderr_tail
+
+        assert self._process.stdout is not None
+        stderr = asyncio.create_task(stderr_tail(self._process.stderr))
+        try:
+            async for event in self._stream.events(self._process.stdout, process=self._process):
+                self._spend.add(event)
+                if event.get("type") == "result":
+                    event["observed_cost_usd"] = self._spend.observed_cost_usd
+                yield event
+                if self._spend.cap is not None and (self._spend.exceeded or not self._spend.budget_verifiable):
+                    self._stream.cancel()
+                    await proc_tree.end(self._process, label="DSH budget stop")
+                    result = {**self._stream._result(self._process.returncode),
+                              **soft_cap_result(self._spend.observed_cost_usd or 0, self._spend.cap),
+                              "observed_cost_usd": self._spend.observed_cost_usd}
+                    if not self._spend.budget_verifiable:
+                        result["errors"] = ["Cannot verify the configured budget: DSH root step usage is missing or unpriced"]
+                    yield result
+                    return
+            await stderr
+        except BaseException:
+            self._stream.cancel()
+            await proc_tree.end(self._process, label="DSH stopped")
+            raise
+        finally:
+            stderr.cancel()
+            await asyncio.gather(stderr, return_exceptions=True)
+
+
+def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
+    """Explicit deployment policy overrides launcher/project environment defaults; no secrets are serialized."""
+    policy = validate_provider(launch.profile.provider, launch.model, launch.effort)
+    search = dict(launch.env).get("DSH_ALLOW_WEB_SEARCH", "false")
+    if search not in ("true", "false"):
+        raise RuntimeUnsupported("DSH_ALLOW_WEB_SEARCH must be true or false")
+    disabled = ("hmr", "settings", "config-editor", "plugin-manager", "tool-plugin-manager", "credentials",
+                "authorization", "deepseek-account", "llm-deepseek-account", "llm-pi-ai", "otel",
+                "session-log-deepseek", "plugin-package-inventory-deepseek", "session-title-llm", "agent-instructions")
+    config = {
+        "agent-default-model": {"provider": policy.route, "model": policy.model},
+        "llm-deepseek": {"apiKeyEnv": KEY_ENV, "baseURL": policy.base_url, "reasoningEffort": policy.effort,
+                         "models": [{"id": policy.model}]},
+        "tools": {"mode": "native"},
+        "sandbox-policy": {"mode": "danger-full-access", "workspaceRoot": str(Path(cwd).absolute())},
+        "approval": {"policy": "never"},
+        "skill-filesystem": {"includeDefaultRoots": False, "customSkillDirs": [], "watch": False},
+        "session-telemetry-otel": {"mode": "DISABLED"},
+        "tool-web": {"fetch": True, "search": search == "true", "searchTimeoutMs": 60000},
+    }
+    return [*({"id": name, "disabled": True} for name in disabled),
+            *({"id": name, "config": value} for name, value in config.items()),
+            {"id": "session-telemetry-otel", "disabled": True},
+            *({"id": name, "disabled": search != "true"} for name in ("web-search-deepseek", "web-deepseek-api"))]
 
 
 def runtime_notes() -> str:
@@ -303,7 +511,7 @@ def bootstrap_files(executable: str, looper_prompt: str, launch: Launch, *,
 
 
 def bootstrap_entry(home: DshHome) -> dict[str, str]:
-    """Patch only the required runner's module; retain its config and headlessStartup dependency."""
+    """The required runner's identity and module; the command restates its startup config and dependency."""
     return {"id": "headless-runner", "name": (home.config / "looper-bootstrap.mjs").as_uri()}
 
 
@@ -428,11 +636,15 @@ class DshHome:
 def environment(launch: Launch, home: DshHome) -> dict[str, str]:
     """Allowed inheritance, explicit settings, binding, then locked paths. The overlay must also explicitly set
     the validated ``baseURL`` and policy: dsh's launcher reads project .env independently of this environment."""
+    return {**_launch_environment(launch), **home.paths}
+
+
+def _launch_environment(launch: Launch) -> dict[str, str]:
     binding = bind_provider(launch.profile.provider, launch.model, launch.effort)
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
     mcp = mcp_config(launch.library, role=launch.role.value)
     return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
-            **(mcp.env if mcp else {}), **home.paths}
+            **(mcp.env if mcp else {})}
 
 
 def _private_dir(directory: Path, *, root: Path) -> None:
