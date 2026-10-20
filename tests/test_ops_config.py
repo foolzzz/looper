@@ -459,3 +459,47 @@ def test_manager_provider_preset_errors(monkeypatch: pytest.MonkeyPatch, argumen
 def test_manager_provider_list_includes_presets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(manager_config, "_registry", AsyncMock(return_value={"providers": []}))
     assert _provider_call({"action": "list"}) == {"providers": [], "presets": presets_view()}
+
+
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize(("base_url", "model", "unknown", "unpriced"), [
+    ("https://api.deepseek.com/other/path", "deepseek-typo", True, True),
+    ("https://api.deepseek.com", "deepseek-flash[1m]", False, False),
+    ("https://api.z.ai/api/anthropic", "glm-5.3-flashx[1m]", False, False),
+    ("https://api.deepseek.com.example.com", "deepseek-typo", False, True),
+    ("https://[invalid", "custom-model", False, True),
+    (None, "custom-model", False, True),
+])
+def test_manager_provider_model_warnings(
+    monkeypatch: pytest.MonkeyPatch, action: str, base_url: str | None, model: str, unknown: bool, unpriced: bool,
+) -> None:
+    provider = {
+        "provider_id": "prov-test", "name": "custom", "auth": "api_key", "oauth_runtime_type": None,
+        "protocols": ["anthropic-messages"], "base_url": base_url, "models": [{"name": model}],
+        "profile_count": 0, "builtin": False, "api_key": None, "env": [],
+    }
+    monkeypatch.setattr(manager_config, "_registry", AsyncMock(return_value={"providers": [provider]}))
+    for method in ("create_provider", "update_provider"):
+        monkeypatch.setattr(manager_config.profile_registry, method, AsyncMock(return_value={"provider": provider}))
+    answer = _provider_call({"action": action, **({"provider": "custom"} if action == "update" else {}),
+                             "name": "custom", "protocols": ["anthropic-messages"],
+                             "base_url": base_url, "models": [model]})
+    warnings = answer["warnings"]
+    unknown_warnings = [w for w in warnings if "known models" in w.lower()]
+    price_warnings = [w for w in warnings if "no full price" in w]
+    assert bool(unknown_warnings) is unknown
+    assert bool(price_warnings) is unpriced
+    if unknown:
+        assert model in unknown_warnings[0]
+        assert all(name in unknown_warnings[0] for name in ("deepseek-flash", "deepseek-v4-pro"))
+    if unpriced:
+        assert model in price_warnings[0] and "spend caps" in price_warnings[0]
+
+
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize("field", ["key", "api_key", "apiKey", "password", "credential"])
+def test_manager_provider_refuses_key_arguments(action: str, field: str) -> None:
+    with pytest.raises(OpError, match="Settings → LLM Providers") as error:
+        _provider_call({"action": action, field: SECRET})
+    assert error.value.code.value == "forbidden"
+    assert SECRET not in str(error.value)

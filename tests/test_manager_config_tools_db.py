@@ -287,14 +287,107 @@ def test_provider_list_includes_available_presets(monkeypatch: pytest.MonkeyPatc
     _run(test, monkeypatch)
 
 
-@pytest.mark.parametrize("name", ["api_key", "apiKey", "password", "credential"])
+def test_provider_update_changes_the_dashboard_and_preserves_its_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "deepseek", "auth": "api_key", "protocols": ["anthropic-messages"],
+            "base_url": "https://api.deepseek.com/anthropic", "models": [{"name": "deepseek-flash"}],
+            "api_key": SECRET, "env": [{"key": "API_TIMEOUT_MS", "value": "3000000"}]}))["provider"]
+        chat = _Chat(tmp_path)
+        (answer,) = await chat.say("更新 provider", ("looper_providers", {
+            "action": "update", "provider": "DEEPSEEK", "protocols": ["openai-chat", "openai-responses"],
+            "base_url": "https://api.deepseek.com", "models": ["deepseek-v4-pro"], "env": {}}))
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["provider"]["models"] == ["deepseek-v4-pro"]
+        assert answer["result"]["warnings"] == []
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+                      if p["provider_id"] == provider["provider_id"])
+        assert stored["protocols"] == ["openai-responses", "openai-chat"]
+        assert stored["base_url"] == "https://api.deepseek.com"
+        assert [m["name"] for m in stored["models"]] == ["deepseek-v4-pro"]
+        assert stored["env"] == []
+        assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
+                                   provider["provider_id"]) == SECRET
+        assert await _trail(pool) == [("looper_providers", "write", "ok")]
+        # Updating by id preserves omitted fields and permits clearing the URL.
+        (answer,) = await chat.say("清空 URL", ("looper_providers", {
+            "action": "update", "provider": provider["provider_id"], "base_url": None}))
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["provider"]["base_url"] is None
+        assert answer["result"]["provider"]["models"] == ["deepseek-v4-pro"]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["register", "update"])
+def test_provider_writes_warn_about_unknown_models_and_missing_prices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        arguments: dict[str, Any] = {"action": action, "models": ["deepseek-typo"]}
+        if action == "register":
+            arguments.update(preset="deepseek", api="anthropic-messages")
+        else:
+            await _ok("POST", "/api/providers", {
+                "name": "custom-name", "auth": "api_key", "protocols": ["anthropic-messages"],
+                "base_url": "https://api.deepseek.com/anthropic", "models": [{"name": "deepseek-flash"}]})
+            arguments["provider"] = "custom-name"
+        (answer,) = await _Chat(tmp_path).say("设置模型", ("looper_providers", arguments))
+        assert answer["status"] == "ok", answer
+        warnings = answer["result"]["warnings"]
+        assert any("deepseek-typo" in w and "no full price" in w for w in warnings)
+        assert any(all(name in w for name in ("deepseek-typo", "deepseek-flash", "deepseek-v4-pro"))
+                   and "known models" in w for w in warnings)
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+                      if p["provider_id"] == answer["result"]["provider"]["provider_id"])
+        assert [m["name"] for m in stored["models"]] == ["deepseek-typo"]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("fields", [
+    {}, {"protocols": []}, {"base_url": "ftp://example.com"}, {"env": {"OTHER_API_TOKEN": "x"}},
+    {"protocols": ["openai-chat"]}, {"models": ["deepseek-v4-pro"]},
+])
+def test_provider_update_refuses_with_the_dashboard_validation_and_rolls_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fields: dict[str, Any],
+) -> None:
+    async def test(pool: Any) -> None:
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "deepseek", "auth": "api_key", "protocols": ["anthropic-messages"],
+            "models": [{"name": "deepseek-flash"}]}))["provider"]
+        await _ok("POST", "/api/agent-profiles", {
+            "name": "fast", "runtime_id": "rt-claude-code", "provider_id": provider["provider_id"],
+            "model": "deepseek-flash"})
+        before = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "deepseek")
+        data = {**fields}
+        if "env" in data:
+            data["env"] = [{"key": k, "value": v} for k, v in data["env"].items()]
+        if "models" in data:
+            data["models"] = [{"name": m} for m in data["models"]]
+        status, dashboard = await _call("PUT", f"/api/providers/{provider['provider_id']}", data)
+        assert status == 400, dashboard
+        (answer,) = await _Chat(tmp_path).say("更新 provider", ("looper_providers", {
+            "action": "update", "provider": "deepseek", **fields}))
+        assert _error(answer) == "invalid", answer
+        assert answer["error"]["message"] == dashboard["error"]
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "deepseek")
+        assert stored == before
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize("name", ["api_key", "apiKey", "key", "password", "credential"])
 def test_no_tool_takes_a_key_and_none_is_kept_or_answered(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, action: str,
 ) -> None:
     async def test(pool: Any) -> None:
         chat = _Chat(tmp_path)
         (answer,) = await chat.say(f"登记 deepseek，key 是 {SECRET}", ("looper_providers", {
-            "action": "register", "name": "deepseek", "protocols": ["anthropic-messages"], name: SECRET}))
+            "action": action, "name": "deepseek", "protocols": ["anthropic-messages"], name: SECRET}))
         assert _error(answer) == "forbidden"
         assert "Settings → LLM Providers" in answer["error"]["message"] and SECRET not in json.dumps(answer)
         assert await pool.fetchval("SELECT count(*) FROM llm_providers WHERE name = 'deepseek'") == 0
