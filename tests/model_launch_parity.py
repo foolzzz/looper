@@ -14,9 +14,12 @@ defaults or expected values are invented here. The returned list is JSON
 data, suitable for freezing on an old checkout and comparing on a new one.
 Drivers must seed deterministic IDs and control their inherited environment.
 
-Only the supplied temporary root and explicitly requested session timestamps
-can be normalized. Config text, URL spelling, model/provider names, ordering,
-explicit nulls, environment removals, prices and caps remain significant.
+Only the supplied temporary root (including derived prompt addresses),
+explicitly requested session timestamps, materialized model identity metadata,
+internal catalog price number spelling
+and declared account-id mappings can be normalized. Config text, URL spelling,
+model/provider names, ordering, environment removals, model settings, price
+values and caps remain significant.
 Existing main fixtures are never read or refreshed by this module.
 """
 
@@ -25,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -47,6 +51,10 @@ LAUNCH_FIELDS = frozenset({"unset", "config", "prompt", "permissions", "isolatio
 STATE_FIELDS = frozenset({"session", "totals", "price", "cap"})
 FIELDS = frozenset({"argv", "env", "unset", "first_input"}) | LAUNCH_FIELDS | STATE_FIELDS
 TIME_PATHS = frozenset({("session", "created_at"), ("session", "updated_at")})
+CATALOG_FIELDS = ("name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
+                  "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts", "background_model")
+CATALOG_PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok",
+                        "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
 
 # The last old-schema main after both preset patches, before model splitting.
 # A new resolver must never manufacture the expected side of this contract.
@@ -855,6 +863,210 @@ async def _capture_legacy_claude(checkout: Path) -> dict[str, Any]:
     return {"source": source, "captures": captures}
 
 
+async def seed_conversion(pool: Any, conversion: Any) -> None:
+    """Seed an already initialized, disposable v3 schema from the pure converter.
+
+    No legacy DDL or upgrade entry point: the release gate can run before the
+    transactional upgrade is connected. Readback still uses production SQL.
+    """
+    from looper.agents.profile_registry import MODEL_FIELDS
+
+    for profile in conversion.profiles.values():
+        runtime = profile.runtime
+        await pool.execute(
+            "INSERT INTO agent_runtimes (id, name, type, executable, capabilities) VALUES ($1,$2,$3,$4,$5) "
+            "ON CONFLICT (id) DO UPDATE SET executable = EXCLUDED.executable, capabilities = EXCLUDED.capabilities",
+            runtime.id, runtime.name, runtime.type, runtime.executable,
+            sorted(capability.value for capability in runtime.capabilities))
+    for account in conversion.providers.values():
+        await pool.execute(
+            "INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, env, max_concurrency) "
+            "VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)", account.id, account.name, account.vendor_type.value,
+            account.auth.value, account.oauth_runtime_type,
+            json.dumps([{"key": key, "value": value} for key, value in account.env]), account.max_concurrency)
+        if account.api_key is not None:
+            await pool.execute("INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ($1,$2)",
+                               account.id, account.api_key)
+    for endpoint in conversion.endpoints.values():
+        await pool.execute(
+            "INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url, use_runtime_default) "
+            "VALUES ($1,$2,$3,$4)", endpoint.provider_id, endpoint.protocol.value, endpoint.base_url,
+            endpoint.use_runtime_default)
+    columns = ("id", "provider_id", "protocol", *MODEL_FIELDS, "catalog_order", "builtin")
+    for model in conversion.models.values():
+        values = [getattr(model, name) for name in columns]
+        await pool.execute(f"INSERT INTO llm_models ({', '.join(columns)}) "
+                           f"VALUES ({', '.join(f'${index}' for index in range(1, len(columns) + 1))})", *values)
+    for profile in conversion.profiles.values():
+        await pool.execute(
+            "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7)", profile.id, profile.name, profile.runtime.id, profile.model_id,
+            profile.effort, profile.agent_teams, profile.custom_prompt)
+    for (provider, name, protocol), (target_provider, model) in conversion.model_map.items():
+        await pool.execute(
+            "INSERT INTO llm_model_migration_map (legacy_provider_id, legacy_model, protocol, provider_id, model_id) "
+            "VALUES ($1,$2,$3,$4,$5)", provider, name, protocol.value, target_provider, model)
+
+
+async def capture_converted_tiers(
+    pool: Any, runtime: str, case: str, temporary_root: Path, *, rename_profile_after: int | None = None,
+    merge_provider: bool = False,
+) -> tuple[list[dict[str, Any]], Any]:
+    """Capture all roles from converted rows, never patching settings or adapters.
+
+    Inputs are the same synthetic scenarios used by the pinned legacy driver;
+    expected output is exclusively the frozen files. Every run is read back
+    from SQL, including resumed turns before their totals are overwritten.
+    """
+    import agent_launch_parity as tiers
+    from looper.agents import claude_cli
+    from looper.agents.profile_registry import RuntimeSpec
+    from looper.agents.registry_migration import convert
+    from looper.agents.runtimes import adapter
+    from looper.db import agent_sessions
+    from itertools import count
+
+    mode, scope, teams = None, "role", False
+    if runtime == "claude":
+        auth, url, background, teams, mode, scope = CLAUDE_CASES[case]
+        runtime_type, name, effort = "claude-code", "main-model[1m]", "high"
+        protocols = ["anthropic-messages"]
+        catalog = [{"name": name, "context_window": 1_000_000, "input_usd_per_mtok": 0.6,
+                    "output_usd_per_mtok": 2.2, "cache_read_usd_per_mtok": 0,
+                    "cache_write_usd_per_mtok": 1, "efforts": ["high", "low"], "background_model": background}]
+        account_env = [{"key": "API_TIMEOUT_MS", "value": "3000000"}]
+        budget = 0.5
+        # Match the legacy driver's parent: Claude's isolation settings include
+        # every ancestor, so nesting under pytest changes actual config bytes.
+        root_context = tempfile.TemporaryDirectory(prefix="looper-target-claude-", dir="/tmp")
+    else:
+        runtime_type = runtime
+        account_env = [{"key": "CAPTURE_SETTING", "value": "provider"}]
+        protocols = ["openai-responses"]
+        if runtime == "codex":
+            auth, url, effort, mode, explicit_home = CODEX_CASES[case]
+            name, catalog, budget = "capture-codex", [CODEX_CATALOG], 0.5
+            root_context = codex_capture_root()
+        elif runtime == "omp":
+            protocols, url, catalog, effort, mode = OMP_CASES[case]
+            auth, name, budget = "api_key", "capture-omp[1m]", 0.5
+            root_context = omp_capture_root()
+        elif runtime == "grok":
+            fallback, cost, effort, mode, explicit_home = GROK_CASES[case]
+            auth, url, name, catalog, budget = "oauth", "", "grok-4.7", [GROK_CATALOG], 0.005
+            root_context = grok_capture_root()
+        else:
+            raise ValueError(f"unsupported capture runtime: {runtime}")
+
+    with root_context as directory:
+        # The three content-addressed drivers lease stable lexical /tmp
+        # paths, as the old capture did. Resolving a /tmp symlink would change
+        # generated bytes and their hashes before root normalization can run.
+        root = Path(directory).resolve() if runtime == "claude" else Path(directory)
+        if runtime == "claude":
+            executable = ""
+            environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
+                           "CLAUDE_CONFIG_DIR": str(root / "login"),
+                           "ANTHROPIC_API_KEY": "sk-test-inherited-key",
+                           "ANTHROPIC_AUTH_TOKEN": "sk-test-inherited-token",
+                           "ANTHROPIC_BASE_URL": "https://inherited.example.test/",
+                           "ANTHROPIC_DEFAULT_HAIKU_MODEL": "inherited-side",
+                           "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
+            login = root / "login/.credentials.json"
+            login.parent.mkdir()
+            login.write_text('{"synthetic":true}\n')
+        elif runtime == "codex":
+            executable = codex_executable(root)
+            environment = codex_environment(root, explicit_home=explicit_home)
+        elif runtime == "omp":
+            executable, environment = omp_executable(root), omp_environment(root)
+        else:
+            executable = grok_executable(root, cost=cost, fallback=fallback)
+            environment = grok_environment(root, explicit_home=explicit_home)
+        spec = RuntimeSpec(f"rt-{runtime_type}", runtime_type, runtime_type, executable,
+                           adapter(runtime_type).capabilities)
+        account = {"id": "prov-capture", "name": "capture", "auth": auth,
+                   "oauth_runtime_type": runtime_type if auth == "oauth" else None,
+                   "protocols": protocols, "base_url": url, "models": catalog, "env": account_env,
+                   "api_key": "sk-test-capture" if auth == "api_key" else None}
+        accounts = [account]
+        if merge_provider:
+            # Two explicitly identified accounts with the same saved key,
+            # endpoint, catalog, name and env. The converter owns the mapping.
+            account["vendor_type"] = "glm-bigmodel"
+            accounts.append({**account, "id": "prov-canonical"})
+        conversion = convert([spec], accounts,
+                             [{"id": "profile-capture", "name": "capture", "runtime_id": spec.id,
+                               "provider_id": "prov-capture", "model": name, "effort": effort or None,
+                               "agent_teams": teams}])
+        await seed_conversion(pool, conversion)
+        await tiers.seed_projects(pool)
+        await pool.execute(
+            "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
+            "VALUES ('system', 'profile-capture', $1, $2::jsonb)", budget,
+            json.dumps([] if runtime == "claude" else [{"key": "CAPTURE_SETTING", "value": "settings"}]))
+        states: list[dict[str, Any]] = []
+
+        async def state(index: int) -> dict[str, Any]:
+            rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
+                                    "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+            if len(rows) != index + 1 or rows[-1]["status"] != "completed":
+                raise AssertionError(f"{runtime}/{case}: tier {index} did not persist a completed run")
+            resident = index < (4 if runtime in {"codex", "grok"} else 2)
+            owner = "manager" if index < (2 if runtime in {"codex", "grok"} else 1) else (
+                f"planner-{tiers.TASKS[tiers.PROJECT_A]}")
+            session = await agent_sessions.get_session(owner) if resident else {"session_id": rows[-1]["session_id"]}
+            result = {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+            if index == rename_profile_after:
+                await pool.execute(
+                    "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt) "
+                    "SELECT 'profile-renamed', 'renamed', runtime_id, model_id, effort, agent_teams, custom_prompt "
+                    "FROM agent_profiles WHERE id = 'profile-capture'")
+                await pool.execute("UPDATE agent_setting_layers SET profile_id = 'profile-renamed' "
+                                   "WHERE scope = 'system'")
+            return result
+
+        original_capture = tiers.capture
+
+        async def claude_exercise(*args: Any) -> Any:
+            result = await original_capture(*args)
+            # Claude's existing driver completes all roles before readback.
+            rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
+                                    "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+            if len(rows) != 4 or any(row["status"] != "completed" for row in rows):
+                raise AssertionError("Claude tiers did not persist four completed runs")
+            for index in range(4):
+                owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+                saved = await agent_sessions.get_session(owner) if index < 2 else {"session_id": rows[index]["session_id"]}
+                states.append({"session": saved, "totals": {key: rows[index][key] for key in CODEX_TOTALS}})
+            return result
+
+        ids = count(1)
+        cli = tiers._CLAUDE.replace(
+            "'total_cost_usd': 0,", "'total_cost_usd': 0.25, 'modelUsage': {{'main-model[1m]': "
+            "{{'inputTokens': 100, 'outputTokens': 40, 'cacheReadInputTokens': 5, 'cacheCreationInputTokens': 2}}}},")
+        with patch.dict(os.environ, environment, clear=True):
+            await tiers.seed_rest("unconfigured", root)
+            if mode is not None:
+                for role in ("manager", "planner", "worker", "reviewer"):
+                    if scope == "task" and role != "manager":
+                        await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
+                                           "VALUES ('role', $1, 'append')", role)
+                        await pool.execute("INSERT INTO task_system_prompt_modes VALUES ($1,$2,$3)",
+                                           tiers.TASKS[tiers.PROJECT_A], role, mode)
+                    else:
+                        await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
+                                           "VALUES ('role',$1,$2)", role, mode)
+            if runtime == "claude":
+                with patch.object(tiers, "_CLAUDE", cli), patch.object(tiers, "capture", claude_exercise), \
+                        patch.object(claude_cli, "uuid4", lambda: uuid.UUID(int=next(ids))):
+                    records = await capture_claude_tiers(root, "unconfigured", read_state=states.__getitem__)
+            else:
+                driver = {"codex": capture_codex_tiers, "omp": capture_omp_tiers, "grok": capture_grok_tiers}[runtime]
+                records = await driver(root, read_state=state)
+        return [normalize(record, root=root) for record in records], conversion
+
+
 def _fields(value: Mapping[str, Any], expected: frozenset[str]) -> None:
     if not isinstance(value, dict) or value.keys() != expected:
         actual = set(value) if isinstance(value, dict) else set()
@@ -891,7 +1103,7 @@ def _json_copy(value: Any) -> Any:
 
 def normalize(record: dict[str, Any], *, root: Path,
               time_paths: Iterable[tuple[str, ...]] = ()) -> dict[str, Any]:
-    """Return a detached contract, normalizing only root paths and opted-in times."""
+    """Normalize root paths, their derived prompt addresses and opted-in times."""
     _fields(record, FIELDS)
     result = _json_copy(record)
     for name in ("argv", "unset"):
@@ -942,23 +1154,85 @@ def normalize(record: dict[str, Any], *, root: Path,
             return replaced
         return value
 
-    return replace(result)
+    normalized = replace(result)
+    # Claude names prompt files by the raw text's hash. That text can name
+    # the temporary root, so root substitution also changes its content
+    # address. Validate the raw address before canonicalizing this one argv
+    # operand; retain the flag, directory and exact normalized prompt bytes.
+    # Pinned captures already contain <root> and cannot recover their old raw
+    # root. Like agent_launch_parity._normalized, compare the derived address
+    # rather than treating a random temporary directory as a behavior change.
+    for flag in ("--system-prompt-file", "--append-system-prompt-file"):
+        if flag not in result["argv"]:
+            continue
+        at = result["argv"].index(flag) + 1
+        if at >= len(result["argv"]):
+            raise ValueError("missing Claude prompt file operand")
+        path = normalized["argv"][at]
+        if not re.fullmatch(r"<root>/runtime/\.local/prompts/[0-9a-f]{64}\.md", path):
+            continue
+        raw_path = result["argv"][at]
+        if raw_path.startswith(root_text + "/"):
+            digest = hashlib.sha256(result["prompt"].encode("utf-8")).hexdigest()
+            if Path(raw_path).name != f"{digest}.md":
+                raise ValueError("Claude prompt file does not match its captured text's hash")
+        digest = hashlib.sha256(normalized["prompt"].encode("utf-8")).hexdigest()
+        normalized["argv"][at] = str(Path(path).with_name(f"{digest}.md"))
+    return normalized
 
 
 def assert_parity(expected: list[dict[str, Any]], actual: list[dict[str, Any]], *,
                   expected_root: Path, actual_root: Path,
-                  time_paths: Iterable[tuple[str, ...]] = ()) -> None:
+                  time_paths: Iterable[tuple[str, ...]] = (),
+                  provider_ids: Mapping[str, str] | None = None) -> None:
     """Compare every launch, with a field-level diff. Empty baselines are errors."""
     if not expected or not actual:
         raise ValueError("launch captures must be non-empty")
     if len(expected) != len(actual):
         raise AssertionError(f"launch count: expected {len(expected)}, actual {len(actual)}")
     paths = tuple(time_paths)
+    identities = dict(provider_ids or {})
+    if any(type(key) is not str or not key or type(value) is not str or not value
+           for key, value in identities.items()):
+        raise ValueError("provider_ids must map non-empty ids to declared canonical ids")
+
+    def comparable(record: dict[str, Any], root: Path) -> dict[str, Any]:
+        result = normalize(record, root=root, time_paths=paths)
+        # An open legacy catalog has no row. Conversion materializes the
+        # selected name with every setting unknown: only new model identity
+        # metadata (§6.3). Generated files and the exact selected name remain
+        # byte-for-byte inputs. A zero price or [] efforts is NOT unknown.
+        config = result["config"]
+        if isinstance(config, dict) and isinstance(config.get("model"), str) and config["model"]:
+            identity = {name: None for name in CATALOG_FIELDS}
+            identity["name"] = config.get("model")
+            for field in ("config", "price"):
+                metadata = result[field]
+                if isinstance(metadata, dict) and metadata.get("catalog") == [identity]:
+                    metadata["catalog"] = []
+        # These two catalogs are internal asdict(provider.catalog) snapshots,
+        # not runtime files/argv/env. SQL DOUBLE PRECISION reads legacy JSON
+        # prices 0/1 as 0.0/1.0. Normalize only their four price fields by value;
+        # generated config strings and every other field retain exact bytes.
+        for field in ("config", "price"):
+            metadata = result[field]
+            if isinstance(metadata, dict) and isinstance(metadata.get("catalog"), list):
+                for entry in metadata["catalog"]:
+                    if isinstance(entry, dict):
+                        for name in CATALOG_PRICE_FIELDS:
+                            value = entry.get(name)
+                            if type(value) is float and value.is_integer():
+                                entry[name] = int(value)
+        # An account merge changes saved ownership metadata, never strings in
+        # prompts, URLs, generated config, argv or environment variables.
+        session = result["session"]
+        if isinstance(session, dict) and isinstance(session.get("provider_id"), str):
+            session["provider_id"] = identities.get(session["provider_id"], session["provider_id"])
+        return result
+
     for index, (before, after) in enumerate(zip(expected, actual)):
-        left = json.dumps(normalize(before, root=expected_root, time_paths=paths),
-                          ensure_ascii=False, sort_keys=True, indent=2)
-        right = json.dumps(normalize(after, root=actual_root, time_paths=paths),
-                           ensure_ascii=False, sort_keys=True, indent=2)
+        left = json.dumps(comparable(before, expected_root), ensure_ascii=False, sort_keys=True, indent=2)
+        right = json.dumps(comparable(after, actual_root), ensure_ascii=False, sort_keys=True, indent=2)
         if left != right:
             diff = "\n".join(difflib.unified_diff(left.splitlines(), right.splitlines(),
                                                 fromfile="legacy", tofile="current", lineterm=""))
