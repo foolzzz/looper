@@ -276,6 +276,40 @@ def model_registry_contract(expected: dict[str, dict[str, Any]]) -> dict[str, di
     return result
 
 
+
+# Declared Planner contract delta between 252e736725c4 and 9dd4ec666d47.
+# Frozen from origin/main's _WAIT_RULES, not imported from the current prompt;
+# every other byte in the v2 captures remains an independent expected value.
+_PLANNER_WAIT_RULES = """\
+- Waits: when something outside the task must happen before some steps can
+  run (a pull request's author pushes fixes, CI finishes, another system's
+  job ends), a step may be a wait instead of a Worker that polls:
+  {"id": "w1", "kind": "wait", "topic": "...", "depends_on": ["s1"], "max_wait_seconds": 259200, "check": {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}, "every_seconds": 600}
+  It opens when the steps it depends on are done. Looper runs the check every
+  every_seconds (at least 300, default 600) with no turn of yours, and the
+  steps that depend on it start once it is ready; they read why. check:
+  github_pr ("ready_when": "head_changed", "checks_finished" or
+  "new_comments"). Without a check, give "not_before_seconds" (or
+  "not_before", an ISO time) and it ends then. Always set max_wait_seconds
+  (at most 604800): when it passes, the user is told and you get a [WAIT]
+  turn. Prefer a typed check. Never wait for what a step of this task does:
+  depend on that step. In [DECISION] and [CHAT], "waits": [{"id": "w1",
+  "action": "cancel", "resolution": "..."}] ends a wait now; it counts as done.
+"""
+
+
+def planner_wait_contract(expected: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Apply only main's declared wait-step contract addition to pinned Planner captures."""
+    boundary = "\n[DECISION]: decide what happens to a step after its Worker's or Reviewer's\n"
+    result = dict(expected)
+    for case, seen in expected.items():
+        if case.partition("@")[0] == "planner":
+            prompt = seen["system_prompt"]
+            assert prompt.count(boundary) == 1 and "- Waits:" not in prompt, case
+            result[case] = {**seen, "system_prompt": prompt.replace(boundary, _PLANNER_WAIT_RULES + boundary)}
+    return result
+
+
 def set_aside_agent_teams(captured: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The captures without agent teams, after checking each one but a Planner's had the flag and the variable and
     a Planner's had neither (the caller removed the variable from the server's environment, so a capture shows it)."""

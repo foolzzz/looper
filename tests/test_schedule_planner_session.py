@@ -882,3 +882,186 @@ def test_restart_after_reset_resumes_with_the_persisted_storage_label(
     assert gone in removed and kept not in removed
     assert (kept / "state").read_text() == "saved conversation"
     assert not gone.exists()
+
+
+def _dsh_planner_transport(tmp_path, monkeypatch):
+    """Real subprocess transport, independent of the separate native read-only guard card.
+
+    The stand-in never executes tools. This explicitly disables Launch's read-only requirement only
+    in these session tests; it does not qualify DSH's production Planner execution guard.
+    """
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from fake_claude import fake_claude
+    from looper.agents.agent_settings import Launch
+    from looper.agents.tiers import planner
+    from tests.test_dsh_runtime import _run_launch
+
+    launch = _run_launch(tmp_path, role="planner")
+    log = tmp_path / "planner-dsh-turns.jsonl"
+    executable = fake_claude(tmp_path / "planner-dsh", f'''
+import hashlib, json, os, pathlib, sys, uuid
+args = sys.argv[1:]
+text = sys.stdin.read()
+home = pathlib.Path(os.environ['DSH_HOME'])
+state = home / 'stand-in-state'
+saved = json.loads(state.read_text()) if state.exists() else None
+resume = args[args.index('--session-id') + 1] if '--session-id' in args else None
+patch_path = pathlib.Path(args[args.index('--patch') + 1])
+patch = json.loads(patch_path.read_text())
+model = next(p['config']['model'] for p in patch if p.get('id') == 'agent-default-model')
+bootstrap = (patch_path.parent / 'looper-bootstrap.mjs').read_text()
+with open({str(log)!r}, 'a') as output:
+    output.write(json.dumps({{'argv': args, 'text': text, 'home': str(home), 'patch': str(patch_path),
+                             'model': model, 'bootstrap': bootstrap,
+                             'secrets': {{k: v for k, v in os.environ.items() if k.startswith('LOOPER_DSH_MCP_SECRET_')}}}}) + '\\n')
+if resume and (not saved or resume != saved['id'] or os.getcwd() != saved['cwd']):
+    print(json.dumps({{'type': 'error', 'message': 'Unknown Session'}}), flush=True)
+    sys.exit(7)
+session = resume or ('planner-' + uuid.uuid4().hex)
+state.write_text(json.dumps({{'id': session, 'cwd': os.getcwd()}}))
+print(json.dumps({{'type': 'session', 'sessionId': session}}), flush=True)
+if text == 'fail after tool':
+    print(json.dumps({{'type': 'tool_call', 'callId': 'tool-1', 'tool': 'read', 'input': {{}}}}), flush=True)
+    sys.exit(9)
+print(json.dumps({{'type': 'status', 'phase': 'step_end', 'turn': 1, 'step': 1,
+                  'usage': {{'inputTokens': 10, 'outputTokens': 4, 'cacheReadTokens': 7, 'cacheWriteTokens': 2}}}}), flush=True)
+print(json.dumps({{'type': 'status', 'phase': 'turn_end', 'reason': {{'kind': 'completed'}}}}), flush=True)
+print(json.dumps({{'type': 'final', 'text': 'planner reply'}}), flush=True)
+''')
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(
+        launch.profile, runtime=replace(launch.profile.runtime, executable=executable))))
+    state = SimpleNamespace(launch=launch, log=log)
+
+    async def settings(*args, **kwargs):
+        return state.launch.settings
+
+    async def installed(*args, **kwargs):
+        return state.launch.library
+
+    monkeypatch.setattr(planner, "load_agent_settings", settings)
+    monkeypatch.setattr(planner, "load_installed", installed)
+    monkeypatch.setattr(planner, "load_settings", AsyncMock(return_value=planner.PlannerSettings(
+        planner.DEFAULT_SYSTEM_PROMPT, 10, 0, 0)))
+    monkeypatch.setattr(Launch, "read_only", property(lambda self: False))
+    return state
+
+
+def test_dsh_planner_owners_resume_with_new_prompt_token_and_model(tmp_path, monkeypatch, agent_db):
+    import json
+    from dataclasses import replace
+
+    from looper.agents.ops.service import server_config
+
+    state = _dsh_planner_transport(tmp_path, monkeypatch)
+
+    async def check():
+        a = PlannerAgent(task_id="dsh-a", runtime_root=tmp_path)
+        b = PlannerAgent(task_id="dsh-b", runtime_root=tmp_path)
+        a._plan = TaskPlan(plan_id="a", goal_id="g", requirement="first", work_dir=str(tmp_path))
+        b._plan = TaskPlan(plan_id="b", goal_id="g", requirement="second", work_dir=str(tmp_path))
+        try:
+            assert await a._turn("first A") == "planner reply"
+            first_id = a._plan.session_id
+            assert first_id and agent_db.store.sessions[a.agent_id]["session_id"] == first_id
+            assert await b._turn("first B") == "planner reply"
+            assert b._plan.session_id and b._plan.session_id != first_id
+            a._plan.requirement = "new overlay requirement"
+            state.launch = replace(state.launch, settings=replace(state.launch.settings, profile=replace(
+                state.launch.profile, model="deepseek-v4-pro")))
+            Path(state.launch.library.mcp_config).write_text(json.dumps({"mcpServers": {
+                "looper": server_config("http://127.0.0.1:19999", "rotated-planner-token"),
+            }}))
+            assert await a._turn("second A") == "planner reply"
+            assert a._plan.session_id == first_id
+            assert a._plan.session_totals.input_tokens == 20
+            assert a._plan.session_totals.output_tokens == 8
+            assert b._plan.session_totals.input_tokens == 10
+        finally:
+            await a._claude.stop()
+            await b._claude.stop()
+
+    asyncio.run(asyncio.wait_for(check(), 15))
+    turns = [json.loads(line) for line in state.log.read_text().splitlines()]
+    assert len(turns) == 3
+    first, other, second = turns
+    assert "--session-id" not in first["argv"] and "--session-id" not in other["argv"]
+    assert second["argv"][second["argv"].index("--session-id") + 1] == agent_db.store.sessions["planner-dsh-a"]["session_id"]
+    assert first["home"] == second["home"] != other["home"]
+    assert first["patch"] != second["patch"]
+    assert "new overlay requirement" in second["bootstrap"] and "new overlay requirement" not in first["bootstrap"]
+    assert first["model"] == "deepseek-flash" and second["model"] == "deepseek-v4-pro"
+    assert "rotated-planner-token" in second["secrets"].values()
+    assert "rotated-planner-token" not in first["secrets"].values()
+
+
+def test_dsh_schedule_claim_resumes_the_saved_owner_across_planners(tmp_path, monkeypatch, agent_db):
+    import json
+
+    from looper.db import schedules, tasks
+
+    state = _dsh_planner_transport(tmp_path, monkeypatch)
+    claim, save, mark = AsyncMock(), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(schedules, "claim_planner_session", claim)
+    monkeypatch.setattr(schedules, "save_planner_session", save)
+    monkeypatch.setattr(tasks, "set_continues_schedule_session", mark)
+
+    async def check():
+        agents = []
+        session = None
+        totals = {}
+        try:
+            for index in range(2):
+                task_id = f"scheduled-dsh-{index}"
+                agent = PlannerAgent(task_id=task_id, runtime_root=tmp_path)
+                agents.append(agent)
+                agent._scheduled, agent._schedule_id = True, "schedule-dsh"
+                agent._plan = TaskPlan(plan_id=task_id, goal_id="g", requirement=f"run {index}", work_dir=str(tmp_path))
+                claim.return_value = {"claimed": True, "session_id": session, "session_totals": totals,
+                                      "runtime_type": "dsh", "provider_id": state.launch.profile.provider.id,
+                                      "profile_id": state.launch.profile.id, "previous": None}
+                await agent._claim_schedule_session(agent._plan)
+                assert await agent._turn(agent._plan_message(agent._plan)) == "planner reply"
+                assert agent._claude.label == "planner-schedule-schedule-dsh"
+                if session:
+                    assert agent._plan.session_id == session
+                session, totals = agent._plan.session_id, agent._plan.session_totals.to_dict()
+                assert save.await_args.args[1] == session
+                await agent._claude.stop()
+        finally:
+            for agent in agents:
+                await agent._claude.stop()
+
+    asyncio.run(asyncio.wait_for(check(), 15))
+    turns = [json.loads(line) for line in state.log.read_text().splitlines()]
+    assert len(turns) == 2 and turns[0]["home"] == turns[1]["home"]
+    assert "--session-id" not in turns[0]["argv"] and "--session-id" in turns[1]["argv"]
+    assert "这是这个定时任务的一次新运行" in turns[1]["text"]
+    assert any(call.args == ("scheduled-dsh-1", True) for call in mark.await_args_list)
+
+
+def test_dsh_planner_does_not_replay_a_turn_that_opened_then_failed(tmp_path, monkeypatch, agent_db):
+    import json
+
+    from looper.agents.tiers.planner import PlannerTurnError
+
+    state = _dsh_planner_transport(tmp_path, monkeypatch)
+
+    async def check():
+        agent = PlannerAgent(task_id="dsh-failure", runtime_root=tmp_path)
+        agent._plan = TaskPlan(plan_id="p", goal_id="g", requirement="do it", work_dir=str(tmp_path))
+        try:
+            assert await agent._turn("first") == "planner reply"
+            with pytest.raises(PlannerTurnError):
+                await agent._turn("fail after tool")
+            # A distinct subsequent request can use the owner's ordinary recovery path.
+            assert await agent._turn("new request") == "planner reply"
+        finally:
+            await agent._claude.stop()
+
+    asyncio.run(asyncio.wait_for(check(), 15))
+    turns = [json.loads(line) for line in state.log.read_text().splitlines()]
+    assert [turn["text"] for turn in turns] == ["first", "fail after tool", "new request"]
+    assert len({turn["home"] for turn in turns}) == 1

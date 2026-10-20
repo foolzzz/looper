@@ -12,7 +12,7 @@ from looper.agents.profile_registry import (
 )
 from looper.agents.registry_migration import LEGACY_RULES, MigrationBlocked, convert
 from looper.agents.runtimes import ApiProtocol as P, AuthKind, VendorType
-from looper.agents.runtimes import codex, omp
+from looper.agents.runtimes import codex, dsh, omp, pi
 
 
 def provider(**changes):
@@ -27,7 +27,7 @@ def profile(runtime="omp", **changes):
             "agent_teams": runtime == "claude-code", "custom_prompt": "instructions", **changes}
 
 
-RUNTIMES = [RuntimeSpec(f"rt-{name}", name, name) for name in ("omp", "claude-code", "codex", "grok")]
+RUNTIMES = [RuntimeSpec(f"rt-{name}", name, name) for name in ("omp", "claude-code", "codex", "grok", "pi", "dsh")]
 
 
 def launch_for(provider, model, runtime):
@@ -695,3 +695,81 @@ def test_merged_profiles_keep_real_legacy_binding_and_generated_config(runtime, 
         assert omp.models_yml(old_launch) == omp.models_yml(new_launch)
     elif runtime == "codex":
         assert codex.config_toml(old_launch) == codex.config_toml(new_launch)
+
+
+@pytest.mark.parametrize("runtime,protocol,model,effort", [
+    ("pi", P.OPENAI_RESPONSES, "Exact.Model[1m]", "xhigh"),
+    ("pi", P.OPENAI_CHAT, "Exact.Model[1m]", "low"),
+    ("dsh", P.ANTHROPIC_MESSAGES, "deepseek-flash[1m]", "max"),
+])
+def test_new_runtime_explicit_bindings_preserve_exact_model_effort_and_metadata(runtime, protocol, model, effort):
+    from looper.agents.registry_migration import plan, snapshot
+
+    catalog = [{"name": model, "context_window": 1_000_000, "efforts": [effort],
+                "input_usd_per_mtok": 0, "output_usd_per_mtok": 2}]
+    row = profile(runtime, model=model, effort=effort)
+    old = snapshot(RUNTIMES, [provider(protocols=[protocol], models=catalog, api_key="test-key")], [row])
+    assert old.bindings
+    result = plan(old)
+    assert result.applicable
+    assert result.report["binding_mismatches"] == result.report["pricing_mismatches"] == 0
+    target = result.conversion
+    saved = target.profiles[row["id"]]
+    selected = target.models[saved.model_id]
+    assert (saved.effort, selected.name, selected.protocol, selected.context_window, selected.efforts) == (
+        effort, model, protocol, 1_000_000, (effort,))
+    assert target.endpoints[(selected.provider_id, protocol)].base_url == "https://example.invalid/v1"
+
+
+def test_pi_legacy_priority_and_generated_config_are_independent_of_conversion_rules():
+    from looper.agents.registry_migration import plan, snapshot
+
+    assert LEGACY_RULES.protocol_priority["pi"] == tuple(p for p, _ in pi.API_NAMES)
+    account = provider(protocols=[P.OPENAI_CHAT, P.OPENAI_RESPONSES], api_key="test-key")
+    result = run(account, [profile("pi")])
+    assert result.models[result.profiles["agent-test"].model_id].protocol is P.OPENAI_RESPONSES
+    rules = replace(LEGACY_RULES, protocol_priority={**LEGACY_RULES.protocol_priority,
+                    "pi": (P.OPENAI_CHAT, P.OPENAI_RESPONSES)})
+    comparison = plan(snapshot(RUNTIMES, [account], [profile("pi")], rules=rules))
+    assert not comparison.applicable
+    assert comparison.report["binding_mismatches"] == 1
+
+
+def test_dsh_omitted_url_preserves_its_own_default_and_cross_runtime_conflicts_block():
+    from looper.agents.registry_migration import plan, snapshot
+
+    account = provider(protocols=[P.ANTHROPIC_MESSAGES], base_url="", api_key="test-key")
+    row = profile("dsh", model="deepseek-flash", effort="max")
+    converted = run(account, [row])
+    assert converted.default_urls[("prov-test", P.ANTHROPIC_MESSAGES)] == dsh.DEFAULT_BASE_URL
+    assert converted.endpoints[("prov-test", P.ANTHROPIC_MESSAGES)].use_runtime_default
+    assert plan(snapshot(RUNTIMES, [account], [row])).applicable
+    with pytest.raises(MigrationBlocked, match="default_endpoint_conflict"):
+        run(account, [row, profile("claude-code", id="agent-claude", model="deepseek-flash")])
+
+
+def test_pi_omitted_endpoint_blocks_without_changing_existing_runtime_defaults():
+    with pytest.raises(MigrationBlocked, match="unknown_default_endpoint"):
+        run(provider(protocols=[P.OPENAI_RESPONSES], base_url=""), [profile("pi")])
+    assert run(provider(protocols=[P.OPENAI_RESPONSES], base_url=""), [profile("codex")]).profiles
+
+
+@pytest.mark.parametrize("runtime,model,effort", [("dsh", "deepseek-flash", "xhigh"),
+                                                  ("dsh", "unsupported", "high"),
+                                                  ("pi", "exact", "unsupported")])
+def test_new_runtime_invalid_model_or_effort_blocks_conversion(runtime, model, effort):
+    protocol = P.ANTHROPIC_MESSAGES if runtime == "dsh" else P.OPENAI_CHAT
+    with pytest.raises(MigrationBlocked):
+        run(provider(protocols=[protocol]), [profile(runtime, model=model, effort=effort)])
+
+
+def test_dsh_unused_chat_endpoint_keeps_the_proven_legacy_default():
+    from looper.agents.registry_migration import plan, snapshot
+
+    account = provider(protocols=[P.ANTHROPIC_MESSAGES, P.OPENAI_CHAT], base_url="", api_key="test-key")
+    row = profile("dsh", model="deepseek-flash")
+    result = plan(snapshot(RUNTIMES, [account], [row]))
+    assert result.applicable
+    converted = result.conversion
+    assert converted.default_urls[("prov-test", P.ANTHROPIC_MESSAGES)] == dsh.DEFAULT_BASE_URL
+    assert converted.default_urls[("prov-test", P.OPENAI_CHAT)] == "https://api.openai.com/v1"

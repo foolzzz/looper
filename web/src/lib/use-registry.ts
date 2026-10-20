@@ -44,7 +44,7 @@ const getSnapshot = () => snapshot;
 
 /** All mounted registry consumers share one load and one refresh per dashboard mutation. */
 export function useRegistry() {
-  const current = useSyncExternalStore(subscribe, getSnapshot);
+  const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   return { ...current, reload };
 }
 

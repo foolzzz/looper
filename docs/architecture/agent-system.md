@@ -818,12 +818,14 @@ adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
   write). Verified with Codex 0.162.0 through a local API-key provider, in
   a run and a resumed turn: the MCP tool ran, `README.md` was read, and
   writing `made.txt` failed with the working tree unchanged.
-- **`tools`** (OMP, Grok): the run starts with the tools that read and no
+- **`tools`** (OMP, Grok, Pi): the run starts with the tools that read and no
   shell or write tool: OMP `--tools read,glob,grep`, Grok
-  `--tools read_file,grep,list_dir`. Nothing is refused, so nothing is
+  `--tools read_file,grep,list_dir`, Pi
+  `--tools read,grep,find,ls,mcp__looper__*`. Nothing is refused, so nothing is
   recorded. The MCP tools stay (OMP 18.4.3 through the home's MCP plugin,
   verified with a stub server in a run and a resumed turn; Grok through
-  `use_tool`). Such a Planner cannot run `git diff`, tests or any other
+  `use_tool`; Pi through the packaged HTTP bridge, named `mcp__looper__*`).
+  Such a Planner cannot run `git diff`, tests or any other
   command, and OMP's web search and sub-agent tools are not available to it.
 - **`check`** (a runtime that can do neither; none ships now): the command is
   unchanged, and the Planner compares its task directory's git
@@ -990,8 +992,9 @@ Manager tools.
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
   are materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
-  `OmpRuntime` and `GrokRuntime` (`codex`, `omp`, `grok`, below) translate
-  them at launch; Codex and OMP keep the Manager's and a Planner's session
+  `OmpRuntime`, `GrokRuntime` and `PiRuntime` (`codex`, `omp`, `grok`, `pi`,
+  below) translate
+  them at launch; Codex, OMP and Pi keep the Manager's and a Planner's session
   with one process per turn (`runtimes/per_turn.py`), Grok with one process
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
   Capabilities:
@@ -1002,9 +1005,12 @@ Manager tools.
   `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
   `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
   `compaction_events`; Grok has `run`, `resident_session`, `resume`, `mcp`,
-  `compaction_events` and `cost_report`). Codex and OMP list `steer` when
+  `compaction_events` and `cost_report`; Pi has `run`, `resident_session`,
+  `resume`, `steer`, `read_tools`, `compaction_events` and `mcp` when the
+  probe accepts version 1.3.0 or newer and every required help flag, and none
+  otherwise. Pi's `mcp` is the Looper platform bridge only). Codex and OMP list `steer` when
   their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
-  Claude Code and Grok do not.
+  Claude Code and Grok do not. Pi's `steer` is in that probed set.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
@@ -1120,8 +1126,71 @@ Manager tools.
   runtime `omp` (`rt-omp`) when `omp` is on its PATH. When it starts,
   `read_only_copies` removes the OMP homes no running process names and the
   session directories (`codex/sessions/<agent>`, `omp/sessions/<agent>`,
-  `grok/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
+  `grok/sessions/<agent>`, `pi/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
   is not of that runtime.
+- **DSH** (`looper/agents/runtimes/dsh.py`, DeepSeek Harness
+  `@deepseek-ai/dsh` **0.2.1-rc.2**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
+  is available to Manager, Planner, Worker and Reviewer through the same Agent
+  Profiles and role/project/task overrides. Put the supported `dsh` on the
+  server's PATH, re-detect it in Settings → Agent Runtimes, then create an
+  Agent Profile selecting a saved `anthropic-messages` model from an API-key
+  provider with a matching endpoint.
+  Only `deepseek-flash`, `deepseek-flash[1m]`, `deepseek-v4-pro` and
+  `deepseek-v4-pro[1m]` are accepted; the `[1m]` suffix is removed on the wire,
+  after validating the saved model reference. Effort is `low`, `high`
+  or `max`, default `high`; `off`, `medium` and `xhigh` are rejected. OAuth
+  and providers without Messages are rejected. The default endpoint is
+  `https://api.deepseek.com/anthropic`; an explicit Messages-compatible
+  gateway is preserved. Other runtimes' defaults and profiles are unchanged.
+
+  DSH declares `run`, `resident_session`, `resume` and `mcp`. It uses headless
+  JSONL, one process per turn, with the complete user turn on stdin. Manager
+  and each Planner resume their own persisted Session; a Worker or Reviewer
+  has its own owner, and an ended session's room consult resumes a separate,
+  read-only snapshot. Each owner has private `HOME`, `DSH_HOME`,
+  `DSH_AGENTS_HOME` and XDG directories under the runtime root; no operator
+  home or login is imported. Configuration refreshes each turn without
+  changing the owner's Session root. Looper's prompt is appended literally
+  to DSH's built-in prompt; replace is unavailable and Prompt Preview explains
+  the effective append mode. There is no busy steer, autonomous-turn or
+  structured-output capability, no compaction event projection and no native
+  `max_turns` enforcement.
+
+  A required bootstrap waits for `dsh-mcp-client` to mount the existing
+  `looper mcp-server` stdio bridge before starting the headless runner. The
+  bridge's HTTP API URL is not an MCP HTTP endpoint. Missing bridge tools or
+  failed bootstrap stop the run before any model request. Planner and consult
+  launches apply an execution guard allowing only `read`, `glob`, `grep` and
+  the exact registered Looper platform tools; shell, file mutations, subagents
+  and external catalog MCP are denied or omitted. This is a tool guard, not
+  a host sandbox. Installed catalog skills are validated by the official skill
+  provider and copied into managed roots with their resources. Claude plugin
+  hooks, commands, agents, output styles and plugin-local MCP discovery are
+  omitted; external catalog MCP uses stdio or Streamable HTTP in writable
+  runs. Unsupported frontmatter, disabled model invocation, duplicate skills
+  and other omissions appear in `metadata.runtime_catalog`. Session upload,
+  telemetry and title requests are disabled; web search is off unless
+  `DSH_ALLOW_WEB_SEARCH=true` is explicitly set.
+
+  Root step usage is priced with the selected model's effective prices and shown
+  as **observed cost** (`cost_basis=observed`). Missing buckets stay unknown;
+  root observations do not establish the total bill. Auxiliary coverage
+  (compaction summaries, search, child Sessions and consults) remains unknown,
+  so `cost_usd` may be null and a soft cap covers only reported root spend.
+  There is no hard billing cap. See the
+  [bounded validation commands](../../evals/README.md#dsh-validation) for
+  safe preflight and the pending real-model acceptance. The CLI has no DSH
+  flags: PATH discovery and existing Profile selection suffice. Dashboard,
+  Telegram and Lark share the same Manager/runtime adapter; DSH channel checks
+  use stand-ins, with no real account sends. Existing task eval artifacts cover
+  the four task cases at two repetitions each. Manager acceptance remains
+  pending: existing real dialog artifacts have four passing samples with
+  continuous Manager Sessions and successful MCP reads/create/start calls.
+  The acceptance checker now allows the newly started Planner to await its
+  first Session, while retaining dsh/append checks for every role. Rechecking
+  those artifacts finds no evidence gaps; a fresh run remains blocked at
+  process-tree preflight. Explicit run-token rotation, a comparable append
+  baseline and complete auxiliary billing remain unverified.
 - **Grok** (`looper/agents/runtimes/grok.py`, xAI's `grok` CLI, verified
   against Grok 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md))
   runs headless `grok --prompt-file /dev/stdin --output-format
@@ -1181,6 +1250,104 @@ Manager tools.
   the provider. The login's state is whether its file is there (`stat`,
   never read), in the provider's view and in the `grok_login` self-check,
   skipped while no Agent Profile uses the login.
+- **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
+  verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
+  runs Manager, Planner, Worker and Reviewer. A Worker or Reviewer is
+  `pi -p --mode json`; a Worker that can steer drops `-p` and uses
+  `--mode rpc` (`pi_steer`), without OMP's `--no-ui`. Providers are API keys
+  only, speaking `openai-responses` or `openai-chat` (pi's
+  `openai-completions`). The profile selects a saved model by `model_id`,
+  which fixes its provider and protocol; the matching endpoint supplies the URL.
+  A missing key, a missing endpoint URL, OAuth, Anthropic, an unknown protocol,
+  or an unresolved model reference is refused before launch. The provider
+  name is not matched by substring, and the endpoint `base_url` is passed
+  through unchanged. Pi's `/login` and OAuth are not bound. Each process
+  runs with `HOME` set to a home of Looper's own, `pi/homes/<sha256>` (one
+  per set of generated settings, shared by its runs; directories 0700, the
+  files 0600), named on its command line
+  (`env HOME=... PI_CODING_AGENT_DIR=<home>/agent
+  PI_CODING_AGENT_SESSION_DIR=<session> pi ... --offline --no-approve
+  --no-context-files --no-extensions --no-mcp --no-skills
+  --no-prompt-templates --no-themes -e <packaged looper.ts> --provider looper
+  --model <id>`). Sessions stay outside the home, in
+  `pi/sessions/<owner>`. The probe is `--version` then `--help` in a
+  temporary home, agent directory and session directory, 10 seconds, and no
+  model. `models.json` holds only the chosen model: `input` `["text"]`, a
+  `contextWindow` only when the selected model has one, reasoning from the
+  model's efforts (empty efforts set reasoning false), and cost four
+  fields at 0 so pi's catalog prices are unused. The key is only
+  `LOOPER_PROVIDER_API_KEY`, and the file's `apiKey` is the interpolation
+  `$LOOPER_PROVIDER_API_KEY`. There is no `--api-key`. Responses sets
+  `compat.supportsStrictMode` so optional tool parameters stay optional and
+  the request sends `strict: false`; Chat Completions omit that compat.
+  Output limits and a context window the model omits stay pi's defaults.
+  A local pi 1.3 model-runtime readback, with no live model call, still
+  reported a positive context window and max tokens; those figures are the
+  defaults, not the model's capacity. `--thinking` is one of `off`,
+  `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and is omitted when
+  empty. Whether a model clamps that value is unchecked on a live model.
+  The environment starts from `child_env.inherited()` plus the explicit
+  bindings, drops other runtimes' homes and external `PI_*`, `LOOPER_*` and
+  `LOOPX_*` overrides, and sets `PI_OFFLINE=1`, `PI_TELEMETRY=0` and
+  `PI_SKIP_VERSION_CHECK=1`. Provider and role variables cannot override the
+  isolation. `settings.json` turns cache warming, analytics and telemetry
+  off, sets project trust to never, and leaves packages, extensions, skills,
+  prompts and themes empty. Its `shellCommandPrefix` unsets the platform and
+  bridge variables, the pi directories, pi's shell metadata, the other
+  runtimes' homes and the provider's variable names, so a child shell keeps
+  the private `HOME` and does not receive the run's credentials. The prefix
+  is checked by running it under `/bin/sh -c`. A nested `pi` was not
+  launched. `--no-context-files` stays on: Looper injects project
+  instructions itself (`AGENTS.md`, else `CLAUDE.md`, one file per
+  directory, `Delivery.INJECTED`, the existing 32 KiB truncation). Project
+  `.pi`, `SYSTEM.md`, skills, themes, prompt templates and catalog MCP
+  servers and plugins stay unloaded. `launch_record` writes
+  `runtime_catalog.skipped` for non-looper MCP servers, skills and plugins.
+  Knowledge still follows the existing index. The bridge is the packaged
+  `pi_extension/looper.ts`, loaded by pi's TypeScript loader. Before the
+  model it GETs `/api/agent/v1/tools` with the bearer token and registers
+  each tool as `mcp__looper__<name>`; `execute` POSTs
+  `/api/agent/v1/ops/<name>`. No proxy, no redirects, no automatic POST
+  retry. Timeouts are 120 seconds, and a room inbox wait uses
+  `max(120, wait_seconds + 20)`. Credentials come only from
+  `library.mcp_config`'s `mcpServers.looper.env` (`LOOPER_AGENT_URL`,
+  `LOOPER_AGENT_TOKEN`). A missing `looper` entry means no platform tools; a
+  partial entry fails before launch. An invalid URL binding makes the real
+  pi CLI exit non-zero (`Failed to load extension`) before a model call. A
+  representative rich schema (`$defs`, enum, required,
+  additionalProperties, nested) is preserved and accepted by pi. A census of
+  every production tool schema was not run. Tokens stay out of argv, the
+  prompt, the home files and the records. A Planner or a consult passes
+  `--tools read,grep,find,ls,mcp__looper__*`. A normal run keeps pi's
+  default read, bash, edit and write tools plus the bridge. A Reviewer is
+  left on that default. The allowlist is not an OS sandbox (`read_only` is
+  `tools`). Append is `--append-system-prompt` and replace is
+  `--system-prompt`, the same generated file, with runtime notes: the final
+  message is the reply, and platform tools use `mcp__looper__`. A Worker or
+  Reviewer outside a room is one `--no-session` process, its prompt on stdin,
+  which then closes. In a room the run gets its own `--session-dir`. The
+  Manager and a Planner run one JSON process per turn (`ResidentPi`) with
+  `--session-dir pi/sessions/<agent>` and, after the first turn, the exact
+  `--session <file>` of the unique match in that directory. `--resume`,
+  `--session-id` and `--continue` are unused. A missing, ambiguous, partial,
+  symlinked, other-owner or bad-header session starts no session and follows
+  the existing session-lost and handoff path. Usage counts each assistant
+  `message_end.usage`, an optional nested usage on a tool result, and a
+  successful compaction once. `input` is the uncached input; cache read and
+  cache write stay separate; output already includes reasoning. A resident
+  turn adds only this process's new usage. Looper prices that usage with the
+  the selected model's effective prices (`provider_price` for an API key). An unknown price stays
+  null, and a catalog cost of 0 leaves the price to Looper. The soft cap
+  stops the process tree when a usage event crosses it and leaves a request
+  already in flight to finish. Cache warming is off. A Worker steer uses
+  `PiChannel`: `start` returns after sending setup, and events wait for the
+  `get_state` and `set_steering_mode(one-at-a-time)` ACKs before the prompt.
+  A steer is accepted only on a queued ACK. Cancel and the soft cap use the
+  process tree. `looper serve` registers `pi` (`rt-pi`) when `pi` is on its
+  PATH, and `read_only_copies` reclaims pi homes no running process names.
+  Settings → Agent Runtimes and Agent Profiles show Pi, with no login help.
+  The CLI follows the registry. Telegram and Lark keep their protocols. What
+  has run, and what is still open, is in the pi runtime RFC.
 - **Runtimes** (`agent_runtimes`) are built in, never registered by hand: one
   per type found on the server's PATH (`rt-<type>`, named after its type;
   Claude Code's `rt-claude-code` comes with the schema and runs the server's
@@ -1246,7 +1413,7 @@ profile `claude-code/opus` (`BUILTIN_PROFILE`), which a role runs when nothing
 selects another. A profile is refused when it is created or changed if its
 runtime does not support the model's protocol, an OAuth provider is paired with
 another runtime type, the runtime cannot take that kind of provider yet
-(Claude Code and Codex take their own login and API keys, OMP API keys only), or the
+(Claude Code and Codex take their own login and API keys, OMP, Pi and DSH take API keys only), or the
 model has no matching endpoint; a profile whose model or background
 model has no full price is registered with a warning (provider-priced runs
 may have unknown cost and cannot rely on a spend cap), and every profile shows how its runs
@@ -1287,7 +1454,7 @@ resident process whose binding changed (provider, key, endpoint) is started
 again.
 
 **System prompt mode.** The mode is `append` (Looper's prompt is added to the runtime's default one) or `replace`
-(it takes the default prompt's place). On **every runtime** (Claude Code, Codex, Grok and OMP) it is a role's setting,
+(it takes the default prompt's place). On **every runtime** (Claude Code, Codex, Grok, OMP and Pi) it is a role's setting,
 `system_prompt_mode` on the role layer (`PUT /api/agent-settings/roles/<role>`; a null or empty value unsets it). The
 built-in values are `replace` for the Manager and the Planner and `append` for every other launch: Workers, Reviewers,
 the seats of Planner-defined roles, consults and a launch with no role (`agent_settings.BUILTIN_SYSTEM_PROMPT_MODE`). The
@@ -1298,7 +1465,7 @@ which wins over the built-in value; the task's `agents` view gives each role's e
 appends, and the Manager has no task level. Only a role layer takes it: the shared defaults, a project and a role in a
 project refuse it (400). An Agent Profile has no mode of its own. A runtime whose adapter cannot replace (the typed
 `can_replace_system_prompt` capability, exposed by `/api/registry` with `replace_system_prompt_refusal`) always gets
-`append`; today all four adapters can replace. `Launch.system_prompt_mode` is the role's value on any runtime (append with
+`append`; today all five adapters can replace. `Launch.system_prompt_mode` is the role's value on any runtime (append with
 no role). Configuration export and import carry the role layers' value; an older export's profile `system_prompt_mode`
 is accepted and ignored, with a note. The schema adds the layer column once, and while `agent_profiles.system_prompt_mode`
 still exists, sets the Worker's and the Reviewer's role layer to `replace` where their effective profile (the role layer's,
@@ -1312,6 +1479,7 @@ appended on Codex, Grok or OMP now replaces unless its role layer says `append`.
 | Codex | Generated home's `AGENTS.md` | Top-level `model_instructions_file` in `config.toml`, before any table, points to a content-addressed instructions file; the home's `AGENTS.md` is empty |
 | Grok | Generated home's `rules/looper.md` | `--agent` points to the home's `agent.md`, with `prompt_mode: full`; the rules file's body is empty |
 | OMP | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
+| Pi | `--append-system-prompt` | `--system-prompt`, using the same generated prompt file |
 
 Codex and Grok include their runtime notes with Looper's prompt in either
 mode. Replacement keeps the runtime's tools and project instruction loading;
@@ -3049,6 +3217,21 @@ role prompt as a brief: the expertise, the platform's conventions and quality
 bar, what the role owns and must not touch, how it hands off, and the checks
 it runs before it reports.
 
+### Wait steps
+
+A plan's `wait` step holds its dependents until a time or check is ready.
+The server loads the system wait limits at startup. `WaitService` checks
+due waits while their tasks are active; it stops and reaps in-flight checks before
+the agents and bus stop. A task that only waits has status `waiting`
+(group `in_progress`); a user gate still takes precedence as `waiting_user`.
+The task detail lists waits in plan order, including their check, timing,
+latest result and resolution. The dashboard's resume and cancel requests
+conditionally move only `waiting` rows to `ready` (outcome `resumed`) or
+`cancel_requested`, record activity and wake an existing Planner. A stopped
+task keeps that state for its restart. Once timed out or cancellation is
+requested, the Planner decides what happens next; user actions return 409.
+See the [wait-step RFC](rfcs/plan-wait-step-v0.zh-CN.md).
+
 ### User gates
 
 In a project with `user_gates` `on`, also when unset (the default), a task's
@@ -3254,20 +3437,23 @@ before.
   starts, sends the questions to the Planner (`no_session`). Looper resumes
   a fork of it (Claude
   Code `--resume <id> --fork-session`; Codex and OMP a copy of the session
-  the run kept; Grok a home of its own holding a copy of that one session
+  the run kept; Pi a copy of that session file, resumed with `--session`;
+  Grok a home of its own holding a copy of that one session
   from the run's home, resumed with `--fork-session`, and removed afterwards),
   read only (`Launch.consult`: Claude Code has only `Read`, `Glob` and `Grep`,
   allowed without prompts; Bash and writing tools are refused, and MCP tools
   have no allow rule in manual mode with no prompts; not verified on a real
   run yet. Codex has its read-only sandbox; OMP `--tools read,glob,grep`;
-  Grok `--tools read_file,grep,list_dir`), with the run's system prompt and
+  Grok `--tools read_file,grep,list_dir`; Pi
+  `--tools read,grep,find,ls,mcp__looper__*`), with the run's system prompt and
   `CONSULT_CONTRACT` in place of its contract and a `[CONSULT]` turn listing
   the questions (their bodies share 20,000 characters) and the seat's earlier
   consult answers. Claude Code, Codex and Grok run where the step ran. OMP's
   reading tools are not verified on a real run; it runs in a detached checkout
-  of the task directory's branch, removed afterwards. The checkout keeps writes
+  of the task directory's branch, removed afterwards. Pi uses that checkout too.
+  A live-model Pi consult was not run. The checkout keeps writes
   out of the task directory and `wrote_files` catches changes inside it, dropping
-  the answers. It is not a sandbox: OMP runs as the operator's user, so a write
+  the answers. It is not a sandbox: OMP and Pi run as the operator's user, so a write
   outside it (another path or the home directory) is neither prevented nor
   detected. The checkout and fork are removed even when preparing or running
   the consult fails. Claude Code ignores `fork_dir`: it keeps the fork in its
@@ -3319,12 +3505,14 @@ before.
   `rate_limited` (a new error code) or `invalid`. A run keeps at most 5 watches;
   they end with it. The Planner is held to the length and the task's total
   only.
-- **Kept sessions.** A Codex or OMP run in a room keeps its session, for the
+- **Kept sessions.** A Codex, OMP or Pi run in a room keeps its session, for the
   consults: Codex in a home of its own
   (`.local/codex/run-sessions/<task>/<run>`, given the run home's
   configuration as a resident session's is, without `--ephemeral`; the
   Codex login check looks at these homes too), OMP with `--session-dir
-  .local/omp/run-sessions/<task>/<run>` in place of `--no-session`. They go
+  .local/omp/run-sessions/<task>/<run>` in place of `--no-session`, Pi with
+  `--session-dir .local/pi/run-sessions/<task>/<run>` in place of
+  `--no-session`. They go
   when the task is planned anew or deleted, and when the server starts after
   it ended a week ago (`RUN_SESSIONS_KEPT_DAYS`). Claude Code keeps every
   run's session itself.
@@ -3867,7 +4055,7 @@ does not imply HTTP compatibility.
 | `/api/workspaces/check` | GET | What a new task in `?dir=` (else `?project_id=`'s directory) would run in, with `?mode=` and `?base=` as the create form has them: `mode` (`in_place` outside git), `requested_mode`, `default_mode`, `git` (`repository`, `branch`, `head`, `base_commit`; null outside git), `warnings` (`kind`, `text`, and `files` or `tasks`), `notes` (whether the directory has operator's notes, which files) and `notes_on` (whether the project gives them). 400 as `/api/tasks/create` |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing); `workspace_mode` (`worktree`, `in_place`) and `base` ([Task workspaces](#task-workspaces)). Answers `workspace`, the workspace check. 400 for a bad `workspace_mode`, a `base` without a worktree or one the repository does not have, a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `continues_schedule_session` (true only after the runtime resumed the schedule's claimed Planner session), `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces); no undo commands for a task in a worktree of its own); `task_workspace` (`workspace_dir`, `mode`, `base`, and `worktree`: `branch`, `base_commit`, `path`, `repository`, `links`, `state`, `result_commit`, `removed_at` and the `commands` that take the work over, null before its first start or in place: [Task workspaces](#task-workspaces)) |
+| `/api/tasks/:id` | GET | Task detail with steps and `waits` in plan order (each `{step, step_id, state, outcome, topic, check, every_seconds, opened_at, due_at, deadline_at, next_check_at, last_checked_at, checks, last_result, last_output, last_error, resolution, notice, closed_at, depends_on}`), its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `continues_schedule_session` (true only after the runtime resumed the schedule's claimed Planner session), `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`), `by_model` (one row per recorded model, null for an unrecorded model: `model`, `runs`, `running`, `unpriced_runs`, `interrupted_runs`, sums of `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, and `cost_usd`, null when none of its runs has a cost; costs add up to `cost_usd`), and `manager_by_model` (rows of the same shape for Manager turns recorded with the task's id (a message about the task) or whose tool calls all named that one task; a turn about several tasks or none is on no task; excluded from the task's `cost_usd`, `by_role`, `by_model` and the task's spend cap); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces); no undo commands for a task in a worktree of its own); `task_workspace` (`workspace_dir`, `mode`, `base`, and `worktree`: `branch`, `base_commit`, `path`, `repository`, `links`, `state`, `result_commit`, `removed_at` and the `commands` that take the work over, null before its first start or in place: [Task workspaces](#task-workspaces)) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again from its saved plan (`TASK_RESTART` `continue`), or, with `"start_over": true`, plan it anew, its steps, plan and Planner session deleted; 400 when `start_over` is not a boolean. It also starts a ready one, as before |
@@ -3922,6 +4110,9 @@ does not imply HTTP compatibility.
 | `/api/scheduler-settings` | GET/PUT | The scheduler's system settings: `{min_interval_seconds, run_timeout_seconds}`, each `{value, source, built_in, minimum, ...}` with `source` `setting`, `env` (the deprecated variable, for the minimum interval) or `built-in`; the first also has `gated_value`, the second `maximum`. PUT takes either or both as a whole number of seconds (the timeout at most 30 days), or `null` for the built-in; 400 with the reason for anything else, nothing changed. The configuration export carries the stored values as `settings.scheduler`, and the Manager's `looper_settings` has the action `scheduler` (the user confirms) |
 | `/api/knowledge-vault` | GET/PUT | The knowledge vault: `{configured, path, writable, rules_file, git, problem}`. PUT `{path, writable, rules_file}` (checked as [The knowledge vault](#the-knowledge-vault-the-operators-notes-read-and-written-through-looper) says; 400 with the reason), or `{path: null}` to turn it off |
 | `/api/gate-settings` | GET/PUT | Where the user gates of a task asked for on the dashboard or in the web chat go besides the task page: `{dashboard_target: {channel, chat} \| null, targets}`, `targets` the chats a channel's sender allowlist lets in (as a schedule's notify target), and `dashboard_target_problem` when the saved chat no longer is one (the gates then go to the task page only). PUT `{dashboard_target}`; 400 for a chat that is not one of them, or on a channel that is off ([User gates](#user-gates)) |
+| `/api/tasks/:id/waits/:step/resume` | POST | Ignore the body; move a `waiting` step to `ready`, outcome `resumed`, record activity and wake its Planner when running. Returns `{task_id, wait}`; 404 for an unknown task or wait, 409 for a completed/cancelled task, a non-waiting row or a concurrent move |
+| `/api/tasks/:id/waits/:step/cancel` | POST | Ignore the body; move a `waiting` step to `cancel_requested`, record activity and wake its Planner to decide what follows. Same response and refusal rules as resume; `timed_out` and `cancel_requested` explain that the Planner decides next |
+| `/api/wait-settings` | GET/PUT | `{max_wait_seconds, min_check_seconds}`, each `{value, default, min, max, source}` (`setting` or `built-in`). PUT one or both whole numbers of seconds, or `null` to restore the built-in; 400 for an invalid range or a minimum check interval above the maximum wait, with no changes stored |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |

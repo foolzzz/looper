@@ -24,7 +24,7 @@ from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
     operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
-    schedules, self_check, vault,
+    schedules, self_check, vault, wait_service,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -367,6 +367,8 @@ class AgentHTTPServer:
     _RE_TASK_GATE_MESSAGES = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
                                         r"/messages$")
     _RE_TASK_GATE_END = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/end$")
+    _RE_TASK_WAIT_ACTION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/waits/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
+                                      r"/(resume|cancel)$")
     _RE_TASK_WORKSPACE_DISCARD = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/workspaces/(\d{1,18})/discard$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
@@ -469,6 +471,8 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=False))
         elif (m := self._RE_TASK_GATE_END.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=True))
+        elif (m := self._RE_TASK_WAIT_ACTION.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: self._wait_action(m.group(1), m.group(2), m.group(3)))
         elif (m := self._RE_TASK_WORKSPACE_DISCARD.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._discard_workspace(m.group(1), int(m.group(2))))
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
@@ -694,6 +698,10 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, gate_service.gate_settings)
         elif path == "/api/gate-settings" and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: gate_service.update_gate_settings(projects.json_object(body)))
+        elif path == "/api/wait-settings" and method == "GET":
+            await self._answer(writer, HTTP_200, wait_service.settings_view)
+        elif path == "/api/wait-settings" and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: wait_service.update_settings(projects.json_object(body)))
         elif path == "/api/knowledge-vault" and method == "GET":
             await self._answer(writer, HTTP_200, vault.settings_view)
         elif path == "/api/knowledge-vault" and method == "PUT":
@@ -804,6 +812,11 @@ class AgentHTTPServer:
             task_id, label, projects.json_object(body) if body else {},
             has_planner=self._task_router.has_planner(task_id), bus=self._supervisor.bus,
             source=self._web_adapter._address, end=end)
+
+    async def _wait_action(self, task_id: str, label: str, action: str) -> dict[str, Any]:
+        request = wait_service.resume if action == "resume" else wait_service.cancel
+        return await request(task_id, label, has_planner=self._task_router.has_planner(task_id),
+                             bus=self._supervisor.bus, source=self._web_adapter._address)
 
     async def _discard_workspace(self, task_id: str, workspace_id: int) -> dict[str, Any]:
         """The user drops a step worktree a task that is not running keeps: its directory and branch go. The task's
@@ -1422,6 +1435,7 @@ class AgentHTTPServer:
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
             gates = await gate_service.gates_view(task_id) if raw else []
+            waits = await wait_service.waits_view(task_id) if raw else []
             task_workspace = await self._task_workspace(raw) if raw else None
             workspaces = await self._task_workspaces(task_id, raw.get("steps", []),
                                                      in_worktree=bool(task_workspace and task_workspace["worktree"]),
@@ -1479,6 +1493,9 @@ class AgentHTTPServer:
             # The user gates of its plan, in plan order: state, agenda, findings, how each closed, and whom each
             # waiting one waits for (gate_service.gate_view); their discussions are at .../gates/<step>/messages.
             "gates": gates,
+            # Wait steps in plan order, with their check, timing and latest result (wait_service.wait_view).
+            # Only waiting rows accept .../waits/<step>/resume or /cancel; the Planner settles moved rows.
+            "waits": waits,
             # Its workspace: the directory it names, how it runs there, and the worktree it runs in (its branch,
             # where it started, the commands that take the work over), null for none (task_workspaces).
             "task_workspace": task_workspace,

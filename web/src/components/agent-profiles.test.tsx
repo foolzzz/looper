@@ -2,10 +2,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RuntimesSection } from "@/components/runtime-cards";
 import { TaskAgentsSection } from "@/components/task-agents";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
 import { AgentProfileForm, AgentProfilesSection, AgentProfileSelect } from "@/components/agent-profiles";
-import { fetchPromptPreview, REGISTRY_CHANGED_EVENT, type AgentProfile, type Registry, type Model, type Provider, type TaskAgents } from "@/lib/api";
+import { fetchPromptPreview, REGISTRY_CHANGED_EVENT, type AgentProfile, type Registry, type Model, type Provider, type TaskAgents, type Runtime, type RuntimeType } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -38,6 +39,7 @@ const REGISTRY: Registry = {
     type, label: type === "stand-in" ? "Stand-in" : "Claude Code", default_executable: type,
     runtime_id: `rt-${type}`, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], capabilities: [], roles: ["worker"],
     auth_kinds: ["api_key", "oauth"], can_replace_system_prompt: type !== "stand-in",
+    supported_models: null,
     replace_system_prompt_refusal: type === "stand-in" ? REFUSAL : null,
   })),
   runtimes: ["claude-code", "codex", "stand-in"].map<Registry["runtimes"][number]>((type) => ({
@@ -62,13 +64,15 @@ describe("Agent Profiles", () => {
   let container: HTMLDivElement;
   let root: Root;
   let requests: { url: string; body: Record<string, unknown> }[];
+  let registry: Registry;
 
   beforeEach(() => {
     requests = [];
+    registry = structuredClone(REGISTRY);
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
-      const answer = url.endsWith("/registry") ? REGISTRY : url.endsWith("/status") ? { checks: [] }
+      const answer = url.endsWith("/registry") ? registry : url.endsWith("/status") ? { checks: [] }
         : { profile: PROFILE, warnings: [] };
       return new Response(JSON.stringify(answer), { status: 200 });
     }));
@@ -82,8 +86,8 @@ describe("Agent Profiles", () => {
     vi.unstubAllGlobals();
   });
 
-  const show = async (profile: AgentProfile | null = PROFILE, registry = REGISTRY) => {
-    await act(async () => root.render(<AgentProfileForm profile={profile} registry={registry} onDone={() => {}} />));
+  const show = async (profile: AgentProfile | null = PROFILE, data = registry) => {
+    await act(async () => root.render(<AgentProfileForm profile={profile} registry={data} onDone={() => {}} />));
   };
   const select = (label: string) => {
     const field = [...container.querySelectorAll("label")].find((item) => item.textContent === label);
@@ -181,6 +185,106 @@ describe("Agent Profiles", () => {
       field.value = "p"; field.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(change).toHaveBeenCalledExactlyOnceWith("p");
+  });
+
+  const supported = ["deepseek-flash", "deepseek-flash[1m]", "deepseek-v4-pro", "deepseek-v4-pro[1m]"];
+  const dsh = () => {
+    registry.runtime_types.push({
+      ...registry.runtime_types[0], type: "dsh", label: "DSH", runtime_id: "rt-dsh",
+      default_executable: "dsh", protocols: ["anthropic-messages"], supported_models: supported,
+      auth_kinds: ["api_key"], can_replace_system_prompt: false,
+      replace_system_prompt_refusal: "the DSH runtime cannot replace its default system prompt",
+    });
+    registry.runtimes.push({ ...registry.runtimes[0], type: "dsh", runtime_id: "rt-dsh", type_label: "DSH" });
+
+  };
+  const registeredModels = (names: string[], providerId = "provider", protocol: Model["protocol"] = "anthropic-messages") =>
+    names.map((name) => ({ ...model(`${providerId}-${name}`, protocol, providerId), name }));
+  const modelOptions = () => [...select("Model *").options].filter((o) => o.value).map((o) => o.value);
+
+  it("shows the DSH runtime card and pinned install command using the existing cards", async () => {
+    dsh();
+    await act(async () => root.render(<RuntimesSection />));
+    expect([...container.querySelectorAll("h3")].map((h) => h.textContent)).toContain("DSH CLI");
+    expect(container.textContent).toContain("npm install -g @deepseek-ai/dsh@0.2.1-rc.2");
+    expect(container.textContent).toContain("Claude Code CLI");
+    expect(container.textContent).toContain("Codex CLI");
+  });
+
+  it("pairs Messages API key providers by the server's exact supported models and saves [1m]", async () => {
+    dsh();
+    registry.models = registeredModels(["unrelated", ...supported]);
+    await show();
+    await choose("Runtime", "rt-dsh");
+    expect(modelOptions()).toEqual(supported.map((name) => `provider-${name}`));
+    expect(select("Model *").value).toBe("");
+    await choose("Model *", "provider-deepseek-v4-pro[1m]");
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(requests[0].body).toMatchObject({ runtime_id: "rt-dsh", model_id: "provider-deepseek-v4-pro[1m]", agent_teams: false });
+    expect(container.textContent).toContain("the DSH runtime cannot replace its default system prompt");
+  });
+
+  it.each(["chat", "oauth", "no intersection"])("offers no valid DSH pairing for %s providers", async (kind) => {
+    dsh();
+    const provider = registry.providers[0];
+    registry.models = registeredModels([kind === "no intersection" ? "deepseek-flash-extra" : supported[0]],
+      "provider", kind === "chat" ? "openai-chat" : "anthropic-messages");
+    if (kind === "oauth") Object.assign(provider, { auth: "oauth", oauth_runtime_type: "dsh" });
+    await show();
+    await choose("Runtime", "rt-dsh");
+    expect([...select("Provider").options].map((o) => o.value)).not.toContain("provider");
+    expect(select("Provider").value).toBe("");
+  });
+
+  it("requires a registered compatible DSH model even when the provider has suggestions", async () => {
+    dsh();
+    registry.providers[0].suggested_models = supported;
+    await show();
+    await choose("Runtime", "rt-dsh");
+    expect(select("Model *").tagName).toBe("SELECT");
+    expect(modelOptions()).toEqual([]);
+    expect(container.textContent).toContain("No compatible models");
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(requests).toEqual([]);
+    expect(container.querySelector('[role="alert"]')!.textContent).toContain("Choose a compatible model");
+  });
+
+  it("uses supported_models for any runtime and preserves unrestricted runtime catalogs including pi", async () => {
+    dsh();
+    registry.runtime_types.at(-1)!.supported_models = ["server-only-model"];
+    registry.models = registeredModels(["server-only-model", supported[0]]);
+    await show();
+    await choose("Runtime", "rt-dsh");
+    expect(modelOptions()).toEqual(["provider-server-only-model"]);
+    registry.runtime_types.push({ ...registry.runtime_types[0], type: "pi", label: "pi", runtime_id: "rt-pi", supported_models: null });
+    registry.runtimes.push({ ...registry.runtimes[0], type: "pi", runtime_id: "rt-pi" });
+    await show();
+    await choose("Runtime", "rt-pi");
+    expect(modelOptions()).toEqual(["provider-server-only-model", `provider-${supported[0]}`]);
+  });
+
+  it("filters DSH models by account without silently selecting another model", async () => {
+    dsh();
+    registry.models = [...registeredModels(["unrelated", supported[1]]), ...registeredModels([supported[2]], "second")];
+    registry.providers.push(provider("second"));
+    await show();
+    await choose("Runtime", "rt-dsh");
+    await choose("Model *", `provider-${supported[1]}`);
+    await choose("Provider", "second");
+    expect(modelOptions()).toEqual([`second-${supported[2]}`]);
+    expect(select("Model *").value).toBe("");
+    await choose("Model *", `second-${supported[2]}`);
+    await choose("Runtime", "rt-claude-code");
+    await choose("Runtime", "rt-dsh");
+    expect(select("Model *").value).toBe(`second-${supported[2]}`);
+  });
+
+  it("opens a saved DSH profile with its exact [1m] model selected", async () => {
+    dsh();
+    registry.models = registeredModels(supported);
+    await show({ ...PROFILE, runtime_id: "rt-dsh", runtime_type: "dsh", model_id: registry.models[3].model_id, model: registry.models[3], agent_teams: false });
+    expect(select("Runtime").value).toBe("rt-dsh");
+    expect(select("Model *").value).toBe(registry.models[3].model_id);
   });
 
   it.each([PROFILE, CODEX])("has no system prompt choice on $runtime_type, which is set per role", async (profile) => {
@@ -449,5 +553,131 @@ describe("Agent Profiles", () => {
   it("includes and encodes the optional project in preview requests", async () => {
     await fetchPromptPreview("p/1", "planner", "project /?");
     expect(fetch).toHaveBeenCalledWith("/api/agent-profiles/p%2F1/prompt-preview?role=planner&project_id=project+%2F%3F");
+  });
+});
+
+const PI_ROLES = ["manager", "planner", "worker", "reviewer"] as const;
+
+const PI_RUNTIME: Runtime = {
+  runtime_id: "rt-pi", name: "pi", type: "pi", type_label: "pi", executable: "", default_executable: "pi",
+  path: "/usr/local/bin/pi", protocols: ["openai-chat", "openai-responses"], version: "1.3.0",
+  capabilities: ["run", "resident_session", "resume"], roles: [...PI_ROLES],
+  probed_at: null, probe_error: null, builtin: true, profile_count: 1,
+};
+
+const PI_TYPE: RuntimeType = {
+  type: "pi", label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+  supported_models: null,
+  protocols: ["openai-chat", "openai-responses"], capabilities: ["run", "resident_session", "resume"],
+  roles: [...PI_ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null,
+};
+
+const PI_PROFILE: AgentProfile = {
+  ...PROFILE, profile_id: "pi-profile", name: "pi/default", model_id: "pi-model",
+  model: { model_id: "pi-model", name: "selected-model", protocol: "openai-responses", provider_id: "responses" },
+  agent_teams: false, runtime_id: "rt-pi", runtime_type: "pi", runtime_name: "pi",
+  provider: { ...PROFILE.provider, provider_id: "responses", name: "Responses" },
+  roles: [...PI_ROLES],
+};
+
+const PI_REGISTRY: Registry = {
+  ...REGISTRY,
+  runtime_types: [PI_TYPE],
+  runtimes: [PI_RUNTIME],
+  providers: [
+    provider("responses", { name: "Responses" }),
+    provider("chat", { name: "Chat" }),
+    provider("anthropic", { name: "Anthropic" }),
+    provider("claude-login", {
+      name: "Claude login", auth: "oauth",
+      oauth_runtime_type: "claude-code",
+    }),
+    provider("pi-login", {
+      name: "Pi login", auth: "oauth",
+      oauth_runtime_type: "pi",
+    }),
+  ],
+  models: [
+    { ...model("pi-model", "openai-responses", "responses"), name: "selected-model" },
+    model("chat-model", "openai-chat", "chat"), model("anthropic-model", "anthropic-messages", "anthropic"),
+    model("claude-oauth-model", "anthropic-messages", "claude-login"),
+    model("pi-oauth-model", "openai-responses", "pi-login"),
+  ],
+  profiles: [PI_PROFILE],
+};
+
+describe("pi Agent Profiles", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let requests: { url: string; body: Record<string, unknown> }[];
+
+  beforeEach(() => {
+    requests = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
+      const answer = url.endsWith("/registry") ? PI_REGISTRY : { profile: PI_PROFILE, warnings: [] };
+      return new Response(JSON.stringify(answer), { status: 200 });
+    }));
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  const select = (label: string) => {
+    const field = [...container.querySelectorAll("label")].find((item) => item.textContent === label);
+    expect(field, label).toBeTruthy();
+    return document.getElementById(field!.htmlFor) as HTMLSelectElement;
+  };
+  const choose = async (label: string, value: string) => {
+    await act(async () => {
+      const field = select(label);
+      field.value = value;
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  };
+
+  it("offers both compatible API-key providers and not OAuth or Anthropic", async () => {
+    await act(async () => root.render(<AgentProfileForm profile={PI_PROFILE} registry={PI_REGISTRY} onDone={() => {}} />));
+    const provider = select("Provider");
+    expect([...provider.querySelectorAll("option")].map((option) => option.value)).toEqual(["", "responses", "chat"]);
+    expect([...provider.options].every((option) => !option.disabled || option.value === "")).toBe(true);
+    await choose("Provider", "chat");
+    expect(select("Provider").value).toBe("chat");
+    await choose("Provider", "responses");
+    expect(select("Provider").value).toBe("responses");
+    expect(container.textContent).not.toMatch(/login \(OAuth\)|Pi login|Claude login|Anthropic/);
+    expect([...select("Runtime").querySelectorAll("option")].map((option) => option.textContent)).toContain("Pi CLI");
+  });
+
+  it("lists four roles and leaves the system prompt mode on the role", async () => {
+    await act(async () => root.render(<AgentProfilesSection />));
+    expect(container.textContent).toContain("Pi CLI · Responses · model selected-model");
+    expect(container.textContent).toContain("Can run Manager, Planner, Worker, Reviewer");
+    const role = select("Role");
+    expect([...role.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "Manager", "Planner", "Worker", "Reviewer",
+    ]);
+    const edit = container.querySelector('button[aria-label="Edit Agent Profile pi/default"]') as HTMLButtonElement;
+    expect(edit).toBeTruthy();
+    await act(async () => edit.click());
+    expect([...container.querySelectorAll("label")].some((label) => label.textContent === "System prompt")).toBe(false);
+    expect(container.querySelector('[data-testid="prompt-mode-per-role"]')!.textContent)
+      .toContain("set per role in Settings → Roles");
+    expect([...container.querySelectorAll("option")].map((option) => option.value)).not.toContain("append");
+    expect([...container.querySelectorAll("option")].map((option) => option.value)).not.toContain("replace");
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(requests).toHaveLength(1);
+    expect(requests[0].body).not.toHaveProperty("system_prompt_mode");
+    expect(requests[0].body).not.toHaveProperty("api_key");
+    expect(requests[0].body.model_id).toBe("pi-model");
+    expect(requests[0].body).not.toHaveProperty("provider_id");
+    expect(requests[0].body.runtime_id).toBe("rt-pi");
   });
 });

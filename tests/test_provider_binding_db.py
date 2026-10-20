@@ -8,7 +8,9 @@ the provider endpoints are never contacted.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -103,6 +105,51 @@ def _env_of(seen: dict[str, Any], *names: str) -> dict[str, str | None]:
 
 MAPPED = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
           "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL")
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_pi_bridge_reads_the_materialized_scoped_library_after_loading_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, role: str,
+) -> None:
+    from looper.agents.agent_settings import AgentType, Launch, load_agent_settings
+    from looper.agents.library import load_installed
+    from looper.agents.ops.planner import PlannerOps
+    from looper.agents.ops.service import ManagerOps
+    from tests.test_profile_registry_db import _runtime
+
+    async def _test(pool: Any) -> None:
+        runtime_id = await _runtime("pi")
+        # Exercise binding independently of Pi's capability rollout gate.
+        await pool.execute("UPDATE agent_runtimes SET capabilities = $1 WHERE id = $2",
+                           ["run", "resident_session", "resume", "mcp", "read_tools"], runtime_id)
+        provider = await _provider("pi-key", protocol="openai-responses",
+                                   base_url="https://provider.example.invalid/v1", models=[{"name": "selected"}])
+        model = await _model(provider, "selected", "openai-responses")
+        profile = (await _ok("POST", "/api/agent-profiles", {
+            "name": "pi-test", "runtime_id": runtime_id, "model_id": model["model_id"],
+        }))["profile"]["profile_id"]
+        await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile})
+        settings = await load_agent_settings(role)
+        assert settings.profile_error is None
+        library = await load_installed(tmp_path, role)
+        url = "http://127.0.0.1:19321"
+        if role == "manager":
+            token = "manager-scoped-token"
+            library = await ManagerOps(None, url=url, token=token).library_with_server(library, tmp_path)
+        else:
+            ops = PlannerOps(None, url=url)
+            token = ops.issue(await _task(tmp_path))
+            library = await ops.library_with_server(library, tmp_path, token)
+        launch = Launch(settings=settings, library=library, role=AgentType(role))
+        assert not {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN"} & dict(launch.env).keys()
+        environment = launch.environment()
+        assert environment["LOOPER_AGENT_URL"] == url
+        assert environment["LOOPER_AGENT_TOKEN"] == token
+        assert not {"LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN"} & environment.keys()
+        assert token not in json.dumps(launch.record())
+        assert url not in json.dumps(launch.record())
+
+    _run(_test, monkeypatch)
 
 
 # --- The binding ---
@@ -624,3 +671,381 @@ def test_resolved_claude_binding_matches_pinned_launches(case: str) -> None:
                 assert settings.replace(str(tmp_path), "<root>") == expected["config"]["settings"]
                 assert ("--system-prompt-file" in command) == (mode is SystemPromptMode.REPLACE)
                 assert "sk-test-capture" not in " ".join(command)
+
+# --- DSH subprocess failures and budget states, read back from PostgreSQL and the API ---
+
+
+def _usage_over_minimum_budget() -> dict[str, int]:
+    """Twelve times the stand-in step. Its observed cost is about $0.000101, over the smallest cap the API
+    accepts ($0.0001, four decimal places). The unscaled step costs about $0.000008 and cannot cross that cap."""
+    from tests.test_dsh_runtime import DSH_STEP_USAGE
+
+    return {key: value * 12 for key, value in DSH_STEP_USAGE.items()}
+
+
+async def _dsh_worker_profile(executable: str, *, key: str | None = KEY, budget: float | None = None) -> tuple[str, str]:
+    from tests.test_profile_registry_db import _runtime
+
+    runtime_id = await _runtime("dsh", executable=executable)
+    provider_id = await _provider("dsh-gateway", api_key=key)
+    model = await _model(provider_id, "deepseek-flash", "anthropic-messages")
+    profile = (await _ok("POST", "/api/agent-profiles", {
+        "name": "dsh-worker", "runtime_id": runtime_id, "model_id": model["model_id"],
+    }))["profile"]
+    assert profile["model"] == {
+        "model_id": model["model_id"], "name": "deepseek-flash",
+        "protocol": "anthropic-messages", "provider_id": provider_id,
+    }
+    assert profile["provider"]["provider_id"] == provider_id
+    profile_id = profile["profile_id"]
+    await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile_id, "run_budget_usd": budget})
+    return profile_id, provider_id
+
+
+def _dsh_worker_library(monkeypatch: pytest.MonkeyPatch, root: Path, *, broken: bool = False) -> None:
+    """Only replace MCP installation: profiles, role choices, records and events use the real database."""
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.service import server_config
+    from looper.agents.tiers import worker
+
+    source = root / "mcp.json"
+    bridge = server_config("http://127.0.0.1:19999", "disposable-worker-token")
+    if broken:
+        # No bridge is valid with room/vault off; a configured bridge without its run token must still fail.
+        bridge["env"].pop("LOOPER_AGENT_TOKEN")
+    source.write_text(json.dumps({"mcpServers": {"looper": bridge}}))
+
+    async def installed(*_args: Any, **_kwargs: Any) -> AgentLibrary:
+        return AgentLibrary(mcp_config=str(source), role="worker")
+
+    monkeypatch.setattr(worker, "load_installed", installed)
+
+
+@pytest.mark.parametrize("mode", ["no-final", "nonzero-final", "explicit-error"])
+def test_dsh_manager_failed_result_is_failed_in_the_database_and_never_a_successful_reply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
+) -> None:
+    from looper.agents.bus import MessageBus
+    from looper.agents.library import AgentLibrary
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.ops.service import server_config
+    from looper.agents.tiers import manager
+    from tests.test_dsh_runtime import _manager_failure_dsh
+
+    executable = _manager_failure_dsh(tmp_path, mode)
+    source = tmp_path / "manager-mcp.json"
+    source.write_text(json.dumps({"mcpServers": {
+        "looper": server_config("http://127.0.0.1:19999", "disposable-manager-token"),
+    }}))
+
+    async def installed(*_args: Any, **_kwargs: Any) -> AgentLibrary:
+        return AgentLibrary(mcp_config=str(source), role="manager")
+
+    monkeypatch.setattr(manager, "load_installed", installed)
+
+    async def _test(pool: Any) -> None:
+        profile_id, provider_id = await _dsh_worker_profile(executable)
+        await _ok("PUT", "/api/agent-settings/roles/manager", {"profile_id": profile_id})
+        task = await _task(tmp_path)
+        steward = manager.ManagerAgent(config=manager.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        steward._bus = MessageBus(tmp_path)
+        steward._clean_start = True
+        envelope = MessageEnvelope.create(source=channel_address("web"), target=MANAGER_ADDRESS,
+            message_type=MessageType.USER_MESSAGE, payload={"text": "read state"}, metadata={"task_id": task})
+        try:
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(steward._run_turn("read state", envelope), 8)
+        finally:
+            await steward._claude.stop()
+        row = await pool.fetchrow("SELECT id FROM llm_records WHERE task_id = $1 AND agent_id = 'manager'", task)
+        assert row is not None
+        record = (await _ok("GET", f"/api/llm-records/{row['id']}"))["record"]
+        events = (await _ok("GET", f"/api/llm-records/{row['id']}/events"))["events"]
+        assert record["status"] == "failed" and record["error"]
+        assert record["session_id"] == "failed-manager-session"
+        assert record["model"] == "deepseek-flash"
+        assert record["input_tokens"] == 10 and record["output_tokens"] == 4
+        assert record["cost_usd"] is None and record["cost_source"] == "provider_price"
+        assert record["metadata"]["profile"]["id"] == profile_id
+        assert record["metadata"]["profile"]["provider"]["id"] == provider_id
+        assert record["metadata"]["profile"]["runtime"]["type"] == "dsh"
+        result = next(item["event"] for item in events if item["event"]["type"] == "result")
+        assert result["is_error"] is True and result["subtype"] != "success"
+        assert KEY not in json.dumps([record, events], default=str)
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+@pytest.mark.parametrize("unknown", [False, True], ids=["observed-cap", "unknown-root-usage"])
+def test_dsh_resident_budget_failure_is_read_back_without_inventing_a_total_cost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, role: str, unknown: bool,
+) -> None:
+    from looper.agents.bus import MessageBus
+    from looper.agents.library import AgentLibrary
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.ops.service import server_config
+    from looper.agents.tiers import manager, planner
+    from tests.test_dsh_runtime import _headless_stand_in
+
+    # The API keeps at most 4 decimal places, so $0.0001 is the smallest cap. Scale the step until its
+    # observed cost is over that cap; the unscaled step costs about $0.000008.
+    executable = _headless_stand_in(tmp_path, usage=None if unknown else _usage_over_minimum_budget(), hang=True)
+    source = tmp_path / "resident-mcp.json"
+    source.write_text(json.dumps({"mcpServers": {
+        "looper": server_config("http://127.0.0.1:19999", "disposable-resident-token"),
+    }}))
+
+    async def installed(*_args: Any, **_kwargs: Any) -> AgentLibrary:
+        return AgentLibrary(mcp_config=str(source), role=role)
+
+    monkeypatch.setattr(manager if role == "manager" else planner, "load_installed", installed)
+
+    async def _test(pool: Any) -> None:
+        profile_id, provider_id = await _dsh_worker_profile(executable)
+        await _ok("PUT", f"/api/agent-settings/roles/{role}", {
+            "profile_id": profile_id, "run_budget_usd": 1 if unknown else 0.0001,
+        })
+        task = await _task(tmp_path)
+        bus = MessageBus(tmp_path)
+        if role == "manager":
+            agent = manager.ManagerAgent(config=manager.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+            agent._bus, agent._clean_start = bus, True
+            envelope = MessageEnvelope.create(source=channel_address("web"), target=MANAGER_ADDRESS,
+                message_type=MessageType.USER_MESSAGE, payload={"text": "read status"}, metadata={"task_id": task})
+            turn = agent._run_turn("read status", envelope)
+        else:
+            agent = planner.PlannerAgent(task_id=task, runtime_root=tmp_path)
+            agent._bus = bus
+            plan = agent._plan = planner.TaskPlan(plan_id="budget-plan", goal_id="", requirement="read status",
+                                                  work_dir=str(tmp_path))
+            turn = agent._run_turn(agent._plan_message(plan))
+        try:
+            with pytest.raises((RuntimeError, planner.PlannerTurnError)):
+                await asyncio.wait_for(turn, 8)
+        finally:
+            await agent._claude.stop()
+            await bus.shutdown()
+        row = await pool.fetchrow("SELECT id FROM llm_records WHERE task_id = $1", task)
+        assert row is not None
+        record = (await _ok("GET", f"/api/llm-records/{row['id']}"))["record"]
+        assert record["status"] == "failed" and "spend cap" in record["error"]
+        assert record["session_id"] == "stand-in-session" and record["model"] == "deepseek-flash"
+        assert record["cost_usd"] is None and record["cost_source"] == "provider_price"
+        assert record["metadata"]["profile"]["id"] == profile_id
+        assert record["metadata"]["profile"]["provider"]["id"] == provider_id
+        assert record["metadata"]["usage_complete"] is False
+        assert record["metadata"]["cost_basis"] == "observed"
+        assert record["input_tokens"] == (None if unknown else 120)
+        assert record["output_tokens"] == (None if unknown else 48)
+        if unknown:
+            assert "Cannot verify the configured budget" in record["error"]
+        pid = json.loads((tmp_path / "seen.json").read_text())["pid"]
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize(("missing", "reason"), [
+    ("executable", "installed executable"),
+    ("key", "has no API key"),
+    ("mcp", "LOOPER_AGENT_TOKEN"),
+])
+def test_dsh_worker_configuration_failure_is_readable_without_a_fake_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing: str, reason: str,
+) -> None:
+    from tests.test_dsh_runtime import _headless_stand_in
+
+    _dsh_worker_library(monkeypatch, tmp_path, broken=missing == "mcp")
+    executable = str(tmp_path / "missing-dsh") if missing == "executable" else _headless_stand_in(tmp_path)
+
+    async def _test(pool: Any) -> None:
+        await _dsh_worker_profile(executable, key=None if missing == "key" else KEY)
+        task = await _task(tmp_path)
+        outcome = await asyncio.wait_for(_work("unused-claude", task, tmp_path), 10)
+        assert outcome["status"] == "failed" and reason in outcome["error"]
+        activities = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = $1", task)
+        assert any(row["kind"] == "error" and reason in row["summary"] for row in activities)
+        assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE task_id = $1", task) == 0
+        assert not (tmp_path / "seen.json").exists()
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize("mode", ["success", "no-final", "cancel", "soft-cap", "unknown-cap", "unknown"])
+def test_dsh_worker_lifecycle_and_budget_states_survive_database_and_api_readback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
+) -> None:
+    from tests.test_dsh_runtime import DSH_STEP_USAGE, _dsh_step
+
+    _dsh_worker_library(monkeypatch, tmp_path)
+    usage = None if mode in ("unknown-cap", "unknown") else (
+        _usage_over_minimum_budget() if mode == "soft-cap" else DSH_STEP_USAGE)
+    events = [{"type": "session", "sessionId": "binding-session"}, _dsh_step(usage=usage)]
+    if mode != "no-final":
+        events += [{"type": "status", "phase": "turn_end", "reason": {"kind": "completed"}},
+                   {"type": "final", "text": REPORT}]
+    executable = fake_claude(tmp_path / "dsh-lifecycle", f'''
+import json, os, pathlib, sys, time
+sys.stdin.buffer.read()
+pathlib.Path({str(tmp_path / 'seen.json')!r}).write_text(json.dumps({{'pid': os.getpid()}}))
+for event in {events!r}:
+    print(json.dumps(event), flush=True)
+if {mode in ('cancel', 'soft-cap', 'unknown-cap')!r}:
+    time.sleep(60)
+''')
+
+    async def _test(pool: Any) -> None:
+        budget = 0.0001 if mode == "soft-cap" else 1 if mode == "unknown-cap" else None
+        profile_id, provider_id = await _dsh_worker_profile(executable, budget=budget)
+        task = await _task(tmp_path)
+        running = asyncio.create_task(_work("unused-claude", task, tmp_path))
+        try:
+            if mode == "cancel":
+                async def started() -> None:
+                    while not await pool.fetchval("SELECT count(*) FROM llm_record_events"):
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(started(), 5)
+                running.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await running
+            else:
+                outcome = await asyncio.wait_for(running, 10)
+                assert (outcome["status"] == "completed") is (mode in ("success", "unknown"))
+                if mode in ("soft-cap", "unknown-cap"):
+                    assert "spend cap" in outcome["error"]
+        finally:
+            if not running.done():
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+
+        row = await pool.fetchrow("SELECT * FROM llm_records WHERE task_id = $1", task)
+        assert row is not None
+        record = (await _ok("GET", f"/api/llm-records/{row['id']}"))["record"]
+        transcript = (await _ok("GET", f"/api/llm-records/{row['id']}/events"))["events"]
+        assert record["status"] == ("interrupted" if mode == "cancel" else
+                                     "completed" if mode in ("success", "unknown") else "failed")
+        assert record["session_id"] == "binding-session"
+        assert record["model"] == "deepseek-flash" and record["cost_source"] == "provider_price"
+        assert record["cost_usd"] is None  # DSH root observations never claim a complete bill.
+        assert record["finished_at"] is not None
+        metadata = record["metadata"]
+        assert metadata["profile"]["id"] == profile_id
+        assert metadata["profile"]["provider"]["id"] == provider_id
+        assert metadata["profile"]["runtime"]["type"] == "dsh"
+        assert metadata["usage_complete"] is False and metadata["cost_basis"] == "observed"
+        assert metadata["outcome"] == ("completed" if mode in ("success", "unknown") else "run_failed")
+        assert any(item["event"].get("subtype") == "init" for item in transcript)
+        if mode != "cancel":
+            result = next(item["event"] for item in transcript if item["event"]["type"] == "result")
+            assert result["is_error"] is (mode not in ("success", "unknown"))
+            if mode == "unknown-cap":
+                assert "Cannot verify the configured budget" in " ".join(result["errors"])
+            if usage is not None:
+                scaled = mode == "soft-cap"
+                assert record["input_tokens"] == (120 if scaled else 10)
+                assert record["output_tokens"] == (48 if scaled else 4)
+                assert record["cache_read_tokens"] == (84 if scaled else 7)
+                assert record["cache_creation_tokens"] == (24 if scaled else 2)
+                assert result["observed_cost_usd"] == pytest.approx(0.000101304 if scaled else 0.000008442)
+            else:
+                assert record["input_tokens"] is None and record["output_tokens"] is None
+        assert KEY not in json.dumps([record, transcript], default=str)
+        pid = json.loads((tmp_path / "seen.json").read_text())["pid"]
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_dsh_rejected_saved_session_is_replaced_before_any_turn_executes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, role: str,
+) -> None:
+    from looper.agents.bus import MessageBus
+    from looper.agents.library import AgentLibrary
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.ops.service import server_config
+    from looper.agents.tiers import manager, planner
+    from looper.db import agent_sessions
+    from tests.test_dsh_runtime import _resident_dsh_stand_in
+
+    executable = _resident_dsh_stand_in(tmp_path)
+    source = tmp_path / "restore-mcp.json"
+    source.write_text(json.dumps({"mcpServers": {
+        "looper": server_config("http://127.0.0.1:19999", "disposable-restore-token"),
+    }}))
+
+    async def installed(*_args: Any, **_kwargs: Any) -> AgentLibrary:
+        return AgentLibrary(mcp_config=str(source), role=role)
+
+    monkeypatch.setattr(manager if role == "manager" else planner, "load_installed", installed)
+
+    async def _test(pool: Any) -> None:
+        profile_id, provider_id = await _dsh_worker_profile(executable)
+        await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile_id})
+        task = await _task(tmp_path)
+        work_dir = tmp_path / "w"
+        work_dir.mkdir()
+        agent_id = "manager" if role == "manager" else f"planner-{task}"
+        await agent_sessions.save_session(agent_id, "not-a-session", {}, runtime_type="dsh",
+                                           provider_id=provider_id, profile_id=profile_id, clean_start=True)
+        saved = await agent_sessions.get_session(agent_id)
+        if role == "manager":
+            owner = manager.ManagerAgent(config=manager.ManagerConfig(work_dir=work_dir),
+                                          runtime_root=tmp_path / "runtime")
+            owner._bus = MessageBus(tmp_path / "runtime")
+            await owner._load_session_state()
+            assert owner._session_id == "not-a-session"
+            envelope = MessageEnvelope.create(source=channel_address("web"), target=MANAGER_ADDRESS,
+                message_type=MessageType.USER_MESSAGE, payload={"text": "read state"}, metadata={"task_id": task})
+            turn = owner._run_turn("read state", envelope)
+        else:
+            owner = planner.PlannerAgent(task_id=task, runtime_root=tmp_path / "runtime")
+            owner._plan = planner.TaskPlan(plan_id="restore-plan", goal_id="", requirement="read state",
+                work_dir=str(work_dir), session_id=saved["session_id"], session_runtime=saved["runtime_type"],
+                session_profile=saved["profile_id"], session_provider=saved["provider_id"])
+            turn = owner._run_turn("read state")
+        try:
+            assert "read state" in await asyncio.wait_for(turn, 12)
+            actual_command = list(owner._claude.command)
+        finally:
+            await owner._claude.stop()
+
+        rows = await pool.fetch("SELECT id FROM llm_records WHERE agent_id = $1 ORDER BY id", agent_id)
+        assert len(rows) == 2  # Exactly one rejected restore and one newly executed turn.
+        records = [(await _ok("GET", f"/api/llm-records/{row['id']}"))["record"] for row in rows]
+        transcripts = [(await _ok("GET", f"/api/llm-records/{row['id']}/events"))["events"] for row in rows]
+        first, second = records
+        assert first["status"] == "failed" and "could not be resumed" in first["error"]
+        assert first["session_id"] == "not-a-session"
+        assert not any(item["event"].get("subtype") == "init" or item["event"]["type"] == "assistant"
+                       for item in transcripts[0])
+        assert any(item["event"].get("event_type") == "error" for item in transcripts[0])
+        assert second["status"] == "completed"
+        new_session = second["session_id"]
+        assert new_session and new_session != "not-a-session"
+        assert any(item["event"].get("subtype") == "init" and item["event"].get("session_id") == new_session
+                   for item in transcripts[1])
+        saved = await agent_sessions.get_session(agent_id)
+        assert (saved["session_id"], saved["runtime_type"], saved["provider_id"], saved["profile_id"]) == \
+            (new_session, "dsh", provider_id, profile_id)
+        assert saved["session_totals"]["input_tokens"] == 10
+        for record in records:
+            assert record["metadata"]["profile"]["runtime"]["type"] == "dsh"
+            assert record["metadata"]["profile"]["provider"]["id"] == provider_id
+        home = Path(next(arg.partition("=")[2] for arg in actual_command if arg.startswith("DSH_HOME=")))
+        calls = [json.loads(line) for line in (home / "calls").read_text().splitlines()]
+        assert len(calls) == 2
+        assert calls[0]["args"][-3:] == ["--session-id", "not-a-session", "-"]
+        assert "--session-id" not in calls[1]["args"]
+        # The stand-in writes its store only after accepting a session: the rejected input had no execution.
+        store = json.loads((home / "opaque-test-store").read_text())
+        assert set(store) == {new_session}
+        assert len(store[new_session]["turns"]) == 1
+        assert "read state" in store[new_session]["turns"][0]
+        assert KEY not in json.dumps([records, transcripts], default=str)
+
+    _run(_test, monkeypatch)

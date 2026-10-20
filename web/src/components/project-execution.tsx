@@ -15,6 +15,7 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "workspace_links",
   "max_step_retries",
   "planner_roles",
+  "wait_commands",
   "role_text_max_chars",
   "user_gates",
   "gate_reminder_hours",
@@ -247,6 +248,22 @@ export function ProjectExecutionFields({
             When on, the project&apos;s Planners may define roles for their steps: an Agent Profile from the
             project&apos;s allowed list, a role prompt and a harness. A review role adds a review after the built-in
             Reviewer and never replaces it.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("wait_commands", "Wait commands")}
+          <select
+            id={`${idPrefix}-wait_commands`}
+            value={draft.wait_commands || "off"}
+            onChange={set("wait_commands")}
+            aria-describedby={`${idPrefix}-wait_commands-help`}
+            className={SELECT}
+          >
+            <option value="off">Off by default</option>
+            <option value="on">On</option>
+          </select>
+          <p id={`${idPrefix}-wait_commands-help`} className="text-xs text-muted-foreground">
+            Lets this project&apos;s Planners use a shell command as a wait&apos;s check. It runs as the server&apos;s user in the task&apos;s directory.
           </p>
         </div>
         <div className="space-y-1">

@@ -38,7 +38,7 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
 # ``interrupted`` instead).
 RECORD_FAILED = "failed"
 # Claude Code's file-editing tools, each naming one file; Codex's patches (``runtimes.codex``), naming each file
-# they change; and OMP's (``runtimes.omp.edited_paths``).
+# they change; Pi's write/edit tools name a path directly; OMP also has patches (``runtimes.omp.edited_paths``).
 FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", *OMP_EDIT_TOOLS})
 
 _BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE|GATE|VAULT) contract \(")
@@ -210,6 +210,20 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
     }
 
 
+def wait_metrics(detail: Mapping[str, Any]) -> dict[str, int]:
+    """Waits opened, their typed checks, directly dependent steps (once per step), and current timeouts."""
+    waits = detail.get("waits") or []
+    step_ids = {wait["step_id"] for wait in waits if wait.get("step_id")}
+    return {
+        "waits_opened": sum(1 for wait in waits if wait.get("opened_at") is not None),
+        "wait_github_checks": sum(1 for wait in waits if (wait.get("check") or {}).get("type") == "github_pr"),
+        "wait_command_checks": sum(1 for wait in waits if (wait.get("check") or {}).get("type") == "command"),
+        "wait_dependents": sum(1 for step in detail.get("steps") or []
+                               if step_ids.intersection(step.get("depends_on") or [])),
+        "waits_timed_out": sum(1 for wait in waits if wait.get("state") == "timed_out"),
+    }
+
+
 def gate_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]], *, now: float) -> dict[str, int]:
     """The task's user gates and how they went: how many opened (``gates_opened``), the [GATE] turns whose reply was
     taken (``gate_turns``), how they closed (``gates_passed``, of them ``gates_ended_by_user``; ``gates_cancelled``),
@@ -338,10 +352,11 @@ def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path, refused
             if (isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS
                     and block.get("id") not in refused):
                 tool_input = block.get("input") or {}
-                named = [tool_input.get("file_path") or tool_input.get("notebook_path"),
+                named = [tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path"),
                          *(c.get("path") for c in tool_input.get("changes") or [] if isinstance(c, Mapping)),
                          *omp_edited_paths(str(block.get("name")), tool_input)]
-                paths += [_relative(str(path), work_dir) for path in named if path]
+                paths += [_relative(path, work_dir) for path in dict.fromkeys(
+                    str(path) for path in named if path and "://" not in str(path))]
     return paths
 
 
@@ -372,6 +387,25 @@ def most_at_once(spans: Iterable[tuple[float, float]]) -> int:
         running += change
         most = max(most, running)
     return most
+
+
+def dependency_order(steps: Iterable[Mapping[str, Any]], records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Check API dependency edges against run times; missing evidence stays unknown."""
+    workers: dict[str, list[Mapping[str, Any]]] = {}
+    for record in records:
+        if role(record) == "worker":
+            workers.setdefault(str((record.get("metadata") or {}).get("step_id")), []).append(record)
+    result = {"edges": 0, "verified": 0, "violations": 0, "unknown": 0}
+    for step in steps:
+        for dependency in step.get("depends_on") or []:
+            result["edges"] += 1
+            starts = [timestamp(r.get("created_at")) for r in workers.get(str(step.get("id")), [])]
+            ends = [timestamp(r.get("finished_at")) for r in workers.get(str(dependency), [])]
+            if not starts or not ends or None in starts or None in ends:
+                result["unknown"] += 1
+            else:
+                result["verified" if max(ends) <= min(starts) else "violations"] += 1
+    return result
 
 
 def _before(steps: Iterable[Mapping[str, Any]]) -> dict[str, set[str]]:
@@ -545,6 +579,7 @@ def task_metrics(
         # The user gates the Planner opened, and how they went.
         **gate_metrics(detail, records, now=now),
         "gate_asks_beyond_script": gate_asks_beyond_script,
+        **wait_metrics(detail),
         # What the task's agents did in its room.
         **room_metrics(detail, activity, events),
         # What its runtime refused the read-only Planner.
@@ -572,6 +607,41 @@ def task_metrics(
     # Tokens are what every runtime reports, priced or not (a subscription, a provider without prices).
     tokens = {name: sum(int(r.get(f"{name}_tokens") or 0) for r in records)
               for name in ("input", "output", "cache_read", "cache_creation")}
+    runtime_evidence = []
+    for record in records:
+        metadata = record.get("metadata") or {}
+        command = list(metadata.get("command") or [])
+        if command[:1] == ["env"]:
+            command.pop(0)
+            while command and "=" in command[0]:
+                command.pop(0)
+        finals = [row.get("event", row) for row in events.get(int(record["id"]), [])
+                  if row.get("event", row).get("type") == "result"]
+        name = role(record)
+        text = result_text(events.get(int(record["id"]), []))
+        report_valid = None if name not in ("worker", "reviewer") or text is None else not report_violation(
+            text, is_verify=name == "reviewer")
+        verdict = extract_report(text, "passed") if name == "reviewer" and report_valid else None
+        tool_calls = []
+        for row in events.get(int(record["id"]), []):
+            event = row.get("event", row)
+            message = event.get("message")
+            if event.get("type") == "assistant" and isinstance(message, Mapping):
+                tool_calls.extend({"id": block.get("id"), "name": block.get("name")}
+                                  for block in message.get("content") or []
+                                  if isinstance(block, Mapping) and block.get("type") == "tool_use")
+        runtime_evidence.append({
+            "role": name, "runtime": ((metadata.get("profile") or {}).get("runtime") or {}).get("type"),
+            "executable": Path(command[0]).name if command else None,
+            "system_prompt_mode": metadata.get("system_prompt_mode"),
+            "session_present": bool(record.get("session_id")),
+            "root_usage_complete": finals[-1].get("root_usage_complete") if finals else None,
+            "status": record.get("status"), "report_valid": report_valid,
+            "verdict_passed": verdict.get("passed") if verdict else None,
+            "tool_calls": tool_calls,
+            "permission_denials": [{key: denial[key] for key in ("id", "tool") if key in denial}
+                                   for denial in metadata.get("permission_denials") or []],
+        })
     return {
         "status": status,
         "success": not problems,
@@ -586,6 +656,8 @@ def task_metrics(
         "run_errors": sum(1 for r in records if r.get("status") == RECORD_FAILED),
         "models": {name: sorted({str(r["model"]) for r in rows if r.get("model")}) for name, rows in by_role.items()},
         "tokens": tokens,
+        "runtime_evidence": runtime_evidence,
+        "dependency_order": dependency_order(detail.get("steps") or [], records),
         # How the runs were priced: a runtime's own login (an equivalent, Claude Code's figure or Codex's tokens at
         # the built-in prices), by Looper at an API key provider's prices, or not at all (tokens only).
         "cost_basis": {name: int(cost.get(f"{name}_runs") or 0) for name in ("equivalent", "provider_price",

@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs thirty-seven small tasks through a disposable `looper serve` (a new
+It runs thirty-nine small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -37,6 +37,8 @@ directories), one at a time over the HTTP API:
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
+| `wait_pr_rereview` | review a simulated pull request whose loop skips the last value, then review the author's real fix commit. A successful `github_pr` / `head_changed` check of the requested PR must separate the two dependent Workers delivering `findings.md` and `rereview.md`; a manual resume does not count |
+| `wait_not_needed` | write and run `build.sh`, then check its `out/app.txt` and write `ok` to `result.txt`: the build is the task's own work, so no wait opens (`max_waits_opened` 0) |
 | `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
 | `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
 | `vault_closeout_keeps` | the project has the knowledge vault on; adding multiplication uncovers a test runner that needs `CALC_LOCALE=C`: the Planner's closeout must keep that fact in a committed note under `codex-mem/` |
@@ -69,7 +71,10 @@ depend on one same step (`interface_dependents`), the user gates the Planner ope
 passed, `gates_passed`, of them ended by the user, `gates_ended_by_user`; cancelled, `gates_cancelled`; the
 assumptions their summaries stated, `assumptions_stated`; the steps the closing turns added, dropped or stopped,
 `gate_plan_changes`; Worker runs while a gate waited, `gate_parallel_runs`; Worker and Reviewer runs that read a
-gate's conclusion, `conclusion_reads`), what the agents did in the task's agent room (`room_messages`, Looper's notices
+gate's conclusion, `conclusion_reads`), the waits whose `opened_at` is set (`waits_opened`), waits with a
+`github_pr` or `command` check (`wait_github_checks`, `wait_command_checks`, including unopened waits), steps
+directly depending on at least one wait (`wait_dependents`, once per step), waits currently in `timed_out`
+(`waits_timed_out`), what the agents did in the task's agent room (`room_messages`, Looper's notices
 and escalations apart; of them `room_questions`, `room_unanswered` and `room_interface`; `room_escalations`;
 `room_reminders`, the reminders Claude Code runs got; `room_refused`, the posts the room refused; and
 `room_tool_calls`, the runs' calls of the room's tools, reads included; `room_consults`, the consults of seats whose run
@@ -136,6 +141,27 @@ skipped, and 2 when the run could not start or stopped midway.
 Both modes need a PostgreSQL server where the eval may create and drop a
 database: pass `--pg-url` (any database on the server except `loopx`) or set
 `LOOPER_EVAL_DATABASE_URL`.
+
+Every eval server, in fake and real mode (dialogs included), installs a Python `gh` stub in its `bin_dir`,
+first on `PATH`: evals never call the real GitHub CLI. It accepts only
+`gh pr view <n> --repo <r> --json <fields>` and `gh pr diff <n> --repo <r>`.
+By default, views return head `1111111111111111111111111111111111111111`, state `OPEN`, and empty comments,
+reviews and checks. Diffs come from the task's `gh_pr_diffs` fixture (`owner/repo#number` keys), or are empty.
+For `wait_pr_rereview`, each case has an isolated git repository: views (including commit OIDs) and diffs
+read the same pull ref. The wait check runs in the task directory, so it sees the same PR as its Workers.
+Every other command exits 1 with `gh stub: unsupported`.
+
+After the requested PR's wait has recorded its old head, and at least 5 seconds after it opened, the runner
+commits `gh_pr_fix_files` and advances that pull ref once. The actual head-change check releases the wait;
+the fake Workers also read the diff and reject the wrong revision. This task requests a 10-second check
+interval and a 45-second maximum wait, within both the fake case's 60 seconds and the real case's 900 seconds.
+Runs containing this fixture set the disposable server's minimum check interval to 10 seconds.
+
+Only tasks with `wait_resume_after_s` set let the runner manually resume waits: after that many seconds from
+`opened_at`, each wait still in `waiting` is resumed through `POST /api/tasks/:id/waits/:step/resume`, once.
+Each row records successful resumes in `wait_resumes` (step label to timestamp, on the database clock).
+With the field unset (`None`), as in `wait_pr_rereview`, the runner never resumes waits. Flow expectations
+include `min_waits_opened`, `max_waits_opened`, `min_wait_github_checks` and `min_wait_dependents`.
 
 ### Fake mode: the flow, free
 
@@ -225,7 +251,7 @@ database, then run every role on it). The explicit spec is:
 
 Replace the example endpoint and model with the intended callable entry.
 Runtimes are built in: `runtime.name` selects one by name, else `runtime.type`
-selects the detected built-in runtime (`codex`, `omp`, `grok` when on PATH).
+selects the detected built-in runtime (`codex`, `omp`, `grok`, `pi`, `dsh` when on PATH).
 `provider.api_key_env` names an environment variable; literal `api_key` in the
 spec is rejected. Never put a credential in the JSON file. A saved provider
 can instead be selected with `{"provider_id": "prov-codex-login"}` (or
@@ -255,7 +281,7 @@ whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `roles_template_unfit`, `gate_ambiguous`,
 `gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface`,
 `room_consult`, `planner_plan_file`, `operator_notes`, `operator_notes_stale`,
-`vault_closeout_keeps` and `vault_closeout_nothing` (22 tasks); a set is
+`vault_closeout_keeps`, `vault_closeout_nothing`, `wait_pr_rereview` and `wait_not_needed` (24 tasks); a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
@@ -287,6 +313,81 @@ comparison again:
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]
 ```
 
+### DSH validation
+
+[DSH's RFC](../docs/architecture/rfcs/dsh-runtime-v0.zh-CN.md#9-验收与边界)
+tracks passed, failed and untested separately. Local fake responses and the
+installed package's offline checks do not establish real-model acceptance.
+The opt-in launcher is [examples/dsh/validate.py](../examples/dsh/validate.py),
+using [agent-spec.json](../examples/dsh/agent-spec.json): DSH 0.2.1-rc.2,
+DeepSeek Messages, `deepseek-flash`, effort `high`, effective append. It
+registers a DSH Profile for all four roles; `--provider-preset deepseek`
+would create a Claude Code Profile instead.
+
+From the checkout root, these commands make no model calls:
+
+```sh
+uv run --extra test python -m examples.dsh.validate --help
+uv run --extra test python -m examples.dsh.validate preflight --help
+uv run --extra test python -m examples.dsh.validate preflight \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+```
+
+The URL is an example for a dedicated, disposable local PostgreSQL instance;
+replace it with yours, never an operator or production database. Preflight
+requires an explicit local `/postgres` management URL, rejects port 8767,
+checks the interpreter/checkout, exact DSH version, help and process-tree
+observation, and uses temporary private homes for the probe. It neither reads
+the key nor connects to PostgreSQL: `credentials`, `database_connection` and
+`real_validation` remain `untested` even when preflight passes. Missing or
+unsupported dependencies are a failed preflight, not model acceptance.
+
+The following are **pending, paid acceptance commands**, each requiring an
+explicit `--real`; they were not run for this documentation change:
+
+```sh
+uv run --extra test python -m examples.dsh.validate task-basic --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+uv run --extra test python -m examples.dsh.validate task-review --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+uv run --extra test python -m examples.dsh.validate manager --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+uv run --extra test python -m examples.dsh.validate smoke --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+```
+
+Only the launcher captures the key at runtime from the configured interactive
+zsh into memory, then supplies the eval provider through `api_key_env`; do not
+expand, echo or paste it into a shell command, spec, report or artifact. Empty
+or failed capture stops the run. Eval artifacts stay in ignored
+`evals/runs/dsh/`; smoke uses a disposable root and fresh database, closes
+external channels and starts its own server away from 8767. It checks two
+Manager turns, two tasks, all four roles, room consults and API/DB readback.
+Channel stand-ins do not establish Telegram/Lark delivery to real accounts.
+
+The eval commands select `single_step,dependent_steps`,
+`reviewed_step,planner_plan_file` and Manager `status,confirm_create_start`,
+respectively, each at `jobs=1`, `reps=2`. Manager results include actual launch,
+Session and root usage readback plus the existing per-turn tool audit. Missing
+evidence cannot establish acceptance; repeated MCP success alone does not
+prove a changed run token was applied. Each invocation sets a $0.50 per-run
+soft cap, a $4 total observed-spend cap, 300 seconds per task/dialog (per stage
+for smoke), and 20 minutes outside the workflow plus cleanup grace. With one
+job, **`--case-budget-usd` is not enforced**; the launcher does not pass it or
+promise a per-case cap. Root observed cost is not a complete bill: summary,
+search, child-session and consult coverage remains unknown, including when
+the official Session reader returns observations. These are not hard billing
+limits; unknown cost causing a consult refusal is a failed smoke, not a pass.
+
+For an eval command, optional `--baseline path/to/real-append.json` must point
+to an existing real result with the same case and explicit
+`validation.effective_system_prompt_mode=append`. Missing or incompatible
+evidence is a gap; the launcher neither starts Claude/OMP nor updates public
+baselines. Existing Claude/OMP/pi workflows remain independent. The RFC's
+broader two-repetition task/dialog comparison is still pending; these three
+one-case commands do not cover `dependent_steps`, `planner_plan_file` or
+`confirm_create_start`.
+
 ### Which tier to run
 
 A pull request runs real mode only on what its change touches, and pastes the
@@ -312,10 +413,10 @@ ones, with `--reps 2` and haiku (`--tasks a,b` or a task set, `--dialogs a,b`):
 Do not rerun after a change the model cannot see.
 
 Once before a release, on the release candidate (`main` after every merge):
-haiku on all 37 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
+haiku on all 39 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
 --case-budget-usd 2.0 --total-cap-usd 20` (the earlier baseline cost about $12.32); opus,
 `run --mode real --model opus --reps 3 --tasks planner --jobs 4
---max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (22 tasks;
+--max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (24 tasks;
 the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the opus xhigh Manager,
 `dialogs --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
 --case-budget-usd 1.0 --total-cap-usd 8` (about $4.36) and
@@ -323,6 +424,31 @@ the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the 
 --manager-effort xhigh --max-budget-usd 3.0 --case-budget-usd 3.0
 --total-cap-usd 12` (about $7.91). `--jobs` above 1 under a total cap needs
 `--case-budget-usd`. The baselines are refreshed from these runs.
+
+#### Pi
+
+`--register-agent` can target the built-in runtime type `pi` (API key only:
+`openai-responses`, or `openai-chat`, which pi calls `openai-completions`).
+Example specs are `evals/agents/pi-cpa.example.json` and
+`evals/agents/pi-deepseek.example.json`. These legacy specs use the shared
+converter above; new specs should declare provider endpoints and a separate
+model with an explicit protocol. The selected model fixes the endpoint, whose
+`base_url` is passed through. The entry scripts are `examples/pi/eval-responses.sh`,
+`examples/pi/eval-deepseek.sh` and `examples/pi/eval-prompt-comparison.sh`.
+They follow the tiers above. The comparison script scopes 13 distinct cases
+across 4 tiers, 48 case/reps, and exits before `uv` when `ANTHROPIC_API_KEY`
+is absent.
+
+This change did not run those real tiers. The Claude CLI comparison is 0
+passed, 0 failed and 48 unverified because the API key was absent. The two
+provider scripts were not run against a live Responses or Chat provider.
+Tests of the scripts with a fake `uv` (83 passed) check command, budget and
+gap boundaries only. A syntax pass stays short of acceptance, and a pytest
+skip when no disposable database is available stays unverified. Baselines
+stay as they are. The scripts also leave unverified: steering, worker session
+resume, the cancel tree, a raw Responses readback of optional parameters and
+`strict`, the `operator_notes_stale` and `schedule_*` dialogs, and a shared
+prompt or contract comparison against the baseline commit.
 
 #### Running cases in parallel
 
@@ -429,7 +555,7 @@ costliest single dialog `task_cost` at about $0.46; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd` such as 12),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
-OMP or Grok agent checks that runtime's tool calls), `--reps` (as for `run`),
+OMP, Grok or Pi agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is
 `baselines/dialogs-real-<model>.json` by the Manager's model: `haiku`, and
 `opus` for the run with the Manager on opus at xhigh), `--max-budget-usd`,

@@ -136,10 +136,12 @@ def reported_totals(result_event: dict[str, Any] | None, price: Price | None = N
 
     The tokens are None when the result has no ``modelUsage`` (an older Claude Code). With ``price``, the cost
     is each model's tokens at that price, None when one of them cannot be priced, instead of
-    ``total_cost_usd``.
+    ``total_cost_usd``. An explicit ``usage_complete=False`` keeps cost unknown
+    while retaining reported tokens, including a runtime's partial observations.
     """
     result = result_event or {}
-    totals = Usage(cost_usd=_dollars(result.get("total_cost_usd")) if price is None else None)
+    complete = result.get("usage_complete") is not False
+    totals = Usage(cost_usd=_dollars(result.get("total_cost_usd")) if price is None and complete else None)
     models = result.get("modelUsage")
     if not isinstance(models, dict) or not models:
         return totals
@@ -149,7 +151,7 @@ def reported_totals(result_event: dict[str, Any] | None, price: Price | None = N
         counts = [getattr(usage, name) for usage in per_model.values()]
         if counts and all(count is not None for count in counts):
             sums[name] = sum(counts)
-    if price is not None and per_model:
+    if price is not None and per_model and complete:
         costs = [price(name, usage) for name, usage in per_model.items()]
         sums["cost_usd"] = None if any(c is None for c in costs) else round(sum(costs), 10)  # type: ignore[arg-type]
     return replace(totals, **sums)

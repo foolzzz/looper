@@ -1,0 +1,9 @@
+{"type": "session", "sessionId": "synthetic-truncated", "cwd": "/synthetic", "truncated": true}
+{"type": "thinking", "text": "cut thinking", "truncated": true}
+{"type": "text", "text": "cut text", "truncated": true}
+{"type": "tool_call", "callId": "cut-call", "tool": "read", "truncated": true}
+{"type": "tool_result", "callId": "cut-call", "status": "completed", "result": "cut result", "truncated": true}
+{"type": "text", "truncated": true}
+{"type": "status", "phase": "step_end", "turn": 1, "step": 1, "truncated": true}
+{"type": "status", "phase": "turn_end", "turn": 1, "reason": {"kind": "completed"}}
+{"type": "final", "text": "Lossless final after bounded progress."}

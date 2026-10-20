@@ -38,7 +38,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import shutil
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -58,7 +57,7 @@ from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
 from ..project_execution import ProjectExecution
 from ..library import items_label, load_installed
-from ..runtimes import RunChannel
+from ..runtimes import RunChannel, RuntimeUnsupported
 from ..task_roles import TaskRole, run_role
 from ..room import room_section, run_seat, run_session_dir
 from ..message import (
@@ -415,7 +414,8 @@ class WorkerPool:
         self._active.clear()
 
     def is_healthy(self) -> bool:
-        return self._running and bool(shutil.which(self._config.claude_bin))
+        # A missing unrelated runtime must not restart the pool and cancel active runs.
+        return self._running and self._listener_task is not None and not self._listener_task.done()
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -892,9 +892,16 @@ class WorkerPool:
         session_dir = run_session_dir(self._runtime_root, runtime.type, parent_task_id, worker_id) \
             if seat is not None else None
         run_command = runtime.steer_command if launch.steers else runtime.run_command
-        command = run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
-                              prompt_file=prompt_file, launch=launch, max_turns=max_turns,
-                              session_dir=session_dir)
+        try:
+            command = run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
+                                  prompt_file=prompt_file, launch=launch, max_turns=max_turns,
+                                  session_dir=session_dir)
+        except (RuntimeUnsupported, OSError) as exc:
+            problem = f"Cannot prepare {runtime.label}: {exc}"
+            logger.error("worker %s: %s", worker_id, problem)
+            if parent_task_id:
+                await self._activity(parent_task_id, worker_id, "error", problem[:500])
+            return _verify_failed(problem) if is_verify else _work_failed(problem)
 
         if parent_task_id:
             prompt_input = "over the runtime's protocol" if launch.steers else "on stdin"
@@ -975,7 +982,9 @@ class WorkerPool:
                     await recorder.record(event)
                     if (capped := recorder.cap_stop) is not None:
                         # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
+                        # That result is Looper's, not a line the process wrote, so the transcript has to keep it.
                         result_event = capped.result_event
+                        await recorder.record(result_event)
                         _end_input()
                         await proc_tree.end(process, label=f"worker {worker_id}")
                         return

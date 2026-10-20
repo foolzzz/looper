@@ -348,7 +348,7 @@ class ResolvedModel:
             raise RegistryError("model, provider and endpoint references must match")
         self.endpoint.check_provider(self.provider)
 
-    def check_runtime(self, runtime: RuntimeSpec) -> None:
+    def check_runtime(self, runtime: RuntimeSpec, effort: str | None = None) -> None:
         adapter = _runtime_type(runtime.type)
         if self.model.protocol not in adapter.protocols:
             raise RegistryError("runtime does not support the model's exact protocol")
@@ -356,6 +356,10 @@ class ResolvedModel:
             raise RegistryError("a login provider can only use its own runtime")
         if self.provider.auth not in adapter.auth_kinds:
             raise RegistryError("runtime does not support the provider's auth kind")
+        try:
+            adapter.check_pairing(self.binding_provider(), self.model.name, effort)
+        except RuntimeUnsupported as exc:
+            raise RegistryError(str(exc)) from None
 
     def binding_provider(self) -> LegacyProviderSpec:
         """The adapter input: exactly this endpoint and model, never an account catalog."""
@@ -434,7 +438,7 @@ class ResolvedAgentProfile(AgentProfile):
 
     @property
     def provider(self) -> LegacyProviderSpec:
-        self.resolved_model.check_runtime(self.runtime)
+        self.resolved_model.check_runtime(self.runtime, self.effort)
         return self.resolved_model.binding_provider()
 
     def record(self) -> dict[str, Any]:
@@ -653,7 +657,7 @@ def _listed(values: Iterable[Any]) -> str:
     return ", ".join(sorted(getattr(v, "value", str(v)) for v in values))
 
 
-def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str) -> None:
+def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str, effort: str | None = None) -> None:
     """Refuse a profile of ``runtime``, ``provider`` and ``model`` that could not run (the module's rules)."""
     try:
         adapter = runtimes.adapter(runtime.type)
@@ -675,6 +679,10 @@ def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str
     if provider.models and model not in provider.models:
         raise RegistryError(f"provider {provider.name!r} lists the models {', '.join(provider.models)}; "
                             f"{model!r} is not one of them")
+    try:
+        adapter.check_pairing(provider, model, effort)
+    except RuntimeUnsupported as exc:
+        raise RegistryError(str(exc)) from None
 
 
 def default_agent_teams(runtime: RuntimeSpec) -> bool:
@@ -779,6 +787,7 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
             "protocols": sorted(p.value for p in adapter.protocols),
             "capabilities": sorted(c.value for c in adapter.capabilities),
             "roles": servable_roles(adapter.capabilities),
+            "supported_models": sorted(adapter.supported_models) if adapter.supported_models is not None else None,
             "can_replace_system_prompt": adapter.can_replace_system_prompt,
             "replace_system_prompt_refusal": runtimes.replace_refusal(adapter),
             "auth_kinds": sorted(a.value for a in adapter.auth_kinds)}
@@ -1246,7 +1255,7 @@ async def _check_provider_profiles(conn: Any, provider: Mapping[str, Any]) -> No
         profile = AgentProfile.from_row(row)
         try:
             model = ModelSpec.from_entry({k: row["model"][k] for k in ModelSpec.__dataclass_fields__})
-            ResolvedModel(model, spec, Endpoint.from_entry(row["endpoint"])).check_runtime(profile.runtime)
+            ResolvedModel(model, spec, Endpoint.from_entry(row["endpoint"])).check_runtime(profile.runtime, profile.effort)
             check_agent_teams(profile.runtime, profile.agent_teams)
         except RegistryError as exc:
             raise RegistryError(f"Agent Profile {profile.name!r} uses this provider: {exc}") from None
@@ -1428,7 +1437,7 @@ async def update_model(model_id: str, data: Any) -> dict[str, Any]:
                 continue
             try:
                 profile = AgentProfile.from_row(profile_row)
-                resolved.check_runtime(profile.runtime)
+                resolved.check_runtime(profile.runtime, profile.effort)
                 check_roles(profile, await _selected_roles(profile.id, conn))
             except RegistryError as exc:
                 raise RegistryError(f"Agent Profile {profile_row['name']!r} uses this model: {exc}") from None
@@ -1498,7 +1507,7 @@ async def create_profile(data: Any) -> dict[str, Any]:
             runtime, model = await _parts(fields["runtime_id"], fields["model_id"], conn)
             fields["agent_teams"] = (_agent_teams(data["agent_teams"]) if "agent_teams" in data
                                      else default_agent_teams(runtime))
-            model.check_runtime(runtime)
+            model.check_runtime(runtime, fields["effort"])
             AgentProfile("draft", fields["name"], runtime, model.model.id, fields["effort"],
                          fields["agent_teams"], fields["custom_prompt"])
             profile_id = await db.insert_profile(fields, pool=conn)
@@ -1551,7 +1560,7 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
                 raise RegistryConflict("Agent Profile changed concurrently: reload it before updating")
             if "agent_teams" not in fields and runtime.type != current["runtime_type"]:
                 fields["agent_teams"] = default_agent_teams(runtime)
-            model.check_runtime(runtime)
+            model.check_runtime(runtime, fields.get("effort", current["effort"]))
             checked = AgentProfile(profile_id, fields.get("name", current["name"]), runtime,
                                    model.model.id, fields.get("effort", current["effort"]),
                                    fields.get("agent_teams", current["agent_teams"]),

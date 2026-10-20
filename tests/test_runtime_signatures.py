@@ -21,7 +21,7 @@ from looper.agents.profile_registry import (
 )
 from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeAdapter, VendorType, adapter, can_resume
 
-ADAPTER_TYPES = ("claude-code", "codex", "omp", "grok")
+ADAPTER_TYPES = ("claude-code", "codex", "omp", "grok", "dsh", "pi")
 METHODS = [name for name, member in vars(RuntimeAdapter).items()
            if getattr(member, "__isabstractmethod__", False) and name.endswith("_command")]
 
@@ -111,7 +111,15 @@ def _profile_row(profile):
     return row
 
 
-def test_loader_builds_exact_model_binding_before_reading_its_key(monkeypatch):
+@pytest.fixture
+def pricing_catalog(monkeypatch):
+    from looper.db import profile_registry as db
+
+    # The selected model is already in the profile; these unit fixtures have no auxiliary models.
+    monkeypatch.setattr(db, 'list_models', AsyncMock(return_value=[]))
+
+
+def test_loader_builds_exact_model_binding_before_reading_its_key(monkeypatch, pricing_catalog):
     from looper.db import agent_setting_layers, profile_registry as db
     profile = bound_profile()
     resolved = profile.resolved_model
@@ -158,7 +166,7 @@ def test_invalid_binding_keeps_the_selected_profile_and_fails_before_secret_read
 
 
 @pytest.mark.parametrize('protocol', list(ApiProtocol))
-def test_loader_never_substitutes_another_protocol_endpoint(protocol, monkeypatch):
+def test_loader_never_substitutes_another_protocol_endpoint(protocol, monkeypatch, pricing_catalog):
     from looper.db import agent_setting_layers, profile_registry as db
     row = _profile_row(bound_profile(protocol=protocol))
     monkeypatch.setattr(agent_setting_layers, 'list_layers', AsyncMock(return_value=[
@@ -173,7 +181,7 @@ def test_loader_never_substitutes_another_protocol_endpoint(protocol, monkeypatc
     assert config['baseUrl'] == row['endpoint']['base_url']
 
 
-def test_loader_preserves_profile_precedence_through_every_layer_to_builtin(monkeypatch):
+def test_loader_preserves_profile_precedence_through_every_layer_to_builtin(monkeypatch, pricing_catalog):
     from looper.agents.profile_registry import builtin_resolved_profile
     from looper.db import agent_setting_layers, profile_registry as db
     places = [(Layer.SYSTEM, None), (Layer.ROLE, 'worker'), (Layer.PROJECT, None),

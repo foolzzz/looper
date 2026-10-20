@@ -952,10 +952,11 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
                 for order, model in enumerate(legacy_provider["models"])]
             expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [
                 {k: v for k, v in role.items() if k != "max_concurrency"} for role in old["settings"]["roles"]]}
-            # A file from before step workspaces, per-project retries, Planner roles, user gates and the agent room
+            # A file from before step workspaces, per-project retries, Planner roles, wait commands, user gates and the agent room
             # leaves them unset.
             expected["projects"] = [{**p, "execution": {**p["execution"], "step_workspaces": None,
                                                         "workspace_links": None, "max_step_retries": None, "planner_roles": None,
+                                                        "wait_commands": None,
                                                         "role_text_max_chars": None, "user_gates": None,
                                                         "gate_reminder_hours": None, "task_workspaces": None,
                                                         "operator_notes": None, "vault": None,

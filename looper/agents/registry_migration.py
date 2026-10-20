@@ -62,6 +62,8 @@ LEGACY_RULES = LegacyRules(
         "codex": (ApiProtocol.OPENAI_RESPONSES,),
         "omp": (ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT, ApiProtocol.ANTHROPIC_MESSAGES),
         "grok": (ApiProtocol.OPENAI_RESPONSES,),
+        "pi": (ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT),
+        "dsh": (ApiProtocol.ANTHROPIC_MESSAGES,),
     }),
     MappingProxyType({
         ("claude-code", ApiProtocol.ANTHROPIC_MESSAGES): "https://api.anthropic.com",
@@ -69,6 +71,7 @@ LEGACY_RULES = LegacyRules(
         ("omp", ApiProtocol.OPENAI_RESPONSES): "https://api.openai.com/v1",
         ("omp", ApiProtocol.OPENAI_CHAT): "https://api.openai.com/v1",
         ("omp", ApiProtocol.ANTHROPIC_MESSAGES): "https://api.anthropic.com",
+        ("dsh", ApiProtocol.ANTHROPIC_MESSAGES): "https://api.deepseek.com/anthropic",
     }),
 )
 
@@ -154,21 +157,25 @@ def _launch_inputs(runtime: RuntimeSpec, provider: LegacyProviderSpec, row: Mapp
     # Missing credentials are not permission to discover a key or login. A
     # local sentinel compares binding structure while preserving missingness.
     adapter = ADAPTERS[runtime.type]
-    if resolved is None and runtime.type == "omp":
-        from .runtimes.omp import API_NAMES
+    if resolved is None and runtime.type in {"omp", "pi"}:
+        from .runtimes.omp import API_NAMES as OMP_API_NAMES
+        from .runtimes.pi import API_NAMES as PI_API_NAMES
 
-        # The old OMP selected its own priority, independently of conversion
+        priorities = OMP_API_NAMES if runtime.type == "omp" else PI_API_NAMES
+
+        # These adapters selected their own priority, independently of conversion
         # rules. Keep that baseline so a changed conversion is detectable.
-        protocol = next(p for p, _ in API_NAMES if p in provider.protocols)
+        protocol = next(p for p, _ in priorities if p in provider.protocols)
     bound = resolved.binding_provider() if resolved is not None else _binding_provider(provider, row["model"], protocol)
-    binding = adapter.bind_provider(replace(bound, api_key=bound.api_key or "migration-static-missing"),
-                                    row["model"], row.get("effort") or "")
+    launch_provider = replace(bound, api_key=bound.api_key or "migration-static-missing")
+    binding = adapter.bind_provider(launch_provider, row["model"], row.get("effort") or "")
     config = None
-    if runtime.type == "omp":
+    if runtime.type in {"omp", "pi"}:
         from .runtimes.omp import models_yml
+        from .runtimes.pi import models_json
 
         # Pure config generation also checks the old multi-protocol selection;
-        # binding flags alone do not contain OMP's API or context window.
+        # binding flags alone do not contain the API or context window.
         if resolved is None:
             entry, = bound.catalog
             model = ModelSpec("migration-static", provider.id, entry.name, protocol,
@@ -177,7 +184,15 @@ def _launch_inputs(runtime: RuntimeSpec, provider: LegacyProviderSpec, row: Mapp
                                    env=provider.env, api_key=provider.api_key)
             resolved = ResolvedModel(model, account, Endpoint(provider.id, protocol, provider.base_url,
                                                             use_runtime_default=not provider.base_url))
-        config = models_yml(SimpleNamespace(settings=SimpleNamespace(resolved_model=resolved), model=row["model"]))
+        launch = SimpleNamespace(settings=SimpleNamespace(resolved_model=resolved), model=row["model"],
+                                 profile=SimpleNamespace(provider=launch_provider))
+        config = models_yml(launch) if runtime.type == "omp" else models_json(launch)
+    elif runtime.type == "dsh":
+        from .runtimes.dsh import validate_provider
+
+        # DSH provider flags contain only the key; the overlay chooses the wire
+        # model, endpoint and effort. Compare those without materializing a CLI.
+        config = validate_provider(bound, row["model"], row.get("effort"))
     entry = provider.catalog_model(row["model"])
     return (runtime, protocol, provider.auth, provider.oauth_runtime_type, actual_url,
             provider.base_url, provider.api_key, dict(provider.env),
@@ -327,11 +342,16 @@ def _vendor(row: Mapping[str, Any], protocols: tuple[ApiProtocol, ...]) -> Vendo
     return matches[0] if len(matches) == 1 else VendorType.CUSTOM
 
 
-def _default_url(protocol: ApiProtocol, rules: LegacyRules) -> str:
+def _default_url(protocol: ApiProtocol, rules: LegacyRules, *,
+                 runtime_types: set[str] | None = None) -> str:
     # An unused declared endpoint still needs a provable default. Check all
     # old API-key adapters that could select this protocol, not just profiles.
+    # Preserve the established four-adapter check for old accounts. A newer
+    # adapter has a different (DSH) or absent (Pi) default: only accounts it
+    # actually uses need that additional boundary.
+    scope = runtime_types if runtime_types is not None else {"claude-code", "codex", "omp"}
     runtimes = [name for name, priority in rules.protocol_priority.items()
-                if name != "grok" and protocol in priority]
+                if name in scope and protocol in priority]
     urls = {rules.default_urls.get((name, protocol)) for name in runtimes}
     if not urls or None in urls or "" in urls:
         raise MigrationBlocked("unknown_default_endpoint")
@@ -351,11 +371,17 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
     """
     runtime_rows = _index(runtimes, runtimes=True)
     provider_rows, profile_rows = _index(providers), _index(profiles)
-    known_runtimes = {"claude-code", "codex", "omp", "grok"}
+    known_runtimes = {"claude-code", "codex", "omp", "grok", "pi", "dsh"}
     for runtime in runtime_rows.values():
         if not isinstance(runtime.type, str) or runtime.type not in known_runtimes \
                 or runtime.type not in rules.protocol_priority:
             raise MigrationBlocked("unknown_runtime")
+    account_runtimes: dict[str, set[str]] = {}
+    for row in profile_rows.values():
+        runtime = runtime_rows.get(row.get("runtime_id"))
+        account_id = row.get("provider_id")
+        if runtime is not None and isinstance(account_id, str):
+            account_runtimes.setdefault(account_id, set()).add(runtime.type)
     result = Conversion()
     catalogs: dict[str, list[dict[str, Any]]] = {}
     protocols_by_provider = {}
@@ -380,7 +406,10 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
                 endpoint.check_provider(account)
                 result.endpoints[key] = endpoint
                 if runtime_default:
-                    actual = _default_url(protocol, rules)
+                    selected = account_runtimes.get(identity, set())
+                    scope = selected if any(name in {"pi", "dsh"} and protocol in rules.protocol_priority[name]
+                                            for name in selected) else None
+                    actual = _default_url(protocol, rules, runtime_types=scope)
                     # Validate supplied rules' addresses with the same boundary.
                     Endpoint(identity, protocol, actual)
                     result.default_urls[key] = actual
@@ -437,7 +466,7 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
                                    row.get("effort"), row.get("agent_teams", False), row.get("custom_prompt", ""))
             model = result.models[model_id]
             ResolvedModel(model, result.providers[model.provider_id],
-                          result.endpoints[(model.provider_id, model.protocol)]).check_runtime(profile.runtime)
+                          result.endpoints[(model.provider_id, model.protocol)]).check_runtime(profile.runtime, profile.effort)
             result.profiles[identity] = profile
     except MigrationBlocked:
         raise

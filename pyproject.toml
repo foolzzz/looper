@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "looper"
-version = "2.12.2"
+version = "2.12.5"
 description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,6 +44,7 @@ include = ["looper*"]
 [tool.setuptools.package-data]
 "looper" = ["web/dashboard/*", "web/dashboard/assets/*"]
 "looper.db" = ["*.sql"]
+"looper.agents.runtimes" = ["*.mjs", "pi_extension/looper.ts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

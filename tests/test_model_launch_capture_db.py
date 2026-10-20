@@ -15,7 +15,7 @@ import subprocess
 import sys
 import uuid
 import venv
-from dataclasses import replace
+from dataclasses import asdict, replace
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,23 @@ import pytest
 
 import agent_launch_parity as tiers
 import model_launch_parity as parity
+from runtime_model_helpers import resolved_profile
+# Current-runtime captures use the same fixed contract deltas as the migration
+# gate; old-checkout regeneration below still compares untouched v2 fixtures.
+from test_model_launch_parity_db import pinned as declared_contract_captures
+
+
+def _install_profile(monkeypatch: pytest.MonkeyPatch, profile: Any) -> None:
+    """Give the memory-backed tier capture the same resolved snapshot a DB load supplies."""
+    from unittest.mock import AsyncMock
+    from looper.agents import agent_settings
+    from looper.db import profile_registry
+
+    original = agent_settings.resolve
+    monkeypatch.setattr(agent_settings, "resolve", lambda *a, **kw: replace(
+        original(*a, **kw), profile=profile, profile_source=agent_settings.Layer.SYSTEM))
+    monkeypatch.setattr(profile_registry, "list_models",
+                        AsyncMock(return_value=[asdict(profile.resolved_model.model)]))
 
 
 FIXTURE = Path(__file__).parent / "fixtures/model_launch_parity_v2_claude.json"
@@ -37,26 +54,23 @@ GROK_FIXTURE = FIXTURE.with_name("model_launch_parity_v2_grok.json")
 def test_grok_capture_observes_real_tiers_login_resume_and_cost(
     case: str, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
-    from looper.agents import agent_settings, profile_registry as registry
+    from looper.agents import profile_registry as registry
     from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
 
     fallback, cost, effort, mode, explicit_home = parity.GROK_CASES[case]
     with parity.grok_capture_root() as root:
         executable = parity.grok_executable(root, cost=cost, fallback=fallback)
         provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
-        profile_type = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
         provider = provider_type(
             "prov-capture", "capture", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}),
             oauth_runtime_type="grok", catalog=(registry.CatalogModel(**parity.GROK_CATALOG),),
             env=(("CAPTURE_SETTING", "provider"),),
         )
-        profile = profile_type("profile-capture", "capture",
+        profile = resolved_profile("profile-capture", "capture",
                                registry.RuntimeSpec("rt-grok", "grok", "grok", executable,
                                                     adapter("grok").capabilities),
                                provider, "grok-4.7", effort or None)
-        original = agent_settings.resolve
-        monkeypatch.setattr(agent_settings, "resolve",
-                            lambda *a, **kw: replace(original(*a, **kw), profile=profile))
+        _install_profile(monkeypatch, profile)
         agent_db.list_layers.return_value = [
             {"scope": "system", "role": None, "env": [{"key": "CAPTURE_SETTING", "value": "settings"}],
              "run_budget_usd": 0.005},
@@ -151,8 +165,8 @@ def test_grok_capture_observes_real_tiers_login_resume_and_cost(
                 with pytest.raises(AssertionError, match=key):
                     parity.assert_parity(captures, mutated, expected_root=root, actual_root=root)
         assert GROK_FIXTURE.is_file(), "generate Grok expected on patched v2 with a disposable DB"
-        pinned = json.loads(GROK_FIXTURE.read_text())
-        parity.assert_parity(pinned["captures"][case], captures, expected_root=root, actual_root=root)
+        expected = declared_contract_captures("grok")[case]
+        parity.assert_parity(expected, captures, expected_root=root, actual_root=root)
 
 
 @pytest.mark.parametrize("oauth_runtime", [None, "codex", "grok"])
@@ -249,7 +263,7 @@ def test_old_grok_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> No
 def test_omp_capture_observes_all_four_real_tiers(
     case: str, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
-    from looper.agents import agent_settings, profile_registry as registry
+    from looper.agents import profile_registry as registry
     from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
     from looper.db import profile_registry as db_registry
     from unittest.mock import AsyncMock
@@ -258,20 +272,17 @@ def test_omp_capture_observes_all_four_real_tiers(
     with parity.omp_capture_root() as root:
         executable = parity.omp_executable(root)
         provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
-        profile_type = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
         provider = provider_type(
             "prov-capture", "capture", AuthKind.API_KEY,
             frozenset(ApiProtocol(value) for value in protocols), base_url=url,
             catalog=tuple(registry.CatalogModel(**entry) for entry in catalog),
             api_key="sk-test-capture", env=(("CAPTURE_SETTING", "provider"),),
         )
-        profile = profile_type("profile-capture", "capture",
+        profile = resolved_profile("profile-capture", "capture",
                                registry.RuntimeSpec("rt-omp", "omp", "omp", executable,
                                                     adapter("omp").capabilities),
                                provider, "capture-omp[1m]", effort or None)
-        original = agent_settings.resolve
-        monkeypatch.setattr(agent_settings, "resolve",
-                            lambda *a, **kw: replace(original(*a, **kw), profile=profile))
+        _install_profile(monkeypatch, profile)
         monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-capture"))
         agent_db.list_layers.return_value = [
             {"scope": "system", "role": None, "env": [{"key": "CAPTURE_SETTING", "value": "settings"}],
@@ -351,8 +362,8 @@ def test_omp_capture_observes_all_four_real_tiers(
                 with pytest.raises(AssertionError, match="models_yml"):
                     parity.assert_parity(captures, mutated, expected_root=root, actual_root=root)
         assert OMP_FIXTURE.is_file(), "generate the OMP baseline on the patched v2 checkout with a disposable DB"
-        pinned = json.loads(OMP_FIXTURE.read_text())
-        parity.assert_parity(pinned["captures"][case], captures, expected_root=root, actual_root=root)
+        expected = declared_contract_captures("omp")[case]
+        parity.assert_parity(expected, captures, expected_root=root, actual_root=root)
 
 
 def test_omp_baseline_requires_clean_patched_source(tmp_path: Path) -> None:
@@ -418,7 +429,7 @@ def test_old_omp_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> Non
 def test_codex_capture_observes_real_tiers_and_resume(
     case: str, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
 ) -> None:
-    from looper.agents import agent_settings, profile_registry as registry
+    from looper.agents import profile_registry as registry
     from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
     from looper.db import profile_registry as db_registry
     from unittest.mock import AsyncMock
@@ -427,20 +438,18 @@ def test_codex_capture_observes_real_tiers_and_resume(
     with parity.codex_capture_root() as root:
         executable = parity.codex_executable(root)
         provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
-        profile_type = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
         provider = provider_type(
             "prov-capture", "capture", AuthKind(account), frozenset({ApiProtocol.OPENAI_RESPONSES}),
             oauth_runtime_type="codex" if account == "oauth" else None, base_url=url,
-            catalog=(registry.CatalogModel(**parity.CODEX_CATALOG),), api_key="sk-test-capture",
+            catalog=(registry.CatalogModel(**parity.CODEX_CATALOG),),
+            api_key="sk-test-capture" if account == "api_key" else None,
             env=(("CAPTURE_SETTING", "provider"),),
         )
-        profile = profile_type("profile-capture", "capture",
+        profile = resolved_profile("profile-capture", "capture",
                                registry.RuntimeSpec("rt-codex", "codex", "codex", executable,
                                                     adapter("codex").capabilities),
                                provider, "capture-codex", effort or None)
-        original = agent_settings.resolve
-        monkeypatch.setattr(agent_settings, "resolve",
-                            lambda *a, **kw: replace(original(*a, **kw), profile=profile))
+        _install_profile(monkeypatch, profile)
         monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-capture"))
         agent_db.list_layers.return_value = [
             {"scope": "system", "role": None, "env": [{"key": "CAPTURE_SETTING", "value": "settings"}],
@@ -513,7 +522,7 @@ def test_codex_capture_observes_real_tiers_and_resume(
             with pytest.raises(AssertionError, match=key):
                 parity.assert_parity(captures, mutated, expected_root=root, actual_root=root)
         assert CODEX_FIXTURE.is_file(), "generate the Codex baseline on the patched v2 checkout with a disposable DB"
-        expected = json.loads(CODEX_FIXTURE.read_text())["captures"][case]
+        expected = declared_contract_captures("codex")[case]
         parity.assert_parity(expected, captures, expected_root=root, actual_root=root)
 
 
@@ -591,13 +600,12 @@ def test_claude_capture_observes_all_four_real_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, baseline: dict[str, Any],
     account: str, url: str, background: str | None, teams: bool, mode: str | None, scope: str,
 ) -> None:
-    from looper.agents import agent_settings, profile_registry as registry
+    from looper.agents import profile_registry as registry
     from looper.agents.runtimes import ApiProtocol, AuthKind
     from looper.db import agent_setting_layers
 
     assert Path(registry.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1])
     provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
-    profile_type = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
     catalog = registry.CatalogModel("main-model[1m]", context_window=1_000_000,
                                     input_usd_per_mtok=0.6, output_usd_per_mtok=2.2,
                                     cache_read_usd_per_mtok=0, cache_write_usd_per_mtok=1,
@@ -605,9 +613,9 @@ def test_claude_capture_observes_all_four_real_tiers(
     provider = provider_type("prov-capture", "capture", AuthKind(account),
                              frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
                              oauth_runtime_type="claude-code" if account == "oauth" else None,
-                             base_url=url, catalog=(catalog,), api_key="sk-test-capture",
+                             base_url=url, catalog=(catalog,), api_key="sk-test-capture" if account == "api_key" else None,
                              env=(("API_TIMEOUT_MS", "3000000"),))
-    profile = profile_type("profile-capture", "capture", registry.BUILTIN_RUNTIME, provider,
+    profile = resolved_profile("profile-capture", "capture", registry.BUILTIN_RUNTIME, provider,
                            "main-model[1m]", "high", agent_teams=teams)
     monkeypatch.setattr(registry, "BUILTIN_PROFILE", profile)
     # Persistence is the existing in-memory positive control. Settings still
@@ -616,12 +624,7 @@ def test_claude_capture_observes_all_four_real_tiers(
     from unittest.mock import AsyncMock
 
     monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-capture"))
-    original_resolve = agent_settings.resolve
-
-    def resolve(*args: Any, **kwargs: Any) -> Any:
-        return replace(original_resolve(*args, **kwargs), profile=profile)
-
-    monkeypatch.setattr(agent_settings, "resolve", resolve)
+    _install_profile(monkeypatch, profile)
     rows = [{"scope": "system", "role": None, "env": [], "run_budget_usd": 0.5}]
     rows += [] if mode is None else [
         {"scope": "role" if role == "manager" else scope, "role": role, "system_prompt_mode": mode, "env": []}
@@ -680,7 +683,7 @@ def test_claude_capture_observes_all_four_real_tiers(
     captures = asyncio.run(parity.capture_claude_tiers(tmp_path, "unconfigured", read_state=state))
     case = next(name for name, values in parity.CLAUDE_CASES.items()
                 if values == (account, url, background, teams, mode, scope))
-    expected = baseline["captures"][case]
+    expected = declared_contract_captures("claude")[case]
     assert len(captures) == 4
     for index, record in enumerate(captures):
         # The in-memory store is a fast adapter-path control, not a substitute

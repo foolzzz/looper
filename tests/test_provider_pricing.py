@@ -10,6 +10,10 @@ import asyncio
 import json
 from dataclasses import asdict, replace
 
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from looper.agents.profile_registry import (
@@ -302,6 +306,34 @@ def test_the_soft_cap_counts_usage_events_at_the_providers_prices() -> None:
         == (False, False, False, True)
 
 
+@pytest.mark.parametrize("tokens", [Usage(), Usage(input_tokens=0), Usage(input_tokens=10, output_tokens=4)])
+def test_only_explicit_incomplete_usage_makes_missing_buckets_unknown(tokens):
+    legacy = RunSpend(_provider(MAIN), "m-main", cap=1)
+    legacy.add(usage_event("m-main", tokens))
+    assert legacy.usage.cost_usd is not None  # existing runtime contract is unchanged
+    incomplete = RunSpend(_provider(MAIN), "m-main", cap=1)
+    incomplete.add(usage_event("m-main", tokens, usage_complete=False))
+    assert incomplete.usage.cost_usd is None
+    incomplete.add(usage_event("m-main", Usage(input_tokens=1)))
+    assert incomplete.usage.cost_usd is None  # a later complete report cannot erase an unknown part
+
+
+def test_dsh_observed_cost_uses_catalog_prices_before_builtin_prices():
+    from looper.agents.runtimes.dsh import DshStream
+
+    provider = _provider(CatalogModel("deepseek-v4-pro[1m]", output_usd_per_mtok=8))
+    stream = DshStream(model="deepseek-v4-pro")
+    events = stream.translate({"type": "status", "phase": "step_end", "turn": 1, "step": 1,
+                               "usage": {"inputTokens": 10, "outputTokens": 4,
+                                         "cacheReadTokens": 7, "cacheWriteTokens": 2}})
+    spend = RunSpend(provider, "deepseek-v4-pro[1m]", cap=None)
+    for event in events:
+        spend.add(event)
+    # (10 * 1.32 + 4 * 8 + 7 * .044 + 2 * 1.32) / 1M = .000048148.
+    assert spend.observed_cost_usd == pytest.approx(0.000048148)
+    assert spend.usage.cost_usd is None and spend.usage.output_tokens == 4
+
+
 def test_claude_codes_stream_yields_one_usage_event_per_model_request() -> None:
     from looper.agents.claude_cli import stream_events
 
@@ -555,3 +587,136 @@ def test_recorder_writes_snapshot_cost_or_null_for_an_unpriced_request(agent_db,
     assert saved["cost_source"] == "provider_price"
     assert saved["cost_usd"] == (None if unknown else 0.8)
     assert saved["input_tokens"] == (None if unknown else 300_000)
+
+
+@pytest.mark.parametrize("priced", [True, False])
+def test_pi_usage_reaches_provider_pricing_and_the_recorders_soft_cap(priced: bool, tmp_path: Path) -> None:
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from looper.agents.runtimes.pi import PiRuntime
+
+    # Totals: main (157, 18, 63, 8), nested + compaction (50, 7, 15, 3).
+    # At (2, 10, .2, 2.5) and (1, 2, .1, 1): .0005266 + .0000685 = .0005951.
+    catalog = (CatalogModel("test-model", input_usd_per_mtok=2, output_usd_per_mtok=10,
+                            cache_read_usd_per_mtok=.2, cache_write_usd_per_mtok=2.5),
+               CatalogModel("configured-model", input_usd_per_mtok=1, output_usd_per_mtok=2,
+                            cache_read_usd_per_mtok=.1, cache_write_usd_per_mtok=1)) if priced else ()
+    resolved = _resolved("configured-model", protocol=ApiProtocol.OPENAI_RESPONSES,
+                         **({name: getattr(catalog[1], name) for name in (
+                             "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok",
+                             "cache_write_usd_per_mtok")} if priced else {}))
+    auxiliary = tuple(ModelSpec("model-aux", resolved.provider.id, protocol=resolved.model.protocol,
+                      **asdict(entry)) for entry in catalog[:1])
+    launch = _launch(resolved, auxiliary, runtime="pi")
+    launch = replace(launch, settings=replace(launch.settings, max_budget_usd=.0005))
+    provider = resolved.binding_provider()
+    runtime = PiRuntime()
+    recorder = ClaudeRunRecorder(agent_id="worker-test", task_id=None, command=["pi"], cwd=str(tmp_path),
+                                 input_text="synthetic", launch=launch)
+    crossed: list[int] = []
+    results: list[dict] = []
+
+    async def read() -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data((Path(__file__).parent / "fixtures/pi_json/compaction.jsonl").read_bytes())
+        reader.feed_eof()
+        requests = 0
+        async for event in runtime.parse(reader, model=launch.model):
+            before = recorder.cap_stop
+            await recorder.record(event)
+            requests += event["type"] == "usage"
+            if before is None and recorder.cap_stop is not None:
+                crossed.append(requests)
+                assert event["type"] == "usage"
+            if event["type"] == "result":
+                results.append(event)
+
+    asyncio.run(asyncio.wait_for(read(), 5))
+    result, = results
+    own = run_usage(result, price=launch.price)
+    cost = runtime.cost(own, provider)
+    assert cost.source is runtime.cost_source(provider) is CostSource.PROVIDER_PRICE
+    assert (own.input_tokens, own.output_tokens, own.cache_read_tokens, own.cache_creation_tokens) == (207, 25, 78, 11)
+    assert own.cost_usd == (pytest.approx(.0005951) if priced else None)
+    if priced:
+        assert crossed == [4]  # .0003965 before the recovered request, .0005605 after it.
+        stop = recorder.cap_stop
+        assert stop is not None and stop.usage == own
+        assert runtime.budget_error(stop.result_event)
+    else:
+        assert crossed == [] and recorder.cap_stop is None
+    assert runtime.budget_error(result) is None
+    assert runtime.budget_error({"subtype": "error_max_budget_usd"}) is None
+
+
+@pytest.mark.parametrize("protocol", [ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT])
+def test_pi_real_provider_client_separates_cached_input_before_looper_prices_it(
+    protocol: ApiProtocol, tmp_path: Path,
+) -> None:
+    """Use pi's real model loader/client against synthetic SSE via fetch; no operator login or network."""
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.runtimes.pi import PiStream, _probe_env, models_json
+
+    executable, node = shutil.which("pi"), shutil.which("node")
+    if not executable or not node:
+        pytest.skip("installed pi 1.3.0 and Node are required for the provider wire usage check")
+    package = next((path for path in Path(executable).resolve().parents
+                    if (path / "package.json").exists()), None)
+    if package is None or json.loads((package / "package.json").read_text()).get("version") != "1.3.0":
+        pytest.skip("the provider wire usage check targets pi 1.3.0")
+    resolved = _resolved(protocol=protocol, base_url="https://example.invalid/v1", **asdict(MAIN))
+    resolved = replace(resolved, provider=replace(resolved.provider, api_key="synthetic-key"))
+    provider = resolved.binding_provider()
+    (tmp_path / "models.json").write_text(json.dumps(models_json(_launch(resolved, runtime="pi"))))
+    script = tmp_path / "usage.mjs"
+    script.write_text('''
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+const [pkg, root] = process.argv.slice(2);
+const { ModelRuntime } = await import(pathToFileURL(join(pkg, 'dist/core/model-runtime.js')));
+const runtime = await ModelRuntime.create({authPath: join(root, 'auth.json'),
+  modelsPath: join(root, 'models.json'), refreshOnCreate: false});
+if (runtime.getError()) throw new Error(runtime.getError());
+const model = runtime.getModel('looper', 'm-main');
+const requests = [];
+const fetch = async (url, init) => {
+  requests.push({path: new URL(url).pathname, body: JSON.parse(init.body)});
+  let data;
+  if (model.api === 'openai-responses') {
+    const response = {id: 'resp-test', status: 'completed', output: [], usage: {
+      input_tokens: 100, input_tokens_details: {cached_tokens: 40, cache_write_tokens: 8},
+      output_tokens: 10, output_tokens_details: {reasoning_tokens: 6}, total_tokens: 110}};
+    data = 'event: response.completed\\ndata: ' + JSON.stringify({type: 'response.completed', response}) + '\\n\\n';
+  } else {
+    const chunk = {id: 'chat-test', object: 'chat.completion.chunk', model: 'm-main',
+      choices: [{index: 0, delta: {role: 'assistant', content: 'Done.'}, finish_reason: 'stop'}],
+      usage: {prompt_tokens: 100, prompt_tokens_details: {cached_tokens: 40, cache_write_tokens: 8},
+        completion_tokens: 10, completion_tokens_details: {reasoning_tokens: 6}, total_tokens: 110}};
+    data = 'data: ' + JSON.stringify(chunk) + '\\n\\ndata: [DONE]\\n\\n';
+  }
+  return new Response(data, {headers: {'Content-Type': 'text/event-stream'}});
+};
+const message = await runtime.complete(model, {
+  messages: [{role: 'user', content: 'test', timestamp: 0}],
+}, {fetch, signal: AbortSignal.timeout(10000)});
+if (message.stopReason !== 'stop') throw new Error(message.errorMessage || message.stopReason);
+console.log(JSON.stringify({requests, message}));
+''')
+    home, agent, session = (tmp_path / name for name in ("home", "agent", "session"))
+    for directory in (home, agent, session):
+        directory.mkdir()
+    env = {**_probe_env(home, agent, session), "LOOPER_PROVIDER_API_KEY": "synthetic-key"}
+    done = subprocess.run([node, str(script), str(package), str(tmp_path)], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=20, check=False)
+    assert done.returncode == 0, done.stderr
+    readback = json.loads(done.stdout)
+    request, = readback["requests"]
+    assert request["path"] == ("/v1/responses" if protocol is ApiProtocol.OPENAI_RESPONSES else "/v1/chat/completions")
+    stream = PiStream(model="m-main")
+    events = stream.translate({"type": "message_end", "message": readback["message"]})
+    result, = stream.translate({"type": "agent_settled", "aborted": False})
+    spend = RunSpend(provider, "m-main", cap=.0002)
+    assert [spend.add(event) for event in events] == [False, True]
+    # (100 - 40 - 8) * 2 + 10 * 10 + 40 * .2 + 8 * 2.5 = 232 per million.
+    assert spend.usage == run_usage(result, price=pricer(provider)) == Usage(
+        cost_usd=.000232, input_tokens=52, output_tokens=10, cache_read_tokens=40, cache_creation_tokens=8)

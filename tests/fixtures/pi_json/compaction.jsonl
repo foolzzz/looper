@@ -1,0 +1,16 @@
+{"type":"session","id":"test-session","cwd":"workspace","usage":{"input":9999}}
+{"type":"message_start","message":{"role":"assistant","usage":{"input":100,"output":10}}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Progress","partial":{"usage":{"input":100,"output":10}}}}
+{"type":"message_update","message":{"role":"assistant","usage":{"input":100,"output":10}}}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","content":[{"type":"text","text":"Attempt."}],"stopReason":"error","usage":{"input":100,"output":10,"cacheRead":40,"cacheWrite":8,"cacheWrite1h":5,"reasoning":6,"totalTokens":158,"cost":{"total":99}}}}
+{"type":"tool_execution_end","toolCallId":"nested-work","result":{"usage":{"input":20,"output":3,"cacheRead":5,"cacheWrite":2},"details":{"usage":{"input":999}}}}
+{"type":"message_end","message":{"role":"toolResult","toolCallId":"nested-work","toolName":"nested","content":[{"type":"text","text":"Nested work."}],"isError":false,"usage":{"input":20,"output":3,"cacheRead":5,"cacheWrite":2},"details":{"usage":{"input":999}}}}
+{"type":"agent_end","willRetry":true,"messages":[{"role":"assistant","usage":{"input":100,"output":10,"cacheRead":40,"cacheWrite":8}},{"role":"toolResult","usage":{"input":20,"output":3,"cacheRead":5,"cacheWrite":2}}]}
+{"type":"compaction_start","reason":"overflow"}
+{"type":"compaction_end","reason":"overflow","result":{"summary":"Synthetic compacted context.","tokensBefore":150,"estimatedTokensAfter":32,"usage":{"input":30,"output":4,"cacheRead":10,"cacheWrite":1,"reasoning":2}},"aborted":false,"willRetry":true}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","content":[{"type":"text","text":"Recovered."}],"stopReason":"stop","usage":{"input":50,"output":6,"cacheRead":20,"cacheWrite":0}}}
+{"type":"compaction_end","reason":"threshold","aborted":false,"willRetry":false,"errorMessage":"Synthetic compaction failure."}
+{"type":"compaction_end","reason":"manual","aborted":true,"willRetry":false}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","content":[],"stopReason":"aborted","usage":{"input":7,"output":2,"cacheRead":3,"cacheWrite":0}}}
+{"type":"agent_end","messages":[{"role":"assistant","usage":{"input":7,"output":2,"cacheRead":3,"cacheWrite":0}}]}
+{"type":"agent_settled","aborted":true}

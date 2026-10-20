@@ -78,7 +78,7 @@ from typing import Any
 from .compare import outcome
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
-    fresh_database, install_claude, model_name, register_agent, run_suite, running_server, select_agent, write_result,
+    _all_events, fresh_database, install_claude, model_name, register_agent, run_suite, running_server, select_agent, write_result,
 )
 
 # v2: every row has rep, outcome (with error_class and error when it is an error) and models; the run has reps,
@@ -1520,6 +1520,38 @@ def _manager_profile(api: Api, model: str, effort: str | None) -> dict[str, Any]
     return chosen
 
 
+def runtime_evidence(api: Api) -> list[dict[str, Any]]:
+    """Read actual launches and root observations, without commands or credentials."""
+    records = []
+    while True:
+        page = api.get("/api/llm-records", limit=200, offset=len(records))["records"]
+        records.extend(page)
+        if len(page) < 200:
+            break
+    evidence = []
+    for brief in sorted(records, key=lambda row: row["id"]):
+        record = api.get(f"/api/llm-records/{brief['id']}")["record"]
+        metadata = record.get("metadata") or {}
+        command = list(metadata.get("command") or [])
+        if command[:1] == ["env"]:
+            command.pop(0)
+            while command and "=" in command[0]:
+                command.pop(0)
+        finals = [row["event"] for row in _all_events(api, record["id"])
+                  if row["event"].get("type") == "result"]
+        final = finals[-1] if finals else {}
+        evidence.append({"role": record["agent_id"].split("-", 1)[0],
+            "runtime": ((metadata.get("profile") or {}).get("runtime") or {}).get("type"),
+            "executable": Path(command[0]).name if command else None,
+            "system_prompt_mode": metadata.get("system_prompt_mode"),
+            "session_id": record.get("session_id"), "status": record.get("status"),
+            "root_usage_complete": final.get("root_usage_complete"),
+            "observed_cost_usd": final.get("observed_cost_usd"),
+            "tokens": {key: record.get(key) for key in
+                       ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")}})
+    return evidence
+
+
 def run(
     *, mode: str, dialogs: tuple[Dialog, ...], admin_url: str, out_dir: Path, model: str | None = None,
     agent: str | None = None, register: dict[str, Any] | None = None, max_budget_usd: float | None = None,
@@ -1584,7 +1616,13 @@ def run(
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
                                      runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None)
+                    if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
+                        row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
+                if "runtime_evidence" in row:
+                    # DSH's full bill is unknown. Use reported root spend for the
+                    # suite's observable soft cap rather than a null bill as zero.
+                    cost = max(cost, sum(run["observed_cost_usd"] or 0 for run in row["runtime_evidence"]))
             return {**row, "cost_usd": round(cost, 6), "models": models}
 
         # A failure to set a dialog's server up is not caught: it stops the run (catch off).

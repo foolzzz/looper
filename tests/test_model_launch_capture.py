@@ -139,6 +139,10 @@ def test_existing_claude_capture_is_a_nonempty_positive_control(
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("LOOPER_RUNTIME_ROOT", raising=False)
     monkeypatch.setenv("PGPASSWORD", "synthetic-inherited-token")
+    from unittest.mock import AsyncMock
+    from looper.db import profile_registry as db_registry
+
+    monkeypatch.setattr(db_registry, "get_profile", AsyncMock(return_value=None))
     old: dict[str, Any] = {}
 
     async def exercise() -> None:
@@ -254,7 +258,7 @@ def test_existing_runtime_fakes_work_with_the_same_capture_interface(
     monkeypatch.setenv("GROK_HOME", str(login.parent))
     adapter_ = adapter(runtime)
     provider_cls = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
-    profile_cls = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
+    from runtime_model_helpers import resolved_profile as profile_cls
     provider = provider_cls("prov-parity", "parity", AuthKind.OAUTH if runtime == "grok" else AuthKind.API_KEY,
                             frozenset({ApiProtocol.OPENAI_RESPONSES}),
                             **({"oauth_runtime_type": "grok"} if runtime == "grok" else
@@ -277,7 +281,7 @@ def test_existing_runtime_fakes_work_with_the_same_capture_interface(
             home = Path(env["HOME"])
             files = sorted(home.rglob("models.yml")) + [Path(argv[argv.index("--append-system-prompt") + 1])]
         assert files and all(file.is_file() for file in files)
-        binding = adapter_.bind_provider(provider, launch.model, launch.effort)
+        binding = adapter_.bind_provider(launch.profile.provider, launch.model, launch.effort)
         return {"unset": list(binding.unset), "config": {str(file): file.read_text() for file in files},
                 "prompt": prompt.read_text(), "permissions": {"read_only": launch.read_only},
                 "isolation": {"home": str(home), "mode": oct(home.stat().st_mode & 0o777)},

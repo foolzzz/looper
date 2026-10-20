@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,7 +21,10 @@ import pytest
 
 from looper import child_env
 from looper.agents import agent_settings
-from looper.agents.profile_registry import BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile
+from looper.agents.profile_registry import (
+    BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, ResolvedAgentProfile,
+)
+from tests.runtime_model_helpers import resolved_profile
 from looper.agents.agent_settings import (
     BUILTIN_SYSTEM_PROMPT_MODE,
     BUILTIN_SETTINGS,
@@ -55,7 +58,7 @@ def _place(layer: Layer, role: str) -> tuple[Layer, AgentType | None]:
 
 def _profile(model: str, effort: str | None = None) -> AgentProfile:
     """A profile of the built-in runtime and provider with ``model``."""
-    return AgentProfile(f"agent-{model}", f"claude-code/{model}", BUILTIN_RUNTIME, BUILTIN_PROVIDER, model, effort)
+    return resolved_profile(f"agent-{model}", f"claude-code/{model}", BUILTIN_RUNTIME, BUILTIN_PROVIDER, model, effort)
 
 
 # A distinct value of each field at each layer.
@@ -79,6 +82,16 @@ def _resolved(settings: agent_settings.AgentSettings, field: str) -> tuple[Any, 
 
 def _row(profile: AgentProfile) -> dict[str, Any]:
     """``profile`` as the database gives it (``db.profile_registry.PROFILE_JSON``)."""
+    if isinstance(profile, ResolvedAgentProfile):
+        resolved = profile.resolved_model
+        provider = asdict(resolved.provider)
+        provider["env"] = [{"key": key, "value": value} for key, value in resolved.provider.env]
+        return {"id": profile.id, "name": profile.name, "model_id": profile.model_id,
+                "model": asdict(resolved.model), "provider": provider, "endpoint": asdict(resolved.endpoint),
+                "effort": profile.effort, "agent_teams": profile.agent_teams, "custom_prompt": profile.custom_prompt,
+                "builtin": False, "runtime_id": profile.runtime.id, "runtime_name": profile.runtime.name,
+                "runtime_type": profile.runtime.type, "runtime_executable": profile.runtime.executable,
+                "runtime_capabilities": sorted(c.value for c in profile.runtime.capabilities)}
     return {"id": profile.id, "name": profile.name, "model": profile.model, "effort": profile.effort,
             "builtin": False, "runtime_id": profile.runtime.id, "runtime_name": profile.runtime.name,
             "runtime_type": profile.runtime.type, "runtime_executable": profile.runtime.executable,

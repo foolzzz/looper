@@ -406,12 +406,13 @@ def test_another_task_running_in_a_directory_is_found_and_an_ended_one_or_itself
     async def test(pool: Any) -> None:
         project = await projects.create_project(name="alpha", pool=pool)
         rows = [("task-self", "/w/a", "executing"), ("task-done", "/w/a", "completed"), ("task-other", "/w/b", "running"),
-                ("task-wait", "/w/c", "waiting_user")]
+                ("task-wait", "/w/c", "waiting_user"), ("task-waits", "/w/d", "waiting")]
         await pool.executemany("INSERT INTO tasks (id, requirement, work_dir, status, project_id) "
                                "VALUES ($1, 'r', $2, $3, $4)", [(*row, project["id"]) for row in rows])
         assert await db_tasks.others_active_in("/w/a", "task-self", pool=pool) is False  # itself, and one that ended
         assert await db_tasks.others_active_in("/w/b", "task-self", pool=pool) is True
         assert await db_tasks.others_active_in("/w/c", "task-self", pool=pool) is True  # waiting for its user
+        assert await db_tasks.others_active_in("/w/d", "task-self", pool=pool) is True  # a wait holds it
         assert await db_tasks.others_active_in("/w/b", "task-other", pool=pool) is False
 
     _run(test, monkeypatch)

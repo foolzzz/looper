@@ -19,17 +19,17 @@ import pytest
 from fake_claude import fake_claude
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.claude_cli import ClaudeRunRecorder
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
-from looper.agents.runtimes import ApiProtocol, AuthKind, adapter, codex_login
+from looper.agents.profile_registry import (
+    Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+)
+from looper.agents.runtimes import ApiProtocol, AuthKind, VendorType, adapter, codex_login
 from looper.agents.runtimes.codex_login import LoginState, parse_status
 from looper.agents.self_check import FAIL, OK, SKIP, WARN, check_codex_login
 from looper.agents.system_prompt import SystemPrompt
 
 CODEX = adapter("codex")
-LOGIN = ProviderSpec("prov-codex-login", "codex-login", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}),
-                     "codex")
-API_KEY = ProviderSpec("prov-cpa", "cpa", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_RESPONSES}),
-                       base_url="http://127.0.0.1:8317/v1", api_key="sk-test")
+LOGIN = ProviderSpec("prov-codex-login", "codex-login", VendorType.CODEX_LOGIN, AuthKind.OAUTH, "codex")
+API_KEY = ProviderSpec("prov-cpa", "cpa", VendorType.CUSTOM, AuthKind.API_KEY, api_key="sk-test")
 
 
 # --- What `codex login status` says ---
@@ -113,8 +113,12 @@ def _operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _run(tmp_path: Path, provider: ProviderSpec = LOGIN, prompt: str = "PROMPT") -> tuple[Launch, list[str]]:
-    profile = AgentProfile("agent-codex-login", "codex/login", RuntimeSpec("rt-codex", "codex", "codex", "",
-                                                                         CODEX.capabilities), provider, "gpt-6.1-sol")
+    model = ModelSpec("model-codex-login", provider.id, "gpt-6.1-sol", ApiProtocol.OPENAI_RESPONSES)
+    endpoint = Endpoint(provider.id, model.protocol, "" if provider.auth is AuthKind.OAUTH else
+                        "http://127.0.0.1:8317/v1")
+    profile = ResolvedAgentProfile("agent-codex-login", "codex/login",
+        RuntimeSpec("rt-codex", "codex", "codex", "", CODEX.capabilities), model.id,
+        resolved_model=ResolvedModel(model, provider, endpoint))
     launch = Launch(AgentSettings(profile=profile))
     command = CODEX.run_command("codex", cwd=tmp_path, prompt_file=SystemPrompt(prompt).write_file(tmp_path / "rt"),
                                 launch=launch)

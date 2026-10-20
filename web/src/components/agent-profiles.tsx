@@ -47,6 +47,7 @@ function pairs(registry: Registry, runtime: Runtime | undefined, model: Model): 
   const type = runtimeType(registry, runtime);
   const provider = registry.providers.find((p) => p.provider_id === model.provider_id);
   return !!type && !!provider && type.protocols.includes(model.protocol)
+    && (!type.supported_models || type.supported_models.includes(model.name))
     && type.auth_kinds.includes(provider.auth)
     && (provider.auth !== "oauth" || provider.oauth_runtime_type === type.type);
 }
@@ -267,6 +268,7 @@ export function AgentProfileForm({
         </div>
         <p className="text-[11px] text-muted-foreground sm:col-span-2" data-testid="prompt-mode-per-role">
           The system prompt mode (append to the runtime&apos;s default or replace it) is set per role in Settings → Roles.
+          {type?.replace_system_prompt_refusal && <> {type.replace_system_prompt_refusal}.</>}
         </p>
         {teams && (
           <div className="space-y-1 sm:col-span-2">

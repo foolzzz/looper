@@ -18,6 +18,79 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.12.5] - 2026-10-20
+
+### Highlights
+
+- **Pi and DeepSeek Harness are optional runtimes for all four roles.** Manager, Planner, Worker and Reviewer can use pi (the pi coding agent CLI, minimum 1.3.0 with required launch flags) or exactly `@deepseek-ai/dsh` 0.2.1-rc.2. Both integrate with Agent Profiles, platform tools, events, usage, sessions and dashboard selection. Existing defaults and profile selections are unchanged. ([#252](https://github.com/foolzzz/looper/pull/252), [#256](https://github.com/foolzzz/looper/pull/256))
+
+### Behavior changes
+
+- **Pi supports API-key Responses and Chat Completions providers.** `openai-responses` includes CPA-style gateways; `openai-chat` includes DeepSeek, with Responses preferred when both are declared. Private homes, agent directories and separate sessions avoid operator configuration; discovery, telemetry and cache warming are disabled. Looper's bundled extension loads with `-e` and `--no-extensions`, preserving scoped tool descriptions, schemas, authorization and confirmation through the existing HTTP API. Catalog MCP/skills/plugins are skipped; Planner/consult reading-tool allowlists are not an OS sandbox. ([#252](https://github.com/foolzzz/looper/pull/252))
+- **Pi accounts new usage and resumes exact sessions.** JSON messages, tools, compaction and terminal events are normalized, with finalization on `agent_settled`, provider pricing and usage-based soft caps. Manager/Planner resume exact session files, room consults fork read-only copies, Worker RPC steering requires a correlated queued acknowledgement, and private storage participates in reclamation. ([#252](https://github.com/foolzzz/looper/pull/252))
+- **DSH binds DeepSeek API-key Messages providers to private runs.** `anthropic-messages` supports `deepseek-flash` and `deepseek-v4-pro`, including their `[1m]` catalog aliases; effort is low/high/max, default high. The key is supplied to the dsh process environment. Private `DSH_HOME` and immutable overlays pin the model, disable telemetry, uploads, title requests and default web search, append Looper's prompt and wire stdio MCP to the run's Looper endpoint. Compatible skills/external MCP are translated and omissions recorded. Planner/consult runs allow only reading tools and exact platform registrations; this is not a host sandbox. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **DSH has headless events and resumable owner sessions.** Success requires a completed turn, final response and verified successful exit. Resume refreshes launch configuration; read-only consults run in place with separate ended-session snapshots, refusing active-session snapshots. Active-run steering, autonomous turns, structured output and native `max_turns` enforcement are unsupported. Dashboard provider/model selections respect runtime compatibility and show the append-only limitation. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **Incomplete usage stays unknown.** DSH prices reported root steps at provider prices and stops capped runs when root usage cannot be verified; observed root spend is not a complete bill or a hard billing cap. Shared accounting honors explicit incomplete-usage markers, and the observed-root budget policy applies only when the runtime requests it; other runtimes keep their prior policy without those markers. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **Shared records and eval metrics improve.** Manager/Planner record materialized resident commands when available. Runtime cards retain probe errors beside versions for all runtimes. Eval edit accounting accepts `path`, deduplicates within a tool call and excludes URLs. The #256 description's managed-parent symlink cleanup protection, including Codex/OMP storage, is not present in merged code: cleanup skips symlinked session entries but does not check their managed parents. See the release notes' code-verification gap. ([#252](https://github.com/foolzzz/looper/pull/252), [#256](https://github.com/foolzzz/looper/pull/256))
+
+### Model-visible changes
+
+- **Manager profile tools list detected pi/dsh runtimes.** Pi notes require complete final replies/reports and identify `mcp__looper__`; its append/replace prompt modes receive scoped bridge tool definitions. DSH literally appends Looper instructions to its built-in prompt without rewriting saved role settings, requires complete final reports and tells Workers/Reviewers to finish rather than wait for later room questions. Both inject project instructions once with `AGENTS.md` preferred over `CLAUDE.md` per directory; DSH Prompt Preview includes effective content, compatible skills and role tools are exposed through DSH. Shared role prompts/contracts and existing runtimes' prompt content are unchanged. Dashboard chat, Telegram and Lark share these adapters/tools; no new product CLI subcommand or channel command is introduced. ([#252](https://github.com/foolzzz/looper/pull/252), [#256](https://github.com/foolzzz/looper/pull/256))
+
+### Fixes
+
+- **A missing unrelated runtime no longer restarts the pool and cancels active runs.** For every runtime, Manager and WorkerPool health checks inspect their own loop instead of requiring the `claude` binary on PATH; availability is checked at launch. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **Failures are explicit across runtimes.** Manager requires a successful terminal result before treating text as a successful reply, so error results with text fail. Worker command-preparation errors become work/verification failures, and soft-budget stop results are retained in transcripts. ([#256](https://github.com/foolzzz/looper/pull/256))
+
+### Validation
+
+- Both PRs' Codex review rounds ended not blocking and CI passed. Pi real evals: CPA-style `openai-responses` tasks 18/18, DeepSeek `openai-chat` tasks 17/18 (one room-consult case passed 1 of 2 runs, model variance), Manager dialogs 8/8; installed tool-bridge checks used pi 1.3.0.
+- DSH real validation used a DeepSeek key: an earlier task-stage attempt timed out and remains an error, with unknown observed cost and auxiliary coverage, no hard billing cap, a USD 0.50 per-run soft cap and USD 4 total observed cap. Later task-basic, task-review and Manager-dialog summaries each report 4 pass and 0 fail/error/skipped/untested; no per-stage cost is claimed. A separate reported four-role smoke covered two tasks, two Manager turns, API/database readback and session resume, with about USD 0.02 observed spend, not a complete bill. These are retained implementation reports; runtime checks and a full final-head prompt suite were not rerun for this draft.
+
+See the [bilingual release notes](docs/releases/v2.12.5.md) for activation, verification, authority boundaries, rollback and validation limits.
+
+## [2.12.4] - 2026-10-20
+
+### Highlights
+
+- **A Planner can wait for an external event inside its plan.** A `kind: "wait"` step waits for a time and an optional typed `github_pr` check, or a shell `command` only when the project's `wait_commands` is On (Off by default). Only dependent steps wait; readiness continues them without a model turn, Worker or Worker/Reviewer concurrency slot held for the wait. ([#247](https://github.com/foolzzz/looper/pull/247))
+
+### Behavior changes
+
+- **Waits have system limits and respect scheduled-run timeouts.** Settings → Scheduler → Waits sets the longest wait (built-in seven days) and shortest check interval (built-in 300 seconds); the Manager can view or change these with confirmation. A scheduled wait cannot outlast the run's remaining timeout. GitHub conditions cover head changes, finished checks and new comments; finished checks do not imply success. Command checks run as the server user in the task directory, require explicit project permission and are limited to 60 seconds and 2 KiB of retained output.
+- **Timeout, Resume now and Cancel have distinct outcomes.** Timeout records a notice, routes it to the originating Telegram/Lark chat when available, and gives the Planner a `[WAIT]` turn to extend, proceed, fail or adjust the plan. Resume now bypasses the condition without a model turn; Cancel requests a Planner decision. Dashboard actions apply only to waiting rows of active tasks. Saved waits recover after restart with their deadlines intact; stopped tasks are not checked or notified. A task with only waits reports `waiting` in In progress.
+- **The Planner reply contract and wait-step guide change what the model sees.** They add the wait shape, limits and DECISION/CHAT cancellation list; `[WAIT]` messages carry their own reply shape, check details and remaining scheduled-run time. Manager task reads include waits and step kinds; settings reads and the confirmed `waits` action expose limits. Dashboard chat, Telegram and Lark share the Manager tools; user wait actions remain on the dashboard. No new CLI command is added.
+
+### Validation
+
+- Codex review rounds for #247 ended not blocking. Opus Planner tier passed 40/40 on the 20 shared tasks; the broader run was 46/47, with the re-review wait miss fixed and a focused wait-task rerun passing 4/4. Opus Manager dialogs passed 54/54. A disposable real run with a sonnet Planner and haiku Workers covered a ready command check, timeout notice and `[WAIT]` turn, Resume now and Cancel, with no Worker running while waiting; headless screenshots covered waiting and timed-out steps. These are retained implementation reports, not runtime checks rerun for this draft.
+
+See the [bilingual release notes](docs/releases/v2.12.4.md) for activation, permissions, verification, rollback and validation limits.
+
+## [2.12.3] - 2026-10-20
+
+### Highlights
+
+- **Reply to user gates from the dashboard.** Waiting for you shows the task, topic, first open question and elapsed wait, with an inline reply and a link to the discussion. Up to ten cards are shown, with overflow links to Needs you tasks; a sent reply stays visible while the Planner owes it an answer. End discussion remains on the task page. ([#255](https://github.com/foolzzz/looper/pull/255))
+- **OpenCode and Sub2API provider presets, with models per API.** OpenCode uses its official inference endpoints and separates Responses/GPT, Chat Completions/DeepSeek, GLM and Kimi, and Anthropic/Claude catalogs. Sub2API defaults to a local self-hosted gateway; adjust its address and models to match the gateway. ([#257](https://github.com/foolzzz/looper/pull/257))
+- **DeepSeek Responses and Manager provider editing.** The DeepSeek preset offers Responses and Chat Completions at one base URL. The Manager can list presets, register from a preset and chosen API, and update a provider by id or name without accepting its key. Retained model names keep their catalog metadata; unknown vendor models and missing prices produce separate warnings. Thanks to @michaelx1993 for the report. ([#254](https://github.com/foolzzz/looper/pull/254), fixes [#251](https://github.com/foolzzz/looper/issues/251))
+
+### Behavior changes
+
+- **OpenAI-format preset models have no Claude Code context suffix.** GLM, Kimi and DeepSeek keep `[1m]` only on Anthropic-format entries, retaining context windows on suffix-free OpenAI entries. Kimi K3's preset window changes from 1,048,576 to 1,000,000. Existing providers and profiles are not rewritten. Saving a provider without Anthropic Messages or a non-Claude-Code profile warns about suffixed foreground/background names; the provider form displays saved warnings until acknowledged. ([#257](https://github.com/foolzzz/looper/pull/257), closes [#253](https://github.com/foolzzz/looper/issues/253))
+- **The Manager's provider tool changes what the model sees.** `looper_providers` describes preset discovery, registration, updates and warnings; its schema adds `update`, `provider`, `preset`, `api` and nullable `base_url`, and its answers include preset catalogs and warnings. Dashboard chat, Telegram and Lark share the change. Keys remain dashboard-only. There is no new CLI command. ([#254](https://github.com/foolzzz/looper/pull/254), [#257](https://github.com/foolzzz/looper/pull/257))
+
+### Fixes
+
+- **OMP failures carry the API error.** Available provider error text and HTTP status reach Manager, Planner and Worker/Reviewer failure reasons, with credential redaction before error-event recording and bounded displayed details. RPC error enrichment preserves session and usage data; streamed assistant text does not make an errored Manager turn successful. Startup failures name the runtime that could not start. ([#257](https://github.com/foolzzz/looper/pull/257))
+- **Waiting gate cards keep refreshing through slow reads and deleted tasks.** Refreshes queue instead of invalidating in-flight reads; one missing task does not block other cards, and pending reply receipts survive unrelated Planner turns. ([#255](https://github.com/foolzzz/looper/pull/255))
+
+### Validation
+
+- Codex review rounds for #255, #257 and #254 all ended not blocking after fixes. Opus Manager dialogs for #251 / #254 passed 54/54, two repetitions, on `b7500a892`, before the final review fixes. #255 has headless screenshots from a disposable server. These are retained implementation validations, not runtime checks rerun for this release draft; live provider calls and a full final-head prompt eval were not rerun.
+
+See the [bilingual release notes](docs/releases/v2.12.3.md) for activation, verification, authority boundaries, rollback and validation limits.
+
 ## [2.12.2] - 2026-10-19
 
 ### Highlights

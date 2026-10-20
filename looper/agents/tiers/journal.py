@@ -38,7 +38,10 @@ change it records (``db.plans.save``); the model never writes one. The kinds
   gate of the plan opened, the Planner changed it, cancelled it or closed it
   (``user_gates``): its topic, what changed, why, and how it closed; for the
   task page only (the plan lines show the Planner its gates, and a gate that
-  passed leaves its conclusion as a supplement, ``via`` ``gate``).
+  passed leaves its conclusion as a supplement, ``via`` ``gate``);
+- ``wait_opened``, ``wait_extended``, ``wait_closed``: a wait of the plan
+  opened, the Planner extended it or it closed (``waits``): its topic, why,
+  and how it closed; for the task page only.
 
 The entries come back as bounded sections:
 
@@ -105,6 +108,9 @@ class JournalKind(str, Enum):
     GATE_UPDATED = "gate_updated"
     GATE_CANCELLED = "gate_cancelled"
     GATE_CLOSED = "gate_closed"
+    WAIT_OPENED = "wait_opened"
+    WAIT_EXTENDED = "wait_extended"
+    WAIT_CLOSED = "wait_closed"
 
 
 # How a section heads each kind, in the order the Planner's section shows them: pitfalls first.

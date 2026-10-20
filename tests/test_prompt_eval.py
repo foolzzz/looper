@@ -10,6 +10,8 @@ import asyncio
 import dataclasses
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,9 +26,13 @@ from evals.prompt_regression import __main__ as cli
 from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
+from looper.agents import agent_settings, profile_registry
+from looper.agents.runtimes import ApiProtocol, AuthKind
+from looper.agents.runtimes.pi import PiRuntime, PiStream
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
-from looper.agents.tiers.planner_protocol import TurnKind, parse_plan, parse_vault
+from looper.agents.tiers.planner_protocol import TurnKind, WaitPolicy, parse_plan, parse_vault
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool, judge_result
+from looper.agents.waits import WaitLimits
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
@@ -127,6 +133,280 @@ def test_edit_tool_paths_are_relative_and_never_local_paths(tmp_path: Path) -> N
               omp("edit", {"input": "[h.txt#A1B2]\nPUT 1:\n+x\n"}), omp("read", {"path": "i.txt"})]
     assert metrics.edit_tool_paths(events, tmp_path) == [
         "a.txt", "sub/c.txt", "<outside the working directory>/d.txt", "e.txt", "f.txt", "g.txt", "h.txt"]
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+@pytest.mark.parametrize("location", ["relative", "absolute", "outside"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_pi_file_edits_reach_the_planners_metrics(
+    tmp_path: Path, tool: str, location: str, failed: bool,
+) -> None:
+    path = {"relative": "sub/plan.md", "absolute": str(tmp_path / "sub/plan.md"),
+            "outside": "/elsewhere/private/plan.md"}[location]
+    arguments = {"path": path, **({"content": "new"} if tool == "write" else
+                                 {"oldText": "old", "newText": "new"})}
+    stream = PiStream(model="selected")
+    raw = [
+        {"type": "message_end", "message": {"role": "assistant", "content": [
+            {"type": "toolCall", "id": "edit-1", "name": tool, "arguments": arguments}]}},
+        {"type": "message_end", "message": {"role": "toolResult", "toolCallId": "edit-1",
+            "isError": failed, "content": [{"type": "text", "text": "denied" if failed else "done"}]}},
+    ]
+    events = [{"event": event} for row in raw for event in stream.translate(row)]
+    expected = [] if failed else ["<outside the working directory>/plan.md" if location == "outside"
+                                 else "sub/plan.md"]
+    assert metrics.edit_tool_paths(events, tmp_path) == expected
+    # No filesystem diff can hide a missed tool: the actual task metric must see the event alone.
+    result = metrics.task_metrics(
+        detail={"status": "completed", "steps": []}, activity=[],
+        records=[_record(1, "planner-task-1")], events={1: events}, changes={}, work_dir=tmp_path,
+        check_problem=None, expect={"max_planner_modified_files": 0}, now=0.0)
+    assert result["planner_edit_tool_paths"] == expected
+    assert result["planner_modified_files"] == int(not failed)
+    assert result["problems"] == ([] if failed else ["planner_modified_files 1 > 0"])
+
+
+# --- Explicit eval Agent Profiles ----------------------------------------------------------------------
+
+
+_PI_SPECS = [("pi-cpa.example.json", "openai-responses", "gpt-6.1-sol"),
+             ("pi-deepseek.example.json", "openai-chat", "deepseek-flash")]
+
+
+@pytest.fixture
+def eval_registry(tmp_path: Path) -> Any:
+    """In-memory persistence and scripted Pi subprocesses; registration, settings and adapters are real."""
+    from fake_claude import fake_claude as executable
+
+    pi = executable(tmp_path / "pi", """import json, sys
+from pathlib import Path
+role = sys.stdin.read()
+if role == 'worker':
+    Path('done.txt').write_text('done\\n')
+reply = {'worker': json.dumps({'status': 'completed', 'changed_files': {'done.txt': 'done'},
+                              'deleted_files': [], 'summary': 'ok'}),
+         'reviewer': json.dumps({'passed': True}), 'planner': 'planned', 'manager': 'ok'}[role]
+model = sys.argv[sys.argv.index('--model') + 1]
+print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', 'model': model,
+                 'content': [{'type': 'text', 'text': reply}], 'stopReason': 'stop'}}))
+print(json.dumps({'type': 'agent_settled', 'aborted': False}))
+""")
+
+    class Registry:
+        def __init__(self) -> None:
+            self.providers: dict[str, Any] = {}
+            self.endpoints: dict[tuple[str, ApiProtocol], Any] = {}
+            self.models: dict[str, Any] = {}
+            self.profiles = [{"profile_id": "builtin", "name": "claude-code/opus", "builtin": True}]
+            self.layers: dict[Any, Any] = {}
+            self.posts: list[tuple[str, Any]] = []
+            self.launches: list[tuple[str, str, str]] = []
+            self.records: list[dict[str, Any]] = []
+            self.events: dict[int, list[dict[str, Any]]] = {}
+            self.messages: list[dict[str, Any]] = []
+            self.work = tmp_path
+            self.runtime = profile_registry.RuntimeSpec("rt-pi", "pi", "pi", pi, PiRuntime.capabilities)
+
+        def launch(self, role: str) -> str:
+            kind = agent_settings.AgentType(role)
+            launch = agent_settings.Launch(agent_settings.resolve(kind, self.layers), role=kind)
+            prompt = tmp_path / "prompt.md"
+            prompt.write_text("Disposable eval stand-in", encoding="utf-8")
+            command = launch.runtime.run_command(launch.executable("must-not-run-claude"), cwd=self.work,
+                                                 prompt_file=prompt, launch=launch)
+            done = subprocess.run(command, cwd=self.work, env=launch.environment(), input=role,
+                                  capture_output=True, text=True, check=True, timeout=10)
+
+            async def read() -> list[dict[str, Any]]:
+                stdout = asyncio.StreamReader()
+                stdout.feed_data(done.stdout.encode())
+                stdout.feed_eof()
+                return [event async for event in launch.runtime.parse(stdout, model=launch.model)]
+
+            events = asyncio.run(read())
+            record_id = len(self.records) + 1
+            self.records.append({**_record(record_id, f"{role}-eval", step_id="s1" if role == "worker" else None),
+                                 "model": launch.model})
+            self.events[record_id] = [{"seq": i, "event": event} for i, event in enumerate(events, 1)]
+            self.launches.append((role, launch.runtime.type, launch.model))
+            return next(event["result"] for event in events if event["type"] == "result")
+
+        def get(self, path: str, **_: Any) -> dict[str, Any]:
+            if path == "/api/registry":
+                return {"runtimes": [{"runtime_id": "rt-claude-code", "name": "claude-code",
+                                      "type": "claude-code", "builtin": True},
+                                     {"runtime_id": "rt-pi", "name": "pi", "type": "pi", "builtin": True}],
+                        "providers": [], "profiles": self.profiles,
+                        "models": [{"model_id": resolved.model.id, "provider_id": resolved.provider.id,
+                                    "name": resolved.model.name, "protocol": resolved.model.protocol.value}
+                                   for resolved in self.models.values()]}
+            if path == "/api/tasks":
+                return {"tasks": []}
+            if path == "/api/tasks/task-eval":
+                return {"status": "completed", "steps": [{"id": "s1"}]}
+            if path == "/api/tasks/task-eval/activity":
+                return {"activity": []}
+            if path == "/api/llm-records":
+                return {"records": self.records}
+            if path.endswith("/events"):
+                return {"events": self.events[int(path.split("/")[-2])]}
+            assert path == "/api/chat/messages", path
+            return {"messages": self.messages}
+
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            self.posts.append((path, body))
+            if path == "/api/providers":
+                assert "api_key_env" not in body
+                fields, key = profile_registry._provider_fields(body, None)
+                account = profile_registry.provider_spec({**fields, "id": "provider-eval"})
+                self.providers[account.id] = dataclasses.replace(account, api_key=key)
+                for entry in fields["endpoints"]:
+                    endpoint = profile_registry.Endpoint(account.id, ApiProtocol(entry["protocol"]), entry["base_url"])
+                    self.endpoints[account.id, endpoint.protocol] = endpoint
+                return {"provider": {"provider_id": account.id}}
+            if path == "/api/models":
+                model = profile_registry.ModelSpec.from_entry({**body, "id": f"model-{len(self.models)}"})
+                resolved = profile_registry.ResolvedModel(model, self.providers[model.provider_id],
+                                                          self.endpoints[model.provider_id, model.protocol])
+                self.models[model.id] = resolved
+                return {"model": {"model_id": model.id, "provider_id": model.provider_id,
+                                  "name": model.name, "protocol": model.protocol.value}}
+            if path == "/api/agent-profiles":
+                assert body["runtime_id"] == self.runtime.id
+                resolved = self.models[body["model_id"]]
+                resolved.check_runtime(self.runtime, body.get("effort"))
+                profile = {"profile_id": "profile-eval", **body,
+                           "model": {"model_id": resolved.model.id, "provider_id": resolved.provider.id,
+                                     "name": resolved.model.name, "protocol": resolved.model.protocol.value}}
+                self.profiles.append(profile)
+                return {"profile": profile}
+            if path == "/api/projects":
+                self.work = Path(body["work_dir"])
+                return {"project_id": "project-eval"}
+            if path == "/api/tasks/create":
+                self.work = Path(body["project"]["work_dir"])
+                return {"task_id": "task-eval", "project_id": "project-eval"}
+            if path == "/api/tasks/start":
+                for role in ("planner", "worker", "reviewer"):
+                    self.launch(role)
+                return {}
+            assert path == "/api/chat/send", path
+            self.messages.append({"message_id": f"{body['message_id']}:reply", "content": self.launch("manager")})
+            return {}
+
+        def put(self, path: str, body: Any) -> None:
+            assert path == "/api/agent-settings/system"
+            profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
+            chosen = profile_registry.ResolvedAgentProfile(profile["profile_id"], profile["name"], self.runtime,
+                profile["model_id"], resolved_model=self.models[profile["model_id"]])
+            profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
+            self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
+
+    return Registry()
+
+
+@pytest.mark.parametrize(("filename", "protocol", "model"), _PI_SPECS)
+def test_pi_eval_specs_register_without_exposing_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    eval_registry: Any, filename: str, protocol: str, model: str,
+) -> None:
+    spec_path = runner.REPO_ROOT / "evals" / "agents" / filename
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    assert spec["runtime"] == {"type": "pi"}
+    assert spec["provider"]["auth"] == "api_key"
+    assert spec["provider"]["protocols"] == [protocol]
+    assert spec["agent"]["model"] == model
+    assert "api_key" not in spec["provider"]
+    assert spec["provider"]["base_url"] == ("http://127.0.0.1:8080/v1" if protocol == "openai-responses"
+                                               else "https://api.deepseek.com/v1")
+    original = json.dumps(spec)
+    secret = "sk-disposable-eval-secret"
+    variable = spec["provider"]["api_key_env"]
+    monkeypatch.delenv(variable, raising=False)
+    with pytest.raises(runner.EvalError, match=variable):
+        runner.register_agent(eval_registry, spec)
+    assert eval_registry.posts == []
+    monkeypatch.setenv(variable, secret)
+    registered = runner.register_agent(eval_registry, spec)
+    chosen = runner.select_agent(eval_registry, agent=registered["name"], model=None)
+    assert chosen["runtime_id"] == "rt-pi"
+    assert chosen["model"] == {"model_id": chosen["model_id"], "provider_id": "provider-eval",
+                               "name": model, "protocol": protocol}
+    account = eval_registry.providers["provider-eval"]
+    assert account.api_key == secret
+    assert eval_registry.endpoints[account.id, ApiProtocol(protocol)].base_url == spec["provider"]["base_url"]
+    assert list(eval_registry.models) == [chosen["model_id"]]
+    assert eval_registry.models[chosen["model_id"]].model.protocol is ApiProtocol(protocol)
+    assert json.dumps(spec) == original  # adding the key must not mutate a shareable spec
+    report = {"agent": chosen, "tasks": []}
+    saved = tmp_path / "result.json"
+    runner.write_result(report, saved, roots=(tmp_path,), rows="tasks")
+    print(compare.markdown({"mode": "fake", "agent": chosen["name"], "git": {}, "tasks": []}))
+    captured = capsys.readouterr()
+    assert secret not in saved.read_text() + captured.out + captured.err + repr(chosen)
+
+
+def test_registering_pi_without_its_runtime_does_not_fall_back_to_claude(
+    monkeypatch: pytest.MonkeyPatch, eval_registry: Any,
+) -> None:
+    registry = eval_registry.get("/api/registry")
+    registry["runtimes"] = [runtime for runtime in registry["runtimes"] if runtime["type"] != "pi"]
+    monkeypatch.setattr(eval_registry, "get", lambda _: registry)
+    spec = json.loads((runner.REPO_ROOT / "evals/agents/pi-cpa.example.json").read_text(encoding="utf-8"))
+    with pytest.raises(runner.EvalError, match="no 'pi' runtime"):
+        runner.register_agent(eval_registry, spec)
+    assert eval_registry.posts == [] and eval_registry.launches == []
+
+
+@pytest.mark.parametrize(("filename", "protocol", "model"), _PI_SPECS)
+@pytest.mark.parametrize("suite", ["task", "dialog"])
+def test_registered_pi_runs_a_fake_eval_task_or_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, eval_registry: Any,
+    capsys: pytest.CaptureFixture[str], filename: str, protocol: str, model: str, suite: str,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    spec = json.loads((runner.REPO_ROOT / "evals" / "agents" / filename).read_text(encoding="utf-8"))
+    secret = "sk-disposable-eval-secret"
+    monkeypatch.setenv(spec["provider"]["api_key_env"], secret)
+
+    @contextmanager
+    def database(_: str) -> Any:
+        yield "disposable", 0.0
+
+    @contextmanager
+    def server(**_: Any) -> Any:
+        yield eval_registry
+
+    harness = runner if suite == "task" else dialogs
+    monkeypatch.setattr(harness, "fresh_database", database)
+    monkeypatch.setattr(harness, "running_server", server)
+    monkeypatch.setattr(harness, "_git", lambda: {})
+    if suite == "task":
+        task = EvalTask("pi_smoke", "Create done.txt.", lambda work: None if
+                        (work / "done.txt").read_text() == "done\n" else "wrong file", expect={"min_reviews": 1})
+        result, path = runner.run(mode="fake", tasks=(task,), register=spec,
+                                  admin_url="disposable", out_dir=tmp_path / "results", task_timeout=10)
+        roles = ["planner", "worker", "reviewer"]
+    else:
+        monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+        monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+        monkeypatch.setattr(dialogs, "_usage", lambda *_: (0.0, {
+            "manager": sorted({record["model"] for record in eval_registry.records})}))
+        dialog = dialogs.Dialog("pi_smoke", (dialogs.Say("Status?", lambda look: None if look.reply == "ok"
+                                                        else "wrong reply"),))
+        result, path = dialogs.run(mode="fake", dialogs=(dialog,), register=spec,
+                                   admin_url="disposable", out_dir=tmp_path / "results", timeout=10)
+        roles = ["manager"]
+        assert result["manager_agent"] == spec["agent"]["name"]
+    assert result["aborted"] is None
+    (row,) = result["tasks" if suite == "task" else "dialogs"]
+    assert row["outcome"] == "pass", row
+    assert row["models"] == {role: [model] for role in roles}
+    assert eval_registry.launches == [(role, "pi", model) for role in roles]
+    assert result["agent"] == spec["agent"]["name"]
+    captured = capsys.readouterr()
+    assert secret not in path.read_text(encoding="utf-8") + captured.out + captured.err
 
 
 def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
@@ -414,6 +694,48 @@ def _record(record_id: int, agent_id: str, *, input_text: str = "", step_id: str
 
 def _result(text: str) -> list[dict[str, Any]]:
     return [{"seq": 1, "event": {"type": "result", "subtype": "success", "result": text}}]
+
+
+def test_task_metrics_preserve_actual_runtime_and_unknown_usage(tmp_path):
+    record = _record(1, "planner-task")
+    record.update(session_id="session", metadata={
+        "profile": {"runtime": {"type": "dsh"}}, "system_prompt_mode": "append",
+        "command": ["env", "HOME=/disposable", "/bin/dsh", "--profile", "headless", "-"],
+    })
+    result = metrics.task_metrics(detail={"status": "completed"}, activity=[], records=[record],
+        events={}, changes={}, work_dir=tmp_path, check_problem=None, expect={}, now=0)
+    assert result["runtime_evidence"] == [{"role": "planner", "runtime": "dsh", "executable": "dsh",
+        "system_prompt_mode": "append", "session_present": True, "root_usage_complete": None,
+        "status": "completed", "report_valid": None, "verdict_passed": None,
+        "tool_calls": [], "permission_denials": []}]
+
+
+@pytest.mark.parametrize("text,valid,passed", [('{"passed": true}', True, True),
+    ('{"passed": false}', True, False), ('{"passed": "yes"}', False, None), ('no verdict', False, None)])
+def test_task_metrics_preserve_reviewer_contract_and_tool_evidence(tmp_path, text, valid, passed):
+    record = _record(1, "reviewer-step")
+    record["metadata"]["permission_denials"] = [{"id": "denied", "tool": "write", "input": '{"path":"PLAN.md"}'}]
+    events = [{"event": {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "read-1", "name": "read", "input": {"path": "config.json"}}]}}},
+        *_result(text)]
+    result = metrics.task_metrics(detail={"status": "completed"}, activity=[], records=[record],
+        events={1: events}, changes={}, work_dir=tmp_path, check_problem=None, expect={}, now=0)
+    evidence = result["runtime_evidence"][0]
+    assert evidence["report_valid"] is valid
+    assert evidence["verdict_passed"] is passed
+    assert evidence["tool_calls"] == [{"id": "read-1", "name": "read"}]
+    assert evidence["permission_denials"] == [{"id": "denied", "tool": "write"}]
+
+
+@pytest.mark.parametrize("end,expected", [("2026-10-13T10:00:04+00:00", "verified"),
+    ("2026-10-13T10:00:06+00:00", "violations"), (None, "unknown")])
+def test_dependency_order_checks_api_run_timestamps(end, expected):
+    steps = [{"id": "first"}, {"id": "second", "depends_on": ["first"]}]
+    records = [_record(1, "worker-a", step_id="first", end=end),
+               _record(2, "worker-b", step_id="second", start="2026-10-13T10:00:05+00:00")]
+    result = metrics.dependency_order(steps, records)
+    assert result == {"edges": 1, "verified": int(expected == "verified"),
+                      "violations": int(expected == "violations"), "unknown": int(expected == "unknown")}
 
 
 @pytest.mark.parametrize(("outside", "has_fact", "closeout", "problems"), [
@@ -911,6 +1233,353 @@ class _Poster:
     def post(self, path: str, body: Any) -> dict[str, Any]:
         self.posted.append((path, body))
         return {}
+
+
+def test_wait_metrics_read_specs_states_and_direct_dependents(tmp_path: Path) -> None:
+    detail = {"status": "completed", "waits": [
+        {"step": "w1", "step_id": "wait-1", "opened_at": "2026-01-01T00:00:00Z", "state": "done",
+         "check": {"type": "github_pr"}},
+        {"step": "w2", "step_id": "wait-2", "opened_at": "2026-01-01T00:00:00Z", "state": "timed_out",
+         "check": {"type": "command"}},
+        {"step": "w3", "step_id": "wait-3", "opened_at": None, "state": "pending", "check": {"type": "github_pr"}},
+        {"step": "w4", "step_id": "wait-4", "opened_at": "2026-01-01T00:00:00Z", "state": "done", "check": None},
+    ], "steps": [
+        {"id": "s1", "depends_on": []}, {"id": "wait-1", "step_key": "w1", "depends_on": ["s1"]},
+        {"id": "s2", "depends_on": ["wait-1", "wait-2"]}, {"id": "s3", "depends_on": ["s2"]},
+        {"id": "s4", "depends_on": ["wait-3"]},
+    ]}
+    expected = {"waits_opened": 3, "wait_github_checks": 2, "wait_command_checks": 1,
+                "wait_dependents": 2, "waits_timed_out": 1}
+    result = metrics.task_metrics(detail=detail, activity=[], records=[], events={}, changes={}, work_dir=tmp_path,
+                                 check_problem=None, expect={f"min_{key}": value for key, value in expected.items()},
+                                 now=0.0)
+    assert {key: result[key] for key in expected} == expected
+    assert result["success"]
+    assert metrics.wait_metrics({}) == dict.fromkeys(expected, 0)
+
+
+@pytest.mark.parametrize(("expect", "observed", "problems"), [
+    ({"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1},
+     {"waits_opened": 1, "wait_github_checks": 1, "wait_dependents": 1}, []),
+    ({"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1}, {},
+     ["waits_opened 0 < 1", "wait_github_checks 0 < 1", "wait_dependents 0 < 1"]),
+    ({"max_waits_opened": 0}, {"waits_opened": 0}, []),
+    ({"max_waits_opened": 0}, {"waits_opened": 1}, ["waits_opened 1 > 0"]),
+])
+def test_wait_expectations(expect: dict[str, int], observed: dict[str, int], problems: list[str]) -> None:
+    assert metrics.flow_problems(expect, observed) == problems
+
+
+@pytest.mark.parametrize("filename", ["findings.md", "rereview.md"])
+def test_rereview_rejects_empty_review_files(tmp_path: Path, filename: str) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    for name in ("findings.md", "rereview.md"):
+        (tmp_path / name).write_text("The loop skips the last value.\n")
+    (tmp_path / filename).write_text(" \n\t")
+    assert task.check(tmp_path) is not None
+
+
+def _rereview_flow() -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+    detail = {"steps": [
+        {"id": "review", "depends_on": []},
+        {"id": "wait", "depends_on": ["review"]},
+        {"id": "rereview", "depends_on": ["wait"]},
+    ], "waits": [{"step_id": "wait", "state": "done", "outcome": "ready", "last_result": "ready", "checks": 2,
+                  "opened_at": "2026-10-13T10:00:06+00:00", "closed_at": "2026-10-13T10:00:10+00:00",
+                  "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                            "ready_when": "head_changed"}}]}
+    records = [_record(1, "worker-initial", step_id="review"),
+               _record(2, "worker-second", step_id="rereview", start="2026-10-13T10:00:11+00:00",
+                       end="2026-10-13T10:00:15+00:00")]
+    events = {i: _result(json.dumps({"status": "completed", "changed_files": {filename: "written"}}))
+              for i, filename in ((1, "findings.md"), (2, "rereview.md"))}
+    return detail, records, events
+
+
+@pytest.mark.parametrize("fault", [None, "repo", "number", "ready_when", "unrelated_wait", "initial_not_upstream",
+                                  "early_rereview", "same_worker", "not_opened", "missing_report",
+                                  "proceeded", "cancelled", "resumed", "no_check", "no_baseline"])
+def test_rereview_checks_the_requested_pr_and_actual_review_dependency(fault: str | None) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    detail, records, events = _rereview_flow()
+    wait = detail["waits"][0]
+    if fault in {"repo", "number", "ready_when"}:
+        wait["check"][fault] = {"repo": "other/repo", "number": 99, "ready_when": "merged"}[fault]
+    elif fault in {"proceeded", "cancelled", "resumed"}:
+        wait["outcome"] = fault
+    elif fault == "no_check":
+        wait["last_result"] = "not_ready"
+    elif fault == "no_baseline":
+        wait["checks"] = 1
+    elif fault == "unrelated_wait":
+        detail["steps"][2]["depends_on"] = ["review"]
+        detail["steps"].append({"id": "unrelated", "depends_on": ["wait"]})
+    elif fault == "initial_not_upstream":
+        detail["steps"][1]["depends_on"] = []
+    elif fault == "early_rereview":
+        records[1]["created_at"] = "2026-10-13T10:00:07+00:00"
+    elif fault == "same_worker":
+        events[1] = _result(json.dumps({"status": "completed", "changed_files": {
+            "findings.md": "written", "rereview.md": "written"}}))
+        del events[2]
+    elif fault == "not_opened":
+        wait["opened_at"] = None
+    elif fault == "missing_report":
+        del events[2]
+    assert task.flow_check is not None
+    assert (task.flow_check(detail, records, events) is None) is (fault is None)
+
+
+@pytest.mark.parametrize("fixture", [False, True])
+def test_gh_stub_answers_views_and_fixture_diffs_and_refuses_other_commands(tmp_path: Path, fixture: bool) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    stub = runner.install_gh(tmp_path / "bin", diffs=task.gh_pr_diffs if fixture else None)
+
+    def gh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(stub), *args], capture_output=True, text=True, timeout=5, check=False)
+
+    view = gh("pr", "view", "12", "--repo", "example-org/demo-service", "--json",
+              "headRefOid,state,comments,reviews,statusCheckRollup")
+    assert view.returncode == 0 and not view.stderr
+    assert json.loads(view.stdout) == {"headRefOid": "1" * 40, "state": "OPEN", "comments": [], "reviews": [],
+                                       "statusCheckRollup": []}
+    diff = gh("pr", "diff", "12", "--repo", "example-org/demo-service")
+    assert diff.returncode == 0 and not diff.stderr
+    assert diff.stdout == (task.gh_pr_diffs["example-org/demo-service#12"] if fixture else "")
+    assert gh("pr", "diff", "99", "--repo", "other/repo").stdout == ""
+    for args in [("pr", "merge", "12"), ("api", "user"), (),
+                 ("pr", "view", "12", "--repo", "example-org/demo-service"),
+                 ("pr", "diff", "12", "--repo", "example-org/demo-service", "--patch")]:
+        refused = gh(*args)
+        assert refused.returncode == 1 and refused.stdout == ""
+        assert refused.stderr.strip() == "gh stub: unsupported"
+
+
+def test_pr_fix_is_visible_to_both_wait_check_and_worker(tmp_path: Path) -> None:
+    from looper.agents.wait_service import run_github_pr
+    from looper.agents.waits import CheckResult, GithubPrCheck, ReadyWhen
+
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    stub = runner.install_gh(tmp_path / "bin", diffs=task.gh_pr_diffs)
+    work = tmp_path / "work"
+    work.mkdir()
+    runner.init_pr_fixture(work, task)
+    other = tmp_path / "other-case"
+    other.mkdir()
+    runner.init_pr_fixture(other, task)
+    check = GithubPrCheck("example-org/demo-service", 12, ReadyWhen.HEAD_CHANGED)
+
+    def worker(*args: str) -> str:
+        return subprocess.run([str(stub), "pr", *args, "--repo", check.repo], cwd=work,
+                              capture_output=True, text=True, check=True, timeout=5).stdout
+
+    first = asyncio.run(run_github_pr(check, None, gh=str(stub), work_dir=str(work)))
+    assert first[0] is CheckResult.NOT_READY
+    old_head = first[3]["baseline"]["head"]
+    assert "range(len(values) - 1)" in worker("diff", "12")
+    detail = {"waits": [{"step": "w1", "state": "waiting", "checks": 1, "last_result": "not_ready",
+                         "opened_at": "1970-01-01T00:01:40Z", "check": check.row()}]}
+    assert not runner.push_pr_fixes(task, work, detail, now=104.9)
+    assert runner.push_pr_fixes(task, work, detail, now=105.0)
+    assert not runner.push_pr_fixes(task, work, detail, now=106.0)
+    second = asyncio.run(run_github_pr(check, first[3]["baseline"], gh=str(stub), work_dir=str(work)))
+    assert second[0] is CheckResult.READY
+    new_head = second[3]["baseline"]["head"]
+    assert new_head != old_head
+    view = subprocess.run([str(stub), "pr", "view", "12", "--repo", check.repo, "--json", "headRefOid,commits"],
+                          cwd=work, capture_output=True, text=True, check=True, timeout=5)
+    metadata = json.loads(view.stdout)
+    assert metadata["headRefOid"] == new_head
+    assert metadata["commits"][-1]["oid"] == new_head
+    assert runner._git_in(work, "rev-parse", f"{new_head}^") == old_head
+    assert runner._git_in(work, "show", f"{new_head}:totals.py") == task.gh_pr_fix_files["totals.py"].strip()
+    diff = worker("diff", "12")
+    assert "range(len(values) - 1)" not in diff
+    assert "+    for value in values:" in diff
+    other_diff = subprocess.run([str(stub), "pr", "diff", "12", "--repo", check.repo], cwd=other,
+                                capture_output=True, text=True, check=True, timeout=5).stdout
+    assert "range(len(values) - 1)" in other_diff
+    # Step worktrees share the PR ref even if their own branch still has the old checkout.
+    checkout = tmp_path / "worker-checkout"
+    runner._git_in(work, "worktree", "add", "--detach", str(checkout), old_head)
+    worktree_diff = subprocess.run([str(stub), "pr", "diff", "12", "--repo", check.repo], cwd=checkout,
+                                   capture_output=True, text=True, check=True, timeout=5).stdout
+    assert worktree_diff == diff
+
+
+@pytest.mark.parametrize("fault", ["no_baseline", "error", "wrong_pr", "pending"])
+def test_pr_fix_waits_for_a_successful_baseline_of_the_requested_pr(tmp_path: Path, fault: str) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    runner.init_pr_fixture(tmp_path, task)
+    old_head = runner._git_in(tmp_path, "rev-parse", "HEAD")
+    wait = {"state": "waiting", "checks": 1, "last_result": "not_ready", "opened_at": "1970-01-01T00:00:00Z",
+            "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                      "ready_when": "head_changed"}}
+    if fault == "no_baseline":
+        wait["checks"] = 0
+    elif fault == "error":
+        wait["last_result"] = "error"
+    elif fault == "wrong_pr":
+        wait["check"]["number"] = 99
+    else:
+        wait["state"] = "pending"
+    assert not runner.push_pr_fixes(task, tmp_path, {"waits": [wait]}, now=100)
+    assert runner._git_in(tmp_path, "rev-parse", "HEAD") == old_head
+
+
+def test_fake_pr_worker_requires_the_changed_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    stub = runner.install_gh(tmp_path / "bin")
+    work = tmp_path / "work"
+    work.mkdir()
+    runner.init_pr_fixture(work, task)
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PATH", f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(fake_claude, "_answer", lambda *_args, **_kwargs: None)
+    stdin = SimpleNamespace(readline=lambda: "start")
+    fake_claude._worker(task.fake, "Your step: s1", stdin, [])
+    with pytest.raises(RuntimeError, match="does not contain the commit"):
+        fake_claude._worker(task.fake, "Your step: s2", stdin, [])
+    assert not (work / "rereview.md").exists()
+    wait = {"state": "waiting", "checks": 1, "last_result": "not_ready", "opened_at": "1970-01-01T00:00:00Z",
+            "check": task.fake["plan"][1]["check"]}
+    assert runner.push_pr_fixes(task, work, {"waits": [wait]}, now=5)
+    fake_claude._worker(task.fake, "Your step: s2", stdin, [])
+    assert task.check(work) is None
+
+
+def test_wait_resumes_after_delay_once_per_wait_and_only_when_opted_in() -> None:
+    task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), wait_resume_after_s=5)
+    api, resumed = _Poster(), {}
+    detail = {"waits": [{"step": "w1", "state": "waiting", "opened_at": "1970-01-01T00:01:40Z"},
+                        {"step": "w2", "state": "pending", "opened_at": None}]}
+    assert not runner.resume_waits(api, task, "t1", detail, resumed, now=104.9)
+    assert runner.resume_waits(api, task, "t1", detail, resumed, now=105.0)
+    assert not runner.resume_waits(api, task, "t1", detail, resumed, now=106.0)
+    detail["waits"][1].update(state="waiting", opened_at="1970-01-01T00:01:42Z")
+    assert runner.resume_waits(api, task, "t1", detail, resumed, now=107.0)
+    assert resumed == {"w1": 105.0, "w2": 107.0}
+    assert api.posted == [("/api/tasks/t1/waits/w1/resume", {}), ("/api/tasks/t1/waits/w2/resume", {})]
+    api = _Poster()
+    for state in ("pending", "ready", "done", "timed_out", "cancel_requested", "failed", "skipped"):
+        detail["waits"][0]["state"] = state
+        assert not runner.resume_waits(api, task, "t1", {"waits": detail["waits"][:1]}, {}, now=110.0)
+    detail["waits"][0]["state"] = "waiting"
+    no_resume = dataclasses.replace(task, wait_resume_after_s=None)
+    assert not runner.resume_waits(api, no_resume, "t1", detail, {}, now=110.0)
+    assert api.posted == []
+
+
+def test_a_failed_resume_is_not_recorded_and_a_later_poll_can_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), wait_resume_after_s=0)
+    detail = {"waits": [{"step": "w1", "state": "waiting", "opened_at": "1970-01-01T00:00:00Z"}]}
+    api, resumed = _Poster(), {}
+
+    def conflict(*_: Any) -> Any:
+        raise runner.EvalError("POST answered 409: wait changed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(api, "post", conflict)
+        assert not runner.resume_waits(api, task, "t1", detail, resumed, now=0.0)
+        assert resumed == {}
+    assert runner.resume_waits(api, task, "t1", detail, resumed, now=1.0)
+    assert resumed == {"w1": 1.0}
+    detail["waits"][0]["opened_at"] = None
+    assert not runner.resume_waits(api, task, "t1", detail, {}, now=2.0)
+
+
+@pytest.mark.parametrize("fault", [None, "wrong_pr", "unrelated_wait"])
+def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), check=lambda _: None)
+    final, records, events = _rereview_flow()
+    final["status"] = "completed"
+    final["waits"][0].update(step="w1", opened_at="1970-01-01T00:01:40Z", closed_at="1970-01-01T00:01:45Z")
+    if fault == "wrong_pr":
+        final["waits"][0]["check"]["number"] = 99
+    elif fault == "unrelated_wait":
+        final["steps"][2]["depends_on"] = ["review"]
+        final["steps"].append({"id": "unrelated", "depends_on": ["wait"]})
+    records[0].update(created_at="1970-01-01T00:01:30Z", finished_at="1970-01-01T00:01:35Z")
+    records[1].update(created_at="1970-01-01T00:01:46Z", finished_at="1970-01-01T00:01:50Z")
+    wait = {**final["waits"][0], "state": "waiting", "closed_at": None, "last_result": "not_ready", "checks": 1}
+    details = iter([{"status": "waiting", "waits": [wait]}, {"status": "waiting", "waits": [wait]}, final, final])
+    posted: list[tuple[str, Any]] = []
+
+    def post(path: str, body: Any) -> dict[str, Any]:
+        posted.append((path, body))
+        return {"task_id": "t1", "project_id": "p1"} if path == "/api/tasks/create" else {}
+
+    def get(path: str, **_: Any) -> dict[str, Any]:
+        if path == "/api/tasks/t1":
+            return next(details)
+        if path == "/api/llm-records":
+            return {"records": records}
+        if path.startswith("/api/llm-records/"):
+            return {"events": events[int(path.split("/")[-2])]}
+        assert path == "/api/tasks/t1/activity"
+        return {"activity": []}
+
+    monkeypatch.setattr(runner.time, "time", lambda: 104.0)
+    result = runner.run_task(SimpleNamespace(post=post, get=get), task, tmp_path, timeout=10, poll=0,
+                             clock_offset=1.0)
+    assert result["outcome"] == ("pass" if fault is None else "fail")
+    assert result["wait_dependents"] == 1
+    if fault is not None:
+        assert result["problems"]  # aggregate counts pass; only the task-specific flow check rejects this
+    assert result["wait_resumes"] == {}
+    assert [path for path, _ in posted] == ["/api/tasks/create", "/api/tasks/start"]
+    assert ("for value in values" in runner._git_in(tmp_path, "show", "HEAD:totals.py")) is (fault != "wrong_pr")
+
+
+def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stop_before_start() -> int:
+        assert (tmp_path / "bin" / "gh").is_file()
+        assert os.access(tmp_path / "bin" / "gh", os.X_OK)
+        raise RuntimeError("server deliberately disabled")
+
+    monkeypatch.setattr(runner, "free_port", stop_before_start)
+    with pytest.raises(RuntimeError, match="server deliberately disabled"), runner.running_server(
+        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "server.log",
+    ):
+        pytest.fail("no server may start")
+
+
+@pytest.mark.parametrize("task_id", ["wait_pr_rereview", "wait_not_needed"])
+def test_fake_wait_plans_parse_and_delivered_files_are_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task_id: str,
+) -> None:
+    task = next(t for t in TASKS if t.id == task_id)
+    assert task_id in {t.id for t in runner.select_tasks(["planner"])}
+    messages = iter([json.dumps({"message": {"content": "[PLAN] Plan the task"}}), None])
+    replies: list[str] = []
+    monkeypatch.setattr(fake_claude, "_answer", lambda _session, text, _cost, **_: replies.append(text))
+    fake_claude._planner(task.fake, [], SimpleNamespace(readline=lambda: next(messages)))
+    parsed = parse_plan(replies[0], wait_policy=WaitPolicy(limits=WaitLimits(min_check_seconds=10)))
+    assert [step.id for step in parsed.steps] == (["s1", "w1", "s2"] if task_id == "wait_pr_rereview"
+                                                else ["s1", "s2"])
+    if task_id == "wait_pr_rereview":
+        assert parsed.steps[1].wait is not None
+        assert parsed.steps[1].wait.check.row() == task.fake["plan"][1]["check"]
+        assert parsed.steps[1].wait.max_wait_seconds == 45
+        assert parsed.steps[1].wait.every_seconds == 10
+        assert parsed.steps[2].depends_on == ("w1",)
+    else:
+        assert all(step.wait is None for step in parsed.steps)
+    assert task.check(tmp_path) is not None
+    for attempts in task.fake["attempts"].values():
+        for name, content in attempts[0]["files"].items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+    assert task.check(tmp_path) is None
+    if task_id == "wait_pr_rereview":
+        (tmp_path / "rereview.md").unlink()
+    else:
+        (tmp_path / "result.txt").write_text("wrong")
+    assert task.check(tmp_path) is not None
 
 
 def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out() -> None:
@@ -1504,6 +2173,18 @@ def test_with_a_real_reviewer_task_the_stand_in_hands_claude_code_every_run_but_
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_fake_mode_rereviews_the_new_pr_commit(tmp_path: Path) -> None:
+    result, _ = runner.run(mode="fake", tasks=task_list.select(["wait_pr_rereview"]),
+                           admin_url=str(DSN), out_dir=tmp_path, agent="claude-code/opus",
+                           reps=2, jobs=2, task_timeout=60)
+    assert result["aborted"] is None
+    assert len(result["tasks"]) == 2
+    for row in result["tasks"]:
+        assert row["outcome"] == "pass", row["problems"]
+        assert not row["wait_resumes"]
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_fake_mode_reviews_files_in_another_worktree(tmp_path: Path) -> None:
     result, _ = runner.run(mode="fake", tasks=task_list.select(["reviewer_elsewhere", "reviewer_elsewhere_wrong"]),
                            admin_url=str(DSN), out_dir=tmp_path, agent="claude-code/opus")
@@ -1542,6 +2223,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
     assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+                    "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
                     "parallel_parts": (3, 0, 0, 0),
                     "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
                     "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
@@ -1569,6 +2251,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
              for t in by_id}
     assert shape == {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+                     "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
                      "parallel_parts": (1, 0, 2),
                      "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
                      "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
@@ -1629,6 +2312,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     assert gates == {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
                      "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
     assert by_id["gate_discoverable"]["gates_opened"] == 0
+    assert by_id["wait_pr_rereview"]["waits_opened"] == 1
+    assert not by_id["wait_pr_rereview"]["wait_resumes"]
+    assert all(row["waits_opened"] == 0 and not row["wait_resumes"]
+               for task_id, row in by_id.items() if task_id != "wait_pr_rereview")
     assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
     # The stand-in is refused nothing: the denials are Claude Code's.
     assert all(by_id[t]["planner_denials"] == 0 for t in by_id)

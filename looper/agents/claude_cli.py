@@ -1113,12 +1113,18 @@ class ClaudeRunRecorder:
     @property
     def cap_stop(self) -> CapStop | None:
         """Once the run is over its per-run cap at its provider's prices (Looper's soft cap): the result it ends
-        with and what it spent. The owner stops the run then; None until then, and always for a run without a
-        cap or priced by its runtime."""
+        with and what it spent. An observed-root budget also stops when its usage cannot be verified.
+        None until then, and always for a run without a cap or priced by its runtime."""
         spend = self._spend
-        if spend is None or not spend.exceeded or spend.cap is None or spend.usage.cost_usd is None:
+        if spend is None or spend.cap is None or not (spend.exceeded or spend.budget_unverifiable):
             return None
-        return CapStop(soft_cap_result(spend.usage.cost_usd, spend.cap), spend.usage)
+        result = soft_cap_result(spend.budget_cost_usd or 0, spend.cap)
+        if spend.usage.cost_usd is None:
+            result.update(usage_complete=False, root_usage_complete=spend.budget_verifiable,
+                          cost_basis="observed", observed_cost_usd=spend.observed_cost_usd)
+        if spend.budget_unverifiable:
+            result["errors"] = ["Cannot verify the configured budget: root step usage is missing or unpriced"]
+        return CapStop(result, spend.usage)
 
     def _runtime(self) -> RuntimeAdapter:
         """The runtime the recorded run went through (Claude Code for a record without a launch)."""

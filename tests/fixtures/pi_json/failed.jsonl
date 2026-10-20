@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"failed-session","cwd":"workspace"}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","stopReason":"error","errorMessage":"Synthetic provider failure.","content":[{"type":"text","text":"Incomplete progress."}]}}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"Synthetic provider failure."}
+{"type":"agent_settled","aborted":false}

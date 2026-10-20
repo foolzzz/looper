@@ -45,12 +45,14 @@ import { TaskWorkspaceField, type WorkspaceChoice } from "@/components/task-work
 import { TaskDetailRoute } from "./task-detail";
 
 const STATUS_FILTERS = [
-  "all", "init", "running", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+  "all", "init", "running", "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
 ] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
 function statusBadge(status: string) {
   switch (status) {
+    case "waiting":
+      return <Badge variant="outline">Waiting</Badge>;
     case "running":
       return <Badge variant="default">Running</Badge>;
     case "pending":

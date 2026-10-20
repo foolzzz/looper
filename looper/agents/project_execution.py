@@ -36,6 +36,9 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset);
 - ``planner_roles``: whether the project's Planners may define the roles their
   steps run as (``on``) or not (``off``, also when unset; ``task_roles``);
+- ``wait_commands``: whether a wait step of the project's Planners may run a
+  shell command as its check (``on``) or not (``off``, also when unset;
+  ``waits``): the command runs as the server's user;
 - ``role_text_max_chars``: how long such a role's prompt and its harness may
   each be, ``ROLE_TEXT_MIN_CHARS`` to ``ROLE_TEXT_MAX_CHARS``
   (``DEFAULT_ROLE_TEXT_CHARS`` when unset);
@@ -142,6 +145,11 @@ class PlannerRoles(str, Enum):
     ON = "on"
 
 
+class WaitCommands(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 class UserGates(str, Enum):
     OFF = "off"
     ON = "on"
@@ -187,6 +195,7 @@ class ProjectExecution:
     vault: VaultMode | None = None
     max_step_retries: int | None = None
     planner_roles: PlannerRoles | None = None
+    wait_commands: WaitCommands | None = None
     role_text_max_chars: int | None = None
     user_gates: UserGates | None = None
     gate_reminder_hours: int | None = None
@@ -243,6 +252,11 @@ class ProjectExecution:
     def roles_on(self) -> bool:
         """Whether the project's Planners may define the roles their steps run as."""
         return self.planner_roles is PlannerRoles.ON
+
+    @property
+    def wait_commands_on(self) -> bool:
+        """Whether the project's Planners may let a wait run a shell command."""
+        return self.wait_commands is WaitCommands.ON
 
     @property
     def role_text_limit(self) -> int:
@@ -337,6 +351,8 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, VaultMode)
     if field == "planner_roles":
         return _choice(field, raw, PlannerRoles)
+    if field == "wait_commands":
+        return _choice(field, raw, WaitCommands)
     if field == "user_gates":
         return _choice(field, raw, UserGates)
     if field == "agent_room":

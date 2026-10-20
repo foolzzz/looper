@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ...db import agent_setting_layers as db_layers, profile_registry as db_profiles, role_configs as db_roles
-from .. import agent_settings, projects, schedules, scheduler_settings, vault
+from .. import agent_settings, projects, schedules, scheduler_settings, vault, wait_service, waits
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, LayerValues, SettingsError
 from ..agent_settings import default_concurrency, index_layers, layer_update, resolve
 from ..project_execution import format_usd
@@ -155,6 +155,7 @@ def _shown_value(name: str, value: Any, profiles: Mapping[str, str]) -> str:
 
 
 _SCHEDULER_WORDS = {"min_interval_seconds": "定时任务的最小间隔", "run_timeout_seconds": "定时任务的默认运行超时"}
+_WAIT_WORDS = {"max_wait_seconds": "单步最长等待时间", "min_check_seconds": "等待检查的最小间隔"}
 _SOURCE_WORDS = {"setting": "设置", "env": "旧环境变量", "built-in": "内置默认"}
 
 
@@ -198,11 +199,38 @@ async def _scheduler_set(call: Call) -> dict[str, Any]:
                          "after": _scheduler_shown(after[name])} for name in values]}
 
 
+def _wait_values(arguments: Mapping[str, Any]) -> dict[str, int | None]:
+    try:
+        return waits.checked(arguments.get("waits"))
+    except ValueError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+
+
+async def _wait_confirming(call: Call) -> str:
+    values = _wait_values(call.arguments)
+    before = await waits.settings_view()
+    lines = ["要修改等待步骤的系统限制吗？"]
+    for name, value in values.items():
+        after = f"{value} 秒" if value is not None else f"内置默认 {before[name]['default']} 秒"
+        lines.append(f"- {_WAIT_WORDS[name]}：{_scheduler_shown(before[name])} → {after}")
+    lines.append("最长等待时间约束之后规划或延长的等待步骤；最小检查间隔限制新等待步骤的检查频率。")
+    return "\n".join(lines)
+
+
+async def _wait_set(call: Call) -> dict[str, Any]:
+    values = _wait_values(call.arguments)
+    before = await waits.settings_view()
+    after = await answered(wait_service.update_settings(values))
+    return {"changes": [{"setting": name, "before": before[name], "after": after[name]} for name in values]}
+
+
 async def _confirming(call: Call) -> str | None:
     """What a change of the vault, the shared defaults, a limit, or one raising a spend cap does, for the user to confirm;
     None for any other call (``write``), or another action."""
     if call.arguments["action"] == "scheduler":
         return await _scheduler_confirming(call)
+    if call.arguments["action"] == "waits":
+        return await _wait_confirming(call)
     if call.arguments["action"] == "knowledge_vault":
         values = _vault_values(call.arguments)
         try:
@@ -348,6 +376,7 @@ async def _view(call: Call) -> dict[str, Any]:
         scheduler = await scheduler_settings.settings_view()
         vault_view = await vault.settings_view()
         return {"scheduler": {name: _scheduler_shown(entry) for name, entry in scheduler.items()},
+                "waits": await waits.settings_view(),
                 "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
                                  "effective": _effective(entry["effective"]), "timeout_seconds": timeouts.get(role)}
@@ -397,6 +426,8 @@ async def _settings(call: Call) -> dict[str, Any]:
         return await _allowed(call)
     if action == "scheduler":
         return await _scheduler_set(call)
+    if action == "waits":
+        return await _wait_set(call)
     if action == "knowledge_vault":
         return {"knowledge_vault": await answered(vault.update_settings(_vault_values(call.arguments)))}
     return await _set(call)
@@ -409,15 +440,18 @@ TOOLS: tuple[Tool, ...] = (
                     "project. view (with project: its layers and allowed profiles); set values on one layer (no role "
                     "nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners "
                     "may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user "
-                    "confirms them first). knowledge_vault: the notes folder agents read in projects that turn it on, and "
+                    "confirms them first); waits: system limits for wait steps (the user confirms first). "
+                    "knowledge_vault: the notes folder agents read in projects that turn it on, and "
                     "the folders they may write (the user confirms first). The user confirms shared defaults, limits and "
                     "higher spend caps first. Model and "
                     "effort are the profile's.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "scheduler",
+                "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "scheduler", "waits",
                                                       "knowledge_vault"]},
+                "waits": {"type": "object", "description": "waits: max_wait_seconds (longest wait step), "
+                          "min_check_seconds (least gap between checks); null restores the built-in default."},
                 "knowledge_vault": {"type": "object", "description": "knowledge_vault: path (absolute), writable "
                                     "(folders in it), rules_file; {\"path\": null} turns it off."},
                 "project": {"type": "string", "minLength": 1, "description": "The project's name."},

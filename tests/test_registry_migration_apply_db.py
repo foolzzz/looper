@@ -170,3 +170,43 @@ def test_unknown_legacy_pair_rolls_back_expansion_and_historical_migrations():
                 assert await conn.fetchval('SELECT to_regclass($1)', table) is None
 
     asyncio.run(asyncio.wait_for(run(), 45))
+
+
+@pytest.mark.parametrize("runtime,protocol,model,effort", [
+    ("pi", "openai-responses", "Exact.Model[1m]", "xhigh"),
+    ("pi", "openai-chat", "Exact.Model[1m]", "low"),
+    ("dsh", "anthropic-messages", "deepseek-flash[1m]", "max"),
+])
+def test_apply_preserves_new_runtime_model_endpoint_effort_and_session(runtime, protocol, model, effort):
+    async def run():
+        async with _database() as conn:
+            await _legacy(conn)
+            await conn.execute("INSERT INTO agent_runtimes (id, name, type) VALUES ($1, $2, $2)",
+                               f"rt-{runtime}", runtime)
+            await conn.execute("UPDATE llm_providers SET protocols = $1, models = $2 WHERE id IN ('prov-a', 'prov-b')",
+                               [protocol], json.dumps([{"name": model, "context_window": 1_000_000,
+                                                       "efforts": [effort], "input_usd_per_mtok": 0}]))
+            await conn.execute("UPDATE agent_profiles SET runtime_id = $1, model = $2, effort = $3 WHERE id = 'agent-test'",
+                               f"rt-{runtime}", model, effort)
+            await conn.execute("UPDATE agent_sessions SET runtime_type = $1", runtime)
+            await conn.execute("UPDATE schedules SET planner_session_runtime = $1", runtime)
+            expected = plan(await registry_migration._read_snapshot(conn))
+            assert expected.applicable
+            records = await conn.fetch("SELECT * FROM llm_records")
+            await connection.ensure_schema(conn)
+            saved = await conn.fetchrow("SELECT p.id, p.runtime_id, p.effort, m.name, m.protocol, "
+                                       "m.context_window, e.base_url FROM agent_profiles p "
+                                       "JOIN llm_models m ON m.id = p.model_id "
+                                       "JOIN llm_provider_endpoints e ON e.provider_id = m.provider_id "
+                                       "AND e.protocol = m.protocol WHERE p.id = 'agent-test'")
+            assert tuple(saved) == ('agent-test', f'rt-{runtime}', effort, model, protocol, 1_000_000,
+                                    'https://example.invalid/v1')
+            session = await conn.fetchrow("SELECT runtime_type, session_id, profile_id FROM agent_sessions")
+            assert tuple(session) == (runtime, 'session-test', 'agent-test')
+            assert await conn.fetch("SELECT * FROM llm_records") == records
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
+            before = await state(conn)
+            await connection.ensure_schema(conn)
+            assert await state(conn) == before
+
+    asyncio.run(asyncio.wait_for(run(), 45))

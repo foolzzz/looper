@@ -1231,3 +1231,82 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
                     pass
 
     _run(test, monkeypatch)
+
+
+def test_dsh_consult_snapshot_records_answer_and_new_run_without_changing_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Exercise the snapshot/recorder/room boundary; admission and the execution guard are separate slices."""
+    from dataclasses import replace
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from looper.agents.consult import ConsultService, _cleanup, consult_answers
+    from looper.agents.runtimes import ReadOnly
+    from looper.db import room as db_room
+    from tests.test_dsh_runtime import _kept_dsh_run, _tree_bytes
+
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path, task_id="task-r")
+    monkeypatch.setattr(runtime, "read_only", ReadOnly.PERMISSIONS)
+    source_bytes = _tree_bytes(directory)
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path, session=sid, provider=launch.profile.provider.id)
+        metadata = {"profile": {"runtime": {"type": "dsh"}, "provider": {"id": launch.profile.provider.id}},
+                    "command": command, "cwd": str(tmp_path)}
+        await pool.execute("UPDATE llm_records SET metadata = $1::jsonb", json.dumps(metadata))
+        source = await pool.fetchrow("SELECT * FROM llm_records WHERE agent_id = 'worker-1'")
+        await pool.execute("INSERT INTO llm_record_events (record_id, seq, event) VALUES ($1, 1, $2::jsonb)",
+                           source["id"], json.dumps({"type": "system", "subtype": "init", "session_id": sid}))
+        source_events = await pool.fetch("SELECT * FROM llm_record_events WHERE record_id = $1", source["id"])
+        question = await _question(pool, "qty or quantity?")
+        queued, _ = await db_room.admit_consult("task-r", seat="backend_rd@s1", question=question["id"],
+            source_run="worker-1", source_record=source["id"], runtime="dsh", limit=5)
+        assert queued is not None
+        await db_room.move_consult(queued["id"], "running", expect=("queued",), consult_run="consult-dsh")
+        room = RoomService(batch_seconds=0)
+        service = ConsultService(room=room, worker_pool=None, runtime_root=tmp_path)
+        record = await db_room.run_record(source["id"])
+        assert record["session_id"] == sid
+        assert service._session_dir("dsh", "task-r", "worker-1", record) == directory
+        fork = tmp_path / "consult-fork"
+        readonly = replace(launch, consult=True)
+        argv = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=readonly,
+                                       session_id=sid, session_dir=directory, fork_dir=fork)
+        answer_text = json.dumps({"answers": [{"reply_to": question["id"], "body": "the field is qty"}],
+                                  "unsure": ""})
+        recorder = ClaudeRunRecorder(agent_id="consult-dsh", task_id="task-r", command=argv,
+            cwd=str(tmp_path), input_text=answer_text, launch=readonly, whole_process=True)
+        await recorder.start()
+        process = await asyncio.create_subprocess_exec(*argv, cwd=tmp_path, env=readonly.environment(),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            channel = runtime.run_channel(process, launch=readonly, cwd=tmp_path, session_dir=fork)
+            await channel.start(answer_text)
+            result = None
+            async for event in channel.events():
+                await recorder.record(event)
+                if event["type"] == "result":
+                    result = event
+            assert result is not None and result["is_error"] is False
+            await recorder.finish(output_text=result["result"], result_event=result)
+            answers, unsure = consult_answers(result["result"], [question["id"]])
+            await room.finish_consult("task-r", queued["id"], "backend_rd@s1", state="answered",
+                expect=("running",), answers=[(question, answers[question["id"]])], to_planner=[],
+                reason=FallbackReason.UNSURE, why=unsure, columns={"read_only": "runtime"})
+            saved = await pool.fetchrow("SELECT * FROM llm_records WHERE agent_id = 'consult-dsh'")
+            assert saved["id"] != source["id"] and saved["session_id"] == sid and saved["status"] == "completed"
+            assert saved["output_text"] == answer_text
+            assert await pool.fetchval("SELECT count(*) FROM llm_record_events WHERE record_id = $1", saved["id"]) > 1
+            posted = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'answer'")
+            assert (posted["body"], posted["reply_to"], posted["via"]) == ("the field is qty", question["id"], "consult")
+            assert await pool.fetchrow("SELECT * FROM llm_records WHERE id = $1", source["id"]) == source
+            assert await pool.fetch("SELECT * FROM llm_record_events WHERE record_id = $1", source["id"]) == source_events
+            assert _tree_bytes(directory) == source_bytes
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            _cleanup(None, fork)
+        assert not fork.exists()
+
+    _run(test, monkeypatch)

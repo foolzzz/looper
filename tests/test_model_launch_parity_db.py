@@ -35,22 +35,34 @@ def pinned(runtime: str) -> dict[str, Any]:
     assert baseline["source"]["revision"] == parity.CLAUDE_LEGACY_REVISION
     assert baseline["captures"].keys() == CASES[runtime].keys()
     # Like the two older parity gates, account explicitly for the declared
-    # Manager model-tool contract change without refreshing the v2 fixtures.
-    def updated_prompt(text):
-        return tiers.model_registry_contract({"manager": {"system_prompt": text}})["manager"]["system_prompt"]
+    # Manager model-tool and Planner wait contract changes without refreshing
+    # the v2 fixtures. Both transformations pin literal historical deltas.
+    def updated_prompt(text, role):
+        transform = tiers.model_registry_contract if role == "manager" else tiers.planner_wait_contract
+        return transform({role: {"system_prompt": text}})[role]["system_prompt"]
 
     for case, records in baseline["captures"].items():
         manager_launches = 2 if runtime in {"codex", "grok"} else 1
         if runtime == "grok" and parity.GROK_CASES[case][0]:
             manager_launches = 4  # refused ACP plus fallback on both turns
-        for record in records[:manager_launches]:
+        for index, record in enumerate(records[:2 * manager_launches]):
+            role = "manager" if index < manager_launches else "planner"
             old_agent = record["config"].get("agent_md")
-            old_hash = hashlib.sha256(record["prompt"].encode()).hexdigest()
-            record["prompt"] = updated_prompt(record["prompt"])
-            new_hash = hashlib.sha256(record["prompt"].encode()).hexdigest()
+            # These adapters' pinned capture roots are part of their content
+            # addresses. Recover that exact input before changing the contract.
+            address_root = {"codex": "/tmp/looper-codex-launch-parity-v2",
+                            "omp": "/tmp/looper-omp-launch-parity-v2"}.get(runtime, "<root>")
+
+            def prompt_hash(text):
+                return hashlib.sha256(text.replace("<root>", address_root).encode()).hexdigest()
+
+            old_hash = prompt_hash(record["prompt"])
+            record["prompt"] = updated_prompt(record["prompt"], role)
+            new_hash = prompt_hash(record["prompt"])
             for field in {"codex": ("agents_md",), "grok": ("agent_md", "acp_agent_md")}.get(runtime, ()):
-                if record["config"][field]:
-                    record["config"][field] = updated_prompt(record["config"][field])
+                text = record["config"][field]
+                if text and (role == "manager" or "## Reply contract (required; code parses it)" in text):
+                    record["config"][field] = updated_prompt(text, role)
             if runtime == "codex":
                 record["config"]["toml"] = record["config"]["toml"].replace(
                     f"instructions/{old_hash}.md", f"instructions/{new_hash}.md")
@@ -71,6 +83,31 @@ def pinned(runtime: str) -> dict[str, Any]:
                 assert path.parent.name == agent_home_hash(old_agent)
                 record["argv"][at] = str(path.parent.with_name(agent_home_hash(record["config"]["agent_md"])) / path.name)
     return baseline["captures"]
+
+
+@pytest.mark.parametrize("runtime", CASES)
+def test_declared_wait_delta_keeps_planner_prompt_mutations_visible(runtime: str, tmp_path: Path) -> None:
+    expected = next(iter(pinned(runtime).values()))
+    planner = next(index for index, row in enumerate(expected) if "You are the Planner" in row["prompt"])
+    assert expected[planner]["prompt"].count(tiers._PLANNER_WAIT_RULES) == 1
+    actual = copy.deepcopy(expected)
+    parity.assert_parity(expected, actual, expected_root=tmp_path, actual_root=tmp_path)
+    actual[planner]["prompt"] = actual[planner]["prompt"].replace('"ready_when": "head_changed"',
+                                                               '"ready_when": "new_comments"')
+    with pytest.raises(AssertionError, match=f"launch {planner} differs"):
+        parity.assert_parity(expected, actual, expected_root=tmp_path, actual_root=tmp_path)
+
+
+def test_declared_wait_delta_changes_only_the_pinned_insertion_and_refuses_reapplication():
+    records = json.loads((FIXTURES / "model_launch_parity_v2_claude.json").read_text())["captures"]["oauth-default"]
+    original = records[1]["prompt"]
+    expected = {"planner": {"system_prompt": original}, "worker": {"system_prompt": "unchanged"}}
+    transformed = tiers.planner_wait_contract(expected)
+    assert transformed["planner"]["system_prompt"].replace(tiers._PLANNER_WAIT_RULES, "") == original
+    assert transformed["worker"] == expected["worker"]
+    assert expected["planner"]["system_prompt"] == original
+    with pytest.raises(AssertionError):
+        tiers.planner_wait_contract(transformed)
 
 
 @pytest.mark.parametrize("runtime", CASES)

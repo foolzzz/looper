@@ -53,7 +53,7 @@ Planner's session by resuming it on every turn (``per_turn.PerTurnSession``);
 Grok keeps one process for it over ACP (``grok_acp``), per turn when it cannot.
 
 The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``), ``omp``
-(``omp``) and ``grok`` (``grok``).
+(``omp``), ``grok`` (``grok``), ``dsh`` (``dsh``) and ``pi`` (``pi``).
 """
 
 from __future__ import annotations
@@ -272,6 +272,8 @@ class RuntimeAdapter(ABC):
     protocols: ClassVar[frozenset[ApiProtocol]]
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]
+    # Exact model ids when this runtime restricts them; None leaves the provider's catalog authoritative.
+    supported_models: ClassVar[frozenset[str] | None] = None
     isolation_id: ClassVar[str]  # names its isolation flags in each run's record
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.
@@ -303,6 +305,10 @@ class RuntimeAdapter(ABC):
         return self.capabilities
 
     # --- The launch ---
+
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+        """Additional configuration rules, without requiring or reading a provider key; none by default."""
+        return None
 
     @abstractmethod
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
@@ -384,6 +390,12 @@ class RuntimeAdapter(ABC):
         """The process's output as internal events, in order; ``model`` is the one the run was started with, for a
         runtime whose output does not name it."""
 
+    def parse_process(self, process: asyncio.subprocess.Process, *, model: str | None = None, launch: Launch | None = None
+                      ) -> AsyncIterator[dict[str, Any]]:
+        """Read a managed run, verifying exit and applying its launch's accounting policy when needed."""
+        assert process.stdout is not None
+        return self.parse(process.stdout, model=model)
+
     @abstractmethod
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """One of its tool calls in a few words, for the task's activity."""
@@ -454,10 +466,13 @@ def replace_refusal(adapter: RuntimeAdapter) -> str | None:
 def _adapters() -> dict[str, RuntimeAdapter]:
     from .claude_code import ClaudeCodeRuntime
     from .codex import CodexRuntime
+    from .dsh import DshRuntime
     from .grok import GrokRuntime
     from .omp import OmpRuntime
+    from .pi import PiRuntime
 
-    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime())}
+    return {adapter.type: adapter for adapter in (
+        ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), DshRuntime(), PiRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.
