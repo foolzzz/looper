@@ -321,12 +321,49 @@ def test_provider_update_changes_the_dashboard_and_preserves_its_key(
     _run(test, monkeypatch)
 
 
-@pytest.mark.parametrize("action", ["register", "update"])
-def test_provider_writes_warn_about_unknown_models_and_missing_prices(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+@pytest.mark.parametrize("models", [None, ["priced-b", "priced-a", "new-model"], ["priced-a"], [], [" priced-a "]])
+def test_provider_model_list_update_preserves_retained_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, models: list[str] | None,
 ) -> None:
     async def test(pool: Any) -> None:
-        arguments: dict[str, Any] = {"action": action, "models": ["deepseek-typo"]}
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "custom", "auth": "api_key", "protocols": ["anthropic-messages"],
+            "models": [
+                {"name": "priced-a", "context_window": 200_000, "background_model": "background-a",
+                 "efforts": ["low", "high"], "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+                 "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 0.5},
+                {"name": "priced-b", "context_window": 1_000_000, "background_model": "background-b",
+                 "efforts": ["medium"], "input_usd_per_mtok": 3.0, "output_usd_per_mtok": 4.0,
+                 "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 1.5},
+            ]}))["provider"]
+        before = {m["name"]: m for m in provider["models"]}
+        arguments = {"action": "update", "provider": provider["provider_id"], "name": "renamed"}
+        if models is not None:
+            arguments["models"] = models
+        (answer,) = await _Chat(tmp_path).say("更新 provider 模型列表", ("looper_providers", arguments))
+        assert answer["status"] == "ok", answer
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+                      if p["provider_id"] == provider["provider_id"])
+        expected_names = list(before) if models is None else [m.strip() for m in models]
+        assert answer["result"]["provider"]["models"] == expected_names
+        assert [m["name"] for m in stored["models"]] == expected_names
+        for model in stored["models"]:
+            if model["name"] in before:
+                assert model == before[model["name"]]
+            else:
+                assert model == {**dict.fromkeys(before["priced-a"]), "name": "new-model"}
+        assert any("no full price" in w for w in answer["result"]["warnings"]) == ("new-model" in expected_names)
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize("model", ["deepseek-typo", "gpt-6.1-sol"])
+def test_provider_writes_warn_about_unknown_models_and_missing_prices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str, model: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        arguments: dict[str, Any] = {"action": action, "models": [model]}
         if action == "register":
             arguments.update(preset="deepseek", api="anthropic-messages")
         else:
@@ -337,12 +374,12 @@ def test_provider_writes_warn_about_unknown_models_and_missing_prices(
         (answer,) = await _Chat(tmp_path).say("设置模型", ("looper_providers", arguments))
         assert answer["status"] == "ok", answer
         warnings = answer["result"]["warnings"]
-        assert any("deepseek-typo" in w and "no full price" in w for w in warnings)
-        assert any(all(name in w for name in ("deepseek-typo", "deepseek-flash", "deepseek-v4-pro"))
+        assert any(model in w and "no full price" in w for w in warnings) == (model == "deepseek-typo")
+        assert any(all(name in w for name in (model, "deepseek-flash", "deepseek-v4-pro"))
                    and "known models" in w for w in warnings)
         stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
                       if p["provider_id"] == answer["result"]["provider"]["provider_id"])
-        assert [m["name"] for m in stored["models"]] == ["deepseek-typo"]
+        assert [m["name"] for m in stored["models"]] == [model]
 
     _run(test, monkeypatch)
 

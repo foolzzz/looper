@@ -479,11 +479,33 @@ def test_manager_provider_list_includes_presets(monkeypatch: pytest.MonkeyPatch)
     assert _provider_call({"action": "list"}) == {"providers": [], "presets": presets_view()}
 
 
+def test_manager_provider_model_update_keeps_catalog_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    models = [{"name": name, "context_window": 200_000, "background_model": "background",
+               "efforts": ["low", "high"], "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+               "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.5}
+              for name in ("first", "second")]
+    provider = {"provider_id": "prov-test", "name": "custom", "auth": "api_key", "protocols": ["openai-chat"],
+                "base_url": "https://example.com", "models": models, "profile_count": 0, "builtin": False,
+                "api_key": None}
+    monkeypatch.setattr(manager_config, "_registry", AsyncMock(return_value={"providers": [provider]}))
+
+    async def update(provider_id: str, data: dict) -> dict:
+        assert provider_id == provider["provider_id"]
+        # The registry replaces the whole catalog, filling omitted metadata with null.
+        provider["models"] = manager_config.profile_registry._models(data["models"])
+        return {"provider": provider}
+
+    monkeypatch.setattr(manager_config.profile_registry, "update_provider", update)
+    _provider_call({"action": "update", "provider": "custom", "models": ["second", " first ", "new"]})
+    assert provider["models"] == [models[1], models[0], {**dict.fromkeys(models[0]), "name": "new"}]
+
+
 @pytest.mark.parametrize("action", ["register", "update"])
 @pytest.mark.parametrize(("base_url", "model", "unknown", "unpriced"), [
     ("https://api.deepseek.com/other/path", "deepseek-typo", True, True),
     ("https://api.deepseek.com", "deepseek-flash[1m]", False, False),
-    ("https://api.z.ai/api/anthropic", "glm-5.3-flashx[1m]", False, False),
+    ("https://api.deepseek.com", "gpt-6.1-sol", True, False),
+    ("https://api.z.ai/api/anthropic", "glm-5.3-flashx[1m]", True, False),
     ("https://api.deepseek.com.example.com", "deepseek-typo", False, True),
     ("https://[invalid", "custom-model", False, True),
     (None, "custom-model", False, True),
@@ -509,7 +531,9 @@ def test_manager_provider_model_warnings(
     assert bool(price_warnings) is unpriced
     if unknown:
         assert model in unknown_warnings[0]
-        assert all(name in unknown_warnings[0] for name in ("deepseek-flash", "deepseek-v4-pro"))
+        known = ("glm-5.3", "glm-4.7") if base_url == "https://api.z.ai/api/anthropic" else (
+            "deepseek-flash", "deepseek-v4-pro")
+        assert all(name in unknown_warnings[0] for name in known)
     if unpriced:
         assert model in price_warnings[0] and "spend caps" in price_warnings[0]
 

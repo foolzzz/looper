@@ -24,7 +24,7 @@ from ...db import llm_records as db_llm_records, projects as db_projects
 from .. import catalog, profile_registry, projects, provider_presets
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..projects import RequestError, project_name
-from ..runtimes.pricing import BUILTIN_PRICES, base_model, model_price
+from ..runtimes.pricing import base_model, model_price
 from ..tiers.journal import clip
 from . import Call, ErrorCode, OpError, Risk, Tool
 from .tasks import _TASK_ID, _request_error, _task, _task_argument
@@ -234,7 +234,7 @@ def _provider_warnings(view: Mapping[str, Any]) -> list[str]:
             warnings.append(f"model {model.name!r} has no full price with provider {provider.name!r} (input, output, "
                             "cache read and cache write): its runs record tokens only and spend caps do not apply "
                             "to them; add its prices to the provider's model catalog")
-        if preset and base_model(model.name) not in known and base_model(model.name) not in BUILTIN_PRICES:
+        if preset and base_model(model.name) not in known:
             warnings.append(f"model {model.name!r} is unknown for preset {preset.label!r}; known models: "
                             f"{', '.join(sorted(known))}. Check the vendor's model name before using it.")
     return warnings
@@ -275,6 +275,10 @@ async def _providers(call: Call) -> dict[str, Any]:
         _required(arguments, action, "provider")
         current = by_id_or_name((await _registry())["providers"], arguments["provider"],
                                 id_key="provider_id", what="provider")
+        if "models" in data:
+            # The registry replaces the catalog; names retained by the tool keep their metadata.
+            existing = {model["name"]: model for model in current["models"]}
+            data["models"] = [existing.get(model["name"].strip(), model) for model in data["models"]]
         answer = await answered(profile_registry.update_provider(current["provider_id"], data))
     else:
         _required(data, "register", "name", "protocols")
