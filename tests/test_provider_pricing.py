@@ -189,6 +189,18 @@ def test_a_runs_cost_is_each_kind_of_token_at_its_price() -> None:
                                cache_creation_tokens=4_000)
 
 
+def test_deepseek_models_stay_priced_with_and_without_the_context_window_suffix() -> None:
+    """``[1m]`` is Claude Code's context-window mark. DeepSeek's OpenAI API names the model without it, and a
+    run reports whichever form it used. Both are the same full price."""
+    bare = _provider()
+    for name, prices in (("deepseek-flash", (0.30, 1.20, 0.006, 0.30)),
+                         ("deepseek-v4-pro", (1.32, 3.96, 0.044, 1.32))):
+        plain, marked = model_price(bare, name), model_price(bare, f"{name}[1m]")
+        assert plain.complete and plain == marked
+        assert (plain.input_usd_per_mtok, plain.output_usd_per_mtok, plain.cache_read_usd_per_mtok,
+                plain.cache_write_usd_per_mtok) == prices
+
+
 def test_a_model_name_without_a_catalog_price_falls_back_to_the_builtin_table() -> None:
     """OpenCode prices some models as ranges, so the table stays the vendors' list prices and those names fall back."""
     from looper.agents.runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES
