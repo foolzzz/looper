@@ -307,6 +307,7 @@ const PI_RUNTIME: Runtime = {
 
 const PI_TYPE: RuntimeType = {
   type: "pi", label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+  supported_models: null,
   protocols: ["openai-chat", "openai-responses"], capabilities: ["run", "resident_session", "resume"],
   roles: [...PI_ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null,
 };
