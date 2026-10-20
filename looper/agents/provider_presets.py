@@ -9,17 +9,22 @@ not part of a preset: the built-in table (``runtimes.pricing``) prices these
 models, and the provider's catalog can override it.
 
 The URLs, models and variables come from each vendor's official documentation
-(``docs``), read on 2026-10-14. ``[1m]`` asks Claude Code for a model's 1M
-context window, as the vendors' Claude Code guides write it; it is added to
-every model with a 1M window.
+(``docs``), read on 2026-10-14; DeepSeek's were read again on 2026-10-20.
+``[1m]`` asks Claude Code for a model's 1M context window, as the vendors'
+Claude Code guides write it; it is added to every model with a 1M window. A
+provider of an OpenAI-format API uses those names without the suffix.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from .runtimes import ApiProtocol
+
+# Claude Code's context-window mark (``deepseek-flash[1m]``). An OpenAI-format API names the model without it.
+_CONTEXT_SUFFIX = re.compile(r"\[[^\]]*\]$")
 
 _ANTHROPIC = (ApiProtocol.ANTHROPIC_MESSAGES,)
 _CHAT = (ApiProtocol.OPENAI_CHAT,)
@@ -53,15 +58,28 @@ class ProviderPreset:
     docs: tuple[str, ...]
     note: str = ""
 
+    def models_for(self, api: PresetApi) -> tuple[PresetModel, ...]:
+        """The models a provider of ``api`` lists. An Anthropic-format API keeps Claude Code's ``[1m]`` mark; an
+        OpenAI-format API uses the plain name."""
+        if ApiProtocol.ANTHROPIC_MESSAGES in api.protocols:
+            return self.models
+        return tuple(PresetModel(_CONTEXT_SUFFIX.sub("", model.name), model.context_window,
+                                 _CONTEXT_SUFFIX.sub("", model.background_model) if model.background_model else None)
+                     for model in self.models)
+
     def view(self) -> dict[str, Any]:
         return {
             "preset_id": self.id, "label": self.label, "name": self.name,
-            "apis": [{"protocols": [p.value for p in api.protocols], "base_url": api.base_url} for api in self.apis],
-            "models": [{"name": m.name, "context_window": m.context_window, "background_model": m.background_model}
-                       for m in self.models],
+            "apis": [{"protocols": [p.value for p in api.protocols], "base_url": api.base_url,
+                      "models": [_model_view(model) for model in self.models_for(api)]} for api in self.apis],
+            "models": [_model_view(model) for model in self.models],
             "env": [{"key": key, "value": value} for key, value in self.env],
             "docs": list(self.docs), "note": self.note,
         }
+
+
+def _model_view(model: PresetModel) -> dict[str, Any]:
+    return {"name": model.name, "context_window": model.context_window, "background_model": model.background_model}
 
 
 _GLM_MODELS = (
@@ -105,12 +123,13 @@ PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
         "deepseek", "DeepSeek", "deepseek",
         (PresetApi(_ANTHROPIC, "https://api.deepseek.com/anthropic"),
-         PresetApi(_CHAT, "https://api.deepseek.com")),
+         PresetApi(_OPENAI, "https://api.deepseek.com")),
         (PresetModel("deepseek-flash[1m]", 1_000_000, "deepseek-flash"),
          PresetModel("deepseek-v4-pro[1m]", 1_000_000, "deepseek-flash")),
         (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "786432"),),
         ("https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code/",
-         "https://api-docs.deepseek.com/guides/anthropic_api", "https://api-docs.deepseek.com/"),
+         "https://api-docs.deepseek.com/guides/anthropic_api",
+         "https://api-docs.deepseek.com/guides/responses_api/", "https://api-docs.deepseek.com/"),
     ),
     ProviderPreset(
         "kimi-moonshot-cn", "Kimi (Moonshot, China)", "kimi",

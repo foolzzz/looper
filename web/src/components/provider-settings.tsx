@@ -158,7 +158,8 @@ function presetDraft(preset: ProviderPreset, api: ProviderPreset["apis"][number]
     auth: "api_key",
     protocols: api.protocols,
     baseUrl: api.base_url,
-    models: preset.models.map((m) => modelDraft(m, registry.limits.price_fields)),
+    // api.models drops Claude Code's [1m] mark on an OpenAI-format API.
+    models: api.models.map((m) => modelDraft(m, registry.limits.price_fields)),
     // The vendor's Claude Code variables matter only to an Anthropic-format API.
     env: api.protocols.includes("anthropic-messages") ? envText(preset.env) : "",
   };

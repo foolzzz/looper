@@ -2504,7 +2504,12 @@ export interface ProviderPreset {
   preset_id: string;
   label: string;
   name: string;
-  apis: { protocols: string[]; base_url: string }[];
+  apis: {
+    protocols: string[];
+    base_url: string;
+    /** Models for a provider of this API. An OpenAI-format API omits Claude Code's `[1m]` mark. */
+    models: Pick<ProviderModel, "name" | "context_window" | "background_model">[];
+  }[];
   models: Pick<ProviderModel, "name" | "context_window" | "background_model">[];
   env: ProviderEnvEntry[];
   docs: string[];
