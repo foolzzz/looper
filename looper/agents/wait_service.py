@@ -1,4 +1,8 @@
-"""Run one wait check. The loop that decides when to run one comes later.
+"""Run due waits and their checks, recording each result before moving a waiting row.
+
+``WaitService`` checks active tasks at ``WAIT_TICK_SEC`` with at most four
+checks at once. Ready and timed-out rows wake their Planner only after the
+conditional move succeeds; a timeout records its activity and notice first.
 
 ``run_github_pr`` runs a fixed ``gh pr view`` (no shell). ``run_command`` runs a
 shell command only when the project allows it. Each returns ``(result, output,
@@ -9,7 +13,7 @@ only records that baseline.
 
 Output is the last ``OUTPUT_MAX_BYTES`` of the combined stream, decoded with
 invalid bytes replaced. The database caps it again when the row is written.
-Nothing here is logged: the output and the command stay out of the log.
+Only check identifiers, result and exit code are logged; output and command text stay out.
 """
 
 from __future__ import annotations
@@ -17,16 +21,27 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import signal
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .. import child_env
+from ..db import activity as db_activity, projects as db_projects, tasks as db_tasks, waits as db_waits
 from . import proc_tree, waits
+from .bus import MessageBus
+from .links import task_link
+from .message import AgentAddress, MessageEnvelope, MessageType, channel_address, planner_address
+from .project_execution import ProjectExecution
+from .task_notice import Notice, NotifyTarget, link_line, notify_channel
+from .tiers.journal import clip
 from .waits import (
     CHECK_TIMEOUT_SEC, OUTPUT_MAX_BYTES, CheckResult, CommandCheck, GithubPrCheck, ReadyWhen,
 )
+
+logger = logging.getLogger(__name__)
 
 _JSON_FIELDS = "headRefOid,state,comments,reviews,statusCheckRollup"
 # A StatusContext still waiting reports PENDING or EXPECTED. Anything else has finished.
@@ -81,22 +96,30 @@ async def _capture(process: asyncio.subprocess.Process, timeout: float,
             data.extend(chunk)
 
     reader = asyncio.ensure_future(drain())
-    timed_out = not await _exited(process, timeout)
-    if timed_out:
-        await stop()
     try:
-        await asyncio.wait_for(reader, _DRAIN_SEC)
-    except TimeoutError:
-        reader.cancel()
-    try:
-        await reader
+        timed_out = not await _exited(process, timeout)
+        if timed_out:
+            await stop()
+        try:
+            await asyncio.wait_for(reader, _DRAIN_SEC)
+        except TimeoutError:
+            reader.cancel()
+        if not reader.cancelled():
+            try:
+                await reader
+            except Exception:
+                # A killed process can reset the pipe. The bytes already read are the output.
+                if not timed_out:
+                    raise
+        return bytes(data), timed_out
     except asyncio.CancelledError:
-        pass
-    except Exception:
-        # A killed process can reset the pipe. The bytes already read are the output.
-        if not timed_out:
-            raise
-    return bytes(data), timed_out
+        # Stopping the service must reap the in-flight check as well as its loop.
+        try:
+            await stop()
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+        raise
 
 
 def _drop_pipes(process: asyncio.subprocess.Process) -> None:
@@ -264,3 +287,147 @@ async def run_command(check: CommandCheck, work_dir: str | os.PathLike[str], *, 
         return _done(CheckResult.READY, output, "",
                      _extra(resolution="Ready: the command exited 0.", exit_code=0))
     return _done(CheckResult.NOT_READY, output, "", _extra(exit_code=code))
+
+
+async def _commands_allowed(task_id: str) -> bool:
+    """The task's current project must still allow commands when a check starts."""
+    return ProjectExecution.from_row(await db_projects.get_task_project(task_id)).wait_commands_on
+
+
+class WaitService:
+    """Every ``interval`` seconds, check each due wait of an active task, at most
+    ``MAX_CONCURRENT_CHECKS`` at once. Store checks before conditional moves;
+    tell the user of timeouts, then wake a Planner that is running."""
+
+    def __init__(self, *, bus: MessageBus, has_planner: Callable[[str], bool], dashboard_url: str = "",
+                 interval: float = waits.WAIT_TICK_SEC, gh: str = "gh") -> None:
+        self._bus = bus
+        self._has_planner = has_planner
+        self._dashboard_url = dashboard_url
+        self._interval = interval
+        self._gh = gh
+        self._semaphore = asyncio.Semaphore(waits.MAX_CONCURRENT_CHECKS)
+        self._task: asyncio.Task[Any] | None = None
+
+    async def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("the wait loop failed; trying again later")
+            await asyncio.sleep(self._interval)
+
+    async def run_once(self, now: datetime | None = None) -> int:
+        """Check waits due at ``now`` (UTC now when omitted); how many rows moved."""
+        now = now or datetime.now(timezone.utc)
+        rows = await db_waits.due(now, db_tasks.ACTIVE_STATUSES)
+        return sum(await asyncio.gather(*(self._run_row(row, now) for row in rows)))
+
+    async def _run_row(self, row: Mapping[str, Any], now: datetime) -> int:
+        async with self._semaphore:
+            try:
+                return await self._run_wait(row, now)
+            except Exception:
+                # Exceptions may contain command output or notice text. Only the row's id belongs in the log.
+                logger.warning("wait step %s failed; trying again later", row["step_id"])
+                return 0
+
+    async def _run_wait(self, row: Mapping[str, Any], now: datetime) -> int:
+        step_id, task_id = row["step_id"], row["task_id"]
+        spec = waits.WaitSpec.from_row(row["topic"], row["spec"])
+        check = spec.check
+        moved = None
+        if check is not None and row["next_check_at"] is not None and row["next_check_at"] <= now:
+            if isinstance(check, GithubPrCheck):
+                result, output, error, extra = await run_github_pr(check, row["baseline"], gh=self._gh)
+            else:
+                result, output, error, extra = await run_command(
+                    check, row["work_dir"], project_allows=await _commands_allowed(task_id))
+            # Keep the first view as the baseline: a change before due_at must still count afterwards.
+            baseline = None
+            if isinstance(check, GithubPrCheck) and row["baseline"] is None and result is not CheckResult.ERROR:
+                baseline = extra["baseline"]
+                result = CheckResult.NOT_READY
+                output = f"baseline: head {baseline['head'][:7]}, {baseline['comments']} comments"
+            recorded = await db_waits.record_check(
+                step_id, at=now, result=result.value, output=output, error=error,
+                next_check_at=now + timedelta(seconds=waits.effective_every(spec, waits.limits())), baseline=baseline)
+            logger.info("wait step %s task %s result %s exitcode %s", step_id, task_id, result.value,
+                        extra.get("exit_code"))
+            if not recorded:
+                return 0
+            if result is CheckResult.ERROR and row["last_result"] != CheckResult.ERROR.value:
+                await db_activity.insert_activity(task_id=task_id, worker="planner", kind="phase",
+                                                  summary=f"Wait {row['step_key']} check failed: {error[:200]}")
+            if result is CheckResult.READY and row["due_at"] <= now:
+                resolution = extra["resolution"] + (f"\n{output}" if output else "")
+                moved = await db_waits.move(step_id, to="ready", expect=("waiting",), outcome="ready",
+                                            resolution=resolution)
+                if moved is None:
+                    return 0
+        elif check is None and row["due_at"] <= now:
+            stamp = row["due_at"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            moved = await db_waits.move(step_id, to="ready", expect=("waiting",), outcome="ready",
+                                        resolution=f"Ready: the time it waited for came ({stamp}).")
+            if moved is None:
+                return 0
+        if moved is None and row["deadline_at"] <= now:
+            seconds = max(0, int((now - row["opened_at"]).total_seconds()))
+            duration = waits._duration(seconds)
+            moved = await db_waits.move(step_id, to="timed_out", expect=("waiting",),
+                                        resolution=f"Timed out after {duration}.")
+            if moved is not None:
+                await db_activity.insert_activity(
+                    task_id=task_id, worker="planner", kind="phase",
+                    summary=f"Wait {row['step_key']} timed out after {duration}: {row['topic']}; the Planner decides next")
+                await self._notify_timeout(row, seconds)
+        if moved is None:
+            return 0
+        if self._has_planner(task_id):
+            try:
+                await self._bus.publish(MessageEnvelope.create(
+                    source=AgentAddress("wait_service", "wait-service"), target=planner_address(task_id),
+                    message_type=MessageType.WAIT_EVENT, payload={"task_id": task_id, "wait": row["step_key"]}))
+            except Exception:
+                logger.warning("wait step %s could not wake its Planner", step_id)
+        return 1
+
+    async def _notify_timeout(self, row: Mapping[str, Any], seconds: int) -> None:
+        task_id = row["task_id"]
+        task = await db_tasks.get_task(task_id) or {}
+        channel, target = notify_channel(task.get("origin_channel_id")), NotifyTarget.from_columns(task)
+        notice = "dashboard"
+        if channel is not None and target is not None:
+            name = db_tasks.task_name(title=task.get("title"), goal_id=task.get("goal_id"),
+                                      requirement=task.get("requirement"), task_id=task_id)
+            if seconds >= 86400:
+                waited = f"{seconds // 86400} 天"
+            elif seconds >= 3600:
+                waited = f"{seconds // 3600} 小时"
+            else:
+                waited = f"{max(1, seconds // 60)} 分钟"
+            text = "\n".join([f"⏳ 等待超时 · {clip(name, 40)}", row["topic"],
+                               f"等了 {waited}，条件一直没有满足；规划者接下来决定怎么做。",
+                               link_line(task_link(self._dashboard_url, task_id), channel)])
+            try:
+                await self._bus.publish(MessageEnvelope.create(
+                    source=planner_address(task_id), target=channel_address(channel.value),
+                    message_type=MessageType.CHAT_NOTICE, payload=Notice(channel, target, text).payload(),
+                    metadata={"origin_channel_id": task.get("origin_channel_id")}))
+                notice = "sent"
+            except Exception:
+                notice = "failed"
+                logger.warning("wait step %s could not notify its chat", row["step_id"])
+        await db_waits.set_notice(row["step_id"], notice)
