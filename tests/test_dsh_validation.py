@@ -210,14 +210,14 @@ def test_key_capture_exception_is_not_forwarded(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("command,selector,case", [
-    ("task-basic", "--tasks", "single_step"),
+    ("task-basic", "--tasks", "single_step,dependent_steps"),
     ("task-review", "--tasks", "reviewed_step"),
     ("manager", "--dialogs", "status"),
 ])
 def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, case, tmp_path):
     argv = launcher.eval_argv(command, PG, tmp_path)
     assert argv[:3] == [sys.executable, "-m", "evals.prompt_regression"]
-    for option, expected in {"--mode": "real", "--jobs": "1", "--reps": "1",
+    for option, expected in {"--mode": "real", "--jobs": "1", "--reps": "2" if command == "task-basic" else "1",
                              "--max-budget-usd": "0.50", "--total-cap-usd": "4", selector: case,
                              "--timeout" if command == "manager" else "--task-timeout": "300"}.items():
         assert argv[argv.index(option) + 1] == expected
@@ -233,6 +233,88 @@ def test_eval_arguments_are_bounded_and_register_only_dsh(command, selector, cas
     assert "api_key" not in spec["provider"]
     assert spec["agent"]["model"] == "deepseek-flash"
     assert spec["agent"]["effort"] == "high"
+
+
+def test_basic_summary_keeps_missing_repetitions_as_gaps():
+    summary = launcher.summarize({"tasks": [
+        {"id": "single_step", "rep": 1, "outcome": "pass"},
+        {"id": "dependent_steps", "rep": 1, "outcome": "error"},
+    ]}, ("single_step", "dependent_steps"), reps=2)
+    assert summary["outcomes"] == {"pass": 1, "fail": 0, "error": 1, "skipped": 0, "untested": 2}
+    assert summary["cases"]["single_step"]["outcomes"]["untested"] == 1
+    assert summary["cases"]["dependent_steps"]["outcomes"]["untested"] == 1
+
+
+def test_basic_summary_does_not_accept_duplicate_repetitions():
+    summary = launcher.summarize({"tasks": [
+        {"id": "single_step", "rep": 1, "outcome": "pass"},
+        {"id": "single_step", "rep": 1, "outcome": "pass"},
+    ]}, ("single_step",), reps=2)
+    assert summary["sample_gaps"]
+
+
+@pytest.mark.parametrize("flag", ["timed_out", "stopped_by_cap"])
+def test_summary_never_accepts_pass_with_timeout_or_cap(flag):
+    summary = launcher.summarize({"tasks": [
+        {"id": "single_step", "outcome": "pass", flag: True},
+    ]}, ("single_step",))
+    assert summary["outcomes"]["pass"] == 0
+    assert summary["outcomes"]["error"] == 1
+
+
+def basic_row(case="single_step", rep=1):
+    return {"id": case, "rep": rep, "outcome": "pass", "contract_violations": {"total": 0},
+        "planner_modified_files": 0, "runtime_evidence": [
+            {"role": role, "runtime": "dsh", "executable": "dsh", "system_prompt_mode": "append",
+             "session_present": True, "root_usage_complete": True} for role in ("planner", "worker")],
+        "dependency_order": {"edges": 1, "verified": 1, "violations": 0, "unknown": 0}}
+
+
+@pytest.mark.parametrize("problem", ["runtime", "missing_role", "mode", "contract", "planner_write", "dependency"])
+def test_basic_acceptance_requires_evidence_beyond_task_pass(problem):
+    row = basic_row("dependent_steps")
+    if problem == "runtime":
+        row["runtime_evidence"][0]["executable"] = "claude"
+    elif problem == "missing_role":
+        row["runtime_evidence"].pop()
+    elif problem == "mode":
+        row["runtime_evidence"][0]["system_prompt_mode"] = "replace"
+    elif problem == "contract":
+        row["contract_violations"]["total"] = 1
+    elif problem == "planner_write":
+        row["planner_modified_files"] = 1
+    else:
+        row["dependency_order"]["verified"] = 0
+        row["dependency_order"]["unknown"] = 1
+    assert launcher.basic_evidence_gaps([row])
+
+
+def test_basic_acceptance_accepts_observed_runtime_and_order():
+    assert launcher.basic_evidence_gaps([basic_row()]) == []
+
+
+@pytest.mark.parametrize("problem", ["missing_sample", "duplicate_rep", "runtime", "contract", "timeout"])
+def test_basic_execute_rejects_incomplete_or_invalid_success_rows(problem, tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "ARTIFACTS", tmp_path)
+    rows = [basic_row(case, rep) for case in ("single_step", "dependent_steps") for rep in (1, 2)]
+    if problem == "missing_sample":
+        rows.pop()
+    elif problem == "duplicate_rep":
+        rows[1]["rep"] = 1
+    elif problem == "runtime":
+        rows[0]["runtime_evidence"][0]["executable"] = "claude"
+    elif problem == "contract":
+        rows[0]["contract_violations"]["total"] = 1
+    else:
+        rows[0]["timed_out"] = True
+    async def run(argv, **kwargs):
+        out_dir = Path(argv[argv.index("--out-dir") + 1])
+        (out_dir / "test-real.json").write_text(json.dumps({"tasks": rows}))
+        return launcher.ProcessResult(0, b"", b"")
+    monkeypatch.setattr(launcher, "run_process", run)
+    summary, code = launcher.execute("task-basic", PG, "synthetic-private-key", None)
+    assert code != 0
+    assert summary["status"] != "pass"
 
 
 def test_agent_spec_provider_passes_registry_validation():
@@ -298,13 +380,15 @@ def test_execute_uses_only_eval_key_env_and_ignored_private_root(command, tmp_pa
         assert Path(env["TMPDIR"]).is_relative_to(out_dir)
         rows_key = "dialogs" if command == "manager" else "tasks"
         (out_dir / "test-real.json").write_text(json.dumps({rows_key: [
-            {"id": launcher.CASES[command], "outcome": "pass"}], "total_cost_usd": 0.1}))
+            basic_row(case, rep)
+            for case in launcher.CASES[command].split(",")
+            for rep in range(1, 3 if command == "task-basic" else 2)], "total_cost_usd": 0.1}))
         return launcher.ProcessResult(0, b"private eval output", b"private diagnostic")
     monkeypatch.setattr(launcher, "run_process", run)
     summary, code = launcher.execute(command, PG, "synthetic-private-key", tmp_path / "missing-baseline.json")
     assert code == 0
     assert summary["baseline"]["comparable"] is False
-    assert summary["outcomes"]["pass"] == 1
+    assert summary["outcomes"]["pass"] == (4 if command == "task-basic" else 1)
     for path in (tmp_path / "artifacts").rglob("*"):
         if path.is_file():
             assert "synthetic-private-key" not in path.read_text()

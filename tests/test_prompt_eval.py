@@ -416,6 +416,29 @@ def _result(text: str) -> list[dict[str, Any]]:
     return [{"seq": 1, "event": {"type": "result", "subtype": "success", "result": text}}]
 
 
+def test_task_metrics_preserve_actual_runtime_and_unknown_usage(tmp_path):
+    record = _record(1, "planner-task")
+    record.update(session_id="session", metadata={
+        "profile": {"runtime": {"type": "dsh"}}, "system_prompt_mode": "append",
+        "command": ["env", "HOME=/disposable", "/bin/dsh", "--profile", "headless", "-"],
+    })
+    result = metrics.task_metrics(detail={"status": "completed"}, activity=[], records=[record],
+        events={}, changes={}, work_dir=tmp_path, check_problem=None, expect={}, now=0)
+    assert result["runtime_evidence"] == [{"role": "planner", "runtime": "dsh", "executable": "dsh",
+        "system_prompt_mode": "append", "session_present": True, "root_usage_complete": None}]
+
+
+@pytest.mark.parametrize("end,expected", [("2026-10-13T10:00:04+00:00", "verified"),
+    ("2026-10-13T10:00:06+00:00", "violations"), (None, "unknown")])
+def test_dependency_order_checks_api_run_timestamps(end, expected):
+    steps = [{"id": "first"}, {"id": "second", "depends_on": ["first"]}]
+    records = [_record(1, "worker-a", step_id="first", end=end),
+               _record(2, "worker-b", step_id="second", start="2026-10-13T10:00:05+00:00")]
+    result = metrics.dependency_order(steps, records)
+    assert result == {"edges": 1, "verified": int(expected == "verified"),
+                      "violations": int(expected == "violations"), "unknown": int(expected == "unknown")}
+
+
 @pytest.mark.parametrize(("outside", "has_fact", "closeout", "problems"), [
     (False, True, True, []),
     (True, True, True, ["vault_outside 1 > 0"]),

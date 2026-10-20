@@ -197,7 +197,8 @@ CLI 的 serve/PATH 探测已泛化，无新专属参数。Telegram/Lark 与 Dash
 | installed 包离线 bootstrap / resume / guard | **passed（指定 runtime 套件内的范围）**；独立完整套件未重跑 | [test_dsh_runtime.py](../../../tests/test_dsh_runtime.py)的实际安装包回归验证 guard、恢复和无 MCP consult：一次源请求加三次 consult root 请求，计费 33 input / 15 output token，无额外网络调用；源 Session 不变。未完整重跑 [test_dsh_installed.py](../../../tests/test_dsh_installed.py)，不宣称其全部案例通过。 |
 | 文档命令 help 与 preflight 负例 | **passed（既有记录；launcher 回归亦通过）**：6 个 help exit 0、缺 URL exit 2 | 顶层及 `preflight/task-basic/task-review/manager/smoke` 的 help 均通过；缺 disposable URL 被拒且 `real_validation=untested`。本次真实 smoke 也已通过完整 preflight，未绕过进程树检查。 |
 | 真实 `smoke` | **passed** | `status=pass`、`tasks=2`、`manager_turns=2`、`database_readback=true`、`outer_timeout=false`；root 观测金额 $0.0209028。阶段 300 秒、外层 20 分钟均未提高；费用辅助覆盖仍未知。 |
-| 真实 `task-basic` / `task-review` / `manager` 与完整评测 | **untested，待验收** | 本次执行的是四角色/consult smoke；未单独重跑这三个入口或 §9 第 6 项更广的 reps=2 集合，也没有有效 append 的 Claude/OMP 对照，不能据 smoke 宣称完整验收交付。 |
+| 真实 `task-basic` | **blocked，4 个样本仍为 gap** | 验收入口已修正为 `single_step,dependent_steps` 各 reps=2，并检查每角色实际 dsh 启动、有效 append、Session、契约违规、Planner 写文件与 API 依赖运行时间。新增负例先失败，修复后相关离线定向检查 79 passed；实际命令在进程树观察 preflight 被执行环境拒绝，exit 2，未进入 key 捕获、PG 或模型调用，不能记 pass。已有 Claude baseline 缺有效 append 证据，未修改 baseline 或提高预算。 |
+| 真实 `task-review` / `manager` 与完整评测 | **untested，待验收** | 已通过的四角色/consult smoke 不覆盖 §9 第 6 项更广的 reps=2 集合；这些入口及有效 append 的 Claude/OMP 对照仍待验收，不能据 smoke 宣称完整交付。 |
 | UI 浏览器、真实渠道和费用完整性 | **untested，待验收** | Dashboard/Telegram/Lark 共用 adapter；渠道仅替身，未真发。浏览器截图/build 本切片未重跑；有效 append 的 Claude/OMP 对照、官方 reader 与 root observed cost 的真实对账、summary/search/child/consult 费用覆盖均未知。 |
 
 排障时实际复现了任务超时、consult 启动/费用拒绝及审计回读失败；修复后上述完整 smoke 通过。原始阻塞是依赖 Claude 的健康检查误重启并取消 Reviewer；后续发现并修复无 MCP consult、受限 consult 计费、Worker 等待未来 Reviewer 的循环和审计 command 的 owner 不符。官方 Session reader 仍为 unavailable（9 个 owner 不可读），未宣称完整费用对账通过；其他未执行范围仍保持 untested。CLI 无专属参数，Dashboard、Telegram、Lark 的共享入口无需新增渠道参数或发送逻辑。

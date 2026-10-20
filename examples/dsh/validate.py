@@ -9,7 +9,8 @@
 eval 产物固定在 ignored evals/runs/dsh/；smoke 的临时根随服务清理，
 stdout 仅有脱敏汇总。smoke 严格检查 room consult，费用未知导致的拒绝不算通过。
 
-每次启动 jobs=1、reps=1，每 run $0.50 软上限、总观测 $4、任务/对话
+每次启动 jobs=1；task-basic 两 case 各 reps=2，其余 reps=1。
+每 run $0.50 软上限、总观测 $4、任务/对话
 300 秒、外层 20 分钟（另有清理宽限）；不是硬账单上限。辅助费用 coverage
 未知。jobs=1 不执行 case budget，本入口不传它，也不承诺每 case $2。
 可选 baseline 必须是 real eval JSON，显式提供 validation 中的
@@ -49,7 +50,7 @@ from evals.prompt_regression import compare  # noqa: E402
 
 SPEC = Path(__file__).with_name("agent-spec.json")
 ARTIFACTS = ROOT / "evals" / "runs" / "dsh"
-CASES = {"task-basic": "single_step", "task-review": "reviewed_step", "manager": "status"}
+CASES = {"task-basic": "single_step,dependent_steps", "task-review": "reviewed_step", "manager": "status"}
 OUTER_TIMEOUT = 20 * 60
 ROLES = ("manager", "planner", "worker", "reviewer")
 STAGE_TIMEOUT = 300
@@ -193,7 +194,8 @@ def eval_argv(command: str, pg_url: str, out_dir: Path) -> list[str]:
     manager = command == "manager"
     return [sys.executable, "-m", "evals.prompt_regression", "dialogs" if manager else "run",
             "--mode", "real", "--register-agent", str(SPEC), "--pg-url", pg_url,
-            "--dialogs" if manager else "--tasks", CASES[command], "--jobs", "1", "--reps", "1",
+            "--dialogs" if manager else "--tasks", CASES[command], "--jobs", "1", "--reps",
+            "2" if command == "task-basic" else "1",
             "--max-budget-usd", f"{RUN_SOFT_CAP_USD:.2f}", "--total-cap-usd", str(TOTAL_OBSERVED_CAP_USD),
             "--timeout" if manager else "--task-timeout", str(STAGE_TIMEOUT), "--out-dir", str(out_dir)]
 
@@ -209,23 +211,35 @@ def baseline_status(base: dict[str, Any] | None, cases: tuple[str, ...], *, dial
                   all(any(isinstance(row, dict) and row.get("id") == case and
                           compare.outcome(row) in ("pass", "fail") for row in rows)
                       for case in cases))
-    return {"comparable": comparable, "gap": None if comparable else "基线缺同 case 的 real 结果或有效 append 证据"}
+    return {"comparable": comparable, "gap": None if comparable else "基线缺同 case 的 real 结果或有效 append 证据",
+            "mode": base.get("mode"),
+            "effective_system_prompt_mode": validation.get("effective_system_prompt_mode") if isinstance(validation, dict) else None,
+            "samples": {case: sum(isinstance(row, dict) and row.get("id") == case for row in rows)
+                        if isinstance(rows, list) else 0 for case in cases}}
 
 
-def summarize(run: dict[str, Any], cases: tuple[str, ...]) -> dict[str, Any]:
+def summarize(run: dict[str, Any], cases: tuple[str, ...], *, reps: int = 1) -> dict[str, Any]:
     outcomes = dict.fromkeys(("pass", "fail", "error", "skipped", "untested"), 0)
     rows = compare.rows(run)
+    per_case = {}
+    sample_gaps = []
     for case in cases:
         selected = [row for row in rows if row.get("id") == case]
-        if not selected:
-            outcomes["untested"] += 1
+        counts = dict.fromkeys(outcomes, 0)
+        counts["untested"] = max(0, reps - len(selected))
+        if len(selected) != reps or (reps > 1 and sorted(row.get("rep", 0) for row in selected) != list(range(1, reps + 1))):
+            sample_gaps.append(case)
         for row in selected:
-            outcome = compare.outcome(row)
-            outcomes[outcome if outcome in outcomes else "error"] += 1
+            outcome = "error" if row.get("timed_out") or row.get("stopped_by_cap") else compare.outcome(row)
+            counts[outcome if outcome in counts else "error"] += 1
+        for outcome, count in counts.items():
+            outcomes[outcome] += count
+        per_case[case] = {"outcomes": counts, "samples": selected}
     cost = run.get("total_cost_usd")
     if not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
         cost = None
-    return {"outcomes": outcomes, "observed_cost_usd": cost, "aborted": bool(run.get("aborted")),
+    return {"outcomes": outcomes, "cases": per_case, "sample_gaps": sample_gaps,
+            "observed_cost_usd": cost, "aborted": bool(run.get("aborted")),
             "per_run_soft_cap_usd": RUN_SOFT_CAP_USD, "total_observed_cap_usd": TOTAL_OBSERVED_CAP_USD,
             "auxiliary_cost_coverage": "unknown", "hard_billing_cap": False,
             "effective_system_prompt_mode": "append", "case_budget_enforced": False}
@@ -238,6 +252,30 @@ def isolated_env(home: Path, temporary: Path, key: str) -> dict[str, str]:
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
 
 
+def basic_evidence_gaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gaps = []
+    for row in rows:
+        reasons = []
+        evidence = row.get("runtime_evidence") or []
+        if not {"planner", "worker"}.issubset({r.get("role") for r in evidence}) or any(
+            r.get("runtime") != "dsh" or r.get("executable") != "dsh" or
+            r.get("system_prompt_mode") != "append" or r.get("session_present") is not True for r in evidence
+        ):
+            reasons.append("缺少每角色实际 dsh/append/session 证据")
+        if (row.get("contract_violations") or {}).get("total") != 0:
+            reasons.append("契约违规非零或未知")
+        if row.get("planner_modified_files") != 0:
+            reasons.append("Planner 写文件非零或未知")
+        if row.get("id") == "dependent_steps":
+            order = row.get("dependency_order") or {}
+            if not (order.get("edges", 0) > 0 and order.get("verified") == order.get("edges") and
+                    order.get("violations") == 0 and order.get("unknown") == 0):
+                reasons.append("依赖顺序违规或缺少 API 运行时间证据")
+        if reasons:
+            gaps.append({"id": row.get("id"), "rep": row.get("rep"), "reasons": reasons})
+    return gaps
+
+
 def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple[dict[str, Any], int]:
     # Fixed ignored destination: callers cannot redirect real artifacts into tracked paths.
     ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -248,24 +286,33 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     temporary.mkdir(mode=0o700)
     # Do not inherit operator runtime/provider/ops configuration or credentials.
     env = isolated_env(home, temporary, key)
-    result = asyncio.run(run_process(eval_argv(command, pg_url, out_dir), timeout=OUTER_TIMEOUT,
-                                     env=env, capture=False))
-    paths = list(out_dir.glob("*-real.json"))
-    run = json.loads(paths[0].read_text()) if len(paths) == 1 else {}
-    summary = summarize(run, (CASES[command],))
+    cases = tuple(CASES[command].split(","))
+    reps = 2 if command == "task-basic" else 1
     try:
         base = json.loads(baseline.read_text()) if baseline else None
     except (OSError, ValueError):
         base = None
-    summary["baseline"] = baseline_status(base, (CASES[command],), dialogs=command == "manager")
+    baseline_check = baseline_status(base, cases, dialogs=command == "manager")
+    result = asyncio.run(run_process(eval_argv(command, pg_url, out_dir), timeout=OUTER_TIMEOUT,
+                                     env=env, capture=False))
+    paths = list(out_dir.glob("*-real.json"))
+    run = json.loads(paths[0].read_text()) if len(paths) == 1 else {}
+    summary = summarize(run, cases, reps=reps)
+    summary["baseline"] = baseline_check
+    summary["evidence_gaps"] = basic_evidence_gaps(compare.rows(run)) if command == "task-basic" else []
+    if command == "task-basic":
+        summary["effective_system_prompt_mode"] = None if summary["evidence_gaps"] or not run.get("tasks") else "append"
     if summary["baseline"]["comparable"]:
         # The comparison stays private, including the input baseline's provenance.
         (out_dir / "comparison.md").write_text(compare.markdown(run, base), encoding="utf-8")
     summary["outer_timeout"] = result.timed_out
     summary["eval_exit_code"] = result.returncode
-    (out_dir / "validation-summary.json").write_text(json.dumps(summary, ensure_ascii=False) + "\n")
     passed = (result.returncode == 0 and not result.timed_out and not summary["aborted"] and
-              summary["outcomes"] == {"pass": 1, "fail": 0, "error": 0, "skipped": 0, "untested": 0})
+              not summary["sample_gaps"] and not summary["evidence_gaps"] and summary["outcomes"] == {
+                  "pass": len(cases) * reps, "fail": 0, "error": 0, "skipped": 0, "untested": 0})
+    summary["status"] = "pass" if passed else "error" if result.timed_out or not run else "fail"
+    summary["real_validation"] = summary["status"]
+    (out_dir / "validation-summary.json").write_text(json.dumps(summary, ensure_ascii=False) + "\n")
     return summary, 0 if passed else (2 if result.timed_out or result.returncode == 2 or not run else 1)
 
 

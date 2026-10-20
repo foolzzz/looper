@@ -374,6 +374,25 @@ def most_at_once(spans: Iterable[tuple[float, float]]) -> int:
     return most
 
 
+def dependency_order(steps: Iterable[Mapping[str, Any]], records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Check API dependency edges against run times; missing evidence stays unknown."""
+    workers: dict[str, list[Mapping[str, Any]]] = {}
+    for record in records:
+        if role(record) == "worker":
+            workers.setdefault(str((record.get("metadata") or {}).get("step_id")), []).append(record)
+    result = {"edges": 0, "verified": 0, "violations": 0, "unknown": 0}
+    for step in steps:
+        for dependency in step.get("depends_on") or []:
+            result["edges"] += 1
+            starts = [timestamp(r.get("created_at")) for r in workers.get(str(step.get("id")), [])]
+            ends = [timestamp(r.get("finished_at")) for r in workers.get(str(dependency), [])]
+            if not starts or not ends or None in starts or None in ends:
+                result["unknown"] += 1
+            else:
+                result["verified" if max(ends) <= min(starts) else "violations"] += 1
+    return result
+
+
 def _before(steps: Iterable[Mapping[str, Any]]) -> dict[str, set[str]]:
     """Each of the plan's steps and every step it depends on, directly or through other steps."""
     needs = {str(step.get("id")): {str(d) for d in step.get("depends_on") or []} for step in steps}
@@ -572,6 +591,23 @@ def task_metrics(
     # Tokens are what every runtime reports, priced or not (a subscription, a provider without prices).
     tokens = {name: sum(int(r.get(f"{name}_tokens") or 0) for r in records)
               for name in ("input", "output", "cache_read", "cache_creation")}
+    runtime_evidence = []
+    for record in records:
+        metadata = record.get("metadata") or {}
+        command = list(metadata.get("command") or [])
+        if command[:1] == ["env"]:
+            command.pop(0)
+            while command and "=" in command[0]:
+                command.pop(0)
+        finals = [row.get("event", row) for row in events.get(int(record["id"]), [])
+                  if row.get("event", row).get("type") == "result"]
+        runtime_evidence.append({
+            "role": role(record), "runtime": ((metadata.get("profile") or {}).get("runtime") or {}).get("type"),
+            "executable": Path(command[0]).name if command else None,
+            "system_prompt_mode": metadata.get("system_prompt_mode"),
+            "session_present": bool(record.get("session_id")),
+            "root_usage_complete": finals[-1].get("root_usage_complete") if finals else None,
+        })
     return {
         "status": status,
         "success": not problems,
@@ -586,6 +622,8 @@ def task_metrics(
         "run_errors": sum(1 for r in records if r.get("status") == RECORD_FAILED),
         "models": {name: sorted({str(r["model"]) for r in rows if r.get("model")}) for name, rows in by_role.items()},
         "tokens": tokens,
+        "runtime_evidence": runtime_evidence,
+        "dependency_order": dependency_order(detail.get("steps") or [], records),
         # How the runs were priced: a runtime's own login (an equivalent, Claude Code's figure or Codex's tokens at
         # the built-in prices), by Looper at an API key provider's prices, or not at all (tokens only).
         "cost_basis": {name: int(cost.get(f"{name}_runs") or 0) for name in ("equivalent", "provider_price",
