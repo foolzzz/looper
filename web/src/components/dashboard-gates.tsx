@@ -12,7 +12,7 @@ import { errorText, useAction } from "@/lib/use-action";
 const LIMIT = 10;
 const linkClass = "rounded-sm text-primary hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 type Waiting = { task: TaskDetail; gate: UserGate };
-type Reply = { taskId: string; stepId: string; text: string; turns: number };
+type Reply = { taskId: string; stepId: string; text: string };
 const gateKey = (taskId: string, stepId: string) => `${taskId}/${stepId}`;
 
 function GateReply({ task, gate, reply, onChanged }: Waiting & {
@@ -98,7 +98,10 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
         pendingReplies.current = pendingReplies.current.filter((reply) => {
           const task = found.find((task) => task.task_id === reply.taskId);
           const gate = task?.gates.find((gate) => gate.step_id === reply.stepId);
-          return task?.group !== "completed" && gate && isGateWaiting(gate) && gate.turns <= reply.turns;
+          // A turn already running can finish and raise `turns` without taking the message just sent.
+          // It stays pending while the Planner still owes a user message, or a turn failed and none has taken it.
+          return task?.group !== "completed" && !!gate && isGateWaiting(gate)
+            && (gate.waiting_on === "planner" || gate.not_delivered > 0);
         });
         setReplies(pendingReplies.current);
         setTasks(found);
@@ -153,7 +156,7 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
               latest.current++;
               pendingReplies.current = [
                 ...pendingReplies.current.filter((reply) => reply.taskId !== task.task_id || reply.stepId !== updated.step_id),
-                { taskId: task.task_id, stepId: updated.step_id, text, turns: updated.turns },
+                { taskId: task.task_id, stepId: updated.step_id, text },
               ];
               setReplies(pendingReplies.current);
               setTasks((current) => current.map((t) => t.task_id !== task.task_id ? t : {

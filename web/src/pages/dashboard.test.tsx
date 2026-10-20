@@ -238,6 +238,33 @@ describe("Dashboard waiting gates", () => {
     expect(fetchTaskDetail).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps a reply sent while the Planner is answering after that turn raises the count", async () => {
+    details = [task("a", [gate("g1")])];
+    await show();
+    const first = await answer("First answer");
+    details = [task("a", [gate("g1", { state: "discussing", waiting_on: "planner" })])];
+    vi.mocked(postGateMessage).mockResolvedValue({ gate: details[0].gates[0] } as GatePosted);
+    await act(async () => first.form!.requestSubmit());
+    const second = await answer("Still pending");
+    details = [task("a", [gate("g1", { state: "discussing", waiting_on: "planner" })])];
+    vi.mocked(postGateMessage).mockResolvedValue({ gate: details[0].gates[0] } as GatePosted);
+    await act(async () => second.form!.requestSubmit());
+    // The turn already running finishes. It took the earlier message, not this one.
+    details = [task("a", [gate("g1", { state: "discussing", waiting_on: "planner", turns: 1 })])];
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(section()!.querySelectorAll("article")).toHaveLength(1);
+    expect(section()!.textContent).toContain("You replied: Still pending");
+    expect(section()!.textContent).not.toContain("First answer");
+    // The new message's turn fails: the count has already risen, and the gate waits for the user again.
+    details = [task("a", [gate("g1", { state: "discussing", turns: 1, not_delivered: 1 })])];
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(section()!.textContent).toContain("You replied: Still pending");
+    details = [task("a", [gate("g1", { state: "discussing", turns: 2, topic: "Follow-up" })])];
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(section()!.textContent).toContain("Follow-up");
+    expect(section()!.textContent).not.toContain("You replied:");
+  });
+
   it("keeps a sent reply after a failed Planner turn and clears it after a successful answer", async () => {
     details = [task("a", [gate("g1")])];
     await show();
