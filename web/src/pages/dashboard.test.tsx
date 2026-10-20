@@ -51,6 +51,7 @@ describe("Dashboard waiting gates", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
   const show = async () => { await act(async () => root.render(<DashboardPage />)); };
@@ -162,6 +163,72 @@ describe("Dashboard waiting gates", () => {
     await act(async () => vi.advanceTimersByTimeAsync(5000));
     expect(section()!.textContent).toContain("New topic");
     expect(input.value).toBe("Draft");
+  });
+
+  it.each(["deleted", "attention", "cancelled", "completed", "ready", "other"] as const)(
+    "removes a %s task's pending reply while other gates keep refreshing", async (state) => {
+      details = [task("a", [gate("g1")]), task("b", [gate("g2")])];
+      await show();
+      const input = await answer("My answer");
+      const pending = task("a", [gate("g1", { state: "discussing", waiting_on: "planner", not_delivered: 1 })]);
+      details[0] = pending;
+      vi.mocked(postGateMessage).mockResolvedValue({ gate: pending.gates[0] } as GatePosted);
+      await act(async () => input.form!.requestSubmit());
+      expect(section()!.textContent).toContain("You replied: My answer");
+
+      details = [task("b", [gate("g2", { topic: "Updated other gate" })])];
+      const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
+      vi.mocked(fetchTaskDetail).mockImplementation(async (id) => id === "a"
+        ? state === "deleted" ? actual.fetchTaskDetail(id) : { ...pending, group: state }
+        : details.find((t) => t.task_id === id)!);
+      await act(async () => vi.advanceTimersByTimeAsync(5000));
+      expect(section()!.textContent).toContain("Updated other gate");
+      expect(section()!.querySelectorAll("article")).toHaveLength(1);
+      expect(section()!.textContent).not.toContain("You replied:");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+
+      vi.mocked(fetchTaskDetail).mockClear();
+      details = [task("b", [gate("g2", { topic: "Next other gate" })])];
+      await act(async () => vi.advanceTimersByTimeAsync(5000));
+      expect(section()!.textContent).toContain("Next other gate");
+      expect(fetchTaskDetail).not.toHaveBeenCalledWith("a");
+    },
+  );
+
+  it.each(["server", "network"])("isolates a %s failure and retries the pending reply without losing its receipt", async (failure) => {
+    details = [task("a", [gate("g1")]), task("b", [gate("g2")])];
+    await show();
+    const input = await answer("My answer");
+    details[0] = task("a", [gate("g1", { state: "discussing", waiting_on: "planner" })]);
+    vi.mocked(postGateMessage).mockResolvedValue({ gate: details[0].gates[0] } as GatePosted);
+    await act(async () => input.form!.requestSubmit());
+
+    details = [task("b", [gate("g2", { topic: "Updated other gate" })])];
+    const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+    const fetch = vi.fn();
+    if (failure === "server") fetch.mockResolvedValue(new Response(null, { status: 500 }));
+    else fetch.mockRejectedValue(new TypeError("Offline"));
+    vi.stubGlobal("fetch", fetch);
+    vi.mocked(fetchTaskDetail).mockImplementation(async (id) => id === "a"
+      ? actual.fetchTaskDetail(id) : details.find((t) => t.task_id === id)!);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(section()!.textContent).toContain("Updated other gate");
+    expect(section()!.textContent).toContain("You replied: My answer");
+    expect(section()!.querySelectorAll("article")).toHaveLength(2);
+    expect(section()!.querySelector('[role="alert"]')?.textContent).toContain(
+      failure === "server" ? "500" : "Offline",
+    );
+
+    vi.mocked(fetchTaskDetail).mockClear();
+    vi.mocked(fetchTaskDetail).mockImplementation(async (id) => id === "a"
+      ? task("a", [gate("g1", { topic: "Planner follow-up", turns: 1 })])
+      : details.find((t) => t.task_id === id)!);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchTaskDetail).toHaveBeenCalledWith("a");
+    expect(section()!.textContent).toContain("Planner follow-up");
+    expect(section()!.textContent).not.toContain("You replied:");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("shows a load error without pretending there are no waiting gates", async () => {

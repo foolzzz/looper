@@ -3,7 +3,7 @@ import { Loader2, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
-  fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS, isActiveTask,
+  fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS, isActiveTask, TaskDetailError,
   type TaskDetail, type UserGate,
 } from "@/lib/api";
 import { gateAnchor, gateWaitsOn, isGateWaiting, sinceText } from "@/lib/gates";
@@ -93,23 +93,35 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
         const pageIds = page.tasks.slice(0, LIMIT).map((task) => task.task_id);
         // A sent reply stays visible even when its task leaves the first page (or Needs you).
         const ids = [...new Set([...pageIds, ...pendingReplies.current.map((reply) => reply.taskId)])];
-        const found = await Promise.all(ids.map((id) => fetchTaskDetail(id)));
+        const results = await Promise.allSettled(ids.map((id) => fetchTaskDetail(id)));
         if (request !== latest.current) return;
+        const found: TaskDetail[] = [];
+        const failedIds = new Set<string>();
+        const errors: string[] = [];
+        results.forEach((result, index) => {
+          if (result.status === "fulfilled") found.push(result.value);
+          else if (!(result.reason instanceof TaskDetailError && result.reason.status === 404)) {
+            failedIds.add(ids[index]);
+            errors.push(errorText(result.reason));
+          }
+        });
         pendingReplies.current = pendingReplies.current.filter((reply) => {
+          // A transient read failure must not discard a sent reply; retry it on the next poll.
+          if (failedIds.has(reply.taskId)) return true;
           const task = found.find((task) => task.task_id === reply.taskId);
           const gate = task?.gates.find((gate) => gate.step_id === reply.stepId);
           // A turn already running can finish and raise `turns` without taking the message just sent.
           // It stays pending while the Planner still owes a user message, or a turn failed and none has taken it.
-          return task?.group !== "completed" && !!gate && isGateWaiting(gate)
+          return !!task && isActiveTask(task) && !!gate && isGateWaiting(gate)
             && (gate.waiting_on === "planner" || gate.not_delivered > 0);
         });
         setReplies(pendingReplies.current);
-        setTasks(found);
+        setTasks((current) => [...found, ...current.filter((task) => failedIds.has(task.task_id))]);
         // Needs-you counts tasks, including those waiting for the Planner, not user gates.
         const readTasks = pageIds.length + found.filter((task) =>
           !pageIds.includes(task.task_id) && task.group === "needs_you").length;
         setMoreTasks(Math.max(0, Object.values(page.counts).reduce((sum, n) => sum + n, 0) - readTasks));
-        setError("");
+        setError(errors[0] ?? "");
       } catch (err) {
         if (request === latest.current) setError(errorText(err));
       }
@@ -130,7 +142,7 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
     void drain();
   }, [needsYou, revision, refresh]);
 
-  const waiting = tasks.flatMap((task) => task.group === "completed" ? [] : task.gates
+  const waiting = tasks.flatMap((task) => !isActiveTask(task) ? [] : task.gates
     .filter((gate) => isGateWaiting(gate) && (gateWaitsOn(gate, isActiveTask(task)) === "user"
       || replies.some((reply) => reply.taskId === task.task_id && reply.stepId === gate.step_id)))
     .map((gate) => ({ task, gate })))
