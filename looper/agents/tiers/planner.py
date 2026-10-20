@@ -1544,7 +1544,11 @@ class PlannerAgent:
         await self._close_wait(plan, step, reply, trigger)
 
     async def _close_wait(self, plan: TaskPlan, step: PlanStep, reply: Any, trigger: WaitState) -> None:
-        """Do ``reply`` to ``step``'s wait, saving added steps with that change, then the rest of its CHAT action."""
+        """Do ``reply`` to ``step``'s wait, saving added steps with that change, then the rest of its CHAT action.
+
+        A failure settles the task and skips that action. Applying a replan first dispatches a Worker, and
+        the task fails only after the Worker has started.
+        """
         wait = step.wait
         assert wait is not None
         await self._read_run_deadline()
@@ -1602,7 +1606,11 @@ class PlannerAgent:
             await self._activity("phase", f"Wait {step.label} extended by {dur}")
         if added:
             await self._activity("phase", f"Steps added at wait {step.label}: {self._describe(plan, added)}")
-        elif reply.chat.action is not ChatAction.NONE:
+        if action is WaitAction.FAIL:
+            # The task cannot go on. Fail it before a replan or a forward, which would start work first.
+            await self._settle_plan(plan)
+            return
+        if not added and reply.chat.action is not ChatAction.NONE:
             await self._apply_chat(plan, reply.chat, None, at=f"wait {step.label}")
         await self._settle_plan(plan)
 

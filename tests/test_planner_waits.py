@@ -890,6 +890,35 @@ def test_failing_a_wait_fails_the_task_with_the_reason(planner_claude: Any, agen
     assert "Planner on wait w1 (fail): stopping" in activity(agent_db)
 
 
+def test_failing_a_wait_does_not_start_the_step_a_replan_would_add(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    """Fail together with a replan ends the task before that replan can dispatch a Worker."""
+    reason = "the pull request was closed"
+    claude = planner_claude(
+        plan(wait_step("w1"), step("s2", "w1")),
+        _wait_reply("fail", "stopping", reason=reason, chat="replan", steps=[step("s3")]),
+    )
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.finished()
+
+    h = drive(claude, _hold, scenario)
+
+    final = h.final()
+    assert final is not None and final.payload["status"] == "failed"
+    assert f"Wait w1: {reason}" in final.payload["summary"]
+    # The replan's step never starts, and the steps not started stay as they were.
+    assert h.work_items == []
+    stored = _stored_steps(agent_db)
+    assert "s3" not in stored
+    assert stored["s2"]["status"] == "pending"
+    assert stored["w1"]["status"] == "failed"
+    assert _stored_wait(agent_db, "w1")["state"] == "failed"
+    assert _stored_wait(agent_db, "w1")["outcome"] is None
+
+
 def test_extending_a_cancelled_wait_is_repaired(planner_claude: Any, agent_db: Any) -> None:
     claude = planner_claude(
         plan(wait_step("w1")),

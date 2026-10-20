@@ -130,7 +130,12 @@ def _review_files(work_dir: Path) -> str | None:
 
 def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
                    events: Mapping[int, list[Mapping[str, Any]]]) -> str | None:
-    """Bind the requested PR wait to the Workers that actually delivered each review."""
+    """Bind the requested PR wait to the Workers that actually delivered each review.
+
+    The eval's ``gh`` stub never pushes a commit, so the wait between the two reviews has to be the one the
+    runner resumed (outcome ``resumed``). A timeout the Planner then proceeds or cancels, or a check that
+    reports the head changed, does not count.
+    """
     expected = {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
                 "ready_when": "head_changed"}
     waits = [wait for wait in detail.get("waits") or []
@@ -162,7 +167,8 @@ def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
                     delivered[name].append(record)
     for wait in waits:
         opened, closed = timestamp(wait.get("opened_at")), timestamp(wait.get("closed_at"))
-        if wait.get("state") != "done" or opened is None or closed is None:
+        if (wait.get("state") != "done" or wait.get("outcome") != "resumed"
+                or opened is None or closed is None):
             continue
         for first in delivered["findings.md"]:
             for second in delivered["rereview.md"]:
@@ -173,7 +179,8 @@ def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
                         and started is not None and ended <= opened <= closed <= started
                         and upstream(wait["step_id"], first_step) and upstream(second_step, wait["step_id"])):
                     return None
-    return "reviews were not delivered by separate Workers before and after the requested PR wait"
+    return ("reviews were not delivered by separate Workers before and after a runner resume "
+            "of the requested PR wait")
 
 
 def _numbers_and_sum(work_dir: Path) -> str | None:

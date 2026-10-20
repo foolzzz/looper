@@ -963,8 +963,8 @@ def _rereview_flow() -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, li
         {"id": "review", "depends_on": []},
         {"id": "wait", "depends_on": ["review"]},
         {"id": "rereview", "depends_on": ["wait"]},
-    ], "waits": [{"step_id": "wait", "state": "done", "opened_at": "2026-10-13T10:00:06+00:00",
-                  "closed_at": "2026-10-13T10:00:10+00:00",
+    ], "waits": [{"step_id": "wait", "state": "done", "outcome": "resumed",
+                  "opened_at": "2026-10-13T10:00:06+00:00", "closed_at": "2026-10-13T10:00:10+00:00",
                   "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
                             "ready_when": "head_changed"}}]}
     records = [_record(1, "worker-initial", step_id="review"),
@@ -976,13 +976,18 @@ def _rereview_flow() -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, li
 
 
 @pytest.mark.parametrize("fault", [None, "repo", "number", "ready_when", "unrelated_wait", "initial_not_upstream",
-                                  "early_rereview", "same_worker", "not_opened", "missing_report"])
+                                  "early_rereview", "same_worker", "not_opened", "missing_report",
+                                  "proceeded", "cancelled", "check_ready"])
 def test_rereview_checks_the_requested_pr_and_actual_review_dependency(fault: str | None) -> None:
     task = next(t for t in TASKS if t.id == "wait_pr_rereview")
     detail, records, events = _rereview_flow()
     wait = detail["waits"][0]
     if fault in {"repo", "number", "ready_when"}:
         wait["check"][fault] = {"repo": "other/repo", "number": 99, "ready_when": "merged"}[fault]
+    elif fault in {"proceeded", "cancelled", "check_ready"}:
+        # A fixed gh stub never pushes a commit. Proceeding or cancelling after a timeout, or a check that
+        # reports the head changed, is not the runner's resume.
+        wait["outcome"] = "ready" if fault == "check_ready" else fault
     elif fault == "unrelated_wait":
         detail["steps"][2]["depends_on"] = ["review"]
         detail["steps"].append({"id": "unrelated", "depends_on": ["wait"]})
