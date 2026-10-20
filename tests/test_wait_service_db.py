@@ -71,6 +71,7 @@ def _gh(tmp_path: Path) -> tuple[str, Path]:
     executable = tmp_path / "fake-gh"
     executable.write_text(f"#!{sys.executable}\nimport pathlib, sys\n"
                           f"p = pathlib.Path({str(payload)!r})\n"
+                          "assert pathlib.Path.cwd() == p.parent\n"
                           "p.with_suffix('.args').write_text(' '.join(sys.argv[1:]))\n"
                           "data = p.read_text()\n"
                           "if data == 'exit': sys.exit(2)\n"
@@ -115,7 +116,7 @@ def test_first_github_check_only_baselines_then_unchanged_then_changed(
     gh, payload = _gh(tmp_path)
 
     async def test(pool: Any) -> None:
-        await _open(pool, check=_check())
+        await _open(pool, check=_check(), directory=tmp_path)
         bus = Bus()
         loop = _loop(bus, gh=gh)
         _view(payload)
@@ -149,7 +150,7 @@ def test_github_first_success_is_only_baseline_even_if_already_ready(
     gh, payload = _gh(tmp_path)
 
     async def test(pool: Any) -> None:
-        await _open(pool, check=_check(when))
+        await _open(pool, check=_check(when), directory=tmp_path)
         _view(payload, **({} if when == "new_comments" else changes))
         loop = _loop(gh=gh)
         assert await loop.run_once(clock=lambda: NOW) == 0
@@ -168,7 +169,7 @@ def test_github_errors_keep_waiting_and_retry(monkeypatch: pytest.MonkeyPatch, t
     gh, payload = _gh(tmp_path)
 
     async def test(pool: Any) -> None:
-        await _open(pool, check=_check())
+        await _open(pool, check=_check(), directory=tmp_path)
         payload.write_text(output)
         assert await _loop(gh=gh).run_once(clock=lambda: NOW) == 0
         row = await _row()
@@ -212,7 +213,7 @@ def test_github_change_before_earliest_time_keeps_original_baseline(
     gh, payload = _gh(tmp_path)
 
     async def test(pool: Any) -> None:
-        await _open(pool, check=_check(), earliest=600)
+        await _open(pool, check=_check(), earliest=600, directory=tmp_path)
         loop = _loop(gh=gh)
         _view(payload)
         assert await loop.run_once(clock=lambda: NOW) == 0

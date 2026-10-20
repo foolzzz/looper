@@ -104,6 +104,8 @@ def _github(tmp_path: Path, body: dict[str, Any] | bytes, baseline: dict[str, An
 
 
 def test_github_first_view_returns_a_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The injected executable must work without any machine-installed gh on PATH.
+    monkeypatch.setenv("PATH", str(tmp_path))
     body = _pr(comments=[{"body": "one"}], reviews=[])
     (result, output, error, extra), _ = _github(tmp_path, body, None, ReadyWhen.HEAD_CHANGED, monkeypatch=monkeypatch)
     assert result is CheckResult.NOT_READY
