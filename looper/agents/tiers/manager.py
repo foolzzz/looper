@@ -809,7 +809,8 @@ class ManagerAgent:
             exited = result_event is None
             # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
             over_cap = launch.runtime.budget_error(result_event)
-            replied = not exited and not over_cap and bool(final_text)
+            succeeded = not exited and not result_event.get("is_error") and result_event.get("subtype") == "success"
+            replied = succeeded and not over_cap and bool(final_text)
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
             # keeps what it spent.
             await recorder.finish(

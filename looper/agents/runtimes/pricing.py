@@ -249,6 +249,15 @@ class RunSpend:
         return not was and self.exceeded
 
     @property
+    def budget_cost_usd(self) -> float | None:
+        """The soft cap's cost basis; observed root cost is never the complete bill."""
+        return self.observed_cost_usd if self._observed_basis else self.usage.cost_usd
+
+    @property
+    def budget_unverifiable(self) -> bool:
+        """An observed-root contract requires stopping on a gap; other runtimes keep their existing policy."""
+        return self._observed_basis and not self.budget_verifiable
+
+    @property
     def exceeded(self) -> bool:
-        cost = self.observed_cost_usd if self._observed_basis else self.usage.cost_usd
-        return cap_exceeded(cost, self.cap)
+        return cap_exceeded(self.budget_cost_usd, self.cap)

@@ -1463,6 +1463,164 @@ def test_worker_and_reviewer_read_back_dsh_stand_in_results(tmp_path, monkeypatc
             os.kill(pid, 0)
 
 
+@pytest.mark.parametrize("unknown", [False, True], ids=["observed-cap", "unknown-root-usage"])
+def test_dsh_resident_recorder_stops_at_observed_or_unverifiable_budget(tmp_path, agent_db, unknown):
+    from looper.agents.claude_cli import ClaudeRunRecorder, SOFT_CAP
+
+    usage = {"inputTokens": 10, "cacheReadTokens": 7} if unknown else DSH_STEP_USAGE
+    executable = _headless_stand_in(tmp_path, usage=usage, hang=True)
+    launch = _run_launch(tmp_path, budget=1 if unknown else .000001, role="manager")
+    runtime = launch.runtime
+    command = runtime.resident_command(executable, cwd=tmp_path,
+                                       prompt_file=_run_prompt_file(tmp_path), launch=launch)
+
+    async def check():
+        owner = runtime.resident_session("budgeted-owner")
+        await owner.start(command, cwd=str(tmp_path), signature="budget", env=launch.environment(), price=launch.price)
+        recorder = ClaudeRunRecorder(agent_id="manager", task_id=None, command=command, cwd=str(tmp_path),
+                                    input_text="budgeted turn", launch=launch)
+        try:
+            async with recorder:
+                turn = await asyncio.wait_for(owner.run_turn("budgeted turn", recorder.record,
+                                                            stop=lambda: recorder.cap_stop), 2)
+                result = turn.result_event
+                assert result[SOFT_CAP] and result["is_error"] and result["result"] == ""
+                assert result["usage_complete"] is False and result["cost_basis"] == "observed"
+                assert result["root_usage_complete"] is (not unknown)
+                expected_cost = None if unknown else pytest.approx(.000008442)
+                assert result["observed_cost_usd"] == expected_cost
+                assert turn.usage.cost_usd is None
+                assert (turn.usage.input_tokens, turn.usage.cache_read_tokens) == (10, 7)
+                assert turn.usage.output_tokens == (None if unknown else 4)
+                assert turn.session_started
+                assert ("Cannot verify" if unknown else "over") in result["errors"][0]
+                await recorder.finish(output_text=None, result_event=result, usage=turn.usage)
+        finally:
+            await owner.stop()
+
+    asyncio.run(asyncio.wait_for(check(), 5))
+    pid = json.loads((tmp_path / "seen.json").read_text())["pid"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    recorded = agent_db.finish_record.call_args.kwargs
+    assert recorded["status"] == "failed" and recorded["cost_usd"] is None
+    assert (recorded["input_tokens"], recorded["cache_read_tokens"]) == (10, 7)
+
+
+@pytest.mark.parametrize("runtime_type", ["claude-code", "omp"])
+@pytest.mark.parametrize("mode", ["priced", "unpriced", "incomplete"])
+def test_nonobserved_recorder_budget_keeps_existing_priced_and_unknown_behavior(tmp_path, runtime_type, mode):
+    from looper.agents.claude_cli import ClaudeRunRecorder, SOFT_CAP
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import usage_event
+
+    launch = _run_launch(tmp_path, budget=.000001)
+    adapter = runtimes.adapter(runtime_type)
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile,
+        runtime=replace(launch.profile.runtime, type=runtime_type, capabilities=adapter.capabilities))))
+    recorder = ClaudeRunRecorder(agent_id="manager", task_id=None, command=[], cwd=str(tmp_path),
+                                input_text="budget contract", launch=launch)
+    event = usage_event("unpriced-model" if mode == "unpriced" else "deepseek-flash",
+                        Usage(input_tokens=10, output_tokens=4, cache_read_tokens=7, cache_creation_tokens=2),
+                        **({"usage_complete": False, "root_usage_complete": False} if mode == "incomplete" else {}))
+    asyncio.run(recorder.record(event))
+    stop = recorder.cap_stop
+    if mode == "priced":
+        assert stop is not None and stop.result_event[SOFT_CAP] and stop.result_event["is_error"]
+        assert stop.usage.cost_usd == pytest.approx(.000008442)
+    else:
+        assert stop is None
+
+
+def _manager_failure_dsh(tmp_path, mode):
+    """Real subprocess output with progress that must never become a successful reply."""
+    from fake_claude import fake_claude
+
+    records = [{"type": "session", "sessionId": "failed-manager-session"},
+               {"type": "text", "text": "progress before failure"}, _dsh_step(),
+               {"type": "status", "phase": "turn_end", "reason": {"kind": "completed"}}]
+    if mode == "explicit-error":
+        records.append({"type": "error", "message": "stand-in model failed"})
+    if mode != "no-final":
+        records.append({"type": "final", "text": "untrusted final answer"})
+    return fake_claude(tmp_path / "dsh-manager-failure", f'''
+import json, sys
+sys.stdin.buffer.read()
+for record in {records!r}:
+    print(json.dumps(record), flush=True)
+sys.exit({7 if mode == 'nonzero-final' else 0})
+''')
+
+
+@pytest.mark.parametrize("mode", ["success", "no-final", "nonzero-final", "explicit-error"])
+def test_manager_rejects_failed_dsh_results_instead_of_answering_with_progress(
+    tmp_path, monkeypatch, agent_db, mode,
+):
+    from unittest.mock import AsyncMock
+    from looper.agents.bus import MessageBus
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.tiers import manager
+
+    executable = _manager_failure_dsh(tmp_path, mode)
+    launch = _run_launch(tmp_path, role="manager")
+    settings = replace(launch.settings, profile=replace(launch.profile,
+                       runtime=replace(launch.profile.runtime, executable=executable)))
+    monkeypatch.setattr(manager, "load_agent_settings", AsyncMock(return_value=settings))
+    monkeypatch.setattr(manager, "load_installed", AsyncMock(return_value=launch.library))
+
+    async def run():
+        steward = manager.ManagerAgent(config=manager.ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        steward._bus = MessageBus(tmp_path)
+        steward._clean_start = True
+        envelope = MessageEnvelope.create(source=channel_address("web"), target=MANAGER_ADDRESS,
+                                           message_type=MessageType.USER_MESSAGE, payload={"text": "read state"})
+        try:
+            if mode == "success":
+                assert await steward._run_turn("read state", envelope) == "untrusted final answer"
+            else:
+                with pytest.raises(RuntimeError):
+                    await steward._run_turn("read state", envelope)
+        finally:
+            await steward._claude.stop()
+
+    asyncio.run(asyncio.wait_for(run(), 8))
+    recorded = agent_db.finish_record.call_args.kwargs
+    assert recorded["status"] == ("completed" if mode == "success" else "failed")
+    assert recorded["session_id"] == "failed-manager-session"
+
+
+@pytest.mark.parametrize("missing", ["executable", "mcp"])
+@pytest.mark.parametrize("verify", [False, True])
+def test_worker_dsh_configuration_failure_returns_a_failed_step(tmp_path, monkeypatch, agent_db, missing, verify):
+    from unittest.mock import AsyncMock
+    from looper.agents.library import AgentLibrary
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.tiers import worker
+
+    launch = _run_launch(tmp_path, role="reviewer" if verify else "worker")
+    executable = str(tmp_path / "missing-dsh") if missing == "executable" else _headless_stand_in(tmp_path)
+    settings = replace(launch.settings, profile=replace(launch.profile,
+                       runtime=replace(launch.profile.runtime, executable=executable)))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
+    monkeypatch.setattr(worker, "load_installed", AsyncMock(return_value=
+                        AgentLibrary(role=launch.role.value) if missing == "mcp" else launch.library))
+    envelope = MessageEnvelope.create(source=planner_address("test"), target=worker_address("test"),
+                                      message_type=MessageType.VERIFY_REQUEST if verify else MessageType.WORK_ITEM,
+                                      payload={"task_id": "step", "parent_task_id": "test",
+                                               "instruction": "run", "context": {"work_dir": str(tmp_path)}})
+    outcome = asyncio.run(asyncio.wait_for(worker.WorkerPool(config=worker.WorkerConfig(),
+        runtime_root=tmp_path)._execute(envelope, is_verify=verify), 5))
+    reason = "installed executable" if missing == "executable" else "Looper stdio bridge"
+    if verify:
+        assert outcome["passed"] is False and reason in outcome["summary"]
+    else:
+        assert outcome["status"] == "failed" and reason in outcome["error"]
+    assert any(call.kwargs["kind"] == "error" and reason in call.kwargs["summary"]
+               for call in agent_db.insert_activity.call_args_list)
+    agent_db.start_record.assert_not_awaited()
+    assert not (tmp_path / "seen.json").exists()
+
+
 @pytest.mark.parametrize("cancel", [False, True])
 def test_dsh_channel_timeout_or_cancel_reaps_process(tmp_path, cancel):
     from looper.agents import proc_tree
@@ -1540,6 +1698,39 @@ sys.exit({help_code})
     assert all(not Path(call["home"]).exists() for call in calls)
     if supported:
         assert [call["argv"] for call in calls] == [["--version"], ["--help"]]
+
+
+def test_dsh_probe_uses_physical_private_paths_under_a_symlinked_temp_directory(tmp_path, monkeypatch):
+    from fake_claude import fake_claude
+    from looper.agents.runtimes import dsh
+
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "temp-alias"
+    alias.symlink_to(physical, target_is_directory=True)
+    seen = tmp_path / "probe.jsonl"
+    executable = fake_claude(tmp_path / "dsh", f'''
+import json, os, pathlib, sys
+root = pathlib.Path.cwd()
+for name in ('HOME', 'DSH_HOME', 'DSH_AGENTS_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
+             'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_DIRS', 'XDG_DATA_DIRS'):
+    assert pathlib.Path(os.environ[name]) == root / name.lower()
+with open({str(seen)!r}, 'a') as f:
+    f.write(json.dumps({{'argv': sys.argv[1:], 'root': str(root)}}) + '\\n')
+print('dsh 0.2.1-rc.2' if sys.argv[1:] == ['--version'] else 'dsh --profile headless --json')
+''')
+    # Reproduce /var -> /private/var even on hosts without that system alias.
+    monkeypatch.setattr(dsh.tempfile, "tempdir", str(alias))
+
+    probe = runtimes.adapter("dsh").probe(executable)
+
+    assert probe.error is None
+    assert probe.version == dsh.SUPPORTED_VERSION
+    assert probe.capabilities == dsh.DshRuntime.capabilities
+    calls = [json.loads(line) for line in seen.read_text().splitlines()]
+    assert [call["argv"] for call in calls] == [["--version"], ["--help"]]
+    assert all(Path(call["root"]).parent == physical.resolve() for call in calls)
+    assert all(not Path(call["root"]).exists() for call in calls)
 
 
 def test_dsh_probe_missing_and_timeout_are_diagnostic(tmp_path, monkeypatch):
@@ -2152,3 +2343,159 @@ def test_dsh_denials_require_a_paired_error_with_the_exact_guard_reason(tmp_path
         stream.translate(record)
     runtime = runtimes.adapter("dsh")
     assert runtime.permission_denials(stream._result(0)) == [{"tool": "bash", "input": "touch x", "id": "denied"}]
+
+
+def test_dsh_serve_stand_in_delivers_a_file_that_the_reviewer_actually_reads(tmp_path):
+    from looper.agents.tiers.worker import judge_result
+    from tests.dsh_runtime_stand_in import install, read_calls
+
+    bin_dir, state = install(tmp_path)
+    for role, text in (("worker", "Start your step"), ("reviewer", "Review the step in the Task section")):
+        launch = _run_launch(tmp_path, role=role)
+        command = launch.runtime.run_command(str(bin_dir / "dsh"), cwd=tmp_path,
+                                             prompt_file=_run_prompt_file(tmp_path), launch=launch)
+        done = subprocess.run(command, input=text, text=True, capture_output=True,
+                              env=launch.environment(), cwd=tmp_path, timeout=10)
+        assert done.returncode == 0, done.stderr
+        result = _dsh_result(asyncio.run(_dsh_output(tmp_path, done.stdout.encode())))
+        judged = judge_result(result, work_dir=tmp_path, is_verify=role == "reviewer", runtime_label="DSH")
+        assert judged.get("passed") is True if role == "reviewer" else judged["status"] == "completed"
+    assert (tmp_path / "delivery.txt").read_text() == "delivered by disposable DSH\n"
+    calls = read_calls(state)
+    assert {row["role"] for row in calls} == {"worker", "reviewer"}
+    assert len({row["session"] for row in calls}) == 2
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
+                    reason="disposable LOOPER_TEST_DATABASE_URL is required; serve readback is untested")
+def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_path, monkeypatch):
+    """HTTP -> real tiers -> headless processes -> MCP -> PostgreSQL -> HTTP, without a model endpoint."""
+    import time
+    from evals.prompt_regression.runner import fresh_database, running_server
+    from tests.dsh_runtime_stand_in import install, read_calls
+
+    bin_dir, state = install(tmp_path)
+    runtime, home = tmp_path / "runtime", tmp_path / "home"
+    runtime.mkdir()
+    home.mkdir()
+    # Never discover an installed agent or inherit a channel credential in this server.
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    for name in ("LOOPER_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "LARK_APP_SECRET",
+                 "FEISHU_APP_SECRET", "LOOPER_LARK_APP_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("CODEX_HOME", "GROK_HOME", "CLAUDE_CONFIG_DIR", "DSH_HOME", "DSH_AGENTS_HOME"):
+        directory = home / name.lower()
+        directory.mkdir()
+        monkeypatch.setenv(name, str(directory))
+
+    def wait_for(read, predicate, *, seconds=45):
+        deadline = time.monotonic() + seconds
+        while True:
+            value = read()
+            if predicate(value):
+                return value
+            assert time.monotonic() < deadline, value
+            time.sleep(.1)
+
+    with fresh_database(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
+        with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir,
+                            home=home, log_path=tmp_path / "serve.log", startup_timeout=30) as api:
+            assert not api.base_url.endswith(":8767")
+            channels = api.get("/api/channel-configs")["configs"]
+            assert channels and all(not channel["enabled"] for channel in channels)
+            registry = api.get("/api/registry")
+            detected = [row for row in registry["runtimes"] if row["type"] == "dsh"]
+            assert len(detected) == 1 and detected[0]["version"] == "0.2.1-rc.2"
+            api.post("/api/runtimes/rt-dsh/probe", {})
+            provider = api.post("/api/providers", {
+                "name": "disposable-messages", "protocols": ["anthropic-messages"], "auth": "api_key",
+                "base_url": "https://deepseek.example.invalid/anthropic", "api_key": "synthetic-dsh-key",
+            })["provider"]["provider_id"]
+            profile = api.post("/api/agent-profiles", {
+                "name": "disposable-dsh", "runtime_id": "rt-dsh", "provider_id": provider,
+                "model": "deepseek-flash", "effort": "high",
+            })["profile"]["profile_id"]
+            for role in ("manager", "planner", "worker", "reviewer"):
+                api.put(f"/api/agent-settings/roles/{role}", {"profile_id": profile})
+            settings = api.get("/api/agent-settings")
+            assert {settings["roles"][role]["values"]["profile_id"]
+                    for role in ("manager", "planner", "worker", "reviewer")} == {profile}
+
+            # Two Manager turns exercise actual per-turn process resume and its platform bridge.
+            for number in (1, 2):
+                api.post("/api/chat/send", {"text": f"read disposable status {number}",
+                                           "session_id": "disposable-chat", "message_id": f"message-{number}"})
+                wait_for(lambda: api.get("/api/chat/messages", session_id="disposable-chat")["messages"],
+                         lambda rows: sum(row["role"] == "assistant" for row in rows) >= number)
+
+            tasks = []
+            for number in (1, 2):
+                work = tmp_path / f"work-{number}"
+                work.mkdir()
+                project = api.post("/api/projects", {"name": f"disposable-{number}", "work_dir": str(work)})
+                task = api.post("/api/tasks/create", {"requirement": "Write delivery.txt and review its contents",
+                                                       "project_id": project["project_id"]})["task_id"]
+                tasks.append((task, work))
+                api.post("/api/tasks/start", {"task_id": task})
+            for task, work in tasks:
+                detail = wait_for(lambda: api.get(f"/api/tasks/{task}"),
+                                  lambda row: row["status"] in ("completed", "failed", "stopped", "cancelled"))
+                if detail["status"] != "completed":
+                    Path("/tmp/dsh-task-detail.json").write_text(json.dumps(detail, default=str))
+                    Path("/tmp/dsh-serve.log").write_text((tmp_path / "serve.log").read_text())
+                assert detail["status"] == "completed", (detail, (tmp_path / "serve.log").read_text()[-4000:])
+                assert (work / "delivery.txt").read_text() == "delivered by disposable DSH\n"
+
+            records = api.get("/api/llm-records", limit=100)["records"]
+            assert len(records) >= 10
+            persisted = []
+            for row in records:
+                record = api.get(f"/api/llm-records/{row['id']}")["record"]
+                persisted.append(record)
+                assert record["status"] == "completed", record
+                assert record["model"] == "deepseek-flash" and record["session_id"]
+                assert record["cost_source"] == "provider_price" and record["cost_usd"] is None
+                assert (record["input_tokens"], record["output_tokens"], record["cache_read_tokens"],
+                        record["cache_creation_tokens"]) == (10, 4, 7, 2)
+                metadata = record["metadata"]
+                assert metadata["profile"]["runtime"]["type"] == "dsh"
+                assert metadata["profile"]["provider"]["id"] == provider
+                assert metadata["profile"]["id"] == profile
+                assert metadata["usage_complete"] is False and metadata["cost_basis"] == "observed"
+                events = api.get(f"/api/llm-records/{row['id']}/events", limit=1000)["events"]
+                assert {event["event"]["type"] for event in events} >= {"system", "assistant", "result"}
+                result = next(event["event"] for event in events if event["event"]["type"] == "result")
+                assert not result["is_error"] and result["usage_complete"] is False
+                if record["agent_id"].startswith(("worker-", "reviewer-")):
+                    assert result["observed_cost_usd"] == pytest.approx(.000008442)
+                assert "synthetic-dsh-key" not in json.dumps([record, events])
+
+            calls = read_calls(state)
+            managers = [row for row in calls if row["role"] == "manager"]
+            assert len(managers) == 2
+            assert managers[0]["session"] == managers[1]["session"]
+            assert [row["resumed"] for row in managers] == [False, True]
+            assert all(row["tool"] == "looper_overview" and row["tool_status"] == "ok" for row in managers)
+            owners = {}
+            for row in calls:
+                owners.setdefault(row["home"], []).append(row)
+            assert len(owners) == 7
+            assert len({rows[0]["session"] for rows in owners.values()}) == 7
+            assert {row["session_id"] for row in persisted} == {row["session"] for row in calls}
+            manager_records = [row for row in persisted if row["agent_id"] == "manager"]
+            assert len(manager_records) == 2
+            assert {row["session_id"] for row in manager_records} == {managers[0]["session"]}
+            for task, _work in tasks:
+                task_records = [row for row in persisted if row["task_id"] == task]
+                planner_records = [row for row in task_records if row["agent_id"] == f"planner-{task}"]
+                assert len(planner_records) >= 2
+                assert len({row["session_id"] for row in planner_records}) == 1
+                assert sum(row["agent_id"].startswith("worker-") for row in task_records) == 1
+                assert sum(row["agent_id"].startswith("reviewer-") for row in task_records) == 1
+            planners = [rows for rows in owners.values() if rows[0]["role"] == "planner"]
+            assert len(planners) == 2
+            for turns in planners:
+                assert len(turns) >= 2 and turns[0]["resumed"] is False
+                assert all(row["resumed"] and row["session"] == turns[0]["session"] for row in turns[1:])
+                assert all(row["read_only"] for row in turns)
+                assert all(row["tool"] == "looper_task_profiles" and row["tool_status"] == "ok" for row in turns)

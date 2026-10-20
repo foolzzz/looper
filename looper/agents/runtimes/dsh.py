@@ -305,7 +305,9 @@ class DshRuntime(RuntimeAdapter):
     def probe(self, executable: str) -> Probe:
         """Check only CLI availability, without booting plugins or making a model request."""
         with tempfile.TemporaryDirectory(prefix="looper-dsh-probe-") as temporary:
-            root = Path(temporary)
+            # getcwd() reports the physical path. A /var temporary is /private/var
+            # on macOS, so the child must see that same spelling in HOME and DSH_HOME.
+            root = Path(temporary).resolve()
             paths = {name: str(root / name.lower()) for name in (
                 "HOME", "DSH_HOME", "DSH_AGENTS_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
                 "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_DIRS", "XDG_DATA_DIRS")}
