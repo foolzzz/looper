@@ -2049,9 +2049,17 @@ export interface ActivityEvent {
   created_at: string;
 }
 
+export class TaskDetailError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`task detail ${status}`);
+    this.status = status;
+  }
+}
+
 export async function fetchTaskDetail(taskId: string): Promise<TaskDetail> {
   const res = await fetch(`${API_BASE}/tasks/${taskId}`);
-  if (!res.ok) throw new Error(`task detail ${res.status}`);
+  if (!res.ok) throw new TaskDetailError(res.status);
   return res.json();
 }
 

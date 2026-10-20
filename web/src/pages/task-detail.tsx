@@ -1896,6 +1896,7 @@ function TaskProjectControl({
 
 interface TaskDetailPageProps {
   taskId: string;
+  gateStep?: string | null;
   onBack: () => void;
 }
 
@@ -1905,7 +1906,7 @@ export function TaskDetailRoute(props: TaskDetailPageProps) {
   return <TaskDetailPage key={props.taskId} {...props} />;
 }
 
-function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
+function TaskDetailPage({ taskId, gateStep, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
@@ -1921,6 +1922,14 @@ function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
     setTab("overview");
   }, []);
   const gateShown = useCallback(() => setGateFocus(null), []);
+  const linkedGate = useRef<string | null>(null);
+  useEffect(() => {
+    if (!task || !gateStep || linkedGate.current === gateStep) return;
+    const step = task.steps.find((s) => s.kind === "gate" && s.step_key === gateStep);
+    if (!step) return;
+    linkedGate.current = gateStep;
+    openGate(step);
+  }, [task, gateStep, openGate]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval>;
