@@ -95,6 +95,9 @@ turn at the end of the event: extend it, proceed, or fail the task. A turn
 that fails is tried again on its own after each of ``waits.RETRY_WAIT_SEC``,
 then at the end of every later event. With no step in flight, an open wait
 stops Claude the same way a gate does, and the next turn resumes the session.
+A scheduled run reads its stop time once each event, before a wait is checked,
+and a wait may not be asked to last past it; with no run timeout only the
+system limits apply.
 """
 
 from __future__ import annotations
@@ -220,6 +223,7 @@ from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projec
 from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
 from ...db import role_templates as db_templates, task_roles as db_roles, tasks as db_tasks
 from ...db import user_gates as db_user_gates
+from ...db import schedules as db_schedules
 from ...db import waits as db_waits
 from ...db import room as db_room
 from ...db.task_changes import TaskChanges
@@ -868,6 +872,9 @@ class PlannerAgent:
         self._roles: dict[str, RoleKind] | None = None
         # Whether a schedule started the task (it runs unattended, so it opens no gate), as its project was last read.
         self._scheduled = False
+        # This event's scheduled-run stop time (absolute), read once; None when the run does not limit a wait.
+        self._run_deadline: datetime | None = None
+        self._run_deadline_read = False
         self._idle_task: asyncio.Task[Any] | None = None
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
@@ -974,6 +981,9 @@ class PlannerAgent:
             pass
 
     async def _handle(self, envelope: MessageEnvelope) -> None:
+        # The running run is read again for this event, once, before its first wait check.
+        self._run_deadline = None
+        self._run_deadline_read = False
         if self._plan is not None and envelope.message_type is not MessageType.TASK_REQUEST:
             # Turns this event runs see the project as it is now, in their
             # message and in the system prompt (a new plan reads it itself).
@@ -1053,7 +1063,7 @@ class PlannerAgent:
             reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
                                     lambda text: parse_plan(
                                         text, self._roles, gate_policy=self._gate_policy,
-                                        wait_policy=WaitPolicy(waits.limits(), self._execution.wait_commands_on)))
+                                        wait_policy=self._wait_policy()))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
@@ -1180,8 +1190,12 @@ class PlannerAgent:
         """The steps ``step``, a wait, depends on are done: it opens and waits."""
         wait = step.wait
         assert wait is not None
+        await self._read_run_deadline()
         opened_at = datetime.now(timezone.utc)
         due_at, deadline_at, next_check_at = open_times(wait.spec, opened_at)
+        # Cap only the deadline. The earliest due and the first check stay where the wait put them.
+        if self._run_deadline is not None:
+            deadline_at = min(deadline_at, self._run_deadline)
         wait.state = WaitState.WAITING
         wait.opened_at, wait.due_at, wait.deadline_at, wait.next_check_at = (
             opened_at, due_at, deadline_at, next_check_at)
@@ -1241,6 +1255,7 @@ class PlannerAgent:
         leaves them for its automatic retries (``GATE_RETRY_WAIT_SEC``) and the user's next message."""
         gate = step.gate
         assert gate is not None
+        await self._read_run_deadline()
         if gate.state is GateState.OPEN:
             gate.state = GateState.DISCUSSING
         forced = any(m.get("kind") == MessageKind.END.value for m in messages)
@@ -1489,6 +1504,8 @@ class PlannerAgent:
         """
         wait = step.wait
         assert wait is not None
+        # Before the message and the check: the seconds left are measured now, from this event's stop time.
+        await self._read_run_deadline()
         trigger = wait.state
         others = [other for other in plan.steps if other is not step and other.status not in ("verified", "skipped")]
         context = WaitContext(step.label, trigger, last_open=not others)
@@ -1509,6 +1526,7 @@ class PlannerAgent:
         """Do ``reply`` to ``step``'s wait, saving added steps with that change, then the rest of its CHAT action."""
         wait = step.wait
         assert wait is not None
+        await self._read_run_deadline()
         now = datetime.now(timezone.utc)
         action = reply.action
         if reply.final is not None:
@@ -1516,8 +1534,12 @@ class PlannerAgent:
         entries: list[JournalEntry] = []
         if action is WaitAction.EXTEND:
             seconds = int(reply.max_wait_seconds or 0)
+            deadline_at = now + timedelta(seconds=seconds)
+            # The request was already refused when it asked to pass the run. Time may have moved since that check.
+            if self._run_deadline is not None:
+                deadline_at = min(deadline_at, self._run_deadline)
             wait.state = WaitState.WAITING
-            wait.deadline_at = now + timedelta(seconds=seconds)
+            wait.deadline_at = deadline_at
             wait.next_check_at = now
             wait.extensions += 1
             wait.failures, wait.failed_at = 0, None
@@ -1569,6 +1591,10 @@ class PlannerAgent:
         assert wait is not None
         spec = wait.spec
         lines = [self._wait_opening(step, context.state)]
+        run_line = self._scheduled_run_line()
+        # No check: the stop time follows the first line. A check's output, error and notice stay with the check.
+        if spec.check is None and run_line:
+            lines.append(run_line)
         if spec.check is not None:
             lines.append(self._check_line(spec, row))
         output = row.get("last_output")
@@ -1581,6 +1607,8 @@ class PlannerAgent:
             notice = self._notice_line(row.get("notice"), plan.origin_channel_id)
             if notice:
                 lines.append(notice)
+        if spec.check is not None and run_line:
+            lines.append(run_line)
         running = [other for other in plan.steps if other.status == "dispatched"]
         running_text = ", ".join(f"{other.label} ({other.worker_id})" for other in running) or "none"
         waiting = [other.label for other in plan.steps
@@ -1612,6 +1640,17 @@ class PlannerAgent:
             "Reply with the WAIT JSON.",
         ]
         return "\n".join(lines)
+
+    def _scheduled_run_line(self) -> str | None:
+        """This run's stop and the seconds left from now, only when the event read a stop time."""
+        deadline = self._run_deadline
+        if deadline is None:
+            return None
+        now = datetime.now(timezone.utc)
+        remaining = max(0, int((deadline - now).total_seconds()))
+        stamp = deadline.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return (f"This scheduled run is stopped at {stamp} (its run timeout): "
+                f"extend by at most {remaining} s.")
 
     @staticmethod
     def _wait_opening(step: PlanStep, state: WaitState) -> str:
@@ -3091,6 +3130,7 @@ class PlannerAgent:
         Raises ``PlannerTurnError`` when Claude fails or times out, or when the
         repaired reply is still invalid.
         """
+        await self._read_run_deadline()
         run = run or self._turn
         reply = await run(message)
         await self._read_roles()  # a role the turn defined counts for its reply
@@ -3142,8 +3182,35 @@ class PlannerAgent:
 
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
-        return replace(view, roles=self._roles, gate_policy=self._gate_policy,
-                       wait_policy=WaitPolicy(waits.limits(), self._execution.wait_commands_on))
+        return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy())
+
+    def _wait_policy(self) -> WaitPolicy:
+        """System limits, command permission, and this event's scheduled-run stop time."""
+        return WaitPolicy(waits.limits(), self._execution.wait_commands_on, self._run_deadline)
+
+    async def _read_run_deadline(self) -> datetime | None:
+        """The running run's stop time, once per event: ``fired_at`` plus its timeout.
+
+        Only a task a schedule started reads it. No running run, no timeout, or no fired time means no stop
+        time. A failed read is none for the rest of this event, and the wait is then only under the system limits.
+        The seconds left are not kept: each check measures them from this stop time and the current time.
+        """
+        if self._run_deadline_read:
+            return self._run_deadline
+        self._run_deadline_read = True
+        self._run_deadline = None
+        if not self._scheduled:
+            return None
+        try:
+            row = await db_schedules.running_run_of_task(self._task_id)
+        except Exception:
+            logger.warning("planner %s cannot read its scheduled run", self.agent_id, exc_info=True)
+            return None
+        timeout = None if row is None else row.get("run_timeout_seconds")
+        fired = None if row is None else row.get("fired_at")
+        if timeout is not None and fired is not None:
+            self._run_deadline = fired + timedelta(seconds=timeout)
+        return self._run_deadline
 
     @property
     def _gate_policy(self) -> GatePolicy:

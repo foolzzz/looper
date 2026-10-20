@@ -529,6 +529,68 @@ def test_extend_refuses_a_wait_past_the_scheduled_run_deadline() -> None:
     assert parse_wait(reply(data), WaitContext("w1", WaitState.TIMED_OUT), open_view).max_wait_seconds == 3600
 
 
+# A fixed clock: the seconds left are an exact hour, so the boundary is not a second either way.
+_RUN_NOW = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+_RUN_STOP = _RUN_NOW + timedelta(hours=1)
+
+
+def _freeze_run_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.tiers import planner_protocol
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return _RUN_NOW if tz is None else _RUN_NOW.astimezone(tz)
+
+    monkeypatch.setattr(planner_protocol, "datetime", Frozen)
+
+
+def _absolute(moment: datetime, **extra: Any) -> dict[str, Any]:
+    raw = step(not_before=moment.isoformat(), **extra)
+    raw.pop("not_before_seconds")
+    return raw
+
+
+def test_run_deadline_bounds_max_wait_not_before_and_extend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run stop is a hard edge: the same second is allowed, one second past is refused."""
+    _freeze_run_clock(monkeypatch)
+    policy = _run_policy(_RUN_STOP)
+    # max_wait_seconds and not_before_seconds may use the whole of what is left.
+    exact = plan(step(max_wait_seconds=3600, not_before_seconds=3600), policy)
+    assert exact.steps[0].wait.max_wait_seconds == 3600
+    assert exact.steps[0].wait.not_before_seconds == 3600
+    with pytest.raises(ProtocolError, match="at most 3600 s"):
+        plan(step(max_wait_seconds=3601, not_before_seconds=30), policy)
+    with pytest.raises(ProtocolError, match="stopped at 2026-10-19 13:00 UTC"):
+        plan(step(max_wait_seconds=3601, not_before_seconds=3601), policy)
+    # not_before may land on the stop and not one second after it, even when the max wait fits.
+    assert plan(_absolute(_RUN_STOP, max_wait_seconds=3600), policy).steps[0].wait.not_before == _RUN_STOP
+    with pytest.raises(ProtocolError, match="a wait may last at most 3600 s"):
+        plan(_absolute(_RUN_STOP + timedelta(seconds=1), max_wait_seconds=1800), policy)
+    view = replace(OPEN, wait_policy=policy)
+    context = WaitContext("w1", WaitState.TIMED_OUT)
+    extend = {"reply": "more time", "action": "none", "wait": {"action": "extend", "max_wait_seconds": 3600}}
+    assert parse_wait(reply(extend), context, view).max_wait_seconds == 3600
+    over = {"reply": "more time", "action": "none", "wait": {"action": "extend", "max_wait_seconds": 3601}}
+    with pytest.raises(ProtocolError, match="at most 3600 s"):
+        parse_wait(reply(over), context, view)
+
+
+def test_run_deadline_of_zero_seconds_left_refuses_a_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that stops now, or already stopped, leaves nothing a wait can use."""
+    _freeze_run_clock(monkeypatch)
+    context = WaitContext("w1", WaitState.TIMED_OUT)
+    extend = {"reply": "more time", "action": "none", "wait": {"action": "extend", "max_wait_seconds": 1}}
+    for stop in (_RUN_NOW, _RUN_NOW - timedelta(seconds=1)):
+        policy = _run_policy(stop)
+        with pytest.raises(ProtocolError, match="at most 0 s"):
+            plan(step(max_wait_seconds=1, not_before_seconds=1), policy)
+        with pytest.raises(ProtocolError, match="at most 0 s"):
+            plan(_absolute(stop + timedelta(seconds=1), max_wait_seconds=1), policy)
+        with pytest.raises(ProtocolError, match="at most 0 s"):
+            parse_wait(reply(extend), context, replace(OPEN, wait_policy=policy))
+
+
 def test_concurrent_wait_updates_cannot_store_an_invalid_pair(settings: dict[str, str],
                                                              monkeypatch: pytest.MonkeyPatch) -> None:
     async def slow_put(values: Any) -> None:

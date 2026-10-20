@@ -3,6 +3,9 @@ and shows it. A wait that timed out or that the user cancelled is a [WAIT] turn:
 
 The Planner's Claude is a stand-in (``planner_claude``); the Workers are a stand-in pool
 (``tests.test_planner_agent.Harness``); the plan and its waits are kept in memory (``agent_db.store``).
+
+A scheduled run's stop time is read once per event. These tests pin that clock, so a boundary is
+not one second early or late.
 """
 
 from __future__ import annotations
@@ -1208,3 +1211,340 @@ def test_the_wait_message_omits_the_gate_hint_when_gates_are_not_allowed(
     assert _GATE_RULE not in message
     assert _EXTEND_RULE in message and _PROCEED_RULE in message and _FAIL_RULE in message
     assert "Reply with the WAIT JSON." in message
+
+
+# --- A scheduled run's timeout caps every check of a wait ---
+
+
+_NOW = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+_FIRED = _NOW - timedelta(hours=1)
+_RUN_DEADLINE = _FIRED + timedelta(hours=2)  # 13:00 UTC; one hour left at _NOW
+_RUN = {"run_timeout_seconds": 2 * 3600, "fired_at": _FIRED}
+_REFUSAL = (
+    "this task is a scheduled run that is stopped at 2026-10-19 13:00 UTC (its run timeout): "
+    "a wait may last at most 3600 s from now; wait less, or decide without waiting"
+)
+
+
+class _Clock:
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+
+    def advance(self, **delta: float) -> None:
+        self.at += timedelta(**delta)
+
+
+def _freeze(monkeypatch: pytest.MonkeyPatch, clock: _Clock) -> None:
+    from looper.agents.tiers import planner_protocol
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return clock.at if tz is None else clock.at.astimezone(tz)
+
+    monkeypatch.setattr(planner_module, "datetime", Frozen)
+    monkeypatch.setattr(planner_protocol, "datetime", Frozen)
+
+
+def _running(monkeypatch: pytest.MonkeyPatch, row: Any) -> list[str]:
+    calls: list[str] = []
+
+    async def running_run_of_task(task_id: str, *, pool: Any = None) -> Any:
+        calls.append(task_id)
+        if isinstance(row, BaseException):
+            raise row
+        return row
+
+    monkeypatch.setattr("looper.db.schedules.running_run_of_task", running_run_of_task)
+    return calls
+
+
+def _scheduled(agent_db: Any, on: bool = True) -> None:
+    project = _project()
+    if on:
+        project["task_schedule_id"] = "sched-1"
+    agent_db.get_task_project.return_value = project
+
+
+def _repairs(claude: Any) -> list[str]:
+    return [turn["text"] for turn in claude.turns() if "broke the reply contract" in turn["text"]]
+
+
+def _run_line(seconds: int) -> str:
+    return (f"This scheduled run is stopped at 2026-10-19 13:00 UTC (its run timeout): "
+            f"extend by at most {seconds} s.")
+
+
+def test_run_deadline_refuses_a_plan_past_the_run_and_accepts_the_repair(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    calls = _running(monkeypatch, _RUN)
+    _scheduled(agent_db)
+    claude = planner_claude(
+        plan(wait_step("w1", max_wait_seconds=3 * 3600)),
+        plan(wait_step("w1", max_wait_seconds=1800)),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+
+    drive(claude, _hold, scenario)
+
+    assert calls == ["t1"]  # the repair is the same event, so the run is not read again
+    assert _repairs(claude) == [f"[PLAN] Your last reply broke the reply contract: step w1: {_REFUSAL}\n"
+                                 "Answer the same request again. End with exactly one ```json block in the PLAN shape."]
+    stored = _stored_wait(agent_db, "w1")
+    assert stored["spec"]["max_wait_seconds"] == 1800
+    assert stored["deadline_at"] - stored["opened_at"] == timedelta(seconds=1800)
+    assert stored["deadline_at"] <= _RUN_DEADLINE
+
+
+def test_run_deadline_caps_a_wait_opened_after_the_plan(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thirty minutes was legal when the plan was checked. Opening fifty-five minutes later still stops with the run,
+    and the earliest time stays where the wait put it."""
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    calls = _running(monkeypatch, dict(_RUN))
+    _scheduled(agent_db)
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1", "s1", max_wait_seconds=1800, not_before_seconds=600)),
+        decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held and _wait_state(h, "w1") is WaitState.PENDING)
+        assert calls == ["t1"]
+        clock.advance(minutes=55)
+        await h.release(WORK_OK)
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        assert calls == ["t1", "t1"]  # the next event reads the run again
+
+    drive(claude, _hold, scenario)
+
+    opened = _stored_wait(agent_db, "w1")
+    assert opened["opened_at"] == _NOW + timedelta(minutes=55)
+    assert opened["due_at"] == opened["opened_at"] + timedelta(seconds=600)
+    assert opened["due_at"] > _RUN_DEADLINE  # the earliest time is not pulled back to the run
+    assert opened["next_check_at"] == opened["opened_at"]
+    assert opened["deadline_at"] == _RUN_DEADLINE
+    assert opened["spec"]["not_before_seconds"] == 600
+    assert not _repairs(claude)
+
+
+def test_run_deadline_refuses_a_long_extend_and_caps_a_late_one(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    calls = _running(monkeypatch, dict(_RUN))
+    _scheduled(agent_db)
+    original = PlannerAgent._close_wait
+
+    async def close_wait(self: PlannerAgent, plan_: Any, step_: Any, reply_: Any, trigger: Any) -> None:
+        # The extend was checked at _NOW. Writing it happens after the clock has moved.
+        clock.advance(minutes=50)
+        await original(self, plan_, step_, reply_, trigger)
+
+    monkeypatch.setattr(PlannerAgent, "_close_wait", close_wait)
+    claude = planner_claude(
+        plan(wait_step("w1", max_wait_seconds=1800)),
+        _wait_reply("extend", "too long", max_wait_seconds=3 * 3600),
+        _wait_reply("extend", "a bit longer", max_wait_seconds=1200),
+    )
+    due: dict[str, datetime] = {}
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        assert calls == ["t1"]
+        due["at"] = _step(h, "w1").wait.due_at
+        due["opened"] = _step(h, "w1").wait.opened_at
+        _arm(agent_db, "w1", "timed_out")
+        await _wake(h)
+        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1)
+        assert calls == ["t1", "t1"]  # the repair parses twice and still reads the run once
+
+    drive(claude, _hold, scenario)
+
+    assert _REFUSAL in _repairs(claude)[0]
+    stored = _stored_wait(agent_db, "w1")
+    assert stored["state"] == "waiting" and stored["extensions"] == 1
+    assert stored["due_at"] == due["at"] == due["opened"]
+    assert stored["deadline_at"] == _RUN_DEADLINE
+    assert stored["next_check_at"] == _NOW + timedelta(minutes=50)
+    assert stored["spec"]["max_wait_seconds"] == 1800
+
+
+@pytest.mark.parametrize("action", ["add_steps", "replan"])
+def test_run_deadline_reaches_a_chat_wait(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch, action: str,
+) -> None:
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    _running(monkeypatch, dict(_RUN))
+    _scheduled(agent_db)
+    long = wait_step("w1", max_wait_seconds=3 * 3600)
+    short = wait_step("w1", max_wait_seconds=1800)
+    claude = planner_claude(
+        plan(step("s1")),
+        reply({"reply": "wait for the author", "action": action, "steps": [long]}),
+        reply({"reply": "wait for the author", "action": action, "steps": [short]}),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held)
+        await h.say("please wait for the author")
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+
+    drive(claude, _hold, scenario)
+
+    assert _repairs(claude) and _REFUSAL in _repairs(claude)[0]
+    assert _stored_wait(agent_db, "w1")["spec"]["max_wait_seconds"] == 1800
+
+
+def test_run_deadline_reaches_a_decision_replan(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    _running(monkeypatch, dict(_RUN))
+    _scheduled(agent_db)
+    long = wait_step("w1", max_wait_seconds=3 * 3600)
+    short = wait_step("w1", max_wait_seconds=1800)
+    claude = planner_claude(
+        plan(step("s1")),
+        decide("replan", reason="wait for the author", steps=[long]),
+        decide("replan", reason="wait for the author", steps=[short]),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held)
+        await h.release(WORK_OK)
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+
+    drive(claude, _hold, scenario)
+
+    assert _repairs(claude) and _REFUSAL in _repairs(claude)[0]
+    assert _stored_wait(agent_db, "w1")["spec"]["max_wait_seconds"] == 1800
+
+
+def test_run_deadline_is_named_in_the_wait_message(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seconds left are measured when the message is built, not when the event first read the run."""
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    calls = _running(monkeypatch, dict(_RUN))
+    _scheduled(agent_db)
+    original = PlannerAgent._wait_turn
+    reread: list[int] = []
+
+    async def wait_turn(self: PlannerAgent, plan_: Any, step_: Any, row: Any) -> None:
+        before = len(calls)
+        clock.advance(minutes=10)  # the decision in this same event already read the run
+        await original(self, plan_, step_, row)
+        reread.append(len(calls) - before)
+
+    monkeypatch.setattr(PlannerAgent, "_wait_turn", wait_turn)
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1", max_wait_seconds=1800)),
+        decide("accept"),
+        _wait_reply("extend", "a little longer", max_wait_seconds=60),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held and _wait_state(h, "w1") is WaitState.WAITING)
+        assert calls == ["t1"]
+        _arm(agent_db, "w1", "timed_out", checks=4,
+             last_checked_at=datetime(2026, 10, 19, 11, 0, tzinfo=timezone.utc),
+             last_result="not_ready", last_output="still waiting", last_error="disk full", notice="dashboard")
+        await h.release(WORK_OK)
+        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1)
+
+    drive(claude, _hold, scenario)
+
+    assert calls == ["t1", "t1"] and reread == [0]
+    message = _wait_turns(claude)[0]
+    line = _run_line(3000)
+    order = [
+        '[WAIT] Wait w1 "Author pushes fixes" timed out:',
+        "Check: github_pr owner/name#12, ready_when head_changed",
+        "Last output (capped): still waiting",
+        "Last error: disk full",
+        "The task page shows it.",
+        line,
+        "Plan:",
+    ]
+    at = [message.index(part) for part in order]
+    assert at == sorted(at)
+    assert message.index(line) < message.index("\nPlan:")
+
+
+def test_run_deadline_is_named_when_the_wait_has_no_check(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    _running(monkeypatch, dict(_RUN))
+    _scheduled(agent_db)
+    bare = {"id": "w1", "kind": "wait", "topic": TOPIC, "depends_on": [],
+            "max_wait_seconds": 1800, "not_before_seconds": 60}
+    claude = planner_claude(plan(bare), _wait_reply("extend", "more time", max_wait_seconds=60))
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: _wait_turns(claude))
+
+    drive(claude, _hold, scenario)
+
+    lines = _wait_turns(claude)[0].splitlines()
+    assert lines[0] == ('[WAIT] Wait w1 "Author pushes fixes" timed out: it waited 30 min '
+                        "(max_wait_seconds 1800) and its time passed.")
+    assert lines[1] == _run_line(3600)
+    assert lines[2] == ""
+    assert lines[3] == "Plan:"
+    assert "Check:" not in lines[1]
+
+
+@pytest.mark.parametrize(("scheduled", "row", "reads"), [
+    (False, {"run_timeout_seconds": 7200, "fired_at": _FIRED}, 0),
+    (True, None, 1),
+    (True, {"run_timeout_seconds": None, "fired_at": _FIRED}, 1),
+    (True, {"run_timeout_seconds": 7200, "fired_at": None}, 1),
+    (True, RuntimeError("db down"), 1),
+], ids=["not-scheduled", "no-run", "no-timeout", "no-fired-at", "db-error"])
+def test_run_deadline_is_empty_when_the_run_does_not_limit_it(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caplog: Any,
+    scheduled: bool, row: Any, reads: int,
+) -> None:
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
+    calls = _running(monkeypatch, row)
+    _scheduled(agent_db, scheduled)
+    claude = planner_claude(plan(wait_step("w1", max_wait_seconds=3 * 3600)))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+
+    with caplog.at_level(logging.WARNING, logger="looper.agents.tiers.planner"):
+        drive(claude, _hold, scenario)
+
+    assert len(calls) == reads
+    assert not _repairs(claude)
+    stored = _stored_wait(agent_db, "w1")
+    assert stored["spec"]["max_wait_seconds"] == 3 * 3600
+    assert stored["deadline_at"] - stored["opened_at"] == timedelta(hours=3)
+    if isinstance(row, BaseException):
+        assert "cannot read its scheduled run" in caplog.text
+    else:
+        assert "cannot read its scheduled run" not in caplog.text
