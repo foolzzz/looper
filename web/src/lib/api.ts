@@ -2593,6 +2593,126 @@ export interface Registry {
   limits: RegistryLimits;
 }
 
+// V3 wire DTOs. Legacy Registry/Profile exports remain for consumers migrating together later.
+export type ApiProtocolV3 = "anthropic-messages" | "openai-chat" | "openai-responses";
+export type VendorKindV3 = "glm-bigmodel" | "glm-zai" | "deepseek" | "kimi-moonshot-cn" | "kimi-moonshot"
+  | "cpa" | "opencode" | "sub2api" | "claude-subscription" | "codex-login" | "grok-login" | "custom";
+
+export interface ProviderEndpointV3 {
+  provider_id?: string;
+  protocol: ApiProtocolV3;
+  base_url: string;
+  /** Only migrated endpoints may retain the runtime's default URL. */
+  use_runtime_default: boolean;
+}
+
+/** An account owns endpoints and credentials; callable models and prices live separately. */
+export interface ProviderV3 {
+  provider_id: string;
+  name: string;
+  vendor_type: VendorKindV3;
+  auth: ProviderAuth;
+  oauth_runtime_type: string | null;
+  endpoints: ProviderEndpointV3[];
+  suggested_models: string[];
+  login: ProviderLogin | null;
+  env: ProviderEnvEntry[];
+  max_concurrency: number | null;
+  api_key: string | null;
+  builtin: boolean;
+  endpoint_count: number;
+  model_count: number;
+  profile_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelV3 {
+  model_id: string;
+  provider_id: string;
+  provider_name: string;
+  name: string;
+  protocol: ApiProtocolV3;
+  context_window: number | null;
+  input_usd_per_mtok: number | null;
+  output_usd_per_mtok: number | null;
+  cache_read_usd_per_mtok: number | null;
+  cache_write_usd_per_mtok: number | null;
+  efforts: string[] | null;
+  background_model: string | null;
+  catalog_order: number;
+  builtin: boolean;
+  profile_count: number;
+  endpoint: ProviderEndpointV3;
+  prices: Record<PriceField, { override: number | null; effective: number | null; source: "override" | "builtin" | "unknown" }>;
+  warnings: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** Creation defaults only; selecting a vendor never registers its suggested models. */
+export interface VendorTypeV3 {
+  vendor_type: VendorKindV3;
+  auth: ProviderAuth;
+  oauth_runtime_type: string | null;
+  endpoints: ProviderEndpointV3[];
+  suggested_models: (Partial<Pick<ModelV3, "context_window" | "background_model" | "efforts" | PriceField>>
+    & Pick<ModelV3, "name" | "protocol">)[];
+  env: ProviderEnvEntry[];
+  requires_url_confirmation: boolean;
+}
+
+export interface AgentProfileV3 {
+  profile_id: string;
+  name: string;
+  model_id: string;
+  model: Pick<ModelV3, "model_id" | "name" | "protocol" | "provider_id">;
+  effort: string | null;
+  agent_teams: boolean;
+  custom_prompt: string;
+  runtime_id: string;
+  runtime_name: string;
+  runtime_type: string;
+  provider_id: string;
+  provider_name: string;
+  provider: Pick<ProviderV3, "provider_id" | "name" | "vendor_type" | "auth">;
+  builtin: boolean;
+  roles: AgentRole[];
+  used_by: ProfileUsedBy & { schedule_count: number };
+  cost: ProfileCostBasis;
+  warnings: string[];
+}
+
+export interface RegistryV3 {
+  runtime_types: RuntimeType[];
+  runtimes: Runtime[];
+  providers: ProviderV3[];
+  models: ModelV3[];
+  profiles: AgentProfileV3[];
+  vendor_types: VendorTypeV3[];
+  prices: { as_of: string; sources: string[]; models: Record<string, Record<PriceField, number | null>> };
+  limits: RegistryLimits & { model_fields: string[] };
+}
+
+export interface ProviderFieldsV3 {
+  name?: string;
+  vendor_type?: VendorKindV3;
+  endpoints?: ProviderEndpointV3[];
+  env?: ProviderEnvEntry[];
+  max_concurrency?: number | string | null;
+  /** Omitted or masked keeps the key; null removes it. */
+  api_key?: string | null;
+}
+
+export interface ProfileFieldsV3 {
+  name?: string;
+  runtime_id?: string;
+  model_id?: string;
+  effort?: string | null;
+  agent_teams?: boolean;
+  custom_prompt?: string;
+}
+
 /** The provider fields a create or update sends; `api_key` the mask keeps the stored key, null removes it. */
 export interface ProviderFields {
   name?: string;
@@ -2659,20 +2779,27 @@ export async function fetchRegistry(): Promise<Registry> {
   return res.json();
 }
 
+/** The normalized registry. Providers migrate independently of the remaining dashboard consumers. */
+export async function fetchRegistryV3(): Promise<RegistryV3> {
+  const res = await fetch(`${API_BASE}/registry`);
+  if (!res.ok) await failed(res, "registry");
+  return res.json();
+}
+
 /** Re-detect: run `<executable> --version` again and record its version or error; for a type's built-in runtime
  * not found yet (rt-<type>), look for it on the server's PATH again (404 when it is not there). */
 export function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
   return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "re-detect runtime");
 }
 
-export function createProvider(fields: ProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
+export function createProvider(fields: ProviderFieldsV3): Promise<{ provider: ProviderV3; warnings: string[] }> {
   return registryCall("POST", "/providers", fields, "add provider");
 }
 
 export function updateProvider(
   providerId: string,
-  fields: ProviderFields,
-): Promise<{ provider: Provider; warnings: string[] }> {
+  fields: ProviderFieldsV3,
+): Promise<{ provider: ProviderV3; warnings: string[] }> {
   return registryCall("PUT", `/providers/${encodeURIComponent(providerId)}`, fields, "update provider");
 }
 
@@ -2682,7 +2809,7 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
 
 /** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it
  * forked. */
-export function clearLoginProblem(providerId: string): Promise<{ provider: Provider }> {
+export function clearLoginProblem(providerId: string): Promise<{ provider: ProviderV3 }> {
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}/login-problem`, undefined,
     "use the login again");
 }

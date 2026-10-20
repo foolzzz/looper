@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchRegistry, REGISTRY_CHANGED_EVENT, type AgentProfile, type Registry } from "@/lib/api";
+import { fetchRegistry, fetchRegistryV3, REGISTRY_CHANGED_EVENT, type AgentProfile, type RegistryV3 } from "@/lib/api";
 
 /**
  * The registry (runtimes, providers, Agent Profiles), loaded once and again at once when this dashboard changes it. `registry` is null until
  * the first load succeeds.
  */
-export function useRegistry() {
-  const [registry, setRegistry] = useState<Registry | null>(null);
+function useRegistryData<T>(fetchData: () => Promise<T>) {
+  const [registry, setRegistry] = useState<T | null>(null);
   const [error, setError] = useState("");
   const latest = useRef(0);
 
   const reload = useCallback((): Promise<void> => {
     // A slow answer must not overwrite the answer to a newer request.
     const seq = ++latest.current;
-    return fetchRegistry()
+    return fetchData()
       .then((next) => {
         if (seq !== latest.current) return;
         setRegistry(next);
@@ -23,7 +23,7 @@ export function useRegistry() {
         if (seq !== latest.current) return;
         setError(err instanceof Error ? err.message : String(err));
       });
-  }, []);
+  }, [fetchData]);
 
   useEffect(() => {
     reload();
@@ -32,6 +32,16 @@ export function useRegistry() {
   }, [reload]);
 
   return { registry, error, reload };
+}
+
+/** Legacy consumers keep their existing return type until they migrate together. */
+export function useRegistry() {
+  return useRegistryData(fetchRegistry);
+}
+
+/** Read normalized accounts/models without adapting models or prices into an account catalog. */
+export function useRegistryV3() {
+  return useRegistryData<RegistryV3>(fetchRegistryV3);
 }
 
 /** A profile as the dashboard names it: its name, then " · <effort>" when it has an effort its name does not end
