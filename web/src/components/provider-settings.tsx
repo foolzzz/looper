@@ -13,6 +13,7 @@ import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
 import { useRegistryV3 } from "@/lib/use-registry";
 import { useSettingsTarget } from "@/lib/settings-target";
+import { ModelsSection } from "@/components/model-settings";
 
 const usedBy = (count: number) =>
   count === 0 ? `no ${AGENT_PROFILE.plural}` : `used by ${count} ${count === 1 ? AGENT_PROFILE.name : AGENT_PROFILE.plural}`;
@@ -235,6 +236,7 @@ function LoginLine({ provider, label }: { provider: ProviderV3; label: string })
 
 function ProviderRow({ provider, registry }: { provider: ProviderV3; registry: RegistryV3 }) {
   const [editing, setEditing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   // An import's "secrets to fill in" links here (#settings/providers/<id>) to open the form.
   const ref = useSettingsTarget<HTMLLIElement>("provider", provider.provider_id, () => setEditing(!provider.builtin));
   const action = useAction();
@@ -256,9 +258,13 @@ function ProviderRow({ provider, registry }: { provider: ProviderV3; registry: R
       ref={ref}
       title={<RowName name={provider.name} builtin={provider.builtin} />}
       actions={
-        !provider.builtin && (
-          <EditDelete what="provider" name={provider.name} editing={editing} busy={action.busy} onEdit={() => setEditing(!editing)} onDelete={remove} />
-        )
+        <>
+          <Button type="button" size="sm" variant="ghost" aria-label={`Models for provider ${provider.name}`}
+            aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>Models</Button>
+          {!provider.builtin && (
+            <EditDelete what="provider" name={provider.name} editing={editing} busy={action.busy} onEdit={() => setEditing(!editing)} onDelete={remove} />
+          )}
+        </>
       }
       below={
         <>
@@ -268,6 +274,7 @@ function ProviderRow({ provider, registry }: { provider: ProviderV3; registry: R
               <ProviderForm provider={provider} registry={registry} onDone={() => setEditing(false)} />
             </div>
           )}
+          {expanded && <div className="pt-2"><ModelsSection provider={provider} registry={registry} /></div>}
         </>
       }
     >

@@ -2713,6 +2713,15 @@ export interface ProfileFieldsV3 {
   custom_prompt?: string;
 }
 
+/** Mutable model settings. Empty numeric inputs clear overrides; invalid text is validated by the server. */
+export type ModelFieldsV3 = Partial<Record<PriceField | "context_window", number | string | null>> & {
+  efforts?: string[] | null;
+  background_model?: string | null;
+};
+
+/** A model's account, exact name and protocol are immutable after creation. */
+export type CreateModelFieldsV3 = ModelFieldsV3 & Pick<ModelV3, "provider_id" | "name" | "protocol">;
+
 /** The provider fields a create or update sends; `api_key` the mask keeps the stored key, null removes it. */
 export interface ProviderFields {
   name?: string;
@@ -2805,6 +2814,18 @@ export function updateProvider(
 
 export function deleteProvider(providerId: string): Promise<{ deleted: string }> {
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
+}
+
+export function createModel(fields: CreateModelFieldsV3): Promise<{ model: ModelV3; warnings: string[] }> {
+  return registryCall("POST", "/models", fields, "add model");
+}
+
+export function updateModel(modelId: string, fields: ModelFieldsV3): Promise<{ model: ModelV3; warnings: string[] }> {
+  return registryCall("PUT", `/models/${encodeURIComponent(modelId)}`, fields, "update model");
+}
+
+export function deleteModel(modelId: string): Promise<{ deleted: string }> {
+  return registryCall("DELETE", `/models/${encodeURIComponent(modelId)}`, undefined, "delete model");
 }
 
 /** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it
