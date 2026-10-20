@@ -233,8 +233,9 @@ _CUSTOM_RUNTIMES = """
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities)
 VALUES ('rt-custom-beta', 'claude-beta', 'claude-code', '/opt/claude-beta/bin/claude', ARRAY['run']),
        ('rt-custom-old', 'claude-old', 'claude-code', 'claude-old', ARRAY['run']);
-INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model)
-VALUES ('agent-beta', 'beta/haiku', 'rt-custom-beta', 'prov-claude-subscription', 'haiku');
+INSERT INTO agent_profiles (id, name, runtime_id, model_id)
+SELECT 'agent-beta', 'beta/haiku', 'rt-custom-beta', id FROM llm_models
+WHERE provider_id = 'prov-claude-subscription' AND name = 'haiku' AND protocol = 'anthropic-messages';
 """
 
 
@@ -245,6 +246,7 @@ def test_the_upgrade_drops_custom_runtimes_no_profile_uses_once_and_keeps_the_ot
 
     async def _test(pool: Any) -> None:
         # A database from before: the custom rows, and the migration not run yet.
+        await _model_id("prov-claude-subscription", "haiku")
         await pool.execute(_CUSTOM_RUNTIMES)
         await pool.execute("DELETE FROM schema_migrations WHERE name = 'agent_runtimes_unused_custom_removed'")
         await ensure_schema(pool)
@@ -959,8 +961,9 @@ def test_the_upgrade_turns_each_layer_model_into_a_profile(monkeypatch: pytest.M
 
     async def _layers(pool: Any) -> list[tuple[Any, ...]]:
         return [tuple(r) for r in await pool.fetch(
-            "SELECT l.scope, l.role, l.project_id, a.name, a.model, a.runtime_id, a.provider_id, a.effort "
-            "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id ORDER BY 1, 2, 3")]
+            "SELECT l.scope, l.role, l.project_id, a.name, m.name, a.runtime_id, m.provider_id, a.effort "
+            "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id "
+            "LEFT JOIN llm_models m ON m.id = a.model_id ORDER BY 1, 2, 3")]
 
     async def _test(pool: Any) -> None:
         columns = {r["column_name"] for r in await pool.fetch(

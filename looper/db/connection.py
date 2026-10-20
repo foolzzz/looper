@@ -97,14 +97,6 @@ async def check_registry_schema_version(conn: asyncpg.Connection, *, supported_v
     return version
 
 
-async def _check_registry_upgrade(conn: asyncpg.Connection, sql: str) -> None:
-    version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
-    if version is not None and version < REGISTRY_SCHEMA_VERSION:
-        raise RegistrySchemaVersionError("registry schema upgrade is not available; keep using the old-layout patch")
-    if version is None and await _has_schema_tables(conn, sql):
-        raise RegistrySchemaVersionError("unversioned registry schema upgrade is not available; database unchanged")
-
-
 async def _has_schema_tables(conn: asyncpg.Connection, sql: str) -> bool:
     tables = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
     # Earlier releases called agent_profiles/role_configs by these names.
@@ -123,24 +115,30 @@ def _schema_phases(sql: str) -> dict[str, str]:
 
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     from ..agents import layer_effort
-    from . import task_concurrency
+    from . import registry_migration, task_concurrency
 
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     # Keep the old columns through every historical SQL/Python migration.
-    # The v2 converter is not wired yet: reject old databases before any DDL.
     # Version and fingerprint commit only with the complete target schema.
     async with _connection(pool) as conn, conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
-        await _check_registry_upgrade(conn, sql)
+        version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
+        upgrading = version != REGISTRY_SCHEMA_VERSION and await _has_schema_tables(conn, sql)
         phases = _schema_phases(sql)
         await conn.execute(phases["expand"])
+        if upgrading:
+            await registry_migration.seed_legacy_builtin(conn)
         await conn.execute(phases["legacy"])
-        await layer_effort.migrate(conn)
+        await layer_effort.migrate(conn, legacy_registry=upgrading)
         await task_concurrency.migrate(conn)
+        if upgrading:
+            await registry_migration.apply(conn)
         await conn.execute(phases["convert"])
         await conn.execute(phases["contract"])
         await conn.execute(phases["builtin"])
+        await conn.execute('INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING',
+                           registry_migration.MIGRATION)
         await conn.execute("INSERT INTO registry_schema_version (id, version) VALUES (TRUE, $1) "
                            "ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version "
                            "WHERE registry_schema_version.version <> EXCLUDED.version", REGISTRY_SCHEMA_VERSION)
@@ -164,15 +162,17 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
     is missing or differs from the current file's. A database without Looper
     tables is new: applying the schema loses nothing.
 
-    Unsupported versions and legacy upgrades are refused before requesting a
-    backup, using the same locked, read-only gate as ``ensure_schema``.
+    Unsupported versions are refused before requesting a backup, using the
+    same locked, read-only gate as ``ensure_schema``.
     """
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     async with conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
-        await _check_registry_upgrade(conn, sql)
+        version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
         if not await _has_schema_tables(conn, sql):
             return False
+        if version != REGISTRY_SCHEMA_VERSION:
+            return True
         if not await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL"):
             return True
         return await conn.fetchval("SELECT sha256 FROM schema_fingerprint") != schema_fingerprint(sql)

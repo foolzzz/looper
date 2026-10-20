@@ -1,7 +1,4 @@
-"""Target registry constraints and the pre-DDL version gate on disposable PostgreSQL.
-
-No HTTP helpers or v2 upgrade path: those switch together with the converter.
-"""
+"""Target registry constraints, legacy upgrades and version guards on disposable PostgreSQL."""
 
 from __future__ import annotations
 
@@ -10,6 +7,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -279,18 +277,30 @@ def test_forward_guard_rejects_v3_before_ddl_with_v2_support(entry: str, monkeyp
 
 @pytest.mark.parametrize('version', [None, 2])
 @pytest.mark.parametrize('entry', ['ensure_schema', 'schema_change_pending'])
-def test_legacy_upgrade_is_refused_without_partial_schema(version: int | None, entry: str) -> None:
+def test_legacy_upgrade_applies_and_pending_check_is_read_only(version: int | None, entry: str) -> None:
     async def test(conn: asyncpg.Connection) -> None:
-        await conn.execute("CREATE TABLE llm_providers (id TEXT PRIMARY KEY, models JSONB); "
-                           "INSERT INTO llm_providers VALUES ('old-provider', '[]')")
+        await conn.execute((Path(__file__).parent / 'fixtures' / 'schema_v2_6_0.sql').read_text())
         if version is not None:
             await conn.execute("CREATE TABLE registry_schema_version (id BOOLEAN PRIMARY KEY CHECK(id), "
                                "version INTEGER NOT NULL CHECK(version > 0)); "
                                "INSERT INTO registry_schema_version VALUES (TRUE, 2)")
-        with pytest.raises(connection.RegistrySchemaVersionError, match='upgrade'):
-            await getattr(connection, entry)(conn)
-        assert await conn.fetchval("SELECT models FROM llm_providers WHERE id = 'old-provider'") == '[]'
-        for table in ('schema_migrations', 'llm_models', 'llm_provider_endpoints', 'llm_model_migration_map'):
-            assert await conn.fetchval('SELECT to_regclass($1)', table) is None
+        before = await conn.fetch("SELECT * FROM llm_providers ORDER BY id")
+        if entry == 'schema_change_pending':
+            assert await connection.schema_change_pending(conn) is True
+            assert await conn.fetch("SELECT * FROM llm_providers ORDER BY id") == before
+            assert await conn.fetchval("SELECT to_regclass('agents') IS NOT NULL")
+            for table in ('llm_models', 'llm_provider_endpoints', 'llm_model_migration_map', 'schema_fingerprint'):
+                assert await conn.fetchval('SELECT to_regclass($1)', table) is None
+            if version is None:
+                assert await conn.fetchval("SELECT to_regclass('registry_schema_version')") is None
+            else:
+                assert await conn.fetchval("SELECT version FROM registry_schema_version") == version
+        else:
+            await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
+            row = await conn.fetchrow("SELECT m.provider_id, m.name, m.protocol FROM agent_profiles p "
+                                      "JOIN llm_models m ON m.id = p.model_id WHERE p.id = 'agent-claude-code-opus'")
+            assert tuple(row) == ('prov-claude-subscription', 'opus', 'anthropic-messages')
+            assert await connection.schema_change_pending(conn) is False
 
     _run(test, initialize=False)

@@ -228,11 +228,16 @@ def _stored(raw: Any, parse: Any, what: str, place: str) -> Any:
         return None
 
 
-async def migrate(conn: Any) -> None:
+async def migrate(conn: Any, *, legacy_registry: bool = False) -> None:
     """Once (``schema_migrations`` ``MIGRATION``), in the schema's transaction: move each layer's effort onto the
     profiles its roles run (``convert``), log each profile added and each layer and task changed, then drop the
     column and the layers left with nothing set."""
     from ..db.profile_registry import PROFILE_JOIN, PROFILE_JSON, _json, insert_profile
+
+    if legacy_registry:
+        from ..db.registry_migration import LEGACY_PROFILE_JOIN, LEGACY_PROFILE_JSON, insert_legacy_profile
+
+        PROFILE_JOIN, PROFILE_JSON, insert_profile = LEGACY_PROFILE_JOIN, LEGACY_PROFILE_JSON, insert_legacy_profile
 
     if await conn.fetchval("SELECT 1 FROM schema_migrations WHERE name = $1", MIGRATION):
         return

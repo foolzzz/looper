@@ -71,8 +71,8 @@ END $$;
 
 
 -- Registry expansion keeps the v2 columns until historical SQL and Python
--- migrations finish. Existing v2 databases are refused before this phase until
--- the converter and launch comparison are wired into ensure_schema.
+-- migrations finish. ensure_schema compares and applies the conversion before
+-- contract, under the same schema lock and transaction.
 CREATE TABLE IF NOT EXISTS agent_runtimes (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL UNIQUE,
@@ -1885,13 +1885,13 @@ ALTER TABLE channel_rejected_senders ADD COLUMN IF NOT EXISTS chat_id TEXT;
 
 -- registry-phase: convert
 
--- No v2 conversion yet. The pre-DDL gate allows only a fresh registry or v3;
--- these checks also prevent contracting unmapped rows if initialization grows.
+-- Python conversion and launch/pricing comparison have completed. Refuse to
+-- contract any unmapped row, including when a future migration adds one.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM llm_providers WHERE vendor_type IS NULL)
         OR EXISTS (SELECT 1 FROM agent_profiles WHERE model_id IS NULL) THEN
-        RAISE EXCEPTION 'registry schema upgrade conversion is not available';
+        RAISE EXCEPTION 'registry conversion left unmapped rows';
     END IF;
 END $$;
 

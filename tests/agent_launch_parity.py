@@ -243,6 +243,39 @@ def read_only_planner(expected: dict[str, dict[str, Any]], *, recommended: bool 
     return result
 
 
+def model_registry_contract(expected: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Apply the declared Manager model-tool contract changes to the older pinned prompts.
+
+    Keep the captures and every other prompt byte pinned; do not derive the
+    replacement text from the current production prompt.
+    """
+    changes = (
+        ("  task, adding to it, editing it; projects, Agent Profiles, providers,\n",
+         "  task, adding to it, editing it; projects, Agent Profiles, providers, models,\n"),
+        ("- Never ask for, take or repeat an API key, token or password: the user enters\n"
+         "  them on the dashboard.\n",
+         "- Never ask for, take or repeat an API key, token or password: the user enters\n"
+         "  them on the dashboard. If the user pastes one, do not repeat it and\n"
+         "  never pass it to a tool; direct them to Dashboard → Settings → LLM Providers\n"
+         "  → their provider → API key.\n"
+         "- Accounts (looper_providers) hold login or API access; models (looper_models)\n"
+         "  identify one account, exact name and protocol. Use a model id or the full\n"
+         "  {provider, name, protocol} reference; list compatible models when unsure.\n"
+         "  Profiles (looper_agent_profiles) are recipes: runtime, model and runtime\n"
+         "  options (effort, teams, custom prompt). Select a role's profile with\n"
+         "  looper_settings.\n"),
+    )
+    result = dict(expected)
+    for case, seen in expected.items():
+        if case.partition("@")[0] == "manager":
+            prompt = seen["system_prompt"]
+            for before, after in changes:
+                assert prompt.count(before) == 1, case
+                prompt = prompt.replace(before, after)
+            result[case] = {**seen, "system_prompt": prompt}
+    return result
+
+
 def set_aside_agent_teams(captured: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The captures without agent teams, after checking each one but a Planner's had the flag and the variable and
     a Planner's had neither (the caller removed the variable from the server's environment, so a capture shows it)."""
