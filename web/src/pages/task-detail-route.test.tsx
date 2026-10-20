@@ -85,6 +85,49 @@ describe("TaskDetailRoute", () => {
     expect(container.textContent).not.toContain("Build the A parser.");
   });
 
+  const phaseCard = () =>
+    [...container.querySelectorAll("p")].find((p) => p.textContent === "Phase" || p.textContent === "Last phase")?.parentElement;
+
+  const taskWith = (status: string, phase: string, topic?: string) => ({
+    ...detail("task-a"), status, group: status === "failed" ? "attention" : "in_progress", phase,
+    waits: topic ? [{
+      step: "w1", step_id: "step-w1", state: "waiting", outcome: null, topic,
+      check: null, every_seconds: null, opened_at: "2026-10-20T08:00:00Z", due_at: "2026-10-21T08:00:00Z",
+      deadline_at: "2026-10-27T08:00:00Z", next_check_at: null, last_checked_at: null,
+      checks: 0, last_result: null, last_output: "", last_error: "", resolution: "", notice: null,
+      closed_at: null, depends_on: [],
+    }] : [],
+  });
+  const stubTask = (body: ReturnType<typeof taskWith>) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-a")) return Response.json(body);
+      return Response.json(answer(url));
+    }));
+  };
+
+  it("shows the waiting phase while the task is waiting", async () => {
+    stubTask(taskWith("waiting", "executing", "CI finishes"));
+    await show("task-a");
+    expect(phaseCard()?.textContent).toContain("Waiting: CI finishes");
+    expect(phaseCard()?.querySelector(".animate-spin")).toBeNull();
+    // The header and the phase card both name the wait. The stored "executing" phase is not shown.
+    expect(container.textContent?.split("Waiting: CI finishes").length).toBe(3);
+    expect(container.textContent).not.toContain("Worker Executing");
+  });
+
+  it.each([
+    ["running", "executing", "Worker Executing"],
+    ["running", "planning", "Planning"],
+    ["running", "verifying", "Verifying"],
+    ["failed", "failed", "Failed"],
+  ])("keeps a %s task's %s phase (%s)", async (status, phase, label) => {
+    stubTask(taskWith(status, phase));
+    await show("task-a");
+    expect(phaseCard()?.textContent).toContain(label);
+    expect(container.textContent).not.toContain("Waiting:");
+  });
+
   it("renders a wait step with its own badge in the steps list", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       if (String(input) === "/api/tasks/task-a") return Response.json({ ...detail("task-a"), steps: [{

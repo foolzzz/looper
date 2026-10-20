@@ -171,10 +171,25 @@ const PHASE_CONFIG: Record<string, { label: string; icon: typeof Clock; color: s
   verifying: { label: "Verifying", icon: CheckCircle2, color: "text-amber-500" },
   completed: { label: "Completed", icon: CheckCircle2, color: "text-success" },
   failed: { label: "Failed", icon: AlertCircle, color: "text-destructive" },
+  waiting: { label: "Waiting", icon: Hourglass, color: "text-muted-foreground" },
 };
 
-/** The task's phase, spinning only while the task runs (`live`); a task that has ended keeps the phase it was in. */
-function phaseBadge(phase: string, live: boolean) {
+const OPEN_WAIT = new Set<TaskWait["state"]>(["waiting", "ready", "timed_out", "cancel_requested"]);
+
+/** The phase label while the task status is waiting: the open wait's topic, preferring one still waiting. */
+function waitingPhaseLabel(waits: TaskWait[] | undefined): string {
+  const rows = waits ?? [];
+  const waiting = rows.filter((wait) => wait.state === "waiting");
+  const topics = (waiting.length ? waiting : rows.filter((wait) => OPEN_WAIT.has(wait.state)))
+    .map((wait) => wait.topic.trim())
+    .filter(Boolean);
+  return topics.length ? `Waiting: ${topics.join(", ")}` : PHASE_CONFIG.waiting.label;
+}
+
+/** The task's phase. A waiting task names its wait; the icon spins only while a Worker or the Planner runs. */
+function phaseBadge(task: Pick<TaskDetail, "status" | "phase" | "waits">, live: boolean) {
+  const waiting = task.status === "waiting";
+  const phase = waiting ? "waiting" : (task.phase || "pending");
   const cfg = PHASE_CONFIG[phase] || PHASE_CONFIG.pending;
   const Icon = cfg.icon;
   return (
@@ -184,7 +199,7 @@ function phaseBadge(phase: string, live: boolean) {
       ) : (
         <Icon className={cn("h-4 w-4", cfg.color)} />
       )}
-      <span className={cn("text-sm font-medium", cfg.color)}>{cfg.label}</span>
+      <span className={cn("text-sm font-medium", cfg.color)}>{waiting ? waitingPhaseLabel(task.waits) : cfg.label}</span>
     </div>
   );
 }
@@ -702,7 +717,7 @@ function OverviewTab({
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">{isActive ? "Phase" : "Last phase"}</p>
-          <div className="mt-1">{phaseBadge(task.phase || "pending", isActive)}</div>
+          <div className="mt-1">{phaseBadge(task, isActive)}</div>
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Created</p>
@@ -2017,7 +2032,7 @@ function TaskDetailPage({ taskId, gateStep, onBack }: TaskDetailPageProps) {
               {task?.continues_schedule_session && (
                 <span className="text-xs text-muted-foreground">continues the schedule&apos;s Planner session</span>
               )}
-              {task && isActiveTask(task) && task.phase && task.phase !== task.status && phaseBadge(task.phase, true)}
+              {task && isActiveTask(task) && task.phase && task.phase !== task.status && phaseBadge(task, true)}
               {task && (
                 <TaskProjectControl
                   task={task}

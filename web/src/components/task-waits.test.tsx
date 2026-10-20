@@ -61,13 +61,25 @@ describe("wait panel", () => {
       checks: 2, last_result: "error", last_error: "exit 1", last_output: "<img src=x onerror=alert(1)>" }));
     expect(container.querySelector("summary")?.textContent).toContain("Waiting");
     expect(container.textContent).toContain("Command `test -f ready`");
-    expect(container.textContent).toContain("Every 10 min");
+    expect(container.textContent).toContain("every 10 min");
     expect(container.textContent).toContain("Earliest resume");
     expect(container.querySelectorAll("time")).toHaveLength(3);
     expect(container.textContent).toContain("exit 1");
     expect(container.querySelector("pre")?.textContent).toBe("<img src=x onerror=alert(1)>");
     expect(container.querySelector("pre")?.closest("details")?.open).toBe(false);
     expect(container.querySelector("img")).toBeNull();
+  });
+
+  it.each([
+    [10, "every 10 s"],
+    [15, "every 15 s"],
+    [60, "every 1 min"],
+    [90, "every 1 min 30 s"],
+    [600, "every 10 min"],
+  ] as const)("formats a %s second check interval as %s", async (seconds, text) => {
+    await show(wait({ every_seconds: seconds }));
+    expect(container.textContent).toContain(text);
+    expect(container.textContent).not.toMatch(/Every \d+\.\d+ min/);
   });
 
   it.each(["sent", "dashboard", "failed"] as const)("keeps the timeout notice result (%s)", async (notice) => {

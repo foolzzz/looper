@@ -6,6 +6,15 @@ import { cancelWait, isActiveTask, resumeWait, type TaskDetail, type TaskWait } 
 import { useAction } from "@/lib/use-action";
 import { WAIT_STATES, waitAnchor, waitCheckText } from "@/lib/waits";
 
+/** A check interval: seconds under a minute, otherwise minutes and any leftover seconds. */
+function checkEvery(seconds: number): string {
+  const whole = Math.trunc(seconds);
+  if (whole < 60) return `every ${whole} s`;
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return rest === 0 ? `every ${minutes} min` : `every ${minutes} min ${rest} s`;
+}
+
 export function WaitBadge({ state }: { state: TaskWait["state"] }) {
   const look = WAIT_STATES[state];
   return <Badge variant={look.variant}>{look.label}</Badge>;
@@ -79,7 +88,7 @@ export function WaitPanel({ taskId, active, wait, onChanged }: {
       </summary>
       <div className="space-y-3 border-t border-border p-4">
         <p className="break-words text-sm whitespace-pre-wrap">{waitCheckText(wait.check)}</p>
-        {wait.every_seconds != null && <p className="text-xs text-muted-foreground">Every {wait.every_seconds / 60} min</p>}
+        {wait.every_seconds != null && <p className="text-xs text-muted-foreground">{checkEvery(wait.every_seconds)}</p>}
         <dl className="space-y-1 text-xs">
           {facts.filter(([label, iso]) => iso || ["Opened", "Earliest resume", "Deadline", "Next check"].includes(label)).map(([label, iso]) => (
             <div key={label} className="grid gap-1 sm:grid-cols-2">
