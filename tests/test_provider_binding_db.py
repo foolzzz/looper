@@ -562,19 +562,21 @@ async def _dsh_worker_profile(executable: str, *, key: str | None = KEY, budget:
     return profile_id, provider_id
 
 
-def _dsh_worker_library(monkeypatch: pytest.MonkeyPatch, root: Path, *, missing: bool = False) -> None:
+def _dsh_worker_library(monkeypatch: pytest.MonkeyPatch, root: Path, *, broken: bool = False) -> None:
     """Only replace MCP installation: profiles, role choices, records and events use the real database."""
     from looper.agents.library import AgentLibrary
     from looper.agents.ops.service import server_config
     from looper.agents.tiers import worker
 
     source = root / "mcp.json"
-    source.write_text(json.dumps({"mcpServers": {
-        "looper": server_config("http://127.0.0.1:19999", "disposable-worker-token"),
-    }}))
+    bridge = server_config("http://127.0.0.1:19999", "disposable-worker-token")
+    if broken:
+        # No bridge is valid with room/vault off; a configured bridge without its run token must still fail.
+        bridge["env"].pop("LOOPER_AGENT_TOKEN")
+    source.write_text(json.dumps({"mcpServers": {"looper": bridge}}))
 
     async def installed(*_args: Any, **_kwargs: Any) -> AgentLibrary:
-        return AgentLibrary(mcp_config=None if missing else str(source), role="worker")
+        return AgentLibrary(mcp_config=str(source), role="worker")
 
     monkeypatch.setattr(worker, "load_installed", installed)
 
@@ -708,14 +710,14 @@ def test_dsh_resident_budget_failure_is_read_back_without_inventing_a_total_cost
 @pytest.mark.parametrize(("missing", "reason"), [
     ("executable", "installed executable"),
     ("key", "has no API key"),
-    ("mcp", "Looper stdio bridge"),
+    ("mcp", "LOOPER_AGENT_TOKEN"),
 ])
 def test_dsh_worker_configuration_failure_is_readable_without_a_fake_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing: str, reason: str,
 ) -> None:
     from tests.test_dsh_runtime import _headless_stand_in
 
-    _dsh_worker_library(monkeypatch, tmp_path, missing=missing == "mcp")
+    _dsh_worker_library(monkeypatch, tmp_path, broken=missing == "mcp")
     executable = str(tmp_path / "missing-dsh") if missing == "executable" else _headless_stand_in(tmp_path)
 
     async def _test(pool: Any) -> None:

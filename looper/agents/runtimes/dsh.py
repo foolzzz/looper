@@ -506,7 +506,8 @@ class DshRuntime(RuntimeAdapter):
         return budget_error(result_event) if (result_event or {}).get(SOFT_CAP) else None
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
-        mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only, consult=launch.consult)
+        mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
+                         read_only=launch.read_only, consult=launch.consult)
         catalog = materialize(launch.library, launch.profile.runtime.executable or self.default_executable)
         return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit"},
                 "usage_complete": _root_only_consult(launch), "cost_basis": "observed", "isolation": HOME_LAYOUT_ID,
@@ -875,7 +876,8 @@ def _bootstrap_files(executable: str, text: str, launch: Launch) -> dict[str, st
     except OSError:
         raise RuntimeUnsupported("DSH bootstrap requires an installed executable") from None
     module = Path(__file__).with_name("dsh_bootstrap.mjs").resolve().as_uri()
-    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only, consult=launch.consult)
+    mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
+                     read_only=launch.read_only, consult=launch.consult)
     options = json.dumps({"executable": str(anchor), "text": text,
                           "mcp": mcp.servers if mcp else [], "readOnly": launch.read_only,
                           "omissions": mcp.omissions if mcp else []},
@@ -934,10 +936,12 @@ def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: boo
     References are stable across token rotation; every child gets freshly read run values, including on resume.
     The required runner owns all entries, so there is no second, optional platform MCP activation.
     """
-    bridge_required = (role or library.role) not in ("worker", "reviewer")
+    role = role or library.role
+    bridge_required = role not in (None, "worker", "reviewer")
     if not library.mcp_config:
         # ConsultService intentionally resumes with no library or expired source-run token.
         # Workers and reviewers have no platform tools when both room and vault are off.
+        # Without a role, no platform authority is granted implicitly.
         if consult or not bridge_required:
             return DshMcpConfig((), {})
         raise RuntimeUnsupported("DSH MCP configuration requires the Looper stdio bridge")
@@ -960,11 +964,14 @@ def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: boo
     values: dict[str, str] = {}
     translated = []
     omissions = []
-    platform = _platform_tools(role or library.role or "")
+    platform = _platform_tools(role) if role is not None else None
     for index, (name, server) in enumerate(sorted(servers.items(), key=lambda item: item[0] != "looper")):
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name) or not isinstance(server, dict):
             raise RuntimeUnsupported("DSH MCP server has an invalid name or configuration")
         own = name == "looper"
+        if own and platform is None:
+            omissions.append({"name": name, "reason": "platform MCP omitted without an agent role"})
+            continue
         if read_only and not own:
             omissions.append({"name": name, "reason": "external MCP omitted in a read-only run"})
             continue
@@ -1029,7 +1036,8 @@ def _launch_environment(launch: Launch) -> dict[str, str]:
     _web_search(launch)
     binding = bind_provider(launch.profile.provider, launch.model, launch.effort)
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
-    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only, consult=launch.consult)
+    mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
+                     read_only=launch.read_only, consult=launch.consult)
     return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
             **(mcp.env if mcp else {})}
 

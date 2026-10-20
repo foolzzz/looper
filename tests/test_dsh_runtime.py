@@ -571,7 +571,7 @@ def test_dsh_mcp_requires_platform_bridge_even_without_catalog(tmp_path, monkeyp
         dsh.mcp_config(AgentLibrary(role=role))
 
 
-@pytest.mark.parametrize("role", ["worker", "reviewer"])
+@pytest.mark.parametrize("role", [None, "worker", "reviewer"])
 @pytest.mark.parametrize("catalog", [False, True])
 def test_dsh_mcp_allows_optional_platform_bridge(tmp_path, role, catalog):
     from looper.agents.library import AgentLibrary
@@ -994,6 +994,29 @@ def _run_launch(tmp_path, *, budget=None, role="worker"):
                            PROVIDER, "deepseek-flash", "high")
     return Launch(AgentSettings(profile=profile, max_budget_usd=budget),
                   AgentLibrary(mcp_config=str(source), role=role), role=AgentType(role))
+
+
+@pytest.mark.parametrize("platform_bridge", [False, True])
+def test_dsh_roleless_launch_has_no_platform_tools(tmp_path, platform_bridge):
+    from looper.agents.runtimes import dsh
+
+    launch = _run_launch(tmp_path)
+    launch = replace(launch, role=None, library=replace(
+        launch.library, role=None, mcp_config=launch.library.mcp_config if platform_bridge else None))
+    executable = _headless_stand_in(tmp_path)
+    prompt = tmp_path / ".local" / "prompts" / "system.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("Role-less run")
+    command = launch.runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch)
+    assert command[-2:] == ["--json", "-"]
+    assert not any(name.startswith("LOOPER_DSH_MCP_SECRET_") for name in launch.environment())
+    translated = dsh.mcp_config(launch.library)
+    assert not translated.servers and not translated.env
+    omitted = [{"name": "looper", "reason": "platform MCP omitted without an agent role"}] if platform_bridge else []
+    assert list(translated.omissions) == omitted
+    assert launch.runtime.launch_record(launch)["runtime_catalog"]["skipped"] == omitted
+    bootstrap = dsh.bootstrap_files(executable, "Role-less run", launch)["looper-bootstrap.mjs"]
+    assert '"mcp": []' in bootstrap and "test-run-token" not in bootstrap
 
 
 def _headless_stand_in(tmp_path, *, usage=DSH_STEP_USAGE, exit_code=0, hang=False, final=None):
