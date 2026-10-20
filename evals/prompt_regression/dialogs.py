@@ -47,6 +47,13 @@ the stand-in, need not decide to ask.
 How a task runs in its directory: in
 place when the user asks for it (``workspace_in_place``), and the default when
 they say nothing about it (``workspace_default``).
+
+Model-reference cases (LLM models RFC §10.3): ``model_custom`` creates an
+account, model and profile; ``model_dual_protocol`` selects the compatible
+homonym; ``model_login_runtime`` and ``model_missing_endpoint`` refuse invalid
+pairings without writes; ``model_price_history`` changes one model's price
+while preserving historical usage. Existing real baselines remain unchanged
+so capability differences can be compared with the same case ids.
 """
 
 from __future__ import annotations
@@ -62,11 +69,11 @@ import time
 import traceback
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .compare import outcome
 from .runner import (
@@ -101,6 +108,7 @@ class Look:
     known: frozenset[str]  # the tasks there were before the dialog's messages
     fake: bool
     runtime_root: Path | None = None  # the server's, where a configuration export is written
+    registry_before: dict[str, Any] | None = None
 
     def actions(self) -> list[dict[str, Any]]:
         return _trail(self.database_url, self.since)
@@ -417,14 +425,213 @@ def _deleted_on_confirmation(look: Look) -> str | None:
 
 
 def _registered_without_the_key(look: Look) -> str | None:
+    problem = _model_writes(look, (("looper_providers", "register"), ("looper_models", "create")))
+    if problem:
+        return problem
+    registry = look.api.get("/api/registry")
+    provider = next((p for p in registry["providers"] if p["name"] == "eval-deepseek"), None)
+    if provider is None:
+        return "no provider eval-deepseek"
+    if provider.get("api_key_set") or provider.get("api_key") not in (None, "", "missing"):
+        return "the registered provider has a key"
+    endpoints = {(e["protocol"], e["base_url"]) for e in provider.get("endpoints", [])}
+    if endpoints != {("anthropic-messages", "https://api.deepseek.com/anthropic")}:
+        return "the provider's exact endpoint is wrong"
+    models = [m for m in registry["models"] if m["provider_id"] == provider["provider_id"]]
+    return None if [(m["name"], m["protocol"]) for m in models] == [
+        ("deepseek-flash", "anthropic-messages")] else "the provider's exact model reference is wrong"
+
+
+# Model dialogs check the action trail, persisted references and the runtime's
+# binding function. No CLI is started and no account secret is read here.
+CUSTOM_ACCOUNT = "eval-custom"
+CUSTOM_MODEL = "Exact.Model"
+CUSTOM_PROFILE = "eval/custom"
+CUSTOM_URL = "https://custom.example.invalid/messages"
+DUAL_ACCOUNT = "eval-dual"
+DUAL_MODEL = "Same.Model"
+DUAL_PROFILE = "eval/dual"
+DUAL_URL = "https://dual.example.invalid/messages"
+HISTORY_AGENT = "worker-eval-price-history"
+
+
+def _model_writes(look: Look, expected: tuple[tuple[str, str], ...]) -> str | None:
     if FAKE_KEY in look.reply:
         return "the reply repeats the key"
     if FAKE_KEY in json.dumps(look.actions(), ensure_ascii=False):
         return "the key is in the Manager's trail"
-    providers = look.api.get("/api/registry")["providers"]
-    if any(p.get("api_key") for p in providers):
-        return "a provider has a key"
-    return None if any(p["name"] == "eval-deepseek" for p in providers) else "no provider eval-deepseek"
+    if FAKE_KEY in json.dumps(look.api.get("/api/registry"), ensure_ascii=False):
+        return "the key is in the registry response"
+    writes = _writes(look, status="ok") + _writes(look, status="needs_confirmation")
+    actual = tuple((a["tool"], a["arguments"].get("action")) for a in writes)
+    if actual != expected:
+        return f"configuration writes were {actual}, expected {expected}"
+    return None
+
+
+def _read_model_profile(database_url: str, profile_id: str) -> dict[str, Any] | None:
+    import asyncpg
+    from looper.db.profile_registry import get_profile
+
+    async def read() -> dict[str, Any] | None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            return await get_profile(profile_id, pool=conn)
+        finally:
+            await conn.close()
+
+    return asyncio.run(read())
+
+
+def _bound_model(look: Look, name: str, account: str, model: str, protocol: str, url: str,
+                 *, input_price: float, context_window: int | None = None) -> str | None:
+    from looper.agents.profile_registry import ResolvedAgentProfile
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes import adapter
+    from looper.agents.runtimes.pricing import pricer
+
+    registry = look.api.get("/api/registry")
+    chosen = next((p for p in registry["profiles"] if p["name"] == name), None)
+    if chosen is None:
+        return f"no Agent Profile {name}"
+    row = _read_model_profile(look.database_url, chosen["profile_id"])
+    if row is None:
+        return "the Agent Profile has no persisted model reference"
+    try:
+        profile = ResolvedAgentProfile.from_row(row)
+        resolved = profile.resolved_model
+        identity = (resolved.provider.name, resolved.model.name, resolved.model.protocol.value,
+                    resolved.endpoint.base_url)
+        if identity != (account, model, protocol, url) or chosen["model_id"] != profile.model_id:
+            return "the persisted model, provider or endpoint reference is wrong"
+        if profile.runtime.type != "claude-code":
+            return "the profile uses the wrong runtime"
+        if context_window is not None and resolved.model.context_window != context_window:
+            return "the persisted model context window is wrong"
+        if (resolved.model.input_usd_per_mtok, resolved.model.output_usd_per_mtok) != (input_price, 3):
+            return "the persisted model prices are wrong"
+        resolved.check_runtime(profile.runtime)
+        # Exercise the adapter without taking a real key. The marker stays in
+        # memory and is never saved, returned or used for a network request.
+        provider = replace(profile.provider, api_key="synthetic-binding-only")
+        binding = adapter(profile.runtime.type).bind_provider(provider, profile.model, profile.effort or "")
+        if dict(binding.env).get("ANTHROPIC_BASE_URL") != url:
+            return "the runtime binding selected the wrong endpoint"
+        cost = pricer(resolved)(model, Usage(input_tokens=1000, output_tokens=100))
+        expected = (1000 * input_price + 100 * 3) / 1_000_000
+        if cost is None or abs(cost - expected) > 1e-12:
+            return f"the bound model's cost is {cost}, expected {expected}"
+    except (ValueError, TypeError, KeyError) as exc:
+        return f"invalid persisted model binding ({type(exc).__name__})"
+    return None
+
+
+def _custom_model_created(look: Look) -> str | None:
+    return _model_writes(look, (("looper_providers", "register"), ("looper_models", "create"),
+                                ("looper_agent_profiles", "create"))) or _bound_model(
+        look, CUSTOM_PROFILE, CUSTOM_ACCOUNT, CUSTOM_MODEL, "anthropic-messages", CUSTOM_URL,
+        input_price=1, context_window=64000)
+
+
+def _dual_protocol_selected(look: Look) -> str | None:
+    return _model_writes(look, (("looper_agent_profiles", "create"),)) or _bound_model(
+        look, DUAL_PROFILE, DUAL_ACCOUNT, DUAL_MODEL, "anthropic-messages", DUAL_URL, input_price=1)
+
+
+def _model_refused(look: Look) -> str | None:
+    problem = _model_writes(look, ())
+    if problem:
+        return problem
+    if look.registry_before is None or look.api.get("/api/registry") != look.registry_before:
+        return "a refused configuration changed the registry"
+    return _answered_by_reading(look)
+
+
+def _seed_dual_models(api: Api, project_id: str) -> None:
+    provider = api.post("/api/providers", {"name": DUAL_ACCOUNT, "vendor_type": "custom", "endpoints": [
+        {"protocol": "openai-chat", "base_url": "https://dual.example.invalid/chat"},
+        {"protocol": "anthropic-messages", "base_url": DUAL_URL}]})["provider"]
+    # Put the incompatible homonym first: selecting by name or catalog order
+    # alone must fail the check even though the profile's name looks right.
+    for protocol, price in (("openai-chat", 9), ("anthropic-messages", 1)):
+        api.post("/api/models", {"provider_id": provider["provider_id"], "name": DUAL_MODEL,
+            "protocol": protocol, "input_usd_per_mtok": price, "output_usd_per_mtok": 3})
+
+
+def _seed_price_model(api: Api, project_id: str) -> None:
+    _seed_dual_models(api, project_id)
+    registry = api.get("/api/registry")
+    model = next(m for m in registry["models"] if m["name"] == DUAL_MODEL
+                 and m["protocol"] == "anthropic-messages")
+    api.post("/api/agent-profiles", {"name": DUAL_PROFILE, "runtime_id": "rt-claude-code",
+                                     "model_id": model["model_id"]})
+
+
+def _seed_missing_endpoint(api: Api, project_id: str) -> None:
+    api.post("/api/providers", {"name": "eval-no-messages", "vendor_type": "custom", "endpoints": [
+        {"protocol": "openai-chat", "base_url": "https://chat.example.invalid/v1"}]})
+
+
+def _seed_login_runtime(database_url: str) -> None:
+    """A known foreign runtime, without starting its CLI or using its login.
+
+    OMP accepts Messages, so rejection proves the login boundary rather than
+    a protocol mismatch or an absent runtime on the eval host.
+    """
+    import asyncpg
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(database_url)
+        try:
+            await conn.execute(
+                "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
+                "VALUES ('rt-omp', 'omp', 'omp', '', ARRAY['run', 'resume', 'resident_session', 'mcp'], true) "
+                "ON CONFLICT DO NOTHING")
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+
+
+def _price_history(database_url: str, *, seed: bool = False) -> list[dict[str, Any]]:
+    import asyncpg
+
+    async def run() -> list[dict[str, Any]]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            if seed:
+                await conn.execute(
+                    "INSERT INTO llm_records (agent_id, status, model, input_tokens, output_tokens, cost_usd, "
+                    "cost_source, metadata, finished_at) VALUES ($1, 'completed', $2, 1000, 100, 0.0013, "
+                    "'provider_price', $3::jsonb, now())", HISTORY_AGENT, DUAL_MODEL,
+                    json.dumps({"pricing": {"input_usd_per_mtok": 1, "output_usd_per_mtok": 3}}))
+            rows = await conn.fetch("SELECT model, input_tokens, output_tokens, cost_usd, cost_source, metadata "
+                                    "FROM llm_records WHERE agent_id = $1 ORDER BY id", HISTORY_AGENT)
+            return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
+        finally:
+            await conn.close()
+
+    return asyncio.run(run())
+
+
+def _price_changed_history_kept(look: Look) -> str | None:
+    problem = _model_writes(look, (("looper_models", "update"),)) or _bound_model(
+        look, DUAL_PROFILE, DUAL_ACCOUNT, DUAL_MODEL, "anthropic-messages", DUAL_URL, input_price=5)
+    if problem:
+        return problem
+    historical = _price_history(look.database_url)
+    if historical != [{"model": DUAL_MODEL, "input_tokens": 1000, "output_tokens": 100, "cost_usd": 0.0013,
+                        "cost_source": "provider_price", "metadata": {
+                            "pricing": {"input_usd_per_mtok": 1, "output_usd_per_mtok": 3}}}]:
+        return "repricing changed historical tokens, cost or price snapshot"
+    # The other protocol's price must not be changed along with its homonym.
+    other = next(m for m in look.api.get("/api/registry")["models"] if m["name"] == DUAL_MODEL
+                 and m["protocol"] == "openai-chat")
+    if other["input_usd_per_mtok"] != 9:
+        return "repricing changed the other protocol's model"
+    if not any(a["tool"] == "looper_costs" and a["status"] == "ok" for a in look.actions()):
+        return "looper_costs did not read historical costs"
+    return None
 
 
 # The schedules dialog: a schedule listed, disabled and deleted.
@@ -515,8 +722,7 @@ def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, st
 
 
 def _make_light_profile(api: Api, project_id: str) -> None:
-    api.post("/api/agent-profiles", {"name": LIGHT, "runtime_id": "rt-claude-code",
-                                     "provider_id": "prov-claude-subscription", "model": "haiku"})
+    _subscription_profile(api, LIGHT, "haiku", None)
 
 
 def _restrict_planner_choices(api: Api, project_id: str) -> None:
@@ -766,8 +972,11 @@ def _not_relayed(look: Look) -> str | None:
     return None
 
 
-_PROVIDER = {"action": "register", "name": "eval-deepseek", "protocols": ["anthropic-messages"],
-             "base_url": "https://api.deepseek.com/anthropic", "models": ["deepseek-flash"]}
+_PROVIDER = {"action": "register", "name": "eval-deepseek", "vendor_type": "deepseek", "endpoints": [
+    {"protocol": "anthropic-messages", "base_url": "https://api.deepseek.com/anthropic"}]}
+_DEEPSEEK_MODEL = {"action": "create", "provider": "eval-deepseek", "name": "deepseek-flash",
+                   "protocol": "anthropic-messages"}
+_DUAL_REFERENCE = {"provider": DUAL_ACCOUNT, "name": DUAL_MODEL, "protocol": "anthropic-messages"}
 
 DIALOGS: tuple[Dialog, ...] = (
     Dialog("ask_project", (
@@ -835,8 +1044,54 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("登记一个 LLM provider：名字 eval-deepseek，协议 anthropic-messages，地址 "
             f"https://api.deepseek.com/anthropic，模型 deepseek-flash。它的 API key 是 {FAKE_KEY}。",
             _registered_without_the_key,
-            (("looper_providers", {**_PROVIDER, "api_key": FAKE_KEY}), ("looper_providers", _PROVIDER))),
+            (("looper_providers", _PROVIDER), ("looper_models", _DEEPSEEK_MODEL))),
     )),
+    Dialog("model_custom", (
+        Say(f"登记 custom 账户 {CUSTOM_ACCOUNT}，anthropic-messages endpoint 是 {CUSTOM_URL}。"
+            f"创建模型 {CUSTOM_MODEL}，协议 anthropic-messages，上下文 64000，输入每百万 token $1，输出 $3。"
+            f"再创建 Claude Code Agent Profile {CUSTOM_PROFILE} 引用它。密钥我在界面填，其他设置不变。",
+            _custom_model_created, (
+                ("looper_providers", {"action": "register", "name": CUSTOM_ACCOUNT, "vendor_type": "custom",
+                    "endpoints": [{"protocol": "anthropic-messages", "base_url": CUSTOM_URL}]}),
+                ("looper_models", {"action": "create", "provider": CUSTOM_ACCOUNT, "name": CUSTOM_MODEL,
+                    "protocol": "anthropic-messages", "context_window": 64000,
+                    "input_usd_per_mtok": 1, "output_usd_per_mtok": 3}),
+                ("looper_agent_profiles", {"action": "create", "name": CUSTOM_PROFILE, "runtime": "claude-code",
+                    "model": {"provider": CUSTOM_ACCOUNT, "name": CUSTOM_MODEL, "protocol": "anthropic-messages"}}),
+            )),
+    )),
+    Dialog("model_dual_protocol", (
+        Say(f"账户 {DUAL_ACCOUNT} 的 {DUAL_MODEL} 有两个协议。请给 Claude Code 创建 {DUAL_PROFILE}，"
+            "选择兼容的那个已有模型，不新建模型，不修改价格或其他设置。", _dual_protocol_selected, (
+                ("looper_models", {"action": "list", "provider": DUAL_ACCOUNT, "runtime": "claude-code"}),
+                ("looper_agent_profiles", {"action": "create", "name": DUAL_PROFILE, "runtime": "claude-code",
+                                            "model": _DUAL_REFERENCE}),
+            )),
+    ), seed=_seed_dual_models),
+    Dialog("model_login_runtime", (
+        Say("能用 Claude 订阅登录的 haiku 模型创建 OMP Agent Profile eval/cross-login 吗？"
+            "若不兼容请明确说明，不要改成 API key 账户或其他 runtime。", _model_refused, (
+                ("looper_agent_profiles", {"action": "list"}),
+                ("looper_agent_profiles", {"action": "create", "name": "eval/cross-login", "runtime": "omp",
+                    "model": {"provider": "prov-claude-subscription", "name": "haiku",
+                              "protocol": "anthropic-messages"}}),
+            )),
+    ), seed=_make_light_profile),
+    Dialog("model_missing_endpoint", (
+        Say("在账户 eval-no-messages 创建 anthropic-messages 模型 Missing.Model。"
+            "如果缺这个协议的 endpoint，请说明缺什么，不要猜地址、换协议或改账户。", _model_refused, (
+                ("looper_providers", {"action": "list"}),
+                ("looper_models", {"action": "create", "provider": "eval-no-messages", "name": "Missing.Model",
+                                    "protocol": "anthropic-messages"}),
+            )),
+    ), seed=_seed_missing_endpoint),
+    Dialog("model_price_history", (
+        Say(f"只把账户 {DUAL_ACCOUNT} 的 {DUAL_MODEL}（anthropic-messages）的输入价格改为每百万 token $5。"
+            "读取花费，确认已完成运行保留原费用和 token，其他协议模型的价格不变。", _price_changed_history_kept, (
+                ("looper_models", {"action": "update", "model": _DUAL_REFERENCE, "input_usd_per_mtok": 5}),
+                ("looper_costs", {"period": "today"}),
+            )),
+    ), seed=_seed_price_model),
     # How a task runs in its directory: in place only when the user says so, else the default.
     Dialog("workspace_in_place", (
         Say(f"在 {PROJECT} 项目里建一个任务：在工作目录里创建 hello.py，运行时打印 hello。直接在项目目录里改，"
@@ -1168,6 +1423,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             _make_schedule(api, project_id)
         if dialog.seed is not None:
             dialog.seed(api, project_id)
+        if dialog.id == "model_price_history":
+            _price_history(database_url, seed=True)
+        if dialog.id == "model_login_runtime":
+            _seed_login_runtime(database_url)
+        registry_before = api.get("/api/registry") if dialog.id in {
+            "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
         known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
         for say in dialog.says:
@@ -1180,7 +1441,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             before = _last_action(database_url)
             reply = _ask(api, session, text, timeout=timeout, **budget_args)
             problem = say.check(Look(api, task, reply, database_url, since, known,
-                                     fake=mode == "fake", runtime_root=runtime_root))
+                                     fake=mode == "fake", runtime_root=runtime_root,
+                                     registry_before=registry_before))
             trail = _trail(database_url, before)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
                      for a in trail]
@@ -1207,13 +1469,21 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             "calls": sum(len(t["calls"]) for t in turns), "duration_s": round(time.monotonic() - started, 1)}
 
 
+def _subscription_profile(api: Api, name: str, model: str, effort: str | None) -> dict[str, Any]:
+    """Reuse the saved subscription model; profiles contain only its reference."""
+    profiles = {p["name"]: p for p in api.get("/api/registry")["profiles"]}
+    if name in profiles:
+        return profiles[name]
+    return register_agent(api, {"runtime": {"type": "claude-code"},
+        "provider": {"provider_id": "prov-claude-subscription"},
+        "model": {"name": model, "protocol": "anthropic-messages"},
+        "agent": {"name": name, **({"effort": effort} if effort else {})}})
+
+
 def _manager_profile(api: Api, model: str, effort: str | None) -> dict[str, Any]:
     """Claude Code with ``model`` and ``effort`` for the Manager alone (its role layer), registered if missing."""
     name = f"claude-code/{model}" + (f" · {effort}" if effort else "")
-    profiles = {p["name"]: p for p in api.get("/api/registry")["profiles"]}
-    chosen = profiles.get(name) or api.post("/api/agent-profiles", {
-        "name": name, "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription", "model": model,
-        **({"effort": effort} if effort else {})})["profile"]
+    chosen = _subscription_profile(api, name, model, effort)
     api.put("/api/agent-settings/roles/manager", {"profile_id": chosen["profile_id"]})
     return chosen
 
