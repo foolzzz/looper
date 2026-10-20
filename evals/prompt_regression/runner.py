@@ -240,13 +240,41 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
     return script
 
 
+def install_gh(bin_dir: Path, *, diffs: dict[str, str] | None = None) -> Path:
+    """Always shadow gh: fixed PR metadata, fixture diffs keyed by owner/repo#number, no other operations."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "gh"
+    script.write_text(f"""#!{sys.executable}
+import json
+import sys
+
+diffs = {diffs or {}!r}
+args = sys.argv[1:]
+if (len(args) in (5, 7) and args[0] == "pr" and args[2].isdigit()
+        and int(args[2]) > 0 and args[3] == "--repo" and args[4]):
+    if len(args) == 7 and args[1] == "view" and args[5] == "--json" and args[6]:
+        print(json.dumps({{"headRefOid": "1" * 40, "state": "OPEN", "comments": [], "reviews": [],
+                          "statusCheckRollup": []}}))
+        sys.exit(0)
+    if len(args) == 5 and args[1] == "diff":
+        sys.stdout.write(diffs.get(args[4] + "#" + args[2], ""))
+        sys.exit(0)
+print("gh stub: unsupported", file=sys.stderr)
+sys.exit(1)
+""", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
 @contextmanager
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, notes_root: Path | None = None,
+                   gh_diffs: dict[str, str] | None = None,
                    startup_timeout: float = 90.0) -> Iterator[Api]:
     """``looper serve`` on a free port, with an ops file of its own in ``runtime_root`` naming ``database_url``;
     stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
     (the operator's notes)."""
+    install_gh(bin_dir, diffs=gh_diffs)
     port = free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
@@ -452,6 +480,7 @@ def run_task(
             api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
         api.post("/api/tasks/start", {"task_id": task_id})
         answered: dict[str, int] = {}  # each gate's script entries posted so far
+        resumed: dict[str, float] = {}  # each wait resumed by the runner, and when (database clock)
 
         chat_pending = task.chat is not None
         edit_pending = task.edit_requirement is not None
@@ -470,6 +499,8 @@ def run_task(
             elif time.monotonic() - started > timeout and not timed_out:
                 timed_out = True
                 api.post("/api/tasks/cancel", {"task_id": task_id})
+            elif resume_waits(api, task, task_id, detail, resumed, now=time.time() + clock_offset):
+                pass  # the user resumed a wait; read the Planner's progress at the next poll
             elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset):
                 pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
@@ -523,13 +554,34 @@ def run_task(
     if timed_out:
         result["problems"].append(f"cancelled after {timeout:g} s")
     row = {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
-           "timed_out": timed_out, "work_dir": str(work_dir)}
+           "timed_out": timed_out, "work_dir": str(work_dir), "wait_resumes": resumed}
     # A task cancelled at the cap or after its timeout is not scored: what it delivered says nothing of the model.
     if stopped_by_cap:
         return {**row, **error_row(ErrorClass.SPENDING_CAP, "cancelled at the spending cap")}
     if timed_out:
         return {**row, **error_row(ErrorClass.TIMEOUT, f"cancelled after {timeout:g} s")}
     return {**row, "outcome": (Outcome.PASS if result["success"] else Outcome.FAIL).value}
+
+
+def resume_waits(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any], resumed: dict[str, float], *,
+                 now: float) -> bool:
+    """Resume each waiting wait once after the task's delay from opened_at; unset leaves every wait alone."""
+    if task.wait_resume_after_s is None:
+        return False
+    posted = False
+    for wait in detail.get("waits") or []:
+        label = wait.get("step")
+        opened = metrics.timestamp(wait.get("opened_at"))
+        if (not label or label in resumed or wait.get("state") != "waiting" or opened is None
+                or now - opened < task.wait_resume_after_s):
+            continue
+        try:
+            api.post(f"/api/tasks/{task_id}/waits/{label}/resume", {})
+        except EvalError:
+            continue  # it may have stopped waiting meanwhile; read back at the next poll
+        resumed[label] = now
+        posted = True
+    return posted
 
 
 def _script(task: EvalTask) -> tuple[str, ...]:
@@ -601,6 +653,7 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform",
                 "roles_template_fits", "roles_template_unfit", "gate_ambiguous",
                 "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult",
+                "wait_pr_rereview", "wait_not_needed",
                 "planner_plan_file", "operator_notes", "operator_notes_stale",
                 "vault_closeout_keeps", "vault_closeout_nothing"),
 }
@@ -859,6 +912,7 @@ def run(
         with fresh_database(admin_url) as (database_url, clock_offset), running_server(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home, notes_root=notes_root,
+            gh_diffs={pr: diff for task in tasks for pr, diff in task.gh_pr_diffs.items()},
         ) as api:
             if vault_dir is not None:
                 api.put("/api/knowledge-vault", {"path": str(vault_dir), "writable": ["codex-mem"],

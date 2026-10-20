@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -913,6 +914,184 @@ class _Poster:
         return {}
 
 
+def test_wait_metrics_read_specs_states_and_direct_dependents(tmp_path: Path) -> None:
+    detail = {"status": "completed", "waits": [
+        {"step": "w1", "step_id": "wait-1", "opened_at": "2026-01-01T00:00:00Z", "state": "done",
+         "check": {"type": "github_pr"}},
+        {"step": "w2", "step_id": "wait-2", "opened_at": "2026-01-01T00:00:00Z", "state": "timed_out",
+         "check": {"type": "command"}},
+        {"step": "w3", "step_id": "wait-3", "opened_at": None, "state": "pending", "check": {"type": "github_pr"}},
+        {"step": "w4", "step_id": "wait-4", "opened_at": "2026-01-01T00:00:00Z", "state": "done", "check": None},
+    ], "steps": [
+        {"id": "s1", "depends_on": []}, {"id": "wait-1", "step_key": "w1", "depends_on": ["s1"]},
+        {"id": "s2", "depends_on": ["wait-1", "wait-2"]}, {"id": "s3", "depends_on": ["s2"]},
+        {"id": "s4", "depends_on": ["wait-3"]},
+    ]}
+    expected = {"waits_opened": 3, "wait_github_checks": 2, "wait_command_checks": 1,
+                "wait_dependents": 2, "waits_timed_out": 1}
+    result = metrics.task_metrics(detail=detail, activity=[], records=[], events={}, changes={}, work_dir=tmp_path,
+                                 check_problem=None, expect={f"min_{key}": value for key, value in expected.items()},
+                                 now=0.0)
+    assert {key: result[key] for key in expected} == expected
+    assert result["success"]
+    assert metrics.wait_metrics({}) == dict.fromkeys(expected, 0)
+
+
+@pytest.mark.parametrize(("expect", "observed", "problems"), [
+    ({"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1},
+     {"waits_opened": 1, "wait_github_checks": 1, "wait_dependents": 1}, []),
+    ({"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1}, {},
+     ["waits_opened 0 < 1", "wait_github_checks 0 < 1", "wait_dependents 0 < 1"]),
+    ({"max_waits_opened": 0}, {"waits_opened": 0}, []),
+    ({"max_waits_opened": 0}, {"waits_opened": 1}, ["waits_opened 1 > 0"]),
+])
+def test_wait_expectations(expect: dict[str, int], observed: dict[str, int], problems: list[str]) -> None:
+    assert metrics.flow_problems(expect, observed) == problems
+
+
+@pytest.mark.parametrize("fixture", [False, True])
+def test_gh_stub_answers_views_and_fixture_diffs_and_refuses_other_commands(tmp_path: Path, fixture: bool) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    stub = runner.install_gh(tmp_path / "bin", diffs=task.gh_pr_diffs if fixture else None)
+
+    def gh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(stub), *args], capture_output=True, text=True, timeout=5, check=False)
+
+    view = gh("pr", "view", "12", "--repo", "example-org/demo-service", "--json",
+              "headRefOid,state,comments,reviews,statusCheckRollup")
+    assert view.returncode == 0 and not view.stderr
+    assert json.loads(view.stdout) == {"headRefOid": "1" * 40, "state": "OPEN", "comments": [], "reviews": [],
+                                       "statusCheckRollup": []}
+    diff = gh("pr", "diff", "12", "--repo", "example-org/demo-service")
+    assert diff.returncode == 0 and not diff.stderr
+    assert diff.stdout == (task.gh_pr_diffs["example-org/demo-service#12"] if fixture else "")
+    assert gh("pr", "diff", "99", "--repo", "other/repo").stdout == ""
+    for args in [("pr", "merge", "12"), ("api", "user"), (),
+                 ("pr", "view", "12", "--repo", "example-org/demo-service"),
+                 ("pr", "diff", "12", "--repo", "example-org/demo-service", "--patch")]:
+        refused = gh(*args)
+        assert refused.returncode == 1 and refused.stdout == ""
+        assert refused.stderr.strip() == "gh stub: unsupported"
+
+
+def test_wait_resumes_after_delay_once_per_wait_and_only_when_opted_in() -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    api, resumed = _Poster(), {}
+    detail = {"waits": [{"step": "w1", "state": "waiting", "opened_at": "1970-01-01T00:01:40Z"},
+                        {"step": "w2", "state": "pending", "opened_at": None}]}
+    assert not runner.resume_waits(api, task, "t1", detail, resumed, now=104.9)
+    assert runner.resume_waits(api, task, "t1", detail, resumed, now=105.0)
+    assert not runner.resume_waits(api, task, "t1", detail, resumed, now=106.0)
+    detail["waits"][1].update(state="waiting", opened_at="1970-01-01T00:01:42Z")
+    assert runner.resume_waits(api, task, "t1", detail, resumed, now=107.0)
+    assert resumed == {"w1": 105.0, "w2": 107.0}
+    assert api.posted == [("/api/tasks/t1/waits/w1/resume", {}), ("/api/tasks/t1/waits/w2/resume", {})]
+    api = _Poster()
+    for state in ("pending", "ready", "done", "timed_out", "cancel_requested", "failed", "skipped"):
+        detail["waits"][0]["state"] = state
+        assert not runner.resume_waits(api, task, "t1", {"waits": detail["waits"][:1]}, {}, now=110.0)
+    detail["waits"][0]["state"] = "waiting"
+    no_resume = dataclasses.replace(task, wait_resume_after_s=None)
+    assert not runner.resume_waits(api, no_resume, "t1", detail, {}, now=110.0)
+    assert api.posted == []
+
+
+def test_a_failed_resume_is_not_recorded_and_a_later_poll_can_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), wait_resume_after_s=0)
+    detail = {"waits": [{"step": "w1", "state": "waiting", "opened_at": "1970-01-01T00:00:00Z"}]}
+    api, resumed = _Poster(), {}
+
+    def conflict(*_: Any) -> Any:
+        raise runner.EvalError("POST answered 409: wait changed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(api, "post", conflict)
+        assert not runner.resume_waits(api, task, "t1", detail, resumed, now=0.0)
+        assert resumed == {}
+    assert runner.resume_waits(api, task, "t1", detail, resumed, now=1.0)
+    assert resumed == {"w1": 1.0}
+    detail["waits"][0]["opened_at"] = None
+    assert not runner.resume_waits(api, task, "t1", detail, {}, now=2.0)
+
+
+def test_run_task_polls_waits_and_records_successful_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), check=lambda _: None)
+    wait = {"step": "w1", "step_id": "wait-1", "state": "waiting", "opened_at": "1970-01-01T00:01:40Z",
+            "check": {"type": "github_pr"}}
+    final = {"status": "completed", "waits": [{**wait, "state": "done", "outcome": "resumed"}],
+             "steps": [{"id": "wait-1", "step_key": "w1"}, {"id": "s2", "depends_on": ["wait-1"]}]}
+    details = iter([{"status": "waiting", "waits": [wait]}, {"status": "waiting", "waits": [wait]}, final, final])
+    posted: list[tuple[str, Any]] = []
+
+    def post(path: str, body: Any) -> dict[str, Any]:
+        posted.append((path, body))
+        return {"task_id": "t1", "project_id": "p1"} if path == "/api/tasks/create" else {}
+
+    def get(path: str, **_: Any) -> dict[str, Any]:
+        if path == "/api/tasks/t1":
+            return next(details)
+        if path == "/api/llm-records":
+            return {"records": []}
+        assert path == "/api/tasks/t1/activity"
+        return {"activity": []}
+
+    monkeypatch.setattr(runner.time, "time", lambda: 104.0)
+    result = runner.run_task(SimpleNamespace(post=post, get=get), task, tmp_path, timeout=10, poll=0,
+                             clock_offset=1.0)
+    assert result["outcome"] == "pass" and result["wait_dependents"] == 1
+    assert result["wait_resumes"] == {"w1": 105.0}
+    assert [path for path, _ in posted] == ["/api/tasks/create", "/api/tasks/start", "/api/tasks/t1/waits/w1/resume"]
+
+
+def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def stop_before_start() -> int:
+        assert (tmp_path / "bin" / "gh").is_file()
+        assert os.access(tmp_path / "bin" / "gh", os.X_OK)
+        raise RuntimeError("server deliberately disabled")
+
+    monkeypatch.setattr(runner, "free_port", stop_before_start)
+    with pytest.raises(RuntimeError, match="server deliberately disabled"), runner.running_server(
+        database_url="unused", runtime_root=tmp_path / "runtime", bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "server.log",
+    ):
+        pytest.fail("no server may start")
+
+
+@pytest.mark.parametrize("task_id", ["wait_pr_rereview", "wait_not_needed"])
+def test_fake_wait_plans_parse_and_delivered_files_are_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task_id: str,
+) -> None:
+    task = next(t for t in TASKS if t.id == task_id)
+    assert task_id in {t.id for t in runner.select_tasks(["planner"])}
+    messages = iter([json.dumps({"message": {"content": "[PLAN] Plan the task"}}), None])
+    replies: list[str] = []
+    monkeypatch.setattr(fake_claude, "_answer", lambda _session, text, _cost, **_: replies.append(text))
+    fake_claude._planner(task.fake, [], SimpleNamespace(readline=lambda: next(messages)))
+    parsed = parse_plan(replies[0])
+    assert [step.id for step in parsed.steps] == (["s1", "w1", "s2"] if task_id == "wait_pr_rereview"
+                                                else ["s1", "s2"])
+    if task_id == "wait_pr_rereview":
+        assert parsed.steps[1].wait is not None
+        assert parsed.steps[1].wait.check.row() == task.fake["plan"][1]["check"]
+        assert parsed.steps[1].wait.max_wait_seconds == 3600
+        assert parsed.steps[1].wait.every_seconds == 600
+        assert parsed.steps[2].depends_on == ("w1",)
+    else:
+        assert all(step.wait is None for step in parsed.steps)
+    assert task.check(tmp_path) is not None
+    for attempts in task.fake["attempts"].values():
+        for name, content in attempts[0]["files"].items():
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+    assert task.check(tmp_path) is None
+    if task_id == "wait_pr_rereview":
+        (tmp_path / "rereview.md").unlink()
+    else:
+        (tmp_path / "result.txt").write_text("wrong")
+    assert task.check(tmp_path) is not None
+
+
 def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out() -> None:
     task = next(t for t in TASKS if t.id == "gate_ambiguous")
     api, answered = _Poster(), {}
@@ -1369,6 +1548,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
     assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+                    "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
                     "parallel_parts": (3, 0, 0, 0),
                     "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
                     "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
@@ -1396,6 +1576,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
              for t in by_id}
     assert shape == {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+                     "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
                      "parallel_parts": (1, 0, 2),
                      "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
                      "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
@@ -1456,6 +1637,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     assert gates == {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
                      "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
     assert by_id["gate_discoverable"]["gates_opened"] == 0
+    assert by_id["wait_pr_rereview"]["waits_opened"] == 1
+    assert set(by_id["wait_pr_rereview"]["wait_resumes"]) == {"w1"}
+    assert all(row["waits_opened"] == 0 and not row["wait_resumes"]
+               for task_id, row in by_id.items() if task_id != "wait_pr_rereview")
     assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
     # The stand-in is refused nothing: the denials are Claude Code's.
     assert all(by_id[t]["planner_denials"] == 0 for t in by_id)

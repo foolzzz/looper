@@ -51,6 +51,10 @@ class EvalTask:
     user_gates: bool = False
     gate_script: tuple[str, ...] = ()
     gate_reply_after_s: float = 0.0
+    # Resume each waiting wait after this delay from opened_at; None leaves waits alone.
+    wait_resume_after_s: float | None = None
+    # Fixed diffs returned by the server's gh stand-in, keyed by owner/repo#number (empty for other PRs).
+    gh_pr_diffs: dict[str, str] = field(default_factory=dict)
     # The disciplines its work spans, each of which should get a role of its own (discipline_roles).
     disciplines: tuple[Discipline, ...] = ()
     # Where its steps that run side by side work (``step_workspaces``), over the run's ``--step-workspaces``: with
@@ -67,7 +71,8 @@ class EvalTask:
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script; min_room_messages,
     # max_room_messages, max_room_unanswered, min_room_consults, max_planner_modified_files,
-    # min_vault_writes, max_vault_writes, max_vault_outside, min_vault_closeout
+    # min_vault_writes, max_vault_writes, max_vault_outside, min_vault_closeout,
+    # min_waits_opened, max_waits_opened, min_wait_github_checks, min_wait_dependents
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
     # The operator's Claude Code notes for its working directory (file name -> text, MEMORY.md the index); the
@@ -105,6 +110,10 @@ def _equals(name: str, expected: str) -> Callable[[Path], str | None]:
         return None if actual == expected else f"{name} holds {actual[:40]!r}, expected {expected!r}"
 
     return check
+
+
+def _exists(name: str) -> Callable[[Path], str | None]:
+    return lambda work_dir: None if (work_dir / name).is_file() else f"{name} is missing"
 
 
 def _numbers_and_sum(work_dir: Path) -> str | None:
@@ -205,6 +214,21 @@ exit 1
 """
 
 
+_PR_DIFF = """\
+diff --git a/totals.py b/totals.py
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/totals.py
+@@ -0,0 +1,5 @@
++def total(values):
++    result = 0
++    for i in range(len(values) - 1):
++        result += values[i]
++    return result
+"""
+
+
 # Two steps, the first slow enough that a change made once the plan exists reaches the Planner before the second
 # starts; the change is to the second step.
 _TWO_STEPS = ("Work in two steps, the second depending on the first. Step 1: run `sleep 20`, then create part1.txt "
@@ -245,6 +269,54 @@ TASKS: tuple[EvalTask, ...] = (
         fake={
             "plan": [_step("s1", "Create hello.txt containing `hello world`.", ["hello.txt holds hello world"])],
             "attempts": {"s1": [{"status": "completed", "files": {"hello.txt": "hello world\n"}}]},
+        },
+    ),
+    EvalTask(
+        id="wait_pr_rereview",
+        requirement="Review pull request #12 of example-org/demo-service: read its diff with "
+                    "`gh pr diff 12 --repo example-org/demo-service` and write your findings to findings.md. "
+                    "The author will push fixes to the pull request after your review; once a new commit is "
+                    "pushed, review the pull request again and write the result to rereview.md.",
+        check=_all(_exists("findings.md"), _exists("rereview.md")),
+        gh_pr_diffs={"example-org/demo-service#12": _PR_DIFF},
+        wait_resume_after_s=5,
+        expect={"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1},
+        fake={
+            "plan": [
+                _step("s1", "Read gh pr diff 12 --repo example-org/demo-service and write findings.md.",
+                      ["findings.md records the review"]),
+                {"id": "w1", "kind": "wait", "topic": "The author pushes fixes", "depends_on": ["s1"],
+                 "max_wait_seconds": 3600, "every_seconds": 600,
+                 "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                           "ready_when": "head_changed"}},
+                _step("s2", "Read the pull request diff again and write rereview.md.", ["rereview.md exists"],
+                      depends_on=["w1"]),
+            ],
+            "attempts": {
+                "s1": [{"status": "completed", "files": {"findings.md": "The loop skips the last value.\n"}}],
+                "s2": [{"status": "completed", "files": {"rereview.md": "The diff still skips the last value.\n"}}],
+            },
+        },
+    ),
+    EvalTask(
+        id="wait_not_needed",
+        requirement="Write build.sh, which writes out/app.txt containing `built`. Then, once the build has run, "
+                    "check that out/app.txt contains `built` and write `ok` to result.txt.",
+        check=_equals("result.txt", "ok"),
+        expect={"max_waits_opened": 0},
+        fake={
+            "plan": [
+                _step("s1", "Write build.sh to write built to out/app.txt, then run it.",
+                      ["build.sh exists and out/app.txt holds built"]),
+                _step("s2", "Check out/app.txt contains built and write ok to result.txt.",
+                      ["result.txt holds ok"], depends_on=["s1"]),
+            ],
+            "attempts": {
+                "s1": [{"status": "completed", "files": {
+                    "build.sh": "#!/bin/sh\nset -eu\nmkdir -p out\nprintf 'built\\n' > out/app.txt\n",
+                    "out/app.txt": "built\n"}}],
+                "s2": [{"status": "completed", "files": {"result.txt": "ok\n"}}],
+            },
         },
     ),
     EvalTask(

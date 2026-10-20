@@ -7,7 +7,9 @@ It speaks Claude Code's stream-json like the real CLI and plays the role the
 agent system started it in:
 
 - the Planner (a resident process; its task section has neither of the
-  markers below) answers each user turn by its kind: [PLAN] with the task's scripted plan; [DECISION] with
+  markers below) answers each user turn by its kind: [PLAN] with the task's scripted plan, including typed
+  wait steps in ``wait_pr_rereview`` and only work steps in ``wait_not_needed`` (the runner resumes waits);
+  [DECISION] with
   what a careful Planner decides from the allowed decisions (accept, else
   review a completed step that needs one, else retry a failed one, else fail),
   with a progress note, and an accept with the task's final summary;

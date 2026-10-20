@@ -210,6 +210,20 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
     }
 
 
+def wait_metrics(detail: Mapping[str, Any]) -> dict[str, int]:
+    """Waits opened, their typed checks, directly dependent steps (once per step), and current timeouts."""
+    waits = detail.get("waits") or []
+    step_ids = {wait["step_id"] for wait in waits if wait.get("step_id")}
+    return {
+        "waits_opened": sum(1 for wait in waits if wait.get("opened_at") is not None),
+        "wait_github_checks": sum(1 for wait in waits if (wait.get("check") or {}).get("type") == "github_pr"),
+        "wait_command_checks": sum(1 for wait in waits if (wait.get("check") or {}).get("type") == "command"),
+        "wait_dependents": sum(1 for step in detail.get("steps") or []
+                               if step_ids.intersection(step.get("depends_on") or [])),
+        "waits_timed_out": sum(1 for wait in waits if wait.get("state") == "timed_out"),
+    }
+
+
 def gate_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]], *, now: float) -> dict[str, int]:
     """The task's user gates and how they went: how many opened (``gates_opened``), the [GATE] turns whose reply was
     taken (``gate_turns``), how they closed (``gates_passed``, of them ``gates_ended_by_user``; ``gates_cancelled``),
@@ -545,6 +559,7 @@ def task_metrics(
         # The user gates the Planner opened, and how they went.
         **gate_metrics(detail, records, now=now),
         "gate_asks_beyond_script": gate_asks_beyond_script,
+        **wait_metrics(detail),
         # What the task's agents did in its room.
         **room_metrics(detail, activity, events),
         # What its runtime refused the read-only Planner.

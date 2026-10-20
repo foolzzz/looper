@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs thirty-seven small tasks through a disposable `looper serve` (a new
+It runs thirty-nine small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -37,6 +37,8 @@ directories), one at a time over the HTTP API:
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
+| `wait_pr_rereview` | review a pull request, then review it again after its author pushes fixes: at least one opened wait with a `github_pr` check and a step depending on a wait; `findings.md` and `rereview.md` exist. The fixed diff has a loop that skips the last value; the runner resumes the wait after 5 s |
+| `wait_not_needed` | write and run `build.sh`, then check its `out/app.txt` and write `ok` to `result.txt`: the build is the task's own work, so no wait opens (`max_waits_opened` 0) |
 | `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
 | `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
 | `vault_closeout_keeps` | the project has the knowledge vault on; adding multiplication uncovers a test runner that needs `CALC_LOCALE=C`: the Planner's closeout must keep that fact in a committed note under `codex-mem/` |
@@ -69,7 +71,10 @@ depend on one same step (`interface_dependents`), the user gates the Planner ope
 passed, `gates_passed`, of them ended by the user, `gates_ended_by_user`; cancelled, `gates_cancelled`; the
 assumptions their summaries stated, `assumptions_stated`; the steps the closing turns added, dropped or stopped,
 `gate_plan_changes`; Worker runs while a gate waited, `gate_parallel_runs`; Worker and Reviewer runs that read a
-gate's conclusion, `conclusion_reads`), what the agents did in the task's agent room (`room_messages`, Looper's notices
+gate's conclusion, `conclusion_reads`), the waits whose `opened_at` is set (`waits_opened`), waits with a
+`github_pr` or `command` check (`wait_github_checks`, `wait_command_checks`, including unopened waits), steps
+directly depending on at least one wait (`wait_dependents`, once per step), waits currently in `timed_out`
+(`waits_timed_out`), what the agents did in the task's agent room (`room_messages`, Looper's notices
 and escalations apart; of them `room_questions`, `room_unanswered` and `room_interface`; `room_escalations`;
 `room_reminders`, the reminders Claude Code runs got; `room_refused`, the posts the room refused; and
 `room_tool_calls`, the runs' calls of the room's tools, reads included; `room_consults`, the consults of seats whose run
@@ -136,6 +141,20 @@ skipped, and 2 when the run could not start or stopped midway.
 Both modes need a PostgreSQL server where the eval may create and drop a
 database: pass `--pg-url` (any database on the server except `loopx`) or set
 `LOOPER_EVAL_DATABASE_URL`.
+
+Every eval server, in fake and real mode (dialogs included), installs a Python `gh` stub in its `bin_dir`,
+first on `PATH`: evals never call the real GitHub CLI. It accepts only
+`gh pr view <n> --repo <r> --json <fields>` and `gh pr diff <n> --repo <r>`.
+Views always return head `1111111111111111111111111111111111111111`, state `OPEN`, and empty comments,
+reviews and checks. Diffs come from the task's `gh_pr_diffs` fixture (`owner/repo#number` keys), or are empty
+by default. Every other command exits 1 with `gh stub: unsupported`.
+
+Only tasks with `wait_resume_after_s` set let the runner operate on waits: after that many seconds from
+`opened_at`, each wait still in `waiting` is resumed through `POST /api/tasks/:id/waits/:step/resume`, once.
+Each row records successful resumes in `wait_resumes` (step label to timestamp, on the database clock).
+The stub's head and diff stay fixed; this scripted user action lets the re-review run without GitHub activity.
+With the field unset (`None`), the runner leaves waits alone. Flow expectations include `min_waits_opened`,
+`max_waits_opened`, `min_wait_github_checks` and `min_wait_dependents`.
 
 ### Fake mode: the flow, free
 
@@ -225,7 +244,7 @@ whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `roles_template_unfit`, `gate_ambiguous`,
 `gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface`,
 `room_consult`, `planner_plan_file`, `operator_notes`, `operator_notes_stale`,
-`vault_closeout_keeps` and `vault_closeout_nothing` (22 tasks); a set is
+`vault_closeout_keeps`, `vault_closeout_nothing`, `wait_pr_rereview` and `wait_not_needed` (24 tasks); a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
@@ -282,10 +301,10 @@ ones, with `--reps 2` and haiku (`--tasks a,b` or a task set, `--dialogs a,b`):
 Do not rerun after a change the model cannot see.
 
 Once before a release, on the release candidate (`main` after every merge):
-haiku on all 37 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
+haiku on all 39 tasks, `run --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
 --case-budget-usd 2.0 --total-cap-usd 20` (the earlier baseline cost about $12.32); opus,
 `run --mode real --model opus --reps 3 --tasks planner --jobs 4
---max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (22 tasks;
+--max-budget-usd 3.0 --case-budget-usd 6.0 --total-cap-usd 40` (24 tasks;
 the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the opus xhigh Manager,
 `dialogs --mode real --reps 3 --jobs 4 --max-budget-usd 1.0
 --case-budget-usd 1.0 --total-cap-usd 8` (about $4.36) and
