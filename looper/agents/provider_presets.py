@@ -12,10 +12,11 @@ APIs. Prices are not part of a preset: the built-in table (``runtimes.pricing``)
 prices these models, and the provider's catalog can override it.
 
 The URLs, models and variables come from each vendor's official documentation
-(``docs``), read on 2026-10-14. OpenCode and Sub2API were read on 2026-10-20.
-``[1m]`` asks Claude Code for a model's 1M context window, as the vendors'
-Claude Code guides write it; only Anthropic-format APIs use it. OpenAI-format
-APIs use the suffix-free names and keep the catalog's context window.
+(``docs``), read on 2026-10-14. DeepSeek, OpenCode and Sub2API were read on
+2026-10-20. ``[1m]`` asks Claude Code for a model's 1M context window, as the
+vendors' Claude Code guides write it; only Anthropic-format APIs use it.
+OpenAI-format APIs use the suffix-free names and keep the catalog's context
+window.
 """
 
 from __future__ import annotations
@@ -63,6 +64,15 @@ class ProviderPreset:
     env: tuple[tuple[str, str], ...]  # what the vendor's Claude Code guide sets beside the model mapping
     docs: tuple[str, ...]
     note: str = ""
+
+    def models_for(self, api: PresetApi) -> tuple[PresetModel, ...]:
+        """The models a provider of ``api`` lists: that API's catalog, or the preset's when the API lists none.
+
+        An Anthropic-format catalog keeps Claude Code's ``[1m]`` names. An OpenAI-format catalog is the
+        suffix-free names when the preset sets one, and an endpoint that serves one model family lists only
+        that family.
+        """
+        return self.models if api.models is None else api.models
 
     def view(self) -> dict[str, Any]:
         return {
@@ -149,11 +159,12 @@ PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
         "deepseek", "DeepSeek", "deepseek",
         (PresetApi(_ANTHROPIC, "https://api.deepseek.com/anthropic", _DEEPSEEK_MODELS),
-         PresetApi(_CHAT, "https://api.deepseek.com", _without_context_suffix(_DEEPSEEK_MODELS))),
+         PresetApi(_OPENAI, "https://api.deepseek.com", _without_context_suffix(_DEEPSEEK_MODELS))),
         _DEEPSEEK_MODELS,
         (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "786432"),),
         ("https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code/",
-         "https://api-docs.deepseek.com/guides/anthropic_api", "https://api-docs.deepseek.com/"),
+         "https://api-docs.deepseek.com/guides/anthropic_api",
+         "https://api-docs.deepseek.com/guides/responses_api/", "https://api-docs.deepseek.com/"),
     ),
     ProviderPreset(
         "kimi-moonshot-cn", "Kimi (Moonshot, China)", "kimi",

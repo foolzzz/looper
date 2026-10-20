@@ -162,6 +162,9 @@ def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
     _run(_test, monkeypatch)
 
 
+_DEEPSEEK_RESPONSES = "https://api-docs.deepseek.com/guides/responses_api/"
+
+
 def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents.provider_presets import api_models
 
@@ -171,17 +174,64 @@ def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pyt
                                                                           "kimi-moonshot-cn", "kimi-moonshot", "cpa"}
         for preset in registry["provider_presets"]:
             for n, api in enumerate(preset["apis"]):
+                # ``[1m]`` is Claude Code's mark. An OpenAI-format API lists the name without it.
+                # An API with no catalog of its own uses the preset's models.
                 anthropic = "anthropic-messages" in api["protocols"]
+                models = api_models(preset, api)
+                if not anthropic:
+                    assert all("[" not in model["name"] and "[" not in (model["background_model"] or "")
+                               for model in models), preset["preset_id"]
                 provider = (await _ok("POST", "/api/providers", {
                     "name": f"{preset['preset_id']}-{n}", "protocols": api["protocols"], "base_url": api["base_url"],
-                    "auth": "api_key", "api_key": KEY, "models": api_models(preset, api),
+                    "auth": "api_key", "api_key": KEY, "models": models,
                     "env": preset["env"] if anthropic else []}))["provider"]
                 if not anthropic:
                     continue
-                for model in api_models(preset, api):
+                for model in models:
                     answer = await _profile(provider["provider_id"], model["name"])
                     assert answer["warnings"] == [], (preset["preset_id"], model["name"])
                     assert answer["profile"]["cost"] == {"source": "provider_price", "equivalent": False, "unpriced": []}
+
+    _run(_test, monkeypatch)
+
+
+def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_each_protocol(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    fake_claude(tmp_path / "codex", (
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('codex-cli 0.162.0')\n    sys.exit(0)\n"
+        "sys.exit(9)\n"
+    ))
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    async def _test(_pool: Any) -> None:
+        preset = next(p for p in (await _ok("GET", "/api/registry"))["provider_presets"]
+                      if p["preset_id"] == "deepseek")
+        assert [(api["base_url"], api["protocols"], [model["name"] for model in api["models"]])
+                for api in preset["apis"]] == [
+            ("https://api.deepseek.com/anthropic", ["anthropic-messages"],
+             ["deepseek-flash[1m]", "deepseek-v4-pro[1m]"]),
+            ("https://api.deepseek.com", ["openai-responses", "openai-chat"],
+             ["deepseek-flash", "deepseek-v4-pro"]),
+        ]
+        assert _DEEPSEEK_RESPONSES in preset["docs"]
+        codex = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]["runtime_id"]
+        for api in preset["apis"]:
+            anthropic = "anthropic-messages" in api["protocols"]
+            provider = (await _ok("POST", "/api/providers", {
+                "name": "deepseek-anthropic" if anthropic else "deepseek-openai",
+                "protocols": api["protocols"], "base_url": api["base_url"], "auth": "api_key", "api_key": KEY,
+                "models": api["models"], "env": preset["env"] if anthropic else []}))["provider"]
+            assert [model["name"] for model in provider["models"]] == [model["name"] for model in api["models"]]
+            runtime = "rt-claude-code" if anthropic else codex
+            for model in api["models"]:
+                answer = await _ok("POST", "/api/agent-profiles", {
+                    "name": f"{provider['name']}/{model['name']}", "runtime_id": runtime,
+                    "provider_id": provider["provider_id"], "model": model["name"]})
+                assert answer["warnings"] == [], model["name"]
+                assert answer["profile"]["cost"] == {
+                    "source": "provider_price", "equivalent": False, "unpriced": []}
 
     _run(_test, monkeypatch)
 
