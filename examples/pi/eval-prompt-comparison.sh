@@ -15,6 +15,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 python3 - "$ROOT" <<'PY'
+import asyncio
 import json
 import os
 import signal
@@ -26,6 +27,8 @@ from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+from looper.agents import proc_tree
 
 root = Path(sys.argv[1])
 state = root / ".local/pi-eval-prompt-comparison"
@@ -111,22 +114,28 @@ def bounded(argv, log):
     if seconds <= 0:
         fail("deadline: remaining tiers/comparisons 未执行", 124)
     with log.open("w", encoding="utf-8") as out:
-        try:
-            process = subprocess.Popen(argv, cwd=root, env=child, stdout=out, stderr=subprocess.STDOUT,
-                                       start_new_session=True)
-        except OSError:
-            fail("runner/compare executable unavailable")
-        try:
-            return process.wait(timeout=seconds)
-        except subprocess.TimeoutExpired:
-            # SIGKILL the whole group even if its parent exits on SIGTERM.
-            for sig in (signal.SIGTERM, signal.SIGKILL):
+        async def run():
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *argv, cwd=root, env=child, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError:
+                fail("runner/compare executable unavailable")
+            try:
+                return await asyncio.wait_for(process.wait(), timeout=seconds)
+            except asyncio.TimeoutError:
+                # Capture independent agent groups before TERM orphans them;
+                # allow cleanup, then KILL every surviving descendant group.
                 try:
-                    os.killpg(process.pid, sig)
-                except ProcessLookupError:
-                    pass
-            process.wait()
-            fail("deadline: process group stopped; remaining tiers/comparisons 未验证", 124)
+                    await proc_tree.end(process, label="eval deadline")
+                finally:
+                    # Keep the own-group fallback if process listing fails.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                fail("deadline: process tree stopped; remaining tiers/comparisons 未验证", 124)
+
+        return asyncio.run(run())
 
 
 def read_report(path, phase, ids, *, model=None):

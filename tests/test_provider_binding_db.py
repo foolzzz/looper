@@ -114,8 +114,10 @@ def test_pi_bridge_reads_the_materialized_scoped_library_after_loading_settings(
             library = await ops.library_with_server(library, tmp_path, token)
         launch = Launch(settings=settings, library=library, role=AgentType(role))
         assert not {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN"} & dict(launch.env).keys()
-        assert launch.environment()["LOOPER_PI_AGENT_URL"] == url
-        assert launch.environment()["LOOPER_PI_AGENT_TOKEN"] == token
+        environment = launch.environment()
+        assert environment["LOOPER_AGENT_URL"] == url
+        assert environment["LOOPER_AGENT_TOKEN"] == token
+        assert not {"LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN"} & environment.keys()
         assert token not in json.dumps(launch.record())
         assert url not in json.dumps(launch.record())
 

@@ -24,10 +24,13 @@ ROOT = Path(__file__).resolve().parents[1]
 RESOURCE = "looper/agents/runtimes/pi_extension/looper.ts"
 
 
-@pytest.mark.parametrize("kind", ["responses", "deepseek"])
+@pytest.mark.parametrize("kind", ["responses", "deepseek", "prompt-comparison"])
 @pytest.mark.parametrize("parent_exits", [True, False])
-def test_eval_deadline_kills_term_ignoring_child(tmp_path: Path, kind: str, parent_exits: bool) -> None:
-    """The deadline must clean the group even when its leader exits on SIGTERM."""
+@pytest.mark.parametrize("separate_group", [False, True])
+def test_eval_deadline_kills_term_ignoring_child(
+    tmp_path: Path, kind: str, parent_exits: bool, separate_group: bool,
+) -> None:
+    """Clean every agent group, even after the runner exits and orphans it."""
     from fake_claude import fake_claude
 
     scripts = tmp_path / "examples/pi"
@@ -35,6 +38,8 @@ def test_eval_deadline_kills_term_ignoring_child(tmp_path: Path, kind: str, pare
     for name in ("eval-common.sh", f"eval-{kind}.sh"):
         shutil.copy2(ROOT / "examples/pi" / name, scripts / name)
     shutil.copytree(ROOT / "evals/agents", tmp_path / "evals/agents")
+    # The copied entry points run outside the checkout, but use its process cleanup.
+    (tmp_path / "looper").symlink_to(ROOT / "looper", target_is_directory=True)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     child = '''
@@ -55,10 +60,12 @@ def terminate(*_):
 signal.signal(signal.SIGTERM, terminate if {parent_exits!r} else signal.SIG_IGN)
 Path('parent.pid').write_text(str(os.getpid()))
 subprocess.Popen([sys.executable, '-c', {child!r}],
+                 start_new_session={separate_group!r},
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).wait()
 ''')
     env = {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "HOME": str(tmp_path / "home"),
            "PI_EVAL_API_KEY": "test-only-key", "DEEPSEEK_API_KEY": "test-only-key",
+           "ANTHROPIC_API_KEY": "test-only-key",
            "PI_EVAL_BASE_URL": "http://127.0.0.1:9/v1", "PI_EVAL_TOTAL_CAP_USD": "2.5",
            "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "2",
            "LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/disposable_eval"}
@@ -71,8 +78,12 @@ subprocess.Popen([sys.executable, '-c', {child!r}],
         assert (tmp_path / "child.pid").is_file(), "child must be ready before the deadline"
         if parent_exits:
             assert (tmp_path / "parent.terminated").read_text() == "SIGTERM"
-        gaps = (tmp_path / f".local/pi-eval-{kind}/gaps.txt").read_text()
-        assert "gap: deadline: stopped before the runner finished" in gaps
+        if kind == "prompt-comparison":
+            gaps = (tmp_path / ".local/pi-eval-prompt-comparison/latest/ledger.txt").read_text()
+        else:
+            gaps = (tmp_path / f".local/pi-eval-{kind}/gaps.txt").read_text()
+            assert "gap: deadline: stopped before the runner finished" in gaps
+        assert "deadline" in gaps
         # A kernel-held lock proves the child has died, including on systems
         # where an orphan's zombie PID remains until the system reaps it.
         with (tmp_path / "child.lock").open() as lock:
@@ -85,11 +96,19 @@ subprocess.Popen([sys.executable, '-c', {child!r}],
                     assert time.monotonic() < until, "SIGTERM-ignoring child survived the deadline"
                     time.sleep(0.02)
     finally:
-        parent = tmp_path / "parent.pid"
-        if parent.exists():
+        # Also clean independent groups when a regression makes the assertion fail.
+        for name in ("parent", "child"):
+            pid_file = tmp_path / f"{name}.pid"
+            if not pid_file.exists():
+                continue
+            pid = int(pid_file.read_text())
             try:
-                os.killpg(int(parent.read_text()), signal.SIGKILL)
-            except ProcessLookupError:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
                 pass
 
 
@@ -102,6 +121,7 @@ def test_eval_dialogs_receive_only_verified_remaining_budget(tmp_path: Path, kin
     for name in ("eval-common.sh", f"eval-{kind}.sh"):
         shutil.copy2(ROOT / "examples/pi" / name, scripts / name)
     shutil.copytree(ROOT / "evals/agents", tmp_path / "evals/agents")
+    (tmp_path / "looper").symlink_to(ROOT / "looper", target_is_directory=True)
     # Unrelated results from earlier invocations cannot determine this run's spend.
     runs = tmp_path / "evals/runs"
     runs.mkdir()

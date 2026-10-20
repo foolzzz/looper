@@ -172,33 +172,34 @@ run_bounded() {
     return 124
   fi
   python3 - "$remain" "$@" <<'PY'
+import asyncio
 import os
 import signal
-import subprocess
 import sys
+
+from looper.agents import proc_tree
 
 remaining = float(sys.argv[1])
 command = sys.argv[2:]
-process = subprocess.Popen(command, start_new_session=True)
-try:
-    code = process.wait(timeout=remaining)
-except subprocess.TimeoutExpired:
+
+async def run():
+    process = await asyncio.create_subprocess_exec(*command, start_new_session=True)
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        pass
-    # The leader may exit on SIGTERM while its children keep running.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    process.wait()
-    raise SystemExit(124)
-raise SystemExit(code if code is not None else 1)
+        return await asyncio.wait_for(process.wait(), timeout=remaining)
+    except asyncio.TimeoutError:
+        # Snapshot before TERM: real agents lead independent process groups,
+        # which are no longer descendants once the runner/server exits.
+        try:
+            await proc_tree.end(process, label="eval deadline")
+        finally:
+            # Keep the own-group fallback even when process listing is unavailable.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        return 124
+
+raise SystemExit(asyncio.run(run()))
 PY
 }
 
