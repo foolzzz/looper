@@ -135,7 +135,7 @@ def test_a_gate_is_refused_where_the_task_may_not_open_one_with_what_to_do_inste
     ({"agenda": [{"question": "?", "status": "open"}]}, "steps[0].agenda[0] has unknown keys: status"),
     ({"agenda": [{"question": "?", "options": ["a"] * 7}]}, "steps[0].agenda[0].options has 7 options; at most 6"),
     ({"topic": ""}, "steps[0].topic must be a non-empty string"),
-    ({"kind": "review"}, 'steps[0].kind must be "gate" or "work" (or left out for a work step); got \'review\''),
+    ({"kind": "review"}, 'steps[0].kind must be "gate", "wait" or "work" (or left out for a work step); got \'review\''),
 ])
 def test_a_gate_step_of_the_wrong_shape_is_refused(change: dict[str, Any], error: str) -> None:
     with pytest.raises(ProtocolError, match=re.escape(error)):
@@ -332,17 +332,15 @@ def test_a_chat_reply_may_cancel_a_gate_and_depend_on_it_in_a_replan() -> None:
     assert reply.gates[0].action is GateAction.CANCEL and [s.id for s in reply.steps] == ["s3"]
 
 
-# What the contract was before gates, for each combination (sha256): with gates off it is byte for byte the same.
-# The roles-on ones are the contract since a step lists its review roles (review_roles), whose role paragraph
-# replaced the single review_role's; with roles off it is as before.
-_BEFORE = {(False, 2): "eaf7d704210243ea908d0dac3b50ab65a5597f1bb35e609ef6eff5ebd4e3bed8",
-           (False, 0): "e8092df608ce4226b94bb019020297fccaed774a35b5b331c4adb0616669e77b",
-           (True, 2): "df7c5af5919c4f2c13ad13df608ac9693917f17ff1d632aab272222232bc642d",
-           (True, 5): "f3b94368da4eb0384c0c43f9a27dca77b88225f359f1e757555dea14449529de"}
+# The contract without gates, including the wait rules every task gets (sha256).
+_BEFORE = {(False, 2): "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588",
+           (False, 0): "712156fe0550eb002ca39c24338baea1ac3d7823238a8d96d927394fe689c19a",
+           (True, 2): "a444fa4037d257bf9266f5622305f8e85b78733be3b1c0e2e0f2fcf9455c6cc9",
+           (True, 5): "18001adf2c88c900972793992c652815fcbb3dfb373ae1f74729d5f0d9b4205f"}
 
 
 @pytest.mark.parametrize(("roles", "retries"), sorted(_BEFORE))
-def test_the_contract_without_gates_is_the_contract_before_them(roles: bool, retries: int) -> None:
+def test_the_contract_without_gates_keeps_its_shape_and_wait_rules(roles: bool, retries: int) -> None:
     text = reply_contract(retries, roles=roles)
     assert hashlib.sha256(text.encode()).hexdigest() == _BEFORE[(roles, retries)]
     assert "[GATE]" not in text and '"kind": "gate"' not in text

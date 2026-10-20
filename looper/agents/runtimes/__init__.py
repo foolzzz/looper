@@ -370,6 +370,11 @@ class RuntimeAdapter(ABC):
         the adapter says otherwise."""
         return []
 
+    def failure_detail(self, result_event: dict[str, Any] | None, *, launch: Launch,
+                       command: list[str], pid: int | None = None) -> str | None:
+        """A safe, bounded explanation of a failed run, when the runtime provides one."""
+        return None
+
     # --- Its own login ---
 
     # The models the Agent Profile form suggests with the runtime's own login (any model is taken).

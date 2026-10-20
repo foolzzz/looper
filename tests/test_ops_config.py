@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from looper import ops_config as ops
 from looper.ops_config import Flags, OpsConfigError, Origin
+from looper.agents.ops import Call, OpError, Turn, check_arguments
+from looper.agents.ops import config as manager_config
+from looper.agents.provider_presets import PRESETS, presets_view
 
 SECRET = "Sekr1t-pw"
 DATABASE_URL = f"postgresql://u:{SECRET}@h/db"
@@ -20,6 +25,24 @@ MALFORMED_URLS = [
     "looper.example.com", "ftp://looper.example.com", "http://", "http://x:99999", "http://user:secret@x",
     "http://x/?a=1", "http://x/#tasks", "http://x:port",
 ]
+
+
+def test_manager_provider_list_includes_presets_and_each_api_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.ops import Call, Turn
+    from looper.agents.ops import config
+    from looper.agents.provider_presets import presets_view
+
+    presets = presets_view()
+    monkeypatch.setattr(config, "_registry", AsyncMock(return_value={"providers": [], "provider_presets": presets}))
+    answer = asyncio.run(config._providers(Call({"action": "list"}, Turn("web", "test"), None)))
+    assert answer["providers"] == []
+    assert answer["presets"] == presets
+    by_id = {p["preset_id"]: p for p in answer["presets"]}
+    assert {"opencode", "sub2api"} <= by_id.keys()
+    assert [[m["name"] for m in api["models"]] for api in by_id["opencode"]["apis"]] == [
+        ["gpt-6.1-sol", "gpt-5.6-sol"], ["deepseek-v4-pro", "glm-5.3", "kimi-k3"],
+        ["claude-opus-5-5", "claude-sonnet-5-5"],
+    ]
 
 
 def _file(root: Path, text: str | bytes) -> Path:
@@ -392,3 +415,133 @@ def test_init_file_writes_a_new_config_path(tmp_path: Path, dotenv: Path) -> Non
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not (tmp_path / "runtime" / ops.FILE).exists()
     assert all(SECRET not in note for note in notes)
+
+
+def _provider_call(arguments: dict[str, object]) -> dict[str, object]:
+    tool = next(tool for tool in manager_config.TOOLS if tool.name == "looper_providers")
+    call = Call(check_arguments(tool.schema, arguments), Turn(channel=None, chat=None), None)
+    return asyncio.run(tool.run(call))
+
+
+@pytest.mark.parametrize(("api", "protocols", "base_url", "suffix"), [
+    ("anthropic-messages", ["anthropic-messages"], "https://api.deepseek.com/anthropic", "[1m]"),
+    ("openai-chat", ["openai-responses", "openai-chat"], "https://api.deepseek.com", ""),
+    ("openai-responses", ["openai-responses", "openai-chat"], "https://api.deepseek.com", ""),
+])
+def test_manager_provider_preset_defaults(
+    monkeypatch: pytest.MonkeyPatch, api: str, protocols: list[str], base_url: str, suffix: str,
+) -> None:
+    create = AsyncMock(return_value={"provider": {
+        "provider_id": "new", "name": "deepseek", "auth": "api_key", "protocols": protocols,
+        "base_url": base_url, "models": [], "profile_count": 0, "builtin": False, "api_key": None}})
+    monkeypatch.setattr(manager_config.profile_registry, "create_provider", create)
+    _provider_call({"action": "register", "preset": "deepseek", "api": api})
+    assert create.await_args.args[0] == {
+        "name": "deepseek", "auth": "api_key", "protocols": protocols, "base_url": base_url,
+        "models": [{"name": name + suffix, "context_window": 1_000_000, "background_model": "deepseek-flash"}
+                   for name in ("deepseek-flash", "deepseek-v4-pro")],
+        "env": [{"key": "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "value": "786432"}]}
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_manager_provider_preset_explicit_overrides(monkeypatch: pytest.MonkeyPatch, empty: bool) -> None:
+    create = AsyncMock(return_value={"provider": {
+        "provider_id": "new", "name": "custom", "auth": "api_key", "protocols": ["openai-chat"],
+        "base_url": "https://example.com", "models": [], "profile_count": 0, "builtin": False, "api_key": None}})
+    monkeypatch.setattr(manager_config.profile_registry, "create_provider", create)
+    _provider_call({"action": "register", "preset": "glm-bigmodel", "api": "anthropic-messages",
+                    "name": "custom", "protocols": ["openai-chat"], "base_url": "https://example.com",
+                    "models": [] if empty else ["custom-model"], "env": {} if empty else {"API_TIMEOUT_MS": "12"}})
+    assert create.await_args.args[0] == {
+        "name": "custom", "auth": "api_key", "protocols": ["openai-chat"], "base_url": "https://example.com",
+        "models": [] if empty else [{"name": "custom-model"}],
+        "env": [] if empty else [{"key": "API_TIMEOUT_MS", "value": "12"}]}
+
+
+@pytest.mark.parametrize(("arguments", "message"), [
+    ({"preset": "unknown"}, "unknown preset 'unknown'"),
+    ({"preset": "deepseek"}, "api is required"),
+    ({"preset": "deepseek", "api": "unknown"}, "unknown API"),
+])
+def test_manager_provider_preset_errors(monkeypatch: pytest.MonkeyPatch, arguments: dict, message: str) -> None:
+    create = AsyncMock()
+    monkeypatch.setattr(manager_config.profile_registry, "create_provider", create)
+    with pytest.raises(OpError, match=message) as error:
+        _provider_call({"action": "register", **arguments})
+    assert error.value.code.value == "invalid"
+    if arguments["preset"] == "unknown":
+        assert all(preset.id in str(error.value) for preset in PRESETS)
+    create.assert_not_awaited()
+
+
+def test_manager_provider_list_includes_presets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(manager_config, "_registry", AsyncMock(return_value={"providers": []}))
+    assert _provider_call({"action": "list"}) == {"providers": [], "presets": presets_view()}
+
+
+def test_manager_provider_model_update_keeps_catalog_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    models = [{"name": name, "context_window": 200_000, "background_model": "background",
+               "efforts": ["low", "high"], "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
+               "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.5}
+              for name in ("first", "second")]
+    provider = {"provider_id": "prov-test", "name": "custom", "auth": "api_key", "protocols": ["openai-chat"],
+                "base_url": "https://example.com", "models": models, "profile_count": 0, "builtin": False,
+                "api_key": None}
+    monkeypatch.setattr(manager_config, "_registry", AsyncMock(return_value={"providers": [provider]}))
+
+    async def update(provider_id: str, data: dict) -> dict:
+        assert provider_id == provider["provider_id"]
+        # The registry replaces the whole catalog, filling omitted metadata with null.
+        provider["models"] = manager_config.profile_registry._models(data["models"])
+        return {"provider": provider}
+
+    monkeypatch.setattr(manager_config.profile_registry, "update_provider", update)
+    _provider_call({"action": "update", "provider": "custom", "models": ["second", " first ", "new"]})
+    assert provider["models"] == [models[1], models[0], {**dict.fromkeys(models[0]), "name": "new"}]
+
+
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize(("base_url", "model", "unknown", "unpriced"), [
+    ("https://api.deepseek.com/other/path", "deepseek-typo", True, True),
+    ("https://api.deepseek.com", "deepseek-flash[1m]", False, False),
+    ("https://api.deepseek.com", "gpt-6.1-sol", True, False),
+    ("https://api.z.ai/api/anthropic", "glm-5.3-flashx[1m]", True, False),
+    ("https://api.deepseek.com.example.com", "deepseek-typo", False, True),
+    ("https://[invalid", "custom-model", False, True),
+    (None, "custom-model", False, True),
+])
+def test_manager_provider_model_warnings(
+    monkeypatch: pytest.MonkeyPatch, action: str, base_url: str | None, model: str, unknown: bool, unpriced: bool,
+) -> None:
+    provider = {
+        "provider_id": "prov-test", "name": "custom", "auth": "api_key", "oauth_runtime_type": None,
+        "protocols": ["anthropic-messages"], "base_url": base_url, "models": [{"name": model}],
+        "profile_count": 0, "builtin": False, "api_key": None, "env": [],
+    }
+    monkeypatch.setattr(manager_config, "_registry", AsyncMock(return_value={"providers": [provider]}))
+    for method in ("create_provider", "update_provider"):
+        monkeypatch.setattr(manager_config.profile_registry, method, AsyncMock(return_value={"provider": provider}))
+    answer = _provider_call({"action": action, **({"provider": "custom"} if action == "update" else {}),
+                             "name": "custom", "protocols": ["anthropic-messages"],
+                             "base_url": base_url, "models": [model]})
+    warnings = answer["warnings"]
+    unknown_warnings = [w for w in warnings if "known models" in w.lower()]
+    price_warnings = [w for w in warnings if "no full price" in w]
+    assert bool(unknown_warnings) is unknown
+    assert bool(price_warnings) is unpriced
+    if unknown:
+        assert model in unknown_warnings[0]
+        known = ("glm-5.3", "glm-4.7") if base_url == "https://api.z.ai/api/anthropic" else (
+            "deepseek-flash", "deepseek-v4-pro")
+        assert all(name in unknown_warnings[0] for name in known)
+    if unpriced:
+        assert model in price_warnings[0] and "spend caps" in price_warnings[0]
+
+
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize("field", ["key", "api_key", "apiKey", "password", "credential"])
+def test_manager_provider_refuses_key_arguments(action: str, field: str) -> None:
+    with pytest.raises(OpError, match="Settings → LLM Providers") as error:
+        _provider_call({"action": action, field: SECRET})
+    assert error.value.code.value == "forbidden"
+    assert SECRET not in str(error.value)

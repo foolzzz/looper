@@ -116,6 +116,7 @@ const STATUS_VARIANT: Record<string, "default" | "success" | "warning" | "destru
   pending: "warning",
   stopped: "warning",
   waiting_user: "warning",
+  waiting: "outline",
   completed: "success",
   failed: "destructive",
 };
@@ -151,7 +152,7 @@ function TasksCard({ project }: { project: Project }) {
                   variant={STATUS_VARIANT[task.status] ?? "outline"}
                   className={task.status === "waiting_user" ? "shrink-0" : "shrink-0 capitalize"}
                 >
-                  {task.status === READY_STATUS ? "ready" : task.status === "waiting_user" ? "Waiting for you" : task.status}
+                  {task.status === READY_STATUS ? "ready" : task.status === "waiting_user" ? "Waiting for you" : task.status === "waiting" ? "Waiting" : task.status}
                 </Badge>
                 <span className="min-w-0 flex-1 truncate">{task.name || task.requirement}</span>
                 {task.cost && task.cost.runs > 0 && (
@@ -272,6 +273,7 @@ function executionRows(project: Project): [string, string][] {
   if (project.max_step_retries != null)
     rows.push(["Retries per step", String(project.max_step_retries)]);
   if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);
+  if (project.wait_commands === "on") rows.push(["Wait commands", "On"]);
   if (project.role_text_max_chars != null)
     rows.push(["Role text limit", `${project.role_text_max_chars.toLocaleString()} characters`]);
   if (project.user_gates === "off") rows.push(["User gates", "Off"]);

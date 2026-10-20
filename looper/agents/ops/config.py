@@ -18,11 +18,13 @@ from collections.abc import Awaitable, Iterable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 from ...db import llm_records as db_llm_records, projects as db_projects
-from .. import catalog, profile_registry, projects
+from .. import catalog, profile_registry, projects, provider_presets
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..projects import RequestError, project_name
+from ..runtimes.pricing import base_model, model_price
 from ..tiers.journal import clip
 from . import Call, ErrorCode, OpError, Risk, Tool
 from .tasks import _TASK_ID, _request_error, _task, _task_argument
@@ -215,18 +217,78 @@ async def _deleting_profile(call: Call) -> str | None:
             f"{effort}）吗？没有设置层、任务、定时任务或项目的可选列表在用它；删除后不能恢复。")
 
 
+def _provider_warnings(view: Mapping[str, Any]) -> list[str]:
+    provider = profile_registry.provider_spec({**view, "id": view["provider_id"],
+                                               "oauth_runtime_type": view.get("oauth_runtime_type")})
+    # Warning lookup must not impose stricter URL validation after the dashboard's code has saved it.
+    try:
+        host = urlsplit(provider.base_url or "").hostname
+    except ValueError:
+        host = None
+    preset = next((p for p in provider_presets.PRESETS
+                   if host and any(urlsplit(api.base_url).hostname == host for api in p.apis)), None)
+    known = {base_model(model.name) for model in preset.models} if preset else set()
+    warnings = []
+    for model in provider.catalog:
+        if not model_price(provider, model.name).complete:
+            warnings.append(f"model {model.name!r} has no full price with provider {provider.name!r} (input, output, "
+                            "cache read and cache write): its runs record tokens only and spend caps do not apply "
+                            "to them; add its prices to the provider's model catalog")
+        if preset and base_model(model.name) not in known:
+            warnings.append(f"model {model.name!r} is unknown for preset {preset.label!r}; known models: "
+                            f"{', '.join(sorted(known))}. Check the vendor's model name before using it.")
+    return warnings
+
+
 async def _providers(call: Call) -> dict[str, Any]:
-    arguments = call.arguments
-    if arguments["action"] == "list":
-        return {"providers": [_provider_listed(p) for p in (await _registry())["providers"]]}
-    _required(arguments, "register", "name", "protocols")
-    data: dict[str, Any] = {"name": arguments["name"], "protocols": arguments["protocols"], "auth": "api_key",
-                            "base_url": arguments.get("base_url"),
-                            "models": [{"name": model} for model in arguments.get("models") or ()],
-                            "env": [{"key": key, "value": value} for key, value in (arguments.get("env") or {}).items()]}
-    answer = await answered(profile_registry.create_provider(data))
+    arguments, action = call.arguments, call.arguments["action"]
+    if action == "list":
+        registry = await _registry()
+        # The same catalogs the dashboard serves. A caller that lists providers only still gets the presets.
+        presets = registry["provider_presets"] if "provider_presets" in registry else provider_presets.presets_view()
+        return {"providers": [_provider_listed(p) for p in registry["providers"]], "presets": presets}
+    data: dict[str, Any] = {} if action == "update" else {
+        "auth": "api_key", "base_url": None, "models": [], "env": []}
+    if action == "update" and any(arguments.get(field) is not None for field in ("preset", "api")):
+        raise OpError(ErrorCode.INVALID, "preset and api are for register; update protocols, base_url, models or env")
+    if arguments.get("preset") is not None:
+        preset = next((p for p in provider_presets.PRESETS if p.id == arguments["preset"]), None)
+        if preset is None:
+            ids = ", ".join(p.id for p in provider_presets.PRESETS)
+            raise OpError(ErrorCode.INVALID, f"unknown preset {arguments['preset']!r}; there are: {ids}")
+        _required(arguments, "register", "api")
+        view = preset.view()
+        api = next((api for api in view["apis"] if arguments["api"] in api["protocols"]), None)
+        if api is None:
+            protocols = ", ".join(protocol.value for api in preset.apis for protocol in api.protocols)
+            raise OpError(ErrorCode.INVALID, f"unknown API {arguments['api']!r} for preset {preset.id!r}; "
+                                             f"choose a protocol: {protocols}")
+        data.update(name=preset.name, protocols=api["protocols"], base_url=api["base_url"],
+                    models=provider_presets.api_models(view, api))
+        data["env"] = [{"key": key, "value": value} for key, value in preset.env]
+    data.update(_given(arguments, ("name", "protocols", "base_url"), clears=("base_url",)))
+    if arguments.get("models") is not None:
+        data["models"] = [{"name": model} for model in arguments["models"]]
+    if arguments.get("env") is not None:
+        data["env"] = [{"key": key, "value": value} for key, value in arguments["env"].items()]
+    if action == "update":
+        _required(arguments, action, "provider")
+        current = by_id_or_name((await _registry())["providers"], arguments["provider"],
+                                id_key="provider_id", what="provider")
+        if "models" in data:
+            # The registry replaces the catalog; names retained by the tool keep their metadata.
+            existing = {model["name"]: model for model in current["models"]}
+            data["models"] = [existing.get(model["name"].strip(), model) for model in data["models"]]
+        answer = await answered(profile_registry.update_provider(current["provider_id"], data))
+    else:
+        _required(data, "register", "name", "protocols")
+        answer = await answered(profile_registry.create_provider(data))
     provider = _provider_listed(answer["provider"])
-    return {"provider": provider, "note": KEY_NOTE.format(name=provider["name"])}
+    result = {"provider": provider,
+              "warnings": [*answer.get("warnings", ()), *_provider_warnings(answer["provider"])]}
+    if action == "register":
+        result["note"] = KEY_NOTE.format(name=provider["name"])
+    return result
 
 
 # --- looper_catalog ---
@@ -422,15 +484,21 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_providers",
-        description="LLM providers: list (with whether each has its API key); register one, without its key. Never "
-                    "take or pass a key: the user enters it on the dashboard.",
+        description="LLM providers: list providers and presets; register; update by id or name. Never take or change "
+                    "API keys: the user sets them on the dashboard. Warns about unknown preset models, missing "
+                    "prices, and a context suffix another runtime would send verbatim.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["list", "register"]},
+                "action": {"type": "string", "enum": ["list", "register", "update"]},
+                "provider": {"type": "string", "minLength": 1, "description": "Its id or name (update)."},
+                "preset": {"type": "string", "description": "Register: preset id from list; api selects its API, "
+                           "and explicit fields override its defaults."},
+                "api": {"type": "string", "description": "A protocol of the preset's chosen API (required with preset)."},
                 "name": {"type": "string", "minLength": 1},
                 "protocols": {"type": "array", "description": "Of anthropic-messages, openai-responses, openai-chat."},
-                "base_url": {"type": "string", "description": "http(s) URL; leave out for the protocol's own."},
+                "base_url": {"type": ["string", "null"], "description": "http(s) URL; null clears it; omitted on "
+                             "update keeps it."},
                 "models": {"type": "array", "description": "Model names it serves."},
                 "env": {"type": "object", "description": "Extra environment for its runs: {NAME: value}."},
             },

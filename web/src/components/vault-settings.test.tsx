@@ -214,4 +214,20 @@ describe("Knowledge vault settings", () => {
     });
     expect(executionChanges(changed, project)).toEqual({ vault: vault === "on" ? "off" : "on" });
   });
+
+  it.each([null, "off", "on"] as const)("round trips wait commands, off by default (%s)", async (wait_commands) => {
+    const project = { wait_commands } as Project;
+    let draft = executionDraft(project);
+    await act(async () => root.render(<ProjectExecutionFields idPrefix="project" draft={draft}
+      onChange={(value) => { draft = value; }} />));
+    const select = container.querySelector<HTMLSelectElement>("#project-wait_commands")!;
+    expect(select.value).toBe(wait_commands || "off");
+    expect(document.getElementById(select.getAttribute("aria-describedby")!)?.textContent).toContain("server's user");
+    expect(executionChanges(draft, project)).toEqual({});
+    await act(async () => {
+      select.value = wait_commands === "on" ? "off" : "on";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(executionChanges(draft, project)).toEqual({ wait_commands: wait_commands === "on" ? "off" : "on" });
+  });
 });

@@ -26,6 +26,12 @@ reply may update or cancel it (``gates``, ``GateChange``). An open gate counts
 as started, so a replan keeps it. The contract shows gates only where the task
 may open them or still has one that is not closed (``reply_contract(gates=True)``);
 elsewhere it is as before, and a gate step is refused with the reason.
+
+A wait step (``waits.WaitSpec``) waits for time or a typed external check,
+without a Worker or a model turn. Its policy limits the duration and check
+interval, and permits command checks only where the project enables them.
+DECISION and CHAT replies may cancel waits; a [WAIT] reply extends, proceeds
+or fails a wait that timed out or that the user cancelled (``parse_wait``).
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -59,6 +66,13 @@ from ..user_gates import (
     GateVerdict,
     GateView,
     numbered,
+)
+from ..waits import (
+    COMMAND_MAX_CHARS, REASON_MAX_CHARS, REPO_PATTERN,
+    TOPIC_MAX_CHARS as WAIT_TOPIC_MAX_CHARS,
+    RESOLUTION_MAX_CHARS as WAIT_RESOLUTION_MAX_CHARS,
+    CommandCheck, GithubPrCheck, ReadyWhen, WaitAction, WaitChangeAction,
+    WaitLimits, WaitPolicy, WaitSpec, WaitState, WaitView,
 )
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
@@ -87,6 +101,9 @@ _GATE_STEP_KEYS = frozenset({"id", "kind", "topic", "agenda", "depends_on", "fin
 _NEW_ITEM_KEYS = frozenset({"id", "question", "options"})
 _ITEM_KEYS = frozenset({"id", "question", "options", "status", "answer"})
 _GATE_CHANGE_KEYS = frozenset({"id", "action", "topic", "agenda", "findings", "note", "resolution"})
+_WAIT_STEP_KEYS = frozenset({"id", "kind", "topic", "depends_on", "max_wait_seconds", "not_before_seconds",
+                             "not_before", "check", "every_seconds"})
+WAIT_KIND = "wait"
 GATE_KIND = "gate"
 WORK_KIND = "work"  # the default: a step without ``kind``
 
@@ -100,6 +117,8 @@ class TurnKind(str, Enum):
     RESTART = "RESTART"
     # The user wrote in a gate's discussion (or ended it): answered in the CHAT shape plus the gate's own keys.
     GATE = "GATE"
+    # A wait timed out or the user cancelled it: answered in the CHAT shape plus the wait's own keys.
+    WAIT = "WAIT"
     # Messages for the Planner in the task's agent room, or Looper's escalations: answered in the CHAT shape.
     ROOM = "ROOM"
     # The extra turn of a completed task whose project distills lessons; its message gives its own shape.
@@ -165,6 +184,8 @@ class StepSpec:
     review_roles: tuple[ReviewRoleSpec, ...] = ()
     # A gate step: its topic, agenda and findings (its instruction is its topic, and it has no criteria or review).
     gate: GateSpec | None = None
+    # A wait step: its instruction is its topic, and it has no criteria or review.
+    wait: WaitSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +208,15 @@ class GateChange:
     findings: str | None = None  # update: None leaves it
     note: str = ""  # update of an open gate: what changed, for the user
     resolution: str = ""  # cancel: why
+
+
+@dataclass(frozen=True)
+class WaitChange:
+    """A DECISION or CHAT reply's cancellation of one wait that is not closed."""
+
+    id: str
+    action: WaitChangeAction
+    resolution: str
 
 
 @dataclass(frozen=True)
@@ -244,6 +274,7 @@ class DecisionReply:
     progress: ProgressNote | None = None
     final: FinalSummary | None = None  # only on the decision that completes the task
     gates: tuple[GateChange, ...] = ()  # applied before the decision
+    waits: tuple[WaitChange, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -256,6 +287,7 @@ class ChatReply:
     stop: tuple[str, ...] = ()  # replan only: running steps to stop and drop
     gates: tuple[GateChange, ...] = ()  # applied before the action
     final: FinalSummary | None = None  # only when its cancels leave no step open and it adds none
+    waits: tuple[WaitChange, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -277,6 +309,27 @@ class GateReply:
     chat: ChatReply
     summary: GateSummary | None = None  # close only
     final: FinalSummary | None = None  # only when closing the gate completes the task
+
+
+@dataclass(frozen=True)
+class WaitContext:
+    """The wait a [WAIT] turn is about."""
+
+    wait: str
+    state: WaitState  # timed_out or cancel_requested
+    last_open: bool = False
+
+
+@dataclass(frozen=True)
+class WaitReply:
+    """A [WAIT] reply: what happens to the wait, and a CHAT action."""
+
+    action: WaitAction
+    chat: ChatReply
+    max_wait_seconds: int | None = None
+    resolution: str = ""
+    reason: str = ""
+    final: FinalSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -315,6 +368,8 @@ class PlanView:
     # The plan's gates by label (a skipped one is retired), and whether the task may open new ones.
     gates: Mapping[str, GateView] = field(default_factory=dict)
     gate_policy: GatePolicy = GatePolicy.OFF
+    waits: Mapping[str, WaitView] = field(default_factory=dict)
+    wait_policy: WaitPolicy = WaitPolicy()
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
@@ -383,20 +438,20 @@ def extract_reply(text: str) -> dict[str, Any]:
 
 
 def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
-               gate_policy: GatePolicy = GatePolicy.OFF) -> PlanReply:
+               gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy()) -> PlanReply:
     data = extract_reply(text)
     _only_keys(data, {"steps"}, "the PLAN reply")
     steps = _step_list(data.get("steps"), "steps")
     if not steps:
         raise ProtocolError("steps must list at least one step")
-    _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy),
-                     replace_pending=True)
+    _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
+                                               wait_policy=wait_policy), replace_pending=True)
     return PlanReply(steps)
 
 
 def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> DecisionReply:
     data = extract_reply(text)
-    _only_keys(data, {"decision", "reason", "feedback", "steps", "summary", "progress", "final", "gates"},
+    _only_keys(data, {"decision", "reason", "feedback", "steps", "summary", "progress", "final", "gates", "waits"},
                "the DECISION reply")
     raw = data.get("decision")
     try:
@@ -414,7 +469,8 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
     if decision not in context.allowed():
         raise ProtocolError(_refusal(decision, context))
     gates = _gate_changes(data, plan)
-    plan = _after_gates(plan, gates)
+    waits = _wait_changes(data, plan)
+    plan = _after_waits(_after_gates(plan, gates), waits)
     feedback = ""
     steps: tuple[StepSpec, ...] = ()
     if decision is Decision.RETRY:
@@ -432,13 +488,17 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
     final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
         if "final" in data else None
     cancelled = {change.id for change in gates if change.action is GateAction.CANCEL}
-    last = context.last_open or (context.open_gates is not None and context.open_gates <= cancelled)
+    last = context.last_open or (context.open_gates is not None and context.open_gates <= cancelled
+                                 and not any(not wait.state.closed for wait in plan.waits.values()))
+    if waits and not (set(plan.started) - plan.done - {context.step}) \
+            and (decision is Decision.REPLAN or not plan.pending):
+        last = True
     completes = last and (decision is Decision.ACCEPT or (decision is Decision.REPLAN and not steps))
     if completes and final is None:
         raise ProtocolError('this decision completes the task, so it must carry "final": '
                             + ", ".join(FINAL_FIELDS))
     # Only the decision that completes the task keeps a final summary.
-    return DecisionReply(decision, reason, feedback, steps, summary, progress, final if completes else None, gates)
+    return DecisionReply(decision, reason, feedback, steps, summary, progress, final if completes else None, gates, waits)
 
 
 def parse_wrap_up(text: str) -> str:
@@ -474,23 +534,24 @@ def parse_handoff(text: str) -> str:
 
 
 def parse_chat(text: str, plan: PlanView) -> ChatReply:
-    """A CHAT (or RESTART) reply: its gate changes, then its action on the plan they leave. One whose cancels leave
+    """A CHAT (or RESTART) reply: its gate and wait changes, then its action on the plan they leave. One whose cancels leave
     no step open and that adds none completes the task, so it must carry ``final``."""
     data = extract_reply(text)
-    _only_keys(data, {"reply", "action", "step", "text", "steps", "stop", "gates", "final"}, "the CHAT reply")
+    _only_keys(data, {"reply", "action", "step", "text", "steps", "stop", "gates", "waits", "final"}, "the CHAT reply")
     gates = _gate_changes(data, plan)
-    after = _after_gates(plan, gates)
+    waits = _wait_changes(data, plan)
+    after = _after_waits(_after_gates(plan, gates), waits)
     chat = _chat_action(data, after)
     final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
         if "final" in data else None
-    cancels = any(change.action is GateAction.CANCEL for change in gates)
+    cancels = bool(waits) or any(change.action is GateAction.CANCEL for change in gates)
     adds = chat.action is ChatAction.ADD_STEPS or (chat.action is ChatAction.REPLAN and bool(chat.steps))
     completes = cancels and not adds and not (set(after.started) - after.done) and not after.pending
     if completes and final is None:
         raise ProtocolError("these cancels leave no step open, so the reply completes the task: add the steps the "
                             'answer decides, or carry "final": ' + ", ".join(FINAL_FIELDS))
     # Only the reply that completes the task keeps a final summary.
-    return replace(chat, gates=gates, final=final if completes else None)
+    return replace(chat, gates=gates, waits=waits, final=final if completes else None)
 
 
 def parse_gate(text: str, context: GateContext, plan: PlanView) -> GateReply:
@@ -533,6 +594,73 @@ def parse_gate(text: str, context: GateContext, plan: PlanView) -> GateReply:
         raise ProtocolError('closing this gate without adding steps completes the task, so the reply must carry '
                             '"final": ' + ", ".join(FINAL_FIELDS))
     return GateReply(verdict, agenda, chat, summary, final if completes else None)
+
+
+def parse_wait(text: str, context: WaitContext, plan: PlanView) -> WaitReply:
+    """A [WAIT] reply about ``context``'s wait: extend, proceed or fail, and a CHAT action."""
+    data = extract_reply(text)
+    _only_keys(data, {"reply", "wait", "action", "step", "text", "steps", "stop", "final"}, "the WAIT reply")
+    raw = data.get("wait")
+    if not isinstance(raw, dict):
+        raise ProtocolError("wait must be an object")
+    try:
+        action = WaitAction(raw.get("action"))
+    except ValueError:
+        raise ProtocolError('wait.action must be "extend", "proceed" or "fail"') from None
+    seconds = None
+    resolution = reason = ""
+    if action is WaitAction.EXTEND:
+        _only_keys(raw, {"action", "max_wait_seconds"}, "wait")
+        if context.state is WaitState.CANCEL_REQUESTED:
+            raise ProtocolError("the user cancelled this wait: proceed, fail, or change the plan")
+        seconds = _whole_seconds(raw.get("max_wait_seconds"), "wait.max_wait_seconds", 1,
+                                 plan.wait_policy.limits.max_wait_seconds)
+    elif action is WaitAction.PROCEED:
+        _only_keys(raw, {"action", "resolution"}, "wait")
+        resolution = _limited_text(raw, "resolution", WAIT_RESOLUTION_MAX_CHARS, "wait", required=True)
+    else:
+        _only_keys(raw, {"action", "reason"}, "wait")
+        reason = _limited_text(raw, "reason", REASON_MAX_CHARS, "wait", required=True)
+    if action is WaitAction.EXTEND and plan.wait_policy.run_deadline is not None:
+        now = datetime.now(timezone.utc)
+        remaining = max(0, int((plan.wait_policy.run_deadline - now).total_seconds()))
+        if seconds is not None and seconds > remaining:
+            raise ProtocolError(plan.wait_policy.run_refusal(now))
+    chat = _chat_action(data, plan)
+    final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
+        if "final" in data else None
+    completes = _wait_completes(plan, context, action, chat)
+    if completes and final is None:
+        raise ProtocolError('proceeding without adding steps completes the task, so the reply must carry '
+                            '"final": ' + ", ".join(FINAL_FIELDS))
+    if final is not None and not completes:
+        raise ProtocolError('final is only for proceeding when this wait is the last open step and no steps are added')
+    return WaitReply(action, chat, seconds, resolution, reason, final)
+
+
+def _wait_completes(plan: PlanView, context: WaitContext, action: WaitAction, chat: ChatReply) -> bool:
+    """True when proceeding, then the reply's chat action (stops included), leaves no open step."""
+    if action is not WaitAction.PROCEED:
+        return False
+    started = dict(plan.started)
+    pending = dict(plan.pending)
+    done = set(plan.done)
+    if context.wait in pending:
+        started[context.wait] = pending.pop(context.wait)
+    done.add(context.wait)
+    if chat.action is ChatAction.REPLAN:
+        for label in chat.stop:
+            started.pop(label, None)
+            done.discard(label)
+        keep = {spec.id for spec in chat.steps}
+        pending = {label: deps for label, deps in pending.items() if label in keep}
+        for spec in chat.steps:
+            if spec.id not in started and spec.id not in pending:
+                pending[spec.id] = spec.depends_on
+    elif chat.action is ChatAction.ADD_STEPS:
+        for spec in chat.steps:
+            pending[spec.id] = spec.depends_on
+    return not (set(started) - done) and not pending
 
 
 def _chat_action(data: Mapping[str, Any], plan: PlanView) -> ChatReply:
@@ -680,13 +808,20 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
             raise ProtocolError(f"step id {step.id!r} is used twice")
         if step.id in plan.started and step.id in plan.gates and plan.gates[step.id].state.waiting:
             raise ProtocolError(f"gate {step.id} is open: a replan keeps it; change it or cancel it with \"gates\"")
+        if step.id in plan.started and step.id in plan.waits and plan.waits[step.id].state.open:
+            raise ProtocolError(f'wait {step.id} is open: a replan keeps it; end it with "waits"')
         if step.id in plan.started:
             raise ProtocolError(f"step {step.id} has started; started steps cannot change")
         if step.gate is not None and plan.gate_policy is not GatePolicy.ALLOWED:
             raise ProtocolError(f"step {step.id}: {plan.gate_policy.refusal}")
-        if step.id in plan.pending and (step.id in plan.gates) != (step.gate is not None):
-            kind = "a gate" if step.id in plan.gates else "a work step"
-            raise ProtocolError(f"step {step.id} is {kind}; use a new id for a step of the other kind")
+        if step.wait is not None:
+            _check_wait_policy(step.id, step.wait, plan.wait_policy)
+        if step.id in plan.pending:
+            kind = GATE_KIND if step.id in plan.gates else WAIT_KIND if step.id in plan.waits else WORK_KIND
+            new_kind = GATE_KIND if step.gate is not None else WAIT_KIND if step.wait is not None else WORK_KIND
+            if kind != new_kind:
+                noun = "a work step" if kind == WORK_KIND else f"a {kind}"
+                raise ProtocolError(f"step {step.id} is {noun}; use a new id for a step of the other kind")
         if step.id in plan.retired:
             raise ProtocolError(f"step id {step.id!r} belongs to a dropped step; use a new id")
         if step.id in kept:
@@ -764,8 +899,10 @@ def _step(value: Any, index: int) -> StepSpec:
     kind = value.get("kind", WORK_KIND)
     if kind == GATE_KIND:
         return _gate_step(value, where)
+    if kind == WAIT_KIND:
+        return _wait_step(value, where)
     if kind != WORK_KIND:
-        raise ProtocolError(f'{where}.kind must be "gate" or "work" (or left out for a work step); got {kind!r}')
+        raise ProtocolError(f'{where}.kind must be "gate", "wait" or "work" (or left out for a work step); got {kind!r}')
     missing = sorted(_STEP_KEYS - value.keys())
     if missing:
         raise ProtocolError(f"{where} is missing {', '.join(missing)}")
@@ -864,6 +1001,144 @@ def _gate_step(value: Mapping[str, Any], where: str) -> StepSpec:
         raise ProtocolError(f"{where}.depends_on lists a step twice")
     findings = _limited_text(value, "findings", FINDINGS_MAX_CHARS, where)
     return StepSpec(step_id, topic, (), tuple(depends_on), False, gate=GateSpec(topic, numbered(items), findings))
+
+
+def _whole_seconds(raw: Any, where: str, low: int, high: int | None = None) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < low or (high is not None and raw > high):
+        span = f"from {low} to {high}" if high is not None else f"from {low}"
+        raise ProtocolError(f"{where} must be a whole number {span}")
+    return raw
+
+
+def _wait_step(value: Mapping[str, Any], where: str) -> StepSpec:
+    """A wait step: a topic, a maximum duration, and a time or typed check to wait for."""
+    if unknown := sorted(set(value) - _WAIT_STEP_KEYS):
+        raise ProtocolError(f"{where} is a wait, which has only id, kind, topic, depends_on, max_wait_seconds, "
+                            "not_before_seconds, not_before, check and every_seconds; not " + ", ".join(unknown))
+    missing = sorted({"id", "kind", "topic", "depends_on", "max_wait_seconds"} - value.keys())
+    if missing:
+        raise ProtocolError(f"{where} is missing {', '.join(missing)}")
+    step_id = _step_id(value["id"], where)
+    topic = _limited_text(value, "topic", WAIT_TOPIC_MAX_CHARS, where, required=True)
+    depends_on = value["depends_on"]
+    if not isinstance(depends_on, list) or not all(isinstance(d, str) for d in depends_on):
+        raise ProtocolError(f"{where}.depends_on must be a list of step ids")
+    if len(set(depends_on)) != len(depends_on):
+        raise ProtocolError(f"{where}.depends_on lists a step twice")
+    maximum = _whole_seconds(value["max_wait_seconds"], f"{where}.max_wait_seconds", 1)
+    if "not_before_seconds" in value and "not_before" in value:
+        raise ProtocolError(f"{where}: give only one of not_before_seconds and not_before")
+    seconds = _whole_seconds(value["not_before_seconds"], f"{where}.not_before_seconds", 0, maximum) \
+        if "not_before_seconds" in value else None
+    absolute = None
+    if "not_before" in value:
+        raw = value["not_before"]
+        try:
+            if not isinstance(raw, str):
+                raise ValueError
+            absolute = datetime.fromisoformat(raw)
+        except ValueError:
+            raise ProtocolError(f"{where}.not_before must be an ISO time string with a timezone") from None
+        if absolute.tzinfo is None or absolute.utcoffset() is None:
+            raise ProtocolError(f"{where}.not_before must include a timezone")
+    check = None
+    if "check" in value:
+        raw = value["check"]
+        at = f"{where}.check"
+        if not isinstance(raw, dict):
+            raise ProtocolError(f"{at} must be an object")
+        kind = raw.get("type")
+        if kind == "github_pr":
+            _only_keys(raw, {"type", "repo", "number", "ready_when"}, at)
+            repo = raw.get("repo")
+            if not isinstance(repo, str) or not REPO_PATTERN.fullmatch(repo):
+                raise ProtocolError(f"{at}.repo must be owner/name (letters, digits, _, . or -)")
+            number = _whole_seconds(raw.get("number"), f"{at}.number", 1)
+            try:
+                ready_when = ReadyWhen(raw.get("ready_when"))
+            except ValueError:
+                raise ProtocolError(f"{at}.ready_when must be head_changed, checks_finished or new_comments") from None
+            check = GithubPrCheck(repo, number, ready_when)
+        elif kind == "command":
+            _only_keys(raw, {"type", "command"}, at)
+            check = CommandCheck(_limited_text(raw, "command", COMMAND_MAX_CHARS, at, required=True))
+        else:
+            raise ProtocolError(f'{at}.type must be "github_pr" or "command"')
+    every = None
+    if "every_seconds" in value:
+        if check is None:
+            raise ProtocolError(f"{where}.every_seconds is only for a wait with a check")
+        every = _whole_seconds(value["every_seconds"], f"{where}.every_seconds", 1)
+    if check is None and not seconds and absolute is None:
+        raise ProtocolError(f"{where}: a wait without a check needs not_before_seconds (more than 0) or "
+                            "not_before: it would end as soon as it opens")
+    spec = WaitSpec(topic, maximum, seconds, absolute, check, every)
+    return StepSpec(step_id, topic, (), tuple(depends_on), False, wait=spec)
+
+
+def _check_wait_policy(label: str, spec: WaitSpec, policy: WaitPolicy) -> None:
+    """Check a new wait against the system limits, a scheduled run's stop time, and command permission."""
+    maximum = policy.limits.max_wait_seconds
+    minimum = policy.limits.min_check_seconds
+    if spec.max_wait_seconds > maximum:
+        raise ProtocolError(f"step {label}.max_wait_seconds must be at most {maximum}")
+    if spec.every_seconds is not None and not minimum <= spec.every_seconds <= maximum:
+        raise ProtocolError(f"step {label}.every_seconds must be from {minimum} to {maximum}")
+    if spec.not_before is not None and spec.not_before > datetime.now(timezone.utc) + timedelta(seconds=maximum):
+        raise ProtocolError(f"step {label}.not_before must be at most {maximum} seconds from now")
+    if isinstance(spec.check, CommandCheck) and not policy.commands:
+        raise ProtocolError(f"step {label}: {WaitPolicy.command_refusal}")
+    deadline = policy.run_deadline
+    if deadline is None:
+        return
+    now = datetime.now(timezone.utc)
+    remaining = max(0, int((deadline - now).total_seconds()))
+    over = (spec.max_wait_seconds > remaining or (spec.not_before_seconds or 0) > remaining
+            or (spec.not_before is not None and spec.not_before > deadline))
+    if over:
+        raise ProtocolError(f"step {label}: {policy.run_refusal(now)}")
+
+
+def _wait_changes(data: Mapping[str, Any], plan: PlanView) -> tuple[WaitChange, ...]:
+    """A DECISION or CHAT reply's ``waits``: cancel waits that are not closed, each wait once."""
+    if "waits" not in data:
+        return ()
+    raw = data["waits"]
+    if not isinstance(raw, list):
+        raise ProtocolError("waits must be a list of changes to waits")
+    live = {label for label, wait in plan.waits.items() if not wait.state.closed}
+    changes: list[WaitChange] = []
+    for i, item in enumerate(raw):
+        where = f"waits[{i}]"
+        if not isinstance(item, dict):
+            raise ProtocolError(f"{where} must be an object")
+        _only_keys(item, {"id", "action", "resolution"}, where)
+        label = item.get("id")
+        if not isinstance(label, str) or label not in live:
+            choices = ", ".join(sorted(live)) or "none"
+            raise ProtocolError(f"{where}.id {label!r} is not a wait in pending, waiting, ready, timed_out or "
+                                f"cancel_requested (those: {choices})")
+        if any(change.id == label for change in changes):
+            raise ProtocolError(f"{where}: wait {label} is changed twice")
+        try:
+            action = WaitChangeAction(item.get("action"))
+        except ValueError:
+            raise ProtocolError(f'{where}.action must be "cancel"') from None
+        changes.append(WaitChange(label, action, _limited_text(
+            item, "resolution", WAIT_RESOLUTION_MAX_CHARS, where, required=True)))
+    return tuple(changes)
+
+
+def _after_waits(plan: PlanView, changes: tuple[WaitChange, ...]) -> PlanView:
+    """``plan`` once ``changes`` are applied: a cancelled wait is done (an open one started)."""
+    cancelled = {change.id for change in changes}
+    if not cancelled:
+        return plan
+    started = {**plan.started, **{label: plan.pending[label] for label in cancelled if label in plan.pending}}
+    pending = {label: deps for label, deps in plan.pending.items() if label not in cancelled}
+    waits = {label: replace(wait, state=WaitState.DONE) if label in cancelled else wait
+             for label, wait in plan.waits.items()}
+    return replace(plan, started=started, pending=pending, done=plan.done | cancelled, waits=waits)
 
 
 def _options(value: Any, where: str) -> tuple[str, ...]:
@@ -1039,7 +1314,7 @@ the project has one.
   files must depend on it.
 - review: true when an independent Reviewer must pass the step before it counts
   as done.
-{roles}{gate_rules}
+{roles}{gate_rules}{wait_rules}
 [DECISION]: decide what happens to a step after its Worker's or Reviewer's
 result. The message lists the decisions allowed now.
 ```json
@@ -1142,6 +1417,25 @@ _GATE_RULES = """\
   the gate waits; leave out only the steps the answer decides, and add them
   when the gate closes.
 """
+# Waits are available to every task; only command checks need the project's permission.
+_WAIT_RULES = """\
+- Waits: when something outside the task must happen before some steps can
+  run (a pull request's author pushes fixes, CI finishes, another system's
+  job ends), a step may be a wait instead of a Worker that polls:
+  {"id": "w1", "kind": "wait", "topic": "...", "depends_on": ["s1"], "max_wait_seconds": 259200, "check": {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}, "every_seconds": 600}
+  It opens when the steps it depends on are done. Looper runs the check every
+  every_seconds (at least 300, default 600) with no turn of yours, and the
+  steps that depend on it start once it is ready; they read why. check:
+  github_pr ("ready_when": "head_changed", "checks_finished" or
+  "new_comments"). Without a check, give "not_before_seconds" (or
+  "not_before", an ISO time) and it ends then. Always set max_wait_seconds
+  (at most 604800): when it passes, the user is told and you get a [WAIT]
+  turn. Prefer a typed check. Never wait for what a step of this task does:
+  depend on that step. In [DECISION] and [CHAT], "waits": [{"id": "w1",
+  "action": "cancel", "resolution": "..."}] ends a wait now; it counts as done.
+"""
+
+
 _GATE_CHANGES = """\
 - gates (optional, also in [CHAT]): change gates not closed yet, when what you
   found answers or changes their questions: {"id": "g1", "action": "update",
@@ -1201,12 +1495,19 @@ _KINDS = {
 
 
 def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
-                   room: bool = False) -> str:
+                   room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits()) -> str:
     """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
     Planners may define the roles their steps run as; with ``gates``, for a task that may open user gates or has
-    one that is not closed; with ``room``, whose agents share a room."""
+    one that is not closed; with ``room``, whose agents share a room. Waits use ``wait_limits``;
+    ``wait_commands`` also permits shell checks."""
+    command = (', or {"type": "command", "command": "..."}: a shell command run in the working directory, '
+               'exit 0 is ready') if wait_commands else ""
+    wait_rules = _WAIT_RULES.replace("at least 300, default 600",
+                                    f"at least {wait_limits.min_check_seconds}, default {max(wait_limits.min_check_seconds, 600)}")
+    wait_rules = wait_rules.replace("at most 604800", f"at most {wait_limits.max_wait_seconds}")
+    wait_rules = wait_rules.replace('"new_comments").', '"new_comments")' + command + '.')
     return _REPLY_CONTRACT.format(
-        max_retries=max_retries, roles=_ROLE_RULES if roles else "", kinds=_KINDS[(gates, room)],
+        wait_rules=wait_rules, max_retries=max_retries, roles=_ROLE_RULES if roles else "", kinds=_KINDS[(gates, room)],
         gate_rules=_GATE_RULES if gates else "", gate_changes=_GATE_CHANGES if gates else "",
         chat_gates=_CHAT_GATES if gates else "", gate_section=_GATE_SECTION if gates else "",
         room_section=_ROOM_SECTION if room else "")

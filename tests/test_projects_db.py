@@ -302,6 +302,7 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
     async def _test(pool: Any) -> None:
         settings = execution_fields({"task_budget_usd": 2, "task_budget_action": "wrap_up", "supervise_interval_seconds": 0,
                                      "review_policy": "all", "distill_lessons": "draft", "planner_roles": "on",
+                                     "wait_commands": "on",
                                      "role_text_max_chars": 600, "user_gates": "on", "gate_reminder_hours": 0})
         calc = await projects.create_project(name="calc", execution=settings, pool=pool)
         await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
@@ -313,10 +314,12 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
             "room_consult_timeout_seconds": None, "room_consults_per_task": None, "task_workspaces": None,
             "operator_notes": None, "vault": None}
 
-        assert await projects.update_project(calc["id"], execution={"task_budget_usd": None,
+        assert ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool)).wait_commands_on
+        assert await projects.update_project(calc["id"], execution={"task_budget_usd": None, "wait_commands": None,
                                                                     "supervise_interval_seconds": 60}, pool=pool)
         row = await projects.get_project(calc["id"], pool=pool)
         assert (row["task_budget_usd"], row["supervise_interval_seconds"], row["review_policy"]) == (None, 60, "all")
+        assert row["wait_commands"] is None and not ProjectExecution.from_row(row).wait_commands_on
         plain = await projects.create_project(name="plain", pool=pool)
         assert all(plain[column] is None for column in projects.EXECUTION_COLUMNS if column != "distill_lessons")
         assert plain["distill_lessons"] == "off"  # never unset
