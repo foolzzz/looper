@@ -22,6 +22,7 @@ import {
   History,
   RotateCcw,
   CirclePause,
+  Hourglass,
   MessageCircleQuestionMark,
   MessagesSquare,
 } from "lucide-react";
@@ -38,10 +39,12 @@ import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
+import { TaskWaits, WaitBadge } from "@/components/task-waits";
+import { WAIT_STATES, waitAnchor } from "@/lib/waits";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { TaskRoomTab } from "@/components/task-room";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
-import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
+import { type NodeCard, gateCard, waitCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
@@ -88,6 +91,7 @@ import {
   type ActivityEvent,
   type GateState,
   type UserGate,
+  type TaskWait,
   type RunRole,
 } from "@/lib/api";
 
@@ -139,6 +143,8 @@ function stepStatusBadge(status: string) {
 
 function taskStatusBadge(status: string) {
   switch (status) {
+    case "waiting":
+      return <Badge variant="outline" className="text-sm">Waiting</Badge>;
     case "running":
       return <Badge variant="default" className="text-sm">Running</Badge>;
     case "completed":
@@ -613,7 +619,8 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
 
 /** Take the user to a gate's place on the Overview: its panel or closed line (opened), else its row in Steps. */
 function showGate(step: TaskStep) {
-  const place = document.getElementById(gateAnchor(step.step_key)) ?? document.getElementById(stepAnchor(step.id));
+  const anchor = step.kind === "wait" ? waitAnchor(step.step_key) : gateAnchor(step.step_key);
+  const place = document.getElementById(anchor) ?? document.getElementById(stepAnchor(step.id));
   if (!place) return;
   if (place instanceof HTMLDetailsElement) place.open = true;
   place.scrollIntoView({ block: "start" });
@@ -655,10 +662,13 @@ function OverviewTab({
   const steps = task.steps || [];
   // A gate step shows its gate's state, or whose turn it is while it is discussed.
   const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
+  const waits = new Map((task.waits ?? []).map((wait) => [wait.step_id, wait]));
   const gateOf = (step: TaskStep) => (step.kind === "gate" ? gates.get(step.id) : undefined);
   const stepIcon = (step: TaskStep, gate = gateOf(step)) =>
+    step.kind === "wait" ? <Hourglass className={cn("h-4 w-4", WAIT_STATES[waits.get(step.id)?.state ?? "pending"].tone)} aria-hidden="true" /> :
     gate ? <CirclePause className={cn("h-4 w-4", gateLook(gate, isActive).tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
   const stepBadge = (step: TaskStep, gate = gateOf(step)) =>
+    step.kind === "wait" ? <WaitBadge state={waits.get(step.id)?.state ?? "pending"} /> :
     gate ? <GateBadge gate={gate} active={isActive} /> : stepStatusBadge(step.status);
   // Done means accepted (verified); a step in review is not done yet. A dropped (skipped) step is not counted, nor is
   // a cancelled gate (its step is verified, but nothing was settled).
@@ -674,6 +684,7 @@ function OverviewTab({
   return (
     <div className="space-y-6 p-5">
       <TaskGates task={task} onChanged={onGateChanged} />
+      <TaskWaits task={task} onChanged={onContinued} />
       {task.status === "failed" && task.fail_kind === "task_budget" && (
         <ContinueAtCap
           taskId={task.task_id}
@@ -761,6 +772,7 @@ function OverviewTab({
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="text-xs text-muted-foreground">#{step.step_index + 1}</span>
                       {step.kind === "gate" && <span className="font-mono text-xs text-muted-foreground">gate {step.step_key}</span>}
+                      {step.kind === "wait" && <span className="font-mono text-xs text-muted-foreground">wait {step.step_key}</span>}
                       {stepBadge(step)}
                       {step.worker_id && (
                         <a
@@ -1484,6 +1496,13 @@ function stepLook(status: string): NodeLook {
   return STEP_LOOKS[status] ?? { ...STEP_LOOKS.pending, label: status };
 }
 
+function waitLook(step: TaskStep, wait?: TaskWait): NodeLook {
+  const state = wait?.state ?? "pending";
+  const status = { pending: "pending", waiting: "pending", ready: "verified", done: "verified",
+    timed_out: "deciding", cancel_requested: "pending", failed: "failed", skipped: "skipped" }[state];
+  return { ...stepLook(wait ? status : step.status), label: WAIT_STATES[state].label };
+}
+
 /** One look per gate state, in the steps' tokens; the gate's shape (a hexagon with a pause icon) sets it apart. */
 const GATE_LOOKS: Record<GateState, NodeLook> = {
   pending: { ...STEP_LOOKS.pending, label: GATE_STATES.pending.label },
@@ -1513,6 +1532,7 @@ function gateState(step: TaskStep, gate: UserGate | undefined): GateState {
 
 /** The Planner's and the result node's look, from the task's status. */
 function taskLook(status: string, live: string): NodeLook {
+  if (status === "waiting") return { ...STEP_LOOKS.pending, label: "Waiting" };
   if (status === "completed") return { ...STEP_LOOKS.verified, label: "Completed" };
   if (status === "failed") return { ...STEP_LOOKS.failed, label: "Failed" };
   const quiet: Record<string, string> = { stopped: "Stopped", cancelled: "Cancelled", pending: "Starting",
@@ -1601,6 +1621,7 @@ interface GateNodeData extends Record<string, unknown> {
   topic: string;
   look: NodeLook;
   onOpen: () => void;
+  kind?: "gate" | "wait";
 }
 
 const HEXAGON_INSET = 18;
@@ -1613,6 +1634,7 @@ const HEXAGON = [
  * the user to the gate on the Overview tab. */
 function GateNode({ id, data }: NodeProps<Node<GateNodeData, "gate">>) {
   const { look } = data;
+  const Icon = data.kind === "wait" ? Hourglass : CirclePause;
   return (
     <>
       <Handle type="target" position={Position.Top} />
@@ -1633,11 +1655,11 @@ function GateNode({ id, data }: NodeProps<Node<GateNodeData, "gate">>) {
         className="nodrag nopan pointer-events-auto relative flex h-full w-full cursor-pointer flex-col items-center justify-center rounded-md px-6 leading-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className={cn("flex max-w-full items-center gap-1 font-mono text-xs font-semibold", look.muted && "line-through")}>
-          <CirclePause className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
           <span className="truncate">{data.name}</span>
         </span>
         <span className="mt-1 max-w-full truncate text-[10px]">{look.label}</span>
-        <span className="sr-only">: {data.topic}. Show this gate on the Overview tab</span>
+        <span className="sr-only">: {data.topic}. Show this {data.kind ?? "gate"} on the Overview tab</span>
       </button>
       <Handle type="source" position={Position.Bottom} />
     </>
@@ -1691,10 +1713,12 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     const byId = new Map(steps.map((s) => [s.id, s]));
     const allById = new Map(all.map((s) => [s.id, s]));
     const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
+    const waits = new Map((task.waits ?? []).map((wait) => [wait.step_id, wait]));
     const active = isActiveTask(task);
     // Each step's look as its node draws it: a gate's by its gate (whose turn it is while it is discussed, the
     // Planner's only while the task runs, as the gate's panel says).
     const lookOf = (step: TaskStep): NodeLook => {
+      if (step.kind === "wait") return waitLook(step, waits.get(step.id));
       if (step.kind !== "gate") return stepLook(step.status);
       const gate = gates.get(step.id);
       const turn = gate && gateTurn(gate, active);
@@ -1713,14 +1737,16 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       const deps = (step.depends_on ?? []).filter((d) => byId.has(d));
       const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
       const live = step.status !== "skipped";
-      if (step.kind === "gate") {
+      if (step.kind === "gate" || step.kind === "wait") {
         const look = lookOf(step);
         ns.push({
           id: step.id, type: "gate", position, focusable: false,
-          data: { name, topic: step.instruction, look, onOpen: () => onOpenGate(step) },
+          data: { name, kind: step.kind, topic: step.instruction, look, onOpen: () => onOpenGate(step) },
           style: { width: NODE_W, height: NODE_H, padding: 0, background: "transparent", border: "none" },
         });
-        cards[step.id] = gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById, active });
+        cards[step.id] = step.kind === "wait"
+          ? waitCard(step, waits.get(step.id), { look, lookOf, stepsById: allById })
+          : gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById, active });
       }
       for (const source of deps.length ? deps : ["planner"]) {
         const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";
@@ -1728,7 +1754,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
         es.push({ id: `dep:${source}->${step.id}`, source, target: step.id, animated: running,
                   style: edgeStyle(live && fromLive, running) });
       }
-      if (step.kind === "gate") continue;
+      if (step.kind === "gate" || step.kind === "wait") continue;
       const look = stepLook(step.status);
       // Its seats' messages in the task's room (keyed as the room keys its seats).
       const room = task.room?.by_step[step.step_key || step.id];

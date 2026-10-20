@@ -6,12 +6,13 @@ import {
   formatSeconds,
   formatWhen,
   gateCard,
+  waitCard,
   plannerCard,
   resultCard,
   stepCard,
   stepSpan,
 } from "@/lib/node-cards";
-import type { StepWorkspace, TaskDetail, TaskStep, UserGate } from "@/lib/api";
+import type { StepWorkspace, TaskDetail, TaskStep, TaskWait, UserGate } from "@/lib/api";
 
 const look = (label: string): CardLook => ({ label, border: "b", borderStyle: "solid", background: "bg", color: "c" });
 const LOOKS: Record<string, CardLook> = { verified: look("Done"), failed: look("Failed"), pending: look("Not started") };
@@ -27,6 +28,18 @@ function step(id: string, extra: Partial<TaskStep> = {}): TaskStep {
 }
 
 const LONG = Array.from({ length: 12 }, (_, i) => `line ${i + 1} of what the Worker did`).join("\n");
+
+describe("waitCard", () => {
+  it("describes a wait without assigning seats and keeps its dependencies", () => {
+    const dep = step("s1");
+    const s = step("w1", { kind: "wait", instruction: "Wait for the PR", depends_on: [dep.id] });
+    const wait = { topic: s.instruction, check: { type: "github_pr", repo: "owner/name", number: 12, ready_when: "head_changed" } } as TaskWait;
+    const card = waitCard(s, wait, { look: look("Waiting"), lookOf: () => LOOKS.pending, stepsById: new Map([[dep.id, dep]]) });
+    expect(card).toMatchObject({ name: "w1", look: { label: "Waiting" }, roles: [] });
+    expect(card.sections).toContainEqual({ kind: "text", title: "Check", text: "GitHub PR owner/name#12 · head changed" });
+    expect(card.sections).toContainEqual({ kind: "steps", title: "Depends on", steps: [{ name: "s1", look: LOOKS.pending }] });
+  });
+});
 
 function cardOf(
   s: TaskStep, steps: TaskStep[] = [s], skippedBecause?: string, workspaces?: StepWorkspace[], active = true,

@@ -72,6 +72,21 @@ describe("TaskDetailRoute", () => {
     expect(container.textContent).not.toContain("Build the A parser.");
   });
 
+  it("renders a wait step with its own badge in the steps list", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/tasks/task-a") return Response.json({ ...detail("task-a"), steps: [{
+        id: "step-w1", task_id: "task-a", step_key: "w1", step_index: 0, kind: "wait", status: "pending",
+        instruction: "Wait for a revision", depends_on: [], acceptance_criteria: [], target_files: [], review_roles: [],
+      }] });
+      return Response.json(answer(String(input)));
+    }));
+    await show("task-a");
+    const row = container.querySelector("#step-step-w1");
+    expect(row?.textContent).toContain("wait w1");
+    expect(row?.textContent).toContain("Not open yet");
+    expect(row?.querySelector(".lucide-hourglass")).not.toBeNull();
+  });
+
   it("does not show the previous task's data while the next one loads", async () => {
     await show("task-a");
     let release = () => {};
