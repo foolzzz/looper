@@ -42,6 +42,7 @@ from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
     RuntimeUnsupported, instructions, runtime_prompt_text,
 )
+from .channel import RunChannel
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
@@ -276,6 +277,14 @@ class PiRuntime(RuntimeAdapter):
         args.remove("-p")
         args[args.index("--mode") + 1] = "rpc"
         return [*command[:start], *args]
+
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None) -> RunChannel:
+        from .pi_steer import PiChannel
+
+        if not launch.steers:
+            return super().run_channel(process, launch=launch, cwd=cwd, session_dir=session_dir)
+        return PiChannel(process, model=launch.model, cwd=str(cwd))
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
