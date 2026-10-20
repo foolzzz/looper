@@ -113,6 +113,22 @@ def test_github_first_view_returns_a_baseline(tmp_path: Path, monkeypatch: pytes
     assert "1a2b3c4" in output
 
 
+def test_github_check_uses_the_task_directory(tmp_path: Path) -> None:
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "head").write_text("new-head")
+    script = tmp_path / "gh"
+    script.write_text(f"#!{sys.executable}\nimport json\nfrom pathlib import Path\n"
+                      "print(json.dumps({'headRefOid': Path('head').read_text(), 'state': 'OPEN', "
+                      "'comments': [], 'reviews': [], 'statusCheckRollup': []}))\n")
+    script.chmod(0o755)
+    result, _, error, extra = asyncio.run(run_github_pr(
+        _check(ReadyWhen.HEAD_CHANGED), {"head": "old-head", "comments": 0}, gh=str(script), work_dir=str(task_dir)))
+    assert result is CheckResult.READY
+    assert error == ""
+    assert extra["baseline"]["head"] == "new-head"
+
+
 def test_github_head_unchanged_is_not_ready(tmp_path: Path) -> None:
     baseline = {"head": "1a2b3c4", "comments": 0}
     (result, _output, error, extra), _ = _github(tmp_path, _pr(), baseline, ReadyWhen.HEAD_CHANGED)

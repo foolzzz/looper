@@ -26,8 +26,9 @@ from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
-from looper.agents.tiers.planner_protocol import TurnKind, parse_plan, parse_vault
+from looper.agents.tiers.planner_protocol import TurnKind, WaitPolicy, parse_plan, parse_vault
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool, judge_result
+from looper.agents.waits import WaitLimits
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
@@ -963,7 +964,7 @@ def _rereview_flow() -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, li
         {"id": "review", "depends_on": []},
         {"id": "wait", "depends_on": ["review"]},
         {"id": "rereview", "depends_on": ["wait"]},
-    ], "waits": [{"step_id": "wait", "state": "done", "outcome": "resumed",
+    ], "waits": [{"step_id": "wait", "state": "done", "outcome": "ready", "last_result": "ready", "checks": 2,
                   "opened_at": "2026-10-13T10:00:06+00:00", "closed_at": "2026-10-13T10:00:10+00:00",
                   "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
                             "ready_when": "head_changed"}}]}
@@ -977,17 +978,19 @@ def _rereview_flow() -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, li
 
 @pytest.mark.parametrize("fault", [None, "repo", "number", "ready_when", "unrelated_wait", "initial_not_upstream",
                                   "early_rereview", "same_worker", "not_opened", "missing_report",
-                                  "proceeded", "cancelled", "check_ready"])
+                                  "proceeded", "cancelled", "resumed", "no_check", "no_baseline"])
 def test_rereview_checks_the_requested_pr_and_actual_review_dependency(fault: str | None) -> None:
     task = next(t for t in TASKS if t.id == "wait_pr_rereview")
     detail, records, events = _rereview_flow()
     wait = detail["waits"][0]
     if fault in {"repo", "number", "ready_when"}:
         wait["check"][fault] = {"repo": "other/repo", "number": 99, "ready_when": "merged"}[fault]
-    elif fault in {"proceeded", "cancelled", "check_ready"}:
-        # A fixed gh stub never pushes a commit. Proceeding or cancelling after a timeout, or a check that
-        # reports the head changed, is not the runner's resume.
-        wait["outcome"] = "ready" if fault == "check_ready" else fault
+    elif fault in {"proceeded", "cancelled", "resumed"}:
+        wait["outcome"] = fault
+    elif fault == "no_check":
+        wait["last_result"] = "not_ready"
+    elif fault == "no_baseline":
+        wait["checks"] = 1
     elif fault == "unrelated_wait":
         detail["steps"][2]["depends_on"] = ["review"]
         detail["steps"].append({"id": "unrelated", "depends_on": ["wait"]})
@@ -1032,8 +1035,101 @@ def test_gh_stub_answers_views_and_fixture_diffs_and_refuses_other_commands(tmp_
         assert refused.stderr.strip() == "gh stub: unsupported"
 
 
-def test_wait_resumes_after_delay_once_per_wait_and_only_when_opted_in() -> None:
+def test_pr_fix_is_visible_to_both_wait_check_and_worker(tmp_path: Path) -> None:
+    from looper.agents.wait_service import run_github_pr
+    from looper.agents.waits import CheckResult, GithubPrCheck, ReadyWhen
+
     task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    stub = runner.install_gh(tmp_path / "bin", diffs=task.gh_pr_diffs)
+    work = tmp_path / "work"
+    work.mkdir()
+    runner.init_pr_fixture(work, task)
+    other = tmp_path / "other-case"
+    other.mkdir()
+    runner.init_pr_fixture(other, task)
+    check = GithubPrCheck("example-org/demo-service", 12, ReadyWhen.HEAD_CHANGED)
+
+    def worker(*args: str) -> str:
+        return subprocess.run([str(stub), "pr", *args, "--repo", check.repo], cwd=work,
+                              capture_output=True, text=True, check=True, timeout=5).stdout
+
+    first = asyncio.run(run_github_pr(check, None, gh=str(stub), work_dir=str(work)))
+    assert first[0] is CheckResult.NOT_READY
+    old_head = first[3]["baseline"]["head"]
+    assert "range(len(values) - 1)" in worker("diff", "12")
+    detail = {"waits": [{"step": "w1", "state": "waiting", "checks": 1, "last_result": "not_ready",
+                         "opened_at": "1970-01-01T00:01:40Z", "check": check.row()}]}
+    assert not runner.push_pr_fixes(task, work, detail, now=104.9)
+    assert runner.push_pr_fixes(task, work, detail, now=105.0)
+    assert not runner.push_pr_fixes(task, work, detail, now=106.0)
+    second = asyncio.run(run_github_pr(check, first[3]["baseline"], gh=str(stub), work_dir=str(work)))
+    assert second[0] is CheckResult.READY
+    new_head = second[3]["baseline"]["head"]
+    assert new_head != old_head
+    view = subprocess.run([str(stub), "pr", "view", "12", "--repo", check.repo, "--json", "headRefOid,commits"],
+                          cwd=work, capture_output=True, text=True, check=True, timeout=5)
+    metadata = json.loads(view.stdout)
+    assert metadata["headRefOid"] == new_head
+    assert metadata["commits"][-1]["oid"] == new_head
+    assert runner._git_in(work, "rev-parse", f"{new_head}^") == old_head
+    assert runner._git_in(work, "show", f"{new_head}:totals.py") == task.gh_pr_fix_files["totals.py"].strip()
+    diff = worker("diff", "12")
+    assert "range(len(values) - 1)" not in diff
+    assert "+    for value in values:" in diff
+    other_diff = subprocess.run([str(stub), "pr", "diff", "12", "--repo", check.repo], cwd=other,
+                                capture_output=True, text=True, check=True, timeout=5).stdout
+    assert "range(len(values) - 1)" in other_diff
+    # Step worktrees share the PR ref even if their own branch still has the old checkout.
+    checkout = tmp_path / "worker-checkout"
+    runner._git_in(work, "worktree", "add", "--detach", str(checkout), old_head)
+    worktree_diff = subprocess.run([str(stub), "pr", "diff", "12", "--repo", check.repo], cwd=checkout,
+                                   capture_output=True, text=True, check=True, timeout=5).stdout
+    assert worktree_diff == diff
+
+
+@pytest.mark.parametrize("fault", ["no_baseline", "error", "wrong_pr", "pending"])
+def test_pr_fix_waits_for_a_successful_baseline_of_the_requested_pr(tmp_path: Path, fault: str) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    runner.init_pr_fixture(tmp_path, task)
+    old_head = runner._git_in(tmp_path, "rev-parse", "HEAD")
+    wait = {"state": "waiting", "checks": 1, "last_result": "not_ready", "opened_at": "1970-01-01T00:00:00Z",
+            "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                      "ready_when": "head_changed"}}
+    if fault == "no_baseline":
+        wait["checks"] = 0
+    elif fault == "error":
+        wait["last_result"] = "error"
+    elif fault == "wrong_pr":
+        wait["check"]["number"] = 99
+    else:
+        wait["state"] = "pending"
+    assert not runner.push_pr_fixes(task, tmp_path, {"waits": [wait]}, now=100)
+    assert runner._git_in(tmp_path, "rev-parse", "HEAD") == old_head
+
+
+def test_fake_pr_worker_requires_the_changed_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    task = next(t for t in TASKS if t.id == "wait_pr_rereview")
+    stub = runner.install_gh(tmp_path / "bin")
+    work = tmp_path / "work"
+    work.mkdir()
+    runner.init_pr_fixture(work, task)
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PATH", f"{stub.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(fake_claude, "_answer", lambda *_args, **_kwargs: None)
+    stdin = SimpleNamespace(readline=lambda: "start")
+    fake_claude._worker(task.fake, "Your step: s1", stdin, [])
+    with pytest.raises(RuntimeError, match="does not contain the commit"):
+        fake_claude._worker(task.fake, "Your step: s2", stdin, [])
+    assert not (work / "rereview.md").exists()
+    wait = {"state": "waiting", "checks": 1, "last_result": "not_ready", "opened_at": "1970-01-01T00:00:00Z",
+            "check": task.fake["plan"][1]["check"]}
+    assert runner.push_pr_fixes(task, work, {"waits": [wait]}, now=5)
+    fake_claude._worker(task.fake, "Your step: s2", stdin, [])
+    assert task.check(work) is None
+
+
+def test_wait_resumes_after_delay_once_per_wait_and_only_when_opted_in() -> None:
+    task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), wait_resume_after_s=5)
     api, resumed = _Poster(), {}
     detail = {"waits": [{"step": "w1", "state": "waiting", "opened_at": "1970-01-01T00:01:40Z"},
                         {"step": "w2", "state": "pending", "opened_at": None}]}
@@ -1073,7 +1169,7 @@ def test_a_failed_resume_is_not_recorded_and_a_later_poll_can_retry(monkeypatch:
 
 
 @pytest.mark.parametrize("fault", [None, "wrong_pr", "unrelated_wait"])
-def test_run_task_polls_waits_and_records_successful_resumes(
+def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
 ) -> None:
     task = dataclasses.replace(next(t for t in TASKS if t.id == "wait_pr_rereview"), check=lambda _: None)
@@ -1087,7 +1183,7 @@ def test_run_task_polls_waits_and_records_successful_resumes(
         final["steps"].append({"id": "unrelated", "depends_on": ["wait"]})
     records[0].update(created_at="1970-01-01T00:01:30Z", finished_at="1970-01-01T00:01:35Z")
     records[1].update(created_at="1970-01-01T00:01:46Z", finished_at="1970-01-01T00:01:50Z")
-    wait = {**final["waits"][0], "state": "waiting", "closed_at": None}
+    wait = {**final["waits"][0], "state": "waiting", "closed_at": None, "last_result": "not_ready", "checks": 1}
     details = iter([{"status": "waiting", "waits": [wait]}, {"status": "waiting", "waits": [wait]}, final, final])
     posted: list[tuple[str, Any]] = []
 
@@ -1112,8 +1208,9 @@ def test_run_task_polls_waits_and_records_successful_resumes(
     assert result["wait_dependents"] == 1
     if fault is not None:
         assert result["problems"]  # aggregate counts pass; only the task-specific flow check rejects this
-    assert result["wait_resumes"] == {"w1": 105.0}
-    assert [path for path, _ in posted] == ["/api/tasks/create", "/api/tasks/start", "/api/tasks/t1/waits/w1/resume"]
+    assert result["wait_resumes"] == {}
+    assert [path for path, _ in posted] == ["/api/tasks/create", "/api/tasks/start"]
+    assert ("for value in values" in runner._git_in(tmp_path, "show", "HEAD:totals.py")) is (fault != "wrong_pr")
 
 
 def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1140,14 +1237,14 @@ def test_fake_wait_plans_parse_and_delivered_files_are_checked(
     replies: list[str] = []
     monkeypatch.setattr(fake_claude, "_answer", lambda _session, text, _cost, **_: replies.append(text))
     fake_claude._planner(task.fake, [], SimpleNamespace(readline=lambda: next(messages)))
-    parsed = parse_plan(replies[0])
+    parsed = parse_plan(replies[0], wait_policy=WaitPolicy(limits=WaitLimits(min_check_seconds=10)))
     assert [step.id for step in parsed.steps] == (["s1", "w1", "s2"] if task_id == "wait_pr_rereview"
                                                 else ["s1", "s2"])
     if task_id == "wait_pr_rereview":
         assert parsed.steps[1].wait is not None
         assert parsed.steps[1].wait.check.row() == task.fake["plan"][1]["check"]
-        assert parsed.steps[1].wait.max_wait_seconds == 3600
-        assert parsed.steps[1].wait.every_seconds == 600
+        assert parsed.steps[1].wait.max_wait_seconds == 45
+        assert parsed.steps[1].wait.every_seconds == 10
         assert parsed.steps[2].depends_on == ("w1",)
     else:
         assert all(step.wait is None for step in parsed.steps)
@@ -1583,6 +1680,18 @@ def test_with_a_real_reviewer_task_the_stand_in_hands_claude_code_every_run_but_
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_fake_mode_rereviews_the_new_pr_commit(tmp_path: Path) -> None:
+    result, _ = runner.run(mode="fake", tasks=task_list.select(["wait_pr_rereview"]),
+                           admin_url=str(DSN), out_dir=tmp_path, agent="claude-code/opus",
+                           reps=2, jobs=2, task_timeout=60)
+    assert result["aborted"] is None
+    assert len(result["tasks"]) == 2
+    for row in result["tasks"]:
+        assert row["outcome"] == "pass", row["problems"]
+        assert not row["wait_resumes"]
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_fake_mode_reviews_files_in_another_worktree(tmp_path: Path) -> None:
     result, _ = runner.run(mode="fake", tasks=task_list.select(["reviewer_elsewhere", "reviewer_elsewhere_wrong"]),
                            admin_url=str(DSN), out_dir=tmp_path, agent="claude-code/opus")
@@ -1711,7 +1820,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
     assert by_id["gate_discoverable"]["gates_opened"] == 0
     assert by_id["wait_pr_rereview"]["waits_opened"] == 1
-    assert set(by_id["wait_pr_rereview"]["wait_resumes"]) == {"w1"}
+    assert not by_id["wait_pr_rereview"]["wait_resumes"]
     assert all(row["waits_opened"] == 0 and not row["wait_resumes"]
                for task_id, row in by_id.items() if task_id != "wait_pr_rereview")
     assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)

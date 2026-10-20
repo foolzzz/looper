@@ -330,12 +330,13 @@ def _from_view(check: GithubPrCheck, baseline: Mapping[str, Any] | None, data: b
     return _done(result, output, "", _extra(baseline=extracted, resolution=resolution, exit_code=exit_code))
 
 
-async def run_github_pr(check: GithubPrCheck, baseline: Mapping[str, Any] | None, *, gh: str) -> Outcome:
+async def run_github_pr(check: GithubPrCheck, baseline: Mapping[str, Any] | None, *, gh: str,
+                        work_dir: str | None = None) -> Outcome:
     """View ``check`` with ``gh`` and say whether it is ready. ``baseline`` is the previous ``{head, comments}``."""
     try:
         process = await asyncio.create_subprocess_exec(
             gh, "pr", "view", str(check.number), "--repo", check.repo, "--json", _JSON_FIELDS,
-            env=child_env.inherited(), stdin=asyncio.subprocess.DEVNULL,
+            cwd=work_dir, env=child_env.inherited(), stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except OSError:
         return _done(CheckResult.ERROR, "", "the check could not start", _extra())
@@ -458,7 +459,8 @@ class WaitService:
         moved = None
         if check is not None and row["next_check_at"] is not None and row["next_check_at"] <= now:
             if isinstance(check, GithubPrCheck):
-                result, output, error, extra = await run_github_pr(check, row["baseline"], gh=self._gh)
+                result, output, error, extra = await run_github_pr(
+                    check, row["baseline"], gh=self._gh, work_dir=row["work_dir"])
             else:
                 result, output, error, extra = await run_command(
                     check, row["work_dir"], project_allows=await _commands_allowed(task_id))

@@ -8,7 +8,7 @@ agent system started it in:
 
 - the Planner (a resident process; its task section has neither of the
   markers below) answers each user turn by its kind: [PLAN] with the task's scripted plan, including typed
-  wait steps in ``wait_pr_rereview`` and only work steps in ``wait_not_needed`` (the runner resumes waits);
+  wait steps in ``wait_pr_rereview`` and only work steps in ``wait_not_needed``;
   [DECISION] with
   what a careful Planner decides from the allowed decisions (accept, else
   review a completed step that needs one, else retry a failed one, else fail),
@@ -288,6 +288,12 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     attempt_no = int(retried.group(1)) if retried else 1
     attempts = script.get("attempts", {}).get(label) or [{"status": "completed", "files": {}}]
     attempt = attempts[min(attempt_no, len(attempts)) - 1]
+    if expected_diff := attempt.get("pr_diff_contains"):
+        pr = script["pr_review"]
+        diff = subprocess.run(["gh", "pr", "diff", str(pr["number"]), "--repo", pr["repo"]],
+                              capture_output=True, text=True, check=True, timeout=5).stdout
+        if expected_diff not in diff:
+            raise RuntimeError("the simulated PR does not contain the commit this review needs")
     files = dict(attempt.get("files") or {})
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:

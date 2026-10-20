@@ -242,23 +242,47 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
 
 
 def install_gh(bin_dir: Path, *, diffs: dict[str, str] | None = None) -> Path:
-    """Always shadow gh: fixed PR metadata, fixture diffs keyed by owner/repo#number, no other operations."""
+    """Shadow gh: simulated PRs read their git refs; other PRs use fixed metadata and diffs."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     script = bin_dir / "gh"
     script.write_text(f"""#!{sys.executable}
 import json
+from pathlib import Path
+import subprocess
 import sys
 
 diffs = {diffs or {}!r}
+
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
+
+def fixture(key):
+    try:
+        path = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "looper-eval-pr.json"
+    except subprocess.CalledProcessError:
+        return None
+    if path.is_file():
+        pr = json.loads(path.read_text())
+        if pr["key"] == key:
+            return pr
+    return None
+
 args = sys.argv[1:]
 if (len(args) in (5, 7) and args[0] == "pr" and args[2].isdigit()
         and int(args[2]) > 0 and args[3] == "--repo" and args[4]):
+    key = args[4] + "#" + args[2]
+    pr = fixture(key)
     if len(args) == 7 and args[1] == "view" and args[5] == "--json" and args[6]:
-        print(json.dumps({{"headRefOid": "1" * 40, "state": "OPEN", "comments": [], "reviews": [],
-                          "statusCheckRollup": []}}))
+        view = {{"headRefOid": "1" * 40, "state": "OPEN", "comments": [], "reviews": [],
+                 "statusCheckRollup": []}}
+        if pr:
+            head = git("rev-parse", pr["head_ref"])
+            view.update(headRefOid=head, baseRefOid=pr["base"],
+                        commits=[{{"oid": oid}} for oid in git("rev-list", "--reverse", pr["base"] + ".." + head).splitlines()])
+        print(json.dumps(view))
         sys.exit(0)
     if len(args) == 5 and args[1] == "diff":
-        sys.stdout.write(diffs.get(args[4] + "#" + args[2], ""))
+        sys.stdout.write(git("diff", pr["base"], pr["head_ref"]) + "\\n" if pr else diffs.get(key, ""))
         sys.exit(0)
 print("gh stub: unsupported", file=sys.stderr)
 sys.exit(1)
@@ -370,6 +394,50 @@ def init_repository(work_dir: Path) -> None:
     _git_in(work_dir, "commit", "-q", "--allow-empty", "-m", "eval: the task's files")
 
 
+def init_pr_fixture(work_dir: Path, task: EvalTask) -> None:
+    """An isolated PR per case: real commits and a pull ref shared by gh views and diffs."""
+    if len(task.gh_pr_diffs) != 1:
+        raise EvalError("a simulated PR needs exactly one initial diff")
+    init_repository(work_dir)
+    key, diff = next(iter(task.gh_pr_diffs.items()))
+    base = _git_in(work_dir, "rev-parse", "HEAD")
+    subprocess.run(["git", "apply", "--index", "-"], cwd=work_dir, input=diff, text=True,
+                   capture_output=True, check=True, timeout=10)
+    _git_in(work_dir, "commit", "-q", "-m", "eval: initial pull request")
+    head = _git_in(work_dir, "rev-parse", "HEAD")
+    head_ref = f"refs/pull/{key.rsplit('#', 1)[1]}/head"
+    _git_in(work_dir, "update-ref", head_ref, head)
+    common = Path(_git_in(work_dir, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    (common / "looper-eval-pr.json").write_text(json.dumps(
+        {"key": key, "base": base, "initial_head": head, "head_ref": head_ref}))
+
+
+def push_pr_fixes(task: EvalTask, work_dir: Path, detail: dict[str, Any], *, now: float) -> bool:
+    """Play the author once, after the requested wait has captured the old head; never resume a wait."""
+    if not task.gh_pr_fix_files:
+        return False
+    key = next(iter(task.gh_pr_diffs))
+    repo, number = key.rsplit("#", 1)
+    expected = {"type": "github_pr", "repo": repo, "number": int(number), "ready_when": "head_changed"}
+    for wait in detail.get("waits") or []:
+        opened = metrics.timestamp(wait.get("opened_at"))
+        if (wait.get("state") != "waiting" or opened is None or now - opened < task.gh_pr_fix_after_s
+                or not wait.get("checks") or wait.get("last_result") != "not_ready"
+                or wait.get("check") != expected):
+            continue
+        common = Path(_git_in(work_dir, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        pr = json.loads((common / "looper-eval-pr.json").read_text())
+        if _git_in(work_dir, "rev-parse", pr["head_ref"]) != pr["initial_head"]:
+            return False
+        for name, content in task.gh_pr_fix_files.items():
+            (work_dir / name).write_text(content, encoding="utf-8")
+        _git_in(work_dir, "add", "--", *task.gh_pr_fix_files)
+        _git_in(work_dir, "commit", "-q", "-m", "eval: fix the pull request")
+        _git_in(work_dir, "update-ref", pr["head_ref"], "HEAD", pr["initial_head"])
+        return True
+    return False
+
+
 def looper_commits(work_dir: Path, task_id: str) -> dict[str, int]:
     """The commits the task's step workspaces added to the working directory's branch."""
     def count(*args: str) -> int:
@@ -449,7 +517,9 @@ def run_task(
     project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir),
                                "task_workspaces": "in_place"}
     step_workspaces = task.step_workspaces or step_workspaces
-    if step_workspaces or task.init_git:
+    if task.gh_pr_fix_files:
+        init_pr_fixture(work_dir, task)
+    elif step_workspaces or task.init_git:
         init_repository(work_dir)
     if step_workspaces:
         project["step_workspaces"] = step_workspaces
@@ -500,6 +570,8 @@ def run_task(
             elif time.monotonic() - started > timeout and not timed_out:
                 timed_out = True
                 api.post("/api/tasks/cancel", {"task_id": task_id})
+            elif push_pr_fixes(task, work_dir, detail, now=time.time() + clock_offset):
+                pass  # the next real gh check sees the fix, just as the dependent Worker will
             elif resume_waits(api, task, task_id, detail, resumed, now=time.time() + clock_offset):
                 pass  # the user resumed a wait; read the Planner's progress at the next poll
             elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset):
@@ -915,6 +987,8 @@ def run(
             home=home, notes_root=notes_root,
             gh_diffs={pr: diff for task in tasks for pr, diff in task.gh_pr_diffs.items()},
         ) as api:
+            if any(task.gh_pr_fix_files for task in tasks):
+                api.put("/api/wait-settings", {"min_check_seconds": 10})
             if vault_dir is not None:
                 api.put("/api/knowledge-vault", {"path": str(vault_dir), "writable": ["codex-mem"],
                                                   "rules_file": "codex-mem/AGENTS.md"})

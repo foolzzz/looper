@@ -57,6 +57,9 @@ class EvalTask:
     wait_resume_after_s: float | None = None
     # Fixed diffs returned by the server's gh stand-in, keyed by owner/repo#number (empty for other PRs).
     gh_pr_diffs: dict[str, str] = field(default_factory=dict)
+    # A simulated PR gets a real fix commit once its head-change wait has recorded the old head.
+    gh_pr_fix_files: dict[str, str] = field(default_factory=dict)
+    gh_pr_fix_after_s: float = 5.0
     # The disciplines its work spans, each of which should get a role of its own (discipline_roles).
     disciplines: tuple[Discipline, ...] = ()
     # Where its steps that run side by side work (``step_workspaces``), over the run's ``--step-workspaces``: with
@@ -132,9 +135,8 @@ def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
                    events: Mapping[int, list[Mapping[str, Any]]]) -> str | None:
     """Bind the requested PR wait to the Workers that actually delivered each review.
 
-    The eval's ``gh`` stub never pushes a commit, so the wait between the two reviews has to be the one the
-    runner resumed (outcome ``resumed``). A timeout the Planner then proceeds or cancels, or a check that
-    reports the head changed, does not count.
+    The fixture pushes a real fix commit after the wait records its baseline. Only a successful check of
+    that PR, followed by a dependent re-review, counts; a manual resume or proceeding after timeout does not.
     """
     expected = {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
                 "ready_when": "head_changed"}
@@ -167,7 +169,8 @@ def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
                     delivered[name].append(record)
     for wait in waits:
         opened, closed = timestamp(wait.get("opened_at")), timestamp(wait.get("closed_at"))
-        if (wait.get("state") != "done" or wait.get("outcome") != "resumed"
+        if (wait.get("state") != "done" or wait.get("outcome") != "ready" or wait.get("last_result") != "ready"
+                or (wait.get("checks") or 0) < 2
                 or opened is None or closed is None):
             continue
         for first in delivered["findings.md"]:
@@ -179,7 +182,7 @@ def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
                         and started is not None and ended <= opened <= closed <= started
                         and upstream(wait["step_id"], first_step) and upstream(second_step, wait["step_id"])):
                     return None
-    return ("reviews were not delivered by separate Workers before and after a runner resume "
+    return ("reviews were not delivered by separate Workers before and after a successful head-change check "
             "of the requested PR wait")
 
 
@@ -343,26 +346,33 @@ TASKS: tuple[EvalTask, ...] = (
         requirement="Review pull request #12 of example-org/demo-service: read its diff with "
                     "`gh pr diff 12 --repo example-org/demo-service` and write your findings to findings.md. "
                     "The author will push fixes to the pull request after your review; once a new commit is "
-                    "pushed, review the pull request again and write the result to rereview.md.",
+                    "pushed, review the pull request again and write the result to rereview.md. "
+                    "In this simulated repository the author pushes within 5 seconds after the head-change "
+                    "check first records the old head. Check every 10 seconds and wait at most 45 seconds; "
+                    "the entire case has a 900-second timeout.",
         check=_review_files,
         flow_check=_rereview_flow,
         gh_pr_diffs={"example-org/demo-service#12": _PR_DIFF},
-        wait_resume_after_s=5,
+        gh_pr_fix_files={"totals.py": "def total(values):\n    result = 0\n    for value in values:\n"
+                                     "        result += value\n    return result\n"},
         expect={"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1},
         fake={
+            "pr_review": {"repo": "example-org/demo-service", "number": 12},
             "plan": [
                 _step("s1", "Read gh pr diff 12 --repo example-org/demo-service and write findings.md.",
                       ["findings.md records the review"]),
                 {"id": "w1", "kind": "wait", "topic": "The author pushes fixes", "depends_on": ["s1"],
-                 "max_wait_seconds": 3600, "every_seconds": 600,
+                 "max_wait_seconds": 45, "every_seconds": 10,
                  "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
                            "ready_when": "head_changed"}},
                 _step("s2", "Read the pull request diff again and write rereview.md.", ["rereview.md exists"],
                       depends_on=["w1"]),
             ],
             "attempts": {
-                "s1": [{"status": "completed", "files": {"findings.md": "The loop skips the last value.\n"}}],
-                "s2": [{"status": "completed", "files": {"rereview.md": "The diff still skips the last value.\n"}}],
+                "s1": [{"status": "completed", "pr_diff_contains": "+    for i in range(len(values) - 1):",
+                        "files": {"findings.md": "The loop skips the last value.\n"}}],
+                "s2": [{"status": "completed", "pr_diff_contains": "+    for value in values:",
+                        "files": {"rereview.md": "The new commit includes every value.\n"}}],
             },
         },
     ),

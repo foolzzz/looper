@@ -37,7 +37,7 @@ directories), one at a time over the HTTP API:
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
-| `wait_pr_rereview` | review a pull request, then review it again after its author pushes fixes: at least one opened wait with a `github_pr` check and a step depending on a wait; `findings.md` and `rereview.md` exist. The fixed diff has a loop that skips the last value; the runner resumes the wait after 5 s |
+| `wait_pr_rereview` | review a simulated pull request whose loop skips the last value, then review the author's real fix commit. A successful `github_pr` / `head_changed` check of the requested PR must separate the two dependent Workers delivering `findings.md` and `rereview.md`; a manual resume does not count |
 | `wait_not_needed` | write and run `build.sh`, then check its `out/app.txt` and write `ok` to `result.txt`: the build is the task's own work, so no wait opens (`max_waits_opened` 0) |
 | `operator_notes` | the task's project gives its agents the operator's notes (`operator_notes` on), and only they hold the staging port: `port.txt` is 59322 |
 | `operator_notes_stale` | the notes give a production port the repository's `config/production.toml` contradicts: the files win, `port.txt` is 8443 |
@@ -145,16 +145,23 @@ database: pass `--pg-url` (any database on the server except `loopx`) or set
 Every eval server, in fake and real mode (dialogs included), installs a Python `gh` stub in its `bin_dir`,
 first on `PATH`: evals never call the real GitHub CLI. It accepts only
 `gh pr view <n> --repo <r> --json <fields>` and `gh pr diff <n> --repo <r>`.
-Views always return head `1111111111111111111111111111111111111111`, state `OPEN`, and empty comments,
-reviews and checks. Diffs come from the task's `gh_pr_diffs` fixture (`owner/repo#number` keys), or are empty
-by default. Every other command exits 1 with `gh stub: unsupported`.
+By default, views return head `1111111111111111111111111111111111111111`, state `OPEN`, and empty comments,
+reviews and checks. Diffs come from the task's `gh_pr_diffs` fixture (`owner/repo#number` keys), or are empty.
+For `wait_pr_rereview`, each case has an isolated git repository: views (including commit OIDs) and diffs
+read the same pull ref. The wait check runs in the task directory, so it sees the same PR as its Workers.
+Every other command exits 1 with `gh stub: unsupported`.
 
-Only tasks with `wait_resume_after_s` set let the runner operate on waits: after that many seconds from
+After the requested PR's wait has recorded its old head, and at least 5 seconds after it opened, the runner
+commits `gh_pr_fix_files` and advances that pull ref once. The actual head-change check releases the wait;
+the fake Workers also read the diff and reject the wrong revision. This task requests a 10-second check
+interval and a 45-second maximum wait, within both the fake case's 60 seconds and the real case's 900 seconds.
+Runs containing this fixture set the disposable server's minimum check interval to 10 seconds.
+
+Only tasks with `wait_resume_after_s` set let the runner manually resume waits: after that many seconds from
 `opened_at`, each wait still in `waiting` is resumed through `POST /api/tasks/:id/waits/:step/resume`, once.
 Each row records successful resumes in `wait_resumes` (step label to timestamp, on the database clock).
-The stub's head and diff stay fixed; this scripted user action lets the re-review run without GitHub activity.
-With the field unset (`None`), the runner leaves waits alone. Flow expectations include `min_waits_opened`,
-`max_waits_opened`, `min_wait_github_checks` and `min_wait_dependents`.
+With the field unset (`None`), as in `wait_pr_rereview`, the runner never resumes waits. Flow expectations
+include `min_waits_opened`, `max_waits_opened`, `min_wait_github_checks` and `min_wait_dependents`.
 
 ### Fake mode: the flow, free
 
