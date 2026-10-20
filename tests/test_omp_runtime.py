@@ -162,7 +162,7 @@ def test_a_failed_request_is_a_failed_result_and_an_interrupted_run_has_none() -
     failed = _events("failed")
     result = _result(failed)
     assert result is not None and result["is_error"] and result["subtype"] == "error_during_execution"
-    assert result["errors"] == ["401 Invalid API key"] and _usages(failed) == []
+    assert result["errors"] == ["HTTP 401 Invalid API key"] and _usages(failed) == []
     interrupted = _events("interrupted")
     assert _result(interrupted) is None
     assert [r["content"] for r in _blocks(interrupted, "tool_result")] == ["Command aborted"]
@@ -580,6 +580,144 @@ def test_a_resident_session_needs_its_executable(tmp_path: Path) -> None:
 
     with pytest.raises(OSError, match="was not found"):
         asyncio.run(_run())
+
+
+API_ERROR = ("The supported API model names are deepseek-flash, deepseek-v4-pro, "
+             "but you passed deepseek-flash[1m].")
+_FAILED_OMP = r'''
+import json, os, sys
+from pathlib import Path
+sys.stdin.read()
+def emit(event):
+    print(json.dumps(event), flush=True)
+emit({'type': 'session', 'id': 'failed-session'})
+message = {'role': 'assistant', 'stopReason': 'error', 'content': []}
+error = ERROR + '\nAuthorization: Bearer private-header-value\napi_key="private-field-value" ' + os.environ['LOOPER_PROVIDER_API_KEY']
+if SOURCE == 'event':
+    message.update(errorStatus=400, errorMessage=error)
+elif SOURCE == 'log':
+    logs = Path(os.environ['HOME']) / '.omp' / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    entry = {'pid': os.getpid(), 'level': 'warn', 'message': 'agent turn ended with provider error',
+             'errorStatus': 400, 'errorMessage': error}
+    previous = dict(entry, errorMessage='earlier error')
+    (logs / f'omp.2026-10-20.{os.getpid()}.log').write_text(
+        json.dumps(previous) + '\nnot JSON\n' + json.dumps(entry) + '\n')
+    entry.update(pid=99999999, errorMessage='wrong run')
+    (logs / 'omp.2026-10-20.99999999.log').write_text(json.dumps(entry) + '\n')
+emit({'type': 'message_end', 'message': message})
+emit({'type': 'agent_end', 'isTerminal': True})
+sys.exit(1)
+'''
+
+
+@pytest.mark.parametrize("source", ["event", "log"])
+def test_planner_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                           agent_db: Any, source: str) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError, TaskPlan
+
+    executable = fake_claude(tmp_path / "omp", f"ERROR = {API_ERROR!r}\nSOURCE = {source!r}\n" + _FAILED_OMP)
+    launch = _launch(executable=executable, provider=_provider(api_key="opaque-provider-secret"))
+    planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    planner._plan = TaskPlan("p1", "g1", "test failure", str(tmp_path))
+    monkeypatch.setattr(planner, "_load_agent_settings", AsyncMock(return_value=launch.settings))
+
+    async def run() -> None:
+        try:
+            with pytest.raises(PlannerTurnError) as caught:
+                await asyncio.wait_for(planner._run_turn("hello"), 5)
+            reason = str(caught.value)
+            assert reason.startswith("OMP turn did not succeed: HTTP 400 " + API_ERROR)
+            assert len(reason) <= 500
+            assert not any(secret in reason for secret in (
+                "opaque-provider-secret", "private-header-value", "private-field-value", "wrong run", "earlier error"))
+            assert agent_db.finish_record.call_args.kwargs["error"] == reason
+        finally:
+            await planner._claude.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("runtime", ["omp", "codex", "grok", "claude-code"])
+def test_planner_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              agent_db: Any, runtime: str) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError, TaskPlan
+
+    launch = _launch(executable=str(tmp_path / "missing"))
+    profile = replace(launch.profile, runtime=replace(launch.profile.runtime, type=runtime))
+    if runtime == "grok":
+        profile = replace(profile, provider=_provider(auth=AuthKind.OAUTH, oauth_runtime_type="grok"))
+    planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    planner._plan = TaskPlan("p1", "g1", "test startup", str(tmp_path))
+    monkeypatch.setattr(planner, "_load_agent_settings", AsyncMock(return_value=replace(launch.settings, profile=profile)))
+
+    async def run() -> None:
+        try:
+            with pytest.raises(PlannerTurnError) as caught:
+                await asyncio.wait_for(planner._run_turn("hello"), 5)
+            assert str(caught.value).startswith(f"cannot start {adapter(runtime).label}:")
+        finally:
+            await planner._claude.stop()
+
+    asyncio.run(run())
+
+
+def test_manager_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                               agent_db: Any) -> None:
+    from unittest.mock import AsyncMock
+    from looper.agents.message import MessageEnvelope, MessageType
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    launch = _launch(executable=str(tmp_path / "missing-omp"))
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    manager._session_loaded, manager._clean_start = True, True
+    monkeypatch.setattr(manager, "_load_db_config", AsyncMock())
+    monkeypatch.setattr(manager, "_load_agent_settings", AsyncMock(return_value=launch.settings))
+
+    async def run() -> None:
+        try:
+            reply = await asyncio.wait_for(manager._run_turn("hello", MessageEnvelope.create(
+                source="test", target="manager", message_type=MessageType.USER_MESSAGE, payload={})), 5)
+            assert "OMP" in reply and "Claude Code" not in reply
+            assert agent_db.finish_record.call_args.kwargs["error"].startswith("Cannot start OMP:")
+        finally:
+            await manager._claude.stop()
+
+    asyncio.run(run())
+
+
+def test_error_redaction_precedes_clipping() -> None:
+    from looper.agents.runtimes.omp import OmpStream
+
+    launch = _launch(provider=_provider(api_key="opaque-provider-secret"))
+    stream = OmpStream()
+    stream.translate({"type": "message_end", "message": {"role": "assistant", "stopReason": "error",
+                     "errorMessage": "x" * 480 + "opaque-provider-secret" + "y" * 100}})
+    (result,) = stream.translate({"type": "agent_end"})
+    detail = OMP.failure_detail(result, launch=launch, command=[])
+    assert detail is not None and len(detail) == 500
+    assert "opaque" not in detail and "[redacted]" in detail
+
+
+@pytest.mark.parametrize("header", ['Authorization: Bearer header-secret',
+                                  '"Authorization": "Basic header-secret"',
+                                  'x-api-key: header-secret', 'apiKey="header-secret"'])
+def test_redaction_keeps_the_error_after_a_header(header: str) -> None:
+    from looper.agents.runtimes.omp import OmpStream
+
+    stream = OmpStream()
+    stream.translate({"type": "message_end", "message": {"role": "assistant", "stopReason": "error",
+                     "errorMessage": header + "\nHTTP 400 Unsupported model."}})
+    (result,) = stream.translate({"type": "agent_end"})
+    detail = OMP.failure_detail(result, launch=_launch(), command=[])
+    assert detail is not None and "HTTP 400 Unsupported model." in detail and "header-secret" not in detail
+
+
+def test_unknown_error_details_keep_the_existing_fallback() -> None:
+    assert OMP.failure_detail({"errors": [{"Authorization": "private-value"}]},
+                              launch=_launch(), command=[]) is None
 
 
 def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_between_requests(tmp_path: Path) -> None:

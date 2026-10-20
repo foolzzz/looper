@@ -9,11 +9,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..claude_cli import iter_lines
-from .omp import OmpStream
+from .omp import OmpStream, provider_error, safe_error
 
 logger = logging.getLogger(__name__)
 _STEER_TIMEOUT_SEC = 4.0
-_DROPPED = frozenset({"ready", "prompt_result", "session_settled", "available_commands_update",
+_DROPPED = frozenset({"ready", "session_settled", "available_commands_update",
                       "extension_ui_request"})
 
 
@@ -60,6 +60,7 @@ class OmpChannel:
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         assert self._process.stdout is not None
+        pending_failure: dict[str, Any] | None = None
         try:
             async for line in iter_lines(self._process.stdout):
                 try:
@@ -99,13 +100,30 @@ class OmpChannel:
                         elif command == "prompt":
                             self._prompt_acknowledged = True
                     continue
+                if raw.get("type") == "prompt_result":
+                    error = raw.get("error")
+                    # RPC's detailed prompt error arrives after agent_end. Publish one failure with that
+                    # detail, instead of closing input as soon as the generic agent_end error arrives.
+                    if (raw.get("status") == "error" and isinstance(error, dict)
+                            and (pending_failure is not None or not self._result_seen)):
+                        yield self._failure(provider_error(error.get("message"), error.get("httpStatus")))
+                        pending_failure = None
+                    if pending_failure is not None:
+                        yield pending_failure
+                        pending_failure = None
+                    continue
                 if raw.get("type") in _DROPPED:
                     continue
                 for event in self._stream.translate(raw):
                     if event.get("type") == "result":
                         self._result_seen = True
+                        if event.get("is_error"):
+                            pending_failure = event
+                            continue
                     yield event
-            if not self._prompt_acknowledged:
+            if pending_failure is not None:
+                yield pending_failure
+            if not self._prompt_acknowledged and not self._result_seen:
                 yield self._failure("the process ended before acknowledging the prompt")
         finally:
             self._ended = True
@@ -119,7 +137,7 @@ class OmpChannel:
     def _failure(self, message: str) -> dict[str, Any]:
         self._result_seen = True
         return {"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "",
-                "errors": [f"OMP rpc: {message}"]}
+                "errors": [safe_error(f"OMP rpc: {message}", limit=None)]}
 
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         try:

@@ -703,9 +703,10 @@ class ManagerAgent:
                         autonomous=self._autonomous_turns(command, system_prompt, launch), price=launch.price,
                     )
                 except OSError as exc:
-                    logger.error("failed to start Claude Code: %s", exc)
-                    await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
-                    return "无法启动 Claude Code，请检查安装。"
+                    logger.error("failed to start %s: %s", launch.runtime.label, exc)
+                    await recorder.finish(output_text=None, result_event=None,
+                                          error=f"Cannot start {launch.runtime.label}: {exc}")
+                    return f"无法启动 {launch.runtime.label}，请检查安装。"
                 self._process = _Process(command, signature, system_prompt, launch)
 
             text_parts: list[str] = []

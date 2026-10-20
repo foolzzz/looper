@@ -329,6 +329,16 @@ class OmpRuntime(RuntimeAdapter):
         """A run's events; their tokens are named after the run's ``model``."""
         return OmpStream(model=model).events(stdout)
 
+    def failure_detail(self, result_event: dict[str, Any] | None, *, launch: Launch,
+                       command: list[str], pid: int | None = None) -> str | None:
+        errors = (result_event or {}).get("errors")
+        detail = "; ".join(e for e in errors if isinstance(e, str)) if isinstance(errors, list) else ""
+        if not detail or detail in ("the run ended: error", "the run ended: aborted"):
+            home = (Path(command[1][5:]) if len(command) > 1 and command[0] == "env"
+                    and command[1].startswith("HOME=") else None)
+            detail = log_error(home, pid) or detail
+        return safe_error(detail, secrets=(launch.profile.provider.api_key or "",)) or None
+
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         if tool_name == "bash":
             return f"Running: {str(tool_input.get('command') or '')[:80]}"
@@ -647,6 +657,57 @@ def write_prompt(home: Path, text: str) -> Path:
 # --- Events ---
 
 
+def safe_error(message: str, *, secrets: tuple[str, ...] = (), limit: int | None = 500) -> str:
+    """Redact before clipping: a truncated credential must never become visible."""
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    message = re.sub(r'''(?im)["']?authorization["']?\s*[:=]\s*[^\r\n]*''', "Authorization: [redacted]", message)
+    message = re.sub(r'''(?i)(["']?(?:[\w-]*api[_-]?key|access[_-]?token|secret)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)''',
+                     r"\1[redacted]", message)
+    message = re.sub(r"(?i)\bBearer\s+[^\s,;]+|\bsk-[\w-]+", "[redacted]", message)
+    return message.strip()[:limit]
+
+
+def provider_error(message: Any, status: Any = None) -> str:
+    text = message if isinstance(message, str) else ""
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        text = f"HTTP {status} " + re.sub(rf"^(?:HTTP\s+)?{status}\s*", "", text)
+    return text.strip()
+
+
+def log_error(home: Path | None, pid: int | None) -> str | None:
+    """Only this process's provider-error entries, from the bounded tail of its private logs."""
+    if home is None or pid is None:
+        return None
+    try:
+        directory = home / ".omp" / "logs"
+        if directory.is_symlink():
+            return None
+        paths = [p for p in directory.glob(f"omp.*.{pid}.log*")
+                 if not p.is_symlink() and re.fullmatch(rf"omp\.\d{{4}}-\d{{2}}-\d{{2}}\.{pid}\.log(?:\.\d+)?", p.name)]
+        detail = None
+        for path in sorted(paths, key=lambda p: p.stat().st_mtime_ns):
+            with path.open("rb") as file:
+                file.seek(0, os.SEEK_END)
+                size = file.tell()
+                file.seek(max(0, size - 65_536))
+                if size > 65_536:
+                    file.readline()
+                lines = file.read(65_536).splitlines()
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if (isinstance(entry, dict) and entry.get("pid") == pid
+                        and entry.get("message") == "agent turn ended with provider error"):
+                    detail = provider_error(entry.get("errorMessage"), entry.get("errorStatus")) or detail
+        return detail
+    except OSError:
+        return None
+
+
 # omp's file-editing tools, each naming the files it changes (``edited_paths``).
 EDIT_TOOLS = frozenset({"write", "edit", "ast_edit"})
 
@@ -711,6 +772,9 @@ class OmpStream:
     _last_text: str = ""
     _last_stop: str | None = None
     _last_error: str | None = None
+    log_home: Path | None = None
+    pid: int | None = None
+    secrets: tuple[str, ...] = field(default=(), repr=False)
 
     _DROPPED: ClassVar[frozenset[str]] = frozenset({
         "agent_start", "turn_start", "turn_end", "message_start", "message_update", "tool_execution_start",
@@ -719,9 +783,19 @@ class OmpStream:
     async def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
         from ..claude_cli import stream_events
 
+        failed = False
         async for raw in stream_events(stdout):
             for event in self.translate(raw):
+                if event.get("type") == "result" and event.get("is_error"):
+                    failed = True
+                    continue
                 yield event
+        # The process has closed stdout: its last provider log entry is now available too.
+        if failed:
+            yield self._result()
+        elif self._last_stop in (None, "error") and (detail := log_error(self.log_home, self.pid)):
+            self._last_stop, self._last_error = "error", detail
+            yield self._result()
 
     def _base(self) -> dict[str, Any]:
         return {"session_id": self.session_id} if self.session_id else {}
@@ -772,7 +846,7 @@ class OmpStream:
                 blocks.append({"type": "tool_use", "id": str(block.get("id") or ""), "name": str(block.get("name")),
                                "input": dict(arguments) if isinstance(arguments, Mapping) else {}})
         self._last_stop = str(message.get("stopReason") or "") or None
-        self._last_error = str(message.get("errorMessage") or "") or None
+        self._last_error = provider_error(message.get("errorMessage"), message.get("errorStatus")) or None
         if text := _text(message.get("content")):
             self._last_text = text
         tokens = omp_usage(message.get("usage"))
@@ -810,7 +884,9 @@ class OmpStream:
         if self._last_stop in ("error", "aborted"):
             return {"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "",
                     **self._base(), "modelUsage": model_usage,
-                    "errors": [self._last_error or f"the run ended: {self._last_stop}"]}
+                    "errors": [safe_error(self._last_error or log_error(self.log_home, self.pid)
+                                          or f"the run ended: {self._last_stop}", secrets=self.secrets,
+                                          limit=500 if self.secrets else None)]}
         return {"type": "result", "subtype": "success", "is_error": False, "result": self._last_text,
                 **self._base(), "modelUsage": model_usage}
 
@@ -873,7 +949,10 @@ class ResidentOmp(PerTurnSession):
     def _stream(self) -> OmpStream:
         base = self._base
         model = base[base.index("--model") + 1] if "--model" in base else None
-        return OmpStream(model=model.removeprefix(f"{PROVIDER_ID}/") if model else None)
+        return OmpStream(model=model.removeprefix(f"{PROVIDER_ID}/") if model else None,
+                         log_home=Path(base[1].partition("=")[2]),
+                         pid=self._process.pid if self._process else None,
+                         secrets=((self._env or {}).get(KEY_ENV, ""),))
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own tokens, which its result reports; the session's totals add them up."""

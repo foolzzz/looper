@@ -23,7 +23,7 @@ from looper.agents.runtimes.omp_steer import OmpChannel
 from looper.agents.tiers import worker
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from tests.test_agent_planner_worker import _work_item
-from tests.test_omp_runtime import OMP, _blocks, _launch
+from tests.test_omp_runtime import API_ERROR, OMP, _FAILED_OMP, _blocks, _launch, _provider
 
 
 _RPC = """
@@ -101,6 +101,13 @@ while True:
         time.sleep(0.1)
     emit(response)
     if command == 'prompt':
+        if scenario in ('api_error', 'api_error_after_end'):
+            if scenario == 'api_error_after_end':
+                emit({'type': 'message_end', 'message': {'role': 'assistant', 'stopReason': 'error', 'content': []}})
+                emit({'type': 'agent_end', 'isTerminal': True})
+            emit({'type': 'prompt_result', 'status': 'error', 'error': {
+                'httpStatus': 400, 'message': 'Unsupported model. Authorization: Bearer private-rpc-secret'}})
+            continue
         if scenario == 'noise':
             print('not json SECRET-xyz', flush=True)
             print('[]', flush=True)
@@ -476,6 +483,73 @@ def test_worker_omp_input_over_the_bus(tmp_path: Path, monkeypatch: pytest.Monke
             assert argv[argv.index("--mode") + 1] == ("rpc" if steer else "json")
             assert ("-p" in argv) is (not steer)
             assert not await pool.send_input("w1", "late")
+        finally:
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("source", ["event", "log", "rpc", "rpc-after-end"])
+def test_worker_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                          agent_db: Any, source: str) -> None:
+    rpc = source.startswith("rpc")
+    if rpc:
+        executable = _fake(tmp_path, monkeypatch, "api_error_after_end" if source == "rpc-after-end" else "api_error")
+    else:
+        executable = fake_claude(tmp_path / "omp", f"ERROR = {API_ERROR!r}\nSOURCE = {source!r}\n" + _FAILED_OMP)
+    launch = _launch(executable=executable, provider=_provider(api_key="opaque-provider-secret"))
+    capabilities = OMP.capabilities | {Capability.STEER} if rpc else OMP.capabilities
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(
+        launch.profile, runtime=replace(launch.profile.runtime, capabilities=capabilities))))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        await pool.start(bus)
+        try:
+            await asyncio.sleep(0)
+            await bus.publish(_work_item(tmp_path))
+            queue = bus.get_queue("planner-t1")
+            while True:
+                result = await asyncio.wait_for(queue.get(), 8)
+                if result.message_type == MessageType.WORK_RESULT:
+                    break
+            reason = result.payload["error"]
+            assert result.payload["status"] == "failed"
+            assert "HTTP 400 " + ("Unsupported model." if rpc else API_ERROR) in reason
+            assert len(reason) <= 500
+            assert not any(secret in reason for secret in (
+                "opaque-provider-secret", "private-header-value", "private-field-value", "private-rpc-secret", "wrong run"))
+        finally:
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_worker_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              agent_db: Any) -> None:
+    from looper.agents.runtimes import adapter
+
+    launch = _launch(executable=str(tmp_path / "missing-codex"))
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(
+        launch.profile, runtime=replace(launch.profile.runtime, type="codex"))))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    monkeypatch.setattr(worker.proc_tree, "spawn", AsyncMock(side_effect=FileNotFoundError("executable was not found")))
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        await pool.start(bus)
+        try:
+            await asyncio.sleep(0)
+            await bus.publish(_work_item(tmp_path))
+            queue = bus.get_queue("planner-t1")
+            result = await asyncio.wait_for(queue.get(), 8)
+            assert result.message_type == MessageType.WORK_RESULT
+            assert result.payload["error"].startswith(f"Cannot start {adapter('codex').label}:")
         finally:
             await pool.stop()
             await bus.shutdown()
