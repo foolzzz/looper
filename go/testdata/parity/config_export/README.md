@@ -17,7 +17,9 @@ version `2.11.0`. `*.summary.json` contains the four export summaries.
 
 The cases cover default redaction, explicit secret inclusion, optional projects,
 text/upload/path knowledge documents, role templates and catalog references,
-schedule settings/profile names/task limits, role-layer prompt modes,
+schedule settings/profile names/task limits, both stored scheduler
+settings (interval 60 and timeout 600; an unrelated system setting is not
+exported), role-layer prompt modes,
 recommended and edited role prompts, portable sources and omitted local
 paths. Unknown, blank, zero, whitespace and invalid boolean query values follow
 Python's exact `== "1"` behavior and remain default exports with status 200.

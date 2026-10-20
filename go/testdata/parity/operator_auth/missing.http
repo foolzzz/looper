@@ -1,0 +1,6 @@
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json; charset=utf-8
+Content-Length: 251
+WWW-Authenticate: Bearer realm="looper"
+
+{"error": "this API answers the operator only: open the dashboard in a browser on the server's machine (it signs in on load), or sign in at /login with the user name and password set by looper auth set-password; the looper CLI sends the token itself"}

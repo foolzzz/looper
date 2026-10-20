@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -202,6 +203,10 @@ func (s *Store) attachScheduleViews(ctx context.Context, rows []map[string]any) 
 	if err != nil {
 		return nil, err
 	}
+	defaultTimeout, err := s.defaultRunTimeout(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]any, 0, len(rows))
 	for _, row := range rows {
 		id := asString(row["id"])
@@ -213,7 +218,7 @@ func (s *Store) attachScheduleViews(ctx context.Context, rows []map[string]any) 
 			}
 			last = runView(run, cost, false)
 		}
-		out = append(out, scheduleItemView(row, overrides[id], limits[id], last, spent[id]))
+		out = append(out, scheduleItemView(row, overrides[id], limits[id], last, spent[id], defaultTimeout))
 	}
 	return out, nil
 }
@@ -479,13 +484,18 @@ func (s *Store) scheduleLimits(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("schedule limits: %w", err)
 	}
+	defaultTimeout, err := s.defaultRunTimeout(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"name_max_chars":               80,
 		"requirement_max_chars":        27000,
 		"min_interval_seconds":         plain,
 		"min_interval_gated_seconds":   gated,
 		"default_timezone":             localZoneName(),
-		"run_timeout_max_seconds":      30 * 86400,
+		"run_timeout_max_seconds":      runTimeoutMaxSeconds,
+		"run_timeout_default_seconds":  defaultTimeout,
 		"roles":                        []any{"planner", "worker", "reviewer"},
 		"gate_command_max_chars":       2000,
 		"gate_timeout_default_seconds": 60,
@@ -496,31 +506,57 @@ func (s *Store) scheduleLimits(ctx context.Context) (map[string]any, error) {
 	}, nil
 }
 
-// scheduleMinIntervalSeconds is the value configure_min_interval stored at
-// startup. A request does not read the environment again. Tests and the
-// parity harness leave it at the default, which is what the Python handlers
-// return when the server has not called configure_min_interval.
+// scheduleMinIntervalSeconds is the minimum interval scheduler_settings.load
+// stored at startup. A request does not read the database or the environment
+// again. Tests and the parity harness leave it at the default, which is what
+// the Python handlers return when the server has not called load.
 const defaultMinIntervalSeconds = 300
+
+const (
+	scheduleMinIntervalEnvName   = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
+	scheduleMinIntervalEnvLegacy = "LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS"
+)
 
 var scheduleMinIntervalSeconds = defaultMinIntervalSeconds
 
-// ConfigureScheduleMinInterval reads LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS the
-// way schedules.configure_min_interval does. env.get falls back to
-// LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS when the LOOPER name is unset. A value
-// set to empty does not fall back. An empty result keeps 300. A value that
-// is not a whole number of seconds from 1 is an error and the previous
-// value stays.
-func ConfigureScheduleMinInterval() error {
-	raw, ok := os.LookupEnv("LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS")
-	if !ok {
-		legacy, legacyOK := os.LookupEnv("LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS")
-		if legacyOK {
-			slog.Warn("deprecated environment variable",
-				"name", "LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS",
-				"rename", "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS")
-			raw, ok = legacy, true
-		}
+// scheduleMinIntervalEnvWarned is scheduler_settings._warned_env. The
+// deprecation warning is once per process and does not include the value.
+var scheduleMinIntervalEnvWarned bool
+
+// LoadScheduleMinInterval applies scheduler_settings.load after the schema
+// exists. A stored whole number of seconds from 1 wins, including over a
+// variable that would not parse. A stored value that is not is logged
+// without its text and ignored. Otherwise the deprecated variable applies.
+// An invalid variable is an error and the previous interval stays. An empty
+// or unset variable is the built-in 300.
+func LoadScheduleMinInterval(ctx context.Context, sqlDB *sql.DB) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("load scheduler min interval: %w", hide(err))
 	}
+	row, err := NewStore(sqlDB).one(ctx, "scheduler min interval",
+		`SELECT value FROM system_settings WHERE key = $1`, schedulerMinIntervalKey)
+	if err != nil {
+		return fmt.Errorf("load scheduler min interval: %w", hide(err))
+	}
+	if row != nil {
+		if n, ok := parseScheduleMinInterval(asString(row["value"])); ok {
+			scheduleMinIntervalSeconds = n
+			return nil
+		}
+		slog.Warn("the stored scheduler.min_interval_seconds is not a whole number of seconds from 1; ignoring it",
+			"key", schedulerMinIntervalKey)
+	}
+	return ConfigureScheduleMinInterval()
+}
+
+// ConfigureScheduleMinInterval reads LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS
+// the way scheduler_settings._env_min_interval does when no stored setting
+// wins. env.get falls back to LOOPX_SCHEDULE_MIN_INTERVAL_SECONDS when the
+// LOOPER name is unset. A value set to empty does not fall back. An empty
+// result keeps 300. A value that is not a whole number of seconds from 1 is
+// an error and the previous value stays.
+func ConfigureScheduleMinInterval() error {
+	raw, name, ok := lookupScheduleMinIntervalEnv()
 	if !ok || strings.TrimSpace(raw) == "" {
 		scheduleMinIntervalSeconds = defaultMinIntervalSeconds
 		return nil
@@ -528,12 +564,44 @@ func ConfigureScheduleMinInterval() error {
 	// int() accepts underscores between digits and Unicode decimal digits.
 	// A value that does not fit in int cannot be stored, so startup fails
 	// rather than keeping a truncated interval.
+	value, good := parseScheduleMinInterval(raw)
+	if !good {
+		return fmt.Errorf("%s must be a whole number of seconds from 1; got %q", scheduleMinIntervalEnvName, raw)
+	}
+	noteScheduleMinIntervalEnv(name)
+	scheduleMinIntervalSeconds = value
+	return nil
+}
+
+func lookupScheduleMinIntervalEnv() (raw, name string, ok bool) {
+	raw, ok = os.LookupEnv(scheduleMinIntervalEnvName)
+	if ok {
+		return raw, scheduleMinIntervalEnvName, true
+	}
+	legacy, legacyOK := os.LookupEnv(scheduleMinIntervalEnvLegacy)
+	if !legacyOK {
+		return "", "", false
+	}
+	slog.Warn("deprecated environment variable",
+		"name", scheduleMinIntervalEnvLegacy,
+		"rename", scheduleMinIntervalEnvName)
+	return legacy, scheduleMinIntervalEnvLegacy, true
+}
+
+func noteScheduleMinIntervalEnv(name string) {
+	if scheduleMinIntervalEnvWarned {
+		return
+	}
+	scheduleMinIntervalEnvWarned = true
+	slog.Warn(name + " is deprecated and will be ignored in the next version: set the minimum interval in Settings → Scheduler instead")
+}
+
+func parseScheduleMinInterval(raw string) (int, bool) {
 	value, overflow, ok := parsePythonInt(raw)
 	if !ok || overflow != 0 || value < 1 || int64(int(value)) != value {
-		return fmt.Errorf("LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS must be a whole number of seconds from 1; got %q", raw)
+		return 0, false
 	}
-	scheduleMinIntervalSeconds = int(value)
-	return nil
+	return int(value), true
 }
 
 func scheduleMinInterval(gated bool) int {
@@ -567,7 +635,47 @@ func scheduleMidnight(now time.Time) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, loc)
 }
 
-func scheduleItemView(row map[string]any, overrides, taskLimits map[string]any, last any, spent float64) map[string]any {
+// runTimeoutMaxSeconds is scheduler_settings.RUN_TIMEOUT_MAX_SECONDS.
+const runTimeoutMaxSeconds = 30 * 86400
+
+// defaultRunTimeout is scheduler_settings.default_run_timeout. A missing row
+// is no limit. A stored value that is not a whole number of seconds from 1
+// to the maximum is logged and treated as no limit. The text is not logged.
+func (s *Store) defaultRunTimeout(ctx context.Context) (any, error) {
+	row, err := s.one(ctx, "schedule default timeout",
+		`SELECT value FROM system_settings WHERE key = $1`, schedulerRunTimeoutKey)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	return storedRunTimeout(row["value"]), nil
+}
+
+func storedRunTimeout(raw any) any {
+	n, overflow, ok := parsePythonInt(asString(raw))
+	if !ok || overflow != 0 || n < 1 || n > runTimeoutMaxSeconds || int64(int(n)) != n {
+		slog.Warn("the stored scheduler.run_timeout_seconds is not a whole number of seconds from 1 to the maximum; using no limit",
+			"key", schedulerRunTimeoutKey, "maximum", runTimeoutMaxSeconds)
+		return nil
+	}
+	return int(n)
+}
+
+// scheduleTimeoutView is schedules._timeout_view. "inherit" is the request
+// value "default" plus the system default a run that starts now would get.
+// "none" is no limit. Anything else is the stored number for both fields.
+func scheduleTimeoutView(row map[string]any, defaultTimeout any) (shown, effective any) {
+	switch asString(row["run_timeout_mode"]) {
+	case "inherit":
+		return "default", defaultTimeout
+	case "none":
+		return nil, nil
+	default:
+		seconds := row["run_timeout_seconds"]
+		return seconds, seconds
+	}
+}
+
+func scheduleItemView(row map[string]any, overrides, taskLimits map[string]any, last any, spent float64, defaultTimeout any) map[string]any {
 	if overrides == nil {
 		overrides = map[string]any{}
 	}
@@ -587,37 +695,39 @@ func scheduleItemView(row map[string]any, overrides, taskLimits map[string]any, 
 	if notify == "" {
 		notify = "failures"
 	}
+	timeout, effective := scheduleTimeoutView(row, defaultTimeout)
 	return map[string]any{
-		"schedule_id":          row["id"],
-		"project_id":           row["project_id"],
-		"project_name":         row["project_name"],
-		"name":                 row["name"],
-		"cron":                 row["cron"],
-		"timezone":             row["timezone"],
-		"description":          describeCron(asString(row["cron"]), asString(row["timezone"])),
-		"requirement":          row["requirement"],
-		"work_dir":             row["work_dir"],
-		"overlap":              row["overlap"],
-		"max_parallel_runs":    asInt(row["max_parallel_runs"]),
-		"catch_up":             row["catch_up"],
-		"run_timeout_seconds":  row["run_timeout_seconds"],
-		"run_budget_usd":       row["run_budget_usd"],
-		"profile_overrides":    overrides,
-		"task_limits":          limits,
-		"enabled":              asBool(row["enabled"]),
-		"next_fire_at":         row["next_fire_at"],
-		"last_fired_at":        row["last_fired_at"],
-		"last_success_at":      row["last_success_at"],
-		"consecutive_failures": asInt(row["consecutive_failures"]),
-		"created_via":          row["created_via"],
-		"created_at":           row["created_at"],
-		"updated_at":           row["updated_at"],
-		"gate_command":         row["gate_command"],
-		"gate_timeout_seconds": row["gate_timeout_seconds"],
-		"daily_budget_usd":     row["daily_budget_usd"],
-		"notify":               notify,
-		"notify_target":        target,
-		"spent_today_usd":      round6(spent),
+		"schedule_id":                   row["id"],
+		"project_id":                    row["project_id"],
+		"project_name":                  row["project_name"],
+		"name":                          row["name"],
+		"cron":                          row["cron"],
+		"timezone":                      row["timezone"],
+		"description":                   describeCron(asString(row["cron"]), asString(row["timezone"])),
+		"requirement":                   row["requirement"],
+		"work_dir":                      row["work_dir"],
+		"overlap":                       row["overlap"],
+		"max_parallel_runs":             asInt(row["max_parallel_runs"]),
+		"catch_up":                      row["catch_up"],
+		"run_timeout_seconds":           timeout,
+		"run_timeout_effective_seconds": effective,
+		"run_budget_usd":                row["run_budget_usd"],
+		"profile_overrides":             overrides,
+		"task_limits":                   limits,
+		"enabled":                       asBool(row["enabled"]),
+		"next_fire_at":                  row["next_fire_at"],
+		"last_fired_at":                 row["last_fired_at"],
+		"last_success_at":               row["last_success_at"],
+		"consecutive_failures":          asInt(row["consecutive_failures"]),
+		"created_via":                   row["created_via"],
+		"created_at":                    row["created_at"],
+		"updated_at":                    row["updated_at"],
+		"gate_command":                  row["gate_command"],
+		"gate_timeout_seconds":          row["gate_timeout_seconds"],
+		"daily_budget_usd":              row["daily_budget_usd"],
+		"notify":                        notify,
+		"notify_target":                 target,
+		"spent_today_usd":               round6(spent),
 		"alerts": map[string]any{
 			"failures_since": row["failures_alert_at"],
 			"stale_since":    row["stale_alert_at"],

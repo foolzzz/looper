@@ -29,6 +29,11 @@ Go release tags are `vX.Y.Z-go`. The steps are under Releases.
   `main` merged into this branch. G1sync moved that target from v2.10.0 to
   v2.11.0. Read-only routes are checked by golden JSON: same seeded database,
   both servers, compare bodies.
+- Operator routes require the token file under the runtime root. `looper serve`
+  checks that root and the token before it dials PostgreSQL. An empty
+  `--runtime-root` is the process directory, not `~/.looper`. Password login,
+  sessions, and rate limits are not served: `POST /login` and `POST /logout`
+  stay 405, and `can_sign_out` stays false.
 - Defaults follow Python in the milestone that owns the flag. G0's flags are
   the ones named below.
 - Logs go through `log/slog`. A database URL, password, or token is not a log
@@ -256,6 +261,27 @@ the directory before regeneration and runs `diff -ru` against that copy, so
 a clean checkout still fails when committed fixtures drift. `go vet ./...`
 and `go test ./...` passed from `go/` with `LOOPGO_TEST_DATABASE_URL` and
 `LOOPGO_CONFIG_EXPORT_PARITY_URL` set to disposable `loopgo_*` databases.
+
+G1r serves the operator token file and the HTTP authentication boundary.
+`looper serve` checks the runtime root and creates or reads the token before
+it dials PostgreSQL. An empty `--runtime-root` is the process directory.
+Operator routes require that token (`Authorization: Bearer` or the port
+cookie). A missing or wrong credential is 401, and the handler does not read
+the body. Agent routes keep their own token. Loopback browser navigation can
+sign in. Password login, scrypt, sessions, and rate limits are deferred:
+`POST /login` and `POST /logout` stay 405.
+
+A hijacked refusal write has a deadline. `Shutdown` and `Close` close that
+socket, because hijack removes it from `http.Server`'s set. Schedule responses
+expose an inherited run timeout as `"default"` plus
+`run_timeout_effective_seconds`. Project schedule limits include
+`run_timeout_default_seconds`. Those four goldens were regenerated from this
+tree's Python. Config-export regeneration against a disposable `loopgo_*`
+database left the worktree fixtures unchanged. Those fixtures are staged and
+not committed, so the external seed step's `git diff --exit-code` on
+`go/testdata/parity/config_export` is empty. `go vet ./...` and
+`go test ./...` from `go/` passed with both parity database variables set to
+disposable `loopgo_*` databases.
 
 G1p serves `POST /api/chat/messages` and `GET /api/chat/events`. A non-empty
 `cid` reads that message stream. A blank `cid` leaves `session` in effect,

@@ -16,6 +16,7 @@ import (
 	"github.com/foolzzz/looper/go/internal/config"
 	"github.com/foolzzz/looper/go/internal/db"
 	"github.com/foolzzz/looper/go/internal/httpapi"
+	"github.com/foolzzz/looper/go/internal/operatorauth"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -35,12 +36,17 @@ func serveContext(ctx context.Context, args []string, logger *slog.Logger) error
 	if err != nil {
 		return err
 	}
-	// Python reads this once at startup. A bad value stops the process
-	// before it listens. Requests then use the stored number.
-	if err := db.ConfigureScheduleMinInterval(); err != nil {
+	if err := checkWebDir(cfg.WebDir); err != nil {
 		return err
 	}
-	if err := checkWebDir(cfg.WebDir); err != nil {
+	// The runtime root and token are checked before any database dial.
+	// An empty --runtime-root is the process directory, not ~/.looper.
+	root := cfg.RuntimeRoot
+	if root == "" {
+		root = "."
+	}
+	token, err := operatorauth.EnsureToken(ctx, root)
+	if err != nil {
 		return err
 	}
 	sqlDB, err := db.Open(ctx, cfg.DBURL)
@@ -59,17 +65,37 @@ func serveContext(ctx context.Context, args []string, logger *slog.Logger) error
 	// Schema SQL errors are logged without the connection string. Python's
 	// data migrations are not run.
 	schemaCtx, schemaCancel := context.WithTimeout(ctx, schemaTimeout)
-	err = db.EnsureSchema(schemaCtx, cfg.DBURL)
+	schemaErr := db.EnsureSchema(schemaCtx, cfg.DBURL)
 	schemaCancel()
-	if err != nil {
-		logger.Error("ensure schema", "err", db.ErrorText(err))
+	if schemaErr != nil {
+		logger.Error("ensure schema", "err", db.ErrorText(schemaErr))
+	}
+	// scheduler_settings.load runs after the schema exists. A stored minimum
+	// wins over the deprecated variable, so a bad variable does not stop a
+	// start that a saved setting allows. When the schema could not be read,
+	// only the variable applies. A variable that is not a whole number of
+	// seconds from 1 closes the listener instead of serving.
+	loadCtx, loadCancel := context.WithTimeout(ctx, schemaTimeout)
+	var intervalErr error
+	if schemaErr != nil {
+		intervalErr = db.ConfigureScheduleMinInterval()
+	} else {
+		intervalErr = db.LoadScheduleMinInterval(loadCtx, sqlDB)
+	}
+	loadCancel()
+	if intervalErr != nil {
+		_ = ln.Close()
+		if ctx.Err() != nil {
+			return nil
+		}
+		return intervalErr
 	}
 	api := httpapi.New(version, db.Probe{DB: sqlDB}, cfg.WebDir)
 	api.Reads = db.NewStore(sqlDB)
-	api.RuntimeRoot = cfg.RuntimeRoot
-	if api.RuntimeRoot == "" {
-		api.RuntimeRoot = "."
-	}
+	api.RuntimeRoot = root
+	api.OperatorAuth = true
+	api.OperatorToken = token
+	api.Port = cfg.Port
 	return serveListener(ctx, ln, api.Handler(), logger, shutdownTimeout)
 }
 

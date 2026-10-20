@@ -5,7 +5,10 @@ go 1.24.0
 // v5.8.0 is the newest pgx release that builds with Go 1.24.
 require github.com/jackc/pgx/v5 v5.8.0
 
-require golang.org/x/text v0.29.0
+require (
+	golang.org/x/sys v0.36.0
+	golang.org/x/text v0.29.0
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

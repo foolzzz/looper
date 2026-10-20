@@ -21,6 +21,7 @@ import (
 	"github.com/foolzzz/looper/go/internal/agents/broadcast"
 	"github.com/foolzzz/looper/go/internal/agents/web"
 	"github.com/foolzzz/looper/go/internal/db"
+	"github.com/foolzzz/looper/go/internal/operatorauth"
 	"github.com/foolzzz/looper/go/internal/pyjson"
 )
 
@@ -135,7 +136,23 @@ type Server struct {
 	// bodyReadTimeout bounds POST /api/chat/messages body reads. Zero uses
 	// Python's 30 second readexactly wait. Tests set a shorter deadline.
 	bodyReadTimeout time.Duration
-	chatStreams     chatStreams
+	// refusalWriteTimeout bounds a hijacked refusal write. Zero uses
+	// defaultRefusalWriteTimeout. Tests set a shorter deadline, or a long
+	// one so only shutdown can unblock a client that does not read.
+	refusalWriteTimeout time.Duration
+	chatStreams         chatStreams
+	// OperatorAuth turns on the operator credential check. serve sets it
+	// after the token file is validated. Tests leave it false so existing
+	// routes stay open. An empty OperatorToken with OperatorAuth set is
+	// Python's token None: operator routes are refused and a page load
+	// does not set a cookie.
+	OperatorAuth  bool
+	OperatorToken string
+	// Port is the listen port in the operator cookie name.
+	Port int
+	// ManagerToken is the Manager API credential. Agent routes check it
+	// even when operator auth is off. Empty refuses every agent route.
+	ManagerToken string
 }
 
 // New builds a Server. A nil DB is reported as a database error, not a panic.
@@ -227,12 +244,30 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/", s.handleAPI)
 	mux.HandleFunc("/", s.handleRoot)
 	return &rootHandler{server: s, next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Classify the urllib path before cleaning. /api/agent/v1/../status
+		// is an agent route, and a ".." API path is not the cleaned route.
+		escaped := pythonURLPath(requestTarget(r))
+		area := operatorauth.AccessOf(escaped)
 		if reason := requestRefusal(s.bindHost(), r); reason != "" {
 			slog.Warn("refused request", "reason", reason, "remote", r.RemoteAddr)
-			writeJSON(w, http.StatusForbidden, errorBody{Error: reason})
+			s.writeWithoutDraining(w, func(w http.ResponseWriter) {
+				if area == operatorauth.AccessSignIn {
+					setSignInHeaders(w)
+				}
+				writeJSON(w, http.StatusForbidden, errorBody{Error: reason})
+			})
 			return
 		}
-		escaped := pythonURLPath(requestTarget(r))
+		// Operator and agent refusals happen before the body is read.
+		if s.finishBeforeBody(w, r, escaped, area) {
+			return
+		}
+		if r.Method == http.MethodOptions && area == operatorauth.AccessDashboard {
+			s.writeWithoutDraining(w, func(w http.ResponseWriter) {
+				writeNoContent(w)
+			})
+			return
+		}
 		cleaned := canonicalPath(escaped)
 		if escaped != cleaned {
 			if strings.HasPrefix(escaped, "/api/") {
@@ -363,6 +398,10 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorBody{Error: "not found"})
 		return
 	}
+	if s.operatorAuthOn() {
+		s.serveAuthedStatic(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		methodNotAllowed(w)
 		return
@@ -370,7 +409,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// Python joins the undecoded request-target path. EscapedPath re-encodes
 	// raw UTF-8, so /é.js would look up "%C3%A9.js". /%C3%A9.js is that other
 	// file, and /%61pp.js is not app.js. A miss falls back to index.html.
-	f, name, err := openStatic(s.WebDir, pythonURLPath(requestTarget(r)))
+	f, name, _, err := openStatic(s.WebDir, pythonURLPath(requestTarget(r)))
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			writeJSON(w, http.StatusNotFound, errorBody{Error: "not found"})
@@ -446,20 +485,23 @@ var (
 // path such as /link/secret.txt is refused when link itself points outside.
 // A missing path or a directory falls back to index.html. An index.html
 // symlink that leaves the directory is a 404, the same as a missing index.
-func openStatic(rootDir, urlPath string) (*os.File, string, error) {
+// fellBack is true when that fallback served index.html. / is a fallback.
+// An existing /docs/index.html is not. A symlink that leaves the web root
+// is errNotFound and is not a fallback.
+func openStatic(rootDir, urlPath string) (*os.File, string, bool, error) {
 	root, err := os.OpenRoot(rootDir)
 	if err != nil {
-		return nil, "", fmt.Errorf("web dir: %w", err)
+		return nil, "", false, fmt.Errorf("web dir: %w", err)
 	}
 	defer root.Close()
 
 	f, name, err := openPythonStatic(root, urlPath)
 	switch {
 	case err == nil:
-		return f, name, nil
+		return f, name, false, nil
 	case errors.Is(err, os.ErrNotExist), errors.Is(err, errUseIndex):
 	default:
-		return nil, "", err
+		return nil, "", false, err
 	}
 	f, err = openRegular(root, "index.html")
 	if err != nil {
@@ -468,11 +510,11 @@ func openStatic(rootDir, urlPath string) (*os.File, string, error) {
 		miss := errors.Is(err, os.ErrNotExist) || errors.Is(err, errUseIndex) ||
 			errors.Is(err, errNotFound) || errors.Is(err, errStaticEscape)
 		if miss {
-			return nil, "", errNotFound
+			return nil, "", false, errNotFound
 		}
-		return nil, "", err
+		return nil, "", false, err
 	}
-	return f, "index.html", nil
+	return f, "index.html", true, nil
 }
 
 // openPythonStatic opens urlPath the way CPython pathlib does.

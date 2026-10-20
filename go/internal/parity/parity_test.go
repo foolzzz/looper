@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -277,11 +278,18 @@ func TestGoldenParity(t *testing.T) {
 	api.Reads = store
 	api.BindHost = "127.0.0.1"
 	api.Now = noon
+	token := useOperatorToken(t, api)
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
+	if u, err := url.Parse(srv.URL); err == nil {
+		if port, conv := strconv.Atoi(u.Port()); conv == nil {
+			api.Port = port
+		}
+	}
 
 	client := srv.Client()
 	client.Timeout = 30 * time.Second
+	useBearer(client, token)
 	for _, tc := range goldenCases {
 		t.Run(tc.name, func(t *testing.T) {
 			resp, err := client.Get(srv.URL + tc.path)
@@ -490,6 +498,7 @@ func TestKnowledgeGoldenParity(t *testing.T) {
 	api := httpapi.New("parity-test", db.Probe{DB: sqlDB}, "")
 	api.RuntimeRoot = root
 	api.Reads = db.NewStore(sqlDB)
+	token := useOperatorToken(t, api)
 	// Disposable runtime checks use an explicit port above the operator range.
 	var listener net.Listener
 	for port := 18001; port < 18101; port++ {
@@ -506,6 +515,12 @@ func TestKnowledgeGoldenParity(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := srv.Client()
 	client.Timeout = 30 * time.Second
+	if u, err := url.Parse(srv.URL); err == nil {
+		if port, conv := strconv.Atoi(u.Port()); conv == nil {
+			api.Port = port
+		}
+	}
+	useBearer(client, token)
 
 	for _, tc := range knowledgeCases {
 		t.Run(tc.name, func(t *testing.T) {

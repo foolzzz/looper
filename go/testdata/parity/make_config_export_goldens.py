@@ -138,6 +138,8 @@ def fixture_sql(rows):
             insert("schedule_profile_overrides", {"schedule_id": row["id"], "role": role, "profile_id": profile_id})
         for role, limit in row["task_limits"].items():
             insert("schedule_task_limits", {"schedule_id": row["id"], "role": role, "max_concurrency": limit})
+    for row in rows["system_settings"]:
+        insert("system_settings", {"key": row["key"], "value": row["value"]})
     return "\n".join(statements) + "\n"
 
 
@@ -201,10 +203,35 @@ class OfflineRows:
         if "FROM schedule_task_limits " in query:
             return [{"schedule_id": row["id"], "role": role, "max_concurrency": limit}
                     for row in self.rows["schedules"] for role, limit in sorted(row["task_limits"].items())]
+        if "FROM system_settings" in query:
+            # stored_scheduler_settings reads only the two scheduler keys.
+            # The fixture stores both, plus an unrelated key that must stay
+            # out of the file. A query with no key argument is not that read.
+            wanted = set(args[0]) if args else None
+            return [{"key": row["key"], "value": row["value"]}
+                    for row in self.rows.get("system_settings", [])
+                    if wanted is None or row["key"] in wanted]
         for pattern, source in sources:
             if pattern in query:
-                return copy.deepcopy(self.rows[source])
+                copied = copy.deepcopy(self.rows[source])
+                if source == "schedules":
+                    # schema.sql adds run_timeout_mode, backfills old rows, then
+                    # sets the default to inherit. The fixture INSERT omits the
+                    # column, so a migrated database returns inherit.
+                    # schedule_timeout requires the key.
+                    for row in copied:
+                        row.setdefault("run_timeout_mode", "inherit")
+                return copied
         raise AssertionError(f"unexpected SQL: {query}")
+
+    async def fetchval(self, query, *args):
+        # export asks whether system_settings exists before reading it.
+        # The synthetic connection stands in for a database that has the
+        # schema, so to_regclass(...) IS NOT NULL is true. Missing rows
+        # stay in fetch, which returns an empty list.
+        if "to_regclass(" in query and "IS NOT NULL" in query:
+            return True
+        raise AssertionError(f"unexpected fetchval: {query}")
 
 
 CASES = [

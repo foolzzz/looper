@@ -29,6 +29,7 @@
       "worker",
       "reviewer"
     ],
+    "run_timeout_default_seconds": null,
     "run_timeout_max_seconds": 2592000
   },
   "schedules": [
@@ -82,7 +83,8 @@
       "project_name": "Alpha",
       "requirement": "run the nightly check",
       "run_budget_usd": null,
-      "run_timeout_seconds": null,
+      "run_timeout_effective_seconds": null,
+      "run_timeout_seconds": "default",
       "schedule_id": "sched-nightly01",
       "spent_today_usd": 1.5,
       "task_limits": {

@@ -41,8 +41,10 @@ func TestConfigExportHTTPParity(t *testing.T) {
 	s := httpapi.New("go-development", db.Probe{DB: sqlDB}, "")
 	s.Now = func() time.Time { return now }
 	s.Reads = store
+	s.Port = 18081
 	loginHome := t.TempDir()
 	s.LoginEnviron = func() []string { return []string{"HOME=" + loginHome, "PATH=" + loginHome} }
+	token := useOperatorToken(t, s)
 	handler := s.Handler()
 	root := filepath.Join("..", "..", "testdata", "parity", "config_export")
 	casesRaw, err := os.ReadFile(filepath.Join(root, "cases.json"))
@@ -64,6 +66,7 @@ func TestConfigExportHTTPParity(t *testing.T) {
 			}
 			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:18081/api/config/export?"+query.Encode(), nil)
 			req.RemoteAddr = "127.0.0.1:12345"
+			req.Header.Set("Authorization", "Bearer "+token)
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
 			raw, err := os.ReadFile(filepath.Join(root, tt.Name+".http"))
@@ -118,10 +121,11 @@ func TestConfigExportHTTPParity(t *testing.T) {
 		})
 	}
 	// Ordinary dashboard reads must not gain the export's raw provider/MCP
-	// values. Registry probes use an empty synthetic home, never operator auth.
+	// values. Registry probes use an empty synthetic home.
 	for _, path := range []string{"/api/catalog", "/api/registry"} {
 		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:18081"+path, nil)
 		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Authorization", "Bearer "+token)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		exposed := bytes.Contains(rr.Body.Bytes(), []byte("SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE"))

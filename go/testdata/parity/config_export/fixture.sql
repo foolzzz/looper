@@ -60,3 +60,6 @@ INSERT INTO schedule_profile_overrides (schedule_id, role, profile_id) VALUES ('
 INSERT INTO schedule_task_limits (schedule_id, role, max_concurrency) VALUES ('sched-export-a', 'worker', 3);
 INSERT INTO schedule_task_limits (schedule_id, role, max_concurrency) VALUES ('sched-export-a', 'reviewer', 2);
 INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, overlap, max_parallel_runs, catch_up, run_timeout_seconds, run_budget_usd, gate_command, gate_timeout_seconds, daily_budget_usd, notify, notify_channel, notify_chat, work_dir) VALUES ('sched-export-z', 'proj-export-alpha', 'zeta schedule', '0 10 * * *', 'UTC', 'No overrides', 'skip', 1, 'once', NULL, NULL, NULL, NULL, NULL, 'never', NULL, NULL, '');
+INSERT INTO system_settings (key, value) VALUES ('scheduler.run_timeout_seconds', '600');
+INSERT INTO system_settings (key, value) VALUES ('unrelated.setting', 'do-not-export');
+INSERT INTO system_settings (key, value) VALUES ('scheduler.min_interval_seconds', '60');
