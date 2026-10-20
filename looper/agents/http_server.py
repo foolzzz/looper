@@ -24,7 +24,7 @@ from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
     operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
-    schedules, self_check,
+    schedules, self_check, vault,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -674,6 +674,10 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, gate_service.gate_settings)
         elif path == "/api/gate-settings" and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: gate_service.update_gate_settings(projects.json_object(body)))
+        elif path == "/api/knowledge-vault" and method == "GET":
+            await self._answer(writer, HTTP_200, vault.settings_view)
+        elif path == "/api/knowledge-vault" and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: vault.update_settings(projects.json_object(body)))
         elif path == "/api/channel-configs" and method == "GET":
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":

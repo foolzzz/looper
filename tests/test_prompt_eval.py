@@ -25,7 +25,7 @@ from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
-from looper.agents.tiers.planner_protocol import TurnKind, parse_plan
+from looper.agents.tiers.planner_protocol import TurnKind, parse_plan, parse_vault
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool, judge_result
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
@@ -416,6 +416,191 @@ def _result(text: str) -> list[dict[str, Any]]:
     return [{"seq": 1, "event": {"type": "result", "subtype": "success", "result": text}}]
 
 
+@pytest.mark.parametrize(("outside", "has_fact", "closeout", "problems"), [
+    (False, True, True, []),
+    (True, True, True, ["vault_outside 1 > 0"]),
+    (False, False, True, ["no committed vault note records CALC_LOCALE"]),
+    (False, True, False, ["vault_closeout 0 < 1"]),
+])
+def test_vault_metrics_use_only_the_tasks_commits_and_check_their_notes(
+    tmp_path: Path, outside: bool, has_fact: bool, closeout: bool, problems: list[str],
+) -> None:
+    task = task_list.select(["vault_closeout_keeps"])[0]
+    path = "codex-mem/projects/calc.md"
+    (tmp_path / path).parent.mkdir(parents=True)
+    (tmp_path / path).write_text("CALC_LOCALE=C" if has_fact else "a task summary", encoding="utf-8")
+    # Two task commits touch one note; neither the seed nor the other task (even a similar id) belongs to it.
+    log = (f"aaa\0looper: task-1 planner: tests\n\n{path}\n"
+           f"bbb\0looper: task-10 planner: private\n\nmine/diary.md\n"
+           "ccc\0eval: the task's files\n\ncodex-mem/AGENTS.md\nmine/diary.md\n"
+           f"ddd\0looper: task-1 worker@s1: more tests\n\n{path}\n"
+           + ("mine/diary.md\n" if outside else ""))
+    seen: list[list[str]] = []
+
+    def check(vault_dir: Path, paths: list[str]) -> str | None:
+        assert vault_dir == tmp_path
+        seen.append(paths)
+        assert task.vault_check is not None
+        return task.vault_check(vault_dir, paths)
+
+    result = metrics.task_metrics(
+        detail={"status": "completed", "steps": [{}]},
+        activity=[{"kind": "phase", "summary": "Vault closeout: kept the test quirk"}] if closeout else [],
+        records=[_record(1, "planner-task-1", input_text="[VAULT] Keep lasting notes")], events={}, changes={},
+        work_dir=tmp_path, check_problem=None,
+        expect={**task.expect, "min_vault_closeout": 1}, now=0.0,
+        task_id="task-1", vault_dir=tmp_path, vault_log=log, vault_check=check)
+    assert (result["vault_writes"], result["vault_outside"], result["vault_closeout"]) == (2, int(outside), int(closeout))
+    assert result["planner_turns"] == {"vault": 1}
+    assert result["problems"] == problems
+    assert result["success"] is (not problems)
+    assert seen == [sorted([path, "mine/diary.md"] if outside else [path])]
+
+
+def test_vault_metrics_with_no_task_commits_do_not_count_other_tasks(tmp_path: Path) -> None:
+    task = task_list.select(["vault_closeout_keeps"])[0]
+    result = metrics.task_metrics(
+        detail={"status": "completed", "steps": [{}]}, activity=[], records=[], events={}, changes={},
+        work_dir=tmp_path, check_problem=None, expect=task.expect, now=0.0, task_id="task-1", vault_dir=tmp_path,
+        vault_log="aaa\0looper: task-2 planner: a note\n\ncodex-mem/projects/calc.md\n",
+        vault_check=task.vault_check)
+    assert (result["vault_writes"], result["vault_outside"], result["vault_closeout"]) == (0, 0, 0)
+    assert result["problems"] == ["no committed vault note records CALC_LOCALE", "vault_writes 0 < 1"]
+
+
+@pytest.mark.parametrize("task_id", ["vault_closeout_keeps", "vault_closeout_nothing"])
+def test_fake_planner_vault_turn_calls_only_its_script_and_replies_with_the_contract(
+    monkeypatch: pytest.MonkeyPatch, task_id: str,
+) -> None:
+    task = task_list.select([task_id])[0]
+    calls: list[tuple[str, dict[str, Any]]] = []
+    connected: list[bool] = []
+    replies: list[str] = []
+
+    def mcp(args: list[str]) -> Any:
+        assert args == ["stand-in"]
+        connected.append(True)
+        return lambda method, params: calls.append((method, params))
+
+    monkeypatch.setattr(fake_claude, "_mcp", mcp)
+    monkeypatch.setattr(fake_claude, "_answer", lambda _session, text, _cost, **_: replies.append(text))
+    messages = iter([json.dumps({"message": {"content": "[VAULT] Keep lasting notes"}}), None])
+    fake_claude._planner(task.fake, ["stand-in"], SimpleNamespace(readline=lambda: next(messages)))
+    expected = task.fake.get("vault_calls") or []
+    assert calls == [("tools/call", {"name": name, "arguments": arguments}) for name, arguments in expected]
+    assert connected == ([True] if expected else [])
+    assert len(replies) == 1
+    assert parse_vault(replies[0]) == task.fake.get("vault_reply", "nothing worth keeping")
+
+
+def test_fake_worker_carries_the_test_quirk_in_its_learnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = task_list.select(["vault_closeout_keeps"])[0]
+    monkeypatch.chdir(tmp_path)
+    replies: list[str] = []
+    monkeypatch.setattr(fake_claude, "_answer", lambda _session, text, _cost: replies.append(text))
+    fake_claude._worker(task.fake, "Your step: s1", SimpleNamespace(readline=lambda: "start"), [])
+    result = judge_result({"subtype": "success", "result": replies[0]}, work_dir=tmp_path, is_verify=False)
+    assert result["learnings"] == ["run_tests.py needs CALC_LOCALE=C"]
+    assert task.check(tmp_path) is None
+
+
+@pytest.mark.parametrize("with_vault", [False, True])
+def test_one_eval_vault_is_configured_before_the_suite_and_shared_by_its_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_vault: bool,
+) -> None:
+    root = tmp_path / "eval"
+    root.mkdir()
+    tasks = task_list.VAULT_TASKS if with_vault else task_list.select(["single_step"])
+    initialized: list[Path] = []
+    configured: list[dict[str, Any]] = []
+    seen: list[Path | None] = []
+
+    @contextmanager
+    def database(*_: Any) -> Any:
+        yield "unused", 0.0
+
+    @contextmanager
+    def server(**_: Any) -> Any:
+        yield SimpleNamespace(put=lambda path, body: configured.append(body) if path == "/api/knowledge-vault"
+                              else pytest.fail(f"unexpected API call: {path}"))
+
+    def run_task(_api: Any, task: EvalTask, _work: Path, *, vault_dir: Path | None, **_: Any) -> dict[str, Any]:
+        if with_vault:
+            assert initialized == [root / "vault"]
+            assert configured == [{"path": str(root / "vault"), "writable": ["codex-mem"],
+                                   "rules_file": "codex-mem/AGENTS.md"}]
+            assert vault_dir is not None
+            assert {p.relative_to(vault_dir).as_posix(): p.read_text() for p in vault_dir.rglob("*.md")} == \
+                task_list.EVAL_VAULT
+        else:
+            assert not initialized and not configured and not (root / "vault").exists()
+        seen.append(vault_dir)
+        return {"id": task.id, "outcome": "pass", "cost_usd": 0.0}
+
+    monkeypatch.setattr(runner.tempfile, "mkdtemp", lambda **_: str(root))
+    monkeypatch.setattr(runner, "_git", lambda: {})
+    monkeypatch.setattr(runner, "fresh_database", database)
+    monkeypatch.setattr(runner, "running_server", server)
+    monkeypatch.setattr(runner, "init_repository", initialized.append)
+    monkeypatch.setattr(runner, "select_agent", lambda *_, **__: {})
+    monkeypatch.setattr(runner, "run_task", run_task)
+    # Keep results in memory: this test starts no server and writes no run report.
+    monkeypatch.setattr(runner, "write_result", lambda result, *_, **__: result)
+    result, _ = runner.run(mode="fake", tasks=tasks, admin_url="unused", out_dir=tmp_path,
+                           reps=2, jobs=2, keep_work_dirs=True)
+    assert result["aborted"] is None
+    assert seen == [root / "vault" if with_vault else None] * (len(tasks) * 2)
+
+
+@pytest.mark.parametrize("task_id", ["vault_closeout_keeps", "vault_closeout_nothing"])
+def test_vault_tasks_enable_the_project_and_read_back_their_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task_id: str,
+) -> None:
+    task = task_list.select([task_id])[0]
+    work = tmp_path / "work"
+    vault = tmp_path / "vault"
+    note = vault / "codex-mem/projects/calc.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("CALC_LOCALE=C", encoding="utf-8")
+    posts: list[tuple[str, Any]] = []
+    logs: list[Path] = []
+
+    def post(path: str, body: Any) -> dict[str, Any]:
+        posts.append((path, body))
+        if path == "/api/tasks/start":
+            for name, content in task.fake["attempts"]["s1"][0]["files"].items():
+                (work / name).write_text(content, encoding="utf-8")
+        return {"task_id": "task-1"}
+
+    def get(path: str, **_: Any) -> dict[str, Any]:
+        if path == "/api/tasks/task-1":
+            return {"status": "completed", "steps": [{}]}
+        if path == "/api/llm-records":
+            return {"records": []}
+        return {"activity": [{"kind": "phase", "summary": "Vault closeout: done"}]}
+
+    def git(directory: Path, *args: str) -> str:
+        logs.append(directory)
+        assert args == ("log", "--format=%H%x00%s", "--name-only")
+        return "abc\0looper: task-1 planner: tests\n\ncodex-mem/projects/calc.md\n" if task.vault_check else ""
+
+    monkeypatch.setattr(runner, "_git_in", git)
+    api = SimpleNamespace(post=post, get=get)
+    row = runner.run_task(api, task, work, timeout=1, poll=0, vault_dir=vault)
+    assert posts[0][1]["project"]["vault"] == "on"
+    assert logs == [vault]
+    assert row["outcome"] == "pass", row["problems"]
+    assert (row["vault_writes"], row["vault_outside"], row["vault_closeout"]) == (int(bool(task.vault_check)), 0, 1)
+
+
+def test_vault_task_without_an_eval_vault_is_rejected_before_creation(tmp_path: Path) -> None:
+    task = task_list.select(["vault_closeout_nothing"])[0]
+    with pytest.raises(runner.EvalError, match="server has no eval vault"):
+        runner.run_task(SimpleNamespace(), task, tmp_path, timeout=1, poll=0)
+
+
 def test_the_planners_refused_calls_are_counted_and_its_file_changes_can_be_bounded(tmp_path: Path) -> None:
     refused = {"permission_denials": [{"tool": "Bash", "input": "echo x > PLAN.md"}, {"tool": "Bash", "input": "touch a"}]}
     records = [{**_record(1, "planner-task-1", input_text="[PLAN] Plan the task"), "metadata": refused},
@@ -702,6 +887,7 @@ def test_a_task_set_is_resolved_against_the_tasks_there_are(monkeypatch: pytest.
     planner = [task.id for task in runner.select_tasks(["planner"])]
     assert planner == [task.id for task in TASKS if task.id in runner.TASK_SETS["planner"]]
     assert "dependent_steps" in planner and "single_step" not in planner
+    assert {"vault_closeout_keeps", "vault_closeout_nothing"} <= set(planner)
     # Mixed with ids, in the task set's order, each once.
     mixed = [task.id for task in runner.select_tasks(["planner", "single_step", "dependent_steps"])]
     assert mixed == ["single_step", *planner]
@@ -1199,6 +1385,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
                     "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
                      "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0),
+                    "vault_closeout_keeps": (1, 0, 0, 0), "vault_closeout_nothing": (1, 0, 0, 0),
                     "room_interface": (3, 0, 0, 0), "room_consult": (2, 0, 0, 0), "room_quiet": (1, 0, 0, 0),
                     # The retry notes' tasks: one retry and a passing review; two retries, the first review failing.
                     "planner_plan_file": (2, 0, 0, 0), "reviewer_retry_note": (1, 1, 1, 0),
@@ -1224,11 +1411,15 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
                      "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
                       "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1),
+                     "vault_closeout_keeps": (0, 0, 1), "vault_closeout_nothing": (0, 0, 1),
                      "room_interface": (1, 0, 2), "room_consult": (0, 0, 1), "room_quiet": (0, 0, 1),
                      "planner_plan_file": (0, 0, 1), "reviewer_retry_note": (0, 0, 1),
                      "reviewer_unrelated_note": (0, 0, 1), "reviewer_elsewhere": (0, 0, 1),
                      "reviewer_elsewhere_wrong": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
+    assert {t: (by_id[t]["vault_writes"], by_id[t]["vault_closeout"]) for t in by_id
+            if t.startswith("vault_closeout_")} == {"vault_closeout_keeps": (1, 1), "vault_closeout_nothing": (0, 1)}
+    assert all(row["vault_outside"] == 0 for row in by_id.values())
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
         "profile_choice": 1}

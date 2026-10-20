@@ -30,6 +30,8 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
 - ``operator_notes``: whether the project's Planners, Workers and Reviewers
   get the operator's Claude Code notes for the directory they work in, read
   only (``on``, also when unset; ``off``; ``operator_notes``);
+- ``vault``: whether the project's Planners, Workers and Reviewers get the
+  knowledge vault's tools (``on``) or not (``off``, also when unset; ``vault``);
 - ``max_step_retries``: how many times the Planner may retry one step, 0 to
   ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset);
 - ``planner_roles``: whether the project's Planners may define the roles their
@@ -130,6 +132,11 @@ class OperatorNotesMode(str, Enum):
     ON = "on"
 
 
+class VaultMode(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 class PlannerRoles(str, Enum):
     OFF = "off"
     ON = "on"
@@ -177,6 +184,7 @@ class ProjectExecution:
     workspace_links: tuple[str, ...] | None = None
     task_workspaces: TaskWorkspaces | None = None
     operator_notes: OperatorNotesMode | None = None
+    vault: VaultMode | None = None
     max_step_retries: int | None = None
     planner_roles: PlannerRoles | None = None
     role_text_max_chars: int | None = None
@@ -220,6 +228,11 @@ class ProjectExecution:
     def notes_on(self) -> bool:
         """Whether the project's agents get the operator's notes for their directory."""
         return self.operator_notes is not OperatorNotesMode.OFF
+
+    @property
+    def vault_on(self) -> bool:
+        """Whether the project's agents get the knowledge vault's tools."""
+        return self.vault is VaultMode.ON
 
     @property
     def step_retries(self) -> int:
@@ -320,6 +333,8 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, TaskWorkspaces)
     if field == "operator_notes":
         return _choice(field, raw, OperatorNotesMode)
+    if field == "vault":
+        return _choice(field, raw, VaultMode)
     if field == "planner_roles":
         return _choice(field, raw, PlannerRoles)
     if field == "user_gates":

@@ -51,7 +51,8 @@ from typing import Any
 from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error, ended_by
-from .. import proc_tree, reported_files
+from .. import proc_tree, reported_files, vault
+from ..ops.vault import run_section
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
@@ -59,7 +60,6 @@ from ..project_execution import ProjectExecution
 from ..library import items_label, load_installed
 from ..runtimes import RunChannel
 from ..task_roles import TaskRole, run_role
-from ..project_execution import ProjectExecution
 from ..room import room_section, run_seat, run_session_dir
 from ..message import (
     AgentAddress,
@@ -792,22 +792,28 @@ class WorkerPool:
                 return {"passed": False, "findings": [agent_settings.profile_error],
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
-        # The task's agent room, where its project has it on: the run's token and MCP entry, the room's section of
-        # its system prompt, and what its first turn says of the room.
-        seat, room_text = None, ""
-        if self.room_ops is not None and parent_task_id and ProjectExecution.from_row(project).room_on:
+        # The task's room and knowledge vault share the run's token and MCP entry.
+        execution = ProjectExecution.from_row(project)
+        room_on = execution.room_on
+        vault_config = await vault.for_project(project) if parent_task_id else None
+        seat, room_text, vault_text = None, "", ""
+        if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
-                token = self.room_ops.issue(parent_task_id, seat)
+                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config)
                 library = await self.room_ops.library_with_server(library, self._runtime_root, token, worker_id)
-                prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat)}"
-                room_text = room_section(seat)
+                if room_on:
+                    prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat)}"
+                    room_text = room_section(seat)
+                if vault_config is not None:
+                    vault_text = run_section(vault_config)
             except Exception as exc:
-                logger.warning("worker %s: the task's room is unavailable", worker_id, exc_info=True)
+                unavailable = "the task's room" if room_on else "the knowledge vault"
+                logger.warning("worker %s: %s is unavailable", worker_id, unavailable, exc_info=True)
                 self.room_ops.revoke_run(worker_id)
                 seat = None
                 await self._activity(parent_task_id, worker_id, "error",
-                                     f"Warning: the task's room is unavailable ({type(exc).__name__}: {exc}); this "
+                                     f"Warning: {unavailable} is unavailable ({type(exc).__name__}: {exc}); this "
                                      "run goes without it"[:500])
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         background = str((project or {}).get("background") or "")
@@ -827,6 +833,7 @@ class WorkerPool:
                 contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
                 knowledge=knowledge,
                 room=room_text,
+                vault=vault_text,
             )
         else:
             system_prompt = build_role_prompt(
@@ -843,6 +850,7 @@ class WorkerPool:
                 contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
                 knowledge=knowledge,
                 room=room_text,
+                vault=vault_text,
             )
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "phase",

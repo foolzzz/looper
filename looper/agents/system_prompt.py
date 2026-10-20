@@ -26,6 +26,9 @@ The Planner, the Workers and the Reviewers get the same layout::
     ## Task                  L4: what this session is for (the Planner's task,
     ...                          a Worker's or Reviewer's step)
 
+    ## Knowledge vault      when the project has its knowledge vault on, after the room
+    ...
+
     <contract>               L5: code-owned, the reply or report format code parses
 
 Everything here is fixed for the session; what changes from turn to turn
@@ -405,9 +408,10 @@ def build_system_prompt(
     knowledge: AgentKnowledge | None = None,
     custom_prompt: str = "",
     room: str = "",
+    vault: str = "",
 ) -> SystemPrompt:
     """An agent's system prompt (harness, role, project and its knowledge index, task, contract) with its layers;
-    ``room``, a run's agent room section (``room.room_section``), follows the task.
+    ``room``, a run's agent room section (``room.room_section``), follows the task, then ``vault`` follows it.
 
     The Manager passes neither a project nor a task, so it has no knowledge.
     """
@@ -419,7 +423,7 @@ def build_system_prompt(
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.prompt_section,
-        task=_with_room(task, room),
+        task=_with_room(task, room, vault),
         contract=contract,
     )
     layers = prompt_layers(
@@ -427,17 +431,22 @@ def build_system_prompt(
         project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task, harness=harness,
         knowledge=knowledge, custom_prompt=custom_prompt,
     )
-    return SystemPrompt(text, _room_layer(layers, room))
+    return SystemPrompt(text, _room_layer(layers, room, vault))
 
 
-def _with_room(task: str, room: str) -> str:
-    """The task section followed by a run's room section, when it has one."""
-    return f"{task.strip()}\n\n{room.strip()}" if room.strip() else task
+def _with_room(task: str, room: str, vault: str = "") -> str:
+    """The task section, then a run's room and knowledge vault sections when it has them."""
+    for section in (room, vault):
+        if section.strip():
+            task = f"{task.strip()}\n\n{section.strip()}"
+    return task
 
 
-def _room_layer(layers: dict[str, Any], room: str) -> dict[str, Any]:
+def _room_layer(layers: dict[str, Any], room: str, vault: str = "") -> dict[str, Any]:
     if room.strip():
         layers["room"] = {"sha256": sha256_text(room.strip())}
+    if vault.strip():
+        layers["vault"] = {"sha256": sha256_text(vault.strip())}
     return layers
 
 
@@ -466,11 +475,12 @@ def build_role_prompt(
     knowledge: AgentKnowledge | None = None,
     custom_prompt: str = "",
     room: str = "",
+    vault: str = "",
 ) -> SystemPrompt:
     """The system prompt of a run of ``task_role``: its working style (its own harness; else the built-in harness's
     working-style part, or a layer's harness whole, which is the operator's), its role prompt, the project and its
-    knowledge index, the task, the ``boundaries``, then the contract; with its layers. ``role.config_id`` stays the
-    row of its kind's built-in role, whose timeout and turns apply."""
+    knowledge index, the task, its room and vault sections, the ``boundaries``, then the contract; with its layers.
+    ``role.config_id`` stays the row of its kind's built-in role, whose timeout and turns apply."""
     if task_role.harness:
         working, harness_record = task_role.harness, {"source": Layer.TASK_ROLE.value,
                                                       "sha256": sha256_text(task_role.harness)}
@@ -487,7 +497,7 @@ def build_role_prompt(
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.prompt_section,
-        task=f"{_with_room(task, room).strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
+        task=f"{_with_room(task, room, vault).strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
         else boundaries_section(boundaries.text),
         contract=contract,
     )
@@ -500,4 +510,4 @@ def build_role_prompt(
     layers["role"]["task_role"] = task_role.key
     layers["task_role"] = task_role.record()
     layers["boundaries"] = boundaries.record()
-    return SystemPrompt(text, _room_layer(layers, room))
+    return SystemPrompt(text, _room_layer(layers, room, vault))

@@ -281,6 +281,7 @@ function executionRows(project: Project): [string, string][] {
       project.gate_reminder_hours === 0 ? "None" : `Every ${project.gate_reminder_hours} h`,
     ]);
   if (project.agent_room === "off") rows.push(["Agent room", "Off"]);
+  if (project.vault === "on") rows.push(["Knowledge vault", "On"]);
   const roomLimits = ROOM_LIMITS.filter(({ field }) => project[field] != null)
     .map(({ field, label }) => `${label} ${project[field]!.toLocaleString()}`);
   if (roomLimits.length) rows.push(["Agent room limits", roomLimits.join(" · ")]);

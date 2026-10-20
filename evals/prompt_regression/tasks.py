@@ -66,12 +66,16 @@ class EvalTask:
     # max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script; min_room_messages,
-    # max_room_messages, max_room_unanswered, min_room_consults, max_planner_modified_files
+    # max_room_messages, max_room_unanswered, min_room_consults, max_planner_modified_files,
+    # min_vault_writes, max_vault_writes, max_vault_outside, min_vault_closeout
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
     # The operator's Claude Code notes for its working directory (file name -> text, MEMORY.md the index); the
     # task's project gives them to its agents (operator_notes on).
     operator_notes: dict[str, str] = field(default_factory=dict)
+    # Opt the project into the run's one disposable knowledge vault and check this task's committed notes.
+    vault: bool = False
+    vault_check: Callable[[Path, list[str]], str | None] | None = None
 
     @property
     def real_reviewer(self) -> bool:
@@ -995,6 +999,80 @@ NOTES_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + NOTES_TASKS
+
+
+EVAL_VAULT = {
+    "codex-mem/AGENTS.md": (
+        "# Rules for this memory\n\n"
+        "- Keep one note per project under codex-mem/projects/, named after the project's name "
+        "(codex-mem/projects/<project name>.md).\n"
+        "- Record only what later tasks need and cannot see in the repository at a glance: build or test quirks, "
+        "required environment variables, traps. Never record what a task did or a summary of it.\n"
+        "- Update the project's note when it exists; add one otherwise. Write nothing when the task found nothing "
+        "of that kind.\n"),
+    "codex-mem/projects/README.md": "# Project notes\n\nOne note per project.\n",
+    "mine/diary.md": "# Diary\n\nPersonal notes. Agents never write here.\n",
+}
+
+
+def _calc_multiplies(work_dir: Path) -> str | None:
+    done = subprocess.run([sys.executable, "-c", "import calc; assert calc.mul(3, 4) == 12"], cwd=work_dir,
+                          capture_output=True, text=True, timeout=30, check=False)
+    return None if done.returncode == 0 else "calc.mul(3, 4) does not return 12"
+
+
+def _calc_vault_note(vault_dir: Path, paths: list[str]) -> str | None:
+    for name in paths:
+        if name.startswith("codex-mem/"):
+            text = _read(vault_dir, name)
+            if text is not None and "CALC_LOCALE" in text:
+                return None
+    return "no committed vault note records CALC_LOCALE"
+
+
+VAULT_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        id="vault_closeout_keeps",
+        requirement="Add mul(a, b) to calc.py, returning the product, and make `python run_tests.py` pass.",
+        check=_calc_multiplies,
+        files={
+            "calc.py": "def add(a, b): return a + b\n",
+            "test_calc.py": "from calc import add, mul\n\nassert add(2, 3) == 5\nassert mul(3, 4) == 12\n",
+            "run_tests.py": (
+                "import os\nimport sys\n\n"
+                "if os.environ.get(\"CALC_LOCALE\") != \"C\":\n"
+                "    sys.exit(\"run_tests: set CALC_LOCALE=C first (the tests compare formatted numbers)\")\n"
+                "\nimport test_calc\n"),
+        },
+        vault=True,
+        vault_check=_calc_vault_note,
+        expect={"min_steps": 1, "min_vault_writes": 1, "max_vault_outside": 0},
+        fake={
+            "plan": [_step("s1", "Add mul(a, b) to calc.py and run the tests.", ["python run_tests.py passes"])],
+            "attempts": {"s1": [{"status": "completed", "files": {
+                "calc.py": "def add(a, b): return a + b\n\ndef mul(a, b): return a * b\n"},
+                "learnings": ["run_tests.py needs CALC_LOCALE=C"]}]},
+            "vault_calls": [["looper_vault_write", {
+                "path": "codex-mem/projects/calc.md", "expected_sha256": None,
+                "content": "# calc\n\n- Tests: run `CALC_LOCALE=C python run_tests.py`; without it they fail.\n",
+                "reason": "calc's tests need CALC_LOCALE=C"}]],
+            "vault_reply": "kept calc's test environment requirement in codex-mem/projects/calc.md",
+        },
+    ),
+    EvalTask(
+        id="vault_closeout_nothing",
+        requirement="Write the word hello into hello.txt, nothing else.",
+        check=_equals("hello.txt", "hello"),
+        files={"README.md": "# greet\n"},
+        vault=True,
+        expect={"min_steps": 1, "max_vault_writes": 0, "max_vault_outside": 0},
+        fake={
+            "plan": [_step("s1", "Write hello into hello.txt.", ["hello.txt holds hello"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"hello.txt": "hello\n"}}]},
+        },
+    ),
+)
+TASKS = TASKS + VAULT_TASKS
 
 
 # --- The agent room: its agents use it when the work needs them to, and leave it alone when it does not ---

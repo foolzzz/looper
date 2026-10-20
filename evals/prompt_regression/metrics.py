@@ -22,7 +22,7 @@ that changed while one of its turns ran and no Worker or Reviewer ran.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,11 +41,11 @@ RECORD_FAILED = "failed"
 # they change; and OMP's (``runtimes.omp.edited_paths``).
 FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", *OMP_EDIT_TOOLS})
 
-_BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE|GATE) contract \(")
+_BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE|GATE|VAULT) contract \(")
 _REPAIR_REJECTED = "invalid reply after a repair turn"
 # The Planner's answer to a change to the task, with the action it chose.
 _CHANGE_ANSWERED = re.compile(r"^Planner answered a change to the task \((\w+)\)")
-_TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE|GATE|ROOM)\]( Your last reply broke the reply contract)?")
+_TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE|GATE|ROOM|VAULT)\]( Your last reply broke the reply contract)?")
 
 
 def planner_violations(activity: Iterable[Mapping[str, Any]]) -> int:
@@ -283,7 +283,8 @@ def planner_denials(records: Iterable[Mapping[str, Any]]) -> int:
 
 
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``gate``, ``room``, ``repair``)."""
+    """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``gate``, ``room``,
+    ``vault``, ``repair``)."""
     kinds: dict[str, int] = {}
     for record in records:
         if role(record) != "planner":
@@ -459,6 +460,22 @@ def flow_problems(expect: Mapping[str, int], observed: Mapping[str, int]) -> lis
     return problems
 
 
+def vault_metrics(git_log: str, task_id: str) -> dict[str, Any]:
+    """This task's commits and unique paths in ``git log --format=%H%x00%s --name-only``."""
+    writes = 0
+    paths: set[str] = set()
+    belongs = False
+    for line in git_log.splitlines():
+        if "\0" in line:
+            _, subject = line.split("\0", 1)
+            belongs = bool(task_id) and subject.startswith(f"looper: {task_id} ")
+            writes += int(belongs)
+        elif belongs and line:
+            paths.add(line)
+    return {"vault_writes": writes, "vault_outside": sum(not path.startswith("codex-mem/") for path in paths),
+            "vault_paths": sorted(paths)}
+
+
 def task_metrics(
     *,
     detail: Mapping[str, Any],
@@ -472,6 +489,10 @@ def task_metrics(
     disciplines: Iterable[Discipline] = (),
     gate_asks_beyond_script: int = 0,
     clock_offset: float = 0.0,
+    task_id: str = "",
+    vault_dir: Path | None = None,
+    vault_log: str = "",
+    vault_check: Callable[[Path, list[str]], str | None] | None = None,
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
@@ -528,6 +549,8 @@ def task_metrics(
         **room_metrics(detail, activity, events),
         # What its runtime refused the read-only Planner.
         "planner_denials": planner_denials(records),
+        **vault_metrics(vault_log, task_id),
+        "vault_closeout": int(any(str(row.get("summary") or "").startswith("Vault closeout:") for row in activity)),
     }
     violations = {"planner": planner_violations(activity), "worker": worker_violations,
                   "reviewer": reviewer_violations}
@@ -538,8 +561,12 @@ def task_metrics(
         problems.append(f"task {status or 'unknown'}" + (f": {error}" if error else ""))
     if check_problem:
         problems.append(check_problem)
-    problems += flow_problems(expect, {**observed, "contract_violations": sum(violations.values()),
-                                       "planner_modified_files": len(set(planner_edits) | set(changed_by_planner))})
+    if vault_check is not None and vault_dir is not None:
+        if problem := vault_check(vault_dir, observed["vault_paths"]):
+            problems.append(problem)
+    problems += flow_problems({"max_vault_outside": 0, **expect}, {
+        **observed, "contract_violations": sum(violations.values()),
+        "planner_modified_files": len(set(planner_edits) | set(changed_by_planner))})
 
     cost = detail.get("cost") or {}
     # Tokens are what every runtime reports, priced or not (a subscription, a provider without prices).

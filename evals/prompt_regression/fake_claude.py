@@ -247,6 +247,13 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {"reply": script.get("room_reply", "Noted."), "action": "none"}
         elif message.startswith("[CHAT]"):
             reply = _chat(script, message)
+        elif message.startswith("[VAULT]"):
+            vault_calls = script.get("vault_calls") or []
+            if vault_calls and rpc is None:
+                rpc = _mcp(args)
+            for name, arguments in vault_calls:
+                rpc("tools/call", {"name": name, "arguments": arguments})
+            reply = {"vault": script.get("vault_reply") or "nothing worth keeping"}
         else:
             reply = {"reviews": [], "progress": PROGRESS}
         cost += PLANNER_TURN_COST
@@ -317,6 +324,8 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     report = {"status": attempt.get("status", "completed"),
               "changed_files": {name: "written" for name in files},
               "deleted_files": [], "summary": attempt.get("summary") or f"step {label} attempt {attempt_no}"}
+    if "learnings" in attempt:
+        report["learnings"] = attempt["learnings"]
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
 
 

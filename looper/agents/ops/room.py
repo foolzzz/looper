@@ -1,6 +1,6 @@
 """The agent room's tools: what a step's run (``RoomOps``) and a task's Planner (``ops.planner``) call.
 
-A Worker's or Reviewer's run in a project with the agent room on gets a token
+A Worker's or Reviewer's run in a project with the agent room or knowledge vault on gets a token
 of its own when it starts (``issue``, ``run.`` and 43 random characters, kept
 as a hash, never logged), naming its task and its seat; its MCP entry carries
 it as the Planner's does (``looper mcp-server`` with ``LOOPER_AGENT_URL`` and
@@ -14,7 +14,8 @@ then. The endpoint (``/api/agent/v1/``) tells a run's token by its prefix.
 - **Tools.** A work seat has all five; a review seat has no
   ``looper_room_watch``; a task's Planner has the same four as a Reviewer's
   (it is woken for what is for it) through its own token, where its project
-  has the room on.
+  has the room on. The token also carries the knowledge vault's tools where
+  its project has the vault on and the setting holds (``ops.vault``).
 """
 
 from __future__ import annotations
@@ -24,10 +25,14 @@ import json
 import logging
 import secrets
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import vault
+from ..vault import VaultConfig
+from . import vault as vault_ops
+from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
 from ..room import POSTABLE, MemberKind, MessageKind, RoomService, Seat
 from . import ErrorCode, OpError, Risk, Tool, check_arguments
 from .service import library_with_server, server_config
@@ -164,6 +169,9 @@ def _bearer(header: str | None) -> str:
 class _Grant:
     task_id: str
     seat: Seat
+    room: bool = True
+    vault_tools: tuple[Tool, ...] = ()
+    usage: VaultUsage = field(default_factory=VaultUsage)
 
 
 class RoomOps:
@@ -175,10 +183,11 @@ class RoomOps:
 
     # --- Tokens ---
 
-    def issue(self, task_id: str, seat: Seat) -> str:
+    def issue(self, task_id: str, seat: Seat, *, room: bool = True, vault: VaultConfig | None = None) -> str:
         """A new token for ``seat``'s run in ``task_id``."""
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
-        self._grants[_digest(token)] = _Grant(task_id, seat)
+        self._grants[_digest(token)] = _Grant(task_id, seat, room=room,
+                                               vault_tools=vault_ops.tools_for(vault) if vault else ())
         return token
 
     def revoke_run(self, run: str) -> None:
@@ -204,17 +213,23 @@ class RoomOps:
 
     def listing(self, header: str | None) -> list[dict[str, Any]]:
         grant = self._grant(header)
-        return [tool.listing() for tool in tools_for(grant.seat.kind)] if grant is not None else []
+        if grant is None:
+            return []
+        room_tools = tools_for(grant.seat.kind) if grant.room else ()
+        return [tool.listing() for tool in (*room_tools, *grant.vault_tools)]
 
     async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
         grant = self._grant(header)
         if grant is None:
             return _error(ErrorCode.FORBIDDEN, "this run's token no longer works: its run ended")
-        tools = {tool.name: tool for tool in tools_for(grant.seat.kind)}
+        room_tools = tools_for(grant.seat.kind) if grant.room else ()
+        tools = {tool.name: tool for tool in (*room_tools, *grant.vault_tools)}
         tool = tools.get(name)
         if tool is None:
             return _error(ErrorCode.FORBIDDEN if name in TOOL_NAMES or name.startswith("looper_") else ErrorCode.INVALID,
                           f"{name} is not one of your tools; they are: {', '.join(tools)}")
+        if name in VAULT_TOOL_NAMES:
+            return await self._vault_call(grant, tool, raw)
         try:
             arguments = check_arguments(tool.schema, normalize_room_arguments(raw))
             result = await run_tool(self.room, grant.task_id, grant.seat, name, arguments)
@@ -224,6 +239,29 @@ class RoomOps:
             return _error(exc.code, str(exc))
         except Exception as exc:
             logger.exception("task %s: %s's call of %s failed", grant.task_id, grant.seat.key, name)
+            return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); go on "
+                                                 "without it")
+        return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}
+
+    async def _vault_call(self, grant: _Grant, tool: Tool, raw: Any) -> dict[str, Any]:
+        """A knowledge vault call as this run's seat, checked against the current setting."""
+        name = tool.name
+        seat = grant.seat
+        try:
+            arguments = check_arguments(tool.schema, raw)
+            config, why = await vault.for_task(grant.task_id)
+            if config is None:
+                raise OpError(ErrorCode.FORBIDDEN, why)
+            if name not in {t.name for t in vault_ops.tools_for(config)}:
+                raise OpError(ErrorCode.FORBIDDEN, "the knowledge vault is read only: no folder is writable")
+            result = await vault_ops.run_tool(config, name, arguments, task_id=grant.task_id, who=seat.key,
+                                              worker=seat.run or seat.key, usage=grant.usage)
+        except OpError as exc:
+            if name == vault_ops.WRITE:
+                await vault_ops.note_refusal(grant.task_id, seat.run or seat.key, seat.key, name, exc)
+            return _error(exc.code, str(exc))
+        except Exception as exc:
+            logger.exception("task %s: %s's call of %s failed", grant.task_id, seat.key, name)
             return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); go on "
                                                  "without it")
         return {"status": "ok", "result": json.loads(json.dumps(result, ensure_ascii=False, default=str))}

@@ -28,7 +28,8 @@ Planner's replans, added steps and spend-cap stop, with the reason; the
 supplements; a new session and the handoff before it. The Planner's
 DECISION, SUPERVISE and CHAT turns and each Worker's first turn carry the
 journal back, each Worker's and Reviewer's task section the supplements, and a project with ``distill_lessons`` gets one LESSONS turn when
-a task completes, saved as a project knowledge document or a draft of one; a
+a task completes, saved as a project knowledge document or a draft of one; a project with ``vault`` on gets
+one VAULT turn when its task completes or fails to keep lasting notes in the knowledge vault. A
 learning a Worker or Reviewer says holds for the whole project becomes a draft
 when it arrives. The plan, its steps,
 its journal and the Planner's Claude session live in PostgreSQL (``plans``,
@@ -111,6 +112,9 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from .. import vault
+from ..vault import VaultConfig
+from ..ops.vault import planner_guide
 from .. import reported_files
 from .. import step_workspaces as workspaces
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
@@ -174,6 +178,7 @@ from .planner_protocol import (
     parse_gate,
     parse_handoff,
     parse_lessons,
+    parse_vault,
     parse_plan,
     parse_supervise,
     parse_wrap_up,
@@ -740,6 +745,8 @@ class PlannerAgent:
         # The project knowledge the last turn ran with (None before the first turn); a turn that cannot
         # read the knowledge keeps it, as a failed project read keeps the last project.
         self._knowledge: AgentKnowledge | None = None
+        self._vault: VaultConfig | None = None
+        self._vault_closed = False
         # The installed items the last turn ran with, kept the same way when a turn cannot read them.
         self._library: AgentLibrary | None = None
         # The agent settings the last turn ran with, kept the same way when a turn cannot read them.
@@ -2738,6 +2745,11 @@ class PlannerAgent:
         if agent_settings.profile_error:
             # The task fails with the reason rather than run another agent.
             raise PlannerTurnError(agent_settings.profile_error)
+        try:
+            self._vault = await vault.active() if self._execution.vault_on else None
+        except Exception:
+            self._vault = None
+            logger.warning("planner %s cannot read the knowledge vault setting", self.agent_id, exc_info=True)
         system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness,
                                             custom_prompt=agent_settings.profile.custom_prompt)
         launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER)  # never with agent teams
@@ -3109,7 +3121,8 @@ class PlannerAgent:
                                     gates=self._gate_policy is GatePolicy.ALLOWED
                                     or any(s.gate is not None and not s.gate.state.closed for s in plan.steps),
                                     room=self._room is not None)
-            + (f"\n{self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None)}"
+            + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
+                                         vault=planner_guide(self._vault) if self._vault else "")
                if self._ops else ""),
             knowledge=knowledge,
         )
@@ -3410,6 +3423,7 @@ class PlannerAgent:
         if self._execution.lessons_on:
             # Before the final status: the TaskRouter ends the Planner when it gets it.
             await self._distill_lessons(plan)
+        await self._vault_closeout(plan, "completed")
 
         summary = plan.final_summary
         if not summary:
@@ -3440,6 +3454,76 @@ class PlannerAgent:
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
 
+    async def _cap_reached(self) -> float | None:
+        """The task's cap once spent, or None when under it or its cost cannot be read."""
+        cap = self._execution.task_budget_usd
+        if cap is None:
+            return None
+        try:
+            spent = float((await db_llm_records.task_costs([self._task_id]))[self._task_id]["cost_usd"])
+        except Exception:
+            logger.warning("planner %s cannot read its task's cost", self.agent_id, exc_info=True)
+            return None
+        return cap if spent >= cap else None
+
+    async def _vault_closeout(self, plan: TaskPlan, ended: str) -> None:
+        """Keep lasting notes once per Planner; any problem only adds a warning to its activity.
+
+        A task restarted later has a new Planner, whose own ending gets its own closeout.
+        """
+        if self._vault_closed:
+            return
+        try:
+            if self._ops is None or self._token is None or not (await self._read_execution()).vault_on:
+                return
+            config = await vault.active()
+            if config is None or not config.writable:
+                return
+            if not plan.journal:
+                await self._activity("phase", "No vault closeout: the task journal is empty")
+                return
+            cap = await self._cap_reached()
+            if cap is not None:
+                await self._activity("error", f"Warning: no vault closeout: the task has spent its "
+                                              f"${format_usd(cap)} cap (task_budget_usd)"[:500])
+                return
+            rules, problem = await vault.rules_text(config)
+            if problem:
+                await self._activity("error", f"Warning: {problem}"[:500])
+            try:
+                self._vault_closed = True
+                line = await self._ask(TurnKind.VAULT, self._vault_message(plan, ended, config, rules), parse_vault)
+            except PlannerTurnError as exc:
+                await self._activity("error", f"Warning: the Planner's vault closeout failed: {exc}"[:500])
+                return
+            await self._activity("phase", f"Vault closeout: {line}"[:500])
+        except Exception as exc:
+            logger.warning("planner %s cannot close out its task's vault", self.agent_id, exc_info=True)
+            try:
+                await self._activity("error", f"Warning: the Planner's vault closeout failed: {exc}"[:500])
+            except Exception:
+                logger.warning("planner %s cannot record the vault closeout warning", self.agent_id, exc_info=True)
+
+    def _vault_message(self, plan: TaskPlan, ended: str, config: VaultConfig, rules: str | None) -> str:
+        return "\n".join([
+            f"[VAULT] The task {ended}. Keep what later work should know in the operator's knowledge vault, "
+            "following its rules below: search before you add, read a note before you change it (pass its "
+            f"sha256; null for a new note), and write only under {config.folders()} with looper_vault_write. "
+            "Paths are relative to the vault; Looper commits each write. Write nothing when nothing will "
+            "still hold. Do not change any other files.",
+            "",
+            *([f"The vault's rules ({config.rules_file}):", rules] if config.rules_file and rules is not None else [
+                "The vault has no rules file: keep notes short, one topic each, and update a note rather than "
+                "add a near-duplicate."]),
+            "",
+            *journal.lessons_journal(plan.journal),
+            "",
+            "End your reply with exactly one ```json block, and nothing after it:",
+            "```json",
+            '{"vault": "one line: what you wrote, or why nothing"}',
+            "```",
+        ])
+
     async def _distill_lessons(self, plan: TaskPlan) -> None:
         """One more Planner turn turns the task journal into a lessons document, saved in the project's
         knowledge or, in ``draft`` mode, as a draft the user confirms or discards (``distill_lessons``). Any
@@ -3447,17 +3531,11 @@ class PlannerAgent:
         if not plan.journal:
             await self._activity("phase", "No lessons written: the task journal is empty")
             return
-        cap = self._execution.task_budget_usd
+        cap = await self._cap_reached()
         if cap is not None:
-            try:
-                spent = float((await db_llm_records.task_costs([self._task_id]))[self._task_id]["cost_usd"])
-            except Exception:
-                logger.warning("planner %s cannot read its task's cost", self.agent_id, exc_info=True)
-                spent = 0.0
-            if spent >= cap:
-                await self._activity("error", f"Warning: no lessons written: the task has spent its "
-                                              f"${format_usd(cap)} cap (task_budget_usd)")
-                return
+            await self._activity("error", f"Warning: no lessons written: the task has spent its "
+                                          f"${format_usd(cap)} cap (task_budget_usd)")
+            return
         try:
             lessons = await self._ask(TurnKind.LESSONS, self._lessons_message(plan), parse_lessons)
         except PlannerTurnError as exc:
@@ -3512,6 +3590,8 @@ class PlannerAgent:
         if kept:
             await self._activity("phase", f"Kept {len(kept)} step worktree(s) with work not merged, for a restart, "
                                           f"until the task is started over or deleted: {', '.join(kept)}"[:500])
+        await self._vault_closeout(
+            plan, f"failed: {_clip(plan.fail_reason or 'a step failed and the Planner could not go on', 300)}")
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
