@@ -40,6 +40,30 @@ async def _profile(provider_id: str, model: str, name: str | None = None) -> dic
                                                      "model": model})
 
 
+@pytest.mark.parametrize("models", [
+    [{"name": "glm-5.3[1m]", "background_model": "glm-5.3-flash[1m]"}],
+    [{"name": "glm-5.3", "background_model": "glm-5.3-flash[1m]"}],
+])
+def test_provider_saves_warn_about_context_suffixes_without_anthropic_messages(
+    monkeypatch: pytest.MonkeyPatch, models: list[dict[str, Any]],
+) -> None:
+    async def _test(_pool: Any) -> None:
+        answer = await _ok("POST", "/api/providers", {"name": "suffix-test", "auth": "api_key",
+            "protocols": ["openai-chat"], "base_url": "https://example.invalid/v1", "models": models})
+        provider_id = answer["provider"]["provider_id"]
+        assert len(answer["warnings"]) == 1
+        assert "Claude Code convention" in answer["warnings"][0] and "verbatim" in answer["warnings"][0]
+        saved = (await _ok("PUT", f"/api/providers/{provider_id}", {"name": "renamed"}))
+        assert saved["warnings"] == answer["warnings"]
+        assert saved["provider"]["models"][0]["name"] == models[0]["name"]
+        assert saved["provider"]["models"][0]["background_model"] == models[0]["background_model"]
+        anthropic = await _ok("PUT", f"/api/providers/{provider_id}", {"protocols": ["anthropic-messages"]})
+        assert anthropic["warnings"] == []
+        assert (await _profile(provider_id, models[0]["name"]))["warnings"] == []
+
+    _run(_test, monkeypatch)
+
+
 async def _task(tmp_path: Path) -> str:
     project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
     return (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
@@ -139,6 +163,8 @@ def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
 
 
 def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.provider_presets import api_models
+
     async def _test(_pool: Any) -> None:
         registry = await _ok("GET", "/api/registry")
         assert {p["preset_id"] for p in registry["provider_presets"]} >= {"glm-bigmodel", "glm-zai", "deepseek",
@@ -148,11 +174,11 @@ def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pyt
                 anthropic = "anthropic-messages" in api["protocols"]
                 provider = (await _ok("POST", "/api/providers", {
                     "name": f"{preset['preset_id']}-{n}", "protocols": api["protocols"], "base_url": api["base_url"],
-                    "auth": "api_key", "api_key": KEY, "models": preset["models"],
+                    "auth": "api_key", "api_key": KEY, "models": api_models(preset, api),
                     "env": preset["env"] if anthropic else []}))["provider"]
                 if not anthropic:
                     continue
-                for model in preset["models"]:
+                for model in api_models(preset, api):
                     answer = await _profile(provider["provider_id"], model["name"])
                     assert answer["warnings"] == [], (preset["preset_id"], model["name"])
                     assert answer["profile"]["cost"] == {"source": "provider_price", "equivalent": False, "unpriced": []}

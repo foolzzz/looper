@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,6 +22,24 @@ MALFORMED_URLS = [
     "looper.example.com", "ftp://looper.example.com", "http://", "http://x:99999", "http://user:secret@x",
     "http://x/?a=1", "http://x/#tasks", "http://x:port",
 ]
+
+
+def test_manager_provider_list_includes_presets_and_each_api_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.ops import Call, Turn
+    from looper.agents.ops import config
+    from looper.agents.provider_presets import presets_view
+
+    presets = presets_view()
+    monkeypatch.setattr(config, "_registry", AsyncMock(return_value={"providers": [], "provider_presets": presets}))
+    answer = asyncio.run(config._providers(Call({"action": "list"}, Turn("web", "test"), None)))
+    assert answer["providers"] == []
+    assert answer["provider_presets"] == presets
+    by_id = {p["preset_id"]: p for p in answer["provider_presets"]}
+    assert {"opencode", "sub2api"} <= by_id.keys()
+    assert [[m["name"] for m in api["models"]] for api in by_id["opencode"]["apis"]] == [
+        ["gpt-6.1-sol", "gpt-5.6-sol"], ["deepseek-v4-pro", "glm-5.3", "kimi-k3"],
+        ["claude-opus-5-5", "claude-sonnet-5-5"],
+    ]
 
 
 def _file(root: Path, text: str | bytes) -> Path:

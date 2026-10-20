@@ -203,8 +203,8 @@ runs this Agent Profile instead: one registered in the eval's new database,
 such as the built-in `claude-code/opus`; the run records it as `agent`),
 `--provider-preset <id>` (every role runs Claude Code with a provider registered from this
 preset's Anthropic-format API, such as `glm-bigmodel` or `deepseek`, its key
-read from `LOOPER_EVAL_API_KEY`; `--agent-model` picks the model, default the
-preset's first, and `--provider-base-url` replaces the preset's endpoint, for
+read from `LOOPER_EVAL_API_KEY`; `--agent-model` picks the model, default that
+API's first, and `--provider-base-url` replaces the preset's endpoint, for
 example with a logging proxy; the per-run cap is then Looper's own at the
 provider's prices, and each task reports its `cost_basis`), `--register-agent
 SPEC.json` (register an Agent Profile in the eval's database first and run
