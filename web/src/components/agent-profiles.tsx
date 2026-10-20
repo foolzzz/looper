@@ -19,14 +19,14 @@ import {
   fetchStatus,
   fetchPromptPreview,
   updateAgentProfile,
-  type AgentProfileV3 as AgentProfile,
+  type AgentProfile,
   type AgentRole,
   type ProfileUsedBy,
   type PromptPreview,
-  type ProviderV3 as Provider,
-  type ModelV3,
+  type Provider,
+  type Model,
   type ProviderLogin,
-  type RegistryV3 as Registry,
+  type Registry,
   type Runtime,
   type SelfCheck,
 } from "@/lib/api";
@@ -34,7 +34,7 @@ import { LOGIN_HELP, PLANNED_RUNTIMES, RUNTIME_TYPES, loginUsable, roleLabel } f
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { useAction } from "@/lib/use-action";
-import { profileLabelV3, useRegistryV3 } from "@/lib/use-registry";
+import { profileLabel, useRegistry } from "@/lib/use-registry";
 
 // --- What a runtime can be paired with ---
 
@@ -43,7 +43,7 @@ function runtimeType(registry: Registry, runtime: Runtime | undefined) {
 }
 
 /** Match the model's exact protocol and account authentication to the runtime, as the server does. */
-function pairs(registry: Registry, runtime: Runtime | undefined, model: ModelV3): boolean {
+function pairs(registry: Registry, runtime: Runtime | undefined, model: Model): boolean {
   const type = runtimeType(registry, runtime);
   const provider = registry.providers.find((p) => p.provider_id === model.provider_id);
   return !!type && !!provider && type.protocols.includes(model.protocol)
@@ -527,7 +527,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
 
 /** Settings → Agent Profiles: every profile, what it is made of, the roles it can run and where it is used. */
 export function AgentProfilesSection() {
-  const { registry, error } = useRegistryV3();
+  const { registry, error } = useRegistry();
   if (!registry) {
     return error ? (
       <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 px-5 py-4 text-sm text-destructive">{error}</div>
@@ -581,7 +581,7 @@ export function AgentProfileSelect({
   unlistedName?: string;
   className?: string;
 }) {
-  const { registry, error } = useRegistryV3();
+  const { registry, error } = useRegistry();
   const [creating, setCreating] = useState(false);
   const profiles = registry?.profiles ?? [];
   const unlisted = value && !profiles.some((p) => p.profile_id === value) ? unlistedName || value : "";
@@ -600,7 +600,7 @@ export function AgentProfileSelect({
           const missing = roles.filter((role) => !profile.roles.includes(role));
           return (
             <option key={profile.profile_id} value={profile.profile_id} disabled={missing.length > 0 && profile.profile_id !== value}>
-              {profileLabelV3(profile)}
+              {profileLabel(profile)}
               {missing.length > 0 ? ` (cannot run the ${missing.map(roleLabel).join(", ")})` : ""}
             </option>
           );

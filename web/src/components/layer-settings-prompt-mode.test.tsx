@@ -3,6 +3,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LayerSettingsForm } from "@/components/layer-settings";
+import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
+import { RolesSection } from "@/components/role-settings";
 import type { EffectiveSettings, LayerUpdate, LayerValues, SettingLimits } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -22,6 +24,15 @@ const EFFECTIVE: EffectiveSettings = {
   run_budget_usd: { value: null, source: "builtin" },
   system_prompt_mode: "replace",
 };
+
+const REGISTERED_PROFILE = {
+  profile_id: "p", name: "p", effort: null, runtime_id: "rt", runtime_name: "Runtime", runtime_type: "r",
+  model_id: "m", model: { model_id: "m", name: "Exact model", provider_id: "v", protocol: "openai-responses" },
+  provider: { provider_id: "v", name: "Account", vendor_type: "custom", auth: "api_key" },
+  roles: ["manager", "planner", "worker", "reviewer"],
+};
+const SUMMARY_REGISTRY = { profiles: [REGISTERED_PROFILE], runtime_types: [], runtimes: [], providers: [], models: [] };
+const MODEL_SUMMARY = "Account / Exact model / openai-responses";
 
 describe("the role layer's system prompt mode", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -50,5 +61,40 @@ describe("the role layer's system prompt mode", () => {
     expect(saved).toEqual([{ system_prompt_mode: "append" }]);
     act(() => root.unmount());
     container.remove();
+  });
+
+  it.each(["layer", "project", "role"])("shows the registered account, model and protocol in %s summaries", async (view) => {
+    const state = { values: VALUES, effective: EFFECTIVE };
+    const roles = { manager: state, planner: state, worker: state, reviewer: state };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const result = url.endsWith("/registry") ? SUMMARY_REGISTRY
+        : url.endsWith("/allowed-profiles") ? { profiles: [], choosable: [] }
+        : url.endsWith("/roles") ? { configs: [{ role: "planner", display_name: "Planner", enabled: true }] }
+        : url.includes("/projects/") ? { limits: LIMITS, project: { values: VALUES }, roles }
+        : { limits: LIMITS, system: state, roles };
+      return Response.json(result);
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(view === "layer"
+        ? <LayerSettingsForm idPrefix="summary" layer="role" roles={["planner"]} values={VALUES}
+            effective={EFFECTIVE} limits={LIMITS} onSave={async () => VALUES} />
+        : view === "project" ? <ProjectAgentSettingsSection projectId="project" linked="" />
+        : <RolesSection sub="" />));
+      const summary = view === "layer" ? container.querySelector("#summary-profile-now")
+        : container.querySelector(view === "project" ? "#project-profiles-project-button" : "#roles-shared-button");
+      expect(summary?.textContent).toContain(MODEL_SUMMARY);
+      if (view !== "layer") {
+        expect(container.querySelector(view === "project" ? "#project-profiles-planner-button" : "#roles-planner-button")?.textContent)
+          .toContain(MODEL_SUMMARY);
+      }
+      if (view === "layer") expect(container.querySelector("#summary-prompt-mode")).toBeTruthy();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
   });
 });

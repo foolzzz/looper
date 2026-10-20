@@ -3,25 +3,25 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ProvidersSection } from "@/components/provider-settings";
-import type { AgentProfileV3, ModelV3, PriceField, ProviderV3, RegistryV3 } from "@/lib/api";
+import type { AgentProfile, Model, PriceField, Provider, Registry } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const PRICE_FIELDS: PriceField[] = ["input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"];
-const endpoint = (protocol: ModelV3["protocol"]) => ({ protocol, base_url: "https://example.invalid/v1", use_runtime_default: false });
-const provider = (changes: Partial<ProviderV3> = {}): ProviderV3 => ({
+const endpoint = (protocol: Model["protocol"]) => ({ protocol, base_url: "https://example.invalid/v1", use_runtime_default: false });
+const provider = (changes: Partial<Provider> = {}): Provider => ({
   provider_id: "provider-1", name: "Account", vendor_type: "deepseek", auth: "api_key", oauth_runtime_type: null,
   endpoints: [endpoint("openai-chat"), endpoint("anthropic-messages")], suggested_models: [], login: null,
   env: [], max_concurrency: null, api_key: "***", builtin: false, endpoint_count: 2, model_count: 0,
   profile_count: 0, created_at: "", updated_at: "", ...changes,
 });
-const model = (changes: Partial<ModelV3> = {}): ModelV3 => ({
+const model = (changes: Partial<Model> = {}): Model => ({
   model_id: "model-1", provider_id: "provider-1", provider_name: "Account", name: "exact[1m]", protocol: "openai-chat",
   context_window: null, efforts: null, background_model: null, input_usd_per_mtok: null, output_usd_per_mtok: null,
   cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null, catalog_order: 0, builtin: false, profile_count: 0,
   endpoint: endpoint("openai-chat"), prices: Object.fromEntries(PRICE_FIELDS.map((key) => [key,
-    { override: null, effective: null, source: "unknown" }])) as ModelV3["prices"], warnings: [], created_at: "", updated_at: "", ...changes,
+    { override: null, effective: null, source: "unknown" }])) as Model["prices"], warnings: [], created_at: "", updated_at: "", ...changes,
 });
-let data: RegistryV3;
+let data: Registry;
 let root: Root;
 let container: HTMLDivElement;
 let writes: { url: string; method: string; body: Record<string, unknown> }[];
@@ -57,7 +57,7 @@ beforeEach(() => {
     const existing = data.models.find((m) => m.model_id === id);
     const saved = model({ model_id: `model-${data.models.length + 1}`, ...existing, ...body });
     saved.prices = Object.fromEntries(PRICE_FIELDS.map((key) => [key, { override: saved[key], effective: saved[key],
-      source: saved[key] === null ? "unknown" : "override" }])) as ModelV3["prices"];
+      source: saved[key] === null ? "unknown" : "override" }])) as Model["prices"];
     data = { ...data, models: [...data.models.filter((m) => m.model_id !== saved.model_id), saved] };
     return Response.json({ model: saved, warnings });
   }));
@@ -187,7 +187,7 @@ it("requires a provider endpoint before a model can be created", async () => {
 it("lists the profiles affected by editing this exact model and explains effort changes", async () => {
   data.models = [model({ profile_count: 1 })];
   data.profiles = [{ profile_id: "profile-1", model_id: "model-1", name: "Affected worker" },
-    { profile_id: "profile-2", model_id: "another-model", name: "Unrelated worker" }] as AgentProfileV3[];
+    { profile_id: "profile-2", model_id: "another-model", name: "Unrelated worker" }] as AgentProfile[];
   await open(); await edit();
   expect(container.textContent).toContain("Affected worker"); expect(container.textContent).not.toContain("Unrelated worker");
   expect(container.textContent).toMatch(/effort.*runs/i);

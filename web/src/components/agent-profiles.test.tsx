@@ -2,8 +2,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TaskAgentsSection } from "@/components/task-agents";
+import { profileLabel, useRegistry } from "@/lib/use-registry";
 import { AgentProfileForm, AgentProfilesSection, AgentProfileSelect } from "@/components/agent-profiles";
-import { fetchPromptPreview, REGISTRY_CHANGED_EVENT, type AgentProfileV3 as AgentProfile, type RegistryV3 as Registry, type ModelV3, type ProviderV3 } from "@/lib/api";
+import { fetchPromptPreview, REGISTRY_CHANGED_EVENT, type AgentProfile, type Registry, type Model, type Provider, type TaskAgents } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -12,24 +14,24 @@ const PROFILE: AgentProfile = {
   profile_id: "p", name: "Profile", model_id: "model-messages",
   model: { model_id: "model-messages", name: "model", protocol: "anthropic-messages", provider_id: "provider" }, effort: null, agent_teams: true,
   custom_prompt: "", runtime_id: "rt-claude-code", runtime_type: "claude-code",
-  runtime_name: "Claude Code", provider_id: "provider", provider_name: "Provider", builtin: false,
+  runtime_name: "Claude Code", builtin: false,
   provider: { provider_id: "provider", name: "Provider", vendor_type: "custom", auth: "api_key" },
   roles: ["worker"], used_by: { layers: [], task_count: 0, schedule_count: 0, allowed_in: [] }, warnings: [],
   cost: { source: "runtime", equivalent: false, unpriced: [] },
 };
-const provider = (id: string, extra: Partial<ProviderV3> = {}): ProviderV3 => ({
+const provider = (id: string, extra: Partial<Provider> = {}): Provider => ({
   provider_id: id, name: id === "provider" ? "Provider" : id, vendor_type: "custom", auth: "api_key",
   oauth_runtime_type: null, endpoints: ["anthropic-messages", "openai-chat", "openai-responses"].map((protocol) => ({
-    protocol: protocol as ModelV3["protocol"], base_url: "https://example.com", use_runtime_default: false,
+    protocol: protocol as Model["protocol"], base_url: "https://example.com", use_runtime_default: false,
   })), suggested_models: [], login: null, env: [], max_concurrency: null, api_key: null, builtin: false,
   endpoint_count: 3, model_count: 0, profile_count: 1, created_at: "", updated_at: "", ...extra,
 });
-const model = (id: string, protocol: ModelV3["protocol"], providerId = "provider"): ModelV3 => ({
+const model = (id: string, protocol: Model["protocol"], providerId = "provider"): Model => ({
   model_id: id, name: "model", protocol, provider_id: providerId, provider_name: providerId === "provider" ? "Provider" : providerId,
   context_window: null, input_usd_per_mtok: null, output_usd_per_mtok: null, cache_read_usd_per_mtok: null,
   cache_write_usd_per_mtok: null, efforts: null, background_model: null, catalog_order: 0, builtin: false,
   profile_count: 0, endpoint: { protocol, base_url: "https://example.com", use_runtime_default: false },
-  prices: {} as ModelV3["prices"], warnings: [], created_at: "", updated_at: "",
+  prices: {} as Model["prices"], warnings: [], created_at: "", updated_at: "",
 });
 const REGISTRY: Registry = {
   runtime_types: ["claude-code", "codex", "stand-in"].map<Registry["runtime_types"][number]>((type) => ({
@@ -97,6 +99,89 @@ describe("Agent Profiles", () => {
   };
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
+
+  it.each([
+    [null, "Profile"], ["high", "Profile · high"], ["xhigh", "Profile · xhigh"],
+  ])("labels profiles with their derived provider, exact model and protocol (%s)", (effort, name) => {
+    expect(profileLabel({ ...PROFILE, effort })).toBe(
+      `${name} — Claude Code · Provider / model / anthropic-messages`,
+    );
+    expect(profileLabel({ ...PROFILE, name, effort })).toBe(
+      `${name} — Claude Code · Provider / model / anthropic-messages`,
+    );
+  });
+
+  function RegistryReader({ id }: { id: string }) {
+    const { registry, error, reload } = useRegistry();
+    return <div id={id}><output>{registry?.profiles.map(profileLabel).join("; ")}</output>
+      <span role="alert">{error}</span><button onClick={reload}>Reload</button></div>;
+  }
+
+  it("shares one registry fetch and refresh across mounted consumers and later selectors", async () => {
+    let registry = REGISTRY;
+    const fetcher = vi.fn(async () => Response.json(registry));
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<><RegistryReader id="first" /><RegistryReader id="second" /></>));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => root.render(<><RegistryReader id="first" /><RegistryReader id="second" />
+      <RegistryReader id="later" /></>));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    registry = { ...REGISTRY, profiles: [{ ...PROFILE, model: { ...PROFILE.model, protocol: "openai-chat" } }] };
+    await act(async () => window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT)));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    for (const output of container.querySelectorAll("output")) {
+      expect(output.textContent).toContain("Provider / model / openai-chat");
+    }
+  });
+
+  it("retains the last registry after refresh failure and clears the shared error on retry", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(REGISTRY))
+      .mockRejectedValueOnce(new Error("Registry unavailable"))
+      .mockResolvedValueOnce(Response.json({ ...REGISTRY, profiles: [{ ...PROFILE, name: "Renamed" }] }));
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<RegistryReader id="reader" />));
+    await act(async () => window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT)));
+    expect(container.querySelector("output")!.textContent).toContain("Profile —");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("Registry unavailable");
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.querySelector("output")!.textContent).toContain("Renamed —");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("");
+  });
+
+  it("ignores an older registry answer after a newer refresh completes", async () => {
+    let resolveFirst!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce(Response.json({ ...REGISTRY, profiles: [{ ...PROFILE, name: "Latest" }] })));
+    await act(async () => root.render(<RegistryReader id="reader" />));
+    await act(async () => window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT)));
+    await act(async () => resolveFirst(Response.json(REGISTRY)));
+    expect(container.querySelector("output")!.textContent).toContain("Latest —");
+  });
+
+  it.each([true, false])("shows the derived model in task summaries (editable %s)", async (editable) => {
+    const role: TaskAgents["roles"]["worker"] = {
+      profile: { value: { profile_id: "p", name: "Profile", model: "model", effort: null,
+        runtime: "Claude Code", provider: "Provider" }, source: "system" },
+      runtime_type: "claude-code", system_prompt_mode: { value: "append", source: "builtin" },
+      concurrency: { value: 1, source: "builtin", task: null, default: { value: 1, source: "builtin" } },
+    };
+    const agents: TaskAgents = { concurrency_max: 64, editable, roles: { planner: role, worker: role, reviewer: role } };
+    await act(async () => root.render(<TaskAgentsSection taskId="task" agents={agents} onSaved={() => {}} />));
+    const summaries = [...container.querySelectorAll('p[aria-live="polite"]')].filter((item) => item.textContent?.includes("Profile"));
+    expect(summaries).toHaveLength(3);
+    for (const summary of summaries) expect(summary.textContent).toContain("Provider / model / anthropic-messages");
+    expect(container.textContent).not.toContain("[object Object]");
+  });
+
+  it("selects an existing profile by profile_id", async () => {
+    const change = vi.fn();
+    await act(async () => root.render(<AgentProfileSelect id="pick" value="" onChange={change} emptyLabel="Default" />));
+    await act(async () => {
+      const field = container.querySelector<HTMLSelectElement>("#pick")!;
+      field.value = "p"; field.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(change).toHaveBeenCalledExactlyOnceWith("p");
+  });
 
   it.each([PROFILE, CODEX])("has no system prompt choice on $runtime_type, which is set per role", async (profile) => {
     await show(profile);

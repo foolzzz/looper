@@ -10,7 +10,7 @@ import { roleLabel } from "@/lib/runtime-catalog";
 import { NOTIFY_OPTIONS, TASK_LIMIT_ROLES, runNotice, useNotices } from "@/lib/schedules";
 import { errorText } from "@/lib/use-action";
 import { runTimeoutText, seconds } from "@/lib/schedule-text";
-import { profileName, useRegistry } from "@/lib/use-registry";
+import { profileLabel, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -129,9 +129,9 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
   const profiles = ROLES.filter((role) => schedule.profile_overrides[role]);
   const limited = TASK_LIMIT_ROLES.some((role) => schedule.task_limits[role] != null);
   const notifyOption = NOTIFY_OPTIONS.find((option) => option.value === schedule.notify);
-  const profileLabel = (profileId: string) => {
+  const profileText = (profileId: string) => {
     const profile = registry?.profiles.find((p) => p.profile_id === profileId);
-    return profile ? profileName(profile) : profileId;
+    return profile ? profileLabel(profile) : profileId;
   };
 
   return (
@@ -261,7 +261,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
               ? "As the project sets them"
               : profiles.map((role) => (
                   <span key={role} className="block">
-                    {roleLabel(role)}: {profileLabel(schedule.profile_overrides[role] as string)}
+                    {roleLabel(role)}: {profileText(schedule.profile_overrides[role] as string)}
                   </span>
                 ))}
           </Field>

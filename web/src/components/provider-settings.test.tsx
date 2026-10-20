@@ -3,14 +3,14 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { ProvidersSection } from "@/components/provider-settings";
-import { createProvider, updateProvider, type AgentProfileV3, type ProfileFieldsV3, type ProviderFieldsV3, type ProviderV3, type Registry, type RegistryV3, type VendorTypeV3 } from "@/lib/api";
+import { createProvider, updateProvider, type AgentProfile, type ProfileFields, type ProviderFields, type Provider, type Registry, type VendorType } from "@/lib/api";
 
-import { useRegistry, useRegistryV3 } from "@/lib/use-registry";
+import { useRegistry } from "@/lib/use-registry";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const endpoint = (protocol: "anthropic-messages" | "openai-chat" | "openai-responses", base_url: string) =>
   ({ protocol, base_url, use_runtime_default: false });
-const VENDORS: VendorTypeV3[] = [
+const VENDORS: VendorType[] = [
   { vendor_type: "deepseek", auth: "api_key", oauth_runtime_type: null,
     endpoints: [endpoint("anthropic-messages", "https://example.invalid/anthropic"),
       endpoint("openai-chat", "https://example.invalid/v1"), endpoint("openai-responses", "https://example.invalid/responses")],
@@ -25,13 +25,13 @@ const VENDORS: VendorTypeV3[] = [
     endpoints: [endpoint("openai-chat", "https://example.invalid/confirm")], env: [],
     requires_url_confirmation: true, suggested_models: [] },
 ];
-const account = (changes: Partial<ProviderV3> = {}): ProviderV3 => ({
+const account = (changes: Partial<Provider> = {}): Provider => ({
   provider_id: "account-1", name: "Saved account", vendor_type: "deepseek", auth: "api_key",
   oauth_runtime_type: null, endpoints: [endpoint("openai-chat", "https://saved.invalid/v2")],
   env: [], max_concurrency: 3, api_key: "***", builtin: false, login: null, suggested_models: [],
   endpoint_count: 1, model_count: 2, profile_count: 4, created_at: "", updated_at: "", ...changes,
 });
-const registry = (): RegistryV3 => ({
+const registry = (): Registry => ({
   runtime_types: [], runtimes: [], providers: [], models: [], profiles: [], vendor_types: VENDORS,
   prices: { as_of: "", sources: [], models: {} },
   limits: { name_max_chars: 100, models_max: 50, price_fields: [], model_fields: [],
@@ -39,7 +39,7 @@ const registry = (): RegistryV3 => ({
     effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },
     secret_mask: "***", provider_env_owned: [] },
 });
-let data: RegistryV3;
+let data: Registry;
 let container: HTMLDivElement;
 let root: Root;
 let bodies: Record<string, unknown>[];
@@ -52,7 +52,7 @@ beforeEach(() => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     bodies.push(body);
     if (failure) return Response.json({ error: failure }, { status: 409 });
-    const saved = account({ ...body, api_key: body.api_key === null ? null : "***" } as Partial<ProviderV3>);
+    const saved = account({ ...body, api_key: body.api_key === null ? null : "***" } as Partial<Provider>);
     data = { ...data, providers: [saved] };
     return Response.json({ provider: saved, warnings });
   }));
@@ -220,13 +220,12 @@ it("retains server warnings until acknowledged", async () => {
   expect(container.querySelector("form")).toBeNull();
 });
 
-it("keeps normalized DTOs separate from legacy consumers", () => {
+it("uses the normalized registry contract throughout", () => {
   expectTypeOf<ReturnType<typeof useRegistry>["registry"]>().toEqualTypeOf<Registry | null>();
-  expectTypeOf<ReturnType<typeof useRegistryV3>["registry"]>().toEqualTypeOf<RegistryV3 | null>();
-  expectTypeOf<Parameters<typeof createProvider>[0]>().toEqualTypeOf<ProviderFieldsV3>();
-  expectTypeOf<Parameters<typeof updateProvider>[1]>().toEqualTypeOf<ProviderFieldsV3>();
-  expectTypeOf<ProviderV3>().not.toHaveProperty("models");
-  expectTypeOf<ProviderFieldsV3>().not.toHaveProperty("base_url");
-  expectTypeOf<ProfileFieldsV3>().not.toHaveProperty("provider_id");
-  expectTypeOf<AgentProfileV3["model"]>().toHaveProperty("model_id");
+  expectTypeOf<Parameters<typeof createProvider>[0]>().toEqualTypeOf<ProviderFields>();
+  expectTypeOf<Parameters<typeof updateProvider>[1]>().toEqualTypeOf<ProviderFields>();
+  expectTypeOf<Provider>().not.toHaveProperty("models");
+  expectTypeOf<ProviderFields>().not.toHaveProperty("base_url");
+  expectTypeOf<ProfileFields>().not.toHaveProperty("provider_id");
+  expectTypeOf<AgentProfile["model"]>().toHaveProperty("model_id");
 });

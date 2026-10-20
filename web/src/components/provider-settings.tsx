@@ -5,13 +5,13 @@ import { Button } from "@/components/ui/button";
 import { EDIT_BOX, EditDelete, FormFooter, LABEL, RegistryList, Row, RowName, SELECT } from "@/components/registry-ui";
 import {
   clearLoginProblem, createProvider, deleteProvider, updateProvider,
-  type ProviderEndpointV3, type ProviderFieldsV3, type ProviderV3, type RegistryV3,
-  type VendorKindV3, type VendorTypeV3,
+  type ProviderEndpoint, type ProviderFields, type Provider, type Registry,
+  type VendorKind, type VendorType,
 } from "@/lib/api";
 import { LOGIN_HELP, loginUsable } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
-import { useRegistryV3 } from "@/lib/use-registry";
+import { useRegistry } from "@/lib/use-registry";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { ModelsSection } from "@/components/model-settings";
 
@@ -20,8 +20,8 @@ const usedBy = (count: number) =>
 
 interface ProviderDraft {
   name: string;
-  vendorType: VendorKindV3;
-  endpoints: ProviderEndpointV3[];
+  vendorType: VendorKind;
+  endpoints: ProviderEndpoint[];
   maxConcurrency: string;
   env: string;
   apiKey: string;
@@ -45,7 +45,7 @@ function envEntries(raw: string) {
   });
 }
 
-function providerDraft(provider: ProviderV3 | null): ProviderDraft {
+function providerDraft(provider: Provider | null): ProviderDraft {
   return {
     name: provider?.name ?? "", vendorType: provider?.vendor_type ?? "custom",
     endpoints: provider?.endpoints.map((endpoint) => ({ ...endpoint })) ?? [],
@@ -55,7 +55,7 @@ function providerDraft(provider: ProviderV3 | null): ProviderDraft {
 }
 
 /** Defaults are copied only when choosing a vendor for a new account. */
-function presetDraft(vendor: VendorTypeV3): ProviderDraft {
+function presetDraft(vendor: VendorType): ProviderDraft {
   return {
     ...providerDraft(null), name: vendor.vendor_type === "custom" ? "" : vendor.vendor_type,
     vendorType: vendor.vendor_type, endpoints: vendor.endpoints.map((endpoint) => ({ ...endpoint })),
@@ -63,8 +63,8 @@ function presetDraft(vendor: VendorTypeV3): ProviderDraft {
   };
 }
 
-function providerBody(draft: ProviderDraft, provider: ProviderV3 | null, registry: RegistryV3): ProviderFieldsV3 {
-  const fields: ProviderFieldsV3 = {
+function providerBody(draft: ProviderDraft, provider: Provider | null, registry: Registry): ProviderFields {
+  const fields: ProviderFields = {
     name: draft.name.trim(), vendor_type: draft.vendorType,
     endpoints: draft.endpoints.map(({ protocol, base_url, use_runtime_default }) => ({
       protocol, base_url: base_url.trim(), use_runtime_default: base_url.trim() ? false : use_runtime_default,
@@ -79,7 +79,7 @@ function providerBody(draft: ProviderDraft, provider: ProviderV3 | null, registr
   return fields;
 }
 
-function ProviderForm({ provider, registry, onDone }: { provider: ProviderV3 | null; registry: RegistryV3; onDone: () => void }) {
+function ProviderForm({ provider, registry, onDone }: { provider: Provider | null; registry: Registry; onDone: () => void }) {
   const id = useId();
   const [draft, setDraft] = useState<ProviderDraft>(() => providerDraft(provider));
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -98,11 +98,11 @@ function ProviderForm({ provider, registry, onDone }: { provider: ProviderV3 | n
     }
     setValidationError("");
     const body = providerBody(draft, provider, registry);
-    let answer: { provider: ProviderV3; warnings: string[] } | null = null;
+    let answer: { provider: Provider; warnings: string[] } | null = null;
     const done = await action.run(async () => {
       answer = provider ? await updateProvider(provider.provider_id, body) : await createProvider(body);
     });
-    const result = answer as { provider: ProviderV3; warnings: string[] } | null;
+    const result = answer as { provider: Provider; warnings: string[] } | null;
     if (!done || !result) return;
     // Do not retain a submitted secret while showing a server warning.
     set({ apiKey: "" });
@@ -141,7 +141,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: ProviderV3 | n
               <label className="flex items-center gap-1.5 font-mono text-xs">
                 <input type="checkbox" className="h-4 w-4 accent-primary" checked={!!endpoint} disabled={login}
                   onChange={(e) => set({ endpoints: e.target.checked
-                    ? [...draft.endpoints, { protocol: protocol as ProviderEndpointV3["protocol"], base_url: "", use_runtime_default: false }]
+                    ? [...draft.endpoints, { protocol: protocol as ProviderEndpoint["protocol"], base_url: "", use_runtime_default: false }]
                     : draft.endpoints.filter((entry) => entry.protocol !== protocol), urlsConfirmed: false })} />
                 {protocol}
               </label>
@@ -196,7 +196,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: ProviderV3 | n
 
 /** An OAuth provider's login as the server reads it; after a run found it forked, what to check and the way to
  * let runs use it again. */
-function LoginLine({ provider, label }: { provider: ProviderV3; label: string }) {
+function LoginLine({ provider, label }: { provider: Provider; label: string }) {
   const action = useAction();
   const login = provider.login;
   if (!login) return null;
@@ -234,7 +234,7 @@ function LoginLine({ provider, label }: { provider: ProviderV3; label: string })
   );
 }
 
-function ProviderRow({ provider, registry }: { provider: ProviderV3; registry: RegistryV3 }) {
+function ProviderRow({ provider, registry }: { provider: Provider; registry: Registry }) {
   const [editing, setEditing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   // An import's "secrets to fill in" links here (#settings/providers/<id>) to open the form.
@@ -289,7 +289,7 @@ function ProviderRow({ provider, registry }: { provider: ProviderV3; registry: R
  * form (the link #settings/providers/new, from an Agent Profile's provider list).
  */
 export function ProvidersSection({ adding = false }: { adding?: boolean }) {
-  const { registry, error } = useRegistryV3();
+  const { registry, error } = useRegistry();
   if (!registry) {
     return error ? (
       <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 px-5 py-4 text-sm text-destructive">{error}</div>

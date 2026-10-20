@@ -18,7 +18,7 @@ import {
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
-import { profileName } from "@/lib/use-registry";
+import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { cn } from "@/lib/utils";
 
 /** Where a role's Agent Profile comes from, in words (as the settings layers name themselves). */
@@ -120,6 +120,9 @@ function ProfileField({
   onSaved: (agents: TaskAgents) => void;
 }) {
   const id = useId();
+  const { registry } = useRegistry();
+  const registered = registry?.profiles.find((item) => item.profile_id === profile.value.profile_id);
+  const label = registered ? profileLabel(registered) : profileName(profile.value);
   const own = profile.source === "task" ? profile.value.profile_id : "";
   // The choice being saved, shown until the answer.
   const [pending, setPending] = useState<string | null>(null);
@@ -137,7 +140,7 @@ function ProfileField({
 
   const now = (
     <Now id={`${id}-now`}>
-      <Value>{profileName(profile.value)}</Value> · {profileText(profile)}
+      <Value>{label}</Value> · {profileText(profile)}
     </Now>
   );
   if (!editable) {
@@ -163,11 +166,11 @@ function ProfileField({
           emptyLabel={
             own
               ? "From settings"
-              : `${profile.source === "planner_task" ? "The Planner's choice" : "From settings"}: ${profileName(profile.value)}`
+              : `${profile.source === "planner_task" ? "The Planner's choice" : "From settings"}: ${label}`
           }
           roles={[role]}
           describedBy={`${id}-now${error ? ` ${id}-error` : ""}`}
-          unlistedName={own ? profileName(profile.value) : undefined}
+          unlistedName={own ? label : undefined}
           className={cn(SELECT, "h-11 sm:h-9")}
         />
       </fieldset>

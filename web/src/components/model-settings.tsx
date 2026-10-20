@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { EDIT_BOX, EditDelete, FormFooter, LABEL, RegistryList, Row, RowName, SELECT } from "@/components/registry-ui";
 import {
   createModel, deleteModel, updateModel,
-  type ApiProtocolV3, type ModelFieldsV3, type ModelV3, type PriceField, type ProviderV3, type RegistryV3,
+  type ApiProtocol, type ModelFields, type Model, type PriceField, type Provider, type Registry,
 } from "@/lib/api";
 import { settingsHref } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
@@ -16,10 +16,10 @@ const PRICES: { key: PriceField; label: string }[] = [
   { key: "cache_write_usd_per_mtok", label: "Cache write" },
 ];
 type NumericField = PriceField | "context_window";
-type ModelDefaults = Partial<Pick<ModelV3, NumericField | "efforts" | "background_model" | "name">>;
+type ModelDefaults = Partial<Pick<Model, NumericField | "efforts" | "background_model" | "name">>;
 type EffortSupport = "unknown" | "none" | "supported";
 interface ModelDraft {
-  protocol: ApiProtocolV3 | "";
+  protocol: ApiProtocol | "";
   name: string;
   suggestion: string;
   numbers: Record<NumericField, string>;
@@ -49,7 +49,7 @@ function numericValue(raw: string) {
   return Number.isFinite(value) ? value : raw;
 }
 
-function modelSettings(draft: ModelDraft): ModelFieldsV3 {
+function modelSettings(draft: ModelDraft): ModelFields {
   return {
     context_window: numericValue(draft.numbers.context_window),
     input_usd_per_mtok: numericValue(draft.numbers.input_usd_per_mtok),
@@ -63,7 +63,7 @@ function modelSettings(draft: ModelDraft): ModelFieldsV3 {
 }
 
 function ModelForm({ model, provider, registry, onDone }: {
-  model: ModelV3 | null; provider: ProviderV3; registry: RegistryV3; onDone: () => void;
+  model: Model | null; provider: Provider; registry: Registry; onDone: () => void;
 }) {
   const id = useId();
   const [draft, setDraft] = useState(() => modelDraft(model ?? {}, model?.protocol));
@@ -100,7 +100,7 @@ function ModelForm({ model, provider, registry, onDone }: {
       <div className="space-y-1">
         <label htmlFor={`${id}-protocol`} className={LABEL}>Protocol *</label>
         <select id={`${id}-protocol`} className={SELECT} required disabled={!!model} value={draft.protocol}
-          onChange={(event) => setDraft(modelDraft({}, event.target.value as ApiProtocolV3))}>
+          onChange={(event) => setDraft(modelDraft({}, event.target.value as ApiProtocol))}>
           <option value="">Choose a protocol</option>
           {provider.endpoints.map(({ protocol }) => <option key={protocol} value={protocol}>{protocol}</option>)}
         </select>
@@ -163,7 +163,7 @@ function ModelForm({ model, provider, registry, onDone }: {
   </form>;
 }
 
-function ModelRow({ model, provider, registry }: { model: ModelV3; provider: ProviderV3; registry: RegistryV3 }) {
+function ModelRow({ model, provider, registry }: { model: Model; provider: Provider; registry: Registry }) {
   const [editing, setEditing] = useState(false);
   const action = useAction();
   const name = `${model.name} (${model.protocol})`;
@@ -189,7 +189,7 @@ function ModelRow({ model, provider, registry }: { model: ModelV3; provider: Pro
 }
 
 /** A provider's callable models; vendor suggestions are creation inputs, never saved implicitly. */
-export function ModelsSection({ provider, registry }: { provider: ProviderV3; registry: RegistryV3 }) {
+export function ModelsSection({ provider, registry }: { provider: Provider; registry: Registry }) {
   const models = registry.models.filter((model) => model.provider_id === provider.provider_id);
   return <RegistryList title="Models" hint="One exact model name and protocol per entry." addLabel="Add model"
     form={(close) => <ModelForm model={null} provider={provider} registry={registry} onDone={close} />}>
