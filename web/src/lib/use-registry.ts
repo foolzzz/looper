@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchRegistry, fetchRegistryV3, REGISTRY_CHANGED_EVENT, type AgentProfile, type RegistryV3 } from "@/lib/api";
+import { fetchRegistry, fetchRegistryV3, REGISTRY_CHANGED_EVENT, type AgentProfile, type AgentProfileV3, type RegistryV3 } from "@/lib/api";
 
 /**
  * The registry (runtimes, providers, Agent Profiles), loaded once and again at once when this dashboard changes it. `registry` is null until
@@ -54,4 +54,9 @@ export function profileName(profile: { name: string; effort: string | null }) {
 /** A profile as a select option names it: "claude-code/sonnet · high — claude-code · claude-subscription · sonnet". */
 export function profileLabel(profile: AgentProfile) {
   return `${profileName(profile)} — ${profile.runtime_name} · ${profile.provider_name} · ${profile.model}`;
+}
+
+/** The form-local V3 label uses the model's derived account and exact protocol. */
+export function profileLabelV3(profile: AgentProfileV3) {
+  return `${profileName(profile)} — ${profile.runtime_name} · ${profile.provider.name} / ${profile.model.name} / ${profile.model.protocol}`;
 }

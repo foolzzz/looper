@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { settingsHref } from "@/lib/settings-pages";
 
-/** What a link into Settings can open: a provider's or an MCP server's edit form, or a channel's card. */
-export type SettingsTargetKind = "provider" | "mcp" | "channel";
+/** What a link into Settings can open: a provider's, profile's or MCP server's edit form, or a channel's card. */
+export type SettingsTargetKind = "provider" | "profile" | "mcp" | "channel";
 
 /** Where each kind is: its Settings page, and the path on it before the id. */
 const TARGET_PLACES = {
   provider: ["providers", ""],
+  profile: ["profiles", ""],
   mcp: ["catalog", "mcp/"],
   channel: ["channels", ""],
 } as const;
 
-/** The link to one of them: #settings/providers/<id>, #settings/catalog/mcp/<id>, #settings/channels/<id>. */
+/** The link to one of them: #settings/providers/<id>, #settings/profiles/<id>, #settings/catalog/mcp/<id>, #settings/channels/<id>. */
 export function settingsTargetHash(kind: SettingsTargetKind, id: string): string {
   const [page, prefix] = TARGET_PLACES[kind];
   return settingsHref(page, `${prefix}${encodeURIComponent(id)}`);

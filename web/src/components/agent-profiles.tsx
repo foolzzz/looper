@@ -19,20 +19,22 @@ import {
   fetchStatus,
   fetchPromptPreview,
   updateAgentProfile,
-  type AgentProfile,
+  type AgentProfileV3 as AgentProfile,
   type AgentRole,
   type ProfileUsedBy,
   type PromptPreview,
-  type Provider,
+  type ProviderV3 as Provider,
+  type ModelV3,
   type ProviderLogin,
-  type Registry,
+  type RegistryV3 as Registry,
   type Runtime,
   type SelfCheck,
 } from "@/lib/api";
 import { LOGIN_HELP, PLANNED_RUNTIMES, RUNTIME_TYPES, loginUsable, roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
+import { useSettingsTarget } from "@/lib/settings-target";
 import { useAction } from "@/lib/use-action";
-import { profileLabel, useRegistry } from "@/lib/use-registry";
+import { profileLabelV3, useRegistryV3 } from "@/lib/use-registry";
 
 // --- What a runtime can be paired with ---
 
@@ -40,27 +42,13 @@ function runtimeType(registry: Registry, runtime: Runtime | undefined) {
   return registry.runtime_types.find((t) => t.type === runtime?.type);
 }
 
-/** Whether `provider` can serve `runtime`: a protocol in common, and an OAuth provider only for the runtime type
- * whose login it is. The server checks the same (and more) when the Agent Profile is saved. */
-function pairs(registry: Registry, runtime: Runtime | undefined, provider: Provider): boolean {
+/** Match the model's exact protocol and account authentication to the runtime, as the server does. */
+function pairs(registry: Registry, runtime: Runtime | undefined, model: ModelV3): boolean {
   const type = runtimeType(registry, runtime);
-  if (!type || !provider.protocols.some((p) => type.protocols.includes(p))) return false;
-  if (provider.auth === "oauth") return type.auth_kinds.includes("oauth") && provider.oauth_runtime_type === type.type;
-  return type.auth_kinds.includes("api_key");
-}
-
-/** The provider a runtime starts with: its own login when it has one Looper uses, else the first API-key one. */
-function firstProvider(registry: Registry, runtime: Runtime | undefined): string {
-  const fitting = registry.providers.filter((p) => pairs(registry, runtime, p));
-  return (fitting.find((p) => p.auth === "oauth") ?? fitting[0])?.provider_id ?? "";
-}
-
-/** A model the provider lists: the current one if it is there, else its first. A provider that lists none takes
- * any model; a runtime login that suggests some (Codex's) starts from its first unless the current one is one. */
-function fittingModel(provider: Provider | undefined, current: string): string {
-  if (provider?.models.length) return provider.models.some((m) => m.name === current) ? current : provider.models[0].name;
-  const suggested = provider?.suggested_models ?? [];
-  return suggested.length && !suggested.includes(current) ? suggested[0] : current;
+  const provider = registry.providers.find((p) => p.provider_id === model.provider_id);
+  return !!type && !!provider && type.protocols.includes(model.protocol)
+    && type.auth_kinds.includes(provider.auth)
+    && (provider.auth !== "oauth" || provider.oauth_runtime_type === type.type);
 }
 
 /** Agent teams for a profile on `runtime` that does not say: on for Claude Code, whose feature they are, off for
@@ -137,11 +125,9 @@ function LoginHint({ provider, typeLabel, claude }: { provider: Provider; typeLa
 
 // --- The form ---
 
-const NEW_PROVIDER = "__new_provider__";
-
 /**
- * Create or edit an Agent Profile: a name, then Runtime → Provider (its own login, or an API-key provider that
- * speaks its protocol) → Model (from the provider's catalog, or any), and the effort its runs use. `nested` renders it
+ * Create or edit an Agent Profile: a name, then Runtime → a compatible registered Model, and its effort.
+ * Provider is only a filter; the selected model determines the account. `nested` renders it
  * without a form element of its own, for use inside another form; `onDone` gets the saved profile, or nothing
  * when cancelled.
  */
@@ -161,28 +147,28 @@ export function AgentProfileForm({
   const selectable = registry.runtimes.filter((r) => r.builtin || r.runtime_id === profile?.runtime_id);
   const [draft, setDraft] = useState(() => {
     const runtime = registry.runtimes.find((r) => r.runtime_id === profile?.runtime_id) ?? selectable[0];
-    const providerId = profile?.provider_id ?? firstProvider(registry, runtime);
-    const provider = registry.providers.find((p) => p.provider_id === providerId);
     return {
       name: profile?.name ?? "",
       runtime_id: runtime?.runtime_id ?? "",
-      provider_id: providerId,
-      model: profile?.model ?? fittingModel(provider, ""),
+      model_id: profile?.model_id ?? "",
       effort: profile?.effort ?? "",
       agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
       custom_prompt: profile?.custom_prompt ?? "",
     };
   });
   const action = useAction();
+  const [providerFilter, setProviderFilter] = useState("");
+  const [modelError, setModelError] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const [saved, setSaved] = useState<AgentProfile | null>(null);
   const set = (change: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...change }));
   const runtime = registry.runtimes.find((r) => r.runtime_id === draft.runtime_id);
   const type = runtimeType(registry, runtime);
-  const provider = registry.providers.find((p) => p.provider_id === draft.provider_id);
-  const fitting = registry.providers.filter((p) => pairs(registry, runtime, p));
-  const ownLogins = fitting.filter((p) => p.auth === "oauth");
-  const keyProviders = fitting.filter((p) => p.auth === "api_key");
+  const compatible = registry.models.filter((m) => pairs(registry, runtime, m));
+  const model = compatible.find((m) => m.model_id === draft.model_id);
+  const provider = registry.providers.find((p) => p.provider_id === model?.provider_id);
+  const fitting = registry.providers.filter((p) => compatible.some((m) => m.provider_id === p.provider_id));
+  const models = compatible.filter((m) => !providerFilter || m.provider_id === providerFilter);
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
   // Agent teams are a Claude Code feature: the server refuses them on another runtime.
   const teams = type?.type === "claude-code";
@@ -190,27 +176,30 @@ export function AgentProfileForm({
 
   const chooseRuntime = (runtimeId: string) => {
     const next = registry.runtimes.find((r) => r.runtime_id === runtimeId);
-    const providerId = firstProvider(registry, next);
     const nextType = runtimeType(registry, next)?.type;
     // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
-    set({ runtime_id: runtimeId, provider_id: providerId,
-          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model),
+    setProviderFilter("");
+    setModelError("");
+    set({ runtime_id: runtimeId,
+          model_id: model && pairs(registry, next, model) ? model.model_id : "",
           agent_teams: agentTeams });
   };
   const chooseProvider = (providerId: string) => {
-    if (providerId === NEW_PROVIDER) {
-      window.location.hash = settingsHref("providers", "new");
-      return;
-    }
-    set({ provider_id: providerId,
-          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model) });
+    setProviderFilter(providerId);
+    setModelError("");
+    if (model && providerId && model.provider_id !== providerId) set({ model_id: "" });
   };
 
   const save = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    const body = { ...draft, name: draft.name.trim(), model: draft.model.trim(), effort: draft.effort || null,
+    if (!model) {
+      setModelError("Choose a compatible model before saving.");
+      return;
+    }
+    setModelError("");
+    const body = { ...draft, name: draft.name.trim(), effort: draft.effort || null,
                    agent_teams: teams && draft.agent_teams };
     let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
@@ -250,46 +239,22 @@ export function AgentProfileForm({
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-provider`} className={LABEL}>Provider</label>
-          <select id={`${id}-provider`} value={draft.provider_id} onChange={(e) => chooseProvider(e.target.value)} className={SELECT} aria-describedby={`${id}-provider-hint`}>
-            {!provider && <option value="">Choose a provider</option>}
-            {type?.auth_kinds.includes("oauth") ? (
-              <optgroup label={`${typeLabel} login (OAuth)`}>
-                {ownLogins.map((p) => (
-                  <option key={p.provider_id} value={p.provider_id}>
-                    {p.name}
-                    {p.login ? ` (${providerLoginText(p.login)})` : type.type === "claude-code" ? ` (${loginText(login)})` : ""}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null}
-            <optgroup label="API key">
-              {keyProviders.map((p) => (
-                <option key={p.provider_id} value={p.provider_id}>{p.name}</option>
-              ))}
-              <option value={NEW_PROVIDER}>+ New provider (Settings → LLM Providers)</option>
-            </optgroup>
+          <select id={`${id}-provider`} value={providerFilter} onChange={(e) => chooseProvider(e.target.value)} className={SELECT} aria-describedby={`${id}-provider-hint`}>
+            <option value="">All compatible providers</option>
+            {fitting.map((p) => <option key={p.provider_id} value={p.provider_id}>{p.name}</option>)}
           </select>
+          <p className="text-[11px] text-muted-foreground">Filter models by provider.</p>
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-model`} className={LABEL}>Model *</label>
-          {provider?.models.length ? (
-            <select id={`${id}-model`} value={draft.model} onChange={(e) => set({ model: e.target.value })} className={`${SELECT} font-mono`}>
-              {provider.models.map((m) => (
-                <option key={m.name} value={m.name}>{m.name}</option>
-              ))}
-            </select>
-          ) : (
-            <>
-              <Input id={`${id}-model`} value={draft.model} onChange={(e) => set({ model: e.target.value })} placeholder={provider?.suggested_models[0] ?? "sonnet"} list={provider?.suggested_models.length ? `${id}-suggested` : undefined} spellCheck={false} autoCapitalize="none" className="font-mono" />
-              {provider?.suggested_models.length ? (
-                <datalist id={`${id}-suggested`}>
-                  {provider.suggested_models.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-              ) : null}
-            </>
-          )}
+          <select id={`${id}-model`} value={model?.model_id ?? ""} onChange={(e) => { set({ model_id: e.target.value }); setModelError(""); }} className={`${SELECT} font-mono`} aria-invalid={!!modelError} aria-describedby={modelError ? `${id}-model-error` : undefined}>
+            <option value="">Choose a model</option>
+            {models.map((m) => (
+              <option key={m.model_id} value={m.model_id}>{m.provider_name} / {m.name} / {m.protocol}</option>
+            ))}
+          </select>
+          {!compatible.length && <p className="text-[11px] text-muted-foreground">No compatible models. Add a model in <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>.</p>}
+          {modelError && <p id={`${id}-model-error`} role="alert" className="text-xs text-destructive">{modelError}</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-effort`} className={LABEL}>Effort</label>
@@ -337,11 +302,6 @@ export function AgentProfileForm({
           <LoginHint provider={provider} typeLabel={typeLabel} claude={login} />
         )}
         <p>
-          {provider?.models.length
-            ? `${provider.name} lists ${provider.models.map((m) => m.name).join(", ")}.`
-            : provider?.suggested_models.length
-              ? `Any model the login offers, such as ${provider.suggested_models.slice(0, 3).join(", ")}.`
-              : "The model as the runtime takes it: an alias such as sonnet or a full name."}{" "}
           Runs of this profile use this effort; to run a role with another effort, select or create a profile
           with it.
         </p>
@@ -505,6 +465,7 @@ function costBasisText(profile: AgentProfile): string {
 
 function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registry: Registry }) {
   const [editing, setEditing] = useState(false);
+  const ref = useSettingsTarget<HTMLLIElement>("profile", profile.profile_id, () => setEditing(!profile.builtin));
   const action = useAction();
   const remove = () => {
     if (confirm(`Delete ${AGENT_PROFILE.name} "${profile.name}"?`)) action.run(() => deleteAgentProfile(profile.profile_id));
@@ -513,6 +474,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
   const inUse = usedByText(profile.used_by);
   return (
     <Row
+      ref={ref}
       title={<RowName name={profile.name} builtin={profile.builtin} />}
       actions={
         !profile.builtin && (
@@ -540,8 +502,8 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
       }
     >
       <p className="break-words text-xs text-muted-foreground">
-        {runtime ? runtimeTitle(runtime) : profile.runtime_name} · {profile.provider_name} · model{" "}
-        <span className="font-mono text-foreground/80">{profile.model}</span> · effort {profile.effort ?? "runtime default"}
+        {runtime ? runtimeTitle(runtime) : profile.runtime_name} · {profile.provider.name} · model{" "}
+        <span className="font-mono text-foreground/80">{profile.model.name} / {profile.model.protocol}</span> · effort {profile.effort ?? "runtime default"}
         {profile.agent_teams && <> · <span className="text-foreground">agent teams on</span></>}
         {costBasisText(profile) && ` · ${costBasisText(profile)}`}
       </p>
@@ -565,7 +527,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
 
 /** Settings → Agent Profiles: every profile, what it is made of, the roles it can run and where it is used. */
 export function AgentProfilesSection() {
-  const { registry, error } = useRegistry();
+  const { registry, error } = useRegistryV3();
   if (!registry) {
     return error ? (
       <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 px-5 py-4 text-sm text-destructive">{error}</div>
@@ -580,6 +542,7 @@ export function AgentProfilesSection() {
       title={AGENT_PROFILE.plural}
       hint="Selected in Settings → Roles, a project's Agent Profiles tab and a new task."
       addLabel={`Add ${AGENT_PROFILE.name}`}
+      defaultAdding={window.location.hash === settingsHref("profiles", "new")}
       form={(close) => <AgentProfileForm profile={null} registry={registry} onDone={close} />}
     >
       {registry.profiles.map((profile) => (
@@ -594,7 +557,8 @@ export function AgentProfilesSection() {
 const NEW_PROFILE = "__new_profile__";
 
 /**
- * Choose an Agent Profile, or "+ New Agent Profile", which opens the form below and selects what it saves.
+ * Choose an Agent Profile, or "+ New Agent Profile", which opens the form below.
+ * Creating registers it without changing the current role or task selection.
  * A profile whose runtime cannot run one of `roles` is listed but disabled.
  */
 export function AgentProfileSelect({
@@ -617,7 +581,7 @@ export function AgentProfileSelect({
   unlistedName?: string;
   className?: string;
 }) {
-  const { registry, error } = useRegistry();
+  const { registry, error } = useRegistryV3();
   const [creating, setCreating] = useState(false);
   const profiles = registry?.profiles ?? [];
   const unlisted = value && !profiles.some((p) => p.profile_id === value) ? unlistedName || value : "";
@@ -636,7 +600,7 @@ export function AgentProfileSelect({
           const missing = roles.filter((role) => !profile.roles.includes(role));
           return (
             <option key={profile.profile_id} value={profile.profile_id} disabled={missing.length > 0 && profile.profile_id !== value}>
-              {profileLabel(profile)}
+              {profileLabelV3(profile)}
               {missing.length > 0 ? ` (cannot run the ${missing.map(roleLabel).join(", ")})` : ""}
             </option>
           );
@@ -651,10 +615,7 @@ export function AgentProfileSelect({
             profile={null}
             registry={registry}
             nested
-            onDone={(saved) => {
-              setCreating(false);
-              if (saved) onChange(saved.profile_id);
-            }}
+            onDone={() => setCreating(false)}
           />
         </div>
       )}

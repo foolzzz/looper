@@ -2835,15 +2835,15 @@ export function clearLoginProblem(providerId: string): Promise<{ provider: Provi
     "use the login again");
 }
 
-/** Register an Agent Profile; refused (400) when its runtime, provider and model could not run together. */
-export function createAgentProfile(fields: ProfileFields): Promise<{ profile: AgentProfile; warnings: string[] }> {
+/** Register an Agent Profile; refused (400) when its runtime cannot use the selected model and its derived account. */
+export function createAgentProfile(fields: ProfileFieldsV3): Promise<{ profile: AgentProfileV3; warnings: string[] }> {
   return registryCall("POST", "/agent-profiles", fields, "add Agent Profile");
 }
 
 export function updateAgentProfile(
   profileId: string,
-  fields: ProfileFields,
-): Promise<{ profile: AgentProfile; warnings: string[] }> {
+  fields: ProfileFieldsV3,
+): Promise<{ profile: AgentProfileV3; warnings: string[] }> {
   return registryCall("PUT", `/agent-profiles/${encodeURIComponent(profileId)}`, fields, "update Agent Profile");
 }
 
