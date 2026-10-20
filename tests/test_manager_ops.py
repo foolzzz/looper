@@ -464,3 +464,33 @@ def test_the_managers_launch_gets_loopers_server_over_a_catalog_one_of_that_name
     # A Manager with nothing installed gets it too.
     alone = asyncio.run(ops.library_with_server(AgentLibrary(role="manager"), tmp_path))
     assert list(json.loads(open(alone.mcp_config, encoding="utf-8").read())["mcpServers"]) == ["looper"]
+
+
+def test_account_and_model_tools_read_freely_but_write_only_in_user_turn(
+    recorded: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents import profile_registry
+
+    accounts = AsyncMock(return_value={"providers": []})
+    models = AsyncMock(return_value={"models": []})
+    monkeypatch.setattr(profile_registry, "list_providers", accounts)
+    monkeypatch.setattr(profile_registry, "list_models", models)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9")
+
+    async def test() -> None:
+        ops.begin_turn(_turn(None))
+        for name in ("looper_providers", "looper_models"):
+            assert (await ops.call(name, {"action": "list"}))["status"] == "ok"
+        for name, arguments in (
+            ("looper_providers", {"action": "register", "name": "account", "vendor_type": "deepseek"}),
+            ("looper_models", {"action": "create", "provider": "account", "name": "model", "protocol": "openai-chat"}),
+            ("looper_models", {"action": "update", "model": "model-existing", "context_window": 100}),
+            ("looper_models", {"action": "delete", "model": "model-existing"}),
+        ):
+            answer = await ops.call(name, arguments)
+            assert answer["error"]["code"] == "needs_user_turn"
+
+    asyncio.run(asyncio.wait_for(test(), timeout=2))
+    accounts.assert_awaited_once_with()
+    models.assert_awaited_once_with()
+    assert [row["risk"] for row in recorded] == ["read", "read", "write", "write", "write", "write"]
