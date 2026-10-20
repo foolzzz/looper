@@ -78,7 +78,7 @@ from . import (
 from .instructions import InstructionFile
 
 if TYPE_CHECKING:
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..run_usage import Usage
 
@@ -163,6 +163,12 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         ``base_url`` of any other endpoint, whose binding also maps every Claude
         model alias to the provider's models.
         """
+        if provider.protocols != self.protocols:
+            raise RuntimeUnsupported(f"Claude Code speaks anthropic-messages; provider {provider.name!r} "
+                                     "must supply that exact protocol")
+        if len(provider.catalog) != 1 or provider.catalog[0].name != model:
+            raise RuntimeUnsupported("Claude Code requires one resolved model matching the launch model")
+        entry, = provider.catalog
         own = tuple(provider.env)
         if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type == self.type:
             return ProviderBinding(env=own)
@@ -176,8 +182,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                 env=((API_KEY, provider.api_key), *(((BASE_URL, provider.base_url),) if provider.base_url else ()),
                      *own),
                 unset=(AUTH_TOKEN, *(() if provider.base_url else (BASE_URL,))))
-        entry = provider.catalog_model(model)
-        background = (entry.background_model if entry else None) or model
+        background = entry.background_model or model
         return ProviderBinding(
             env=((BASE_URL, provider.base_url), (AUTH_TOKEN, provider.api_key),
                  *((name, model) for name in MAIN_MODEL_VARS), *((name, background) for name in BACKGROUND_MODEL_VARS),

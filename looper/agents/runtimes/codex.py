@@ -83,7 +83,7 @@ from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
 if TYPE_CHECKING:
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..library import AgentLibrary
     from .channel import RunChannel
@@ -171,13 +171,16 @@ class CodexRuntime(RuntimeAdapter):
         """The model and the effort as flags; the provider's own variables, then its key in ``KEY_ENV`` (Codex
         sends it as a bearer token). The provider's endpoint is in the generated config (``config_toml``). With
         Codex's own login there is no key: what would replace the login is removed from the environment."""
-        if ApiProtocol.OPENAI_RESPONSES not in provider.protocols:
-            raise RuntimeUnsupported(f"Codex speaks openai-responses; provider {provider.name!r} does not serve it")
+        if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type != self.type:
+            raise RuntimeUnsupported(f"provider {provider.name!r} is the login of {provider.oauth_runtime_type} "
+                                     "runtimes, not of Codex")
+        if provider.protocols != self.protocols:
+            raise RuntimeUnsupported(f"Codex speaks openai-responses; provider {provider.name!r} "
+                                     "must supply that exact protocol")
+        if len(provider.catalog) != 1 or provider.catalog[0].name != model:
+            raise RuntimeUnsupported("Codex requires one resolved model matching the launch model")
         args = ("-m", model, *(("-c", f"model_reasoning_effort={_toml_value(effort)}") if effort else ()))
         if provider.auth is AuthKind.OAUTH:
-            if provider.oauth_runtime_type != self.type:
-                raise RuntimeUnsupported(f"provider {provider.name!r} is the login of {provider.oauth_runtime_type} "
-                                         "runtimes, not of Codex")
             return ProviderBinding(args=args, env=provider.env, unset=codex_login.ENV_UNSET)
         if not provider.api_key:
             raise RuntimeUnsupported(f"provider {provider.name!r} has no API key: set one in Settings")
@@ -434,6 +437,7 @@ def config_toml(launch: Launch, *, shell_home: Path | None = None,
     """The ``config.toml`` of a run's home: isolation, the project's CLAUDE.md where it has no AGENTS.md, the
     provider, and the MCP servers. With Codex's own login (``shell_home``, the ``CODEX_HOME`` the agent's shell
     commands get), see ``_login_config``."""
+    launch.runtime.bind_provider(launch.profile.provider, launch.model, launch.effort)
     if launch.profile.provider.auth is AuthKind.OAUTH:
         assert shell_home is not None
         lines = _login_config(shell_home)
