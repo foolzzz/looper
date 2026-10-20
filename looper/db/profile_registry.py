@@ -157,14 +157,41 @@ async def get_api_key(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Connecti
     return await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1", provider_id)
 
 
-_PROVIDER_COLUMNS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "env",
-                     "max_concurrency")
-_JSON_COLUMNS = ("models", "env")
+_PROVIDER_COLUMNS = ("name", "vendor_type", "auth", "oauth_runtime_type", "env", "max_concurrency")
+_JSON_COLUMNS = ("env",)
 
 
 def _provider_values(fields: Mapping[str, Any], columns: Sequence[str]) -> list[Any]:
-    return [json.dumps(list(fields[c]), ensure_ascii=False) if c in _JSON_COLUMNS else
-            list(fields[c]) if c == "protocols" else fields[c] for c in columns]
+    return [json.dumps(list(fields[c]), ensure_ascii=False) if c in _JSON_COLUMNS else fields[c] for c in columns]
+
+
+async def lock_provider(conn: asyncpg.Connection, provider_id: str) -> bool:
+    """Registry writes always lock account, then model, then profile."""
+    return await conn.fetchval("SELECT id FROM llm_providers WHERE id = $1 FOR UPDATE", provider_id) is not None
+
+
+async def lock_model(conn: asyncpg.Connection, model_id: str) -> dict[str, Any] | None:
+    provider_id = await conn.fetchval("SELECT provider_id FROM llm_models WHERE id = $1", model_id)
+    if provider_id is None or not await lock_provider(conn, provider_id):
+        return None
+    if not await conn.fetchval("SELECT id FROM llm_models WHERE id = $1 AND provider_id = $2 FOR UPDATE",
+                               model_id, provider_id):
+        return None
+    return await get_model(model_id, pool=conn)
+
+
+async def _set_endpoints(conn: asyncpg.Connection, provider_id: str, endpoints: Sequence[Mapping[str, Any]]) -> None:
+    # Upsert retained endpoints: deleting and re-inserting would break model FKs.
+    for endpoint in endpoints:
+        await conn.execute(
+            "INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url, use_runtime_default) "
+            "VALUES ($1, $2, $3, $4) ON CONFLICT (provider_id, protocol) DO UPDATE SET "
+            "base_url = EXCLUDED.base_url, use_runtime_default = CASE "
+            "WHEN llm_provider_endpoints.base_url IS DISTINCT FROM EXCLUDED.base_url THEN false "
+            "ELSE EXCLUDED.use_runtime_default END",
+            provider_id, endpoint["protocol"], endpoint["base_url"], endpoint.get("use_runtime_default", False))
+    await conn.execute("DELETE FROM llm_provider_endpoints WHERE provider_id = $1 "
+                       "AND NOT (protocol = ANY($2::text[]))", provider_id, [e["protocol"] for e in endpoints])
 
 
 async def _set_secret(conn: asyncpg.Connection, provider_id: str, api_key: str | None) -> None:
@@ -178,7 +205,7 @@ async def _set_secret(conn: asyncpg.Connection, provider_id: str, api_key: str |
 
 
 async def insert_provider(conn: asyncpg.Connection, fields: Mapping[str, Any], api_key: str | None) -> str:
-    """Add a provider (every column of ``_PROVIDER_COLUMNS``; ``env`` optional) and its key; its id. Raises
+    """Add an account, its endpoints and separate key, without registering suggested models. Raises
     ``asyncpg.UniqueViolationError`` for a name in use."""
     provider_id = new_id("prov")
     fields = {"env": [], **fields}
@@ -188,6 +215,7 @@ async def insert_provider(conn: asyncpg.Connection, fields: Mapping[str, Any], a
         f"INSERT INTO llm_providers (id, {', '.join(_PROVIDER_COLUMNS)}) VALUES ($1, {values})",
         provider_id, *_provider_values(fields, _PROVIDER_COLUMNS),
     )
+    await _set_endpoints(conn, provider_id, fields.get("endpoints", []))
     if api_key is not None:
         await _set_secret(conn, provider_id, api_key)
     return provider_id
@@ -196,20 +224,40 @@ async def insert_provider(conn: asyncpg.Connection, fields: Mapping[str, Any], a
 async def update_provider(conn: asyncpg.Connection, provider_id: str, fields: Mapping[str, Any], *,
                           api_key: str | None = None, keep_key: bool = True) -> None:
     """Set the columns in ``fields``; unless ``keep_key``, replace the key with ``api_key`` (None: remove it)."""
+    await lock_provider(conn, provider_id)
     columns = [c for c in _PROVIDER_COLUMNS if c in fields]
     sets = [f"{c} = ${i}" + ("::jsonb" if c in _JSON_COLUMNS else "") for i, c in enumerate(columns, start=2)]
     await conn.execute(
         f"UPDATE llm_providers SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
         provider_id, *_provider_values(fields, columns),
     )
+    if "endpoints" in fields:
+        await _set_endpoints(conn, provider_id, fields["endpoints"])
     if not keep_key:
         await _set_secret(conn, provider_id, api_key)
 
 
-async def delete_provider(provider_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
-    """Raises ``asyncpg.ForeignKeyViolationError`` while an Agent Profile uses it."""
+async def delete_provider(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
+    """Raises ``asyncpg.ForeignKeyViolationError`` while any model uses it, including unused models."""
+    from .connection import _connection
+
     pool = pool or get_pool()
-    return await pool.execute("DELETE FROM llm_providers WHERE id = $1", provider_id) == "DELETE 1"
+    async with _connection(pool) as conn, conn.transaction():
+        await lock_provider(conn, provider_id)
+        return await conn.execute("DELETE FROM llm_providers WHERE id = $1", provider_id) == "DELETE 1"
+
+
+async def insert_model(conn: asyncpg.Connection, fields: Mapping[str, Any]) -> str:
+    """Insert a model under its account lock; the endpoint FK is never bypassed."""
+    await lock_provider(conn, fields["provider_id"])
+    model_id = new_id("model")
+    columns = [c for c in ("provider_id", "name", "protocol", "context_window", "input_usd_per_mtok",
+                           "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok",
+                           "efforts", "background_model", "catalog_order") if c in fields]
+    values = ", ".join(f"${i}" for i in range(2, len(columns) + 2))
+    await conn.execute(f"INSERT INTO llm_models (id, {', '.join(columns)}) VALUES ($1, {values})",
+                       model_id, *[fields[c] for c in columns])
+    return model_id
 
 
 # --- Agent Profiles ---
@@ -241,24 +289,28 @@ async def get_profile(profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connectio
     return _json(row) if row else None
 
 
-async def insert_profile(fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> str:
-    """Add an Agent Profile (name, runtime, provider, model, effort, agent teams and prompt mode); its id. Raises
+async def insert_profile(fields: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str:
+    """Add an Agent Profile referencing an exact model, locking account before model. Raises
     ``asyncpg.UniqueViolationError`` for a name in use."""
+    from .connection import _connection
+
     pool = pool or get_pool()
     # Profile ids keep the agent- prefix they had before the rename, so stored ids and new ones read alike.
     profile_id = new_id("agent")
-    await pool.execute(
-        "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, custom_prompt) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        profile_id, fields["name"], fields["runtime_id"], fields["provider_id"], fields["model"], fields["effort"],
-        fields["agent_teams"], fields.get("custom_prompt", ""),
-    )
+    async with _connection(pool) as conn, conn.transaction():
+        await lock_model(conn, fields["model_id"])
+        await conn.execute(
+            "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            profile_id, fields["name"], fields["runtime_id"], fields["model_id"], fields["effort"],
+            fields["agent_teams"], fields.get("custom_prompt", ""))
     return profile_id
 
 
-async def update_profile(profile_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
+async def update_profile(profile_id: str, fields: Mapping[str, Any], *,
+                         pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     pool = pool or get_pool()
-    columns = [c for c in ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "custom_prompt")
+    columns = [c for c in ("name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt")
                if c in fields]
     sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
     await pool.execute(f"UPDATE agent_profiles SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",

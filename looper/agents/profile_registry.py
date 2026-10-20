@@ -7,9 +7,9 @@ holds an immutable provider/name/protocol identity and its model settings.
 runtime compatibility. ``AgentProfile`` references a model id and runtime,
 with effort, agent teams and custom prompt as its only runtime options.
 
-Registry reads use the normalized account, endpoint and model tables. The v2
-write and launch functions still use ``LegacyProviderSpec`` and
-``LegacyAgentProfile`` until their migrations switch them. ``CatalogModel``
+Registry reads and account/profile writes use the normalized account,
+endpoint and model tables. The v2 launch functions still use
+``LegacyProviderSpec`` and ``LegacyAgentProfile`` until their migrations switch them. ``CatalogModel``
 also adapts saved model settings for the existing cost calculation. API keys
 remain separate from stored account metadata and are omitted from reprs.
 
@@ -687,12 +687,12 @@ async def check_selection(profile_id: str, roles: Iterable[str]) -> LegacyAgentP
     return profile
 
 
-async def _selected_roles(profile_id: str) -> list[str]:
+async def _selected_roles(profile_id: str, conn: Any = None) -> list[str]:
     """Every role ``profile_id`` is selected for, by a layer or a task."""
     from ..db import agent_setting_layers
 
     roles: set[str] = set()
-    for scope, role in await agent_setting_layers.selected_roles(profile_id):
+    for scope, role in await agent_setting_layers.selected_roles(profile_id, pool=conn):
         roles.update(_SCOPE_ROLES.get(scope, (role,)))
     return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
 
@@ -1074,8 +1074,7 @@ async def probe_runtime(runtime_id: str, *, server_claude: str = "claude") -> di
 
 # --- Providers ---
 
-_PROVIDER_FIELDS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "env",
-                    "max_concurrency", "api_key")
+_PROVIDER_FIELDS = ("name", "vendor_type", "endpoints", "env", "max_concurrency", "api_key")
 
 
 async def _existing_provider(provider_id: str, conn: Any = None) -> dict[str, Any]:
@@ -1090,37 +1089,69 @@ async def _existing_provider(provider_id: str, conn: Any = None) -> dict[str, An
 def _provider_fields(data: Mapping[str, Any], current: Mapping[str, Any] | None) -> tuple[dict[str, Any], Any]:
     """The provider's columns after the request, validated, and what to do with its key: ``...`` keep it, None
     remove it, or the new key."""
-    merged = {name: data[name] if name in data else (current or {}).get(name) for name in _PROVIDER_FIELDS[:-1]}
-    try:
-        auth = AuthKind(merged["auth"])
-    except ValueError:
-        raise RegistryError(f"auth must be one of {', '.join(a.value for a in AuthKind)}") from None
-    fields: dict[str, Any] = {
-        "name": entry_name(merged["name"], "provider"),
-        "protocols": _protocols(list(merged["protocols"]) if merged["protocols"] is not None else None),
-        "auth": auth.value,
-        "base_url": _base_url(merged["base_url"]),
-        "models": _models(merged["models"]),
-        "env": _provider_env(merged["env"]),
-        "max_concurrency": _max_concurrency(merged["max_concurrency"]),
-    }
-    key: Any = ...
-    if auth is AuthKind.OAUTH:
-        adapter = _runtime_type(merged["oauth_runtime_type"])
-        if AuthKind.OAUTH not in adapter.auth_kinds:
-            raise RegistryError(f"{adapter.label} has no login of its own to bind a provider to")
-        if fields["base_url"]:
-            raise RegistryError("an OAuth provider uses its runtime's own endpoint: leave base_url empty")
-        if data.get("api_key") not in (None, SECRET_MASK):
-            raise RegistryError("an OAuth provider signs in with its runtime's login and takes no api_key")
-        fields["oauth_runtime_type"] = adapter.type
-        key = None if current is not None and current.get("api_key_set") else ...
+    from .provider_presets import vendor_defaults
+
+    _fields(data, _PROVIDER_FIELDS)
+    vendor = _typed_enum(VendorType, data.get("vendor_type", (current or {}).get("vendor_type")), "vendor_type")
+    if current is not None and vendor.value != current["vendor_type"]:
+        raise RegistryError("vendor_type is immutable: create another provider instead")
+    provider_id = current["id"] if current else "draft"
+    # Defaults belong only to creation, never re-applied during an update.
+    if current is None:
+        defaults = vendor_defaults(vendor, provider_id=provider_id)
+        initial = {"endpoints": [{"protocol": e.protocol.value, "base_url": e.base_url,
+                                  "use_runtime_default": e.use_runtime_default} for e in defaults.endpoints],
+                   "env": [{"key": key, "value": value} for key, value in defaults.env]}
+        if defaults.requires_url_confirmation and "endpoints" not in data:
+            raise RegistryError("this vendor requires explicit endpoint URL confirmation")
     else:
-        if merged["oauth_runtime_type"] is not None and "oauth_runtime_type" in data:
-            raise RegistryError("only an OAuth provider names an oauth_runtime_type")
-        fields["oauth_runtime_type"] = None
-        if "api_key" in data and data["api_key"] != SECRET_MASK:
-            key = None if data["api_key"] in (None, "") else _api_key(data["api_key"])
+        initial = dict(current)
+    merged = {**initial, **data}
+    fields: dict[str, Any] = {
+        "name": entry_name(merged.get("name"), "provider"), "vendor_type": vendor.value,
+        "auth": vendor.auth_kind.value, "oauth_runtime_type": vendor.oauth_runtime_type,
+        "env": _provider_env(merged.get("env")),
+        "max_concurrency": _max_concurrency(merged.get("max_concurrency")),
+    }
+    spec = provider_spec({**fields, "id": provider_id})
+    raw = merged.get("endpoints")
+    if not isinstance(raw, list) or (current is None and not raw) or len(raw) > len(ApiProtocol):
+        raise RegistryError("endpoints must be a list with distinct protocols; a new account needs an endpoint")
+    old = {e["protocol"]: e for e in (current or {}).get("endpoints", [])}
+    endpoints: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in raw:
+        entry = _fields(entry, ("provider_id", "protocol", "base_url", "use_runtime_default"))
+        if "provider_id" in entry and entry["provider_id"] != provider_id:
+            raise RegistryError("endpoint belongs to a different provider")
+        protocol = _typed_enum(ApiProtocol, entry.get("protocol"), "protocol").value
+        if protocol in seen:
+            raise RegistryError("endpoints must contain distinct protocols")
+        seen.add(protocol)
+        url = _base_url(entry.get("base_url"))
+        previous = old.get(protocol, {})
+        marker = entry.get("use_runtime_default", previous.get("use_runtime_default", False))
+        if not isinstance(marker, bool):
+            raise RegistryError("use_runtime_default must be boolean")
+        if url != previous.get("base_url"):
+            # Explicit URLs end migration compatibility, even on a read-modify-write body.
+            if url:
+                marker = False
+            elif marker:
+                raise RegistryError("use_runtime_default is reserved for migrated endpoints")
+        if marker and not previous.get("use_runtime_default"):
+            raise RegistryError("use_runtime_default is reserved for migrated endpoints")
+        endpoint = Endpoint(provider_id, ApiProtocol(protocol), url, marker)
+        endpoint.check_provider(spec)
+        endpoints.append({"protocol": protocol, "base_url": endpoint.base_url, "use_runtime_default": marker})
+    fields["endpoints"] = endpoints
+    key: Any = ...
+    if spec.auth is AuthKind.OAUTH:
+        if data.get("api_key") not in (None, SECRET_MASK):
+            raise RegistryError("a login provider takes no api_key")
+        key = None if current is not None and current.get("api_key_set") else ...
+    elif "api_key" in data and data["api_key"] != SECRET_MASK:
+        key = None if data["api_key"] in (None, "") else _api_key(data["api_key"])
     return fields, key
 
 
@@ -1130,9 +1161,11 @@ async def _check_provider_profiles(conn: Any, provider: Mapping[str, Any]) -> No
 
     spec = provider_spec(provider)
     for row in await db.list_profiles(pool=conn, provider_id=provider["id"]):
-        profile = LegacyAgentProfile.from_row(row)
+        profile = AgentProfile.from_row(row)
         try:
-            check_pairing(profile.runtime, spec, profile.model)
+            model = ModelSpec.from_entry({k: row["model"][k] for k in ModelSpec.__dataclass_fields__})
+            ResolvedModel(model, spec, Endpoint.from_entry(row["endpoint"])).check_runtime(profile.runtime)
+            check_agent_teams(profile.runtime, profile.agent_teams)
         except RegistryError as exc:
             raise RegistryError(f"Agent Profile {profile.name!r} uses this provider: {exc}") from None
 
@@ -1140,14 +1173,17 @@ async def _check_provider_profiles(conn: Any, provider: Mapping[str, Any]) -> No
 async def _provider_answer(provider_id: str) -> dict[str, Any]:
     from ..db import profile_registry as db
 
-    rows = {r["id"]: r for r in await db.list_providers()}
-    row = rows[provider_id]
-    return {"provider": provider_view(row, await _logins([row])), "warnings": provider_warnings(provider_spec(row))}
+    row = await _existing_provider(provider_id)
+    warnings: list[str] = []
+    if not any(e["protocol"] == ApiProtocol.ANTHROPIC_MESSAGES.value for e in row["endpoints"]):
+        models = await db.list_models(provider_id=provider_id)
+        warnings = _context_suffix_warnings(name for model in models
+                                            for name in (model["name"], model["background_model"]) if name)
+    return {"provider": provider_view(row, await _logins([row])), "warnings": warnings}
 
 
 async def create_provider(data: Any) -> dict[str, Any]:
-    """Register ``{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?,
-    api_key?}``."""
+    """Register an account and its endpoints. Vendor suggestions never register models implicitly."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -1184,6 +1220,8 @@ async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
             await _check_provider_profiles(conn, {**fields, "id": provider_id})
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"a provider named {data.get('name')!r} already exists") from None
+    except asyncpg.ForeignKeyViolationError:
+        raise RegistryConflict("an endpoint still serves models: remove those models first") from None
     return await _provider_answer(provider_id)
 
 
@@ -1202,41 +1240,46 @@ async def delete_provider(provider_id: str) -> dict[str, Any]:
     import asyncpg
 
     from ..db import profile_registry as db
+    from ..db.connection import transaction
 
-    row = await _existing_provider(provider_id)
-    _not_builtin(row, "provider")
     try:
-        await db.delete_provider(provider_id)
+        async with transaction() as conn:
+            await db.lock_provider(conn, provider_id)
+            row = await _existing_provider(provider_id, conn)
+            _not_builtin(row, "provider")
+            await db.delete_provider(provider_id, pool=conn)
     except asyncpg.ForeignKeyViolationError:
-        raise RegistryConflict(f"provider {row['name']!r} still serves Agent Profiles: change or remove them first") \
+        raise RegistryConflict(f"provider {row['name']!r} still serves models: remove them first") \
             from None
     return {"deleted": provider_id}
 
 
 # --- Agent Profiles ---
 
-_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams", "custom_prompt")
+_PROFILE_FIELDS = ("name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt")
 
 
-async def _existing_profile(profile_id: str) -> dict[str, Any]:
+async def _existing_profile(profile_id: str, conn: Any = None) -> dict[str, Any]:
     from ..db import profile_registry as db
 
-    row = await db.get_profile(profile_id)
+    row = await db.get_profile(profile_id, pool=conn)
     if row is None:
         raise RegistryNotFound(f"no Agent Profile {profile_id!r}")
     return row
 
 
-async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, LegacyProviderSpec]:
+async def _parts(runtime_id: Any, model_id: Any, conn: Any) -> tuple[RuntimeSpec, ResolvedModel]:
     from ..db import profile_registry as db
 
-    runtime = await db.get_runtime(runtime_id) if isinstance(runtime_id, str) else None
+    runtime = await db.get_runtime(runtime_id, pool=conn) if isinstance(runtime_id, str) else None
     if runtime is None:
         raise RegistryError(f"no runtime {runtime_id!r}: give the runtime_id of a registered runtime")
-    provider = await db.get_provider(provider_id) if isinstance(provider_id, str) else None
-    if provider is None:
-        raise RegistryError(f"no provider {provider_id!r}: give the provider_id of a registered provider")
-    return runtime_spec(runtime), provider_spec(provider)
+    row = await db.lock_model(conn, model_id) if isinstance(model_id, str) else None
+    if row is None:
+        raise RegistryError(f"no model {model_id!r}: give the model_id of a registered model")
+    model = ModelSpec.from_entry({k: row[k] for k in ModelSpec.__dataclass_fields__})
+    return runtime_spec(runtime), ResolvedModel(model, provider_spec(row["provider"]),
+                                               Endpoint.from_entry(row["endpoint"]))
 
 
 async def create_profile(data: Any) -> dict[str, Any]:
@@ -1245,18 +1288,21 @@ async def create_profile(data: Any) -> dict[str, Any]:
     import asyncpg
 
     from ..db import profile_registry as db
+    from ..db.connection import transaction
 
     data = _fields(data, _PROFILE_FIELDS)
     fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
-              "provider_id": data.get("provider_id"), "model": _model(data.get("model")),
+              "model_id": data.get("model_id"),
               "effort": _effort(data.get("effort")),
               "custom_prompt": _custom_prompt(data.get("custom_prompt", ""))}
-    runtime, provider = await _parts(fields["runtime_id"], fields["provider_id"])
-    fields["agent_teams"] = _agent_teams(data["agent_teams"]) if "agent_teams" in data else default_agent_teams(runtime)
-    check_pairing(runtime, provider, fields["model"])
-    check_agent_teams(runtime, fields["agent_teams"])
     try:
-        profile_id = await db.insert_profile(fields)
+        async with transaction() as conn:
+            runtime, model = await _parts(fields["runtime_id"], fields["model_id"], conn)
+            fields["agent_teams"] = (_agent_teams(data["agent_teams"]) if "agent_teams" in data
+                                     else default_agent_teams(runtime))
+            model.check_runtime(runtime)
+            check_agent_teams(runtime, fields["agent_teams"])
+            profile_id = await db.insert_profile(fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
     return await _profile_answer(profile_id)
@@ -1277,6 +1323,7 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
     import asyncpg
 
     from ..db import profile_registry as db
+    from ..db.connection import transaction
 
     data = _fields(data, _PROFILE_FIELDS)
     if not data:
@@ -1286,29 +1333,32 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     if "name" in data:
         fields["name"] = entry_name(data["name"], "profile")
-    if "model" in data:
-        fields["model"] = _model(data["model"])
     if "effort" in data:
         fields["effort"] = _effort(data["effort"])
     if "agent_teams" in data:
         fields["agent_teams"] = _agent_teams(data["agent_teams"])
     if "custom_prompt" in data:
         fields["custom_prompt"] = _custom_prompt(data["custom_prompt"])
-    for name in ("runtime_id", "provider_id"):
+    for name in ("runtime_id", "model_id"):
         if name in data:
             fields[name] = data[name]
-    runtime, provider = await _parts(fields.get("runtime_id", row["runtime_id"]),
-                                     fields.get("provider_id", row["provider_id"]))
-    model = fields.get("model", row["model"])
-    if "agent_teams" not in fields and runtime.type != row["runtime_type"]:
-        # A profile moved to a runtime of another type takes that type's default, unless the change says.
-        fields["agent_teams"] = default_agent_teams(runtime)
-    check_pairing(runtime, provider, model)
-    check_agent_teams(runtime, fields.get("agent_teams", bool(row.get("agent_teams"))))
-    check_roles(LegacyAgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),
-                await _selected_roles(profile_id))
     try:
-        await db.update_profile(profile_id, fields)
+        async with transaction() as conn:
+            runtime, model = await _parts(fields.get("runtime_id", row["runtime_id"]),
+                                           fields.get("model_id", row["model_id"]), conn)
+            await conn.execute("SELECT 1 FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
+            current = await _existing_profile(profile_id, conn)
+            if current["model_id"] != row["model_id"] or current["runtime_id"] != row["runtime_id"]:
+                raise RegistryConflict("Agent Profile changed concurrently: reload it before updating")
+            if "agent_teams" not in fields and runtime.type != current["runtime_type"]:
+                fields["agent_teams"] = default_agent_teams(runtime)
+            model.check_runtime(runtime)
+            checked = AgentProfile(profile_id, fields.get("name", current["name"]), runtime,
+                                   model.model.id, fields.get("effort", current["effort"]),
+                                   fields.get("agent_teams", current["agent_teams"]),
+                                   fields.get("custom_prompt", current["custom_prompt"]))
+            check_roles(checked, await _selected_roles(profile_id, conn))
+            await db.update_profile(profile_id, fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
     return await _profile_answer(profile_id)
