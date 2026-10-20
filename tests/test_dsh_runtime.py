@@ -521,6 +521,140 @@ def _dsh_result(events):
     return results[0]
 
 
+DSH_STEP_USAGE = {"inputTokens": 10, "outputTokens": 4, "cacheReadTokens": 7, "cacheWriteTokens": 2,
+                  "reasoningTokens": 3, "totalTokens": 23}
+
+
+def _dsh_usage_run(tmp_path, *steps):
+    records = [{"type": "session", "sessionId": "usage-session"},
+               {"type": "status", "phase": "turn_start", "turn": 1}, *steps,
+               {"type": "status", "phase": "turn_end", "turn": 1, "reason": {"kind": "completed"}},
+               {"type": "final", "text": "done"}]
+    payload = "".join(json.dumps(record) + "\n" for record in records).encode()
+    return asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5))
+
+
+def _dsh_step(step=1, usage=DSH_STEP_USAGE, **extra):
+    return {"type": "status", "phase": "step_end", "turn": 1, "step": step, "usage": usage, **extra}
+
+
+def test_dsh_step_usage_prices_disjoint_buckets_and_keeps_auxiliary_total_unknown(tmp_path):
+    from looper.agents.run_usage import Usage, run_usage
+    from looper.agents.runtimes.pricing import RunSpend, pricer
+
+    events = _dsh_usage_run(tmp_path, _dsh_step())
+    increments = [event for event in events if event["type"] == "usage"]
+    assert len(increments) == 1
+    event = increments[0]
+    tokens = Usage(input_tokens=10, output_tokens=4, cache_read_tokens=7, cache_creation_tokens=2)
+    assert Usage.from_dict(event["usage"]) == tokens  # input is uncached; reasoning is already in output
+    assert event["raw_usage"] == DSH_STEP_USAGE
+    assert event["root_usage_complete"] is True
+    assert event["usage_complete"] is False and event["cost_basis"] == "observed"
+    spend = RunSpend(PROVIDER, "deepseek-flash", cap=0.000008)
+    crossings = [spend.add(item) for item in events]
+    # (10 * .30 + 4 * 1.20 + 7 * .006 + 2 * .30) / 1M = .000008442.
+    assert spend.observed_cost_usd == pytest.approx(0.000008442)
+    assert spend.usage == tokens and spend.usage.cost_usd is None
+    assert crossings.count(True) == 1 and spend.exceeded and spend.budget_verifiable
+    result = _dsh_result(events)
+    assert result["root_usage_complete"] is True and result["usage_complete"] is False
+    assert run_usage(result, price=pricer(PROVIDER)) == tokens  # no result repricing as a complete total
+
+
+@pytest.mark.parametrize("turn,step", [(1, 2), (2, 1)])
+def test_dsh_duplicate_steps_retry_totals_and_resumed_process_do_not_double_count(tmp_path, turn, step):
+    from looper.agents.run_usage import Usage, run_usage
+    from looper.agents.runtimes.pricing import RunSpend, pricer
+
+    first = _dsh_step(attempts=[{"usage": DSH_STEP_USAGE}, {"usage": DSH_STEP_USAGE}])
+    events = _dsh_usage_run(tmp_path, first, {"type": "text", "text": "progress"}, first, _dsh_step(step, turn=turn))
+    increments = [event for event in events if event["type"] == "usage"]
+    assert len(increments) == 2  # step total already includes retries; final and text add nothing
+    spend = RunSpend(PROVIDER, "deepseek-flash", cap=None)
+    for event in events:
+        spend.add(event)
+    expected = Usage(input_tokens=20, output_tokens=8, cache_read_tokens=14, cache_creation_tokens=4)
+    assert spend.usage == expected
+    assert spend.observed_cost_usd == pytest.approx(0.000016884)
+    assert run_usage(_dsh_result(events), price=pricer(PROVIDER)) == expected
+    # The same persisted session in a new process counts only the new step, even if its indices repeat.
+    resumed = _dsh_usage_run(tmp_path, _dsh_step())
+    assert run_usage(_dsh_result(resumed), price=pricer(PROVIDER)).input_tokens == 10
+
+
+@pytest.mark.parametrize("raw_usage,truncated,missing", [
+    (None, False, "input_tokens"),
+    ({}, False, "output_tokens"),
+    ("invalid", False, "input_tokens"),
+    (True, False, "input_tokens"),
+    ({key: value for key, value in DSH_STEP_USAGE.items() if key != "cacheReadTokens"}, False, "cache_read_tokens"),
+    ({key: value for key, value in DSH_STEP_USAGE.items() if key != "cacheWriteTokens"}, False,
+     "cache_creation_tokens"),
+    (DSH_STEP_USAGE, True, None),
+    *[({**DSH_STEP_USAGE, key: invalid}, False, name)
+      for key, name in (("inputTokens", "input_tokens"), ("outputTokens", "output_tokens"),
+                        ("cacheReadTokens", "cache_read_tokens"), ("cacheWriteTokens", "cache_creation_tokens"))
+      for invalid in (True, False, -1, "10", 1.5, None)],
+    *[({**DSH_STEP_USAGE, key: invalid}, False, None)
+      for key in ("totalTokens", "reasoningTokens") for invalid in (True, -1, "10")],
+])
+def test_dsh_incomplete_step_usage_stays_unknown_with_known_buckets_readable(
+    tmp_path, raw_usage, truncated, missing,
+):
+    from looper.agents.run_usage import run_usage
+    from looper.agents.runtimes.pricing import RunSpend, pricer
+
+    events = _dsh_usage_run(tmp_path, _dsh_step(usage=raw_usage, truncated=truncated))
+    increments = [event for event in events if event["type"] == "usage"]
+    assert len(increments) == 1
+    event = increments[0]
+    assert event["raw_usage"] == raw_usage
+    assert event["root_usage_complete"] is False and event["usage_complete"] is False
+    spend = RunSpend(PROVIDER, "deepseek-flash", cap=1)
+    for item in events:
+        assert spend.add(item) is False
+    assert spend.usage.cost_usd is None and spend.observed_cost_usd is None
+    assert spend.budget_verifiable is False
+    result = _dsh_result(events)
+    assert result["root_usage_complete"] is False and result["usage_complete"] is False
+    own = run_usage(result, price=pricer(PROVIDER))
+    assert own.cost_usd is None
+    if missing:
+        assert getattr(own, missing) is None
+    if isinstance(raw_usage, dict) and raw_usage.get("cacheWriteTokens") == 2:
+        assert own.cache_creation_tokens == 2
+
+
+@pytest.mark.parametrize("steps", [(), ({"type": "status", "phase": "step_start", "turn": 1, "step": 2},),
+                                   ({"type": "status", "phase": "step_end", "turn": 1, "step": 1},)])
+def test_dsh_no_reported_step_cannot_become_zero_dollars(tmp_path, steps):
+    from looper.agents.runtimes.pricing import RunSpend
+
+    events = _dsh_usage_run(tmp_path, *steps)
+    spend = RunSpend(PROVIDER, "deepseek-flash", cap=1)
+    for event in events:
+        spend.add(event)
+    assert spend.usage.cost_usd is None and spend.observed_cost_usd is None
+    assert spend.budget_verifiable is False
+    assert _dsh_result(events)["root_usage_complete"] is False
+
+
+def test_dsh_missing_later_step_keeps_known_usage_without_claiming_a_complete_budget(tmp_path):
+    from looper.agents.run_usage import run_usage
+    from looper.agents.runtimes.pricing import RunSpend, pricer
+
+    events = _dsh_usage_run(tmp_path, _dsh_step(),
+                            {"type": "status", "phase": "step_start", "turn": 1, "step": 2})
+    spend = RunSpend(PROVIDER, "deepseek-flash", cap=1)
+    for event in events:
+        spend.add(event)
+    assert spend.usage.cost_usd is None and spend.budget_verifiable is False
+    assert spend.observed_cost_usd == pytest.approx(0.000008442)
+    own = run_usage(_dsh_result(events), price=pricer(PROVIDER))
+    assert own.input_tokens == 10 and own.cost_usd is None
+
+
 def test_dsh_projects_headless_events_and_only_final_is_the_result(tmp_path):
     from looper.agents.claude_cli import answer_text
 
@@ -602,7 +736,7 @@ def test_dsh_unknown_events_are_bounded_diagnostics_and_do_not_invent_compaction
 def test_dsh_unknown_diagnostic_limit_does_not_drop_known_truncation_markers(tmp_path):
     payload = b'{"type":"future"}\n' * 20 + (DSH_JSON / "truncated.jsonl").read_bytes()
     events = asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5))
-    assert len([event for event in events if event.get("truncated") is True]) == 7
+    assert len([event for event in events if event["type"] != "usage" and event.get("truncated") is True]) == 7
     assert _dsh_result(events)["is_error"] is False
 
 
@@ -648,7 +782,7 @@ def test_dsh_empty_final_stays_empty_and_duplicate_final_does_not_replace_it(tmp
 
 def test_dsh_keeps_truncation_markers_and_does_not_invent_dropped_tool_input(tmp_path):
     events = _dsh_replay(tmp_path, "truncated.jsonl")
-    truncated = [event for event in events if event.get("truncated") is True]
+    truncated = [event for event in events if event["type"] != "usage" and event.get("truncated") is True]
     assert len(truncated) == 7
     blocks = [block for event in truncated if event["type"] in ("assistant", "user")
               for block in event["message"]["content"]]

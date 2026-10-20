@@ -111,6 +111,34 @@ def test_the_soft_cap_counts_usage_events_at_the_providers_prices() -> None:
         == (False, False, False, True)
 
 
+@pytest.mark.parametrize("tokens", [Usage(), Usage(input_tokens=0), Usage(input_tokens=10, output_tokens=4)])
+def test_only_explicit_incomplete_usage_makes_missing_buckets_unknown(tokens):
+    legacy = RunSpend(_provider(MAIN), "m-main", cap=1)
+    legacy.add(usage_event("m-main", tokens))
+    assert legacy.usage.cost_usd is not None  # existing runtime contract is unchanged
+    incomplete = RunSpend(_provider(MAIN), "m-main", cap=1)
+    incomplete.add(usage_event("m-main", tokens, usage_complete=False))
+    assert incomplete.usage.cost_usd is None
+    incomplete.add(usage_event("m-main", Usage(input_tokens=1)))
+    assert incomplete.usage.cost_usd is None  # a later complete report cannot erase an unknown part
+
+
+def test_dsh_observed_cost_uses_catalog_prices_before_builtin_prices():
+    from looper.agents.runtimes.dsh import DshStream
+
+    provider = _provider(CatalogModel("deepseek-v4-pro[1m]", output_usd_per_mtok=8))
+    stream = DshStream(model="deepseek-v4-pro")
+    events = stream.translate({"type": "status", "phase": "step_end", "turn": 1, "step": 1,
+                               "usage": {"inputTokens": 10, "outputTokens": 4,
+                                         "cacheReadTokens": 7, "cacheWriteTokens": 2}})
+    spend = RunSpend(provider, "deepseek-v4-pro[1m]", cap=None)
+    for event in events:
+        spend.add(event)
+    # (10 * 1.32 + 4 * 8 + 7 * .044 + 2 * 1.32) / 1M = .000048148.
+    assert spend.observed_cost_usd == pytest.approx(0.000048148)
+    assert spend.usage.cost_usd is None and spend.usage.output_tokens == 4
+
+
 def test_claude_codes_stream_yields_one_usage_event_per_model_request() -> None:
     from looper.agents.claude_cli import stream_events
 

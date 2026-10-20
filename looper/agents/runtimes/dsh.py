@@ -16,11 +16,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
 
 from ... import child_env
+from ..run_usage import Usage
 from . import (
     ApiProtocol, AuthKind, PromptBlock, ProviderBinding, RuntimeAdapter, RuntimeUnsupported, instructions,
     runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
+from .pricing import usage_event
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -46,6 +48,12 @@ _DIRECTORY_VARS = frozenset({
     "PI_CONFIG_FILES", "AGENTS_HOME", "AGENT_HOME", "AGENT_DIR", "AGENT_DIRS",
 })
 _OWNED_PREFIXES = ("DSH_", "XDG_", "DEEPSEEK_", "ANTHROPIC_", "OPENAI_")
+_USAGE_FIELDS = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
+                 "cache_read_tokens": "cacheReadTokens", "cache_creation_tokens": "cacheWriteTokens"}
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 @dataclass
@@ -61,6 +69,10 @@ class DshStream:
 
     model: str | None = None
     session_id: str | None = None
+    usage: Usage = field(default_factory=Usage, init=False)
+    _steps: set[tuple[int, int]] = field(default_factory=set, init=False)
+    _open_steps: set[tuple[int, int] | None] = field(default_factory=set, init=False)
+    _root_usage_complete: bool = field(default=True, init=False)
     _final: str | None = field(default=None, init=False)
     _reason: dict[str, Any] | None = field(default=None, init=False)
     _errors: list[str] = field(default_factory=list, init=False)
@@ -100,6 +112,12 @@ class DshStream:
         except asyncio.CancelledError:
             self.cancel()
             raise
+        if self._open_steps or not self._steps or self._errors:
+            # A missing step_end (including EOF mid-request) must invalidate the budget too.
+            # This is an unknown increment, never another copy of the result's totals.
+            self._root_usage_complete = False
+            yield usage_event(self.model, Usage(), **self._base(), usage_complete=False,
+                              root_usage_complete=False, cost_basis="observed", raw_usage=None)
         yield self._result(returncode)
 
     def _base(self) -> dict[str, Any]:
@@ -127,6 +145,34 @@ class DshStream:
         return [{"type": "assistant", **self._base(), **flags, "parent_tool_use_id": None,
                  "message": {"role": "assistant", "model": self.model, "content": [{**block, **flags}]}}]
 
+    @staticmethod
+    def _step_key(raw: Mapping[str, Any]) -> tuple[int, int] | None:
+        turn, step = _count(raw.get("turn")), _count(raw.get("step"))
+        return (turn, step) if turn is not None and step is not None else None
+
+    def _step_usage(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+        key = self._step_key(raw)
+        if key is not None and key in self._steps:
+            return []
+        if key is not None:
+            self._steps.add(key)
+        self._open_steps.discard(key)
+        reported = raw.get("usage")
+        values = reported if isinstance(reported, Mapping) else {}
+        tokens = Usage(**{name: _count(values.get(wire)) for name, wire in _USAGE_FIELDS.items()})
+        complete = (key is not None and raw.get("truncated") is not True
+                    and all(getattr(tokens, name) is not None for name in _USAGE_FIELDS))
+        # Optional counters remain metadata: reasoning is already in output, retries in step usage.
+        if any(name in values and _count(values[name]) is None for name in ("totalTokens", "reasoningTokens")):
+            complete = False
+        self._root_usage_complete = self._root_usage_complete and complete
+        self.usage = self.usage.plus(tokens)
+        # Headless root JSONL has not been shown to cover compaction, children and search.
+        # Even a fully observed root step cannot establish completeness of the total bill.
+        return [usage_event(self.model, tokens, **self._base(), turn=raw.get("turn"), step=raw.get("step"),
+                            raw_usage=reported, usage_complete=False, root_usage_complete=complete,
+                            cost_basis="observed", **({"truncated": True} if raw.get("truncated") is True else {}))]
+
     def translate(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
         """Project one committed record. Only ``events`` publishes a terminal result."""
         kind = raw.get("type")
@@ -151,6 +197,12 @@ class DshStream:
             elif phase == "turn_end":
                 reason = raw.get("reason")
                 self._reason = dict(reason) if isinstance(reason, Mapping) else None
+            elif phase == "step_start":
+                key = self._step_key(raw)
+                if key not in self._steps:
+                    self._open_steps.add(key)
+            elif phase == "step_end":
+                return [*self._diagnostic(raw), *self._step_usage(raw)]
             return self._diagnostic(raw, limited=phase not in ("turn_start", "step_start", "step_end", "turn_end"))
         if kind == "session" and isinstance(raw.get("sessionId"), str) and raw["sessionId"]:
             self.session_id = raw["sessionId"]
@@ -188,7 +240,13 @@ class DshStream:
             errors.append("DSH turn did not complete: " + self._bounded(json.dumps(self._reason, ensure_ascii=False)))
         return {"type": "result", "subtype": "error_during_execution" if errors else "success",
                 "is_error": bool(errors), "result": self._final if self._final is not None else "",
-                **self._base(), "stop_reason": self._reason, **({"errors": errors} if errors else {})}
+                **self._base(), "stop_reason": self._reason, **({"errors": errors} if errors else {}),
+                "modelUsage": {self.model or "dsh": {
+                    wire: value for name, wire in zip(_USAGE_FIELDS, (
+                        "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"))
+                    if (value := getattr(self.usage, name)) is not None}},
+                "usage_complete": False, "root_usage_complete": bool(self._steps) and self._root_usage_complete,
+                "cost_basis": "observed"}
 
 
 class DshRuntime(RuntimeAdapter):

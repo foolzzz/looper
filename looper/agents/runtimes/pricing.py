@@ -25,8 +25,8 @@ alias stays unpriced, since the provider's environment may map it to a model
 of its own.
 
 A runtime reports a run's tokens as internal ``usage`` events (``usage_event``):
-the tokens of one model request (Claude Code) or of one turn (a runtime that
-reports usage only when a turn completes), never running totals. ``RunSpend``
+the tokens of one model request (Claude Code), step (DSH) or turn (a runtime
+that reports usage only when a turn completes), never running totals. ``RunSpend``
 adds them up at the provider's prices and says when the run went over its cap
 (``cap_exceeded``): a soft cap, since the request that crosses it is already
 made and paid.
@@ -187,7 +187,13 @@ USAGE_EVENT = "usage"
 
 
 def usage_event(model: str | None, usage: Usage, **extra: Any) -> dict[str, Any]:
-    """The internal event for the tokens of one model request or turn (not running totals)."""
+    """Tokens of one request, step or turn, never running totals.
+
+    ``usage_complete=False`` explicitly withholds a total cost even with known
+    tokens. ``cost_basis=observed`` permits a soft cap on complete reported root
+    steps; ``root_usage_complete=False`` marks a gap in that budget's coverage.
+    Omitting these signals preserves the other runtimes' missing-bucket policy.
+    """
     tokens = {name: value for name, value in usage.to_dict().items() if name != "cost_usd"}
     return {"type": USAGE_EVENT, "model": model, "usage": tokens, **extra}
 
@@ -206,6 +212,10 @@ class RunSpend:
 
     ``usage`` sums the events' tokens and their cost; its ``cost_usd`` is None
     once one event cannot be priced, which takes the run out of the cap.
+    An explicit ``usage_complete=False`` also keeps the total unknown. With
+    ``cost_basis=observed``, the soft cap instead checks reported complete root
+    steps' cost. ``budget_verifiable`` is false when a root step is missing or
+    unpriced; the caller must stop further calls when a budget is configured.
     """
 
     def __init__(self, provider: ProviderSpec, model: str, cap: float | None) -> None:
@@ -214,6 +224,9 @@ class RunSpend:
         self.cap = cap
         self.usage = Usage()
         self._unpriced = False
+        self.observed_cost_usd: float | None = None
+        self.budget_verifiable = True
+        self._observed_basis = False
 
     def add(self, event: Mapping[str, Any]) -> bool:
         """Count ``event`` if it is a usage event; True when it is the one that took the run over its cap."""
@@ -223,11 +236,19 @@ class RunSpend:
         model, usage = found
         was = self.exceeded
         cost = model_price(self._provider, model or self._model).cost(usage)
-        self._unpriced = self._unpriced or (cost is None and usage != Usage())
+        root_complete = event.get("root_usage_complete") is not False
+        self._observed_basis = self._observed_basis or event.get("cost_basis") == "observed"
+        if not root_complete:
+            cost = None
+        if cost is not None:
+            self.observed_cost_usd = round((self.observed_cost_usd or 0.0) + cost, 10)
+        self.budget_verifiable = self.budget_verifiable and root_complete and cost is not None
+        self._unpriced = self._unpriced or event.get("usage_complete") is False or (cost is None and usage != Usage())
         spent = None if self._unpriced else round((self.usage.cost_usd or 0.0) + (cost or 0.0), 10)
         self.usage = replace(self.usage.plus(usage), cost_usd=spent)
         return not was and self.exceeded
 
     @property
     def exceeded(self) -> bool:
-        return cap_exceeded(self.usage.cost_usd, self.cap)
+        cost = self.observed_cost_usd if self._observed_basis else self.usage.cost_usd
+        return cap_exceeded(cost, self.cap)
