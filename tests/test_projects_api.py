@@ -196,6 +196,10 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import user_gates
 
     monkeypatch.setattr(user_gates, "list_for_task", AsyncMock(return_value=[]))
+    # Task detail also lists waits (wait_service.waits_view). This store has none.
+    from looper.db import waits as db_waits
+
+    monkeypatch.setattr(db_waits, "list_for_task", AsyncMock(return_value=[]))
     from looper.db import step_workspaces, task_worktrees
 
     monkeypatch.setattr(step_workspaces, "list_for_task", AsyncMock(return_value=[]))
