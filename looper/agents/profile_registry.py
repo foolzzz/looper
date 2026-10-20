@@ -656,7 +656,7 @@ def _custom_prompt(raw: Any) -> str:
     return text
 
 
-def check_roles(profile: LegacyAgentProfile, roles: Iterable[str]) -> None:
+def check_roles(profile: AgentProfile | LegacyAgentProfile, roles: Iterable[str]) -> None:
     """Refuse ``profile`` for a role its runtime lacks a capability for."""
     adapter = runtimes.ADAPTERS.get(profile.runtime.type)
     for role in roles:
@@ -672,14 +672,14 @@ def check_roles(profile: LegacyAgentProfile, roles: Iterable[str]) -> None:
 _SCOPE_ROLES = {"system": tuple(runtimes.ROLE_CAPABILITIES), "project": ("planner", "worker", "reviewer")}
 
 
-async def check_selection(profile_id: str, roles: Iterable[str]) -> LegacyAgentProfile:
+async def check_selection(profile_id: str, roles: Iterable[str]) -> AgentProfile:
     """The Agent Profile ``profile_id``, refused when it cannot run one of ``roles``."""
     from ..db import profile_registry as db
 
     row = await db.get_profile(profile_id) if isinstance(profile_id, str) else None
     if row is None:
         raise RegistryError(f"no Agent Profile {profile_id!r}: give the profile_id of a registered one")
-    profile = LegacyAgentProfile.from_row(row)
+    profile = AgentProfile.from_row(row)
     if profile.runtime.type not in runtimes.ADAPTERS:
         raise RegistryError(f"Agent Profile {profile.name!r} runs on a {profile.runtime.type!r} runtime, which this "
                             "version cannot run")
@@ -1411,9 +1411,7 @@ async def _parts(runtime_id: Any, model_id: Any, conn: Any) -> tuple[RuntimeSpec
     row = await db.lock_model(conn, model_id) if isinstance(model_id, str) else None
     if row is None:
         raise RegistryError(f"no model {model_id!r}: give the model_id of a registered model")
-    model = ModelSpec.from_entry({k: row[k] for k in ModelSpec.__dataclass_fields__})
-    return runtime_spec(runtime), ResolvedModel(model, provider_spec(row["provider"]),
-                                               Endpoint.from_entry(row["endpoint"]))
+    return runtime_spec(runtime), _resolved_model(row)
 
 
 async def create_profile(data: Any) -> dict[str, Any]:
@@ -1435,7 +1433,8 @@ async def create_profile(data: Any) -> dict[str, Any]:
             fields["agent_teams"] = (_agent_teams(data["agent_teams"]) if "agent_teams" in data
                                      else default_agent_teams(runtime))
             model.check_runtime(runtime)
-            check_agent_teams(runtime, fields["agent_teams"])
+            AgentProfile("draft", fields["name"], runtime, model.model.id, fields["effort"],
+                         fields["agent_teams"], fields["custom_prompt"])
             profile_id = await db.insert_profile(fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None

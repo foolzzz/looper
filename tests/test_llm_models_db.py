@@ -186,13 +186,17 @@ def test_invalid_settings_rollback(changes, monkeypatch):
 def test_profile_reference_protection_revalidation_and_history(monkeypatch):
     async def test(pool):
         mid = (await service.create_model(_body()))["model"]["model_id"]
-        await service.create_profile({"name": "Referenced profile", "runtime_id": "rt-claude-code",
-                                      "model_id": mid})
+        profile = (await service.create_profile({"name": "Referenced profile", "runtime_id": "rt-claude-code",
+                                                "model_id": mid, "effort": "max"}))["profile"]
+        profile_id = profile["profile_id"]
         assert (await service.get_model(mid))["model"]["profile_count"] == 1
         with pytest.raises(service.RegistryConflict):
             await service.delete_model(mid)
         # Changing effort metadata alone must preserve existing runtime behavior.
         await service.update_model(mid, {"efforts": []})
+        retained = await db.get_profile(profile_id)
+        assert retained["model_id"] == mid and retained["effort"] == "max"
+        assert service.AgentProfile.from_row(retained).record()["model_id"] == mid
         await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
                            "VALUES ('rt-test', 'Test runtime', 'codex', 'codex', '{}'); "
                            "UPDATE agent_profiles SET runtime_id = 'rt-test', agent_teams = false "
