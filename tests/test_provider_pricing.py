@@ -35,6 +35,19 @@ def test_a_runs_cost_is_each_kind_of_token_at_its_price() -> None:
                                cache_creation_tokens=4_000)
 
 
+def test_a_model_name_without_a_catalog_price_falls_back_to_the_builtin_table() -> None:
+    """OpenCode prices some models as ranges, so the table stays the vendors' list prices and those names fall back."""
+    from looper.agents.runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES
+
+    provider = _provider()
+    for name in ("gpt-6.1-sol", "gpt-5.6-sol", "claude-opus-5-5", "claude-sonnet-5-5", "deepseek-v4-pro", "glm-5.3",
+                 "kimi-k3"):
+        assert name in BUILTIN_PRICES
+        assert model_price(provider, name) == BUILTIN_PRICES[name]
+        assert model_price(provider, name).complete
+    assert all("opencode.ai" not in source for source in PRICE_SOURCES)
+
+
 def test_a_catalog_price_wins_and_an_unknown_one_comes_from_the_builtin_table() -> None:
     # glm-5.3's built-in prices: 1.40 input, 4.40 output, 0.26 cache read, 1.40 cache write.
     provider = _provider(CatalogModel("glm-5.3[1m]", output_usd_per_mtok=5.0))

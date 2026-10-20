@@ -9,9 +9,9 @@ not part of a preset: the built-in table (``runtimes.pricing``) prices these
 models, and the provider's catalog can override it.
 
 The URLs, models and variables come from each vendor's official documentation
-(``docs``), read on 2026-10-14. ``[1m]`` asks Claude Code for a model's 1M
-context window, as the vendors' Claude Code guides write it; it is added to
-every model with a 1M window.
+(``docs``), read on 2026-10-14. OpenCode and Sub2API were read on 2026-10-20.
+``[1m]`` asks Claude Code for a model's 1M context window, as the vendors'
+Claude Code guides write it; it is added to every model with a 1M window.
 """
 
 from __future__ import annotations
@@ -136,6 +136,30 @@ PRESETS: tuple[ProviderPreset, ...] = (
         (),
         "a local proxy for development: its key is one of the api-keys in its config file, and its models are "
         "those it serves",
+    ),
+    ProviderPreset(
+        "opencode", "OpenCode (Zen)", "opencode",
+        (PresetApi(_OPENAI, "https://opencode.ai/inference/openai/v1"),
+         PresetApi(_ANTHROPIC, "https://opencode.ai/inference/anthropic")),
+        (PresetModel("gpt-6.1-sol", 1_050_000), PresetModel("gpt-5.6-sol", 1_050_000),
+         PresetModel("claude-opus-5-5"), PresetModel("claude-sonnet-5-5"), PresetModel("deepseek-v4-pro"),
+         PresetModel("glm-5.3"), PresetModel("kimi-k3")),
+        (),
+        ("https://opencode.ai/docs/zen",),
+        "the address may be checked against https://opencode.ai/docs/zen; an older page named "
+        "https://opencode.ai/zen/v1. OpenCode prices some models as ranges, so they are not in the built-in table; "
+        "a model whose name is in that table is priced at the vendor list price. Its key is an OpenCode API key "
+        "(OPENCODE_API_KEY), sent as Authorization: Bearer",
+    ),
+    ProviderPreset(
+        "sub2api", "Sub2API on this machine", "sub2api",
+        (PresetApi(_OPENAI, "http://127.0.0.1:8080/v1"), PresetApi(_ANTHROPIC, "http://127.0.0.1:8080")),
+        (PresetModel("gpt-6.1-sol", 1_050_000, "gpt-6-luna"), PresetModel("gpt-5.6-sol", 1_050_000, "gpt-5.6-luna"),
+         PresetModel("gpt-5.6-luna", 1_050_000, "gpt-5.6-luna")),
+        (),
+        ("https://github.com/Wei-Shaw/sub2api",),
+        "a self-hosted gateway: its key is an sk-... key the gateway issues, sent as Authorization: Bearer, and its "
+        "models depend on the accounts behind it, so match this list to /v1/models",
     ),
 )
 
