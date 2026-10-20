@@ -774,13 +774,15 @@ class PlannerAgent:
         self._schedule_session_id: str | None = None
         self._schedule_previous: Mapping[str, Any] | None = None
         self._schedule_session_writes = False
-        # The session directory claimed for this task (planner-schedule-<id>). Set for this process when the
-        # claim succeeds, and read back with the task after a restart. Unset tasks keep self.agent_id.
-        # Giving the conversation up switches this to the task's own label and keeps a project read from
-        # putting the shared directory back. Until that label is stored, a turn does not start a session.
+        # Where this task's session files live. The schedule directory is used only for the stored
+        # schedule session: this process claimed that conversation and is still writing it, or a resume
+        # is finding the directory a persisted label already names. Any fresh session (nothing to resume,
+        # including after a restart that found an empty session) uses this task's own label, whatever the
+        # task row still says. The persisted label does not adopt the schedule directory.
         self._planner_session_label: str | None = None
         self._own_session_label = False
         self._own_label_pending = False
+        self._schedule_directory_adopted = False
         self._idle_task: asyncio.Task[Any] | None = None
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
@@ -2793,7 +2795,16 @@ class PlannerAgent:
                 await self._activity("phase", ("Schedule Planner session replaced: the stored session cannot be "
                                               f"resumed ({switch.describe()}); this run starts fresh")[:500])
             await self._switch_session(plan, switch, settings.timeout_seconds)
-        label = self._planner_session_label or self.agent_id
+        label = self._directory_label(plan)
+        if label == self.agent_id and not plan.session_id:
+            # This fresh session is the task's, not the schedule's. Do not publish it back onto the
+            # schedule. Store the own label before the process starts when the row still names another
+            # directory, so the next resume and cleanup follow this directory. The label above was
+            # already chosen; a persisted value does not replace it.
+            self._schedule_session_writes = False
+            if self._planner_session_label not in (None, self.agent_id):
+                await self._use_own_session_label(stop_turn=True)
+                label = self.agent_id
         if launch.runtime is not self._claude_runtime or self._claude.label != label:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await self._claude.stop()
@@ -3713,6 +3724,7 @@ class PlannerAgent:
         self._scheduled = project.get("task_schedule_id") is not None
         self._schedule_id = project.get("task_schedule_id")
         if project.get("task_planner_session_label") and not self._own_session_label:
+            # Locates an existing session on resume. A fresh start does not run here; see _directory_label.
             self._planner_session_label = str(project["task_planner_session_label"])
         updated_at = project.get("updated_at")
         plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
@@ -3943,6 +3955,7 @@ class PlannerAgent:
         """Only a new non-parallel schedule plan borrows the stored conversation."""
         self._schedule_session_id, self._schedule_previous = None, None
         self._schedule_session_writes = False
+        self._schedule_directory_adopted = False
         if not self._scheduled:
             return
         try:
@@ -3958,6 +3971,10 @@ class PlannerAgent:
                 return
             self._schedule_session_writes = True
             self._own_session_label = False
+            self._own_label_pending = False
+            # This process owns the schedule conversation, so the session it writes lives in the schedule
+            # directory. Reading a label back after a restart does not.
+            self._schedule_directory_adopted = True
             if self._schedule_id:
                 self._planner_session_label = db_schedules.planner_storage_label(self._schedule_id)
             plan.session_id = self._schedule_session_id = claimed["session_id"]
@@ -3983,13 +4000,31 @@ class PlannerAgent:
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
 
+    def _directory_label(self, plan: TaskPlan) -> str:
+        """The directory label for the session this turn starts.
+
+        The schedule label is used only while this process is writing the stored schedule session it
+        claimed (resuming it, creating it, or replacing it). Resuming any other saved session uses the
+        persisted label, which is where that session's files already are. Every fresh session — a first
+        turn with nothing to resume, after giving the schedule session up, after a reset, after an error,
+        after a restart that found an empty session — uses this task's own label, whatever was persisted.
+        """
+        if self._schedule_directory_adopted and self._schedule_session_writes and self._schedule_id:
+            return db_schedules.planner_storage_label(self._schedule_id)
+        if plan.session_id:
+            return self._planner_session_label or self.agent_id
+        return self.agent_id
+
     async def _use_own_session_label(self, *, stop_turn: bool = False) -> None:
         """This run's session directory is its own (``planner-<task>``), not the schedule's.
 
-        The run that holds the conversation keeps ``planner-schedule-<id>``. The label is stored before any new
-        session starts. A failed write leaves it pending. With ``stop_turn`` the turn stops and is retried the
-        usual way; it does not continue in the shared directory. The next turn tries the write again.
+        Giving the conversation up, or starting fresh when the task row still names the schedule
+        directory, stores that own label before a new session starts. A failed write leaves it pending.
+        With ``stop_turn`` the turn stops and is retried the usual way; it does not continue in the shared
+        directory. The next turn tries the write again. The directory a fresh session runs in is chosen by
+        ``_directory_label``, not by the label this write has or has not stored yet.
         """
+        self._schedule_directory_adopted = False
         self._own_label_pending = True
         try:
             await db_tasks.set_planner_session_label(self._task_id, self.agent_id)

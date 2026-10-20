@@ -300,9 +300,10 @@ async def set_continues_schedule_session(task_id: str, continues: bool) -> None:
 async def set_planner_session_label(task_id: str, label: str) -> None:
     """Persist the session-directory label this task's Planner uses.
 
-    A task that holds a schedule conversation stores ``planner-schedule-<id>``. One that gives that conversation
-    up stores its own label (``planner-<task id>``), so its session directory and per-turn cleanup stay off the
-    holder's.
+    Resume uses it to find that session's directory, and cleanup keeps the directory of every live task.
+    It is ``planner-schedule-<id>`` while the task is in the schedule's stored conversation, and the task's
+    own label (``planner-<task id>``) once a fresh session is its own, so that session's directory and
+    per-turn cleanup stay off the schedule's.
     """
     await get_pool().execute("UPDATE tasks SET planner_session_label = $2 WHERE id = $1", task_id, label)
 
