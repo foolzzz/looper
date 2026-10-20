@@ -353,9 +353,13 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 					Steps: []pyStep{{Do: "arm"}, {Do: "take"}, {Do: "drop"}},
 				})
 				reads := &streamReads{rows: rows}
-				_, _, addr := startActivity(t, reads, nil)
+				srv, _, addr := startActivity(t, reads, nil)
 				conn := dialActivity(t, addr, activityStreamTask, tc.query)
 				readEqual(t, conn, py.Parts[0])
+				// The follow-up page is issued after those history frames are
+				// flushed. Python records calls only once the live subscription
+				// has armed. Wait for that subscriber, then compare.
+				waitCount(t, srv.Activity, activityStreamTask, 1)
 				sinces, limits, calls, task := reads.snapshot()
 				sameStreamCalls(t, py.Calls, sinces, limits, calls, task, activityStreamTask)
 				if len(sinces) != len(tc.sinces) || !sameInts(sinces, tc.sinces) {
