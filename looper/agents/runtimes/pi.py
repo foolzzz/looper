@@ -3,16 +3,16 @@
 pi is a fifth runtime type (the pi runtime RFC, sections 1, 3 and 6). Registering
 it discovers ``rt-pi`` when ``pi`` is on PATH. Launch commands use private,
 content-addressed homes and separate session directories. JSON events are
-translated independently of OMP. Sessions and the tool bridge are not
-implemented yet, so capabilities stay empty.
+translated independently of OMP. Residents resume one JSON process per turn;
+capabilities stay empty until the tool bridge is implemented.
 There is no pi login and no schema change.
 
 A probe runs only ``--version`` and ``--help``, in a temporary home, agent
 directory and session directory, offline, with a 10 second deadline. 1.3.0 is
 the oldest version that passes. An older version, a version that cannot be
 read, or help that lacks a flag the launch needs is reported and gives the
-runtime nothing it can do. Capabilities stay empty either way until the
-launch, sessions, stream and Looper tool bridge exist. The later ``mcp``
+runtime nothing it can do. Capabilities stay empty until the remaining
+execution paths, including the Looper tool bridge, exist. The later ``mcp``
 capability is that bridge only, not a general MCP client.
 """
 
@@ -28,25 +28,26 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ... import child_env
-from ..run_usage import Usage
+from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter,
     RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
+from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
+    from ..claude_cli import CapStop, ResidentTurn
     from ..profile_registry import ProviderSpec
-    from . import ResidentSession
 
 _PROBE_TIMEOUT_SEC = 10.0
 _VERSION_MAX = 200
@@ -117,7 +118,7 @@ class PiRuntime(RuntimeAdapter):
     type = "pi"
     label = "pi"
     default_executable = "pi"
-    # Empty until the launch, sessions, stream and Looper tool bridge exist. Not a general MCP client.
+    # Empty until all execution paths and the Looper tool bridge exist. Not a general MCP client.
     capabilities = frozenset()
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT})
     # API keys only. pi's own /login and OAuth are not providers Looper binds.
@@ -180,9 +181,6 @@ class PiRuntime(RuntimeAdapter):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def _refuse(self) -> NoReturn:
-        raise RuntimeUnsupported("pi does not implement this yet; only version and help probes run")
-
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch, cwd=cwd),
                              "system prompt file")
@@ -217,10 +215,14 @@ class PiRuntime(RuntimeAdapter):
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
-        self._refuse()
+        """The shared launch, with owner storage and exact resume added by ``ResidentPi``."""
+        sessions = Path(prompt_file).absolute().parent.parent / "pi" / "sessions"
+        return self.run_command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch,
+                                max_turns=max_turns, session_dir=sessions)[:-2]
 
     def resume_args(self, session_id: str) -> list[str]:
-        self._refuse()
+        # This saved ID is resolved inside the owner's directory before spawning, never passed to pi.
+        return ["--session", session_id]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                     max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
@@ -252,11 +254,16 @@ class PiRuntime(RuntimeAdapter):
             *(["--no-session"] if session_dir is None else ["--session-dir", str(session)]),
         ]
 
-    def resident_session(self, label: str) -> ResidentSession:
-        self._refuse()
+    def resident_session(self, label: str) -> ResidentPi:
+        return ResidentPi(label=label)
 
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
-        self._refuse()
+        """Pi reads a single prompt through EOF; JSON mode has no live user-turn transport."""
+        if stdin.is_closing():
+            raise RuntimeError("pi reads one prompt per run: it takes no user turn while it runs")
+        stdin.write(text.encode("utf-8"))
+        await stdin.drain()
+        stdin.close()
 
     def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
         return PiStream(model=model).events(stdout)
@@ -494,6 +501,103 @@ class PiStream:
                     **self._base(), "modelUsage": model_usage, "result": "", "errors": [error]}
         return {"type": "result", "subtype": "success", "is_error": False,
                 **self._base(), "modelUsage": model_usage, "result": self._last_text}
+
+
+class _SessionLost(Exception):
+    """The owner's saved ID has no unique private file to resume."""
+
+
+class ResidentPi(PerTurnSession):
+    """Manager/Planner turns on pi: JSON subprocesses, private owner storage, exact file resume.
+
+    Only new requests are emitted by ``PiStream``. Saved totals therefore add
+    each turn's usage, including after a server restart; history is never billed again.
+    Cancellation, spend caps and process-tree cleanup belong to ``PerTurnSession``.
+    """
+
+    runtime_label = "pi"
+
+    def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
+        if (len(command) < 5 or command[0] != "env" or not command[1].startswith("HOME=")
+                or not command[2].startswith("PI_CODING_AGENT_DIR=")
+                or not command[3].startswith("PI_CODING_AGENT_SESSION_DIR=")):
+            raise ValueError("a resident pi command starts with env HOME=<home> PI_CODING_AGENT_DIR=<agent> "
+                             "PI_CODING_AGENT_SESSION_DIR=<sessions> <pi>")
+        session = None
+        if command[-2] == "--session":
+            command, session = command[:-2], command[-1]
+        if any(flag in command[5:] for flag in
+               ("--session", "--session-id", "--resume", "--continue", "--no-session", "--session-dir")):
+            raise ValueError("a resident pi command must leave session selection to its owner")
+        return command, session, command[4]
+
+    def _session_dir(self) -> Path:
+        home = Path(self._base[1].partition("=")[2])
+        return home.parent.parent / "sessions" / session_dir_name(self._label)
+
+    def _session_file(self, session_id: str) -> Path | None:
+        """Match the header's whole ID, never a partial ID or a link into another owner."""
+        directory = self._session_dir()
+        if not directory.is_dir() or directory.is_symlink():
+            return None
+        matches = []
+        for path in directory.glob("*.jsonl"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                with path.open("rb") as source:
+                    header = json.loads(source.readline(65_536))
+            except (OSError, ValueError):
+                continue
+            if isinstance(header, dict) and header.get("type") == "session" and header.get("id") == session_id:
+                matches.append(path)
+        return matches[0] if len(matches) == 1 else None
+
+    def _turn_argv(self) -> list[str]:
+        directory = self._session_dir()
+        resume = []
+        if self._session is not None:
+            saved = self._session_file(self._session)
+            if saved is None:
+                raise _SessionLost("pi's saved session has no unique file in its owner's directory")
+            resume = ["--session", str(saved)]
+        _private_dir(directory)
+        base = list(self._base)
+        base[3] = f"PI_CODING_AGENT_SESSION_DIR={directory}"
+        return [*base, "--session-dir", str(directory), *resume]
+
+    def _stream(self) -> PiStream:
+        model = self._base[self._base.index("--model") + 1] if "--model" in self._base else None
+        return PiStream(model=model)
+
+    async def run_turn(
+        self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
+        stop: Callable[[], CapStop | None] | None = None,
+    ) -> ResidentTurn:
+        from ..claude_cli import ResidentTurn
+
+        new_session = self._session is None
+        try:
+            turn = await super().run_turn(text, on_event, tag=tag, stop=stop)
+        except _SessionLost:
+            self._ended = True
+            return ResidentTurn(None, 1, session_started=False)
+        if new_session and turn.session_started and turn.result_event and not turn.result_event.get("is_error"):
+            self._prune_sessions()
+        return turn
+
+    def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
+        own = run_usage(result_event, price=self._price)
+        if result_event is not None:
+            self._totals = self._totals.plus(own)
+        return own
+
+    def _prune_sessions(self) -> None:
+        if self._session is None or (keep := self._session_file(self._session)) is None:
+            return
+        for path in self._session_dir().glob("*.jsonl"):
+            if path != keep and (path.is_file() or path.is_symlink()):
+                path.unlink(missing_ok=True)
 
 
 def runtime_notes() -> str:
