@@ -78,12 +78,15 @@ func TestCatalogGoldenParity(t *testing.T) {
 	t.Cleanup(func() { sqlDB.Close() })
 	api := httpapi.New("parity-test", db.Probe{DB: sqlDB}, "")
 	api.Reads = db.NewStore(sqlDB)
+	api.Port = 18091
+	token := useOperatorToken(t, api)
 	handler := api.Handler()
 
 	check := func(name, path string, status int) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:18091"+path, nil).WithContext(ctx)
+			req.Header.Set("Authorization", "Bearer "+token)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, req)
 			if response.Code != status {

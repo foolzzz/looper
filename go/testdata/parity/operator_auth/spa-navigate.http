@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+Content-Type: text/html
+Content-Length: 22
+Cache-Control: no-store
+Referrer-Policy: same-origin
+Set-Cookie: looper_operator_18834=operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; Path=/; HttpOnly; SameSite=Strict
+
+<html>dashboard</html>

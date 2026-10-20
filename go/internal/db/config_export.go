@@ -21,19 +21,20 @@ const PythonVersion = "2.11.0"
 // Each read is deliberately separate from dashboard reads: only this explicit
 // download path may read provider keys and unmasked MCP values.
 var configExportSQL = map[string]string{
-	"layers":    `SELECT l.scope,l.role,l.project_id,l.harness_prompt,l.profile_id,a.name AS profile,l.env,l.run_budget_usd,l.max_concurrency,l.boundaries,l.system_prompt_mode FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id=l.profile_id ORDER BY l.project_id NULLS FIRST,l.scope,l.role NULLS FIRST`,
-	"runtimes":  `SELECT id,name,type,executable,capabilities,builtin FROM agent_runtimes ORDER BY name COLLATE "C"`,
-	"providers": `SELECT p.id,p.name,p.protocols,p.auth,p.oauth_runtime_type,p.base_url,p.models,p.env,p.max_concurrency,p.builtin,s.api_key FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id=p.id ORDER BY p.name COLLATE "C"`,
-	"profiles":  `SELECT a.id,a.name,r.name AS runtime,p.name AS provider,a.model,a.effort,a.agent_teams,a.custom_prompt,a.builtin FROM agent_profiles a JOIN agent_runtimes r ON r.id=a.runtime_id JOIN llm_providers p ON p.id=a.provider_id ORDER BY a.name COLLATE "C"`,
-	"roles":     `SELECT role,system_prompt,default_prompt,timeout_seconds,enabled FROM role_configs WHERE role=ANY(ARRAY['manager','planner','worker','reviewer']) ORDER BY role`,
-	"items":     `SELECT i.id,i.kind,i.name,i.origin,i.owner_project_id,p.name AS owner_project_name,i.description,i.source,i.version,i.sha256,i.size_bytes,i.file_count,i.modified,m.transport,m.command,m.args,m.env,m.url,m.headers FROM library_items i LEFT JOIN projects p ON p.id=i.owner_project_id LEFT JOIN library_mcp_servers m ON m.item_id=i.id ORDER BY i.owner_project_id NULLS FIRST,i.kind,i.name COLLATE "C"`,
-	"files":     `SELECT path,content,sha256,executable FROM library_files WHERE item_id=$1 ORDER BY path COLLATE "C"`,
-	"installs":  `SELECT s.id,s.item_id,s.scope,s.project_id,p.name AS project_name,s.roles,s.enabled,i.kind,i.name,o.name AS owner_project_name FROM library_installs s JOIN library_items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=s.project_id LEFT JOIN projects o ON o.id=i.owner_project_id ORDER BY s.scope,p.name COLLATE "C" NULLS FIRST,i.kind,i.name COLLATE "C",o.name COLLATE "C"`,
-	"channels":  `SELECT channel_id,channel_type,display_name,enabled,config FROM channel_configs ORDER BY channel_id`,
-	"projects":  `SELECT id,name,description,background,` + strings.Join(executionFields, ",") + ` FROM projects ORDER BY lower(name)`,
-	"documents": `SELECT id,project_id,title,summary,source_kind,filename,path,size_bytes,sha256,content FROM project_documents ORDER BY project_id,created_at,id`,
-	"templates": `SELECT t.project_id,t.template_key,t.kind,t.description,t.role_prompt,t.harness,t.profile_id,t.items,a.name AS profile FROM project_role_templates t LEFT JOIN agent_profiles a ON a.id=t.profile_id ORDER BY t.project_id,t.template_key`,
-	"schedules": `SELECT s.*,p.name AS project_name FROM schedules s JOIN projects p ON p.id=s.project_id ORDER BY lower(p.name),p.id,lower(s.name),s.id`,
+	"layers":          `SELECT l.scope,l.role,l.project_id,l.harness_prompt,l.profile_id,a.name AS profile,l.env,l.run_budget_usd,l.max_concurrency,l.boundaries,l.system_prompt_mode FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id=l.profile_id ORDER BY l.project_id NULLS FIRST,l.scope,l.role NULLS FIRST`,
+	"runtimes":        `SELECT id,name,type,executable,capabilities,builtin FROM agent_runtimes ORDER BY name COLLATE "C"`,
+	"providers":       `SELECT p.id,p.name,p.protocols,p.auth,p.oauth_runtime_type,p.base_url,p.models,p.env,p.max_concurrency,p.builtin,s.api_key FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id=p.id ORDER BY p.name COLLATE "C"`,
+	"profiles":        `SELECT a.id,a.name,r.name AS runtime,p.name AS provider,a.model,a.effort,a.agent_teams,a.custom_prompt,a.builtin FROM agent_profiles a JOIN agent_runtimes r ON r.id=a.runtime_id JOIN llm_providers p ON p.id=a.provider_id ORDER BY a.name COLLATE "C"`,
+	"roles":           `SELECT role,system_prompt,default_prompt,timeout_seconds,enabled FROM role_configs WHERE role=ANY(ARRAY['manager','planner','worker','reviewer']) ORDER BY role`,
+	"items":           `SELECT i.id,i.kind,i.name,i.origin,i.owner_project_id,p.name AS owner_project_name,i.description,i.source,i.version,i.sha256,i.size_bytes,i.file_count,i.modified,m.transport,m.command,m.args,m.env,m.url,m.headers FROM library_items i LEFT JOIN projects p ON p.id=i.owner_project_id LEFT JOIN library_mcp_servers m ON m.item_id=i.id ORDER BY i.owner_project_id NULLS FIRST,i.kind,i.name COLLATE "C"`,
+	"files":           `SELECT path,content,sha256,executable FROM library_files WHERE item_id=$1 ORDER BY path COLLATE "C"`,
+	"installs":        `SELECT s.id,s.item_id,s.scope,s.project_id,p.name AS project_name,s.roles,s.enabled,i.kind,i.name,o.name AS owner_project_name FROM library_installs s JOIN library_items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=s.project_id LEFT JOIN projects o ON o.id=i.owner_project_id ORDER BY s.scope,p.name COLLATE "C" NULLS FIRST,i.kind,i.name COLLATE "C",o.name COLLATE "C"`,
+	"channels":        `SELECT channel_id,channel_type,display_name,enabled,config FROM channel_configs ORDER BY channel_id`,
+	"system_settings": `SELECT key, value FROM system_settings WHERE key IN ($1, $2)`,
+	"projects":        `SELECT id,name,description,background,` + strings.Join(executionFields, ",") + ` FROM projects ORDER BY lower(name)`,
+	"documents":       `SELECT id,project_id,title,summary,source_kind,filename,path,size_bytes,sha256,content FROM project_documents ORDER BY project_id,created_at,id`,
+	"templates":       `SELECT t.project_id,t.template_key,t.kind,t.description,t.role_prompt,t.harness,t.profile_id,t.items,a.name AS profile FROM project_role_templates t LEFT JOIN agent_profiles a ON a.id=t.profile_id ORDER BY t.project_id,t.template_key`,
+	"schedules":       `SELECT s.*,p.name AS project_name FROM schedules s JOIN projects p ON p.id=s.project_id ORDER BY lower(p.name),p.id,lower(s.name),s.id`,
 }
 
 type exportRead func(context.Context, string, string) ([]map[string]any, error)
@@ -71,6 +72,10 @@ func (s *Store) ExportConfig(ctx context.Context, out io.Writer, opts configtran
 			args := []any{}
 			if section == "files" {
 				args = append(args, id)
+			}
+			if section == "system_settings" {
+				// The same two keys stored_scheduler_settings passes to ANY($1).
+				args = append(args, schedulerMinIntervalKey, schedulerRunTimeoutKey)
 			}
 			rows, err := exportQuery(ctx, tx, query, args...)
 			if err != nil {
@@ -161,9 +166,10 @@ func exportConfig(ctx context.Context, out io.Writer, opts configtransfer.Option
 		return string(raw), nil
 	}
 	headRows := map[string][]map[string]any{}
-	// Python reads these before yielding the header, so a failed read still
-	// produces a normal HTTP error rather than a partial download.
-	for _, section := range []string{"layers", "items", "installs", "channels", "providers", "runtimes", "profiles", "roles"} {
+	// Python reads these, including stored scheduler settings, before yielding
+	// the header, so a failed read still produces a normal HTTP error rather
+	// than a partial download.
+	for _, section := range []string{"layers", "items", "installs", "channels", "providers", "runtimes", "profiles", "roles", "system_settings"} {
 		rows, e := read(ctx, section, "")
 		if e != nil {
 			return summary, e
@@ -222,7 +228,19 @@ func exportConfig(ctx context.Context, out io.Writer, opts configtransfer.Option
 	}
 	summary.Counts["settings.layers"] = len(layers)
 	summary.Counts["settings.roles"] = len(roles)
-	head = append(head, exportField{Key: "settings", Value: exportObject{{Key: "layers", Value: layers}, {Key: "roles", Value: roles}}})
+	// stored_scheduler_settings carries only a setting that is actually stored.
+	// The count includes zero. An empty store is omitted from the file so the
+	// importer keeps its own built-in interval and timeout.
+	scheduler, e := exportSchedulerSettings(headRows["system_settings"])
+	if e != nil {
+		return summary, e
+	}
+	summary.Counts["settings.scheduler"] = len(scheduler)
+	settings := exportObject{{Key: "layers", Value: layers}, {Key: "roles", Value: roles}}
+	if len(scheduler) > 0 {
+		settings = append(settings, exportField{Key: "scheduler", Value: scheduler})
+	}
+	head = append(head, exportField{Key: "settings", Value: settings})
 	channels := []any{}
 	for _, row := range headRows["channels"] {
 		entry, n, e := exportChannel(row, opts.IncludeSecrets)

@@ -121,7 +121,7 @@ class _Env(SimpleNamespace):
 def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import asyncpg
 
-    from looper.agents import schedules
+    from looper.agents import scheduler_settings
     from looper.agents.scheduler import Scheduler
     from looper.db import connection, projects
 
@@ -133,7 +133,7 @@ def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         try:
             await connection.ensure_schema(pool)
             monkeypatch.setattr(connection, "_pool", pool)
-            monkeypatch.setattr(schedules, "_min_interval", schedules.DEFAULT_MIN_INTERVAL_SECONDS)
+            monkeypatch.setattr(scheduler_settings, "_min_interval", scheduler_settings.DEFAULT_MIN_INTERVAL_SECONDS)
             project = await projects.create_project(name="alerts", work_dir=str(tmp_path), pool=pool)
             bus, clock = _Bus(), _Clock()
             env = _Env(pool=pool, bus=bus, clock=clock,

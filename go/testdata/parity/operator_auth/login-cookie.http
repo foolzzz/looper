@@ -1,0 +1,8 @@
+HTTP/1.1 303 See Other
+Content-Type: text/html; charset=utf-8
+Content-Length: 0
+Cache-Control: no-store
+Referrer-Policy: same-origin
+Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'
+Location: /
+

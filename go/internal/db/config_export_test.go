@@ -95,6 +95,12 @@ func TestConfigExportGolden(t *testing.T) {
 				}
 				t.Fatalf("export differs at byte %d:\ngot %s\nwant %s", first, out.String(), want)
 			}
+			if !bytes.Contains(out.Bytes(), []byte(`"scheduler":{"min_interval_seconds":60,"run_timeout_seconds":600}`)) {
+				t.Fatal("stored scheduler settings missing")
+			}
+			if bytes.Contains(out.Bytes(), []byte("do-not-export")) {
+				t.Fatal("non-scheduler system setting exported")
+			}
 			const secret = "SYNTHETIC_CONFIG_EXPORT_SECRET_DO_NOT_USE"
 			if bytes.Contains(out.Bytes(), []byte(secret)) != tt.secrets {
 				t.Fatal("secret opt-in did not control exported values")
@@ -130,9 +136,100 @@ func TestConfigExportGolden(t *testing.T) {
 		})
 	}
 }
+func TestExportStoredSchedulerSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		rows    []map[string]any
+		want    string
+		count   int
+		wantErr bool
+	}{
+		{
+			name: "both keys ignore order and unrelated rows",
+			rows: []map[string]any{
+				{"key": "scheduler.run_timeout_seconds", "value": "600"},
+				{"key": "unrelated.setting", "value": "do-not-export"},
+				{"key": "scheduler.min_interval_seconds", "value": " 60 "},
+			},
+			want:  `"scheduler":{"min_interval_seconds":60,"run_timeout_seconds":600}`,
+			count: 2,
+		},
+		{
+			name:  "timeout only",
+			rows:  []map[string]any{{"key": "scheduler.run_timeout_seconds", "value": "15"}},
+			want:  `"scheduler":{"run_timeout_seconds":15}`,
+			count: 1,
+		},
+		{name: "empty store omits the object", count: 0},
+		{
+			name:    "not an integer",
+			rows:    []map[string]any{{"key": "scheduler.min_interval_seconds", "value": "60.0"}},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			summary, err := exportConfig(context.Background(), &out, configtransfer.Options{
+				Now: time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), Version: PythonVersion,
+			}, func(ctx context.Context, section, id string) ([]map[string]any, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if section == "system_settings" {
+					return tt.rows, nil
+				}
+				return []map[string]any{}, nil
+			})
+			if tt.wantErr {
+				if err == nil || out.Len() != 0 || !strings.Contains(err.Error(), "scheduler.min_interval_seconds") {
+					t.Fatalf("err %v bytes %d", err, out.Len())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.Counts["settings.scheduler"] != tt.count {
+				t.Fatalf("count %d", summary.Counts["settings.scheduler"])
+			}
+			if tt.want == "" {
+				if bytes.Contains(out.Bytes(), []byte("scheduler")) {
+					t.Fatalf("empty store wrote %s", out.Bytes())
+				}
+				return
+			}
+			if !bytes.Contains(out.Bytes(), []byte(tt.want)) {
+				t.Fatalf("missing %s in %s", tt.want, out.Bytes())
+			}
+		})
+	}
+}
+
+func TestExportScheduleTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		row  map[string]any
+		want any
+	}{
+		{name: "inherit", row: map[string]any{"run_timeout_mode": "inherit", "run_timeout_seconds": 900}, want: "default"},
+		{name: "missing column", row: map[string]any{"run_timeout_seconds": 900}, want: "default"},
+		{name: "seconds", row: map[string]any{"run_timeout_mode": "seconds", "run_timeout_seconds": 900}, want: 900},
+		{name: "none", row: map[string]any{"run_timeout_mode": "none", "run_timeout_seconds": 900}, want: nil},
+		{name: "blank", row: map[string]any{"run_timeout_mode": "", "run_timeout_seconds": 1}, want: "default"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exportScheduleTimeout(tt.row); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("%s: %#v want %#v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConfigExportFailure(t *testing.T) {
 	fail := errors.New("synthetic failure")
-	for _, section := range []string{"providers", "documents", "files"} {
+	for _, section := range []string{"providers", "system_settings", "documents", "files"} {
 		t.Run(section, func(t *testing.T) {
 			read := exportFixtureRead(t)
 			var out bytes.Buffer
@@ -145,10 +242,10 @@ func TestConfigExportFailure(t *testing.T) {
 			if !errors.Is(err, fail) {
 				t.Fatalf("error %v", err)
 			}
-			if section == "providers" && out.Len() != 0 {
+			if (section == "providers" || section == "system_settings") && out.Len() != 0 {
 				t.Fatal("header written before reads completed")
 			}
-			if section != "providers" && (out.Len() == 0 || json.Valid(out.Bytes())) {
+			if section != "providers" && section != "system_settings" && (out.Len() == 0 || json.Valid(out.Bytes())) {
 				t.Fatal("post-header failure did not leave partial JSON")
 			}
 		})

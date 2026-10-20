@@ -672,18 +672,10 @@ async def _run_agent_system(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import links, operator_notes, schedules
+    from . import links, operator_notes, scheduler_settings
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
-    try:
-        min_interval = schedules.configure_min_interval()
-    except ValueError as exc:
-        raise StartupCheckFailed(str(exc)) from None
-    if min_interval != schedules.DEFAULT_MIN_INTERVAL_SECONDS:
-        logger.warning("%s=%d: schedules may fire %d s apart instead of %d s; this setting is for tests and "
-                       "validation only", schedules.MIN_INTERVAL_ENV, min_interval, min_interval,
-                       schedules.DEFAULT_MIN_INTERVAL_SECONDS)
 
     from . import operator_auth
     try:
@@ -698,6 +690,10 @@ async def _run_agent_system(
     pool = await init_pool(dsn)
     await _back_up_before_schema_change(pool, ops, runtime_root, skip_backup=skip_backup)
     await ensure_schema(pool)
+    try:
+        await scheduler_settings.load()
+    except ValueError as exc:
+        raise StartupCheckFailed(str(exc)) from None
 
     await seed_role_configs(pool)
     await seed_channel_configs(pool)

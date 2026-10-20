@@ -629,5 +629,19 @@
       "profile_overrides": {},
       "task_limits": {}
     }
+  ],
+  "system_settings": [
+    {
+      "key": "scheduler.run_timeout_seconds",
+      "value": "600"
+    },
+    {
+      "key": "unrelated.setting",
+      "value": "do-not-export"
+    },
+    {
+      "key": "scheduler.min_interval_seconds",
+      "value": "60"
+    }
   ]
 }

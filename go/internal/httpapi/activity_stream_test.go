@@ -541,7 +541,6 @@ func TestDeferredChannelGetsStayNotFound(t *testing.T) {
 		"/api/channels/lark/people",
 		"/api/channels/lark_bot/status",
 		"/api/channels/lark_bot/people",
-		"/api/agent/v1/tools",
 	}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {

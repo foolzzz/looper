@@ -29,6 +29,7 @@
       "worker",
       "reviewer"
     ],
+    "run_timeout_default_seconds": null,
     "run_timeout_max_seconds": 2592000
   },
   "schedules": []

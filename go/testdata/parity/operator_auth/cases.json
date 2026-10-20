@@ -1,0 +1,388 @@
+{
+  "port": 18834,
+  "operator_token": "operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "agent_token": "agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "files": {
+    "index.html": "<html>dashboard</html>",
+    "assets/app.js": "console.log(1)",
+    "docs/index.html": "DOC"
+  },
+  "cases": [
+    {
+      "name": "missing",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "wrong",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Authorization": "Bearer wrong"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "bearer-unknown",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Authorization": "Bearer operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "cookie-unknown",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Cookie": "other=value; looper_operator_18834=operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "other-port",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Cookie": "other=value; looper_operator_18835=operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "agent-on-operator",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Authorization": "Bearer agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "agent-and-cookie",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Authorization": "Bearer agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "Cookie": "other=value; looper_operator_18834=operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "mixed-case-bearer",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Authorization": "bEaReR operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "put-missing",
+      "method": "PUT",
+      "target": "/api/tasks/task-1/roles/coder",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "options-api-missing",
+      "method": "OPTIONS",
+      "target": "/api/tasks/create",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "options-api-token",
+      "method": "OPTIONS",
+      "target": "/api/tasks/create",
+      "headers": {
+        "Authorization": "Bearer operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "post-import-missing",
+      "method": "POST",
+      "target": "/api/config/imports",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "agent-tools",
+      "method": "GET",
+      "target": "/api/agent/v1/tools",
+      "headers": {
+        "Authorization": "Bearer agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "source": "deferred-tools",
+      "deferred_tools": true
+    },
+    {
+      "name": "operator-on-agent",
+      "method": "GET",
+      "target": "/api/agent/v1/tools",
+      "headers": {
+        "Authorization": "Bearer operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "agent-missing",
+      "method": "GET",
+      "target": "/api/agent/v1/tools",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "options-agent-missing",
+      "method": "OPTIONS",
+      "target": "/api/agent/v1/tools",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "options-agent-token",
+      "method": "OPTIONS",
+      "target": "/api/agent/v1/tools",
+      "headers": {
+        "Authorization": "Bearer agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "agent-scheme",
+      "method": "GET",
+      "target": "/api/agent/v1/tools",
+      "headers": {
+        "Authorization": "bearer agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "source": "deferred-tools",
+      "deferred_tools": true
+    },
+    {
+      "name": "agent-spaced",
+      "method": "GET",
+      "target": "/api/agent/v1/nope",
+      "headers": {
+        "Authorization": "Bearer  agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  "
+      },
+      "source": "handler"
+    },
+    {
+      "name": "agent-prefix",
+      "method": "GET",
+      "target": "/api/agent/v1",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "agent-dotdot",
+      "method": "GET",
+      "target": "/api/agent/v1/../status",
+      "headers": {
+        "Authorization": "Bearer agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "root-navigate",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "index-navigate",
+      "method": "GET",
+      "target": "/index.html",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "spa-navigate",
+      "method": "GET",
+      "target": "/tasks/task-1",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "assets-dir-navigate",
+      "method": "GET",
+      "target": "/assets",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "no-fetch",
+      "method": "GET",
+      "target": "/",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "iframe",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "iframe"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "script",
+      "method": "GET",
+      "target": "/assets/app.js",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "script"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "docs-index",
+      "method": "GET",
+      "target": "/docs/index.html",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "xff",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+        "X-Forwarded-For": ""
+      },
+      "source": "handler"
+    },
+    {
+      "name": "forwarded-empty",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+        "Forwarded": ""
+      },
+      "source": "handler"
+    },
+    {
+      "name": "bearer-not-browser",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Authorization": "Bearer operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "query-token",
+      "method": "GET",
+      "target": "/?token=operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "query-code",
+      "method": "GET",
+      "target": "/?code=operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "login-navigate",
+      "method": "GET",
+      "target": "/login",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "login-cookie",
+      "method": "GET",
+      "target": "/login",
+      "headers": {
+        "Cookie": "looper_operator_18834=operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler"
+    },
+    {
+      "name": "login-anonymous",
+      "method": "GET",
+      "target": "/login",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "options-dashboard",
+      "method": "OPTIONS",
+      "target": "/",
+      "headers": {},
+      "source": "handler"
+    },
+    {
+      "name": "empty-token-api",
+      "method": "GET",
+      "target": "/api/nothing-here",
+      "headers": {
+        "Authorization": "Bearer operator_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": "handler",
+      "clear_operator_token": true
+    },
+    {
+      "name": "empty-token-navigate",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler",
+      "clear_operator_token": true
+    },
+    {
+      "name": "remote-not-loopback",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler",
+      "remote": "10.0.0.5:12345"
+    },
+    {
+      "name": "bad-host",
+      "method": "GET",
+      "target": "/",
+      "headers": {
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document"
+      },
+      "source": "handler",
+      "host": "evil.example:18834"
+    }
+  ]
+}

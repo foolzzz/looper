@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 680
+Cache-Control: no-store
+Referrer-Policy: same-origin
+Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'
+
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Looper</title><style>:root{color-scheme:light dark;font:16px system-ui;background:#f4f5f7;color:#202124}body{max-width:24rem;margin:12vh auto;padding:2rem}form,label{display:grid;gap:.6rem}form{gap:1.2rem}input,button{font:inherit;padding:.7rem;border:1px solid #888;border-radius:.4rem}.error{color:#b3261e}@media(prefers-color-scheme:dark){:root{background:#18191b;color:#eee}.error{color:#ffb4ab}}</style><h1>Looper</h1><p>No password is set. On the server's machine run <code>looper auth set-password</code>, or open the dashboard there.</p></html>

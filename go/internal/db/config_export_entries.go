@@ -13,6 +13,40 @@ import (
 type exportObject = pyjson.Object
 type exportField = pyjson.Field
 
+// The system_settings keys stored_scheduler_settings exports, in the order
+// Python writes them. A key with no row is left out.
+const (
+	schedulerMinIntervalKey = "scheduler.min_interval_seconds"
+	schedulerRunTimeoutKey  = "scheduler.run_timeout_seconds"
+)
+
+func exportSchedulerSettings(rows []map[string]any) (exportObject, error) {
+	stored := map[string]any{}
+	for _, row := range rows {
+		key := asString(row["key"])
+		if key == "" {
+			continue
+		}
+		stored[key] = row["value"]
+	}
+	out := exportObject{}
+	for _, field := range []struct{ name, key string }{
+		{"min_interval_seconds", schedulerMinIntervalKey},
+		{"run_timeout_seconds", schedulerRunTimeoutKey},
+	} {
+		raw, ok := stored[field.key]
+		if !ok {
+			continue
+		}
+		value, ok := RoleVersion(raw)
+		if !ok {
+			return nil, fmt.Errorf("export settings.scheduler %s: stored value is not an integer", field.key)
+		}
+		out = append(out, exportField{Key: field.name, Value: value})
+	}
+	return out, nil
+}
+
 // jsonb stores object keys in byte-length then byte order. Python json.loads
 // preserves that order, including inside arrays and nested objects.
 func exportJSON(v any) any {
@@ -286,8 +320,27 @@ func exportDocument(row map[string]any) exportObject {
 
 var exportScheduleFields = []string{"name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up", "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify"}
 
+// exportScheduleTimeout is config_transfer.schedule_timeout. "inherit" is the
+// file's "default". "seconds" is the stored number. "none" is null. A fixture
+// row that omits the column matches schema.sql's default after the migration,
+// which is inherit: the INSERT does not name the column.
+func exportScheduleTimeout(row map[string]any) any {
+	mode, _ := row["run_timeout_mode"].(string)
+	if mode == "" {
+		mode = "inherit"
+	}
+	switch mode {
+	case "inherit":
+		return "default"
+	case "seconds":
+		return exportJSON(row["run_timeout_seconds"])
+	default:
+		return nil
+	}
+}
+
 func exportSchedule(row map[string]any, profiles map[string]string, overrides, limits map[string]any) exportObject {
-	out := exportFields(row, exportScheduleFields...)
+	out := exportSet(exportFields(row, exportScheduleFields...), "run_timeout_seconds", exportScheduleTimeout(row))
 	var target any
 	if asString(row["notify_channel"]) != "" {
 		target = exportObject{{Key: "channel", Value: row["notify_channel"]}, {Key: "chat", Value: row["notify_chat"]}}

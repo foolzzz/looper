@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/foolzzz/looper/go/internal/operatorauth"
 	relversion "github.com/foolzzz/looper/go/internal/version"
 )
 
@@ -263,6 +264,7 @@ func TestRunPortInUse(t *testing.T) {
 		"serve",
 		"--port", strconv.Itoa(port),
 		"--db-url", "postgres://postgres:s3cr3t-not-in-logs@127.0.0.1:1/none",
+		"--runtime-root", t.TempDir(),
 	}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code %d stderr %s", code, stderr.String())
@@ -285,6 +287,7 @@ func TestServeShutsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -292,6 +295,7 @@ func TestServeShutsDown(t *testing.T) {
 		done <- serveContext(ctx, []string{
 			"--port", strconv.Itoa(port),
 			"--db-url", "postgres://postgres:s3cr3t-not-in-logs@127.0.0.1:1/none?connect_timeout=1",
+			"--runtime-root", root,
 		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
 
@@ -300,9 +304,17 @@ func TestServeShutsDown(t *testing.T) {
 	var resp *http.Response
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		resp, err = client.Get(url)
-		if err == nil {
-			break
+		token, readErr := operatorauth.ReadToken(context.Background(), root)
+		if readErr == nil && token != "" {
+			req, reqErr := http.NewRequest(http.MethodGet, url, nil)
+			if reqErr != nil {
+				t.Fatal(reqErr)
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err = client.Do(req)
+			if err == nil {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("server did not start: %v", err)
@@ -320,6 +332,13 @@ func TestServeShutsDown(t *testing.T) {
 	if strings.Contains(string(body), "s3cr3t-not-in-logs") {
 		t.Fatal("body leaked the database password")
 	}
+	token, err := operatorauth.ReadToken(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" && strings.Contains(string(body), token) {
+		t.Fatal("body leaked the operator token")
+	}
 	const want = `{"status": "running", "agents": {}, "tasks": {"total": 0, "running": 0, "completed": 0}, "channels": {"web": {"channel": "web", "healthy": false, "active_sse_streams": 0}}, "checks": [], "can_sign_out": false}`
 	if string(body) != want {
 		t.Fatalf("body %s", body)
@@ -334,6 +353,104 @@ func TestServeShutsDown(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown exceeded the limit")
 	}
+}
+
+func TestServeChecksTokenBeforeDatabase(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dbLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbLn.Close()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		conn, acceptErr := dbLn.Accept()
+		if acceptErr != nil {
+			return
+		}
+		conn.Close()
+		accepted <- struct{}{}
+	}()
+
+	err = serveContext(context.Background(), []string{
+		"--port", strconv.Itoa(freeLoopbackPort(t)),
+		"--db-url", "postgres://postgres:postgres@" + dbLn.Addr().String() + "/postgres?connect_timeout=2",
+		"--runtime-root", root,
+	}, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "not writable by group or others") {
+		t.Fatal(err)
+	}
+	select {
+	case <-accepted:
+		t.Fatal("database accepted a connection before the token check failed")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestServeCreatesTokenBeforeDatabase(t *testing.T) {
+	root := t.TempDir()
+	dbLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbLn.Close()
+	got := make(chan error, 1)
+	go func() {
+		conn, acceptErr := dbLn.Accept()
+		if acceptErr != nil {
+			got <- acceptErr
+			return
+		}
+		conn.Close()
+		_, statErr := os.Stat(filepath.Join(root, "operator-token"))
+		got <- statErr
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	httpPort := freeLoopbackPort(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveContext(ctx, []string{
+			"--port", strconv.Itoa(httpPort),
+			"--db-url", "postgres://postgres:postgres@" + dbLn.Addr().String() + "/postgres?connect_timeout=2",
+			"--runtime-root", root,
+		}, discardLogger())
+	}()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("token file: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("database was not contacted")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown exceeded the limit")
+	}
+}
+
+func freeLoopbackPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
 }
 
 // closeListener reports when Serve's listener is closed, which is the first
