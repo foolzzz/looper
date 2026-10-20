@@ -770,9 +770,10 @@ class PlannerAgent:
         self._roles: dict[str, RoleKind] | None = None
         # Whether a schedule started the task (it runs unattended, so it opens no gate), as its project was last read.
         self._scheduled = False
+        self._schedule_id: str | None = None
         self._schedule_session_id: str | None = None
         self._schedule_previous: Mapping[str, Any] | None = None
-        self._schedule_session_writes = True
+        self._schedule_session_writes = False
         self._idle_task: asyncio.Task[Any] | None = None
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
@@ -2781,10 +2782,12 @@ class PlannerAgent:
                 await self._activity("phase", ("Schedule Planner session replaced: the stored session cannot be "
                                               f"resumed ({switch.describe()}); this run starts fresh")[:500])
             await self._switch_session(plan, switch, settings.timeout_seconds)
-        if launch.runtime is not self._claude_runtime:
+        label = (f"planner-schedule-{self._schedule_id}"
+                 if self._schedule_id and self._schedule_session_writes else self.agent_id)
+        if launch.runtime is not self._claude_runtime or self._claude.label != label:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await self._claude.stop()
-            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(label), launch.runtime
         if self._claude.stale(signature):
             # Claude exited, or the config, the settings, the project or the task
             # changed: the next process resumes the session with the new prompt.
@@ -2818,7 +2821,8 @@ class PlannerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             self._process = process
-            resumed = f", resuming session {plan.session_id}" if plan.session_id else ""
+            resumed = (", resuming the stored session" if self._scheduled else
+                       f", resuming session {plan.session_id}") if plan.session_id else ""
             await self._activity("phase", f"Planner Claude Code started (pid {self._claude.pid}{resumed})")
 
         try:
@@ -2827,14 +2831,16 @@ class PlannerAgent:
         except _SessionNotResumed as exc:
             # Claude never started the saved session: it no longer exists, and resuming it again would fail
             # every turn. The Planner continues in a new session, which the resume brief starts.
-            await self._activity("error", f"Warning: Planner {exc}")
+            detail = str(exc).replace(f"session {resuming}", "the stored session") if self._scheduled else str(exc)
+            await self._activity("error", f"Warning: Planner {detail}")
             if self._schedule_session_id:
                 self._schedule_session_id = None
                 message = self._plan_message(plan, await self._template_lines(plan))
                 await self._activity("phase", ("Schedule Planner session replaced: the stored session could not be "
-                                              f"resumed ({exc}); this run starts fresh")[:500])
+                                              f"resumed ({detail}); this run starts fresh")[:500])
             await self._claude.stop()
             await self._drop_session(plan, session_switch.session_lost(
+                "the stored session could not be resumed" if self._scheduled else
                 f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
                 profile=launch.profile.id))
             return await self._run_turn(message, retried=True)
@@ -2895,10 +2901,19 @@ class PlannerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise _SessionNotResumed(error)
 
-            if resuming and resuming == self._schedule_session_id and plan.session_id == resuming:
-                await db_tasks.set_continues_schedule_session(self._task_id, True)
+            if resuming and resuming == self._schedule_session_id:
                 self._schedule_session_id = None
-                await self._activity("phase", "Continuing the schedule's Planner session")
+                if plan.session_id != resuming:
+                    await self._activity("phase", "Schedule Planner session replaced: the runtime started a "
+                                                  "different session instead of the stored session")
+                else:
+                    try:
+                        await db_tasks.set_continues_schedule_session(self._task_id, True)
+                    except Exception:
+                        logger.exception("failed to mark the schedule session continuation of %s", self.agent_id)
+                        await self._activity("error", "Warning: could not record that this run continues the "
+                                                     "schedule's Planner session")
+                    await self._activity("phase", "Continuing the schedule's Planner session")
 
             result_event = turn.result_event
             final_text = str((result_event or {}).get("result") or "")
@@ -3686,6 +3701,7 @@ class PlannerAgent:
         plan.project_work_dir = str(project.get("work_dir") or "")
         self._execution = ProjectExecution.from_row(project)
         self._scheduled = project.get("task_schedule_id") is not None
+        self._schedule_id = project.get("task_schedule_id")
         updated_at = project.get("updated_at")
         plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
 
@@ -4028,3 +4044,19 @@ class PlannerAgent:
             if step.step_id in latest:
                 step.workspace = StepWorkspace.from_row(latest[step.step_id])
         self._plan = plan
+        await self._refresh_project(plan)
+        self._schedule_session_writes = False
+        if self._schedule_id:
+            try:
+                schedule = await db_schedules.get_schedule(self._schedule_id)
+            except Exception:
+                logger.exception("planner %s cannot read its schedule's session holder", self.agent_id)
+                return
+            if schedule:
+                holder = schedule["planner_session_task_id"]
+                self._schedule_session_writes = holder == self._task_id
+                if (plan.session_id and schedule["planner_session_id"] == plan.session_id
+                        and holder is not None and holder != self._task_id):
+                    await self._drop_session(plan, session_switch.session_lost(
+                        "the stored session now belongs to another task", runtime=plan.session_runtime,
+                        profile=plan.session_profile))

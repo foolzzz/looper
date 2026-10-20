@@ -1,12 +1,13 @@
 """The first message of a continuing schedule run is a fixed, bounded contract."""
 
+import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from looper.agents.scheduler import continuing_run_preface
-from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+from looper.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
 
 
 OPENING = (
@@ -42,7 +43,7 @@ def test_fresh_plan_message_is_byte_identical(tmp_path: Path):
 
 
 @pytest.mark.parametrize("mode", ["ordinary", "fresh", "continuing", "parallel", "profile", "lost", "claim_error",
-                                  "different_id"])
+                                  "different_id", "mark_error", "holder_busy"])
 def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets_the_flag(
     monkeypatch, agent_db, planner_claude, mode,
 ):
@@ -51,7 +52,11 @@ def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets
 
     agent_db.get_task_project.return_value = {**_project(), **({"task_schedule_id": "sched-a"}
                                                              if mode != "ordinary" else {})}
-    copied = mode in ("continuing", "profile", "lost", "different_id")
+    from looper.agents.runtimes import CLAUDE_CODE
+
+    labels = Mock(wraps=CLAUDE_CODE.resident_session)
+    monkeypatch.setattr(CLAUDE_CODE, "resident_session", labels)
+    copied = mode in ("continuing", "profile", "lost", "different_id", "mark_error")
     claim = AsyncMock(return_value={
         "claimed": True, "session_id": "sess-p" if copied else None,
         "session_totals": {}, "runtime_type": "claude-code", "profile_id": None,
@@ -61,7 +66,14 @@ def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets
         claim.return_value = {"claimed": False, "reason": "parallel"}
     if mode == "claim_error":
         claim.side_effect = ConnectionError("claim unavailable")
+    if mode == "holder_busy":
+        claim.return_value = {"claimed": False, "reason": "another run holds the session"}
     save, mark = AsyncMock(), AsyncMock()
+    if mode == "mark_error":
+        async def mark_session(_task_id, continues):
+            if continues:
+                raise ConnectionError("mark unavailable")
+        mark.side_effect = mark_session
     monkeypatch.setattr(schedules, "claim_planner_session", claim)
     monkeypatch.setattr(schedules, "save_planner_session", save)
     monkeypatch.setattr(tasks, "set_continues_schedule_session", mark)
@@ -69,18 +81,19 @@ def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets
     if mode == "different_id":
         body = Path(claude.bin + ".py")
         body.write_text(body.read_text().replace("sess-p", "sess-other"))
-    result = drive(claude, always(WORK_OK)).final()
+    harness = drive(claude, always(WORK_OK))
+    result = harness.final()
     assert result is not None and result.payload["status"] == "completed"
     first = claude.argvs()[0]
-    assert ("--resume" in first) is (mode in ("continuing", "lost", "different_id"))
+    assert ("--resume" in first) is (mode in ("continuing", "lost", "different_id", "mark_error"))
     if "--resume" in first:
         assert first[first.index("--resume") + 1] == "sess-p"
     continued = [call.args[1] for call in mark.await_args_list if call.args[1]]
-    assert continued == ([True] if mode == "continuing" else [])
+    assert continued == ([True] if mode in ("continuing", "mark_error") else [])
     if mode == "continuing":
         assert claude.turns()[0]["text"] == continuing_run_preface("t1", None) + "\n\n" + FRESH
         assert "Continuing the schedule's Planner session" in activity(agent_db)
-    elif mode not in ("different_id", "lost"):
+    elif mode not in ("different_id", "lost", "mark_error"):
         assert claude.turns()[0]["text"] == FRESH
     assert all("这是这个定时任务的一次新运行" not in prompt for prompt in claude.prompts())
     lines = activity(agent_db)
@@ -93,10 +106,77 @@ def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets
         assert "--resume" not in claude.argvs()[1]
         assert claude.turns()[0]["text"] == FRESH
         assert any("Schedule Planner session replaced: the stored session could not be resumed (" in line
-                   and "sess-p" in line for line in lines)
+                   for line in lines)
+        assert all("sess-p" not in line for line in lines if "could not be resumed" in line)
+    if mode == "different_id":
+        assert harness.planner._schedule_session_id is None
+        assert any("Schedule Planner session replaced:" in line and "different session" in line for line in lines)
+    if mode == "mark_error":
+        assert any("could not record" in line and "continu" in line for line in lines)
+    assert all("sess-p" not in line and "sess-other" not in line for line in lines)
     if mode == "claim_error":
         assert "Schedule Planner session not claimed: claim unavailable; this run starts fresh" in lines
-    if mode in ("ordinary", "parallel", "claim_error"):
+    if mode in ("ordinary", "parallel", "claim_error", "holder_busy"):
         save.assert_not_awaited()
     else:
         assert save.await_args_list[-1].args[1] == ("sess-other" if mode == "different_id" else "sess-p")
+    holder = mode not in ("ordinary", "parallel", "claim_error", "holder_busy")
+    assert labels.call_args.args == (("planner-schedule-sched-a" if holder else "planner-t1"),)
+    assert all(call.args[0] == "planner-t1" for call in agent_db.save_session.await_args_list)
+    assert all(call.kwargs["agent_id"] == "planner-t1" for call in agent_db.start_record.await_args_list)
+
+
+@pytest.mark.parametrize("holder", ["task-old", "task-other", None])
+@pytest.mark.parametrize("stored_session", ["saved-session", "replacement-session", None])
+def test_loaded_schedule_plan_respects_current_session_holder(
+    monkeypatch, agent_db, planner_claude, tmp_path, holder, stored_session,
+):
+    from looper.db import schedules
+    from tests.test_planner_agent import _project, activity
+
+    agent_db.get_task_project.return_value = {**_project(), "task_schedule_id": "sched-a"}
+    get_schedule = AsyncMock(return_value={"planner_session_id": stored_session,
+                                          "planner_session_task_id": holder})
+    monkeypatch.setattr(schedules, "get_schedule", get_schedule)
+    save = AsyncMock()
+    monkeypatch.setattr(schedules, "save_planner_session", save)
+    claude = planner_claude("reply retained")
+    shared_elsewhere = stored_session == "saved-session" and holder not in (None, "task-old")
+
+    async def check():
+        old = PlannerAgent(task_id="task-old", runtime_root=tmp_path)
+        plan = TaskPlan(plan_id="p", goal_id="g", requirement="do it", work_dir=str(tmp_path), status="failed",
+                        session_id="saved-session", session_runtime="claude-code",
+                        session_provider="prov-claude-subscription",
+                        steps=[PlanStep("step-a", 0, "do it")])
+        await old._save(plan, *plan.steps, plan_row=True)
+        await old._save_session(plan)
+        agent_db.store.tasks["task-old"] = {"requirement": "do it", "work_dir": str(tmp_path)}
+        agent = PlannerAgent(task_id="task-old", runtime_root=tmp_path, claude_bin=claude.bin)
+        try:
+            await agent._load_plan(("failed",))
+            assert agent._plan is not None
+            assert agent._plan.session_id == (None if shared_elsewhere else "saved-session")
+            assert agent._schedule_session_writes is (holder == "task-old")
+            if shared_elsewhere:
+                assert agent._pending_switch is not None
+                assert any("another task" in entry.summary for entry in agent._plan.journal)
+                assert agent_db.store.sessions["planner-task-old"]["session_id"] is None
+            assert await agent._turn("Continue the saved plan") == "reply retained"
+            if holder == "task-old":
+                assert save.await_count > 0
+                assert all(call.args[0] == "task-old" for call in save.await_args_list)
+            else:
+                save.assert_not_awaited()
+        finally:
+            await agent._claude.stop()
+
+    asyncio.run(check())
+    assert ("--resume" in claude.argvs()[0]) is not shared_elsewhere
+    text = claude.turns()[0]["text"]
+    assert text.startswith("[RESUME]") is shared_elsewhere
+    if shared_elsewhere:
+        assert "another task" in text
+        assert any("another task" in line for line in activity(agent_db))
+    assert all("saved-session" not in line for line in activity(agent_db)
+               if "another task" in line)

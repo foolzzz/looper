@@ -195,7 +195,8 @@ def test_each_fallback_records_its_reason_and_only_unusable_sessions_are_replace
             phrase = "cannot be resumed" if fallback == "profile" else "could not be resumed"
             assert any(f"Schedule Planner session replaced: the stored session {phrase} (" in p for p in phases)
             reason = "other-provider" if fallback == "profile" else "obsolete-session"
-            assert any(reason in p and phrase in p for p in phases)
+            assert any(phrase in p for p in phases)
+            assert fallback == "profile" or not any(reason in p for p in phases)  # the raw session id stays out of the activity
             assert (await _row(env, sid))["planner_session_id"] == "sess-p"
             await env.pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-new'")
             await _task(env, sid, "task-after")

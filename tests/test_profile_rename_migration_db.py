@@ -52,7 +52,7 @@ ADDED_ROWS = {"llm_providers": {"prov-codex-login", "prov-grok-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 # Columns a later migration of main adds to those tables, empty (NULL or '') on the rows from before.
 NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_text", "title", "chat_kind",
-                         "chat_mention", "workspace_dir", "workspace_mode", "workspace_base"),
+                         "chat_mention", "workspace_dir", "workspace_mode", "workspace_base", "continues_schedule_session"),
                "projects": ("step_workspaces", "workspace_links", "max_step_retries", "planner_roles",
                             "role_text_max_chars", "user_gates", "gate_reminder_hours", "agent_room",
                             "room_post_per_minute", "room_broadcasts_per_run", "room_message_max_chars",
@@ -158,7 +158,7 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
             after_unchanged = {table: [row for row in await _rows(pool, table, "1")
                                        if row.get("id") not in ADDED_ROWS.get(table, ())] for table in UNCHANGED}
             for table, columns in NEW_COLUMNS.items():
-                assert all(row.pop(column) in (None, "") for row in after_unchanged[table] for column in columns)
+                assert all(row.pop(column) in (None, "", False) for row in after_unchanged[table] for column in columns)
             assert after_unchanged == unchanged
             assert {row["id"] for row in await _rows(pool, "llm_providers", "1")} - {
                 row["id"] for row in unchanged["llm_providers"]} == ADDED_ROWS["llm_providers"]

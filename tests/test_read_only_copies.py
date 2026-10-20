@@ -17,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -28,6 +29,7 @@ from looper.db import agent_sessions as db_agent_sessions
 from looper.db import library as db_library
 from looper.db import project_documents as db_documents
 from looper.db import projects as db_projects
+from looper.db import schedules as db_schedules
 
 
 def _sha(text: str) -> str:
@@ -43,6 +45,7 @@ class _Content:
         self.skills: dict[str, list[tuple[str, str]]] = {}  # project id -> (name, body)
         self.servers: dict[str, mcp.Server] = {}  # MCP servers installed globally for Workers, by name
         self.sessions: list[tuple[str, str | None]] = []  # each agent with a saved session, and its runtime type
+        self.schedules: list[dict[str, Any]] = []
         self.fail = False
 
         async def list_projects(**_: Any) -> list[dict[str, Any]]:
@@ -94,6 +97,7 @@ class _Content:
             return list(self.sessions)
 
         monkeypatch.setattr(db_agent_sessions, "saved_sessions", saved_sessions)
+        monkeypatch.setattr(db_schedules, "list_schedules", AsyncMock(side_effect=lambda: self.schedules))
 
     def project(self, project_id: str, *, documents: list[tuple[str, str]], skills: list[tuple[str, str]]) -> dict:
         project = {"id": project_id, "name": project_id, "work_dir": ""}
@@ -304,6 +308,33 @@ def test_a_session_directory_stays_while_its_agent_saved_a_session_of_that_runti
         agent.wait()
     assert sorted(removed) == sorted([directories["omp-gone"], directories["switched"]])
     assert all(directories[name].is_dir() for name in ("omp-manager", "omp-planner", "codex-planner", "running"))
+
+
+def test_saved_schedule_sessions_keep_their_runtime_directories(tmp_path: Path, content: _Content, monkeypatch):
+    from looper.agents.runtimes.per_turn import session_dir_name
+
+    # Include a parallel schedule and one with no holder: stored conversations outlive individual runs.
+    content.schedules = [
+        {"id": "sched/a", "planner_session_id": "saved-a", "planner_session_runtime": "codex",
+         "planner_session_task_id": "task-deleted", "overlap": "skip"},
+        {"id": "sched-b", "planner_session_id": "saved-b", "planner_session_runtime": "omp",
+         "planner_session_task_id": None, "overlap": "parallel"},
+        {"id": "sched-c", "planner_session_id": "saved-c", "planner_session_runtime": "grok"},
+        {"id": "sched-reset", "planner_session_id": None, "planner_session_runtime": "codex"},
+    ]
+    directories = {}
+    for runtime in read_only_copies.SESSION_RUNTIMES:
+        for schedule in content.schedules:
+            directory = (tmp_path / ".local" / runtime / "sessions" /
+                         session_dir_name(f"planner-schedule-{schedule['id']}"))
+            directory.mkdir(parents=True)
+            (directory / "state").write_text("saved conversation")
+            directories[runtime, schedule["id"]] = directory
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
+    kept = {directories["codex", "sched/a"], directories["omp", "sched-b"], directories["grok", "sched-c"]}
+    removed = asyncio.run(reclaim_unused(tmp_path))
+    assert set(removed) == set(directories.values()) - kept
+    assert all((directory / "state").read_text() == "saved conversation" for directory in kept)
 
 
 def test_removing_a_session_directory_unlinks_its_login_link_and_leaves_the_login_file(
