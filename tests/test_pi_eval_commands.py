@@ -425,3 +425,198 @@ def test_deepseek_deadline_terminates_runner(tmp_path: Path, deepseek_env) -> No
     assert completed.returncode == 124
     assert len(_invocations(tmp_path)) == 1
     assert "deadline" in (DEEPSEEK_STATE / "gaps.txt").read_text()
+
+
+COMPARISON_SCRIPT = REPO / "examples/pi/eval-prompt-comparison.sh"
+COMPARISON_STATE = REPO / ".local" / "pi-eval-prompt-comparison"
+PLANNER_TASKS = "dependent_steps,room_interface,room_consult,operator_notes,planner_plan_file,vault_closeout_keeps,vault_closeout_nothing"
+
+
+@pytest.fixture
+def comparison_env(tmp_path: Path):
+    env = _environment(tmp_path, ANTHROPIC_API_KEY=KEY)
+    uv = tmp_path / "bin" / "uv"
+    uv.write_text(FAKE_UV + '''
+args = sys.argv[1:]
+if "compare" not in args and os.environ.get("PI_EVAL_FAKE_NO_RESULT") != "1":
+    phase = "dialogs" if "dialogs" in args else "tasks"
+    flag = "--dialogs" if phase == "dialogs" else "--tasks"
+    ids = args[args.index(flag) + 1].split(",")
+    model = args[args.index("--model") + 1]
+    body = {"mode": "real", "model": model, "agent": "claude-code/" + model,
+            "total_cost_usd": 0.1, phase: [
+                {"id": case, "rep": rep, "outcome": "pass", "cost_usd": 0.1 / (len(ids) * 2),
+                 "planner_denials": 0, "planner_modified_files": 0,
+                 "planner_edit_tool_paths": [], "planner_changed_files": [],
+                 "tokens": {"input": 11, "output": 3}}
+                for case in ids for rep in (1, 2)]}
+    if phase == "dialogs":
+        body["manager_model"] = args[args.index("--manager-model") + 1] if "--manager-model" in args else model
+    override = os.environ.get("PI_EVAL_FAKE_COMPARISON_OVERRIDE")
+    if override:
+        body.update(json.loads(override))
+    out = Path(args[args.index("--out-dir") + 1])
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "result.json").write_text(json.dumps(body))
+''', encoding="utf-8")
+    if COMPARISON_STATE.exists():
+        shutil.rmtree(COMPARISON_STATE)
+    yield env
+    if COMPARISON_STATE.exists():
+        shutil.rmtree(COMPARISON_STATE)
+
+
+def test_comparison_runs_only_affected_cases_at_documented_tiers(tmp_path: Path, comparison_env) -> None:
+    baselines = REPO / "evals/prompt_regression/baselines"
+    before = {p.name: p.read_bytes() for p in baselines.glob("*.json")}
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 0, completed.stderr
+    invocations = _invocations(tmp_path)
+    runs = [r["argv"] for r in invocations if "compare" not in r["argv"]]
+    assert len(runs) == 4
+    assert [_flag(r, "--model") for r in runs] == ["haiku", "opus", "haiku", "haiku"]
+    assert [_flag(r, "--tasks") for r in runs[:2]] == [TASKS, PLANNER_TASKS]
+    assert [_flag(r, "--dialogs") for r in runs[2:]] == [DIALOGS, DIALOGS]
+    assert _flag(runs[3], "--manager-model") == "opus"
+    assert _flag(runs[3], "--manager-effort") == "xhigh"
+    for index, argv in enumerate(runs):
+        assert _flag(argv, "--mode") == "real"
+        assert _flag(argv, "--reps") == "2"
+        assert _flag(argv, "--jobs") == "4"
+        assert float(_flag(argv, "--total-cap-usd")) == pytest.approx(float(TOTAL) - index * 0.1)
+        assert _flag(argv, "--case-budget-usd") == CASE
+        assert _flag(argv, "--max-budget-usd") == CASE
+        assert _flag(argv, "--task-timeout" if index < 2 else "--timeout") == "180"
+        assert _flag(argv, "--pg-url") == PG_URL
+        assert "--register-agent" not in argv
+        assert KEY not in " ".join(argv)
+        assert Path(_flag(argv, "--out-dir")).is_relative_to(COMPARISON_STATE)
+    comparisons = [r["argv"] for r in invocations if "compare" in r["argv"]]
+    assert len(comparisons) == 4
+    assert {Path(r[-1]).name for r in comparisons} == {
+        "real-haiku.json", "real-opus.json", "dialogs-real-haiku.json", "dialogs-real-opus.json"}
+    ledger = (COMPARISON_STATE / "latest" / "ledger.txt").read_text()
+    for term in ("48", "planner_denials", "planner_modified_files", "positive control", "unverified",
+                 "Responses", "DeepSeek", "runtime_notes", "context", "schema", "fake"):
+        assert term in ledger
+    assert all(r["telegram"] == "" for r in invocations)
+    assert before == {p.name: p.read_bytes() for p in baselines.glob("*.json")}
+    subprocess.run(["bash", "-n", str(COMPARISON_SCRIPT)], check=True, timeout=5)
+
+
+@pytest.mark.parametrize("updates", [
+    {"ANTHROPIC_API_KEY": None}, {"ANTHROPIC_API_KEY": " "},
+    {"PI_EVAL_TOTAL_CAP_USD": None}, {"PI_EVAL_CASE_BUDGET_USD": None},
+    {"PI_EVAL_TOTAL_CAP_USD": "nan"}, {"PI_EVAL_TOTAL_CAP_USD": "inf"},
+    {"PI_EVAL_CASE_BUDGET_USD": "0"}, {"PI_EVAL_CASE_BUDGET_USD": "3"},
+    {"PI_EVAL_DEADLINE_SECONDS": "1501"}, {"PI_EVAL_DEADLINE_SECONDS": "0"},
+    {"PI_EVAL_DEADLINE_SECONDS": "1.5"},
+    {"LOOPER_EVAL_DATABASE_URL": None},
+    {"LOOPER_EVAL_DATABASE_URL": "postgresql://db.example/postgres"},
+    {"LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/loopx"},
+    {"LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/looper"},
+])
+def test_comparison_preflight_records_unverified_without_uv(tmp_path: Path, comparison_env, updates) -> None:
+    for key, value in updates.items():
+        if value is None:
+            comparison_env.pop(key, None)
+        else:
+            comparison_env[key] = value
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode != 0
+    assert _invocations(tmp_path) == []
+    assert KEY not in completed.stdout + completed.stderr
+    assert "unverified" in (COMPARISON_STATE / "latest" / "ledger.txt").read_text()
+
+
+@pytest.mark.parametrize("override", [None, {"mode": "fake"}, {"total_cost_usd": None},
+                                       {"total_cost_usd": 2.5}, {"tasks": []}])
+def test_comparison_missing_fake_or_exhausted_readback_stops_next_tier(tmp_path: Path, comparison_env, override) -> None:
+    if override is None:
+        comparison_env["PI_EVAL_FAKE_NO_RESULT"] = "1"
+    else:
+        comparison_env["PI_EVAL_FAKE_COMPARISON_OVERRIDE"] = json.dumps(override)
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode != 0
+    runs = [r for r in _invocations(tmp_path) if "compare" not in r["argv"]]
+    assert len(runs) == 1
+    assert "unverified" in (COMPARISON_STATE / "latest" / "ledger.txt").read_text()
+
+
+def test_comparison_deadline_kills_process_group(tmp_path: Path, comparison_env) -> None:
+    comparison_env.update(PI_EVAL_DEADLINE_SECONDS="1", PI_EVAL_FAKE_UV_SLEEP="30")
+    started = time.monotonic()
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT, timeout=20)
+    assert time.monotonic() - started < 15
+    assert completed.returncode == 124
+    assert len(_invocations(tmp_path)) == 1
+    assert "deadline" in (COMPARISON_STATE / "latest" / "ledger.txt").read_text()
+
+
+def _pi_comparison_report(path: Path, provider: str, phase: str) -> None:
+    ids = (TASKS + ",operator_notes_stale") if phase == "tasks" else DIALOGS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mode": "real", "agent": provider, "total_cost_usd": 0.1,
+        phase: [{"id": case, "rep": rep, "outcome": "pass", "planner_denials": 1,
+                 "planner_modified_files": 0} for case in ids.split(",") for rep in (1, 2)]}))
+
+
+def test_comparison_keeps_independent_pi_profiles_and_same_case_reps(tmp_path: Path, comparison_env) -> None:
+    for provider, agent in (("RESPONSES", "pi/cpa/gpt-6.1-sol"), ("DEEPSEEK", DEEPSEEK_AGENT)):
+        for phase in ("tasks", "dialogs"):
+            path = COMPARISON_STATE / f"{provider}-{phase}.json"
+            _pi_comparison_report(path, agent, phase)
+            comparison_env[f"PI_EVAL_{provider}_{phase.upper()}_JSON"] = str(path)
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 0, completed.stderr
+    comparisons = [r["argv"] for r in _invocations(tmp_path) if "compare" in r["argv"]]
+    assert len(comparisons) == 12
+    pi_pairs = [argv for argv in comparisons if "-selected.json" in argv[-2]]
+    assert len(pi_pairs) == 8
+    for argv in pi_pairs:
+        pi_run, claude = (json.loads(Path(path).read_text()) for path in argv[-2:])
+        phase = "dialogs" if "dialogs" in claude else "tasks"
+        assert {(r["id"], r["rep"]) for r in pi_run[phase]} == {(r["id"], r["rep"]) for r in claude[phase]}
+        assert "operator_notes_stale" not in {r["id"] for r in pi_run[phase]}
+    ledger = (COMPARISON_STATE / "latest/ledger.txt").read_text()
+    assert "planner_denials=1" in ledger
+
+
+@pytest.mark.parametrize("mode,agent", [("fake", DEEPSEEK_AGENT), ("real", "pi/cpa/gpt-6.1-sol")])
+def test_comparison_rejects_fake_or_wrong_provider_input(tmp_path: Path, comparison_env, mode, agent) -> None:
+    path = COMPARISON_STATE / "prior.json"
+    _pi_comparison_report(path, agent, "tasks")
+    body = json.loads(path.read_text())
+    body["mode"] = mode
+    path.write_text(json.dumps(body))
+    comparison_env["PI_EVAL_DEEPSEEK_TASKS_JSON"] = str(path)
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT)
+    assert completed.returncode == 0, completed.stderr
+    assert len([r for r in _invocations(tmp_path) if "compare" in r["argv"]]) == 4
+    assert "DeepSeek: unverified" in (COMPARISON_STATE / "latest/ledger.txt").read_text()
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+@pytest.mark.parametrize("denied", [False, True])
+def test_comparison_planner_edit_positive_and_denial_controls(tmp_path: Path, tool: str, denied: bool) -> None:
+    """Exercise actual event translation and task metrics, with no diff to mask a missed call."""
+    from evals.prompt_regression import metrics
+    from looper.agents.runtimes.pi import PiStream
+
+    stream = PiStream(model="selected")
+    raw = [
+        {"type": "message_end", "message": {"role": "assistant", "content": [
+            {"type": "toolCall", "id": "edit-1", "name": tool, "arguments": {"path": "PLAN.md"}}]}},
+        {"type": "message_end", "message": {"role": "toolResult", "toolCallId": "edit-1",
+            "isError": denied, "content": [{"type": "text", "text": "denied" if denied else "done"}]}},
+    ]
+    events = [{"event": event} for row in raw for event in stream.translate(row)]
+    record = {"id": 1, "agent_id": "planner-task-1", "metadata": {
+        "permission_denials": [{"tool": tool, "id": "edit-1"}] if denied else []}}
+    result = metrics.task_metrics(detail={"status": "completed", "steps": []}, activity=[], records=[record],
+        events={1: events}, changes={}, work_dir=tmp_path, check_problem=None,
+        expect={"max_planner_modified_files": 0}, now=0.0)
+    assert result["planner_denials"] == int(denied)
+    assert result["planner_modified_files"] == int(not denied)
+    assert result["planner_edit_tool_paths"] == ([] if denied else ["PLAN.md"])
+    assert result["problems"] == ([] if denied else ["planner_modified_files 1 > 0"])
