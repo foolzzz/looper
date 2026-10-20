@@ -189,6 +189,7 @@ async def _room_view(call: Call, task_id: str) -> dict[str, Any]:
 
 async def _task_view(task_id: str) -> dict[str, Any]:
     from ...db.llm_records import task_costs
+    from ..wait_service import waits_view
 
     task = await db_tasks.get_task_with_steps(task_id)
     if task is None:
@@ -202,6 +203,7 @@ async def _task_view(task_id: str) -> dict[str, Any]:
         "work_dir": task.get("work_dir"),
         "requirement": task.get("requirement"),
         "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
+                   "kind": s.get("kind") or "work",
                    "instruction": clip(s.get("instruction") or "", 200),
                    # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
                    **({"role": s["role_key"]} if s.get("role_key") else {}),
@@ -209,6 +211,7 @@ async def _task_view(task_id: str) -> dict[str, Any]:
                                         else {"role": item["role"], "required": False}
                                         for item in s["review_roles"]]} if s.get("review_roles") else {})}
                   for s in task.get("steps") or []],
+        "waits": await waits_view(task_id),
         # The roles the task's Planner defined, when it has any (task_roles).
         **({"roles": roles} if (roles := [{"id": r["role_key"], "kind": r["kind"], "version": r["version"]}
                                           for r in await db_roles.current(task_id)]) else {}),
@@ -650,7 +653,8 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_tasks",
-        description="List or search tasks (newest first), or get one task with its steps, supplements, latest "
+        description="List or search tasks (newest first), or get one task with its steps (including each kind), "
+                    "wait conditions and states, supplements, latest "
                     "progress note, result, cost and concurrency limits; room: what the task's agents said to each "
                     "other in its room (read only).",
         schema={

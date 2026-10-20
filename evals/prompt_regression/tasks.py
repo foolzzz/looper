@@ -23,12 +23,14 @@ import json
 import subprocess
 import sys
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .metrics import Discipline
+from looper.agents.tiers.worker import extract_report
+
+from .metrics import Discipline, result_text, role, timestamp
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,13 @@ class EvalTask:
     user_gates: bool = False
     gate_script: tuple[str, ...] = ()
     gate_reply_after_s: float = 0.0
+    # Resume each waiting wait after this delay from opened_at; None leaves waits alone.
+    wait_resume_after_s: float | None = None
+    # Fixed diffs returned by the server's gh stand-in, keyed by owner/repo#number (empty for other PRs).
+    gh_pr_diffs: dict[str, str] = field(default_factory=dict)
+    # A simulated PR gets a real fix commit once its head-change wait has recorded the old head.
+    gh_pr_fix_files: dict[str, str] = field(default_factory=dict)
+    gh_pr_fix_after_s: float = 5.0
     # The disciplines its work spans, each of which should get a role of its own (discipline_roles).
     disciplines: tuple[Discipline, ...] = ()
     # Where its steps that run side by side work (``step_workspaces``), over the run's ``--step-workspaces``: with
@@ -67,7 +76,8 @@ class EvalTask:
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script; min_room_messages,
     # max_room_messages, max_room_unanswered, min_room_consults, max_planner_modified_files,
-    # min_vault_writes, max_vault_writes, max_vault_outside, min_vault_closeout
+    # min_vault_writes, max_vault_writes, max_vault_outside, min_vault_closeout,
+    # min_waits_opened, max_waits_opened, min_wait_github_checks, min_wait_dependents
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
     # The operator's Claude Code notes for its working directory (file name -> text, MEMORY.md the index); the
@@ -76,6 +86,9 @@ class EvalTask:
     # Opt the project into the run's one disposable knowledge vault and check this task's committed notes.
     vault: bool = False
     vault_check: Callable[[Path, list[str]], str | None] | None = None
+    # Task-specific checks of the actual API steps, run records and reports, beyond aggregate flow counts.
+    flow_check: Callable[[Mapping[str, Any], list[Mapping[str, Any]],
+                          Mapping[int, list[Mapping[str, Any]]]], str | None] | None = None
 
     @property
     def real_reviewer(self) -> bool:
@@ -105,6 +118,72 @@ def _equals(name: str, expected: str) -> Callable[[Path], str | None]:
         return None if actual == expected else f"{name} holds {actual[:40]!r}, expected {expected!r}"
 
     return check
+
+
+def _exists(name: str) -> Callable[[Path], str | None]:
+    return lambda work_dir: None if (work_dir / name).is_file() else f"{name} is missing"
+
+
+def _review_files(work_dir: Path) -> str | None:
+    for name in ("findings.md", "rereview.md"):
+        if not _read(work_dir, name):
+            return f"{name} is missing or empty"
+    return None
+
+
+def _rereview_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
+                   events: Mapping[int, list[Mapping[str, Any]]]) -> str | None:
+    """Bind the requested PR wait to the Workers that actually delivered each review.
+
+    The fixture pushes a real fix commit after the wait records its baseline. Only a successful check of
+    that PR, followed by a dependent re-review, counts; a manual resume or proceeding after timeout does not.
+    """
+    expected = {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                "ready_when": "head_changed"}
+    waits = [wait for wait in detail.get("waits") or []
+             if all((wait.get("check") or {}).get(key) == value for key, value in expected.items())]
+    if not waits:
+        return "no head-change wait for example-org/demo-service#12"
+    needs = {step["id"]: step.get("depends_on") or [] for step in detail.get("steps") or []}
+
+    def upstream(step_id: str, ancestor: str) -> bool:
+        seen, todo = set(), list(needs.get(step_id, []))
+        while todo:
+            current = todo.pop()
+            if current == ancestor:
+                return True
+            if current not in seen:
+                seen.add(current)
+                todo.extend(needs.get(current, []))
+        return False
+
+    delivered: dict[str, list[Mapping[str, Any]]] = {"findings.md": [], "rereview.md": []}
+    for record in records:
+        if role(record) != "worker" or record.get("status") != "completed":
+            continue
+        text = result_text(events.get(int(record["id"]), []))
+        report = extract_report(text, "status") if text is not None else None
+        if report is not None and report.get("status") == "completed":
+            for name in delivered:
+                if name in (report.get("changed_files") or {}):
+                    delivered[name].append(record)
+    for wait in waits:
+        opened, closed = timestamp(wait.get("opened_at")), timestamp(wait.get("closed_at"))
+        if (wait.get("state") != "done" or wait.get("outcome") != "ready" or wait.get("last_result") != "ready"
+                or (wait.get("checks") or 0) < 2
+                or opened is None or closed is None):
+            continue
+        for first in delivered["findings.md"]:
+            for second in delivered["rereview.md"]:
+                first_step = (first.get("metadata") or {}).get("step_id")
+                second_step = (second.get("metadata") or {}).get("step_id")
+                ended, started = timestamp(first.get("finished_at")), timestamp(second.get("created_at"))
+                if (first_step and second_step and first_step != second_step and ended is not None
+                        and started is not None and ended <= opened <= closed <= started
+                        and upstream(wait["step_id"], first_step) and upstream(second_step, wait["step_id"])):
+                    return None
+    return ("reviews were not delivered by separate Workers before and after a successful head-change check "
+            "of the requested PR wait")
 
 
 def _numbers_and_sum(work_dir: Path) -> str | None:
@@ -205,6 +284,21 @@ exit 1
 """
 
 
+_PR_DIFF = """\
+diff --git a/totals.py b/totals.py
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/totals.py
+@@ -0,0 +1,5 @@
++def total(values):
++    result = 0
++    for i in range(len(values) - 1):
++        result += values[i]
++    return result
+"""
+
+
 # Two steps, the first slow enough that a change made once the plan exists reaches the Planner before the second
 # starts; the change is to the second step.
 _TWO_STEPS = ("Work in two steps, the second depending on the first. Step 1: run `sleep 20`, then create part1.txt "
@@ -245,6 +339,62 @@ TASKS: tuple[EvalTask, ...] = (
         fake={
             "plan": [_step("s1", "Create hello.txt containing `hello world`.", ["hello.txt holds hello world"])],
             "attempts": {"s1": [{"status": "completed", "files": {"hello.txt": "hello world\n"}}]},
+        },
+    ),
+    EvalTask(
+        id="wait_pr_rereview",
+        requirement="Review pull request #12 of example-org/demo-service: read its diff with "
+                    "`gh pr diff 12 --repo example-org/demo-service` and write your findings to findings.md. "
+                    "The author will push fixes to the pull request after your review; once a new commit is "
+                    "pushed, review the pull request again and write the result to rereview.md. "
+                    "In this simulated repository the author pushes within 5 seconds after the head-change "
+                    "check first records the old head. Check every 10 seconds and wait at most 45 seconds; "
+                    "the entire case has a 900-second timeout.",
+        check=_review_files,
+        flow_check=_rereview_flow,
+        gh_pr_diffs={"example-org/demo-service#12": _PR_DIFF},
+        gh_pr_fix_files={"totals.py": "def total(values):\n    result = 0\n    for value in values:\n"
+                                     "        result += value\n    return result\n"},
+        expect={"min_waits_opened": 1, "min_wait_github_checks": 1, "min_wait_dependents": 1},
+        fake={
+            "pr_review": {"repo": "example-org/demo-service", "number": 12},
+            "plan": [
+                _step("s1", "Read gh pr diff 12 --repo example-org/demo-service and write findings.md.",
+                      ["findings.md records the review"]),
+                {"id": "w1", "kind": "wait", "topic": "The author pushes fixes", "depends_on": ["s1"],
+                 "max_wait_seconds": 45, "every_seconds": 10,
+                 "check": {"type": "github_pr", "repo": "example-org/demo-service", "number": 12,
+                           "ready_when": "head_changed"}},
+                _step("s2", "Read the pull request diff again and write rereview.md.", ["rereview.md exists"],
+                      depends_on=["w1"]),
+            ],
+            "attempts": {
+                "s1": [{"status": "completed", "pr_diff_contains": "+    for i in range(len(values) - 1):",
+                        "files": {"findings.md": "The loop skips the last value.\n"}}],
+                "s2": [{"status": "completed", "pr_diff_contains": "+    for value in values:",
+                        "files": {"rereview.md": "The new commit includes every value.\n"}}],
+            },
+        },
+    ),
+    EvalTask(
+        id="wait_not_needed",
+        requirement="Write build.sh, which writes out/app.txt containing `built`. Then, once the build has run, "
+                    "check that out/app.txt contains `built` and write `ok` to result.txt.",
+        check=_equals("result.txt", "ok"),
+        expect={"max_waits_opened": 0},
+        fake={
+            "plan": [
+                _step("s1", "Write build.sh to write built to out/app.txt, then run it.",
+                      ["build.sh exists and out/app.txt holds built"]),
+                _step("s2", "Check out/app.txt contains built and write ok to result.txt.",
+                      ["result.txt holds ok"], depends_on=["s1"]),
+            ],
+            "attempts": {
+                "s1": [{"status": "completed", "files": {
+                    "build.sh": "#!/bin/sh\nset -eu\nmkdir -p out\nprintf 'built\\n' > out/app.txt\n",
+                    "out/app.txt": "built\n"}}],
+                "s2": [{"status": "completed", "files": {"result.txt": "ok\n"}}],
+            },
         },
     ),
     EvalTask(

@@ -10,6 +10,10 @@ const view = (min: number, source: string, timeout: number | null = null) => ({
   min_interval_seconds: { value: min, source, built_in: 300, minimum: 1, gated_value: Math.min(60, min) },
   run_timeout_seconds: { value: timeout, source: "built-in", built_in: null, minimum: 1, maximum: 2592000 },
 });
+const waits = (max = 604800, min = 300, source = "built-in") => ({
+  max_wait_seconds: { value: max, default: 604800, min: 60, max: 2592000, source },
+  min_check_seconds: { value: min, default: 300, min: 10, max: 86400, source },
+});
 
 describe("Settings → Scheduler", () => {
   let container: HTMLDivElement;
@@ -19,6 +23,13 @@ describe("Settings → Scheduler", () => {
   beforeEach(() => {
     puts = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(_url).endsWith("/wait-settings")) {
+        if (init?.method !== "PUT") return Response.json(waits());
+        const body = JSON.parse(String(init.body));
+        puts.push(body);
+        if (body.min_check_seconds === 0) return Response.json({ error: "min_check_seconds must be at least 10" }, { status: 400 });
+        return Response.json(waits(body.max_wait_seconds ?? 604800, body.min_check_seconds ?? 300, "setting"));
+      }
       if (init?.method === "PUT") {
         const body = JSON.parse(String(init.body));
         puts.push(body);
@@ -80,5 +91,30 @@ describe("Settings → Scheduler", () => {
     const inputs = container.querySelectorAll("input");
     expect((inputs[0] as HTMLInputElement).value).toBe("90");
     expect((inputs[1] as HTMLInputElement).value).toBe("45");
+  });
+
+  it("shows wait defaults and sources, saves seconds, resets to default and shows a refusal", async () => {
+    await act(async () => root.render(<SchedulerSection />));
+    await flush();
+    const max = container.querySelector('input[id$="-max_wait_seconds"]') as HTMLInputElement;
+    const min = container.querySelector('input[id$="-min_check_seconds"]') as HTMLInputElement;
+    expect(max.value).toBe("604800");
+    expect(min.value).toBe("300");
+    expect(max.closest("form")?.textContent).toContain("Built-in value. Built-in default: 7 d");
+    await typeInto(min, "600");
+    await typeInto(max, "86400");
+    await act(async () => { (max.closest("form")!.querySelector("button[type=submit]") as HTMLButtonElement).click(); });
+    await flush();
+    expect(puts).toEqual([{ max_wait_seconds: 86400 }]);
+    expect(min.value).toBe("600");
+    expect(max.closest("form")?.textContent).toContain("Saved here");
+    await act(async () => { (max.closest("form")!.querySelector("button[type=button]") as HTMLButtonElement).click(); });
+    await flush();
+    expect(puts[1]).toEqual({ max_wait_seconds: null });
+    await typeInto(min, "0");
+    await act(async () => { (min.closest("form")!.querySelector("button[type=submit]") as HTMLButtonElement).click(); });
+    await flush();
+    expect(puts[2]).toEqual({ min_check_seconds: 0 });
+    expect(container.querySelector("[role=alert]")?.textContent).toContain("min_check_seconds must be at least 10");
   });
 });

@@ -6,9 +6,13 @@ import { Input } from "@/components/ui/input";
 import {
   fetchSchedulerSettings,
   updateSchedulerSettings,
+  getWaitSettings,
+  updateWaitSettings,
   type SchedulerSetting,
   type SchedulerSettings,
+  type WaitSettings,
 } from "@/lib/api";
+import { waitDuration } from "@/lib/waits";
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -34,7 +38,7 @@ const FIELDS: { name: Name; label: string; help: string }[] = [
 ];
 
 /** Settings → Scheduler: the two system-wide limits of schedules, each with its effective value and source. */
-export function SchedulerSection() {
+function ScheduleSettings() {
   const [settings, setSettings] = useState<SchedulerSettings | null>(null);
   const [drafts, setDrafts] = useState<Record<Name, string>>({ min_interval_seconds: "", run_timeout_seconds: "" });
   const [error, setError] = useState<string | null>(null);
@@ -135,4 +139,92 @@ export function SchedulerSection() {
       </CardContent>
     </Card>
   );
+}
+
+type WaitName = keyof WaitSettings;
+const WAIT_FIELDS: { name: WaitName; label: string }[] = [
+  { name: "max_wait_seconds", label: "Longest wait" },
+  { name: "min_check_seconds", label: "Shortest check interval" },
+];
+
+function WaitSettingsSection() {
+  const [settings, setSettings] = useState<WaitSettings | null>(null);
+  const [drafts, setDrafts] = useState<Record<WaitName, string>>({ max_wait_seconds: "", min_check_seconds: "" });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const idBase = useId();
+  const show = (next: WaitSettings, only?: WaitName) => {
+    setSettings(next);
+    const stored = { max_wait_seconds: String(next.max_wait_seconds.value), min_check_seconds: String(next.min_check_seconds.value) };
+    setDrafts((current) => only ? { ...current, [only]: stored[only] } : stored);
+  };
+  useEffect(() => {
+    let alive = true;
+    getWaitSettings().then(
+      (next) => alive && show(next),
+      (err) => alive && setError(errorText(err)),
+    );
+    return () => { alive = false; };
+  }, []);
+
+  const save = async (name: WaitName, value: number | null) => {
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      show(await updateWaitSettings({ [name]: value }), name);
+      setSaved(true);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!settings) return error ? <p role="alert" className="text-sm text-destructive">{error}</p> : (
+    <p className="flex items-center gap-2 text-sm text-muted-foreground">
+      <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden /> Loading waits
+    </p>
+  );
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Waits</CardTitle></CardHeader>
+      <CardContent className="space-y-5">
+        {WAIT_FIELDS.map(({ name, label }) => {
+          const setting = settings[name];
+          const id = `${idBase}-${name}`;
+          const typed = drafts[name].trim();
+          const valid = /^\d+$/.test(typed);
+          return (
+            <form key={name} className="space-y-1" onSubmit={(e) => { e.preventDefault(); void save(name, Number(typed)); }}>
+              <label htmlFor={id} className="block text-xs font-medium text-muted-foreground">{label} (seconds)</label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input id={id} inputMode="numeric" value={drafts[name]}
+                  onChange={(e) => setDrafts({ ...drafts, [name]: e.target.value })}
+                  aria-describedby={`${id}-hint`} className="w-40" />
+                <Button type="submit" size="sm" disabled={busy || typed === String(setting.value) || !valid}>Save</Button>
+                {setting.source === "setting" && (
+                  <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void save(name, null)}>
+                    Use the built-in ({waitDuration(setting.default)})
+                  </Button>
+                )}
+              </div>
+              <p id={`${id}-hint`} className="text-xs text-muted-foreground">
+                {SOURCE_TEXT[setting.source]}. Built-in default: {waitDuration(setting.default)} ({setting.default} s).
+                {valid && ` Entered: ${waitDuration(Number(typed))}.`}
+              </p>
+            </form>
+          );
+        })}
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {saved && !error && <p role="status" className="text-xs text-muted-foreground">Saved.</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
+export function SchedulerSection() {
+  return <div className="space-y-6"><ScheduleSettings /><WaitSettingsSection /></div>;
 }

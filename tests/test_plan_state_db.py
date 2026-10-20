@@ -88,8 +88,9 @@ def test_a_restarted_planner_reads_back_its_plan_and_session(tmp_path: Path, mon
 
 
 def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """At server start a running task with a live plan is resumed (one whose user gate waits too), a started one
-    without a Planner yet (``pending``) started, any other running one stopped; a new start drops the plan."""
+    """At server start a running task with a live plan is resumed (one whose user gate waits, and one a wait holds,
+    too), a started one without a Planner yet (``pending``) started, any other running one stopped; a new start
+    drops the plan."""
     from looper.agents.serve import carry_on_tasks, tasks_left_running
     from looper.db import agent_sessions, plans, tasks
 
@@ -102,6 +103,8 @@ def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) ->
                                              ("task-unplanned", "running", None),
                                              ("task-planning", "planning", "planning"),
                                              ("task-gated", "waiting_user", "executing"),
+                                             # A wait holds it and its plan is still live, so a start resumes it.
+                                             ("task-waits", "waiting", "executing"),
                                              # Held back for room under its project's old Planner limit: a start,
                                              # and a continued restart that kept its (ended) plan.
                                              ("task-waiting", "pending", None),
@@ -113,14 +116,14 @@ def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) ->
                 await agent_sessions.save_session(f"planner-{task_id}", "sess", {"cost_usd": 0.1}, pool=pool)
         left = await tasks_left_running(pool)
         # A task the Planner left in one of its own statuses counts as running too, and so does one whose user gate
-        # waits for the user.
-        assert left.resumable == ["task-live", "task-review", "task-verifying", "task-gated"]
+        # waits for the user, and one a wait holds.
+        assert left.resumable == ["task-live", "task-review", "task-verifying", "task-gated", "task-waits"]
         assert left.starting == ["task-waiting", "task-restarting"]
         statuses = {t["id"]: t["status"] for t in await tasks.list_tasks(pool=pool)}
         assert statuses == {"task-live": "running", "task-review": "running", "task-verifying": "verifying",
                             "task-ended": "stopped", "task-stopped": "stopped", "task-unplanned": "stopped",
-                            "task-planning": "stopped", "task-gated": "waiting_user", "task-waiting": "pending",
-                            "task-restarting": "pending"}
+                            "task-planning": "stopped", "task-gated": "waiting_user", "task-waits": "waiting",
+                            "task-waiting": "pending", "task-restarting": "pending"}
         # Once the agents are up, the TaskRouter resumes the one and starts the other.
         called: list[tuple[str, list[str]]] = []
 

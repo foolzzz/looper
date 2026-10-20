@@ -124,6 +124,8 @@ export interface ProjectExecution {
   max_step_retries: number | null;
   /** Whether the project's Planners may define the roles their steps run as; null = "off". */
   planner_roles: "off" | "on" | null;
+  /** Whether a wait may run a shell command as the server's user; null = "off". */
+  wait_commands: "off" | "on" | null;
   /** How long such a role's prompt and its harness may each be, 500 to 20,000 characters; null = 8,000. */
   role_text_max_chars: number | null;
   /** Whether the project's Planners may stop part of a plan at a user gate to ask the user; null = "off". Tasks a
@@ -189,6 +191,7 @@ export type TaskGroup = "needs_you" | "in_progress" | "ready" | "attention" | "c
 export const TASK_GROUPS: { id: TaskGroup; label: string }[] = [
   // A user gate of its plan waits for the user (status "waiting_user"); other steps may still run.
   { id: "needs_you", label: "Needs you" },
+  // "waiting": the plan waits on time or a check, without needing the user (unlike "waiting_user").
   { id: "in_progress", label: "In progress" },
   { id: "ready", label: "Ready" },
   { id: "attention", label: "Needs attention" },
@@ -1559,6 +1562,8 @@ export interface TaskDetail extends TaskInfo {
   builtin_role_stats: { worker: RoleStats; reviewer: RoleStats };
   /** The user gates of its plan, in plan order; their discussions are at `fetchGateThread`. */
   gates: UserGate[];
+  /** Wait steps in plan order. */
+  waits?: TaskWait[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
   /** Its steps' git worktrees, in a project whose parallel steps work in worktrees of their own; null (or absent)
@@ -1712,6 +1717,63 @@ export async function fetchTaskRoom(taskId: string, { after = 0 }: { after?: num
  * "discussing", then "passed" (closed with conclusions) or "cancelled"; "skipped" when a replan dropped it before
  * it opened. */
 export type GateState = "pending" | "open" | "discussing" | "passed" | "cancelled" | "skipped";
+
+export interface TaskWait {
+  step: string;
+  step_id: string;
+  state: "pending" | "waiting" | "ready" | "timed_out" | "cancel_requested" | "done" | "failed" | "skipped";
+  outcome: "ready" | "resumed" | "proceeded" | "cancelled" | null;
+  topic: string;
+  check: { type: "github_pr"; repo: string; number: number; ready_when: "head_changed" | "checks_finished" | "new_comments" }
+    | { type: "command"; command: string } | null;
+  every_seconds: number | null;
+  opened_at: string | null;
+  due_at: string | null;
+  deadline_at: string | null;
+  next_check_at: string | null;
+  last_checked_at: string | null;
+  checks: number;
+  last_result: "ready" | "not_ready" | "error" | null;
+  last_output: string;
+  last_error: string;
+  resolution: string;
+  notice: "sent" | "dashboard" | "failed" | null;
+  closed_at: string | null;
+  depends_on: string[];
+}
+
+async function moveWait(taskId: string, step: string, action: "resume" | "cancel"): Promise<TaskWait> {
+  const result = await scheduleCall<{ task_id: string; wait: TaskWait }>(
+    "POST", `${API_BASE}/tasks/${encodeURIComponent(taskId)}/waits/${encodeURIComponent(step)}/${action}`, `${action} wait`,
+  );
+  return result.wait;
+}
+
+export const resumeWait = (taskId: string, step: string) => moveWait(taskId, step, "resume");
+export const cancelWait = (taskId: string, step: string) => moveWait(taskId, step, "cancel");
+
+export interface WaitSetting {
+  value: number;
+  default: number;
+  min: number;
+  max: number;
+  source: "setting" | "built-in";
+}
+
+export interface WaitSettings {
+  max_wait_seconds: WaitSetting;
+  min_check_seconds: WaitSetting;
+}
+
+export type WaitSettingsUpdate = Partial<Record<keyof WaitSettings, number | null>>;
+
+export function getWaitSettings(): Promise<WaitSettings> {
+  return scheduleCall("GET", `${API_BASE}/wait-settings`, "wait settings");
+}
+
+export function updateWaitSettings(body: WaitSettingsUpdate): Promise<WaitSettings> {
+  return scheduleCall("PUT", `${API_BASE}/wait-settings`, "wait settings", body);
+}
 
 /** One question a gate asks the user; code numbers them q1, q2, ... */
 export interface GateAgendaItem {
@@ -1999,8 +2061,8 @@ export interface TaskStep {
   step_index: number;
   /** The Planner's label for the step, unique within the task. */
   step_key: string;
-  /** "gate": a user gate (`TaskDetail.gates`), whose instruction is its topic. */
-  kind: "work" | "gate";
+  /** "gate": a user gate (`TaskDetail.gates`); "wait": time or a check (`TaskDetail.waits`). Instruction is the topic. */
+  kind: "work" | "gate" | "wait";
   instruction: string;
   /** How to tell the step is done, as the Planner wrote it; checked by its Worker and its Reviewer. */
   acceptance_criteria: string[];
@@ -2008,7 +2070,8 @@ export interface TaskStep {
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];
   /** pending, dispatched, deciding, completed (in review), verified, failed or skipped (dropped by a replan); a gate
-   * is waiting_user while it waits, verified once it passed or was cancelled. */
+   * is waiting_user while it waits, verified once it passed or was cancelled. A wait is waiting until the Planner
+   * settles it, then verified, failed or skipped. */
   status: string;
   /** Whether a Reviewer must pass it. */
   review: boolean;

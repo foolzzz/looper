@@ -86,6 +86,16 @@ def _spend_from_records(monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
 
 class TestProjectApi:
     @pytest.mark.parametrize(("value", "enabled"), [("off", False), ("on", True), (None, False)])
+    def test_wait_commands_are_off_unless_the_project_turns_them_on(
+        self, store: _Store, value: str | None, enabled: bool,
+    ) -> None:
+        store.add_project("proj-a", "calc")
+        assert not ProjectExecution.from_row(store.projects["proj-a"]).wait_commands_on
+        status, body = _call("PUT", "/api/projects/proj-a", {"wait_commands": value})
+        assert status == 200 and body["wait_commands"] == value
+        assert ProjectExecution.from_row(store.projects["proj-a"]).wait_commands_on is enabled
+
+    @pytest.mark.parametrize(("value", "enabled"), [("off", False), ("on", True), (None, False)])
     def test_vault_is_off_unless_the_project_turns_it_on(
         self, store: _Store, tmp_path: Path, value: str | None, enabled: bool,
     ) -> None:
@@ -121,6 +131,8 @@ class TestProjectApi:
         ("review_policy", "some", "planner, all"),
         ("vault", "sometimes", "off, on"),
         ("vault", True, "off, on"),
+        ("wait_commands", "sometimes", "off, on"),
+        ("wait_commands", True, "off, on"),
         ("supervise_interval_seconds", -5, "from 0"),
         ("supervise_interval_seconds", 1.5, "whole number"),
         ("supervise_interval_seconds", 86_401, "86400"),

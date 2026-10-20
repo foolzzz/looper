@@ -2,6 +2,7 @@
  * `components/pipeline-node-card`. */
 import { historyHref } from "@/pages/agent-history";
 import { gateWaitsOn } from "@/lib/gates";
+import { waitCheckText } from "@/lib/waits";
 import { MERGE_ERRORS, shortCommit, workspaceState } from "@/lib/workspaces";
 import {
   reviewingRole,
@@ -11,6 +12,7 @@ import {
   type TaskDetail,
   type TaskStep,
   type UserGate,
+  type TaskWait,
 } from "@/lib/api";
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
@@ -230,6 +232,28 @@ export function stepCard(
 }
 
 const AGENDA_STATUS: Record<GateAgendaItem["status"], string> = { open: "Open", resolved: "Resolved", dropped: "Dropped" };
+
+/** Wait nodes have no Worker or Reviewer; their button opens the full wait panel on Overview. */
+export function waitCard(
+  step: TaskStep, wait: TaskWait | undefined,
+  { look, lookOf, stepsById }: Pick<StepCardContext, "look" | "lookOf" | "stepsById">,
+): NodeCard {
+  const deps = step.depends_on.map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
+  return {
+    name: step.step_key || `step ${step.step_index + 1}`, look, roles: [],
+    sections: [
+      ...text("Topic", wait?.topic || step.instruction),
+      ...(wait ? text("Check", waitCheckText(wait.check)) : []),
+      ...text("Resolution", wait?.resolution),
+      ...text("Last error", wait?.last_error, { tone: "destructive" }),
+      ...(deps.length ? [{ kind: "steps" as const, title: "Depends on", steps: deps.map((s) => ({ name: s.step_key || s.id, look: lookOf(s) })) }] : []),
+      ...facts("Timing", [
+        wait?.due_at && { label: "Earliest resume", value: formatWhen(wait.due_at) },
+        wait?.deadline_at && { label: "Deadline", value: formatWhen(wait.deadline_at) },
+      ]),
+    ],
+  };
+}
 
 /** A user gate's card: its topic, its questions with each one's state, whom it waits on (the Planner only while its
  * task runs, `active`, as its panel says), what the Planner found and

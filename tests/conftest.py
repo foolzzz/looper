@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -71,6 +72,9 @@ _AGENT_DB_READS = (
     ("role_templates", "list_templates", []),
 )
 
+# Columns the wait loop writes. A Planner save leaves them as they are.
+_WAIT_LOOP_COLUMNS = ("baseline", "checks", "last_checked_at", "last_result", "last_output", "last_error", "notice")
+
 
 class _PlanStore:
     """The Planner's and Manager's saved state, kept in memory the way ``plans`` and ``agent_sessions`` keep it.
@@ -84,7 +88,8 @@ class _PlanStore:
     edit not delivered yet (``task_changes.RequirementEdit``), as
     ``task_changes.pending`` reads them. ``gates`` holds each task's user gates
     by step id and ``gate_messages`` their discussions, written and read the
-    way ``user_gates`` writes and reads them.
+    way ``user_gates`` writes and reads them. ``waits`` holds each task's waits
+    by step id, the same way ``waits`` writes and reads them.
     """
 
     def __init__(self) -> None:
@@ -100,6 +105,7 @@ class _PlanStore:
         self.requirements: dict[str, Any] = {}
         self.gates: dict[str, dict[str, dict[str, Any]]] = {}
         self.gate_messages: list[dict[str, Any]] = []
+        self.waits: dict[str, dict[str, dict[str, Any]]] = {}
         self._ids = iter(range(1, 1_000_000))
 
     async def add_supplement(self, task_id: str, text: str, *, via: str, **_: object) -> int:
@@ -137,7 +143,7 @@ class _PlanStore:
         return self.ready.pop(task_id, None)
 
     async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), journal: Any = (), gates: Any = (),
-                   gate_messages: Any = (), **_: object) -> None:
+                   gate_messages: Any = (), waits: Any = (), **_: object) -> None:
         if plan is not None:
             self.plans[task_id] = json.loads(json.dumps(dict(plan)))
         for step in steps:
@@ -183,6 +189,19 @@ class _PlanStore:
                         "kind": "late", "text": f"{len(texts)} message(s) reached this gate as it closed",
                         "author": None, "via": "", "agenda_item": None, "option": None, "created_at": None})
                 row["delivered_through"] = max(m["id"] for m in late)
+        kept = self.waits.setdefault(task_id, {})
+        for wait in waits:
+            current = kept.get(wait["step_id"])
+            expect = wait["expect"] if "expect" in wait else None
+            # An update names the states it still expects; a row moved first is left alone. Inserts always land.
+            if current is not None and expect is not None and current.get("state") not in list(expect):
+                continue
+            row = {key: copy.deepcopy(value) for key, value in wait.items() if key != "expect"}
+            if current is not None:
+                for name in _WAIT_LOOP_COLUMNS:
+                    if name in current:
+                        row[name] = copy.deepcopy(current[name])
+            kept[wait["step_id"]] = row
 
     def _gate_row(self, task_id: str, row: dict[str, Any]) -> dict[str, Any]:
         step = self.steps.get(task_id, {}).get(row["step_id"], {})
@@ -209,6 +228,18 @@ class _PlanStore:
 
     async def gate_thread(self, step_id: str, **_: object) -> list[dict[str, Any]]:
         return [dict(m) for m in self.gate_messages if m["step_id"] == step_id]
+
+    async def waits_for_planner(self, task_id: str, **_: object) -> list[dict[str, Any]]:
+        """Ready, timed-out and cancel-requested waits, as ``db.waits.for_planner`` lists them, in plan order."""
+        steps = self.steps.get(task_id, {})
+        rows = []
+        for step_id, row in self.waits.get(task_id, {}).items():
+            if row.get("state") not in ("ready", "timed_out", "cancel_requested"):
+                continue
+            step = steps.get(step_id, {})
+            rows.append({**copy.deepcopy(row), "step_key": step.get("key", ""), "step_index": step.get("index", 0),
+                         "depends_on": list(step.get("depends_on") or [])})
+        return sorted(rows, key=lambda row: (row["step_index"], row["step_id"]))
 
     async def add_gate_message(self, task_id: str, label: str, message: Any, **_: object) -> tuple[Any, Any]:
         """The user writes ``message`` in the task's gate ``label``, as ``user_gates.add_user_message`` adds it."""
@@ -239,7 +270,8 @@ class _PlanStore:
         keys = {step["id"]: step["key"] for step in self.steps.get(task_id, {}).values()}
         journal = [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
         gates = {row["step_id"]: row for row in await self.list_gates(task_id)}
-        return {"plan": plan, "steps": rows, "journal": journal, "gates": gates}
+        waits = {step_id: copy.deepcopy(row) for step_id, row in self.waits.get(task_id, {}).items()}
+        return {"plan": plan, "steps": rows, "journal": journal, "gates": gates, "waits": waits}
 
     async def next_workspace_id(self, **_: object) -> int:
         self.workspace_ids += 1
@@ -539,7 +571,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
     from looper.db import agent_sessions, journal as db_journal, plans, step_workspaces, task_changes, tasks
-    from looper.db import user_gates
+    from looper.db import user_gates, waits as db_waits
 
     db.store = store = _PlanStore()
     for module, name, function, method in (
@@ -570,6 +602,10 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         setattr(db, name, mock)
     # The Planner imports this one by name rather than through its module.
     monkeypatch.setattr(planner_module, "update_task_phase", db.update_task_phase)
+    # Agent tests never ask the loop which waits are ready; that read stays off the real database and on the
+    # in-memory rows (a copy, so a delivery cannot change the stored row before its save).
+    db.for_planner = AsyncMock(side_effect=store.waits_for_planner)
+    monkeypatch.setattr(db_waits, "for_planner", db.for_planner)
     return db
 
 

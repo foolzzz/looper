@@ -44,6 +44,7 @@ from .channels.web import WebChannelAdapter
 from . import self_check
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
+from .wait_service import WaitService
 from .http_server import AgentHTTPServer
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
@@ -672,7 +673,7 @@ async def _run_agent_system(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import links, operator_notes, scheduler_settings
+    from . import links, operator_notes, scheduler_settings, waits
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
@@ -692,6 +693,7 @@ async def _run_agent_system(
     await ensure_schema(pool)
     try:
         await scheduler_settings.load()
+        await waits.load()
     except ValueError as exc:
         raise StartupCheckFailed(str(exc)) from None
 
@@ -841,6 +843,7 @@ async def _run_agent_system(
     gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url)
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                              on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
+    wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url)
     supervisor.register(task_router)
 
     worker_config = WorkerConfig(claude_bin=claude_bin)
@@ -901,6 +904,8 @@ async def _run_agent_system(
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()
+    # Check due waits only after the task router and HTTP API are ready.
+    await wait_service.start()
     await gate_courier.start()
 
     logger.info(
@@ -923,6 +928,8 @@ async def _run_agent_system(
         logger.info("shutting down agent system...")
         await consults.stop()
         await gate_reminders.stop()
+        # Cancel and reap in-flight wait checks before stopping agents and their bus.
+        await wait_service.stop()
         await gate_courier.stop()
         await scheduler.stop()
         await http_server.stop()
