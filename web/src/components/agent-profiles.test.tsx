@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentProfileForm, AgentProfilesSection } from "@/components/agent-profiles";
-import { fetchPromptPreview, type AgentProfile, type Registry } from "@/lib/api";
+import { fetchPromptPreview, type AgentProfile, type Provider, type Registry, type Runtime, type RuntimeType } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -165,5 +165,129 @@ describe("Agent Profile prompts", () => {
   it("includes and encodes the optional project in preview requests", async () => {
     await fetchPromptPreview("p/1", "planner", "project /?");
     expect(fetch).toHaveBeenCalledWith("/api/agent-profiles/p%2F1/prompt-preview?role=planner&project_id=project+%2F%3F");
+  });
+});
+
+const PI_ROLES = ["manager", "planner", "worker", "reviewer"] as const;
+
+function piProvider(fields: Pick<Provider, "provider_id" | "name" | "protocols" | "auth"> & Partial<Provider>): Provider {
+  return {
+    oauth_runtime_type: null, base_url: "https://example.invalid/v1", models: [], suggested_models: [], login: null,
+    env: [], max_concurrency: null, api_key: null, builtin: false, profile_count: 0, ...fields,
+  };
+}
+
+const PI_RUNTIME: Runtime = {
+  runtime_id: "rt-pi", name: "pi", type: "pi", type_label: "pi", executable: "", default_executable: "pi",
+  path: "/usr/local/bin/pi", protocols: ["openai-chat", "openai-responses"], version: "1.3.0",
+  capabilities: ["run", "resident_session", "resume"], roles: [...PI_ROLES],
+  probed_at: null, probe_error: null, builtin: true, profile_count: 1,
+};
+
+const PI_TYPE: RuntimeType = {
+  type: "pi", label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+  protocols: ["openai-chat", "openai-responses"], capabilities: ["run", "resident_session", "resume"],
+  roles: [...PI_ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null,
+};
+
+const PI_PROFILE: AgentProfile = {
+  ...PROFILE, profile_id: "pi-profile", name: "pi/default", model: "selected-model", agent_teams: false,
+  runtime_id: "rt-pi", runtime_type: "pi", runtime_name: "pi", provider_id: "responses", provider_name: "Responses",
+  roles: [...PI_ROLES],
+};
+
+const PI_REGISTRY: Registry = {
+  ...REGISTRY,
+  runtime_types: [PI_TYPE],
+  runtimes: [PI_RUNTIME],
+  providers: [
+    piProvider({ provider_id: "responses", name: "Responses", protocols: ["openai-responses"], auth: "api_key" }),
+    piProvider({ provider_id: "chat", name: "Chat", protocols: ["openai-chat"], auth: "api_key" }),
+    piProvider({ provider_id: "anthropic", name: "Anthropic", protocols: ["anthropic-messages"], auth: "api_key" }),
+    piProvider({
+      provider_id: "claude-login", name: "Claude login", protocols: ["anthropic-messages"], auth: "oauth",
+      oauth_runtime_type: "claude-code",
+    }),
+    piProvider({
+      provider_id: "pi-login", name: "Pi login", protocols: ["openai-responses"], auth: "oauth",
+      oauth_runtime_type: "pi",
+    }),
+  ],
+  profiles: [PI_PROFILE],
+};
+
+describe("pi Agent Profiles", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let requests: { url: string; body: Record<string, unknown> }[];
+
+  beforeEach(() => {
+    requests = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.body) requests.push({ url, body: JSON.parse(String(init.body)) });
+      const answer = url.endsWith("/registry") ? PI_REGISTRY : { profile: PI_PROFILE, warnings: [] };
+      return new Response(JSON.stringify(answer), { status: 200 });
+    }));
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  const select = (label: string) => {
+    const field = [...container.querySelectorAll("label")].find((item) => item.textContent === label);
+    expect(field, label).toBeTruthy();
+    return document.getElementById(field!.htmlFor) as HTMLSelectElement;
+  };
+  const choose = async (label: string, value: string) => {
+    await act(async () => {
+      const field = select(label);
+      field.value = value;
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  };
+
+  it("offers both compatible API-key providers and not OAuth or Anthropic", async () => {
+    await act(async () => root.render(<AgentProfileForm profile={PI_PROFILE} registry={PI_REGISTRY} onDone={() => {}} />));
+    const provider = select("Provider");
+    expect([...provider.querySelectorAll("optgroup")].map((group) => group.label)).toEqual(["API key"]);
+    expect([...provider.querySelectorAll("option")].map((option) => option.value)).toEqual(["responses", "chat", "__new_provider__"]);
+    expect([...provider.options].every((option) => !option.disabled || option.value === "")).toBe(true);
+    await choose("Provider", "chat");
+    expect(select("Provider").value).toBe("chat");
+    await choose("Provider", "responses");
+    expect(select("Provider").value).toBe("responses");
+    expect(container.textContent).not.toMatch(/login \(OAuth\)|Pi login|Claude login|Anthropic/);
+    expect([...select("Runtime").querySelectorAll("option")].map((option) => option.textContent)).toContain("Pi CLI");
+  });
+
+  it("lists four roles and leaves the system prompt mode on the role", async () => {
+    await act(async () => root.render(<AgentProfilesSection />));
+    expect(container.textContent).toContain("Pi CLI · Responses · model selected-model");
+    expect(container.textContent).toContain("Can run Manager, Planner, Worker, Reviewer");
+    const role = select("Role");
+    expect([...role.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "Manager", "Planner", "Worker", "Reviewer",
+    ]);
+    const edit = container.querySelector('button[aria-label="Edit Agent Profile pi/default"]') as HTMLButtonElement;
+    expect(edit).toBeTruthy();
+    await act(async () => edit.click());
+    expect([...container.querySelectorAll("label")].some((label) => label.textContent === "System prompt")).toBe(false);
+    expect(container.querySelector('[data-testid="prompt-mode-per-role"]')!.textContent)
+      .toContain("set per role in Settings → Roles");
+    expect([...container.querySelectorAll("option")].map((option) => option.value)).not.toContain("append");
+    expect([...container.querySelectorAll("option")].map((option) => option.value)).not.toContain("replace");
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(requests).toHaveLength(1);
+    expect(requests[0].body).not.toHaveProperty("system_prompt_mode");
+    expect(requests[0].body).not.toHaveProperty("api_key");
+    expect(requests[0].body.provider_id).toBe("responses");
+    expect(requests[0].body.runtime_id).toBe("rt-pi");
   });
 });
