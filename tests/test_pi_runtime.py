@@ -1,20 +1,29 @@
-"""pi's identity and its version/help probe (the pi runtime RFC, sections 1 and 6).
+"""pi's identity, safe probes and API-key provider configuration (RFC sections 1, 3 and 6).
 
 The launch, sessions and stream are refused. Capabilities stay empty. A probe
 runs only ``--version`` and ``--help``, offline, in temporary directories.
+Provider requests are checked with installed pi 1.3 against a local fake
+Responses service and, separately, an injected fetch transport.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
+import threading
+from contextlib import nullcontext
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.profile_registry import servable_roles
+from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec, servable_roles
 from looper.agents.runtimes import (
     ADAPTERS, ApiProtocol, AuthKind, Probe, RuntimeAdapter, RuntimeUnsupported, adapter,
 )
@@ -203,7 +212,6 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
 @pytest.mark.parametrize("call", [
     lambda: PI.prompt_blocks(None, "prompt"),  # type: ignore[arg-type]
     lambda: PI.isolation_args("."),
-    lambda: PI.bind_provider(None, "model", "low"),  # type: ignore[arg-type]
     lambda: PI.launch_args(None),  # type: ignore[arg-type]
     lambda: PI.environment(None),  # type: ignore[arg-type]
     lambda: PI.resident_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3),  # type: ignore[arg-type]
@@ -229,3 +237,225 @@ def test_an_unimplemented_path_is_refused(call: object) -> None:
 def test_a_turn_write_is_refused() -> None:
     with pytest.raises(RuntimeUnsupported, match="does not implement this yet"):
         asyncio.run(PI.write_turn(None, "hello"))  # type: ignore[arg-type]
+
+
+KEY = "sk-test-pi-provider-only"
+
+
+def _provider(**fields: Any) -> ProviderSpec:
+    return ProviderSpec(**{"id": "prov-test", "name": "arbitrary", "auth": AuthKind.API_KEY,
+                           "protocols": frozenset({ApiProtocol.OPENAI_RESPONSES}),
+                           "base_url": "https://endpoint.example.invalid/v1", "api_key": KEY, **fields})
+
+
+def _launch(provider: ProviderSpec, model: str = "selected", effort: str = "high") -> Launch:
+    profile = AgentProfile("agent-pi", "pi/test", RuntimeSpec("rt-pi", "pi", "pi"), provider, model, effort)
+    return Launch(AgentSettings(profile=profile))
+
+
+@pytest.mark.parametrize(("protocols", "api"), [
+    ([ApiProtocol.OPENAI_RESPONSES], "openai-responses"),
+    ([ApiProtocol.OPENAI_CHAT], "openai-completions"),
+    ([ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT], "openai-responses"),
+    ([ApiProtocol.OPENAI_CHAT, ApiProtocol.OPENAI_RESPONSES], "openai-responses"),
+    ([ApiProtocol.ANTHROPIC_MESSAGES, ApiProtocol.OPENAI_CHAT], "openai-completions"),
+])
+def test_binding_selects_the_protocol_and_keeps_the_key_only_in_env(protocols: list[ApiProtocol], api: str) -> None:
+    from looper.agents.runtimes.pi import models_json, provider_api
+
+    provider = _provider(protocols=frozenset(protocols), env=(("REGION", "test"),))
+    launch = _launch(provider)
+    binding = PI.bind_provider(provider, launch.model, launch.effort)
+    config = models_json(launch)
+    assert provider_api(provider) == config["providers"]["looper"]["api"] == api
+    assert binding.args == ("--provider", "looper", "--model", "selected", "--thinking", "high")
+    assert dict(binding.env) == {"REGION": "test", "LOOPER_PROVIDER_API_KEY": KEY}
+    assert config["providers"]["looper"]["apiKey"] == "$LOOPER_PROVIDER_API_KEY"
+    assert KEY not in json.dumps(config) + repr(binding) + repr(binding.args) + json.dumps(launch.record())
+    assert "LOOPER_PROVIDER_API_KEY" in PI.provider_env_owned
+
+
+@pytest.mark.parametrize("name", ["DeepSeek", "openai", "anthropic-oauth", "unknown"])
+def test_endpoint_and_protocol_do_not_depend_on_the_provider_name(name: str) -> None:
+    from looper.agents.runtimes.pi import models_json
+
+    provider = _provider(name=name, protocols=frozenset({ApiProtocol.OPENAI_CHAT}),
+                         base_url="https://api.deepseek.com")
+    assert models_json(_launch(provider))["providers"]["looper"]["baseUrl"] == "https://api.deepseek.com"
+
+
+@pytest.mark.parametrize(("fields", "error"), [
+    ({"api_key": None}, "API key"), ({"api_key": ""}, "API key"), ({"api_key": " \t"}, "API key"),
+    ({"base_url": ""}, "base_url"), ({"base_url": "  "}, "base_url"),
+    ({"auth": AuthKind.OAUTH, "oauth_runtime_type": "pi"}, "API key"),
+    ({"protocols": frozenset({ApiProtocol.ANTHROPIC_MESSAGES})}, "protocol"),
+    ({"protocols": frozenset()}, "protocol"),
+])
+def test_invalid_providers_are_refused_before_binding_or_rendering(fields: dict[str, Any], error: str) -> None:
+    from looper.agents.runtimes.pi import models_json
+
+    provider = _provider(**fields)
+    for call in (lambda: PI.bind_provider(provider, "selected", "high"), lambda: models_json(_launch(provider))):
+        with pytest.raises(RuntimeUnsupported, match=error):
+            call()
+
+
+@pytest.mark.parametrize("effort", ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_only_pi_thinking_levels_are_passed(effort: str) -> None:
+    binding = PI.bind_provider(_provider(), "selected", effort)
+    assert binding.args == ("--provider", "looper", "--model", "selected", *(
+        ("--thinking", effort) if effort else ()))
+
+
+def test_an_invalid_thinking_level_is_refused() -> None:
+    with pytest.raises(RuntimeUnsupported, match="thinking"):
+        PI.bind_provider(_provider(), "selected", "ultra")
+
+
+@pytest.mark.parametrize(("entry", "reasoning", "context"), [
+    (None, True, None),
+    (CatalogModel("selected"), True, None),
+    (CatalogModel("selected", context_window=128_000, efforts=()), False, 128_000),
+    (CatalogModel("selected", context_window=256_000, efforts=("low", "high")), True, 256_000),
+])
+def test_models_json_contains_only_the_selected_model_with_catalog_metadata(
+    entry: CatalogModel | None, reasoning: bool, context: int | None,
+) -> None:
+    from looper.agents.runtimes.pi import models_json
+
+    catalog = (CatalogModel("other", context_window=1_000_000), entry) if entry else ()
+    provider = _provider(catalog=catalog)
+    rendered = models_json(_launch(provider))
+    expected: dict[str, Any] = {"id": "selected", "name": "selected", "input": ["text"], "reasoning": reasoning,
+                                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                                "compat": {"supportsStrictMode": True}}
+    if context:
+        expected["contextWindow"] = context
+    assert rendered == {"providers": {"looper": {"api": "openai-responses", "baseUrl": provider.base_url,
+                                                  "apiKey": "$LOOPER_PROVIDER_API_KEY", "models": [expected]}}}
+    chat = replace(provider, protocols=frozenset({ApiProtocol.OPENAI_CHAT}))
+    assert "compat" not in models_json(_launch(chat))["providers"]["looper"]["models"][0]
+
+
+def test_a_model_outside_a_nonempty_catalog_is_refused() -> None:
+    from looper.agents.runtimes.pi import models_json
+
+    provider = _provider(catalog=(CatalogModel("known"),))
+    with pytest.raises(RuntimeUnsupported, match="model"):
+        PI.bind_provider(provider, "unknown", "high")
+    with pytest.raises(RuntimeUnsupported, match="model"):
+        models_json(_launch(provider, model="unknown"))
+
+
+@pytest.mark.parametrize("transport", ["http", "fetch"])
+@pytest.mark.parametrize("configured_compat", [False, True])
+def test_pi_responses_wire_preserves_optional_tool_parameters(
+    tmp_path: Path, configured_compat: bool, transport: str,
+) -> None:
+    """Use installed pi 1.3's model loader and HTTP client, without a login or a real model endpoint."""
+    from looper.agents.runtimes.pi import models_json
+
+    executable = shutil.which("pi")
+    node = shutil.which("node")
+    if not executable or not node:
+        pytest.skip("pi 1.3 and Node are required for the local Responses compatibility check")
+    package = next((p for p in Path(executable).resolve().parents if (p / "package.json").exists()), None)
+    if package is None or json.loads((package / "package.json").read_text()).get("version") != "1.3.0":
+        pytest.skip("the compatibility check targets installed pi 1.3.0")
+
+    requests: list[dict[str, Any]] = []
+
+    class Responses(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            requests.append({"path": self.path, "authorization": self.headers.get("Authorization"),
+                             "body": json.loads(self.rfile.read(int(self.headers["Content-Length"])))})
+            response = {"id": "resp-test", "status": "completed", "output": [],
+                        "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1}}
+            data = ("event: response.completed\ndata: " + json.dumps(
+                {"type": "response.completed", "response": response}) + "\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    try:
+        service = ThreadingHTTPServer(("127.0.0.1", 0), Responses) if transport == "http" else nullcontext()
+    except PermissionError:
+        pytest.skip("sandbox does not permit a local HTTP listener; fetch transport is tested separately")
+    with service as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True) if server else None
+        if thread:
+            thread.start()
+        try:
+            provider = _provider(base_url=f"http://127.0.0.1:{server.server_port if server else 1}/v1")
+            config = models_json(_launch(provider))
+            if not configured_compat:
+                del config["providers"]["looper"]["models"][0]["compat"]
+            models_path = tmp_path / "models.json"
+            models_path.write_text(json.dumps(config))
+            script = tmp_path / "request.mjs"
+            script.write_text('''
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+const [pkg, root, transport] = process.argv.slice(2);
+const { ModelRuntime } = await import(pathToFileURL(join(pkg, 'dist/core/model-runtime.js')));
+const runtime = await ModelRuntime.create({
+  authPath: join(root, 'auth.json'), modelsPath: join(root, 'models.json'), refreshOnCreate: false,
+});
+if (runtime.getError()) throw new Error(runtime.getError());
+const model = runtime.getModel('looper', 'selected');
+if (!model) throw new Error('configured model was not loaded');
+const requests = [];
+const fetch = transport === 'fetch' ? async (url, init) => {
+  requests.push({path: new URL(url).pathname, authorization: new Headers(init.headers).get('authorization'),
+    body: JSON.parse(init.body)});
+  const response = {id: 'resp-test', status: 'completed', output: [],
+    usage: {input_tokens: 1, output_tokens: 0, total_tokens: 1}};
+  return new Response('event: response.completed\\ndata: ' + JSON.stringify({
+    type: 'response.completed', response}) + '\\n\\n', {headers: {'Content-Type': 'text/event-stream'}});
+} : undefined;
+const result = await runtime.complete(model, {
+  messages: [{role: 'user', content: 'test', timestamp: 0}],
+  tools: [{name: 'example', description: 'test', parameters: {
+    type: 'object', properties: {required_value: {type: 'string'}, optional_value: {type: 'string'}},
+    required: ['required_value'], additionalProperties: false,
+  }}],
+}, {signal: AbortSignal.timeout(10000), fetch});
+if (result.stopReason === 'error') throw new Error(result.errorMessage);
+console.log(JSON.stringify({requests, contextWindow: model.contextWindow, maxTokens: model.maxTokens}));
+''')
+            home, agent, session = tmp_path / "home", tmp_path / "agent", tmp_path / "sessions"
+            for path in (home, agent, session):
+                path.mkdir()
+            from looper.agents.runtimes.pi import _probe_env
+            env = _probe_env(home, agent, session)
+            env.update(dict(PI.bind_provider(provider, "selected", "").env))
+            env.update({"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"})
+            done = subprocess.run([node, str(script), str(package), str(tmp_path), transport], cwd=tmp_path, env=env,
+                                  capture_output=True, text=True, timeout=20, check=False)
+            assert done.returncode == 0, done.stderr
+        finally:
+            if server:
+                server.shutdown()
+            if thread:
+                thread.join(timeout=2)
+    defaults = json.loads(done.stdout)
+    if transport == "fetch":
+        requests = defaults["requests"]
+    assert len(requests) == 1
+    request = requests[0]
+    assert request["path"] == "/v1/responses"
+    assert request["authorization"] == f"Bearer {KEY}"  # interpolation was resolved by pi, not sent literally
+    tool = request["body"]["tools"][0]
+    assert tool["parameters"]["required"] == ["required_value"]
+    assert set(tool["parameters"]["properties"]) == {"required_value", "optional_value"}
+    if configured_compat:
+        assert tool["strict"] is False
+    else:
+        assert "strict" not in tool  # positive control: pi's default omits the flag
+    assert defaults["contextWindow"] > 0 and defaults["maxTokens"] > 0
+    assert KEY not in models_path.read_text() + script.read_text()

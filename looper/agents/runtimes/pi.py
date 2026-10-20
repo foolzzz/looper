@@ -1,8 +1,8 @@
-"""The pi runtime's identity, and a probe that never calls a model.
+"""The pi runtime's identity, provider binding and safe probe.
 
-pi is a fifth runtime type (the pi runtime RFC, sections 1 and 6). Registering
+pi is a fifth runtime type (the pi runtime RFC, sections 1, 3 and 6). Registering
 it discovers ``rt-pi`` when ``pi`` is on PATH. This module does not launch a
-run, bind a provider, keep a session or speak to a model: those paths raise
+run, keep a session or speak to a model: those paths raise
 ``RuntimeUnsupported`` until they exist. There is no pi login and no schema
 change.
 
@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 from ... import child_env
 from . import (
@@ -42,6 +42,15 @@ if TYPE_CHECKING:
 
 _PROBE_TIMEOUT_SEC = 10.0
 _VERSION_MAX = 200
+PROVIDER_ID = "looper"
+KEY_ENV = "LOOPER_PROVIDER_API_KEY"
+# Preference is independent of provider names and protocol declaration order.
+API_NAMES: tuple[tuple[ApiProtocol, str], ...] = (
+    (ApiProtocol.OPENAI_RESPONSES, "openai-responses"),
+    (ApiProtocol.OPENAI_CHAT, "openai-completions"),
+)
+# pi 1.3's CLI accepts these; the selected model may clamp the actual level.
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 # The oldest pi whose --help has the flags a later launch uses.
 MIN_VERSION = (1, 3, 0)
 # Whole tokens. ``--session`` must not match ``--session-dir`` or ``--session-id``.
@@ -94,6 +103,7 @@ class PiRuntime(RuntimeAdapter):
     # API keys only. pi's own /login and OAuth are not providers Looper binds.
     auth_kinds = frozenset({AuthKind.API_KEY})
     isolation_id = "pi-home/v0"
+    provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV})
 
     def capabilities_for(self, version: str | None) -> frozenset[Capability]:
         """Nothing is advertised yet, whatever ``version`` the probe read.
@@ -157,7 +167,15 @@ class PiRuntime(RuntimeAdapter):
         self._refuse()
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
-        self._refuse()
+        """Pin the private provider and selected model; the API key goes only in the child environment."""
+        _check_provider(provider, model)
+        assert provider.api_key is not None  # checked above; ProviderBinding.env contains strings only
+        if effort and effort not in THINKING_LEVELS:
+            raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(THINKING_LEVELS)}, or empty")
+        return ProviderBinding(
+            args=("--provider", PROVIDER_ID, "--model", model, *(("--thinking", effort) if effort else ())),
+            env=(*provider.env, (KEY_ENV, provider.api_key)),
+        )
 
     def launch_args(self, launch: Launch) -> list[str]:
         self._refuse()
@@ -196,6 +214,53 @@ class PiRuntime(RuntimeAdapter):
 
     def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
         self._refuse()
+
+
+def provider_api(provider: ProviderSpec) -> str:
+    """The supported API to use, preferring Responses over Chat Completions."""
+    api = next((name for protocol, name in API_NAMES if protocol in provider.protocols), None)
+    if api is None:
+        raise RuntimeUnsupported(f"pi speaks protocols {', '.join(p.value for p, _ in API_NAMES)}; "
+                                 f"provider {provider.name!r} serves none of them")
+    return api
+
+
+def _check_provider(provider: ProviderSpec, model: str) -> str:
+    """Fail before rendering or launching; never guess an endpoint or use a pi login."""
+    if provider.auth is not AuthKind.API_KEY:
+        raise RuntimeUnsupported(f"pi runs with an API key provider only; provider {provider.name!r} is not one")
+    api = provider_api(provider)
+    if not provider.api_key or not provider.api_key.strip():
+        raise RuntimeUnsupported(f"provider {provider.name!r} has no API key: set one in Settings")
+    if not provider.base_url or not provider.base_url.strip():
+        raise RuntimeUnsupported(f"provider {provider.name!r} has no base_url: set its endpoint in Settings")
+    if provider.models and model not in provider.models:
+        raise RuntimeUnsupported(f"provider {provider.name!r} does not list model {model!r}")
+    return api
+
+
+def models_json(launch: Launch) -> dict[str, Any]:
+    """The private models.json, containing only the chosen model and an interpolated key reference.
+
+    Missing context/output limits stay with pi's defaults; catalog prices are handled by Looper.
+    """
+    provider = launch.profile.provider
+    api = _check_provider(provider, launch.model)
+    entry = provider.catalog_model(launch.model)
+    model: dict[str, Any] = {
+        "id": launch.model, "name": launch.model,
+        "reasoning": not (entry is not None and entry.efforts is not None and not entry.efforts),
+        "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+    }
+    if entry is not None and entry.context_window:
+        model["contextWindow"] = entry.context_window
+    if api == "openai-responses":
+        # pi 1.3's openai-responses getCompat/convertResponsesTools (also checked in request serialization):
+        # the default omits strict; this sends strict:false without making optional parameters required.
+        model["compat"] = {"supportsStrictMode": True}
+    return {"providers": {PROVIDER_ID: {"baseUrl": provider.base_url, "apiKey": f"${KEY_ENV}",
+                                        "api": api, "models": [model]}}}
 
 
 def _probe_env(home: Path, agent: Path, session: Path) -> dict[str, str]:
