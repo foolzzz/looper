@@ -16,7 +16,6 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents import profile_registry as service
 from tests.test_profile_registry_db import _call, _launch, _ok, _run as _run_db
 from tests.test_catalog_db import DSN
 
@@ -47,16 +46,15 @@ async def _provider(name: str = "glm", *, base_url: str = THIRD_PARTY, api_key: 
         await get_pool().execute("UPDATE llm_provider_endpoints SET base_url = '', use_runtime_default = true "
                                  "WHERE provider_id = $1 AND protocol = $2", provider_id, protocol)
     for model in models or []:
-        # Model CRUD is provided by the registry service; HTTP wiring is a separate slice.
-        await service.create_model({"provider_id": provider_id, "protocol": protocol, **model})
+        await _ok("POST", "/api/models", {"provider_id": provider_id, "protocol": protocol, **model})
     return provider_id
 
 
 async def _model(provider_id: str, name: str, protocol: str = "anthropic-messages") -> dict[str, Any]:
-    models = (await service.list_models(provider_id=provider_id))["models"]
+    models = (await _ok("GET", f"/api/models?provider_id={provider_id}"))["models"]
     found = next((m for m in models if m["provider_id"] == provider_id
                   and m["name"] == name and m["protocol"] == protocol), None)
-    return found or (await service.create_model({
+    return found or (await _ok("POST", "/api/models", {
         "provider_id": provider_id, "name": name, "protocol": protocol}))["model"]
 
 
@@ -236,16 +234,17 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
     async def _test(_pool: Any) -> None:
         preset = next(p for p in (await _ok("GET", "/api/registry"))["vendor_types"]
                       if p["vendor_type"] == "deepseek")
-        assert [(api["base_url"], api["protocol"], [model["name"] for model in preset["suggested_models"]
+        # Endpoints are keyed by protocol; their presentation order is not a preference order.
+        assert sorted((api["base_url"], api["protocol"], [model["name"] for model in preset["suggested_models"]
                                                   if model["protocol"] == api["protocol"]])
-                for api in preset["endpoints"]] == [
+                      for api in preset["endpoints"]) == sorted([
             ("https://api.deepseek.com/anthropic", "anthropic-messages",
              ["deepseek-flash[1m]", "deepseek-v4-pro[1m]"]),
             ("https://api.deepseek.com", "openai-responses",
              ["deepseek-flash", "deepseek-v4-pro"]),
             ("https://api.deepseek.com", "openai-chat",
              ["deepseek-flash", "deepseek-v4-pro"]),
-        ]
+        ])
         from looper.agents.provider_presets import PRESETS
 
         assert _DEEPSEEK_RESPONSES in next(p for p in PRESETS if p.id == "deepseek").docs
@@ -257,7 +256,7 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
                       for m in preset["suggested_models"] if m["protocol"] == protocol]
             provider = await _provider(f"deepseek-{protocol}", protocol=protocol, base_url=api["base_url"],
                                        models=models, env=preset["env"] if anthropic else [])
-            saved = (await service.list_models(provider_id=provider))["models"]
+            saved = (await _ok("GET", f"/api/models?provider_id={provider}"))["models"]
             assert [model["name"] for model in saved] == [model["name"] for model in models]
             runtime = "rt-claude-code" if anthropic else codex
             for model in models:
@@ -287,7 +286,7 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
         priced = [{"name": "mystery-1", "input_usd_per_mtok": 1, "output_usd_per_mtok": 2,
                    "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1}]
         model_id = answer["profile"]["model_id"]
-        await service.update_model(model_id, {
+        await _ok("PUT", f"/api/models/{model_id}", {
             **{k: v for k, v in priced[0].items() if k != "name"}, "background_model": None})
         again = await _ok("PUT", f"/api/agent-profiles/{answer['profile']['profile_id']}", {"name": "mystery"})
         assert again["warnings"] == []

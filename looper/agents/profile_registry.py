@@ -352,10 +352,10 @@ class ResolvedModel:
         adapter = _runtime_type(runtime.type)
         if self.model.protocol not in adapter.protocols:
             raise RegistryError("runtime does not support the model's exact protocol")
-        if self.provider.auth not in adapter.auth_kinds:
-            raise RegistryError("runtime does not support the provider's auth kind")
         if self.provider.auth is AuthKind.OAUTH and self.provider.oauth_runtime_type != runtime.type:
             raise RegistryError("a login provider can only use its own runtime")
+        if self.provider.auth not in adapter.auth_kinds:
+            raise RegistryError("runtime does not support the provider's auth kind")
 
     def binding_provider(self) -> LegacyProviderSpec:
         """The adapter input: exactly this endpoint and model, never an account catalog."""
@@ -1396,7 +1396,9 @@ async def create_model(data: Any) -> dict[str, Any]:
             provider = await _existing_provider(provider_id, conn)
             endpoint = next((e for e in provider["endpoints"] if e["protocol"] == model.protocol.value), None)
             if endpoint is None:
-                raise RegistryError("the model's protocol needs an endpoint on this provider")
+                available = _listed(e["protocol"] for e in provider["endpoints"])
+                raise RegistryError(f"protocol {model.protocol.value!r} needs an endpoint on this provider; "
+                                    f"available protocols: {available}")
             ResolvedModel(model, provider_spec(provider), Endpoint.from_entry(endpoint))
             model_id = await db.insert_model(conn, fields)
             answer = model_view(await _existing_model(model_id, conn))

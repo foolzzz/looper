@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ import pytest
 from looper.agents import profile_registry as service
 from looper.db import connection, llm_records, profile_registry as db
 from tests.test_catalog_db import DSN, _fresh_schema
+from tests.test_llm_provider_api_db import _run as _run_http, _account, SECRET
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -63,6 +65,23 @@ def test_unknown_prices_and_protocol_suffix_warnings():
     assert all(p == {"override": None, "effective": None, "source": "unknown"} for p in view["prices"].values())
     assert len(view["warnings"]) == 2
     assert "api_key" not in repr(view)
+
+
+@pytest.mark.parametrize("protocol,input_price", [("anthropic-messages", 0), ("openai-chat", 2.5)])
+def test_allowed_profile_view_resolves_model_reference_and_prices(protocol, input_price):
+    from looper.agents.projects import allowed_profile_view
+
+    model = _row(name="shared-model", protocol=protocol, input_usd_per_mtok=input_price,
+                 output_usd_per_mtok=3)
+    row = {"id": "agent-test", "name": "Allowed profile", "runtime_id": "rt-test",
+           "runtime_name": "Test runtime", "runtime_type": "omp", "runtime_capabilities": ["run"],
+           "model_id": model["id"], "model": model, "provider": model["provider"],
+           "endpoint": model["endpoint"], "effort": "high", "agent_teams": False, "custom_prompt": ""}
+
+    assert allowed_profile_view(row) == {
+        "profile_id": "agent-test", "name": "Allowed profile", "runtime": "omp", "model": "shared-model",
+        "effort": "high", "roles": ["worker", "reviewer"],
+        "usd_per_million_tokens": {"input": input_price, "output": 3}}
 
 
 @pytest.mark.parametrize("changes", [{"provider_id": None}, {"protocol": ["openai-chat"]},
@@ -331,3 +350,280 @@ def test_model_delete_waits_for_profile_creation_and_preserves_reference(monkeyp
         assert (await db.get_profile(profile_id))["model_id"] == mid
         assert (await db.get_model(mid))["profile_count"] == 1
     _run(test, monkeypatch)
+
+
+# Exercise the authenticated production HTTP parser and registry together.
+
+
+@needs_db
+def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
+    async def test(client, pool):
+        account = (await client.ok("POST", "/api/providers", _account(api_key=SECRET, endpoints=[
+            {"protocol": protocol, "base_url": f"https://{protocol}.example.invalid"}
+            for protocol in ("anthropic-messages", "openai-chat")]), status=201))["provider"]
+        pid = account["provider_id"]
+        body = _body(provider_id=pid, name="claude-haiku-4-5", context_window=100000,
+                     efforts=["high"], input_usd_per_mtok=0, output_usd_per_mtok=0)
+        model = (await client.ok("POST", "/api/models", body, status=201))["model"]
+        mid = model["model_id"]
+        assert mid.startswith("model-") and model["provider_id"] == pid
+        chat = (await client.ok("POST", "/api/models", {**body, "protocol": "openai-chat"}, status=201))["model"]
+        assert mid != chat["model_id"]
+        listed = (await client.ok("GET", f"/api/models?provider_id={pid}&runtime_id=rt-claude-code"))["models"]
+        assert [m["model_id"] for m in listed] == [mid]
+        assert len((await client.ok("GET", f"/api/models?provider_id={pid}"))["models"]) == 2
+        assert (await client.ok("GET", f"/api/models/{mid}"))["model"] == model
+        changed = (await client.ok("PUT", f"/api/models/{mid}", {
+            "context_window": None, "efforts": [], "input_usd_per_mtok": None}))["model"]
+        assert changed["context_window"] is None and changed["efforts"] == []
+        assert changed["output_usd_per_mtok"] == 0
+        assert changed["prices"]["input_usd_per_mtok"] == {"override": None, "effective": 1, "source": "builtin"}
+        changed = (await client.ok("PUT", f"/api/models/{mid}", {"efforts": None}))["model"]
+        assert changed["efforts"] is None and changed["output_usd_per_mtok"] == 0
+        profile = (await client.ok("POST", "/api/agent-profiles", {
+            "name": "HTTP profile", "runtime_id": "rt-claude-code", "model_id": mid,
+            "effort": "high", "agent_teams": False, "custom_prompt": "HTTP instructions"}, status=201))["profile"]
+        aid = profile["profile_id"]
+        assert profile["model"] == {"model_id": mid, "name": body["name"],
+                                    "protocol": body["protocol"], "provider_id": pid}
+        assert profile["provider"]["provider_id"] == pid and profile["provider"]["vendor_type"] == "custom"
+        assert profile["roles"] and profile["used_by"] == dict(service.NOT_USED)
+        assert profile["cost"]["source"] == "provider_price"
+        assert not {"mode", "system_prompt_mode", "role_system_prompt_mode", "system_prompt_modes"} & profile.keys()
+        registry = await client.ok("GET", "/api/registry")
+        assert next(p for p in registry["profiles"] if p["profile_id"] == aid) == profile
+        assert next(m for m in registry["models"] if m["model_id"] == mid)["profile_count"] == 1
+        for path in (f"/api/models/{mid}", f"/api/providers/{pid}"):
+            status, error = await client.call("DELETE", path)
+            assert status == 409 and set(error) == {"error"}
+        profile = (await client.ok("PUT", f"/api/agent-profiles/{aid}", {"effort": None}))["profile"]
+        assert profile["effort"] is None and profile["custom_prompt"] == "HTTP instructions"
+        await client.ok("DELETE", f"/api/agent-profiles/{aid}")
+        for model_id in (mid, chat["model_id"]):
+            assert await client.ok("DELETE", f"/api/models/{model_id}") == {"deleted": model_id}
+        await client.ok("DELETE", f"/api/providers/{pid}")
+        assert await db.get_provider(pid) is None and await db.get_model(mid) is None
+    _run_http(test, monkeypatch, tmp_path)
+
+
+@needs_db
+def test_http_model_errors_and_concurrent_deletion(monkeypatch, tmp_path):
+    async def test(client, pool):
+        pid = (await client.ok("POST", "/api/providers", _account(), status=201))["provider"]["provider_id"]
+        body = _body(provider_id=pid)
+        mid = (await client.ok("POST", "/api/models", body, status=201))["model"]["model_id"]
+        cases = [
+            ("POST", "/api/models", body, 409),
+            ("POST", "/api/models", {**body, "protocol": "openai-chat"}, 400),
+            ("POST", "/api/models", {**body, "provider_id": "prov-missing"}, 404),
+            ("PUT", f"/api/models/{mid}", {"name": "renamed"}, 400),
+            ("PUT", f"/api/models/{mid}", {"context_window": True}, 400),
+            ("GET", "/api/models?runtime_id=rt-missing", None, 404),
+        ]
+        for method in ("GET", "PUT", "DELETE"):
+            cases.append((method, "/api/models/model-missing", {"efforts": None} if method == "PUT" else None, 404))
+        builtin = await pool.fetchval("SELECT id FROM llm_models WHERE builtin LIMIT 1")
+        cases += [("PUT", f"/api/models/{builtin}", {"efforts": []}, 400),
+                  ("DELETE", f"/api/models/{builtin}", None, 400)]
+        for method, path, value, expected in cases:
+            status, error = await client.call(method, path, value)
+            assert status == expected and set(error) == {"error"}, (method, path, error)
+        results = await asyncio.gather(client.call("DELETE", f"/api/models/{mid}"),
+                                       client.call("DELETE", f"/api/models/{mid}"))
+        assert sorted(status for status, _ in results) == [200, 404]
+        assert await db.get_model(mid) is None
+    _run_http(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("field", ["provider_id", "model", "system_prompt_mode", "mode", "protocol", "efforts",
+                                 "role_system_prompt_mode", "system_prompt_modes"])
+@pytest.mark.parametrize("method,path", [("POST", "/api/agent-profiles"),
+                                         ("PUT", "/api/agent-profiles/agent-test")])
+def test_http_profile_rejects_old_body_and_mode_fields(monkeypatch, tmp_path, field, method, path):
+    async def test(client, pool):
+        status, error = await client.call(method, path, {
+            "name": "Rejected", "runtime_id": "rt-claude-code", "model_id": "model-test", field: "legacy"})
+        assert status == 400 and set(error) == {"error"} and field in error["error"]
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("method,path", [("GET", "/api/models"), ("POST", "/api/models"),
+    ("GET", "/api/models/model-test"), ("PUT", "/api/models/model-test"), ("DELETE", "/api/models/model-test")])
+def test_http_model_routes_require_authentication(monkeypatch, tmp_path, method, path):
+    async def test(client, pool):
+        status, error = await client.call(method, path, _body(), token=None)
+        assert status == 401 and set(error) == {"error"}
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("method,path,body", [
+    ("POST", "/api/models", {"provider_id": None, "name": "m", "protocol": "anthropic-messages"}),
+    ("POST", "/api/models", {"provider_id": "prov-test", "name": "m", "protocol": ["openai-chat"]}),
+    ("PUT", "/api/models/model-test", {"name": "immutable"}),
+    ("PUT", "/api/models/model-test", {}),
+])
+def test_http_model_validation_uses_shared_registry(monkeypatch, tmp_path, method, path, body):
+    async def test(client, pool):
+        status, error = await client.call(method, path, body)
+        assert status == 400 and set(error) == {"error"}
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("resource", ["models", "agent-profiles"])
+@pytest.mark.parametrize("raw", [b"{", b"[]", b"null", b'"text"', b"\xff"])
+def test_http_registry_rejects_malformed_or_nonobject_bodies(monkeypatch, tmp_path, resource, raw):
+    async def test(client, pool):
+        status, answer = await client.call("POST", f"/api/{resource}", raw=raw)
+        assert status == 400 and set(answer) == {"error"}
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("model_id", ["prov-test", "agent-test", "model-test/extra", "model_test"])
+@pytest.mark.parametrize("method", ["GET", "PUT", "DELETE"])
+def test_http_model_routes_accept_only_model_ids(monkeypatch, tmp_path, method, model_id):
+    async def test(client, pool):
+        status, answer = await client.call(method, f"/api/models/{model_id}", {"efforts": None})
+        assert status == 404 and set(answer) == {"error"}
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("changes", [
+    {"context_window": 0}, {"context_window": True}, {"input_usd_per_mtok": -1},
+    {"output_usd_per_mtok": float("nan")}, {"cache_read_usd_per_mtok": float("inf")},
+    {"cache_write_usd_per_mtok": 10001}, {"efforts": ["bad value"]}, {"background_model": "bad name"},
+])
+def test_http_model_creation_rejects_invalid_settings(monkeypatch, tmp_path, changes):
+    async def test(client, pool):
+        status, answer = await client.call("POST", "/api/models", _body(**changes))
+        assert status == 400 and set(answer) == {"error"}
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("runtime_type,protocol,auth,owner,error", [
+    ("claude-code", "openai-chat", "api_key", None, "exact protocol"),
+    ("omp", "anthropic-messages", "oauth", "claude-code", "only use its own runtime"),
+    ("grok", "openai-responses", "api_key", None, "auth kind"),
+    ("codex", "openai-responses", "oauth", "grok", "only use its own runtime"),
+])
+def test_http_profile_rejects_incompatible_model_before_inserting(
+    monkeypatch, tmp_path, runtime_type, protocol, auth, owner, error,
+):
+    model = _row(protocol=protocol)
+    if owner is not None:
+        vendor = {"claude-code": "claude-subscription", "grok": "grok-login"}[owner]
+        model["provider"].update(auth=auth, oauth_runtime_type=owner, vendor_type=vendor)
+        model["endpoint"]["base_url"] = ""
+    monkeypatch.setattr(db, "get_runtime", AsyncMock(return_value={
+        "id": "rt-test", "name": "Test runtime", "type": runtime_type, "executable": "", "capabilities": []}))
+    monkeypatch.setattr(db, "lock_model", AsyncMock(return_value=model))
+    insert = AsyncMock()
+    monkeypatch.setattr(db, "insert_profile", insert)
+
+    @asynccontextmanager
+    async def transaction():
+        yield object()
+
+    monkeypatch.setattr(connection, "transaction", transaction)
+    async def test(client, pool):
+        status, answer = await client.call("POST", "/api/agent-profiles", {
+            "name": "Incompatible", "runtime_id": "rt-test", "model_id": "model-test"})
+        assert status == 400 and error in answer["error"], answer
+        insert.assert_not_awaited()
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@needs_db
+def test_http_profile_preview_uses_saved_binding_role_project_and_mode_source(monkeypatch, tmp_path):
+    async def test(client, pool):
+        from looper.agents.system_prompt import build_system_prompt
+        from looper.agents import prompt_preview
+
+        pid = (await client.ok("POST", "/api/providers", _account(), status=201))["provider"]["provider_id"]
+        mid = (await client.ok("POST", "/api/models", _body(provider_id=pid), status=201))["model"]["model_id"]
+        aid = (await client.ok("POST", "/api/agent-profiles", {
+            "name": "Preview profile", "runtime_id": "rt-claude-code", "model_id": mid,
+            "custom_prompt": "Preview identity"}, status=201))["profile"]["profile_id"]
+        project = (await client.ok("POST", "/api/projects", {"name": "Preview project"}, status=201))["project_id"]
+        await client.ok("PUT", "/api/agent-settings/roles/worker", {"system_prompt_mode": "replace"})
+        builds = []
+        def capture(**kwargs):
+            result = build_system_prompt(**kwargs)
+            builds.append(result)
+            return result
+        monkeypatch.setattr(prompt_preview, "build_system_prompt", capture)
+        preview = await client.ok("GET", f"/api/agent-profiles/{aid}/prompt-preview?role=worker&project_id={project}")
+        assert preview["role"] == "worker" and preview["prompt_layers"]["project"]["id"] == project
+        assert preview["system_prompt_mode"] == "replace" and preview["system_prompt_mode_source"] == "role"
+        assert preview["looper_prompt_sha256"] == builds[-1].sha256
+        assert any("Preview identity" in (b["text"] or "") for b in preview["blocks"])
+        assert preview["prompt_layers"]["contract"]["name"] == "WORK_CONTRACT"
+        manager = await client.ok("GET", f"/api/agent-profiles/{aid}/prompt-preview?role=manager&project_id={project}")
+        assert manager["prompt_layers"]["project"] is None
+        assert manager["system_prompt_mode_source"] == "builtin"
+        for path, expected in ((f"/api/agent-profiles/{aid}/prompt-preview", 400),
+                               (f"/api/agent-profiles/agent-missing/prompt-preview?role=worker", 404)):
+            status, error = await client.call("GET", path)
+            assert status == expected and set(error) == {"error"}
+    _run_http(test, monkeypatch, tmp_path)
+
+
+def test_http_model_filters_and_readback_use_registry_views(monkeypatch, tmp_path):
+    row = _row(name="claude-haiku-4-5", input_usd_per_mtok=0)
+    other_protocol = _row(protocol="openai-chat")
+    models = AsyncMock(return_value=[row, other_protocol])
+    monkeypatch.setattr(db, "list_models", models)
+    monkeypatch.setattr(db, "get_model", AsyncMock(return_value=row))
+    monkeypatch.setattr(db, "get_runtime", AsyncMock(return_value={
+        "id": "rt-test", "name": "Test runtime", "type": "claude-code", "executable": "", "capabilities": []}))
+    async def test(client, pool):
+        listed = await client.ok("GET", "/api/models?provider_id=prov-test&runtime_id=rt-test")
+        assert [m["protocol"] for m in listed["models"]] == ["anthropic-messages"]
+        assert models.await_args.kwargs == {"provider_id": "prov-test"}
+        saved = (await client.ok("GET", "/api/models/model-test"))["model"]
+        assert saved == listed["models"][0]
+        assert saved["prices"]["input_usd_per_mtok"] == {"override": 0, "effective": 0, "source": "override"}
+        assert "api_key" not in repr(saved)
+    _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("role", ["worker", "reviewer", "planner", "manager"])
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("runtime_type", ["claude-code", "codex"])
+def test_http_normalized_profile_preview_uses_launch_builder(monkeypatch, tmp_path, role, configured, runtime_type):
+    from looper.agents import prompt_preview
+    from looper.agents.system_prompt import build_system_prompt
+    from looper.db import agent_setting_layers
+
+    runtime = service.runtimes.ADAPTERS[runtime_type]
+    protocol = "openai-responses" if runtime_type == "codex" else "anthropic-messages"
+    model = _row(protocol=protocol)
+    row = {"id": "agent-preview", "name": "Preview", "runtime_id": f"rt-{runtime_type}",
+           "runtime_name": runtime_type, "runtime_type": runtime_type,
+           "runtime_capabilities": [c.value for c in runtime.capabilities],
+           "model_id": model["id"], "model": model, "provider": model["provider"],
+           "endpoint": model["endpoint"], "custom_prompt": "Preview identity", "agent_teams": False}
+    monkeypatch.setattr(db, "get_profile", AsyncMock(return_value=row))
+    monkeypatch.setattr(prompt_preview.db_roles, "get_config", AsyncMock(return_value=None))
+    layers = [{"scope": "role", "role": role, "system_prompt_mode": "replace"}] if configured else []
+    loader = AsyncMock(return_value=layers)
+    monkeypatch.setattr(agent_setting_layers, "list_layers", loader)
+    builds = []
+    def capture(**kwargs):
+        result = build_system_prompt(**kwargs)
+        builds.append(result)
+        return result
+    monkeypatch.setattr(prompt_preview, "build_system_prompt", capture)
+    async def test(client, pool):
+        answer = await client.ok("GET", f"/api/agent-profiles/agent-preview/prompt-preview?role={role}&system_prompt_mode=append")
+        assert answer["role"] == role and answer["runtime"] == runtime_type
+        expected_mode = "replace" if configured or role in ("planner", "manager") else "append"
+        assert answer["system_prompt_mode"] == (expected_mode if runtime.can_replace_system_prompt else "append")
+        role_source = "role" if configured else "builtin"
+        assert answer["system_prompt_mode_source"] == (role_source if runtime.can_replace_system_prompt else "runtime")
+        assert answer["role_system_prompt_mode_source"] == role_source
+        assert answer["role_system_prompt_mode"] == expected_mode
+        assert answer["looper_prompt_sha256"] == builds[-1].sha256
+        assert answer["prompt_layers"] == builds[-1].layers
+        assert any("Preview identity" in (block["text"] or "") for block in answer["blocks"])
+        assert loader.await_count == 1
+    _run_http(test, monkeypatch, tmp_path, database=False)

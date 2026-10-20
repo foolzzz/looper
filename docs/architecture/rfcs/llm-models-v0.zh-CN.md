@@ -358,7 +358,7 @@ dry-run 输出固定计数字段：`providers_before/after`、`endpoints_after`�
 
 Manager dialogs 保留 `provider_key`、`config_tools`、`task_cost`、`schedule_planner_profile`，新增或扩展：custom 建账户→模型→profile、同名双协议的兼容选择、登录不能跨 runtime、缺 endpoint 明确拒绝、key 粘贴不存不复述、按模型改价不改历史。通过标准包括工具确实成功、数据库读回正确引用、实际绑定协议正确、无额外写入及无 key 泄露，不能只判最终回复像是成功。
 
-实现定稿后按 [eval 说明](../../../evals/README.md) 在相同 cases 上跑前后比较，`--reps 2`，haiku 与 opus·xhigh Manager 都跑；命令中的新增 case id 由实现时登记：
+实现定稿后按 [eval 说明](../../../evals/README.md) 在相同 cases 上跑前后比较，`--reps 2`，sonnet 与 opus·xhigh Manager 都跑（真实评测的 Manager 不用 haiku）；命令中的新增 case id 由实现时登记：
 
 ```sh
 uv run --extra test python -m evals.prompt_regression dialogs --mode real \
@@ -370,7 +370,7 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
   --max-budget-usd 3.0 --case-budget-usd 3.0 --total-cap-usd 20
 ```
 
-附与 `dialogs-real-haiku.json`、`dialogs-real-opus.json` 及补丁后同 case 基线的 comparison；新增用例先在旧版记录能力差异，再验证新版的可观察结果，不用刷新基线掩盖失败。预算不足/未运行/缺凭据单列，不记作通过。本 RFC 没有修改实际模型可见代码，因此本次不执行付费 eval；这些是实施发布门禁。
+附与 `dialogs-real-sonnet.json`、`dialogs-real-opus.json` 及补丁后同 case 基线的 comparison；新增用例先在旧版记录能力差异，再验证新版的可观察结果，不用刷新基线掩盖失败。预算不足/未运行/缺凭据单列，不记作通过。本 RFC 没有修改实际模型可见代码，因此本次不执行付费 eval；这些是实施发布门禁。
 
 ## 11. Go 移植与 eval harness 的后续遵循项
 

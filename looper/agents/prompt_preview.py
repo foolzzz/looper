@@ -4,10 +4,12 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 
 from ..db import profile_registry as db_profiles, projects as db_projects, role_configs as db_roles
-from ..db import project_documents as db_documents
-from .agent_settings import AgentType, Launch, load_agent_settings, profile_problem
+from ..db import agent_setting_layers, project_documents as db_documents
+from .agent_settings import (
+    AgentType, Launch, index_layers, profile_problem, resolve, system_prompt_mode_choice,
+)
 from .knowledge import AgentKnowledge, SourceKind, StoredSet, _entry, clipped_index
-from .profile_registry import AgentProfile, RegistryError, RegistryNotFound
+from .profile_registry import AgentProfile, ResolvedAgentProfile, RegistryError, RegistryNotFound
 from .system_prompt import WORK_CONTRACT, REVIEW_CONTRACT, build_system_prompt, is_recommended
 
 
@@ -39,10 +41,12 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
     row = await db_profiles.get_profile(profile_id)
     if row is None:
         raise RegistryNotFound(f"no Agent Profile {profile_id!r}")
-    profile = AgentProfile.from_row(row)
+    profile = ResolvedAgentProfile.from_row(row) if "model_id" in row else AgentProfile.from_row(row)
     # The Manager spans projects; its launch never receives project context or project layers.
     project_id = None if agent is AgentType.MANAGER else project_id
-    settings = replace(await load_agent_settings(role, project_id), profile=profile)
+    layers = index_layers(await agent_setting_layers.list_layers(project_id), project_id)
+    # Resolve the same layers as a launch, without loading another selected profile's credentials.
+    settings = replace(resolve(role, layers, project_id), profile=profile)
     if problem := profile_problem(profile, agent):
         raise RegistryError(problem)
     role_text, recommended = await _role_prompt(agent)
@@ -90,11 +94,14 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         contract_name=contract_name, contract=contract, project=project, knowledge=knowledge,
     )
     launch = Launch(settings, knowledge=knowledge, role=agent)
+    _, mode_source = system_prompt_mode_choice(agent, layers)
     return {
         "profile": {"id": profile.id, "name": profile.name}, "role": role,
         "runtime": launch.runtime.type, "system_prompt_mode": launch.system_prompt_mode.value,
         # The role's setting (the mode above is what the launch uses: append where the runtime cannot replace).
         "role_system_prompt_mode": settings.system_prompt_mode.value,
+        "system_prompt_mode_source": (mode_source.value if launch.runtime.can_replace_system_prompt else "runtime"),
+        "role_system_prompt_mode_source": mode_source.value,
         "custom_prompt_set": bool(profile.custom_prompt.strip()),
         "looper_prompt_sha256": system_prompt.sha256, "prompt_layers": system_prompt.layers,
         "blocks": [asdict(block) for block in launch.runtime.prompt_blocks(launch, system_prompt.text, cwd=cwd)],

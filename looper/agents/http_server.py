@@ -386,6 +386,7 @@ class AgentHTTPServer:
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
+    _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
     _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
@@ -586,6 +587,16 @@ class AgentHTTPServer:
         elif path == "/api/models" and method == "GET":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.list_models(
                 provider_id=query.get("provider_id") or None, runtime_id=query.get("runtime_id") or None))
+        elif path == "/api/models" and method == "POST":
+            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_model(
+                projects.json_object(body)))
+        elif (m := self._RE_MODEL.match(path)) and method == "GET":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.get_model(m.group(1)))
+        elif (m := self._RE_MODEL.match(path)) and method == "PUT":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_model(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_MODEL.match(path)) and method == "DELETE":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_model(m.group(1)))
         elif (m := self._RE_PROFILE_PROMPT_PREVIEW.match(path)) and method == "GET":
             await self._handle_registry(writer, HTTP_200, lambda: prompt_preview.preview(
                 m.group(1), query.get("role", ""), query.get("project_id") or None))

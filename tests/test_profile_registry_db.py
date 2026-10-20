@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -48,7 +49,9 @@ async def _call(method: str, path: str, body: Any = None, *, claude: str = "clau
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
     writer = _Writer()
-    await server._route_api(method, path, {}, b"" if body is None else json.dumps(body).encode(), writer)
+    parsed = urlsplit(path)
+    await server._route_api(method, parsed.path, dict(parse_qsl(parsed.query)),
+                            b"" if body is None else json.dumps(body).encode(), writer)
     head, _, payload = writer.data.partition(b"\r\n\r\n")
     return int(head.split()[1]), json.loads(payload)
 
@@ -116,7 +119,7 @@ def _by_name(entries: list[dict[str, Any]], name: str) -> dict[str, Any]:
 
 
 def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents.profile_registry import BUILTIN_PROFILE, AgentProfile
+    from looper.agents.profile_registry import AgentProfile
     from looper.agents.runtimes import CLAUDE_CODE
     from looper.db import profile_registry as db
     from looper.db.connection import ensure_schema
@@ -126,7 +129,9 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         await ensure_schema(pool)
         await ensure_schema(pool)
         (profile,) = await db.list_profiles()
-        assert AgentProfile.from_row(profile) == BUILTIN_PROFILE
+        spec = AgentProfile.from_row(profile)
+        assert (spec.name, spec.runtime.id, spec.model_id) == (
+            "claude-code/opus", "rt-claude-code", profile["model"]["id"])
         registry = await _registry()
         (runtime,) = registry["runtimes"]
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
@@ -136,23 +141,23 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         assert (claude["name"], claude["auth"], claude["oauth_runtime_type"], claude["api_key"]) == (
             "claude-subscription", "oauth", "claude-code", None)
         assert (codex["provider_id"], codex["name"], codex["builtin"], codex["auth"], codex["oauth_runtime_type"],
-                codex["protocols"], codex["models"]) == (
-            "prov-codex-login", "codex-login", True, "oauth", "codex", ["openai-responses"], [])
+                [e["protocol"] for e in codex["endpoints"]], codex["model_count"]) == (
+            "prov-codex-login", "codex-login", True, "oauth", "codex", ["openai-responses"], 7)
         assert codex["suggested_models"][0] == "gpt-6.1-sol" and claude["suggested_models"] == []
         assert (grok["provider_id"], grok["name"], grok["builtin"], grok["auth"], grok["oauth_runtime_type"],
-                grok["protocols"], grok["models"], grok["suggested_models"][0]) == (
-            "prov-grok-login", "grok-login", True, "oauth", "grok", ["openai-responses"], [], "grok-4.7")
+                [e["protocol"] for e in grok["endpoints"]], grok["model_count"], grok["suggested_models"][0]) == (
+            "prov-grok-login", "grok-login", True, "oauth", "grok", ["openai-responses"], 4, "grok-4.7")
         assert grok["login"]["state"] == "not_logged_in"  # the tests' GROK_HOME has no login
 
     _run(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("method", "path", "body"), [
-    ("PUT", "/api/providers/prov-claude-subscription", {"models": [{"name": "opus"}]}),
+    ("PUT", "/api/providers/prov-claude-subscription", {"name": "renamed"}),
     ("DELETE", "/api/providers/prov-claude-subscription", None),
     ("DELETE", "/api/providers/prov-codex-login", None),
     ("DELETE", "/api/providers/prov-grok-login", None),
-    ("PUT", "/api/agent-profiles/agent-claude-code-opus", {"model": "sonnet"}),
+    ("PUT", "/api/agent-profiles/agent-claude-code-opus", {"effort": "low"}),
     ("DELETE", "/api/agent-profiles/agent-claude-code-opus", None),
 ])
 def test_the_builtins_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str, path: str, body: Any) -> None:
@@ -264,9 +269,11 @@ def test_the_upgrade_drops_custom_runtimes_no_profile_uses_once_and_keeps_the_ot
 def test_a_provider_api_key_is_stored_apart_and_never_shown(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(pool: Any) -> None:
         provider = (await _ok("POST", "/api/providers", {
-            "name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key", "api_key": SECRET,
-            "base_url": "https://api.anthropic.example", "models": [{"name": "claude-sonnet-4-5",
-                                                                     "input_usd_per_mtok": 3}]}))["provider"]
+            "name": "anthropic-key",
+            "api_key": SECRET,
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "anthropic-messages", "base_url": "https://api.anthropic.example"}]}))["provider"]
         provider_id = provider["provider_id"]
         assert provider["api_key"] == "***"
         assert SECRET not in json.dumps(await _registry())
@@ -276,7 +283,7 @@ def test_a_provider_api_key_is_stored_apart_and_never_shown(monkeypatch: pytest.
                                         default=str)
 
         # *** keeps the stored key; another value replaces it; null removes it.
-        await _ok("PUT", f"/api/providers/{provider_id}", {"api_key": "***", "base_url": ""})
+        await _ok("PUT", f"/api/providers/{provider_id}", {"api_key": "***"})
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets") == SECRET
         await _ok("PUT", f"/api/providers/{provider_id}", {"api_key": "sk-other"})
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets") == "sk-other"
@@ -287,14 +294,19 @@ def test_a_provider_api_key_is_stored_apart_and_never_shown(monkeypatch: pytest.
 
 
 @pytest.mark.parametrize(("body", "error"), [
-    ({"protocols": [], "auth": "api_key"}, "non-empty list"),
-    ({"protocols": ["grpc"], "auth": "api_key"}, "non-empty list"),
-    ({"protocols": ["openai-chat"], "auth": "token"}, "auth must be one of"),
-    ({"protocols": ["anthropic-messages"], "auth": "oauth"}, "no runtime type"),
-    ({"protocols": ["anthropic-messages"], "auth": "oauth", "oauth_runtime_type": "claude-code", "api_key": "k"},
-     "takes no api_key"),
-    ({"protocols": ["openai-chat"], "auth": "api_key", "base_url": "ftp://x"}, "base_url must be"),
-    ({"protocols": ["openai-chat"], "auth": "api_key", "models": [{"name": "m"}, {"name": "m"}]}, "listed twice"),
+    ({"vendor_type": "custom", "endpoints": []}, "endpoints must be"),
+    ({
+        "vendor_type": "custom",
+        "endpoints": [
+            {"protocol": "grpc", "base_url": "https://x.invalid"}]}, "protocol must be"),
+    ({"vendor_type": "custom", "auth": "token"}, "unknown field"),
+    ({"vendor_type": "custom", "protocols": ["openai-chat"]}, "unknown field"),
+    ({"vendor_type": "custom", "base_url": "https://x.invalid"}, "unknown field"),
+    ({"vendor_type": "custom", "models": [{"name": "m"}]}, "unknown field"),
+    ({
+        "vendor_type": "custom",
+        "endpoints": [
+            {"protocol": "openai-chat", "base_url": "ftp://x"}]}, "base_url must be"),
 ])
 def test_a_provider_that_does_not_validate_is_refused(
     monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], error: str,
@@ -313,47 +325,89 @@ async def _provider(body: dict[str, Any]) -> str:
     return (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
 
 
+async def _model_id(provider_id: str, name: str, protocol: str = "anthropic-messages") -> str:
+    models = (await _ok("GET", f"/api/models?provider_id={provider_id}"))["models"]
+    found = next((m for m in models if m["name"] == name and m["protocol"] == protocol), None)
+    if found is None:
+        found = (await _ok("POST", "/api/models", {
+            "provider_id": provider_id, "name": name, "protocol": protocol}))["model"]
+    return found["model_id"]
+
+
 def test_a_profile_pairs_a_runtime_and_a_provider_that_can_run_together(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
         standin = await _runtime(stand_in, name="si")
-        chat = await _provider({"name": "openai-chat", "protocols": ["openai-chat"], "auth": "api_key"})
-        key = await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key",
-                               "models": [{"name": "claude-sonnet-4-5"}]})
-        login = await _provider({"name": "stand-in-login", "protocols": ["anthropic-messages"], "auth": "oauth",
-                                 "oauth_runtime_type": stand_in})
+        chat = await _provider({
+            "name": "openai-chat",
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]})
+        key = await _provider({
+            "name": "anthropic-key",
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "anthropic-messages", "base_url": "https://llm.example.invalid/v1"}]})
 
         async def profile(runtime_id: str, provider_id: str, model: str = "claude-sonnet-4-5") -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {"name": f"a-{runtime_id}-{provider_id}-{model}",
-                                                               "runtime_id": runtime_id, "provider_id": provider_id,
-                                                               "model": model})
+                                                               "runtime_id": runtime_id,
+                                                               "model_id": await _model_id(
+                                                                   provider_id, model, "openai-chat" if provider_id == chat
+                                                                   else "anthropic-messages")})
 
         status, payload = await profile("rt-claude-code", "prov-claude-subscription", "sonnet")
         assert status == 201 and payload["profile"]["runtime_name"] == "claude-code"
         assert (await profile(standin, key))[0] == 201  # an adapter that takes API keys
-        assert (await profile(standin, login))[0] == 201  # its own login
 
         # Protocols must intersect.
         status, payload = await profile("rt-claude-code", chat)
-        assert status == 400 and "share no protocol" in payload["error"]
+        assert status == 400 and "exact protocol" in payload["error"]
         # An OAuth provider pairs only with the runtime type whose login it is, either way round.
         status, payload = await profile(standin, "prov-claude-subscription", "sonnet")
-        assert status == 400 and "login of claude-code runtimes" in payload["error"]
-        status, payload = await profile("rt-claude-code", login)
-        assert status == 400 and "login of stand-in runtimes" in payload["error"]
+        assert status == 400 and "only use its own runtime" in payload["error"]
         # Claude Code runs with its own login and with an API key.
         assert (await profile("rt-claude-code", key))[0] == 201
-        # A provider that lists its models takes no other.
-        status, payload = await profile(standin, key, "claude-opus-4-5")
-        assert status == 400 and "not one of them" in payload["error"]
+        # Profiles select a registered model id, never an account catalog entry.
+        status, payload = await _call("POST", "/api/agent-profiles", {
+            "name": "missing", "runtime_id": standin, "model_id": "model-nowhere"})
+        assert status == 400 and "no model" in payload["error"]
         # A runtime that takes only its own login refuses an API key.
         from looper.agents import runtimes
         from looper.agents.runtimes import AuthKind
 
         monkeypatch.setattr(type(runtimes.ADAPTERS[stand_in]), "auth_kinds", frozenset({AuthKind.OAUTH}))
         status, payload = await profile(standin, key, "claude-sonnet-4-5")
-        assert status == 400 and "cannot be started with an api_key provider" in payload["error"]
+        assert status == 400 and "auth kind" in payload["error"]
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize("field", ["runtime_id", "model_id"])
+@pytest.mark.parametrize("invalid", [None, "", "missing", 3, [], {}])
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+def test_profile_identity_fields_require_registered_ids(
+    monkeypatch: pytest.MonkeyPatch, field: str, invalid: Any, method: str,
+) -> None:
+    async def _test(_pool: Any) -> None:
+        model_id = await _model_id("prov-claude-subscription", "sonnet")
+        valid = {"name": "identity", "runtime_id": "rt-claude-code", "model_id": model_id}
+        if method == "PUT":
+            profile = (await _ok("POST", "/api/agent-profiles", valid))["profile"]
+            path = f"/api/agent-profiles/{profile['profile_id']}"
+            body = {field: invalid}
+        else:
+            path = "/api/agent-profiles"
+            body = {**valid, field: invalid}
+        status, payload = await _call(method, path, body)
+        assert status == 400 and f"no {field.removesuffix('_id')}" in payload["error"]
+        profiles = (await _registry())["profiles"]
+        if method == "PUT":
+            saved = _by_name(profiles, "identity")
+            assert (saved["runtime_id"], saved["model_id"]) == ("rt-claude-code", model_id)
+        else:
+            assert all(profile["name"] != "identity" for profile in profiles)
 
     _run(_test, monkeypatch)
 
@@ -377,15 +431,29 @@ def test_codex_pairs_with_its_own_login_or_an_api_key_provider_of_openai_respons
         runtime = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]
         assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
             "codex-cli 0.162.0", "Codex", ["openai-responses"])
-        cpa = await _provider({"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
-                               "base_url": "http://127.0.0.1:8317/v1", "api_key": SECRET})
-        chat = await _provider({"name": "chat-only", "protocols": ["openai-chat"], "auth": "api_key"})
-        anthropic = await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key"})
+        cpa = await _provider({
+            "name": "cpa",
+            "api_key": SECRET,
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "openai-responses", "base_url": "http://127.0.0.1:8317/v1"}]})
+        chat = await _provider({
+            "name": "chat-only",
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]})
+        anthropic = await _provider({
+            "name": "anthropic-key",
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "anthropic-messages", "base_url": "https://llm.example.invalid/v1"}]})
 
         async def profile(provider_id: str) -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {
-                "name": f"codex-{provider_id}", "model": "gpt-5.5", "runtime_id": runtime["runtime_id"],
-                "provider_id": provider_id})
+                "name": f"codex-{provider_id}", "runtime_id": runtime["runtime_id"],
+                "model_id": await _model_id(provider_id, "gpt-5.5",
+                    "openai-chat" if provider_id == chat else "anthropic-messages"
+                    if provider_id in (anthropic, "prov-claude-subscription") else "openai-responses")})
 
         status, payload = await profile(cpa)
         assert status == 201
@@ -393,7 +461,7 @@ def test_codex_pairs_with_its_own_login_or_an_api_key_provider_of_openai_respons
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": payload["profile"]["profile_id"]})
         for provider_id in (chat, anthropic, "prov-claude-subscription"):
             status, payload = await profile(provider_id)
-            assert status == 400 and "share no protocol" in payload["error"]
+            assert status == 400 and "exact protocol" in payload["error"]
         # Codex's own login: any model, priced at the built-in prices as a subscription equivalent.
         status, payload = await profile("prov-codex-login")
         assert status == 201 and payload["warnings"] == []
@@ -411,10 +479,10 @@ def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.Monk
         omp = (await _ok("POST", "/api/runtimes/rt-omp/probe"))["runtime"]["runtime_id"]
         for runtime_id in ("rt-claude-code", omp):
             status, payload = await _call("POST", "/api/agent-profiles", {
-                "name": f"{runtime_id}-login", "model": "gpt-6.1-sol", "runtime_id": runtime_id,
-                "provider_id": "prov-codex-login"})
+                "name": f"{runtime_id}-login", "runtime_id": runtime_id,
+                "model_id": await _model_id("prov-codex-login", "gpt-6.1-sol", "openai-responses")})
             assert status == 400, payload
-            assert "pairs only with" in payload["error"] or "share no protocol" in payload["error"]
+            assert "only use its own runtime" in payload["error"] or "exact protocol" in payload["error"]
         # A login problem is cleared only on the Codex login.
         status, payload = await _call("DELETE", "/api/providers/prov-claude-subscription/login-problem")
         assert status == 400 and "is not the Codex or Grok login" in payload["error"]
@@ -462,16 +530,31 @@ def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_ro
         assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
             "omp/18.4.3", "OMP", ["anthropic-messages", "openai-chat", "openai-responses"])
         providers = [
-            await _provider({"name": "cpa", "protocols": ["openai-responses", "openai-chat"], "auth": "api_key",
-                             "base_url": "http://127.0.0.1:8317/v1", "api_key": SECRET}),
-            await _provider({"name": "chat-only", "protocols": ["openai-chat"], "auth": "api_key"}),
-            await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key"}),
+            await _provider({
+                "name": "cpa",
+                "api_key": SECRET,
+                "vendor_type": "custom",
+                "endpoints": [
+                    {"protocol": "openai-responses", "base_url": "http://127.0.0.1:8317/v1"},
+                    {"protocol": "openai-chat", "base_url": "http://127.0.0.1:8317/v1"}]}),
+            await _provider({
+                "name": "chat-only",
+                "vendor_type": "custom",
+                "endpoints": [
+                    {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]}),
+            await _provider({
+                "name": "anthropic-key",
+                "vendor_type": "custom",
+                "endpoints": [
+                    {"protocol": "anthropic-messages", "base_url": "https://llm.example.invalid/v1"}]}),
         ]
 
         async def profile(provider_id: str) -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {
-                "name": f"omp-{provider_id}", "model": "gpt-5.5", "runtime_id": runtime["runtime_id"],
-                "provider_id": provider_id})
+                "name": f"omp-{provider_id}", "runtime_id": runtime["runtime_id"],
+                "model_id": await _model_id(provider_id, "gpt-5.5",
+                    "openai-responses" if provider_id == providers[0] else "openai-chat"
+                    if provider_id == providers[1] else "anthropic-messages")})
 
         profiles = []
         for provider_id in providers:
@@ -482,10 +565,10 @@ def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_ro
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": profiles[0]})
         # The Claude subscription is Claude Code's login, and OMP's own logins are not ones Looper uses.
         status, payload = await profile("prov-claude-subscription")
-        assert status == 400 and "pairs only with" in payload["error"]
+        assert status == 400 and "only use its own runtime" in payload["error"]
         status, payload = await _call("POST", "/api/providers", {
-            "name": "omp-login", "protocols": ["openai-responses"], "auth": "oauth", "oauth_runtime_type": "omp"})
-        assert status == 400 and "OMP has no login of its own" in payload["error"]
+            "name": "omp-login", "vendor_type": "omp-login"})
+        assert status == 400 and "vendor_type must be" in payload["error"]
 
     _run(_test, monkeypatch)
 
@@ -538,8 +621,9 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
 
         async def profile(provider_id: str, runtime_id: str = "rt-grok") -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {
-                "name": f"{runtime_id}-{provider_id}", "model": "grok-4.7", "runtime_id": runtime_id,
-                "provider_id": provider_id})
+                "name": f"{runtime_id}-{provider_id}", "runtime_id": runtime_id,
+                "model_id": await _model_id(provider_id, "grok-4.7",
+                    "anthropic-messages" if provider_id == "prov-claude-subscription" else "openai-responses")})
 
         # Its own login: any model, priced by Grok's own figure as a subscription equivalent, which no per-run
         # cap can stop.
@@ -550,13 +634,17 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
         assert "per-run spend caps do not stop its runs" in warning
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": payload["profile"]["profile_id"]})
         # Not another runtime's login, not an API key; and its login runs no other runtime.
-        key = await _provider({"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
-                               "base_url": "http://127.0.0.1:8317/v1", "api_key": SECRET})
+        key = await _provider({
+            "name": "cpa",
+            "api_key": SECRET,
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "openai-responses", "base_url": "http://127.0.0.1:8317/v1"}]})
         for provider_id in ("prov-codex-login", "prov-claude-subscription", key):
             status, payload = await profile(provider_id)
             assert status == 400, payload
         status, payload = await profile("prov-grok-login", "rt-codex")
-        assert status == 400 and "pairs only with" in payload["error"]
+        assert status == 400 and "only use its own runtime" in payload["error"]
 
     _run(_test, monkeypatch)
 
@@ -566,16 +654,21 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
 ) -> None:
     async def _test(_pool: Any) -> None:
         runtime_id = await _runtime(stand_in, name="si")
-        provider_id = await _provider({"name": "key", "protocols": ["anthropic-messages"], "auth": "api_key"})
+        provider_id = await _provider({
+            "name": "key",
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "anthropic-messages", "base_url": "https://llm.example.invalid/v1"}]})
         profile = (await _ok("POST", "/api/agent-profiles", {"name": "si-sonnet", "runtime_id": runtime_id,
-                                                             "provider_id": provider_id, "model": "sonnet",
+                                                             "model_id": await _model_id(provider_id, "sonnet"),
                                                              "effort": "low"}))["profile"]
 
-        status, payload = await _call("PUT", f"/api/providers/{provider_id}", {"protocols": ["openai-chat"]})
-        assert status == 400 and "Agent Profile 'si-sonnet' uses this provider" in payload["error"]
+        status, payload = await _call("PUT", f"/api/providers/{provider_id}", {"endpoints": [
+            {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]})
+        assert status == 409 and "models" in payload["error"]
         status, payload = await _call("PUT", f"/api/agent-profiles/{profile['profile_id']}",
-                                      {"provider_id": "prov-claude-subscription"})
-        assert status == 400 and "login of claude-code runtimes" in payload["error"]
+                                      {"model_id": await _model_id("prov-claude-subscription", "sonnet")})
+        assert status == 400 and "only use its own runtime" in payload["error"]
         renamed = (await _ok("PUT", f"/api/agent-profiles/{profile['profile_id']}",
                              {"name": "si-fast", "effort": None}))["profile"]
         assert (renamed["name"], renamed["effort"]) == ("si-fast", None)
@@ -583,6 +676,7 @@ def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
         status, payload = await _call("DELETE", f"/api/providers/{provider_id}")
         assert status == 409 and "first" in payload["error"]
         await _ok("DELETE", f"/api/agent-profiles/{profile['profile_id']}")
+        await _ok("DELETE", f"/api/models/{profile['model_id']}")
         await _ok("DELETE", f"/api/providers/{provider_id}")
         assert runtime_id in {r["runtime_id"] for r in (await _registry())["runtimes"]}
 
@@ -634,14 +728,17 @@ def test_the_upgrade_removes_llm_profiles_and_keeps_the_role_configs(monkeypatch
 async def _profile(name: str, runtime_id: str = "rt-claude-code", provider_id: str = "prov-claude-subscription",
                    model: str | None = None) -> str:
     return (await _ok("POST", "/api/agent-profiles", {
-        "name": name, "runtime_id": runtime_id, "provider_id": provider_id,
-        "model": model or name.rsplit("/", 1)[-1]}))["profile"]["profile_id"]
+        "name": name, "runtime_id": runtime_id,
+        "model_id": await _model_id(provider_id, model or name.rsplit("/", 1)[-1])}))["profile"]["profile_id"]
 
 
 async def _stand_in_profile(stand_in: str) -> str:
     runtime_id = await _runtime(stand_in, name="si")
-    provider_id = (await _ok("POST", "/api/providers", {"name": "si-key", "protocols": ["anthropic-messages"],
-                                                        "auth": "api_key"}))["provider"]["provider_id"]
+    provider_id = (await _ok("POST", "/api/providers", {
+        "name": "si-key",
+        "vendor_type": "custom",
+        "endpoints": [
+            {"protocol": "anthropic-messages", "base_url": "https://llm.example.invalid/v1"}]}))["provider"]["provider_id"]
     return await _profile("si/sonnet", runtime_id, provider_id, "sonnet")
 
 
@@ -666,7 +763,7 @@ def test_a_layer_selects_a_profile_only_for_roles_its_runtime_can_run(
         si_runtime = next(r["runtime_id"] for r in (await _registry())["runtimes"] if r["name"] == "si")
         si_key = next(p["provider_id"] for p in (await _registry())["providers"] if p["name"] == "si-key")
         status, payload = await _call("PUT", f"/api/agent-profiles/{planner}", {"runtime_id": si_runtime,
-                                                                                "provider_id": si_key})
+                                                                                "model_id": await _model_id(si_key, "sonnet")})
         assert status == 400 and "cannot run the planner" in payload["error"]
         # A selected profile stays until nothing selects it.
         assert (await _call("DELETE", f"/api/agent-profiles/{planner}"))[0] == 409
@@ -898,39 +995,48 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
 ) -> None:
     async def _test(_pool: Any) -> None:
         provider = (await _ok("POST", "/api/providers", {
-            "name": "glm", "protocols": ["anthropic-messages", "openai-chat"], "auth": "api_key",
-            "max_concurrency": 4, "models": [
-                {"name": "glm-4.6", "context_window": 200_000, "input_usd_per_mtok": 0.6, "efforts": ["low", "high"]},
-                {"name": "glm-4.5"}]}))["provider"]
+            "name": "glm",
+            "max_concurrency": 4,
+            "vendor_type": "custom",
+            "endpoints": [
+                {"protocol": "anthropic-messages", "base_url": "https://llm.example.invalid/v1"},
+                {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]}))["provider"]
         assert provider["max_concurrency"] == 4
-        assert provider["models"] == [
-            {"name": "glm-4.6", "context_window": 200_000, "input_usd_per_mtok": 0.6, "output_usd_per_mtok": None,
-             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": ["low", "high"],
-             "background_model": None},
-            {"name": "glm-4.5", "context_window": None, "input_usd_per_mtok": None, "output_usd_per_mtok": None,
-             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": None,
-             "background_model": None}]
+        assert provider["model_count"] == 0
+        first = (await _ok("POST", "/api/models", {
+            "provider_id": provider["provider_id"], "name": "glm-4.6", "protocol": "anthropic-messages",
+            "context_window": 200_000, "input_usd_per_mtok": 0.6, "efforts": ["low", "high"]}))["model"]
+        second = (await _ok("POST", "/api/models", {
+            "provider_id": provider["provider_id"], "name": "glm-4.5", "protocol": "anthropic-messages"}))["model"]
+        assert (first["context_window"], first["input_usd_per_mtok"], first["efforts"]) == (
+            200_000, 0.6, ["low", "high"])
+        assert all(second[key] is None for key in (
+            "context_window", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok",
+            "cache_write_usd_per_mtok", "efforts", "background_model"))
         unlimited = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {"max_concurrency": None}))
         assert unlimited["provider"]["max_concurrency"] is None
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
-        assert [(b["max_concurrency"], b["models"]) for b in builtins] == [(None, [])] * 3  # no limit, any model
+        assert all(b["max_concurrency"] is None and b["model_count"] > 0 for b in builtins)
 
     _run(_test, monkeypatch)
 
 
 @pytest.mark.parametrize(("change", "error"), [
-    ({"max_concurrency": 0}, "max_concurrency must be"),
-    ({"models": [{"name": "m", "context_window": 0}]}, "context_window must be"),
-    ({"models": [{"name": "m", "efforts": ["Low"]}]}, "efforts must be"),
-    ({"models": [{"name": "m", "input_usd_per_mtok": -1}]}, "per million tokens"),
-    ({"models": [{"name": "m", "speed": 1}]}, "each model is"),
+    ({"context_window": 0}, "context_window must be"),
+    ({"efforts": ["Low"]}, "efforts must be"),
+    ({"input_usd_per_mtok": -1}, "per million tokens"),
+    ({"speed": 1}, "unknown field"),
 ])
-def test_a_catalog_or_concurrency_that_does_not_validate_is_refused(
+def test_model_settings_that_do_not_validate_are_refused(
     monkeypatch: pytest.MonkeyPatch, change: dict[str, Any], error: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        status, payload = await _call("POST", "/api/providers", {"name": "p", "protocols": ["openai-chat"],
-                                                                 "auth": "api_key", **change})
+        provider = await _provider({"name": "p", "vendor_type": "custom", "endpoints": [
+            {"protocol": "openai-chat", "base_url": "https://llm.example.invalid/v1"}]})
+        status, payload = await _call("POST", "/api/models", {
+            "provider_id": provider, "name": "m", "protocol": "openai-chat", **change})
         assert status == 400 and error in payload["error"], payload
+        status, payload = await _call("PUT", f"/api/providers/{provider}", {"max_concurrency": 0})
+        assert status == 400 and "max_concurrency must be" in payload["error"]
 
     _run(_test, monkeypatch)
