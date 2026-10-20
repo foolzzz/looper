@@ -139,7 +139,8 @@ async def _deleting_project(call: Call) -> str | None:
 def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     used = profile_registry.usage_text(view["used_by"])
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
-            "provider": view["provider_name"], "model": view["model"], "effort": view["effort"],
+            "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
+            "effort": view["effort"],
             "agent_teams": view["agent_teams"],
             "custom_prompt": view.get("custom_prompt", ""),
             "roles": view["roles"], "builtin": view["builtin"],
@@ -162,16 +163,14 @@ def _profile(registry: Mapping[str, Any], wanted: Any) -> dict[str, Any]:
     return by_id_or_name(registry["profiles"], wanted, id_key="profile_id", what="Agent Profile")
 
 
-def _profile_parts(registry: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """The runtime and provider a call names (each by id or name; a runtime also by its type), as the registry's
-    ids."""
+async def _profile_parts(registry: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve a runtime and an exact model reference to their registry ids."""
     parts = {}
     if arguments.get("runtime") is not None:
         parts["runtime_id"] = by_id_or_name(registry["runtimes"], arguments["runtime"], id_key="runtime_id",
                                             what="runtime", keys=("name", "type"))["runtime_id"]
-    if arguments.get("provider") is not None:
-        parts["provider_id"] = by_id_or_name(registry["providers"], arguments["provider"], id_key="provider_id",
-                                             what="provider")["provider_id"]
+    if arguments.get("model") is not None:
+        parts["model_id"] = (await _model_reference(arguments["model"]))["model_id"]
     return parts
 
 
@@ -186,18 +185,18 @@ async def _profiles(call: Call) -> dict[str, Any]:
         return {"profiles": [_profile_listed(p) for p in registry["profiles"]],
                 "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"], "roles": r["roles"]}
                              for r in registry["runtimes"]],
-                "providers": [{"provider_id": p["provider_id"], "name": p["name"],
-                               "models": [m["name"] for m in p["models"]] or p["suggested_models"]}
-                              for p in registry["providers"]]}
-    fields = {**_given(arguments, ("name", "model", "effort", "agent_teams", "custom_prompt"),
-                      clears=("effort",)),
-              **_profile_parts(registry, arguments)}
+                "models": [{key: m[key] for key in ("model_id", "provider_id", "provider_name", "name", "protocol")}
+                           for m in registry["models"]]}
     if action == "create":
-        _required(arguments, action, "name", "runtime", "provider", "model")
-        return _profile_answer(await answered(profile_registry.create_profile(fields)))
-    _required(arguments, action, "profile")
-    profile = _profile(registry, arguments["profile"])
-    if action == "update":
+        _required(arguments, action, "name", "runtime", "model")
+    else:
+        _required(arguments, action, "profile")
+        profile = _profile(registry, arguments["profile"])
+    if action in ("create", "update"):
+        fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt"), clears=("effort",)),
+                  **await _profile_parts(registry, arguments)}
+        if action == "create":
+            return _profile_answer(await answered(profile_registry.create_profile(fields)))
         return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields)))
     await answered(profile_registry.delete_profile(profile["profile_id"]))
     return {"deleted": profile["name"]}
@@ -211,7 +210,8 @@ async def _deleting_profile(call: Call) -> str | None:
     profile = _profile(await _registry(), call.arguments["profile"])
     row = await answered(profile_registry.deletable_profile(profile["profile_id"]))
     effort = f" · effort {row['effort']}" if row.get("effort") else ""
-    return (f"要删除 Agent Profile「{row['name']}」（{row['runtime_name']} · {row['provider_name']} · {row['model']}"
+    return (f"要删除 Agent Profile「{row['name']}」（{row['runtime_name']} · {row['provider']['name']} · "
+            f"{row['model']['name']} · {row['model']['protocol']}"
             f"{effort}）吗？没有设置层、任务、定时任务或项目的可选列表在用它；删除后不能恢复。")
 
 
@@ -502,8 +502,8 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_agent_profiles",
-        description="Agent Profiles (runtime, provider, model, effort): list (with runtimes and providers); create; "
-                    "update; delete one nothing uses (the user confirms first). A role's profile: looper_settings.",
+        description="Agent Profiles: runtime, LLM model and runtime options. List; create; update; delete one "
+                    "nothing uses with confirmation. Select a role's profile with looper_settings.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
@@ -511,9 +511,9 @@ TOOLS: tuple[Tool, ...] = (
                 "profile": {"type": "string", "minLength": 1, "description": "Its id or name (update, delete)."},
                 "name": {"type": "string", "minLength": 1, "description": "create: its name; update: its new name."},
                 "runtime": {"type": "string", "description": "A runtime's id, name or type."},
-                "provider": {"type": "string", "description": "A provider's id or name."},
-                "model": {"type": "string"},
-                "effort": {"type": "string", "description": "low, medium, high, xhigh, max; null: the runtime's."},
+                "model": _MODEL_REFERENCE,
+                "effort": {"type": ["string", "null"],
+                           "description": "low, medium, high, xhigh, max; null: the runtime's."},
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
                 "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
                                   "prompt, before the harness; empty adds nothing."},

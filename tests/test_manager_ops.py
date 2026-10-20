@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -169,6 +171,35 @@ def test_a_write_runs_in_the_turn_answering_the_user(recorded: list[dict[str, An
     assert (row["channel"], row["chat"], row["message_id"], row["risk"], row["task_id"]) == (
         "web", "A", "m1", "write", "task-000000000009")
     assert manager_actions.masked(row["arguments"]) == {"n": 2, "api_key": "***"}
+
+
+@pytest.mark.parametrize("risk", [Risk.READ, Risk.WRITE, Risk.HIGH])
+def test_tool_timestamps_match_dashboard_json(recorded, risk):
+    stamp = datetime(2026, 10, 20, 19, 48, 27, 253760, tzinfo=timezone(timedelta(hours=-7)))
+    result = {"models": [{"created_at": stamp, "updated_at": stamp}], "day": date(2026, 10, 20),
+              "price": Decimal("1.25"), "optional": None}
+    expected = {"models": [{"created_at": "2026-10-20T19:48:27.253760-07:00",
+                            "updated_at": "2026-10-20T19:48:27.253760-07:00"}],
+                "day": "2026-10-20", "price": "1.25", "optional": None}
+    tool = Tool("t_dates", "returns model timestamps", {}, risk, AsyncMock(return_value=result),
+                escalate=AsyncMock(return_value="确认？") if risk is Risk.HIGH else None)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok",
+                     tools=(tool, CONFIRM))
+
+    async def run():
+        ops.begin_turn(_turn("request"))
+        answer = await ops.call("t_dates", {})
+        if risk is Risk.HIGH:
+            assert answer["status"] == "needs_confirmation"
+            ops.begin_turn(_turn("confirm"))
+            answer = await ops.call("looper_confirm", {"confirmation_id": answer["confirmation_id"]})
+        assert answer == {"status": "ok", "result": expected}
+        if risk is Risk.READ:
+            assert recorded[-1]["result"] is None
+        else:
+            assert json.loads(manager_actions._json(recorded[-1]["result"])) == expected
+
+    asyncio.run(run())
 
 
 def test_a_turn_collects_every_calls_task_target(recorded: list[dict[str, Any]]) -> None:
@@ -494,3 +525,145 @@ def test_account_and_model_tools_read_freely_but_write_only_in_user_turn(
     accounts.assert_awaited_once_with()
     models.assert_awaited_once_with()
     assert [row["risk"] for row in recorded] == ["read", "read", "write", "write", "write", "write"]
+
+
+@pytest.mark.parametrize("model", ["sonnet", [], 12, {}, {"provider": "account", "name": "sonnet"},
+    {"provider": "account", "name": "sonnet", "protocol": "anthropic-messages", "mode": "auto"}])
+def test_profile_model_requires_an_exact_reference(recorded, monkeypatch, model):
+    from looper.agents.ops import config
+
+    monkeypatch.setattr(config, "_registry", AsyncMock(return_value={"runtimes": [
+        {"runtime_id": "rt-test", "name": "test", "type": "claude-code"}]}))
+    create = AsyncMock()
+    monkeypatch.setattr(config.profile_registry, "create_profile", create)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok")
+    ops.begin_turn(_turn("create"))
+    answer = asyncio.run(ops.call("looper_agent_profiles", {
+        "action": "create", "name": "recipe", "runtime": "test", "model": model}))
+    assert answer["error"]["code"] == "invalid", answer
+    create.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["provider", "mode", "prompt_mode", "system_prompt_mode", "protocol",
+                                  "models", "model_id"])
+def test_profile_schema_rejects_fields_outside_the_recipe(field):
+    from looper.agents.ops.config import TOOLS
+
+    tool = next(t for t in TOOLS if t.name == "looper_agent_profiles")
+    assert "oneOf" in tool.schema["properties"]["model"]
+    with pytest.raises(OpError, match="unknown argument"):
+        check_arguments(tool.schema, {"action": "create", field: "unused"})
+
+
+@pytest.mark.parametrize("tool", ["looper_agent_profiles", "looper_models", "looper_providers"])
+@pytest.mark.parametrize("field", ["api_key", "token", "credential"])
+def test_configuration_secrets_never_reach_tools_or_final_records(recorded, monkeypatch, tool, field):
+    from looper.agents.ops import config
+
+    secret = "sk-synthetic-manager-profile-test"
+    registry = AsyncMock()
+    monkeypatch.setattr(config, "_registry", registry)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok")
+    ops.begin_turn(_turn("request"))
+    answer = asyncio.run(ops.call(tool, {"action": "create" if tool != "looper_providers" else "register",
+                                         field: secret}))
+    assert answer["error"]["code"] == "forbidden"
+    assert "Settings → LLM Providers" in answer["error"]["message"]
+    assert secret not in json.dumps(answer)
+    assert secret not in json.dumps(manager_actions.masked(recorded))
+    registry.assert_not_awaited()
+
+
+def test_manager_contract_distinguishes_accounts_models_and_profiles():
+    from looper.agents.tiers.manager import TOOLS_CONTRACT
+
+    assert all(name in TOOLS_CONTRACT for name in
+               ("looper_providers", "looper_models", "looper_agent_profiles", "looper_settings"))
+    assert "{provider, name, protocol}" in TOOLS_CONTRACT
+    assert "If the user pastes" in TOOLS_CONTRACT
+    assert "never pass it to a tool" in TOOLS_CONTRACT
+    assert "Settings → LLM Providers" in TOOLS_CONTRACT
+
+
+@pytest.mark.parametrize("reference", ["model-sonnet", {
+    "provider": "Claude account", "name": "sonnet", "protocol": "anthropic-messages"}])
+def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkeypatch, reference):
+    from looper.agents.ops import config
+
+    provider = {"provider_id": "prov-test", "name": "Claude account", "vendor_type": "custom", "auth": "api_key"}
+    models = [{"model_id": "model-sonnet", "provider_id": "prov-test", "provider_name": "Claude account",
+               "name": "sonnet", "protocol": "anthropic-messages"},
+              {"model_id": "model-chat", "provider_id": "prov-test", "provider_name": "Claude account",
+               "name": "sonnet", "protocol": "openai-chat"}]
+    profile = {"profile_id": "agent-test", "name": "recipe", "runtime_name": "Claude", "provider": provider,
+               "model_id": "model-sonnet", "model": {k: v for k, v in models[0].items() if k != "provider_name"},
+               "effort": "high", "agent_teams": False, "custom_prompt": "Be concise.",
+               "roles": ["manager", "planner", "worker", "reviewer"], "builtin": False,
+               "used_by": {"layers": [{"scope": "role", "role": "worker"}], "task_count": 0}}
+    monkeypatch.setattr(config, "_registry", AsyncMock(return_value={"profiles": [profile], "models": models,
+        "runtimes": [{"runtime_id": "rt-test", "name": "Claude", "type": "claude-code", "roles": profile["roles"]}]}))
+    monkeypatch.setattr(config.profile_registry, "get_model", AsyncMock(return_value={"model": models[0]}))
+    monkeypatch.setattr(config.profile_registry, "list_providers", AsyncMock(return_value={"providers": [provider]}))
+    monkeypatch.setattr(config.profile_registry, "list_models", AsyncMock(return_value={"models": models}))
+    create = AsyncMock(return_value={"profile": profile, "warnings": ["missing key"]})
+    update = AsyncMock(return_value={"profile": {**profile, "effort": None}, "warnings": ["missing key"]})
+    delete = AsyncMock()
+    monkeypatch.setattr(config.profile_registry, "create_profile", create)
+    monkeypatch.setattr(config.profile_registry, "update_profile", update)
+    monkeypatch.setattr(config.profile_registry, "deletable_profile", AsyncMock(return_value={
+        "name": "recipe", "runtime_name": "Claude", "provider": {"name": "Claude account"},
+        "model": {"name": "sonnet", "protocol": "anthropic-messages"}, "effort": "high"}))
+    monkeypatch.setattr(config.profile_registry, "delete_profile", delete)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok")
+
+    async def run():
+        turn = _turn("create")
+        ops.begin_turn(turn)
+        answer = await ops.call("looper_agent_profiles", {"action": "create", "name": "recipe", "runtime": "Claude",
+            "model": reference, "effort": "high", "agent_teams": False, "custom_prompt": "Be concise."})
+        assert answer["status"] == "ok", answer
+        assert answer["result"]["profile"]["provider"] == provider
+        assert answer["result"]["profile"]["model_id"] == "model-sonnet"
+        assert answer["result"]["profile"]["used_by"] == "the worker role"
+        assert answer["result"]["warnings"] == ["missing key"]
+        create.assert_awaited_once_with({"name": "recipe", "runtime_id": "rt-test", "model_id": "model-sonnet",
+                                        "effort": "high", "agent_teams": False, "custom_prompt": "Be concise."})
+        changed = await ops.call("looper_agent_profiles", {"action": "update", "profile": "recipe", "effort": None})
+        assert changed["result"]["profile"]["effort"] is None
+        assert changed["result"]["profile"]["custom_prompt"] == "Be concise."
+        update.assert_awaited_once_with("agent-test", {"effort": None})
+        listed = await ops.call("looper_agent_profiles", {"action": "list"})
+        assert listed["result"]["models"] == models
+        assert listed["result"]["profiles"][0]["model_id"] == "model-sonnet"
+        asked = await ops.call("looper_agent_profiles", {"action": "delete", "profile": "agent-test"})
+        assert asked["status"] == "needs_confirmation", asked
+        assert "Claude account · sonnet · anthropic-messages · effort high" in turn.blocks[-1]
+        delete.assert_not_awaited()
+        ops.begin_turn(_turn("confirm"))
+        done = await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})
+        assert done == {"status": "ok", "result": {"deleted": "recipe"}}
+        delete.assert_awaited_once_with("agent-test")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("model", [{"provider": "Claude account", "name": "Sonnet", "protocol": "anthropic-messages"},
+                                  {"provider": "Claude account", "name": "sonnet", "protocol": "openai-responses"}])
+def test_profile_reference_does_not_guess_a_name_or_protocol(recorded, monkeypatch, model):
+    from looper.agents.ops import config
+
+    monkeypatch.setattr(config, "_registry", AsyncMock(return_value={"runtimes": [
+        {"runtime_id": "rt-test", "name": "Claude", "type": "claude-code"}]}))
+    monkeypatch.setattr(config.profile_registry, "list_providers", AsyncMock(return_value={"providers": [
+        {"provider_id": "prov-test", "name": "Claude account"}]}))
+    monkeypatch.setattr(config.profile_registry, "list_models", AsyncMock(return_value={"models": [
+        {"model_id": "model-sonnet", "name": "sonnet", "protocol": "anthropic-messages"}]}))
+    create = AsyncMock()
+    monkeypatch.setattr(config.profile_registry, "create_profile", create)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", token="tok")
+    ops.begin_turn(_turn("create"))
+    answer = asyncio.run(ops.call("looper_agent_profiles", {
+        "action": "create", "name": "recipe", "runtime": "Claude", "model": model}))
+    assert answer["error"]["code"] == "not_found", answer
+    assert "exact name and protocol" in answer["error"]["message"]
+    create.assert_not_awaited()
