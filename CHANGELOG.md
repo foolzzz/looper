@@ -18,6 +18,30 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.12.3] - 2026-10-20
+
+### Highlights
+
+- **Reply to user gates from the dashboard.** Waiting for you shows the task, topic, first open question and elapsed wait, with an inline reply and a link to the discussion. Up to ten cards are shown, with overflow links to Needs you tasks; a sent reply stays visible while the Planner owes it an answer. End discussion remains on the task page. ([#255](https://github.com/foolzzz/looper/pull/255))
+- **OpenCode and Sub2API provider presets, with models per API.** OpenCode uses its official inference endpoints and separates Responses/GPT, Chat Completions/DeepSeek, GLM and Kimi, and Anthropic/Claude catalogs. Sub2API defaults to a local self-hosted gateway; adjust its address and models to match the gateway. ([#257](https://github.com/foolzzz/looper/pull/257))
+- **DeepSeek Responses and Manager provider editing.** The DeepSeek preset offers Responses and Chat Completions at one base URL. The Manager can list presets, register from a preset and chosen API, and update a provider by id or name without accepting its key. Retained model names keep their catalog metadata; unknown vendor models and missing prices produce separate warnings. Thanks to @michaelx1993 for the report. ([#254](https://github.com/foolzzz/looper/pull/254), fixes [#251](https://github.com/foolzzz/looper/issues/251))
+
+### Behavior changes
+
+- **OpenAI-format preset models have no Claude Code context suffix.** GLM, Kimi and DeepSeek keep `[1m]` only on Anthropic-format entries, retaining context windows on suffix-free OpenAI entries. Kimi K3's preset window changes from 1,048,576 to 1,000,000. Existing providers and profiles are not rewritten. Saving a provider without Anthropic Messages or a non-Claude-Code profile warns about suffixed foreground/background names; the provider form displays saved warnings until acknowledged. ([#257](https://github.com/foolzzz/looper/pull/257), closes [#253](https://github.com/foolzzz/looper/issues/253))
+- **The Manager's provider tool changes what the model sees.** `looper_providers` describes preset discovery, registration, updates and warnings; its schema adds `update`, `provider`, `preset`, `api` and nullable `base_url`, and its answers include preset catalogs and warnings. Dashboard chat, Telegram and Lark share the change. Keys remain dashboard-only. There is no new CLI command. ([#254](https://github.com/foolzzz/looper/pull/254), [#257](https://github.com/foolzzz/looper/pull/257))
+
+### Fixes
+
+- **OMP failures carry the API error.** Available provider error text and HTTP status reach Manager, Planner and Worker/Reviewer failure reasons, with credential redaction before error-event recording and bounded displayed details. RPC error enrichment preserves session and usage data; streamed assistant text does not make an errored Manager turn successful. Startup failures name the runtime that could not start. ([#257](https://github.com/foolzzz/looper/pull/257))
+- **Waiting gate cards keep refreshing through slow reads and deleted tasks.** Refreshes queue instead of invalidating in-flight reads; one missing task does not block other cards, and pending reply receipts survive unrelated Planner turns. ([#255](https://github.com/foolzzz/looper/pull/255))
+
+### Validation
+
+- Codex review rounds for #255, #257 and #254 all ended not blocking after fixes. Opus Manager dialogs for #251 / #254 passed 54/54, two repetitions, on `b7500a892`, before the final review fixes. #255 has headless screenshots from a disposable server. These are retained implementation validations, not runtime checks rerun for this release draft; live provider calls and a full final-head prompt eval were not rerun.
+
+See the [bilingual release notes](docs/releases/v2.12.3.md) for activation, verification, authority boundaries, rollback and validation limits.
+
 ## [2.12.2] - 2026-10-19
 
 ### Highlights
