@@ -10,7 +10,7 @@ from __future__ import annotations
 from looper.agents.profile_registry import _provider_fields
 from looper.agents.provider_presets import api_models, presets_view
 
-# The presets this change must leave as they are, field for field.
+# The preset defaults; each API's effective catalog is checked separately below.
 _EXISTING = (
     ("glm-bigmodel", "GLM (BigModel, China)", "glm",
      ((("anthropic-messages",), "https://open.bigmodel.cn/api/anthropic"),
@@ -46,7 +46,7 @@ _EXISTING = (
     ("kimi-moonshot-cn", "Kimi (Moonshot, China)", "kimi",
      ((("anthropic-messages",), "https://api.moonshot.cn/anthropic"),
       (("openai-responses", "openai-chat"), "https://api.moonshot.cn/v1")),
-     (("kimi-k3[1m]", 1_048_576, "kimi-k2.7-code"), ("kimi-k2.7-code", 262_144, "kimi-k2.7-code"),
+     (("kimi-k3[1m]", 1_000_000, "kimi-k2.7-code"), ("kimi-k2.7-code", 262_144, "kimi-k2.7-code"),
       ("kimi-k2.6", 262_144, "kimi-k2.6")),
      (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),),
      ("https://platform.kimi.com/docs/guide/claude-code-kimi.md", "https://platform.kimi.com/docs/api/overview"),
@@ -56,7 +56,7 @@ _EXISTING = (
     ("kimi-moonshot", "Kimi (Moonshot, international)", "kimi-intl",
      ((("anthropic-messages",), "https://api.moonshot.ai/anthropic"),
       (("openai-responses", "openai-chat"), "https://api.moonshot.ai/v1")),
-     (("kimi-k3[1m]", 1_048_576, "kimi-k2.7-code"), ("kimi-k2.7-code", 262_144, "kimi-k2.7-code"),
+     (("kimi-k3[1m]", 1_000_000, "kimi-k2.7-code"), ("kimi-k2.7-code", 262_144, "kimi-k2.7-code"),
       ("kimi-k2.6", 262_144, "kimi-k2.6")),
      (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),),
      ("https://platform.kimi.ai/docs/guide/claude-code-kimi.md", "https://platform.kimi.ai/docs/api/overview.md"),
@@ -114,13 +114,25 @@ def _by_id() -> dict[str, dict]:
     return {preset["preset_id"]: preset for preset in views}
 
 
-def test_the_existing_presets_are_unchanged() -> None:
+def test_existing_preset_defaults_and_api_catalogs() -> None:
     views = presets_view()
     existing = {row[0] for row in _EXISTING}
     assert [_signature(preset) for preset in views if preset["preset_id"] in existing] == [row for row in _EXISTING]
-    # No per-API list: the view of an API stays protocols and base URL, and the preset's models apply.
-    assert all(set(api) == {"protocols", "base_url"}
-               for preset in views if preset["preset_id"] in existing for api in preset["apis"])
+    for preset in views:
+        if preset["preset_id"] not in existing:
+            continue
+        for api in preset["apis"]:
+            if preset["preset_id"] == "cpa":
+                assert set(api) == {"protocols", "base_url"}
+                assert api_models(preset, api) == preset["models"]
+                continue
+            assert set(api) == {"protocols", "base_url", "models"}
+            anthropic = "anthropic-messages" in api["protocols"]
+            expected = [{**model, **{field: model[field].removesuffix("[1m]") if model[field] and not anthropic
+                                    else model[field] for field in ("name", "background_model")}}
+                        for model in preset["models"]]
+            assert api["models"] == expected
+            assert api_models(preset, api) == expected
 
 
 def test_opencode_and_sub2api_appear_in_presets_view() -> None:

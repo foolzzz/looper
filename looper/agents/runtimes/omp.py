@@ -85,7 +85,7 @@ from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
-    RunChannel, RuntimeUnsupported, instructions, runtime_prompt_text,
+    RunChannel, RuntimeUnsupported, StreamChannel, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -299,9 +299,10 @@ class OmpRuntime(RuntimeAdapter):
                     session_dir: Path | None = None) -> RunChannel:
         from .omp_steer import OmpChannel
 
+        secrets = (launch.profile.provider.api_key or "",)
         if not launch.steers:
-            return super().run_channel(process, launch=launch, cwd=cwd, session_dir=session_dir)
-        return OmpChannel(process, model=launch.model, cwd=str(cwd))
+            return OmpPrintChannel(self, process, model=launch.model, secrets=secrets)
+        return OmpChannel(process, model=launch.model, cwd=str(cwd), secrets=secrets)
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
@@ -889,6 +890,19 @@ class OmpStream:
                                           limit=500 if self.secrets else None)]}
         return {"type": "result", "subtype": "success", "is_error": False, "result": self._last_text,
                 **self._base(), "modelUsage": model_usage}
+
+
+class OmpPrintChannel(StreamChannel):
+    """A print run must redact its configured key before any error event is recorded too."""
+
+    def __init__(self, runtime: OmpRuntime, process: asyncio.subprocess.Process, *, model: str | None,
+                 secrets: tuple[str, ...]) -> None:
+        super().__init__(runtime, process, model=model)
+        self._stream = OmpStream(model=model, secrets=secrets)
+
+    def events(self) -> AsyncIterator[dict[str, Any]]:
+        assert self._process.stdout is not None
+        return self._stream.events(self._process.stdout)
 
 
 # --- Resident sessions ---

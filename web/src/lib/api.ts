@@ -2504,7 +2504,12 @@ export interface ProviderPreset {
   preset_id: string;
   label: string;
   name: string;
-  apis: { protocols: string[]; base_url: string }[];
+  apis: {
+    protocols: string[];
+    base_url: string;
+    /** When present, replaces the preset's model catalog for this API, including an empty catalog. */
+    models?: ProviderPreset["models"];
+  }[];
   models: Pick<ProviderModel, "name" | "context_window" | "background_model">[];
   env: ProviderEnvEntry[];
   docs: string[];
