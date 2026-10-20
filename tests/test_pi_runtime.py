@@ -264,7 +264,7 @@ def test_json_launch_uses_pi_flags_and_private_directories(tmp_path: Path) -> No
     env = _command_env(command)
     args = command[command.index("pi") + 1:]
     prompt = Path(args[args.index("--append-system-prompt") + 1])
-    assert prompt.parent == tmp_path / ".local/pi/prompts"
+    assert prompt.parent == Path(env["HOME"]) / "prompts"
     assert prompt.read_text().endswith("Looper prompt")
     assert args == [
         "-p", "--mode", "json", "--offline", "--no-approve", "--no-context-files", "--no-extensions",

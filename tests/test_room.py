@@ -240,15 +240,56 @@ def test_kept_run_sessions_go_with_their_task(tmp_path: Any) -> None:
 
     assert run_session_dir(tmp_path, "claude-code", "task-a", "worker-1") is None  # it keeps its own
     dirs = {(kind, task): run_session_dir(tmp_path, kind, task, "worker-1")
-            for kind in ("codex", "omp") for task in ("task-a", "task-b", "task-c")}
+            for kind in ("codex", "omp", "pi") for task in ("task-a", "task-b", "task-c")}
     for directory in dirs.values():
         assert directory is not None
         directory.mkdir(parents=True)
     remove_run_sessions(tmp_path, "task-a")
-    assert not any(dirs[(kind, "task-a")].exists() for kind in ("codex", "omp"))
+    assert not any(dirs[(kind, "task-a")].exists() for kind in ("codex", "omp", "pi"))
     removed = sweep_run_sessions(tmp_path, keep=["task-b"])
-    assert sorted(p.name for p in removed) == ["task-c", "task-c"]
-    assert all(dirs[(kind, "task-b")].exists() for kind in ("codex", "omp"))
+    assert sorted(p.name for p in removed) == ["task-c", "task-c", "task-c"]
+    assert all(dirs[(kind, "task-b")].exists() for kind in ("codex", "omp", "pi"))
+
+
+def test_a_pi_room_run_persists_its_session(tmp_path: Any) -> None:
+    import json
+    import subprocess
+
+    from fake_claude import fake_claude
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+    from looper.agents.room import run_session_dir
+    from looper.agents.runtimes import ApiProtocol, AuthKind
+    from looper.agents.runtimes.pi import PiRuntime
+
+    runtime = PiRuntime()
+    launch = Launch(AgentSettings(profile=AgentProfile(
+        "pi-test", "pi-test", RuntimeSpec("pi", "pi", "pi"),
+        ProviderSpec("test", "test", auth=AuthKind.API_KEY, api_key="test-key",
+                     protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}), base_url="https://pi.example.invalid/v1"),
+        "selected")))
+    prompt = tmp_path / ".local" / "prompts" / "test.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("worker instructions")
+    executable = fake_claude(tmp_path / "pi", '''
+import json, os, pathlib, sys
+args = sys.argv[1:]
+assert '--no-session' not in args
+directory = pathlib.Path(args[args.index('--session-dir') + 1])
+assert os.environ['PI_CODING_AGENT_SESSION_DIR'] == str(directory)
+text = sys.stdin.read()
+(directory / 'timestamp_worker-session.jsonl').write_text(
+    json.dumps({'type': 'session', 'id': 'worker-session'}) + '\\n' + json.dumps({'text': text}) + '\\n')
+''')
+    directory = run_session_dir(tmp_path, "pi", "task-1", "worker-1")
+    assert directory is not None
+    command = runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch, session_dir=directory)
+    subprocess.run(command, cwd=tmp_path, env=launch.environment(), input="work item", text=True, check=True,
+                   capture_output=True, timeout=10)
+    saved = list(directory.glob("*.jsonl"))
+    assert len(saved) == 1
+    assert [json.loads(line) for line in saved[0].read_text().splitlines()] == [
+        {"type": "session", "id": "worker-session"}, {"text": "work item"}]
 
 
 def test_a_reviewer_answers_only_the_planner() -> None:

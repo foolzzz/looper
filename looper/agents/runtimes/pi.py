@@ -37,7 +37,7 @@ from ... import child_env
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
     RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
@@ -125,6 +125,7 @@ class PiRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.API_KEY})
     isolation_id = HOME_LAYOUT_ID
     can_replace_system_prompt = True
+    read_only = ReadOnly.TOOLS
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({
         *_PI_DIRS, *_PI_ENV, *_PLATFORM_ENV, "PI_SHELL_PREFIX", "PI_CONFIG_FILES", "PI_CONFIG_DIR",
     })
@@ -204,7 +205,8 @@ class PiRuntime(RuntimeAdapter):
 
     def launch_args(self, launch: Launch) -> list[str]:
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        return ["-p", "--mode", "json", *_ISOLATION_FLAGS, *binding.args]
+        return ["-p", "--mode", "json", *_ISOLATION_FLAGS,
+                *(["--tools", "read,grep,find,ls,mcp__looper__*"] if launch.read_only else []), *binding.args]
 
     def environment(self, launch: Launch) -> dict[str, str]:
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
@@ -242,7 +244,8 @@ class PiRuntime(RuntimeAdapter):
                 raise RuntimeUnsupported("pi session directories must be outside shared homes")
             _private_dir(session)
         text = _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
-        prompt = local / "pi" / "prompts" / f"{hashlib.sha256(text.encode('utf-8')).hexdigest()}.md"
+        # env execs pi, so the prompt path also keeps the home visible to startup reclamation via pi's argv.
+        prompt = home / "prompts" / f"{hashlib.sha256(text.encode('utf-8')).hexdigest()}.md"
         _private_dir(prompt.parent)
         _write_private(prompt, text)
         prompt_flag = ("--system-prompt" if launch.system_prompt_mode is SystemPromptMode.REPLACE
@@ -256,6 +259,26 @@ class PiRuntime(RuntimeAdapter):
 
     def resident_session(self, label: str) -> ResidentPi:
         return ResidentPi(label=label)
+
+    def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                        session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
+        """Resume only the requested private session, copied into the consult's disposable storage."""
+        source = _session_file(session_dir, session_id) if session_dir is not None else None
+        if source is None:
+            raise RuntimeUnsupported("pi's saved session has no unique file in the run's directory")
+        fork_dir = fork_dir.absolute()
+        _private_dir(fork_dir.parent)
+        fork_dir.mkdir(mode=0o700)
+        try:
+            copied = fork_dir / source.name
+            shutil.copyfile(source, copied)
+            copied.chmod(0o600)
+            command = self.run_command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch,
+                                       max_turns=max_turns, session_dir=fork_dir)
+            return [*command, "--session", str(copied)]
+        except BaseException:
+            shutil.rmtree(fork_dir, ignore_errors=True)
+            raise
 
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
         """Pi reads a single prompt through EOF; JSON mode has no live user-turn transport."""
@@ -507,6 +530,24 @@ class _SessionLost(Exception):
     """The owner's saved ID has no unique private file to resume."""
 
 
+def _session_file(directory: Path, session_id: str) -> Path | None:
+    """Match the header's whole ID, never a partial ID or a link into another owner."""
+    if not session_id or not directory.is_dir() or directory.is_symlink():
+        return None
+    matches = []
+    for path in directory.glob("*.jsonl"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with path.open("rb") as source:
+                header = json.loads(source.readline(65_536))
+        except (OSError, ValueError):
+            continue
+        if isinstance(header, dict) and header.get("type") == "session" and header.get("id") == session_id:
+            matches.append(path)
+    return matches[0] if len(matches) == 1 else None
+
+
 class ResidentPi(PerTurnSession):
     """Manager/Planner turns on pi: JSON subprocesses, private owner storage, exact file resume.
 
@@ -536,22 +577,7 @@ class ResidentPi(PerTurnSession):
         return home.parent.parent / "sessions" / session_dir_name(self._label)
 
     def _session_file(self, session_id: str) -> Path | None:
-        """Match the header's whole ID, never a partial ID or a link into another owner."""
-        directory = self._session_dir()
-        if not directory.is_dir() or directory.is_symlink():
-            return None
-        matches = []
-        for path in directory.glob("*.jsonl"):
-            if path.is_symlink() or not path.is_file():
-                continue
-            try:
-                with path.open("rb") as source:
-                    header = json.loads(source.readline(65_536))
-            except (OSError, ValueError):
-                continue
-            if isinstance(header, dict) and header.get("type") == "session" and header.get("id") == session_id:
-                matches.append(path)
-        return matches[0] if len(matches) == 1 else None
+        return _session_file(self._session_dir(), session_id)
 
     def _turn_argv(self) -> list[str]:
         directory = self._session_dir()

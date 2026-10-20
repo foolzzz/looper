@@ -11,8 +11,8 @@ writes a new one and leaves the old one:
 - a project's skills plugin as versions before the catalog wrote it:
   ``projects/<id>/skills/<sha256>/``; nothing writes these any more;
 - the MCP servers installed for a run: ``mcp/<sha256>.json`` (``mcp.py``);
-- the homes OMP runs with, one per set of generated settings:
-  ``omp/homes/<sha256>/`` (``runtimes.omp``).
+- the homes OMP and pi run with, one per set of generated settings:
+  ``<runtime_type>/homes/<sha256>/`` (``runtimes.omp``, ``runtimes.pi``).
 
 ``reclaim_unused`` removes the ones nothing uses. ``looper serve`` runs it at
 start, before any agent launches. It keeps a directory that the database's
@@ -20,13 +20,13 @@ current content uses (what the next runs of every role in every project mount,
 and those of a task agent without a project; loading it also writes it) or
 that the command line of a running process names, as every run's
 ``--plugin-dir``, ``--add-dir`` and ``--mcp-config`` do (and an OMP run's
-``--config`` its home), which covers agents an earlier server
+``--config`` or a pi run's prompt path its home), which covers agents an earlier server
 left running and those of another server on the same runtime root; a
 directory that a kept one links into stays too. When the current content or the running
 processes cannot be read, nothing is removed.
 
 The Manager and every Planner on a runtime that runs a process per turn (Codex,
-OMP) keep their sessions in a directory of their own,
+OMP, Grok, pi) keep their sessions in a directory of their own,
 ``<runtime_type>/sessions/<agent>``. ``reclaim_sessions`` removes the one of an
 agent whose saved session (``agent_sessions``) is not of that runtime type, or
 which has none, unless a running process names it.
@@ -55,7 +55,7 @@ def hashed_directories(runtime_root: Path) -> list[Path]:
     every content-hashed MCP configuration file."""
     local = runtime_root.absolute() / ".local"
     parents = [local / "library", *sorted((local / "projects").glob("proj-*/knowledge")),
-               *sorted((local / "projects").glob("proj-*/skills")), local / "omp" / "homes"]
+               *sorted((local / "projects").glob("proj-*/skills")), local / "omp" / "homes", local / "pi" / "homes"]
     directories = [child for parent in parents if parent.is_dir() for child in sorted(parent.iterdir())
                    if _HASHED.fullmatch(child.name) and child.is_dir() and not child.is_symlink()]
     mcp = local / "mcp"
@@ -176,7 +176,7 @@ async def current_copies(runtime_root: Path) -> list[str] | None:
 
 
 # The runtime types whose resident agents keep their sessions in a directory of their own (``per_turn``).
-SESSION_RUNTIMES = ("codex", "omp", "grok")
+SESSION_RUNTIMES = ("codex", "omp", "grok", "pi")
 
 
 def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | None]],
