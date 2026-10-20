@@ -51,7 +51,7 @@
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录在 §5.0 第 3 项交付） | ✅ 已交付（looper #67） | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付（looper #70） | M9c |
-| LLM 模型层 | Provider → Endpoint → Model → Profile；配置 v3 | 分支实现中；新库契约、合成副本迁移、备份故障及真实隔离恢复已验证，真实服务验证待补（§5.4） | M9a、M8e |
+| LLM 模型层 | Provider → Endpoint → Model → Profile；配置 v3 | 分支实现中；迁移后隔离服务、Manager/HTTP 读回、浏览器截图已验证；真实 CLI 与两档 dialogs 缺凭据未测，不可发布（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
@@ -685,6 +685,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-10-20 | 备份失败与隔离恢复演练：dump/校验失败在真实 `serve` 的任何 DDL 前拒绝，registry 升级禁止 `--skip-backup`，备份必须经 `pg_restore --list` 且含表定义和数据；转换写入后注入异常，结构、约束、行、指纹及版本标记全部回滚。真实 PostgreSQL 16.15 完整 dump → 第三个 disposable 库 restore，固定 v2 源码最小回移 version=2 guard 的独立入口在 v3 库的 DDL tripwire 前拒绝，在恢复库读回 20 profiles 的绑定/价格夹具与 144 条历史费用相同，迁移后库的新写入保留；可通过 `LOOPER_TEST_V2_CHECKOUT` 指定待发布旧补丁制品，未将该夹具宣称为已发布补丁。限时运行 `test_llm_registry_recovery_db.py`、`test_db_backup.py`、`test_llm_registry_rehearsal_db.py`：30 通过、0 失败、0 跳过（43.34 秒）；CLI 启动门禁有改动，Dashboard/Telegram/Lark 无新增入口，真实模型服务与发布制品验证仍待补。 |
 
+| 2026-10-20 | 迁移后 runtime smoke：新增选择式真实 CLI 入口，已在 disposable PostgreSQL 上先迁移 v2，再经真实 `serve` 验证 HTTP→Manager MCP→Dashboard 读回、精确名/URL、prompt/角色模式、四类 token 与费用来源快照、未知价提示、重启续接 totals，并保留浏览器截图；模型进程使用脚本替身。指定 `test_llm_registry_runtime_smoke.py`、`test_llm_registry_rehearsal_db.py`、`test_usage_api_db.py` 限时运行，19 通过、0 失败、4 未测；迁移计数 20 profiles / 27 转换模型 + 11 内置 / 144 历史记录，unresolved/binding/pricing mismatch 均为 0，前序恢复计数 20 profiles / 144 历史记录本卡未重跑。四种 CLI installed，独立凭据缺失，真实请求/续接与 haiku、opus·xhigh dialogs comparison 记为未测，个人登录目录及真实渠道未访问、live registry dry-run 未执行，发布门禁仍未齐；本地证据在忽略的 `.local/runtime-smoke/`，详情见 RFC §12。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
@@ -763,7 +765,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.4 验证缺口
 
-- **LLM 模型层（分支实现中，合成副本迁移已验证）**：[迁移演练](../../tests/test_llm_registry_rehearsal_db.py)复用 patched-v2 固定种子，在独立 disposable 源库和模板克隆迁移库验证 count-only dry-run、事务迁移及新连接二次 schema 初始化；20/20 profiles 映射、unresolved/binding/pricing mismatch 均为 0，全部引用层、静态 launch 输入、固定 usage 费用和历史聚合相等，坏引用阻止且事务回滚。dry-run 的 `models_after=27` 仅计转换模型，正常启动额外补齐 11 个内置登录模型（总计 38），测试单独核对新增项；本种子的未知厂商账户保持分离，账户合并及会话重映射由独立 apply/pinned 测试覆盖。[恢复演练](../../tests/test_llm_registry_recovery_db.py)已用真实完整备份恢复第三个 disposable 库，并核对结构/约束/序列、全部行、旧入口绑定/价格夹具和历史费用；固定旧源码最小回移 version=2 guard 的独立入口在 v3 库任何 DDL 前拒绝，提交后的新写入保留在迁移后库，禁止绕过备份或原地反向迁移。仍需待发布旧补丁制品验证、新旧服务副本上真实 CLI 启动/计价/会话续接对照；不能在新 schema 上直接启动未带门禁的旧版。Manager haiku/opus xhigh 定向 dialogs 及候选版本全量评测未在本切片运行；Dashboard smoke 有独立测试，本切片未重跑。HTTP breaking fields（provider 的 `protocols/base_url/models` → `vendor_type/endpoints` 与独立 models，Profile 写入 `model_id`、读回结构化 `model`）必须进入实现 PR 和下次发布说明；门禁未齐不得写已发布或完整交付，详见 [RFC §9](../architecture/rfcs/llm-models-v0.zh-CN.md#9-上线回滚与观测)、[RFC §12](../architecture/rfcs/llm-models-v0.zh-CN.md#12-本次交付状态)与[评测说明](../../evals/README.md)。
+- **LLM 模型层（分支实现中，合成副本迁移已验证）**：[迁移演练](../../tests/test_llm_registry_rehearsal_db.py)复用 patched-v2 固定种子，在独立 disposable 源库和模板克隆迁移库验证 count-only dry-run、事务迁移及新连接二次 schema 初始化；20/20 profiles 映射、unresolved/binding/pricing mismatch 均为 0，全部引用层、静态 launch 输入、固定 usage 费用和历史聚合相等，坏引用阻止且事务回滚。dry-run 的 `models_after=27` 仅计转换模型，正常启动额外补齐 11 个内置登录模型（总计 38），测试单独核对新增项；本种子的未知厂商账户保持分离，账户合并及会话重映射由独立 apply/pinned 测试覆盖。[恢复演练](../../tests/test_llm_registry_recovery_db.py)已用真实完整备份恢复第三个 disposable 库，并核对结构/约束/序列、全部行、旧入口绑定/价格夹具和历史费用；固定旧源码最小回移 version=2 guard 的独立入口在 v3 库任何 DDL 前拒绝，提交后的新写入保留在迁移后库，禁止绕过备份或原地反向迁移。仍需待发布旧补丁制品验证、新旧服务副本上真实 CLI 启动/计价/会话续接对照；不能在新 schema 上直接启动未带门禁的旧版。新增迁移后服务 smoke 已在真实 `serve` 上用脚本 CLI 验证 Manager/HTTP 读回及重启续接，并运行浏览器检查迁移 profiles 和未知价提示、保留截图；选择式真实 CLI 入口把显式组合先写入 v2 再迁移，四种 CLI 已安装但本卡无独立凭据，真实请求和 Manager haiku/opus xhigh 两档 comparison 均记为未测，候选版本全量评测亦未运行。HTTP breaking fields（provider 的 `protocols/base_url/models` → `vendor_type/endpoints` 与独立 models，Profile 写入 `model_id`、读回结构化 `model`）必须进入实现 PR 和下次发布说明；门禁未齐不得写已发布或完整交付，详见 [RFC §9](../architecture/rfcs/llm-models-v0.zh-CN.md#9-上线回滚与观测)、[RFC §12](../architecture/rfcs/llm-models-v0.zh-CN.md#12-本次交付状态)与[评测说明](../../evals/README.md)。
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 

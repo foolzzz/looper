@@ -382,8 +382,10 @@ eval harness 后续把 register-agent spec 明确分为 runtime、provider、mod
 
 本分支已实现新库 schema、Provider/Endpoint/Model/Profile registry、HTTP 与 Manager 工具、运行时解析与计价、v3 导入导出、eval 注册输入及 Dashboard 的最小配置流程。第 2 节保留设计时的旧基线，当前字段与入口以[架构文档](../agent-system.md#runtimes-llm-providers-and-agent-profiles)为准；这不表示已合入、发布或完成真实评测。
 
-- **已验证：** 本切片在一次性 PostgreSQL 上运行指定的配置交换、Manager 配置工具、模型契约回归；文档 v3 示例经 CLI 预览、应用、HTTP 读回与再导出校验，详情记入[计划台账](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md#4-进度台账)。
-- **未通过发布门禁：** `ensure_schema` 尚未接入旧库转换，明确拒绝 version 2 或无版本的现有库；纯转换器与只读预检接口不能替代实际升级。需接通同事务转换与版本标记，并验证失败后 schema/rows 不变。
-- **未测 / 待验证：** 真实数据形状副本的完整迁移与恢复演练、获授权的只读 dry-run、带 forward-schema guard 的旧补丁版回退、旧/新版本真实 tiers 启动和计价对照、相关真实 CLI 与 Manager dialogs 的定向评测。本切片不运行 Dashboard 浏览器 smoke，也不将已有测试文件视为通过证据。
+- **已验证：** `ensure_schema` 已接入同事务 v2 转换、版本标记与失败回滚；前序完整备份/第三库恢复和旧源码 guard 演练见[计划台账](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md#4-进度台账)，本切片未重跑恢复测试。新增[迁移后服务入口](../../../tests/test_llm_registry_runtime_smoke.py)，先核对解释器与源码，再把固定 v2 种子迁移到新建 disposable DB，在临时 HOME/root、非 8767 端口启动真实 `serve`，关闭真实渠道；20 profiles、27 转换模型加 11 内置模型、144 历史记录读回正确。HTTP→Manager MCP 创建账户/模型/profile 后由 Dashboard API 读回，验证实际 CLI 参数的精确模型名、绑定 URL、最终 prompt 哈希/角色模式、四类 token、未知价与来源快照，以及重启续接累计值不重复；模型进程为脚本替身。浏览器读回迁移 profile 和未知价提示，保留一张截图。指定 runtime smoke、rehearsal、usage 三文件限时运行：19 通过、0 失败、4 未测。
+- **失败与修正：** 首轮新增 smoke 对替身累计 token 与角色默认 prompt 的假设不成立，改为报告真实形态的累计四类 token，并对照服务实际持久化的角色 prompt；浏览器改用当前 `#settings/profiles` 路由。修正后的定向用例通过，未以替身结果替代真实模型结果。
+- **未测 / 发布门禁：** 本机四种 CLI installed，但未提供本切片允许使用的独立凭据；不读取个人登录目录，四个真实请求/重启续接组合明确 skipped。入口通过 `LOOPER_REGISTRY_SMOKE_COMBINATIONS` 选择 runtime、精确 model、protocol、endpoint 与独立 key 环境变量，把所选组合先写入 disposable v2 再迁移并启动；Grok 仅支持自身登录，API-key 组合标为不可用。haiku 与 opus·xhigh 真实 dialogs 的两份 comparison 只有 `not-run` 缺口记录，`comparison=null`，并非评测结果；获授权 live registry dry-run、待发布旧补丁制品、新旧真实 tiers 计价对照及候选版本全量评测仍未执行，**不可宣称可发布**。
+
+本地证据使用 `--basetemp=.local/runtime-smoke/<run>` 留存：迁移 count-only 报告、installed/credential/missing/not-run 清单、脚本 Manager dialog、launch 记录、两档未运行报告与 `migrated-dashboard.png`；它们不进入公开仓库。Telegram/Lark 沿用同一 Manager 工具，本卡关闭渠道且不调用真实聊天账号；CLI 产品行为未改，只新增选择式验证入口。
 
 HTTP breaking fields（provider 旧目录字段、Profile 的输入引用和结构化 model 输出）已列入架构 API 说明；实现 PR 与下次发布说明仍须按[发布流程](../../releases/README.md)逐项列出。迁移演练和发布状态必须继续保留待验证。
