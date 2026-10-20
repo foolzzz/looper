@@ -934,9 +934,11 @@ def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: boo
     References are stable across token rotation; every child gets freshly read run values, including on resume.
     The required runner owns all entries, so there is no second, optional platform MCP activation.
     """
+    bridge_required = (role or library.role) not in ("worker", "reviewer")
     if not library.mcp_config:
         # ConsultService intentionally resumes with no library or expired source-run token.
-        if consult:
+        # Workers and reviewers have no platform tools when both room and vault are off.
+        if consult or not bridge_required:
             return DshMcpConfig((), {})
         raise RuntimeUnsupported("DSH MCP configuration requires the Looper stdio bridge")
 
@@ -951,7 +953,7 @@ def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: boo
     try:
         raw = json.loads(Path(library.mcp_config).read_text(encoding="utf-8"), object_pairs_hook=unique)
         servers = raw["mcpServers"]
-        if not isinstance(servers, dict) or "looper" not in servers:
+        if not isinstance(servers, dict) or (bridge_required and "looper" not in servers):
             raise ValueError
     except (OSError, ValueError, KeyError, TypeError):
         raise RuntimeUnsupported("DSH MCP configuration requires the Looper stdio bridge") from None

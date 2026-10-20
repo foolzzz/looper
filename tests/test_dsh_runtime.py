@@ -562,12 +562,26 @@ def test_dsh_mcp_translation_keeps_stdio_and_secrets_in_child_environment(tmp_pa
     assert "fresh-run-token" not in updated.values()
 
 
-def test_dsh_mcp_requires_platform_bridge_even_without_catalog(tmp_path, monkeypatch):
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_dsh_mcp_requires_platform_bridge_even_without_catalog(tmp_path, monkeypatch, role):
     from looper.agents.library import AgentLibrary
     from looper.agents.runtimes import dsh
 
     with pytest.raises(RuntimeUnsupported, match="Looper stdio bridge"):
-        dsh.mcp_config(AgentLibrary(role="planner"))
+        dsh.mcp_config(AgentLibrary(role=role))
+
+
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+@pytest.mark.parametrize("catalog", [False, True])
+def test_dsh_mcp_allows_optional_platform_bridge(tmp_path, role, catalog):
+    from looper.agents.library import AgentLibrary
+    from looper.agents.runtimes import dsh
+
+    source = tmp_path / "catalog.json"
+    source.write_text(json.dumps({"mcpServers": {"catalog": {"command": "catalog-mcp"}}}))
+    translated = dsh.mcp_config(AgentLibrary(role=role, mcp_config=str(source) if catalog else ""))
+    assert [server["serverName"] for server in translated.servers] == (["catalog"] if catalog else [])
+    assert not translated.env
 
 
 @pytest.mark.parametrize("raw", [
@@ -1683,11 +1697,42 @@ def test_manager_rejects_failed_dsh_results_instead_of_answering_with_progress(
     assert recorded["session_id"] == "failed-manager-session"
 
 
+@pytest.mark.parametrize("verify", [False, True])
+def test_worker_dsh_runs_without_room_or_vault(tmp_path, monkeypatch, agent_db, verify):
+    from unittest.mock import AsyncMock
+    from looper.agents.library import AgentLibrary
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.ops.room import RoomOps
+    from looper.agents.room import RoomService
+    from looper.agents.tiers import worker
+
+    final = json.dumps({"passed": True, "findings": [], "summary": "review result"} if verify else
+                       {"status": "completed", "changed_files": {}, "summary": "work result"})
+    executable = _headless_stand_in(tmp_path, final=final)
+    launch = _run_launch(tmp_path, role="reviewer" if verify else "worker")
+    settings = replace(launch.settings, profile=replace(launch.profile,
+                       runtime=replace(launch.profile.runtime, executable=executable)))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
+    monkeypatch.setattr(worker, "load_installed", AsyncMock(return_value=AgentLibrary(role=launch.role.value)))
+    monkeypatch.setattr(worker.db_projects, "get_task_project", AsyncMock(return_value={
+        "id": "project", "agent_room": "off", "vault": "off"}))
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+    pool.room_ops = RoomOps(RoomService(), url="http://127.0.0.1:19999")
+    envelope = MessageEnvelope.create(source=planner_address("test"), target=worker_address("test"),
+                                      message_type=MessageType.VERIFY_REQUEST if verify else MessageType.WORK_ITEM,
+                                      payload={"task_id": "step", "parent_task_id": "test",
+                                               "instruction": "run", "context": {"work_dir": str(tmp_path)}})
+    outcome = asyncio.run(asyncio.wait_for(pool._execute(envelope, is_verify=verify), 8))
+    assert (outcome.get("passed") if verify else outcome.get("status") == "completed"), outcome
+    assert outcome["summary"] == ("review result" if verify else "work result")
+    assert agent_db.finish_record.call_args.kwargs["output_text"] == final
+    assert (tmp_path / "seen.json").exists()
+
+
 @pytest.mark.parametrize("missing", ["executable", "mcp"])
 @pytest.mark.parametrize("verify", [False, True])
 def test_worker_dsh_configuration_failure_returns_a_failed_step(tmp_path, monkeypatch, agent_db, missing, verify):
     from unittest.mock import AsyncMock
-    from looper.agents.library import AgentLibrary
     from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
     from looper.agents.tiers import worker
 
@@ -1695,16 +1740,20 @@ def test_worker_dsh_configuration_failure_returns_a_failed_step(tmp_path, monkey
     executable = str(tmp_path / "missing-dsh") if missing == "executable" else _headless_stand_in(tmp_path)
     settings = replace(launch.settings, profile=replace(launch.profile,
                        runtime=replace(launch.profile.runtime, executable=executable)))
+    if missing == "mcp":
+        source = Path(launch.library.mcp_config)
+        config = json.loads(source.read_text())
+        config["mcpServers"]["looper"]["env"].pop("LOOPER_AGENT_TOKEN")
+        source.write_text(json.dumps(config))
     monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
-    monkeypatch.setattr(worker, "load_installed", AsyncMock(return_value=
-                        AgentLibrary(role=launch.role.value) if missing == "mcp" else launch.library))
+    monkeypatch.setattr(worker, "load_installed", AsyncMock(return_value=launch.library))
     envelope = MessageEnvelope.create(source=planner_address("test"), target=worker_address("test"),
                                       message_type=MessageType.VERIFY_REQUEST if verify else MessageType.WORK_ITEM,
                                       payload={"task_id": "step", "parent_task_id": "test",
                                                "instruction": "run", "context": {"work_dir": str(tmp_path)}})
     outcome = asyncio.run(asyncio.wait_for(worker.WorkerPool(config=worker.WorkerConfig(),
         runtime_root=tmp_path)._execute(envelope, is_verify=verify), 5))
-    reason = "installed executable" if missing == "executable" else "Looper stdio bridge"
+    reason = "installed executable" if missing == "executable" else "LOOPER_AGENT_TOKEN"
     if verify:
         assert outcome["passed"] is False and reason in outcome["summary"]
     else:
@@ -2156,6 +2205,7 @@ def test_dsh_consult_uses_permissions_without_advertising_native_read_tools(tmp_
 
 def test_dsh_consult_resumes_without_the_original_runs_mcp_library(tmp_path):
     """ConsultService supplies a fresh tool-free Launch, never the ended run's token."""
+    from looper.agents.agent_settings import AgentType
     from looper.agents.library import EMPTY_LIBRARY
 
     runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
@@ -2175,7 +2225,7 @@ def test_dsh_consult_resumes_without_the_original_runs_mcp_library(tmp_path):
     assert _tree_bytes(directory) == source
     with pytest.raises(RuntimeUnsupported, match="Looper stdio bridge"):
         runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt,
-                            launch=replace(consult, consult=False))
+                            launch=replace(consult, consult=False, role=AgentType.PLANNER))
 
 
 @pytest.mark.parametrize("consult,missing,with_mcp", [
@@ -2210,6 +2260,32 @@ def test_dsh_tool_free_consult_has_a_price_only_with_complete_usage(tmp_path, co
             assert cost > 0
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+@pytest.mark.parametrize("catalog", [False, True])
+def test_dsh_installed_run_without_platform_bridge(tmp_path, installed_dsh, role, catalog):
+    from looper.agents.library import AgentLibrary
+    from tests.dsh_installed_stand_in import mcp_command, read_records
+    from tests.test_dsh_installed import _launch, _messages, _network_only_messages, _process, _success
+
+    with _messages([["standalone report"]], installed_dsh, "http") as server:
+        launch, _ = _launch(tmp_path, installed_dsh, server, role=role)
+        source = tmp_path / "catalog-only.json"
+        log = tmp_path / "catalog.jsonl"
+        if catalog:
+            peer = mcp_command(log, ["catalog_probe"])
+            source.write_text(json.dumps({"mcpServers": {"catalog": {"command": peer[0], "args": peer[1:]}}}))
+        launch = replace(launch, library=AgentLibrary(role=role, mcp_config=str(source) if catalog else ""))
+        command = launch.runtime.run_command(installed_dsh[0], cwd=tmp_path,
+            prompt_file=tmp_path / ".local/prompts/system.md", launch=launch)
+        with _process(command, launch.environment(), tmp_path) as process:
+            _success(process, "standalone report")
+        assert len(server.requests) == 1
+        assert not (tmp_path / "mcp.jsonl").exists()
+        if catalog:
+            assert any(row["method"] == "tools/list" for row in read_records(log))
+        _network_only_messages(installed_dsh, server)
 
 
 def test_dsh_installed_tool_free_consult_counts_all_requests_and_refuses_auxiliary_tools(tmp_path, installed_dsh):

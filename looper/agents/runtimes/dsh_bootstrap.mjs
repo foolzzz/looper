@@ -45,7 +45,6 @@ export async function createBootstrap({ executable, text, mcp = [], readOnly = f
         if (names.has(server.serverName)) throw new Error('Duplicate MCP serverName');
         names.add(server.serverName);
       }
-      if (!names.has('looper')) throw new Error('Required Looper MCP bridge is missing');
       // Mount the platform first so its exact registration difference cannot include optional catalog tools.
       for (const server of [...mcp].sort((a, b) => Number(b.serverName === 'looper') - Number(a.serverName === 'looper'))) {
         const { envRefs, headerRefs, requiredTools, expectedTools, toolGroups, ...options } = server;
