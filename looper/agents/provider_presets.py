@@ -3,10 +3,13 @@
 A preset names a vendor's APIs, each a set of protocols at one base URL (an
 Anthropic-format API for Claude Code; an OpenAI-format one for an OpenAI-type
 runtime), its common models with a suggested background model and context
-window, and the extra environment its Claude Code guide sets. A provider holds
-one base URL, so a provider made from a preset uses one of its APIs. Prices are
-not part of a preset: the built-in table (``runtimes.pricing``) prices these
-models, and the provider's catalog can override it.
+window, and the extra environment its Claude Code guide sets. An API may list
+its own models; a provider made from that API uses them instead of the
+preset's, which is how a vendor that serves each model family through one
+endpoint (OpenCode) keeps a family off the endpoints that reject it. A
+provider holds one base URL, so a provider made from a preset uses one of its
+APIs. Prices are not part of a preset: the built-in table (``runtimes.pricing``)
+prices these models, and the provider's catalog can override it.
 
 The URLs, models and variables come from each vendor's official documentation
 (``docs``), read on 2026-10-14. OpenCode and Sub2API were read on 2026-10-20.
@@ -16,6 +19,7 @@ Claude Code guides write it; it is added to every model with a 1M window.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,10 +33,15 @@ _OPENAI = (ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT)
 
 @dataclass(frozen=True)
 class PresetApi:
-    """One API of a vendor: the protocols it serves at ``base_url``."""
+    """One API of a vendor: the protocols it serves at ``base_url``.
+
+    ``models``, when set, replaces the preset's models for a provider built
+    from this API. Unset, that provider lists the preset's models.
+    """
 
     protocols: tuple[ApiProtocol, ...]
     base_url: str
+    models: tuple[PresetModel, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -56,12 +65,28 @@ class ProviderPreset:
     def view(self) -> dict[str, Any]:
         return {
             "preset_id": self.id, "label": self.label, "name": self.name,
-            "apis": [{"protocols": [p.value for p in api.protocols], "base_url": api.base_url} for api in self.apis],
-            "models": [{"name": m.name, "context_window": m.context_window, "background_model": m.background_model}
-                       for m in self.models],
+            "apis": [_api_view(api) for api in self.apis],
+            "models": [_model_view(model) for model in self.models],
             "env": [{"key": key, "value": value} for key, value in self.env],
             "docs": list(self.docs), "note": self.note,
         }
+
+
+def _model_view(model: PresetModel) -> dict[str, Any]:
+    return {"name": model.name, "context_window": model.context_window, "background_model": model.background_model}
+
+
+def _api_view(api: PresetApi) -> dict[str, Any]:
+    """One API as the registry shows it. ``models`` is present only when this API lists its own."""
+    shown: dict[str, Any] = {"protocols": [protocol.value for protocol in api.protocols], "base_url": api.base_url}
+    if api.models is not None:
+        shown["models"] = [_model_view(model) for model in api.models]
+    return shown
+
+
+def api_models(preset: Mapping[str, Any], api: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The models a provider built from ``api`` lists: that API's own, when set, else the preset's."""
+    return list(api["models"] if "models" in api else preset["models"])
 
 
 _GLM_MODELS = (
@@ -80,6 +105,12 @@ _KIMI_MODELS = (
 _KIMI_ENV = (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),)
 _KIMI_NOTE = ("kimi-k2.7-code always thinks; Moonshot's Claude Code guide uses it as the background model, and asks "
               "for thinking to be on")
+# OpenCode serves each family through one endpoint (https://opencode.ai/v2/docs/console/models/):
+# Responses the GPT models, chat completions DeepSeek, GLM and Kimi, Anthropic messages the Claude models.
+_OPENCODE_RESPONSES = (PresetModel("gpt-6.1-sol", 1_050_000), PresetModel("gpt-5.6-sol", 1_050_000))
+_OPENCODE_CHAT = (PresetModel("deepseek-v4-pro"), PresetModel("glm-5.3"), PresetModel("kimi-k3"))
+_OPENCODE_ANTHROPIC = (PresetModel("claude-opus-5-5"), PresetModel("claude-sonnet-5-5"))
+_OPENCODE_URL = "https://opencode.ai/inference/openai/v1"
 
 PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
@@ -139,17 +170,16 @@ PRESETS: tuple[ProviderPreset, ...] = (
     ),
     ProviderPreset(
         "opencode", "OpenCode (Zen)", "opencode",
-        (PresetApi(_OPENAI, "https://opencode.ai/inference/openai/v1"),
-         PresetApi(_ANTHROPIC, "https://opencode.ai/inference/anthropic")),
-        (PresetModel("gpt-6.1-sol", 1_050_000), PresetModel("gpt-5.6-sol", 1_050_000),
-         PresetModel("claude-opus-5-5"), PresetModel("claude-sonnet-5-5"), PresetModel("deepseek-v4-pro"),
-         PresetModel("glm-5.3"), PresetModel("kimi-k3")),
+        (PresetApi(_RESPONSES, _OPENCODE_URL, _OPENCODE_RESPONSES),
+         PresetApi(_CHAT, _OPENCODE_URL, _OPENCODE_CHAT),
+         PresetApi(_ANTHROPIC, "https://opencode.ai/inference/anthropic", _OPENCODE_ANTHROPIC)),
+        (*_OPENCODE_RESPONSES, *_OPENCODE_ANTHROPIC, *_OPENCODE_CHAT),
         (),
-        ("https://opencode.ai/docs/zen",),
-        "the address may be checked against https://opencode.ai/docs/zen; an older page named "
-        "https://opencode.ai/zen/v1. OpenCode prices some models as ranges, so they are not in the built-in table; "
-        "a model whose name is in that table is priced at the vendor list price. Its key is an OpenCode API key "
-        "(OPENCODE_API_KEY), sent as Authorization: Bearer",
+        ("https://opencode.ai/v2/docs/console/models/",),
+        "the address may be checked against https://opencode.ai/v2/docs/console/models/; the model list is "
+        "https://opencode.ai/inference/v1/models. OpenCode prices some models as ranges, so they are not in the "
+        "built-in table; a model whose name is in that table is priced at the vendor list price. Its key is an "
+        "OpenCode API key (OPENCODE_API_KEY), sent as Authorization: Bearer",
     ),
     ProviderPreset(
         "sub2api", "Sub2API on this machine", "sub2api",

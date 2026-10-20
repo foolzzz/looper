@@ -8,7 +8,7 @@ models keep the preset default (``None``).
 from __future__ import annotations
 
 from looper.agents.profile_registry import _provider_fields
-from looper.agents.provider_presets import presets_view
+from looper.agents.provider_presets import api_models, presets_view
 
 # The presets this change must leave as they are, field for field.
 _EXISTING = (
@@ -74,10 +74,19 @@ _EXISTING = (
 )
 
 _OPENCODE_NOTE = (
-    "the address may be checked against https://opencode.ai/docs/zen; an older page named "
-    "https://opencode.ai/zen/v1. OpenCode prices some models as ranges, so they are not in the built-in table; "
-    "a model whose name is in that table is priced at the vendor list price. Its key is an OpenCode API key "
-    "(OPENCODE_API_KEY), sent as Authorization: Bearer"
+    "the address may be checked against https://opencode.ai/v2/docs/console/models/; the model list is "
+    "https://opencode.ai/inference/v1/models. OpenCode prices some models as ranges, so they are not in the "
+    "built-in table; a model whose name is in that table is priced at the vendor list price. Its key is an "
+    "OpenCode API key (OPENCODE_API_KEY), sent as Authorization: Bearer"
+)
+# Each OpenCode API serves one family. A model of another family fails on that endpoint.
+_OPENCODE_FAMILIES = (
+    (("openai-responses",), "https://opencode.ai/inference/openai/v1",
+     (("gpt-6.1-sol", 1_050_000, None), ("gpt-5.6-sol", 1_050_000, None))),
+    (("openai-chat",), "https://opencode.ai/inference/openai/v1",
+     (("deepseek-v4-pro", None, None), ("glm-5.3", None, None), ("kimi-k3", None, None))),
+    (("anthropic-messages",), "https://opencode.ai/inference/anthropic",
+     (("claude-opus-5-5", None, None), ("claude-sonnet-5-5", None, None))),
 )
 _SUB2API_NOTE = (
     "a self-hosted gateway: its key is an sk-... key the gateway issues, sent as Authorization: Bearer, and its "
@@ -85,11 +94,15 @@ _SUB2API_NOTE = (
 )
 
 
+def _model_rows(models: list) -> tuple:
+    return tuple((model["name"], model["context_window"], model["background_model"]) for model in models)
+
+
 def _signature(preset: dict) -> tuple:
     return (
         preset["preset_id"], preset["label"], preset["name"],
         tuple((tuple(api["protocols"]), api["base_url"]) for api in preset["apis"]),
-        tuple((model["name"], model["context_window"], model["background_model"]) for model in preset["models"]),
+        _model_rows(preset["models"]),
         tuple((item["key"], item["value"]) for item in preset["env"]),
         tuple(preset["docs"]), preset["note"],
     )
@@ -103,8 +116,11 @@ def _by_id() -> dict[str, dict]:
 
 def test_the_existing_presets_are_unchanged() -> None:
     views = presets_view()
-    assert [_signature(preset) for preset in views if preset["preset_id"] in {row[0] for row in _EXISTING}] == [
-        row for row in _EXISTING]
+    existing = {row[0] for row in _EXISTING}
+    assert [_signature(preset) for preset in views if preset["preset_id"] in existing] == [row for row in _EXISTING]
+    # No per-API list: the view of an API stays protocols and base URL, and the preset's models apply.
+    assert all(set(api) == {"protocols", "base_url"}
+               for preset in views if preset["preset_id"] in existing for api in preset["apis"])
 
 
 def test_opencode_and_sub2api_appear_in_presets_view() -> None:
@@ -115,15 +131,21 @@ def test_opencode_and_sub2api_appear_in_presets_view() -> None:
     opencode = by_id["opencode"]
     assert _signature(opencode) == (
         "opencode", "OpenCode (Zen)", "opencode",
-        ((("openai-responses", "openai-chat"), "https://opencode.ai/inference/openai/v1"),
-         (("anthropic-messages",), "https://opencode.ai/inference/anthropic")),
+        tuple((protocols, base_url) for protocols, base_url, _models in _OPENCODE_FAMILIES),
         (("gpt-6.1-sol", 1_050_000, None), ("gpt-5.6-sol", 1_050_000, None), ("claude-opus-5-5", None, None),
          ("claude-sonnet-5-5", None, None), ("deepseek-v4-pro", None, None), ("glm-5.3", None, None),
          ("kimi-k3", None, None)),
         (),
-        ("https://opencode.ai/docs/zen",),
+        ("https://opencode.ai/v2/docs/console/models/",),
         _OPENCODE_NOTE,
     )
+    assert tuple((tuple(api["protocols"]), api["base_url"], _model_rows(api["models"]))
+                 for api in opencode["apis"]) == _OPENCODE_FAMILIES
+    for api, (_protocols, _base_url, own) in zip(opencode["apis"], _OPENCODE_FAMILIES, strict=True):
+        own_names = {name for name, _window, _background in own}
+        other = {name for _p, _u, family in _OPENCODE_FAMILIES if family is not own
+                 for name, _window, _background in family}
+        assert own_names.isdisjoint(other)
 
     sub2api = by_id["sub2api"]
     cpa = by_id["cpa"]
@@ -137,21 +159,31 @@ def test_opencode_and_sub2api_appear_in_presets_view() -> None:
         _SUB2API_NOTE,
     )
     assert sub2api["models"] == cpa["models"]
+    assert all(set(api) == {"protocols", "base_url"} for api in sub2api["apis"])
+    assert all(api_models(sub2api, api) == sub2api["models"] for api in sub2api["apis"])
 
 
-def test_a_provider_created_from_each_new_preset_api_keeps_its_protocols_and_base_url() -> None:
+def test_a_provider_created_from_each_new_preset_api_keeps_its_protocol_and_models() -> None:
     by_id = _by_id()
     for preset_id in ("opencode", "sub2api"):
         preset = by_id[preset_id]
         for index, api in enumerate(preset["apis"]):
             anthropic = "anthropic-messages" in api["protocols"]
+            models = api_models(preset, api)
             fields, key = _provider_fields({
                 "name": f"{preset['name']}-{index}", "protocols": api["protocols"], "auth": "api_key",
-                "base_url": api["base_url"], "models": preset["models"],
+                "base_url": api["base_url"], "models": models,
                 "env": preset["env"] if anthropic else [], "api_key": "sk-test-preset-key",
             }, None)
             assert fields["auth"] == "api_key"
             assert fields["protocols"] == api["protocols"]
             assert fields["base_url"] == api["base_url"]
-            assert [model["name"] for model in fields["models"]] == [model["name"] for model in preset["models"]]
+            assert [model["name"] for model in fields["models"]] == [model["name"] for model in models]
             assert key == "sk-test-preset-key"
+            if preset_id != "opencode":
+                continue
+            own = {model["name"] for model in models}
+            other = {name for protocols, _url, family in _OPENCODE_FAMILIES
+                     if protocols != tuple(api["protocols"]) for name, _window, _background in family}
+            assert own.isdisjoint(other)
+            assert fields["protocols"] == list(api["protocols"])
