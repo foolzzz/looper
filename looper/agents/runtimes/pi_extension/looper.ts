@@ -14,7 +14,7 @@
  * origin: no proxy and no redirect.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Agent as HttpAgent, request as httpRequest } from "node:http";
+import { Agent as HttpAgent, request as httpRequest, type ClientRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 
 // A direct agent. Node's global agent follows HTTP_PROXY when
@@ -165,11 +165,6 @@ function toParameters(schema: Record<string, unknown>): ParametersSchema {
   } as ParametersSchema;
 }
 
-function formatSeconds(milliseconds: number): string {
-  const seconds = milliseconds / 1000;
-  return Number.isInteger(seconds) ? String(seconds) : String(seconds);
-}
-
 function timeoutFor(name: string, args: Record<string, unknown>): number {
   const wait = name === WAITING_TOOL ? args.wait_seconds : undefined;
   if (typeof wait === "number" && Number.isFinite(wait) && wait > 0) {
@@ -198,60 +193,69 @@ function requestOnce(
     headers["Content-Length"] = String(payload.length);
   }
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new BridgeTimeout("the call was cancelled"));
+      return;
+    }
     let settled = false;
-    const req = transport({
-      protocol: target.protocol,
-      hostname: target.hostname,
-      port: target.port === "" ? undefined : target.port,
-      path: `${target.pathname}${target.search}`,
-      method,
-      headers,
-      timeout: timeoutMs,
-      agent: target.protocol === "https:" ? directHttps : directHttp,
-    }, (response) => {
-      const chunks: Buffer[] = [];
-      response.on("data", (chunk: Buffer) => {
-        chunks.push(chunk);
-      });
-      response.on("end", () => {
-        finish(() => resolve({ status: response.statusCode ?? 0, raw: Buffer.concat(chunks) }));
-      });
-      response.on("error", (error: Error) => {
-        finish(() => reject(new BridgeError(`no answer from ${binding.url} (${error.message})`)));
-      });
-    });
-    const onAbort = () => {
-      req.destroy();
-      finish(() => reject(new BridgeTimeout("the call was cancelled")));
-    };
+    let req: ClientRequest | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (settle: () => void) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       settle();
     };
-    req.on("timeout", () => {
-      req.destroy();
-      finish(() => reject(new BridgeTimeout(
-        `no answer from ${binding.url} within ${formatSeconds(timeoutMs)} s`,
-      )));
+    const fail = (error: BridgeError) => finish(() => {
+      req?.destroy();
+      reject(error);
     });
-    req.on("error", (error: Error) => {
+    const onAbort = () => fail(new BridgeTimeout("the call was cancelled"));
+    // Parser/transport messages can include raw headers. Only expose the code,
+    // never the native error object, response headers or an unparsed body.
+    const unavailable = (error?: NodeJS.ErrnoException) => new BridgeError(
+      `no answer from ${binding.url} (${error?.code ?? "connection closed"})`,
+    );
+    try {
+      req = transport({
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port === "" ? undefined : target.port,
+        path: `${target.pathname}${target.search}`,
+        method,
+        headers,
+        agent: target.protocol === "https:" ? directHttps : directHttp,
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          finish(() => resolve({ status: response.statusCode ?? 0, raw: Buffer.concat(chunks) }));
+        });
+        response.on("error", (error: NodeJS.ErrnoException) => fail(unavailable(error)));
+        response.on("close", () => {
+          if (!response.complete) fail(unavailable());
+        });
+      });
+      req.on("error", (error: NodeJS.ErrnoException) => {
+        if (signal?.aborted) onAbort();
+        else fail(unavailable(error));
+      });
+      // A wall-clock deadline also bounds DNS, connect and a trickling body;
+      // ClientRequest's timeout option only bounds socket inactivity.
+      timer = setTimeout(() => fail(new BridgeTimeout(
+        `no answer from ${binding.url} within ${timeoutMs / 1000} s`,
+      )), timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) {
-        finish(() => reject(new BridgeTimeout("the call was cancelled")));
-        return;
-      }
-      finish(() => reject(new BridgeError(`no answer from ${binding.url} (${error.message})`)));
-    });
-    if (signal) {
-      if (signal.aborted) {
         onAbort();
         return;
       }
-      signal.addEventListener("abort", onAbort, { once: true });
+      if (payload !== null) req.write(payload);
+      req.end();
+    } catch (error) {
+      fail(unavailable(error as NodeJS.ErrnoException));
     }
-    if (payload !== null) req.write(payload);
-    req.end();
   });
 }
 
@@ -305,7 +309,9 @@ async function callTool(
       timeoutMs,
       signal,
     );
-    return textResult(JSON.stringify(answer), answer.status === "error");
+    // The bearer stays transport-only, even if an API answer echoes it.
+    const text = JSON.stringify(answer).replaceAll(JSON.stringify(binding.token).slice(1, -1), "[redacted]");
+    return textResult(text, answer.status === "error");
   } catch (error) {
     const reason = errorMessage(error, binding.token);
     if (error instanceof BridgeTimeout) {

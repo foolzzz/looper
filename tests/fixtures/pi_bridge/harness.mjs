@@ -1,7 +1,9 @@
 // Loads the real pi extension with pi's own TypeScript loader and, when asked,
-// checks registered parameters with pi's tool-argument validator.
+// validates arguments and processes tool results through pi's real agent loop.
 // stdout is one JSON object. Exit 2 asks the caller to skip: node or pi's loader is missing.
 import { execFileSync } from "node:child_process";
+import { channel } from "node:diagnostics_channel";
+import { getEventListeners } from "node:events";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -50,10 +52,15 @@ if (!existsSync(loaderPath) || !existsSync(validatorPath)) {
 let loadExtensions;
 let validateToolArguments;
 let createMcpToolDefinition;
+let runAgentLoop;
+let wrapRegisteredTool;
+const processorPath = join(root, "node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js");
 try {
   ({ loadExtensions } = await import(pathToFileURL(loaderPath).href));
   ({ validateToolArguments } = await import(pathToFileURL(validatorPath).href));
   ({ createMcpToolDefinition } = await import(pathToFileURL(join(root, "dist/extensions/mcp/tools.js")).href));
+  ({ runAgentLoop } = await import(pathToFileURL(processorPath).href));
+  ({ wrapRegisteredTool } = await import(pathToFileURL(join(root, "dist/core/extensions/wrapper.js")).href));
 } catch (error) {
   if (error?.code === "ERR_MODULE_NOT_FOUND") {
     skip(`pi's runtime dependency is missing: ${error.message}`);
@@ -123,20 +130,74 @@ for (const call of scenario.calls ?? []) {
     calls.push({ name: call.name, ok: false, error: "tool was not registered" });
     continue;
   }
+  // Only the bridge's long deadlines use this clock. Network I/O stays real;
+  // advance time (or cancel) after the server has received the POST and begun
+  // its response, never on an arbitrary sleep racing the request.
+  const controller = new AbortController();
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const pending = new Map();
+  const timeouts = [];
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (typeof delay !== "number" || delay < 120_000) return nativeSetTimeout(callback, delay, ...args);
+    const timer = {};
+    timeouts.push(delay);
+    pending.set(timer, () => callback(...args));
+    return timer;
+  };
+  globalThis.clearTimeout = (timer) => {
+    if (!pending.delete(timer)) nativeClearTimeout(timer);
+  };
+  const onRequest = ({ request }) => {
+    if (request.method !== "POST") return;
+    request.once("response", (response) => response.once("data", () => {
+      if (call.control === "abort") controller.abort();
+      if (call.control === "timeout") {
+        const deadlines = [...pending.values()];
+        pending.clear();
+        for (const fire of deadlines) fire();
+        // Bound broken implementations without waiting the real 120 seconds.
+        if (deadlines.length === 0) controller.abort();
+      }
+    }));
+  };
+  const requests = channel("http.client.request.start");
+  requests.subscribe(onRequest);
   try {
-    const result = await tool.definition.execute(
-      call.id ?? "call-1",
-      call.arguments ?? {},
-      undefined,
-      undefined,
-      {},
+    const toolCall = { type: "toolCall", id: call.id ?? "call-1", name: call.name, arguments: call.arguments ?? {} };
+    const message = {
+      role: "assistant", content: [toolCall], stopReason: "toolUse",
+      api: "test", provider: "test", model: "test", usage: {}, timestamp: 0,
+    };
+    const events = [];
+    // Synthetic model output, real pi tool wrapping, validation, execution,
+    // finalization and transcript message creation. No model or auth is used.
+    const messages = await runAgentLoop(
+      [{ role: "user", content: "bridge probe", timestamp: 0 }],
+      { messages: [], tools: [wrapRegisteredTool(tool, { createToolContext: () => ({}) })] },
+      { model: { provider: "test" }, convertToLlm: (messages) => messages,
+        finishTurn: () => ({ action: "end" }) },
+      (event) => events.push(event),
+      controller.signal,
+      () => ({
+        async *[Symbol.asyncIterator]() { yield { type: "done", message }; },
+        result: async () => message,
+      }),
     );
+    const result = messages.find((item) => item.role === "toolResult");
+    const execution = events.find((item) => item.type === "tool_execution_end");
+    if (!result || !execution) throw new Error("pi did not process a tool result");
     calls.push({
       name: call.name,
       ok: true,
       content: result.content,
       isError: result.isError === true,
       detailsUndefined: result.details === undefined,
+      executionIsError: execution.isError,
+      toolCallId: result.toolCallId,
+      timeouts,
+      pendingTimers: pending.size,
+      abortListeners: getEventListeners(controller.signal, "abort").length,
       error: null,
     });
   } catch (error) {
@@ -145,6 +206,10 @@ for (const call of scenario.calls ?? []) {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     });
+  } finally {
+    requests.unsubscribe(onRequest);
+    globalThis.setTimeout = nativeSetTimeout;
+    globalThis.clearTimeout = nativeClearTimeout;
   }
 }
 
@@ -155,6 +220,7 @@ process.stdout.write(`${JSON.stringify({
   extension: extension.path,
   loader: loaderPath,
   validator: validatorPath,
+  processor: processorPath,
   nativeNormalization,
   tools,
   checks,
