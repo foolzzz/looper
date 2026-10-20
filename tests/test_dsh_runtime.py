@@ -18,12 +18,61 @@ import pytest
 from looper.agents import runtimes
 from looper.agents.profile_registry import CatalogModel, ProviderSpec, RegistryError, RuntimeSpec, check_pairing
 from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported
+from tests.test_dsh_installed import installation as installed_dsh
 
 
 MODELS = ("deepseek-flash", "deepseek-flash[1m]", "deepseek-v4-pro", "deepseek-v4-pro[1m]")
 PROVIDER = ProviderSpec("gateway", "Messages gateway", AuthKind.API_KEY,
                         frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
                         base_url="https://gateway.example/anthropic/v1/", api_key="test-dsh-key")
+
+
+@pytest.mark.parametrize("role", ["manager", "worker-pool"])
+def test_dsh_only_server_health_tracks_the_listener_not_claude(tmp_path, monkeypatch, role):
+    """A supervisor health tick must not cancel dsh work because Claude is absent."""
+    from looper.agents.bus import MessageBus
+    from looper.agents.supervisor import AgentSupervisor
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "dsh").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "dsh").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert shutil.which("dsh") and shutil.which("claude") is None
+
+    async def run():
+        bus = MessageBus(tmp_path)
+        if role == "manager":
+            agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+
+            async def no_database():
+                pass
+
+            monkeypatch.setattr(agent, "_load_db_config", no_database)
+            monkeypatch.setattr(agent, "_load_session_state", no_database)
+        else:
+            agent = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        supervisor = AgentSupervisor(bus, tmp_path)
+        supervisor.register(agent)
+        assert not agent.is_healthy()
+        await supervisor.start_all()
+        try:
+            await asyncio.sleep(0)  # the real listener reaches its bus subscription
+            await supervisor.check_health()
+            status = supervisor.agent_status()[role]
+            assert status["state"] == "running", status
+            assert status["healthy"] and status["restart_count"] == 0
+            listener = agent._task if role == "manager" else agent._listener_task
+            listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
+            assert not agent.is_healthy()  # a dead listener still requires recovery
+        finally:
+            await supervisor.stop_all()
+        assert not agent.is_healthy()
+
+    asyncio.run(run())
 
 
 def test_dsh_local_messages_stand_in_counts_requests_and_streams_tool_calls():
@@ -2093,11 +2142,130 @@ def test_dsh_consult_uses_permissions_without_advertising_native_read_tools(tmp_
 
     assert runtime.read_only is ReadOnly.PERMISSIONS
     assert Capability.READ_TOOLS not in runtime.capabilities
+    from looper.agents.consult import RUNTIME_READ_ONLY
+
+    # The guard is trusted, so a consult runs in the step directory. A non-git
+    # smoke project has no snapshot to fall back on.
+    assert runtime.type in RUNTIME_READ_ONLY
     consult = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
                                       session_id=sid, session_dir=directory, fork_dir=tmp_path / "fork")
     assert consult[-3:] == ["--session-id", sid, "-"]
     module = Path(consult[consult.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
     assert '"readOnly": true' in module
+
+
+def test_dsh_consult_resumes_without_the_original_runs_mcp_library(tmp_path):
+    """ConsultService supplies a fresh tool-free Launch, never the ended run's token."""
+    from looper.agents.library import EMPTY_LIBRARY
+
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    source = _tree_bytes(directory)
+    consult = replace(launch, library=EMPTY_LIBRARY, consult=True)
+    argv = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=consult,
+                                   session_id=sid, session_dir=directory, fork_dir=tmp_path / "consult")
+    env = consult.environment()
+    assert not any(key.startswith("LOOPER_DSH_MCP_SECRET_") for key in env)
+    assert runtime.launch_record(consult)["runtime_catalog"]["loaded"] == []
+    module = Path(argv[argv.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
+    assert '"readOnly": true' in module and '"mcp": []' in module
+    done = subprocess.run(argv, input="read-only consult", text=True, capture_output=True,
+                          env=env, cwd=tmp_path, timeout=5)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout.splitlines()[0])["sessionId"] == sid
+    assert _tree_bytes(directory) == source
+    with pytest.raises(RuntimeUnsupported, match="Looper stdio bridge"):
+        runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt,
+                            launch=replace(consult, consult=False))
+
+
+@pytest.mark.parametrize("consult,missing,with_mcp", [
+    (False, False, False), (True, False, False), (True, True, False), (True, False, True)])
+def test_dsh_tool_free_consult_has_a_price_only_with_complete_usage(tmp_path, consult, missing, with_mcp):
+    from looper.agents.library import EMPTY_LIBRARY
+    from looper.agents.run_usage import run_usage
+
+    launch = _run_launch(tmp_path)
+    launch = replace(launch, consult=consult, library=launch.library if with_mcp else EMPTY_LIBRARY)
+    payload = (Path(__file__).parent / "fixtures/dsh_json/success.jsonl").read_text()
+    rows = [json.loads(line) for line in payload.splitlines()]
+    for row in rows:
+        if row.get("phase") == "step_end":
+            if missing:
+                row.pop("usage", None)
+            else:
+                row["usage"] = DSH_STEP_USAGE
+    payload = "\n".join(json.dumps(row) for row in rows) + "\n"
+
+    async def run():
+        process = await asyncio.create_subprocess_exec(sys.executable, "-c",
+            "import sys; sys.stdout.write(sys.argv[1])", payload,
+            stdout=asyncio.subprocess.PIPE)
+        events = [event async for event in launch.runtime.parse_process(process, model=launch.model, launch=launch)]
+        result = _dsh_result(events)
+        complete = consult and not missing and not with_mcp
+        assert result["usage_complete"] is complete
+        cost = run_usage(result, price=launch.price).cost_usd
+        assert (cost is not None) is complete
+        if cost is not None:
+            assert cost > 0
+
+    asyncio.run(run())
+
+
+def test_dsh_installed_tool_free_consult_counts_all_requests_and_refuses_auxiliary_tools(tmp_path, installed_dsh):
+    from looper.agents.library import EMPTY_LIBRARY
+    from looper.agents.run_usage import run_usage
+    from tests.dsh_installed_stand_in import tool
+    from tests.test_dsh_installed import _launch, _messages, _network_only_messages, _process, _success
+
+    with _messages([["original report"], [tool("bash", {"command": "touch escaped.txt"})],
+                    [tool("subagent", {"prompt": "spawn a child"})], ["consult answer"]],
+                   installed_dsh, "http") as server:
+        launch, command = _launch(tmp_path, installed_dsh, server)
+        with _process(command, launch.environment(), tmp_path) as process:
+            first = _success(process, "original report")
+        system = json.dumps(server.requests[0]["body"]["system"])
+        assert "your final report releases the next review or decision" in system
+        assert "separate read-only consult" in system
+        sid = next(row["sessionId"] for row in first if row["type"] == "session")
+        source = _tree_bytes(tmp_path / "owner")
+        consult = replace(launch, consult=True, library=EMPTY_LIBRARY)
+        runtime = consult.runtime
+        command = runtime.consult_command(installed_dsh[0], cwd=tmp_path,
+            prompt_file=tmp_path / ".local/prompts/system.md", launch=consult, session_id=sid,
+            session_dir=tmp_path / "owner", fork_dir=tmp_path / "consult")
+        patch = json.loads(Path(command[command.index("--patch") + 1]).read_text())
+        assert {row["id"] for row in patch if row.get("disabled")} >= {
+            "compaction-basic", "command-compact", "session-title-llm", "web-search-deepseek"}
+
+        async def run():
+            process = await asyncio.create_subprocess_exec(*command, cwd=tmp_path, env=consult.environment(),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stderr = asyncio.create_task(process.stderr.read())
+            try:
+                await runtime.write_turn(process.stdin, "[CONSULT] Answer from the finished session.")
+                events = [event async for event in runtime.parse_process(process, model=consult.model, launch=consult)]
+                result = _dsh_result(events)
+                assert not result["is_error"], (result, await stderr)
+                assert result["result"] == "consult answer" and result["usage_complete"]
+                usage = run_usage(result, price=consult.price)
+                assert (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens,
+                        usage.cache_creation_tokens) == (33, 15, 0, 0)
+                assert usage.cost_usd == pytest.approx(.0000279)
+                assert len([event for event in events if event["type"] == "usage"]) == 3
+                denied = runtime.permission_denials(result)
+                assert {call["tool"] for call in denied} == {"bash", "subagent"}
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+                await stderr
+
+        asyncio.run(asyncio.wait_for(run(), 30))
+        assert len(server.requests) == 4  # one original request, three consult steps; no auxiliary calls
+        assert not (tmp_path / "escaped.txt").exists()
+        assert _tree_bytes(tmp_path / "owner") == source
+        _network_only_messages(installed_dsh, server)
 
 
 def test_dsh_failed_native_restore_cleans_the_fork_and_preserves_source(tmp_path, monkeypatch):
@@ -2516,6 +2684,10 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 assert "synthetic-dsh-key" not in json.dumps([record, events])
 
             calls = read_calls(state)
+            actual_owners = {row["session"]: Path(row["home"]).parent for row in calls}
+            for record in persisted:
+                assert runtimes.adapter("dsh").kept_session_dir(record["metadata"]["command"]) == \
+                    actual_owners[record["session_id"]]
             managers = [row for row in calls if row["role"] == "manager"]
             assert len(managers) == 2
             assert managers[0]["session"] == managers[1]["session"]

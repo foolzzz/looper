@@ -351,6 +351,12 @@ class RuntimeAdapter(ABC):
         """The process's output as internal events, in order; ``model`` is the one the run was started with, for a
         runtime whose output does not name it."""
 
+    def parse_process(self, process: asyncio.subprocess.Process, *, model: str | None = None, launch: Launch | None = None
+                      ) -> AsyncIterator[dict[str, Any]]:
+        """Read a managed run, verifying exit and applying its launch's accounting policy when needed."""
+        assert process.stdout is not None
+        return self.parse(process.stdout, model=model)
+
     @abstractmethod
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """One of its tool calls in a few words, for the task's activity."""

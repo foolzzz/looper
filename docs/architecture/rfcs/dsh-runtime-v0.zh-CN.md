@@ -1,6 +1,6 @@
 # RFC：dsh 运行时 v0
 
-状态：本分支已实现 adapter 和验收入口；真实模型验收待执行，尚未交付；2026-10-20。支持版本：`@deepseek-ai/dsh` **0.2.1-rc.2**。
+状态：adapter 和验收入口已实现；四角色真实 smoke 已通过，完整评测仍待执行，尚未交付；2026-10-20。支持版本：`@deepseek-ai/dsh` **0.2.1-rc.2**。
 
 ## 1. 目标与证据范围
 
@@ -55,7 +55,7 @@ dsh --profile headless --patch <private-overlay.yml> --json [--session-id <saved
 
 所有 launcher flags 位于 app flags 之前；完整用户 turn 写 stdin 并关闭，不能把 prompt 放 argv。首轮不带 session id，从 opening `session.sessionId` 取真实 id。`--session-id` 只能采用已有日志，不是指定新 id。[D1,D2]
 
-`ResidentDsh(PerTurnSession)` 实现 `_split / _turn_argv / _stream / turn_usage`；Manager 与每个 Planner 各自串行续接，Worker/Reviewer 各次 run 各有独立 owner。`run_command` 必须接受 `max_turns`、`session_dir`，包括 agent room consult；不增加 dsh 专属 tier 分支。`room.SESSION_KEEPING_RUNTIMES` 加入 dsh，`run_session_dir` 保存 Worker/Reviewer 的受管 home；实现 `kept_session_dir/consult_command`，将已结束 root Session 的整个 home 作为 opaque snapshot 复制到独立 fork_dir，再以新 token/只读 Launch 恢复；原 Session 不追加咨询记录，不能通过修改 header 伪造 native fork。
+`ResidentDsh(PerTurnSession)` 实现 `_split / _turn_argv / _stream / turn_usage`；Manager 与每个 Planner 各自串行续接，Worker/Reviewer 各次 run 各有独立 owner。`run_command` 必须接受 `max_turns`、`session_dir`，包括 agent room consult；不增加 dsh 专属 tier 分支。`room.SESSION_KEEPING_RUNTIMES` 加入 dsh，`run_session_dir` 保存 Worker/Reviewer 的受管 home；实现 `kept_session_dir/consult_command`，将已结束 root Session 的整个 home 作为 opaque snapshot 复制到独立 fork_dir，再以不带 MCP/library 的只读 Launch 恢复，不复用源 run 已撤销的 token；原 Session 不追加咨询记录，不能通过修改 header 伪造 native fork。
 
 owner 数据位于 `<runtime_root>/.local/dsh/owners/<opaque-owner>/`，其下为 private HOME、DSH_HOME 和 DSH_AGENTS_HOME。owner id 不能只用可碰撞的截断 label；可用完整 label 的 SHA256。生成配置按内容哈希写到 configs 下，**Session 根按 owner 固定**，不能随 prompt/MCP token 哈希变化而丢失。无 `session_dir` 的单次 run 生成唯一 owner，不能让同配置的并行 run 共用可变 home。[D7,D11]
 
@@ -110,6 +110,8 @@ patch 根据实测 composition 的 **entry id** 写，替换 config 时重述需
 
 不能直接把任意 Looper 文本塞进 `personaSuffix`：其中的 `{{...}}` 会被当模板变量。新增一个很小的 Looper bootstrap ESM 模块，以 `systemPrompt.section({name:'looper',order:20000,text,interpolate:false})` 追加字面文本。它依次加入 Profile custom prompt、必要的 runtime notes、受管项目指令、Looper 既有分层 prompt，契约仍在 Looper 段最后；不声称覆盖 dsh 内建系统段。`prompt_blocks` 与真实写入共用 builder，预览显示 dsh 内建段不可展开、有效 append、注入文本和哈希。[D5,D13]
 
+runtime notes 明确 Worker/Reviewer 的最终报告才会释放后续评审或决策；工作完成后应结束本轮，不能留在 room 等尚未启动的 Reviewer 或离线 consult 提问。Manager/WorkerPool 的存活检查依据消息监听循环，不依赖未被该 Profile 选择的 Claude 可执行文件，避免仅安装 dsh 时被监督器误重启并取消在途运行。
+
 bootstrap 替换 **required 的 `headless-runner` entry**，保留原 runner 的 Config/依赖与 stdin/session/json 行为；完成字面 section 注册、MCP 挂载和只读 guard 后才委托原 runner。模块从已探测 dsh 安装锚点解析官方 package exports，不假设私有 home 的 `node_modules` 有依赖，不复制 vendor 源码、不运行安装命令。可用 Python 常量生成固定 ESM；若选择独立 `.mjs` 源文件，wheel 必须明确包含它。该组合启动顺序**需要离线验收**，不可只靠 `--dump-config` 判定模块成功激活。[D16]
 
 只读的 Planner/consult：bootstrap 使用 `tools.guard` 单调拒绝除精确 `read/glob/grep` 与本次 **Looper 平台 MCP** 所注册工具集合之外的调用；不按字符串前缀允许任意 MCP。集合从挂载前后注册差集取得，并核对桥发布的 expected names。禁用 agent settings 编辑；shell、write、edit、PTC、subagent/workflow/jobs 均不可绕过。外部 catalog MCP 在只读运行不挂载，记录 omitted reason。标记 `ReadOnly.PERMISSIONS`，从 tool_result 记录拒绝。保留 Looper 目录前后校验作回归检查；这不是主机级 sandbox。guard 在恢复既有 Worker Session 做 consult 时仍重新应用。[D9]
@@ -157,6 +159,8 @@ headless JSONL 的承诺是提交后的事件，普通字符串最大 8 KiB、�
 
 `BUILTIN_PRICES` 已有两个模型；复用 `price_cost / usage_event / RunSpend`，不重新维护价格。以 provider catalog 为优先，既有表作为 fallback；不是重新宣称当日官方实时价格。压缩 summary、web search、内置子 agent 的用量不保证出现在 root headless step 投影，**需要验证**；发生这些路径时完整花费未知，不以 root usage 冒充总费用。若不能从事件证明这些路径没有发生，默认将完整性标为 unknown，并将 root 观测金额单独作为 observed cost；软上限只约束该可观测金额，不能声称约束完整账单。默认关闭额外搜索和标题请求；常规 token-meter projection 也不保证统计 `compaction/summary.data.usage`，完整对照必须用官方 reader 另计该事件和 child Session；真实验证必须对照官方 token-meter/session reader，不能直接硬编码压缩 JSONL 格式。[D11,D12,D15]
 
+不带 MCP/library 的只读 consult 是受限例外：额外禁用 `compaction-basic` 和 `command-compact`，关闭搜索，执行 guard 拒绝 shell、subagent、workflow 等辅助调用；标题请求沿用禁用策略。仅该 Launch 且所有 root step 的四类 token 均完整时，计费完整性才为 true，使 consult 沿用现有严格费用门禁；缺失 usage 仍为 unknown。安装包回归用本地 Messages 计数及网络拒绝器验证恢复后的调用数、拒绝副作用和源 Session 不变。
+
 每 run 记录 runtime/version、isolation id、owner 的非敏感标识、有效模型/模式、prompt/config 哈希、catalog omissions、usage completeness、cost_basis、停止原因；使用现有 Runs/活动/日志即可，不新建监控平台。故障检查点：MCP bootstrap failure（零模型调用）、resume failure、protocol error、usage unknown、timeout/cap stop。看板沿用 Runs 的成功率、耗时、token 与费用；未知值单列，不填 0。先通过真实 path 验收再决定额外告警阈值，不编造延迟/QPS 承诺。
 
 ## 8. 探测与用户入口
@@ -182,17 +186,18 @@ CLI 的 serve/PATH 探测已泛化，无新专属参数。Telegram/Lark 与 Dash
 
 ### 当前验证记录（2026-10-20）
 
-结果限定到实际执行范围；测试存在、缓存记录或缺失失败记录均不代替通过证据。文档切片未调用真实模型、未发往真实外部账号，未连接数据库。可运行命令见 [evals/README 的 DSH validation](../../../evals/README.md#dsh-validation)。
+结果限定到实际执行范围；测试存在、缓存记录或缺失失败记录均不代替通过证据。本次运行了真实 dsh 四角色 smoke 和临时 PostgreSQL 回读，没有向真实渠道账号发送消息。可运行命令见 [evals/README 的 DSH validation](../../../evals/README.md#dsh-validation)。
 
 | 范围 | 结果 | 证据与限制 |
 |---|---|---|
-| 本地 fake / 离线 launcher、runtime signatures | **passed**：75 passed、1 skipped | 先于文档修改运行 `tests/test_dsh_validation.py tests/test_runtime_signatures.py`，120 秒外层超时；覆盖无副作用 help/preflight、显式 real opt-in、凭据脱敏、固定预算参数、基线判定、子进程超时清理、四角色 workflow 的替身读回和失败分支、Session reader 替身及 adapter 调用签名。负例被正确拒绝算回归通过，不是模型验收失败。 |
-| disposable serve/tiers/MCP 的 PG 集成 | **untested / skipped** | 本次未配置 `LOOPER_TEST_DATABASE_URL`，对应测试跳过；不能把 fake API/DB peer 当真实 PG 或四角色闭环证据。 |
+| runtime / launcher / consult / registry 回归 | **passed**：397 passed，85.77 秒，无 skipped | smoke 通过后，在新建数据库上运行 `tests/test_dsh_runtime.py tests/test_dsh_validation.py tests/test_room_consult.py tests/test_profile_registry_db.py`；数据库随后删除。新增健康检查、无 MCP consult、完整/缺失 usage、实际安装包请求计数与只读 guard、模型可见生命周期说明、审计 owner 回读回归；关键新增用例先确认修复前失败。 |
+| disposable serve/tiers/MCP 的 PG 集成 | **passed** | 独立数据库上的真实 serve/tiers/MCP 回归通过；新增断言逐条核对审计 command 中的 owner 与实际子进程 home。真实 smoke 另外完成两任务、四角色及 consult 的 API/DB 回读。 |
 | 规划阶段已记录的 installed 包检查 | **passed（既有记录，本切片未重跑 dump）** | 已安装版本和包文档/代码只读核对；临时私有 home 下 `--help`、`--version`、headless/acp `--dump-config` exit 0。配置 dump 不证明 bootstrap、MCP、resume 或模型可用。 |
-| installed 包离线探测 | **passed**：精确版本与 help；**failed**：完整 preflight | `probe_dsh` 已通过精确版本 `0.2.1-rc.2` 与 `--help` 检查，随后因 sandbox 拒绝 `ps`，进程树观察不可用而 exit 2。未读 key、未连接 PG；`real_validation=untested`，此环境不能运行真实验收。 |
-| installed 包完整离线 bootstrap / resume / guard | **untested（本切片未重跑）** | [test_dsh_installed.py](../../../tests/test_dsh_installed.py)使用官方模块、本地假 Messages/MCP 与网络拒绝器；[test_dsh_runtime.py](../../../tests/test_dsh_runtime.py)含协议、隔离和 catalog 回归。本切片仅运行指定两份测试，没有可引用的这些套件完整结果，不据其存在声称通过；loopback 受限的 skip 也不是 pass。 |
-| 文档命令 help 与 preflight 负例 | **passed**：6 个 help exit 0、缺 URL exit 2 | 顶层及 `preflight/task-basic/task-review/manager/smoke` 的 help 均通过；缺 disposable URL 被拒且 `real_validation=untested`。带合法示例 URL 的完整 preflight 失败原因见上一行，未绕过进程树检查。 |
-| 真实 `task-basic` / `task-review` / `manager` / `smoke` | **untested，待验收** | [validate.py](../../../examples/dsh/validate.py) 已提供入口，分别是 `single_step`、`reviewed_step`、`status` 各 jobs=1/reps=1，以及四角色/consult 两任务 smoke；未执行 `--real`，不能标已交付。§9 第 6 项更广的 reps=2 集合尚未覆盖。 |
+| installed 包离线探测 | **passed** | 本次 smoke 的 preflight 通过精确版本 `0.2.1-rc.2`、help、checkout 和进程树观察检查；此前 sandbox 拒绝 `ps` 的环境阻碍已解除。 |
+| installed 包离线 bootstrap / resume / guard | **passed（指定 runtime 套件内的范围）**；独立完整套件未重跑 | [test_dsh_runtime.py](../../../tests/test_dsh_runtime.py)的实际安装包回归验证 guard、恢复和无 MCP consult：一次源请求加三次 consult root 请求，计费 33 input / 15 output token，无额外网络调用；源 Session 不变。未完整重跑 [test_dsh_installed.py](../../../tests/test_dsh_installed.py)，不宣称其全部案例通过。 |
+| 文档命令 help 与 preflight 负例 | **passed（既有记录；launcher 回归亦通过）**：6 个 help exit 0、缺 URL exit 2 | 顶层及 `preflight/task-basic/task-review/manager/smoke` 的 help 均通过；缺 disposable URL 被拒且 `real_validation=untested`。本次真实 smoke 也已通过完整 preflight，未绕过进程树检查。 |
+| 真实 `smoke` | **passed** | `status=pass`、`tasks=2`、`manager_turns=2`、`database_readback=true`、`outer_timeout=false`；root 观测金额 $0.0209028。阶段 300 秒、外层 20 分钟均未提高；费用辅助覆盖仍未知。 |
+| 真实 `task-basic` / `task-review` / `manager` 与完整评测 | **untested，待验收** | 本次执行的是四角色/consult smoke；未单独重跑这三个入口或 §9 第 6 项更广的 reps=2 集合，也没有有效 append 的 Claude/OMP 对照，不能据 smoke 宣称完整验收交付。 |
 | UI 浏览器、真实渠道和费用完整性 | **untested，待验收** | Dashboard/Telegram/Lark 共用 adapter；渠道仅替身，未真发。浏览器截图/build 本切片未重跑；有效 append 的 Claude/OMP 对照、官方 reader 与 root observed cost 的真实对账、summary/search/child/consult 费用覆盖均未知。 |
 
-尚无真实模型验收结果可归为 passed 或 failed；没有执行不能记作通过。已知失败/环境阻碍单列：preflight 进程树观察失败、远端同步/PR 查询失败；PG 集成跳过；任何 preflight、bootstrap、consult、超时或预算拒绝都不得用跳过/成功掩盖。CLI 无专属参数，Dashboard、Telegram、Lark 的共享入口无需新增渠道参数或发送逻辑。
+排障时实际复现了任务超时、consult 启动/费用拒绝及审计回读失败；修复后上述完整 smoke 通过。原始阻塞是依赖 Claude 的健康检查误重启并取消 Reviewer；后续发现并修复无 MCP consult、受限 consult 计费、Worker 等待未来 Reviewer 的循环和审计 command 的 owner 不符。官方 Session reader 仍为 unavailable（9 个 owner 不可读），未宣称完整费用对账通过；其他未执行范围仍保持 untested。CLI 无专属参数，Dashboard、Telegram、Lark 的共享入口无需新增渠道参数或发送逻辑。

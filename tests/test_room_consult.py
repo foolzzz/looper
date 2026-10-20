@@ -6,6 +6,7 @@ import asyncio
 import ast
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,47 @@ def test_the_questions_share_one_prompt_allowance(monkeypatch: pytest.MonkeyPatc
     assert len(prompt) < 23_000
     assert all(f"- #{i} from worker@s2:" in prompt for i in range(1, 11))
     assert prompt.count("…") == 10
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_dsh_consult_verifies_the_process_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                             exit_code: int) -> None:
+    from dataclasses import replace
+    from looper.agents import claude_cli
+    from looper.agents.system_prompt import SystemPrompt
+    from tests.test_dsh_runtime import _run_launch
+
+    saved = {}
+
+    class Recorder:
+        cap_stop = None
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        async def record(self, event):
+            pass
+
+        async def finish(self, **kwargs):
+            saved.update(kwargs)
+
+    monkeypatch.setattr(claude_cli, "ClaudeRunRecorder", Recorder)
+    payload = (Path(__file__).parent / "fixtures/dsh_json/success.jsonl").read_bytes()
+    # The same valid final must succeed only after a verified zero exit.
+    script = ("import sys; sys.stdin.read(); "
+              f"sys.stdout.buffer.write({payload!r}); sys.stdout.flush(); sys.exit({exit_code})")
+    service = ConsultService(room=None, worker_pool=None, runtime_root=tmp_path)
+    launch = replace(_run_launch(tmp_path), consult=True)
+    result, started, timed_out = asyncio.run(service._execute(
+        "task", {"id": "step"}, "consult-test", [sys.executable, "-c", script], str(tmp_path),
+        "Answer the question", SystemPrompt(CONSULT_CONTRACT, {}), launch, 5))
+    assert started and not timed_out
+    assert result is not None and result["is_error"] is (exit_code != 0)
+    assert saved["result_event"] == result
+    assert not any("exit was not verified" in error for error in result.get("errors", []))
 
 
 def _repo(repo: Path) -> None:

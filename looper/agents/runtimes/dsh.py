@@ -80,6 +80,7 @@ class DshStream:
     session_id: str | None = None
     process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     require_session: bool = False
+    root_only: bool = False  # Only for a consult launched with auxiliary model calls disabled.
     usage: Usage = field(default_factory=Usage, init=False)
     _steps: set[tuple[int, int]] = field(default_factory=set, init=False)
     _open_steps: set[tuple[int, int] | None] = field(default_factory=set, init=False)
@@ -185,10 +186,10 @@ class DshStream:
             complete = False
         self._root_usage_complete = self._root_usage_complete and complete
         self.usage = self.usage.plus(tokens)
-        # Headless root JSONL has not been shown to cover compaction, children and search.
-        # Even a fully observed root step cannot establish completeness of the total bill.
+        # Ordinary runs may also spend on compaction, children and search. Only a tool-free
+        # consult whose launch disables those paths can treat complete root usage as its total.
         return [usage_event(self.model, tokens, **self._base(), turn=raw.get("turn"), step=raw.get("step"),
-                            raw_usage=reported, usage_complete=False, root_usage_complete=complete,
+                            raw_usage=reported, usage_complete=self.root_only and complete, root_usage_complete=complete,
                             cost_basis="observed", **({"truncated": True} if raw.get("truncated") is True else {}))]
 
     def translate(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -278,7 +279,8 @@ class DshStream:
                     wire: value for name, wire in zip(_USAGE_FIELDS, (
                         "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"))
                     if (value := getattr(self.usage, name)) is not None}},
-                "usage_complete": False, "root_usage_complete": bool(self._steps) and self._root_usage_complete,
+                "usage_complete": self.root_only and bool(self._steps) and self._root_usage_complete,
+                "root_usage_complete": bool(self._steps) and self._root_usage_complete,
                 "cost_basis": "observed"}
 
 
@@ -476,6 +478,12 @@ class DshRuntime(RuntimeAdapter):
         # Without a process handle parsing deliberately cannot certify a successful exit.
         return DshStream(model=model).events(stdout)
 
+    def parse_process(self, process: asyncio.subprocess.Process, *, model: str | None = None, launch: Launch | None = None
+                      ) -> AsyncIterator[dict[str, Any]]:
+        assert process.stdout is not None
+        return DshStream(model=model, process=process, require_session=True,
+                         root_only=launch is not None and _root_only_consult(launch)).events(process.stdout)
+
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         # Headless may report malformed tool input as a string; never let activity rendering kill the run.
         if not isinstance(tool_input, dict):
@@ -498,12 +506,14 @@ class DshRuntime(RuntimeAdapter):
         return budget_error(result_event) if (result_event or {}).get(SOFT_CAP) else None
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
-        mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
+        mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only, consult=launch.consult)
         catalog = materialize(launch.library, launch.profile.runtime.executable or self.default_executable)
         return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit"},
-                "usage_complete": False, "cost_basis": "observed", "isolation": HOME_LAYOUT_ID,
-                "system_prompt_mode": "append", "web_search": _web_search(launch),
-                "usage_limits": "Root steps only; compaction, search and child Session usage may be missing",
+                "usage_complete": _root_only_consult(launch), "cost_basis": "observed", "isolation": HOME_LAYOUT_ID,
+                "system_prompt_mode": "append", "web_search": _web_search(launch) and not _root_only_consult(launch),
+                "usage_limits": ("Tool-free consult: compaction disabled; execution guard denies auxiliary model tools"
+                                 if _root_only_consult(launch) else
+                                 "Root steps only; compaction, search and child Session usage may be missing"),
                 "runtime_catalog": {"runtime": self.type, "skill_dirs": list(catalog.skill_dirs),
                                     "loaded": list(catalog.loaded),
                                     "skipped": [*catalog.skipped, *(mcp.omissions if mcp else ())]}}
@@ -605,7 +615,7 @@ class DshChannel:
 
     def __init__(self, runtime: DshRuntime, process: asyncio.subprocess.Process, *, launch: Launch) -> None:
         self._runtime, self._process = runtime, process
-        self._stream = DshStream(model=launch.model)
+        self._stream = DshStream(model=launch.model, root_only=_root_only_consult(launch))
         self._spend = RunSpend(launch.profile.provider, launch.model, launch.max_budget_usd)
         self._session_lock = None
 
@@ -680,10 +690,16 @@ def _web_search(launch: Launch) -> bool:
     return search == "true"
 
 
+def _root_only_consult(launch: Launch) -> bool:
+    from ..library import EMPTY_LIBRARY
+
+    return launch.consult and launch.library == EMPTY_LIBRARY
+
+
 def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
     """Complete rc.2 configs: a patch replaces each config, rather than merging its fields."""
     policy = validate_provider(launch.profile.provider, launch.model, launch.effort)
-    search = _web_search(launch)
+    search = _web_search(launch) and not _root_only_consult(launch)
     catalog = materialize(launch.library, launch.profile.runtime.executable or "dsh")
     disabled = ("hmr", "settings", "config-editor", "plugin-manager", "tool-plugin-manager", "credentials",
                 "authorization", "deepseek-account", "llm-deepseek-account", "llm-pi-ai", "otel",
@@ -707,7 +723,11 @@ def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
     return [*({"id": name, "disabled": True} for name in disabled),
             *({"id": name, "config": value} for name, value in config.items()),
             {"id": "session-telemetry-otel", "disabled": True},
-            *({"id": name, "disabled": not search} for name in ("web-search-deepseek", "web-deepseek-api"))]
+            *({"id": name, "disabled": not search} for name in ("web-search-deepseek", "web-deepseek-api")),
+            # The read-only guard already refuses subagent/workflow/web execution. Disable the
+            # remaining out-of-band LLM path so this consult can satisfy the strict cost gate.
+            *({"id": name, "disabled": True} for name in
+              (("compaction-basic", "command-compact") if _root_only_consult(launch) else ()))]
 
 
 def _sha256(text: str) -> str:
@@ -824,7 +844,11 @@ try {console.log(JSON.stringify(await provider.list({})));} finally {await provi
 def runtime_notes() -> str:
     return ("# Runtime notes (DSH)\n\n"
             "Looper runs you through DSH. Put the complete reply or report requested by Looper's instructions "
-            "in your final message; Looper reads only that final message.")
+            "in your final message; Looper reads only that final message.\n\n"
+            "Worker and Reviewer lifecycle: your final report releases the next review or decision. "
+            "Once your assigned work is complete, return that report and end the run. Never wait in the room "
+            "for a future Reviewer or a question about your finished work; Looper can ask that finished "
+            "session through a separate read-only consult.")
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
@@ -851,7 +875,7 @@ def _bootstrap_files(executable: str, text: str, launch: Launch) -> dict[str, st
     except OSError:
         raise RuntimeUnsupported("DSH bootstrap requires an installed executable") from None
     module = Path(__file__).with_name("dsh_bootstrap.mjs").resolve().as_uri()
-    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
+    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only, consult=launch.consult)
     options = json.dumps({"executable": str(anchor), "text": text,
                           "mcp": mcp.servers if mcp else [], "readOnly": launch.read_only,
                           "omissions": mcp.omissions if mcp else []},
@@ -903,13 +927,17 @@ def _platform_tools(role: str) -> dict[str, Any]:
     return {"requiredTools": sorted(required), "expectedTools": sorted(allowed), "toolGroups": groups}
 
 
-def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: bool = False) -> DshMcpConfig:
+def mcp_config(library: AgentLibrary, *, role: str | None = None, read_only: bool = False,
+               consult: bool = False) -> DshMcpConfig:
     """Translate the catalog's MCP map without persisting env/header values or mistaking the agent API for MCP.
 
     References are stable across token rotation; every child gets freshly read run values, including on resume.
     The required runner owns all entries, so there is no second, optional platform MCP activation.
     """
     if not library.mcp_config:
+        # ConsultService intentionally resumes with no library or expired source-run token.
+        if consult:
+            return DshMcpConfig((), {})
         raise RuntimeUnsupported("DSH MCP configuration requires the Looper stdio bridge")
 
     def unique(pairs):
@@ -999,7 +1027,7 @@ def _launch_environment(launch: Launch) -> dict[str, str]:
     _web_search(launch)
     binding = bind_provider(launch.profile.provider, launch.model, launch.effort)
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
-    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
+    mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only, consult=launch.consult)
     return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
             **(mcp.env if mcp else {})}
 

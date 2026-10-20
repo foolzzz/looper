@@ -25,7 +25,6 @@ import contextlib
 import json
 import math
 import os
-import shlex
 import shutil
 import signal
 import sys
@@ -37,12 +36,17 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import looper
-from evals.prompt_regression import compare
 from looper.agents import proc_tree
 from looper.agents.runtimes.dsh import SUPPORTED_VERSION
 
-
+# `python examples/dsh/validate.py` puts this directory on sys.path, not the
+# checkout. evals is a source package and is not installed with the wheel.
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from evals.prompt_regression import compare  # noqa: E402
+
 SPEC = Path(__file__).with_name("agent-spec.json")
 ARTIFACTS = ROOT / "evals" / "runs" / "dsh"
 CASES = {"task-basic": "single_step", "task-review": "reviewed_step", "manager": "status"}
@@ -265,6 +269,31 @@ def execute(command: str, pg_url: str, key: str, baseline: Path | None) -> tuple
     return summary, 0 if passed else (2 if result.timed_out or result.returncode == 2 or not run else 1)
 
 
+def disposable_root(directory: str | Path) -> Path:
+    """Physical spelling of a disposable root.
+
+    macOS tempfile keeps the ``/var`` alias of ``/private/var``. DSH snapshot
+    parents and trees reject any symlink ancestor, and a child ``getcwd``
+    reports the physical spelling. One spelling keeps the guard intact.
+    """
+    root = Path(directory).resolve()
+    if not root.is_dir() or root.is_symlink() or ".." in root.parts:
+        raise ValidationError("smoke 临时根不可用")
+    return root
+
+
+def expose_selected_dsh(bin_dir: Path, executable: str) -> Path:
+    """Expose the selected dsh as a symlink so its realpath is the installation.
+
+    A shell ``exec`` wrapper leaves ``realpath`` on the wrapper. Bootstrap then
+    cannot load ``@deepseek-ai/*``, the headless runner never mounts, and the
+    turn ends without an opening session.
+    """
+    launcher = bin_dir / "dsh"
+    launcher.symlink_to(executable)
+    return launcher
+
+
 def _require(condition: Any) -> None:
     if not condition:
         raise ValidationError("smoke 契约未满足")
@@ -432,6 +461,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
         "per_run_soft_cap_usd": RUN_SOFT_CAP_USD, "total_observed_cap_usd": TOTAL_OBSERVED_CAP_USD,
         "real_validation": "error"}
     try:
+        root = disposable_root(root)
         _require(Path(looper.__file__ or "").resolve() == ROOT / "looper/__init__.py")
         _require(Path(sys.executable).is_file())
         runtime, home, bin_dir = root / "runtime", root / "home", root / "bin"
@@ -440,11 +470,7 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
         # Discovery sees only the selected dsh and harmless system helpers.
         executable = shutil.which("dsh")
         _require(executable)
-        # Preserve the selected entry point's argv[0]: launchers may locate
-        # adjacent scripts or resources from it.
-        launcher = bin_dir / "dsh"
-        launcher.write_text(f'#!/bin/sh\nexec {shlex.quote(executable)} "$@"\n', encoding="utf-8")
-        launcher.chmod(0o700)
+        expose_selected_dsh(bin_dir, executable)
         if node := shutil.which("node"):
             (bin_dir / "node").symlink_to(node)
         old_path = os.environ.get("PATH", "")
@@ -527,6 +553,16 @@ def _smoke_workflow(pg_url: str, root: Path) -> tuple[dict[str, Any], int]:
                         detail = _wait(lambda: api.get(f"/api/tasks/{task}"),
                             lambda r: r["status"] in ("completed", "failed", "stopped", "cancelled"),
                             check_budget=check_budget)
+                        if detail["status"] != "completed":
+                            activity = api.get(f"/api/tasks/{task}/activity", limit=40).get("activity") or []
+                            records = api.get("/api/llm-records", limit=20).get("records") or []
+                            ARTIFACTS.mkdir(parents=True, exist_ok=True, mode=0o700)
+                            (ARTIFACTS / "task-diag.json").write_text(json.dumps({
+                                "status": detail.get("status"),
+                                "activity": [str(row.get("summary") or "")[:300] for row in activity[-10:]],
+                                "records": [{"agent_id": row.get("agent_id"), "status": row.get("status"),
+                                             "model": row.get("model")} for row in records[-10:]],
+                            }, ensure_ascii=False), encoding="utf-8")
                         _require(detail["status"] == "completed")
                         _require((work / "delivery.txt").read_text() == "delivered by disposable DSH\n")
                         summary["stage"] = "room_consult"
@@ -609,7 +645,7 @@ def smoke(pg_url: str, key: str) -> tuple[dict[str, Any], int]:
     # An isolated process keeps serve's inherited environment and all private
     # artifacts disposable. The outer supervisor also reaps owned descendants.
     with tempfile.TemporaryDirectory(prefix="looper-dsh-smoke-") as directory:
-        root = Path(directory)
+        root = disposable_root(directory)
         for name in ("launch-home", "tmp"):
             (root / name).mkdir(mode=0o700)
         script = ("import json,sys; from pathlib import Path; "

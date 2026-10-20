@@ -38,7 +38,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import shutil
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -412,7 +411,8 @@ class WorkerPool:
         self._active.clear()
 
     def is_healthy(self) -> bool:
-        return self._running and bool(shutil.which(self._config.claude_bin))
+        # A missing unrelated runtime must not restart the pool and cancel active runs.
+        return self._running and self._listener_task is not None and not self._listener_task.done()
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.

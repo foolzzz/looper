@@ -22,9 +22,13 @@ def install(root: Path) -> tuple[Path, Path]:
     bin_dir, state = root / "bin", root / "stand-in-state"
     bin_dir.mkdir()
     state.mkdir()
-    fake_claude(bin_dir / "dsh", "from pathlib import Path\n"
-                "from tests.dsh_runtime_stand_in import main\n"
-                f"main(Path({str(state)!r}))\n")
+    # Smoke exposes the selected executable through another symlink. Unlike
+    # fake_claude's argv[0] + '.py' driver, this entry works from either path.
+    dsh = bin_dir / "dsh"
+    dsh.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
+                   "from tests.dsh_runtime_stand_in import main\n"
+                   f"main(Path({str(state)!r}))\n", encoding="utf-8")
+    dsh.chmod(0o755)
     # Startup may check Claude, but must never run the operator's binary/login.
     fake_claude(bin_dir / "claude", "import sys\n"
                 "print('2.1.285 (Claude Code)')\n"

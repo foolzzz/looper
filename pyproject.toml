@@ -44,6 +44,7 @@ include = ["looper*"]
 [tool.setuptools.package-data]
 "looper" = ["web/dashboard/*", "web/dashboard/assets/*"]
 "looper.db" = ["*.sql"]
+"looper.agents.runtimes" = ["*.mjs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

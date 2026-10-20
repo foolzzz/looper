@@ -25,6 +25,19 @@ def ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(launcher, "probe_dsh", lambda: None)
 
 
+def test_file_invocation_imports_checkout_evals(tmp_path):
+    """Running the script by path must see evals; -m is not the only entry."""
+    script = Path(__file__).resolve().parents[1] / "examples" / "dsh" / "validate.py"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
+    assert "smoke" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
+
+
 @pytest.mark.parametrize("argv", [["--help"], ["preflight", "--help"], ["task-basic", "--help"], ["smoke", "--help"]])
 def test_help_has_no_side_effects(argv, monkeypatch, capsys):
     def forbidden(*args, **kwargs):
@@ -35,6 +48,47 @@ def test_help_has_no_side_effects(argv, monkeypatch, capsys):
         launcher.main(argv)
     assert raised.value.code == 0
     assert "--help" in capsys.readouterr().out
+
+
+def test_smoke_exposes_selected_dsh_through_a_symlink(tmp_path):
+    """A shell wrapper hides the install from createRequire(realpath(dsh))."""
+    target = tmp_path / "install" / "dsh"
+    target.parent.mkdir()
+    target.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    target.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    exposed = launcher.expose_selected_dsh(bin_dir, str(target))
+    assert exposed.is_symlink()
+    assert exposed.resolve() == target.resolve()
+    assert not exposed.read_text(encoding="utf-8").startswith("#!/bin/sh")
+
+
+def test_disposable_root_is_physical_for_dsh_snapshot_guards(tmp_path):
+    """macOS tempfile keeps the /var alias. Snapshot parents and trees reject it."""
+    from looper.agents.runtimes import RuntimeUnsupported
+    from looper.agents.runtimes.dsh import _snapshot_parent, _snapshot_tree
+
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(physical, target_is_directory=True)
+    linked = alias / "looper-dsh-smoke"
+    linked.mkdir()
+    root = launcher.disposable_root(linked)
+    assert root == (physical / "looper-dsh-smoke").resolve()
+    assert not root.is_symlink()
+    session_parent = root / "runtime" / ".local" / "dsh" / "run-sessions" / "task"
+    alias_parent = linked / "runtime" / ".local" / "dsh" / "run-sessions" / "task"
+    with pytest.raises(RuntimeUnsupported, match="symlink"):
+        _snapshot_parent(alias_parent)
+    _snapshot_parent(session_parent)
+    session = session_parent / "worker"
+    (session / "dsh").mkdir(parents=True)
+    (session / "dsh" / "keep").write_text("ok", encoding="utf-8")
+    _snapshot_tree(session)
+    with pytest.raises(RuntimeUnsupported, match="symlink"):
+        _snapshot_tree(linked / "runtime" / ".local" / "dsh" / "run-sessions" / "task" / "worker")
 
 
 def test_preflight_does_not_read_key_or_connect(ready, monkeypatch, capsys):

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -439,7 +438,8 @@ class ManagerAgent:
             await self._claude.stop()
 
     def is_healthy(self) -> bool:
-        return self._running and bool(shutil.which(self._config.claude_bin))
+        # Runtime availability is checked per launch; Claude is optional for other profiles.
+        return self._running and self._task is not None and not self._task.done()
 
     @property
     def busy(self) -> bool:
@@ -706,6 +706,10 @@ class ManagerAgent:
                     logger.error("failed to start Claude Code: %s", exc)
                     await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
                     return "无法启动 Claude Code，请检查安装。"
+                if self._claude.command != command:
+                    # A per-turn runtime may materialize its owner's home at start.
+                    command = self._claude.command
+                    await recorder.annotate({"command": command})
                 self._process = _Process(command, signature, system_prompt, launch)
 
             text_parts: list[str] = []
