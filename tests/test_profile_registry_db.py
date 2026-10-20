@@ -21,6 +21,7 @@ import pytest
 
 from fake_claude import fake_claude
 from tests.test_catalog_db import DSN, _fresh_schema, _Writer
+from tests.test_dsh_runtime import MODELS as DSH_MODELS, dsh_policy as dsh_policy
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -110,6 +111,137 @@ async def _runtime(runtime_type: str, *, name: str | None = None, builtin: bool 
 
 def _by_name(entries: list[dict[str, Any]], name: str) -> dict[str, Any]:
     return next(e for e in entries if e["name"] == name)
+
+
+# --- DSH provider policy (test-only adapter) ---
+
+
+@pytest.mark.parametrize("model", DSH_MODELS)
+def test_dsh_policy_profile_create_edit_and_provider_update_need_no_key(
+    monkeypatch: pytest.MonkeyPatch, dsh_policy: Any, model: str,
+) -> None:
+    from looper.db import profile_registry as db
+
+    async def refuse_secret_read(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("registry configuration validation must not read API keys")
+
+    monkeypatch.setattr(db, "get_api_key", refuse_secret_read)
+
+    async def _test(_pool: Any) -> None:
+        runtime_id = await _runtime(dsh_policy.type)
+        provider_id = await _provider({"name": "gateway", "auth": "api_key",
+                                       "protocols": ["anthropic-messages"],
+                                       "models": [{"name": m} for m in DSH_MODELS]})
+        profile = (await _ok("POST", "/api/agent-profiles", {
+            "name": "dsh-profile", "runtime_id": runtime_id, "provider_id": provider_id, "model": model,
+        }))["profile"]
+        profile_id = profile["profile_id"]
+        assert profile["model"] == model and profile["effort"] is None
+        for effort in ("low", "high", "max", None):
+            changed = (await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"effort": effort}))["profile"]
+            assert changed["effort"] == effort
+        # Explicit gateway URLs survive readback, including an existing /v1 suffix.
+        changed = (await _ok("PUT", f"/api/providers/{provider_id}", {
+            "base_url": "https://gateway.example/messages/v1/", "api_key": None,
+        }))["provider"]
+        assert changed["base_url"] == "https://gateway.example/messages/v1/"
+        assert changed["api_key"] is None
+        assert (await db.get_profile(profile_id))["model"] == model
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize("change", [
+    {"model": "deepseek-chat"}, {"model": "deepseek-flash-20261020"}, {"model": "gpt-6.1-sol"},
+    {"effort": "off"}, {"effort": "medium"}, {"effort": "xhigh"},
+    {"provider_id": "prov-claude-subscription"},
+])
+def test_dsh_policy_refuses_invalid_profile_create_and_edit(
+    monkeypatch: pytest.MonkeyPatch, dsh_policy: Any, change: dict[str, Any],
+) -> None:
+    from looper.db import profile_registry as db
+
+    async def _test(_pool: Any) -> None:
+        runtime_id = await _runtime(dsh_policy.type)
+        provider_id = await _provider({"name": "gateway", "auth": "api_key",
+                                       "protocols": ["anthropic-messages"]})
+        valid = {"name": "dsh-profile", "runtime_id": runtime_id, "provider_id": provider_id,
+                 "model": "deepseek-flash", "effort": "low"}
+        status, payload = await _call("POST", "/api/agent-profiles", {**valid, **change})
+        assert status == 400, payload
+        assert len(await db.list_profiles()) == 1  # only the built-in profile
+        profile_id = (await _ok("POST", "/api/agent-profiles", valid))["profile"]["profile_id"]
+        before = await db.get_profile(profile_id)
+        status, payload = await _call("PUT", f"/api/agent-profiles/{profile_id}", change)
+        assert status == 400, payload
+        assert await db.get_profile(profile_id) == before
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize("change", [
+    {"protocols": ["openai-chat"]}, {"protocols": ["openai-responses"]},
+    {"auth": "oauth", "oauth_runtime_type": "claude-code"},
+    {"models": [{"name": "deepseek-flash[1m]"}]},
+    {"base_url": "ftp://gateway.example"}, {"base_url": "https://"},
+])
+def test_dsh_policy_refuses_incompatible_providers_and_rolls_back_updates(
+    monkeypatch: pytest.MonkeyPatch, dsh_policy: Any, change: dict[str, Any],
+) -> None:
+    from looper.db import profile_registry as db
+
+    async def _test(_pool: Any) -> None:
+        runtime_id = await _runtime(dsh_policy.type)
+        provider_data = {"name": "gateway", "auth": "api_key", "protocols": ["anthropic-messages"]}
+        provider_id = await _provider(provider_data)
+        valid = {"name": "dsh-profile", "runtime_id": runtime_id, "provider_id": provider_id,
+                 "model": "deepseek-flash"}
+        profile_id = (await _ok("POST", "/api/agent-profiles", valid))["profile"]["profile_id"]
+        before = await db.get_provider(provider_id)
+        status, payload = await _call("PUT", f"/api/providers/{provider_id}", change)
+        assert status == 400, payload
+        assert await db.get_provider(provider_id) == before
+        assert (await db.get_profile(profile_id))["provider_id"] == provider_id
+
+        # A standalone provider may be valid, yet cannot pair with DSH. Both Profile
+        # entry points must reject it; malformed URLs fail at provider creation.
+        status, payload = await _call("POST", "/api/providers", {**provider_data, **change, "name": "other"})
+        if "base_url" in change:
+            assert status == 400, payload
+            return
+        assert status == 201, payload
+        other = payload["provider"]["provider_id"]
+        for method, path, body in (
+            ("POST", "/api/agent-profiles", {**valid, "name": "invalid", "provider_id": other}),
+            ("PUT", f"/api/agent-profiles/{profile_id}", {"provider_id": other}),
+        ):
+            status, payload = await _call(method, path, body)
+            assert status == 400, payload
+
+    _run(_test, monkeypatch)
+
+
+def test_dsh_policy_checks_stored_effort_when_a_provider_changes(
+    monkeypatch: pytest.MonkeyPatch, dsh_policy: Any,
+) -> None:
+    from looper.db import profile_registry as db
+
+    async def _test(pool: Any) -> None:
+        runtime_id = await _runtime(dsh_policy.type)
+        provider_id = await _provider({"name": "gateway", "auth": "api_key",
+                                       "protocols": ["anthropic-messages"]})
+        profile_id = (await _ok("POST", "/api/agent-profiles", {
+            "name": "dsh-profile", "runtime_id": runtime_id, "provider_id": provider_id,
+            "model": "deepseek-flash", "effort": "low",
+        }))["profile"]["profile_id"]
+        # Model a stored profile from an older policy; provider updates must not
+        # skip effort validation simply because the update does not change it.
+        await pool.execute("UPDATE agent_profiles SET effort = 'medium' WHERE id = $1", profile_id)
+        status, payload = await _call("PUT", f"/api/providers/{provider_id}", {"name": "changed"})
+        assert status == 400 and "dsh-profile" in payload["error"]
+        assert (await db.get_provider(provider_id))["name"] == "gateway"
+
+    _run(_test, monkeypatch)
 
 
 # --- The built-ins ---

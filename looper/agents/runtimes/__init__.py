@@ -268,6 +268,10 @@ class RuntimeAdapter(ABC):
 
     # --- The launch ---
 
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+        """Additional configuration rules, without requiring or reading a provider key; none by default."""
+        return None
+
     @abstractmethod
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         """The ordered system inputs, including injected project files when ``cwd`` is known, using the same
