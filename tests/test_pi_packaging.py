@@ -21,6 +21,67 @@ ROOT = Path(__file__).resolve().parents[1]
 RESOURCE = "looper/agents/runtimes/pi_extension/looper.ts"
 
 
+@pytest.mark.parametrize("kind", ["responses", "deepseek"])
+@pytest.mark.parametrize("spend", ["partial", "exhausted", "missing", "unpriced", "inconsistent", "wrong_agent"])
+def test_eval_dialogs_receive_only_verified_remaining_budget(tmp_path: Path, kind: str, spend: str) -> None:
+    """Execute the shipped scripts with a local runner; never contact a model or database."""
+    scripts = tmp_path / "examples/pi"
+    scripts.mkdir(parents=True)
+    for name in ("eval-common.sh", f"eval-{kind}.sh"):
+        shutil.copy2(ROOT / "examples/pi" / name, scripts / name)
+    shutil.copytree(ROOT / "evals/agents", tmp_path / "evals/agents")
+    # Unrelated results from earlier invocations cannot determine this run's spend.
+    runs = tmp_path / "evals/runs"
+    runs.mkdir()
+    (runs / "stale.json").write_text('{"total_cost_usd": 2.5}')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    runner = bindir / "uv"
+    runner.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open('commands.jsonl', 'a') as log:
+    log.write(json.dumps(args) + '\\n')
+if 'dialogs' in args or os.environ['SPEND'] == 'missing':
+    sys.exit(0)
+spec = json.loads(Path(args[args.index('--register-agent') + 1]).read_text())
+cost = 2.5 if os.environ['SPEND'] == 'exhausted' else 0.2
+data = {'agent': spec['agent']['name'], 'total_cost_usd': cost, 'tasks': [
+    {'id': 'single_step', 'cost_usd': cost, 'cost_basis': {'provider_price': 1},
+     'tokens': {'input': 123, 'output': 7}}]}
+if os.environ['SPEND'] == 'unpriced':
+    data['tasks'][0]['cost_basis'] = {'unpriced': 1}
+if os.environ['SPEND'] == 'inconsistent':
+    data['total_cost_usd'] = 0
+if os.environ['SPEND'] == 'wrong_agent':
+    data['agent'] = 'another-agent'
+out = Path(args[args.index('--out-dir') + 1])
+out.mkdir(parents=True, exist_ok=True)
+(out / 'tasks.json').write_text(json.dumps(data))
+''')
+    runner.chmod(0o755)
+    env = {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "HOME": str(tmp_path / "home"),
+           "SPEND": spend, "PI_EVAL_API_KEY": "test-only-key", "DEEPSEEK_API_KEY": "test-only-key",
+           "PI_EVAL_BASE_URL": "http://127.0.0.1:9/v1", "PI_EVAL_TOTAL_CAP_USD": "2.5",
+           "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "10",
+           "LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/disposable_eval"}
+    done = subprocess.run(["bash", str(scripts / f"eval-{kind}.sh")], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=20)
+    commands = [json.loads(line) for line in (tmp_path / "commands.jsonl").read_text().splitlines()]
+    assert commands[0][6] == "run"
+    assert commands[0][commands[0].index("--total-cap-usd") + 1] == "2.5"
+    if spend == "partial":
+        assert done.returncode == 0, done.stderr
+        assert len(commands) == 2
+        assert commands[1][6] == "dialogs"
+        assert commands[1][commands[1].index("--total-cap-usd") + 1] == "2.3"
+    else:
+        assert done.returncode == 2, done.stderr
+        assert len(commands) == 1
+        assert "dialogs unverified:" in (tmp_path / f".local/pi-eval-{kind}/gaps.txt").read_text()
+
+
 def _run(command: list[str], *, cwd: Path, env: dict[str, str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
     done = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
     assert done.returncode == 0, done.stdout + done.stderr

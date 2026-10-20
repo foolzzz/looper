@@ -219,20 +219,21 @@ if [[ "$status" -eq 124 ]]; then
   printf 'gap: deadline: stopped before the runner finished\n' >> "$GAPS"
 else
   run_dialogs=true
-  if [[ "$EVAL_KIND" == deepseek ]]; then
-    if ! remaining=$(python3 - "$RUNS_DIR" "$PI_EVAL_TOTAL_CAP_USD" <<'PY_BUDGET'
+  if ! remaining=$(python3 - "$RUNS_DIR" "$PI_EVAL_TOTAL_CAP_USD" "$SPEC" "$STATE/before.txt" <<'PY_BUDGET'
 import json
 import math
 import sys
 from decimal import Decimal
 from pathlib import Path
 
-paths = list(Path(sys.argv[1]).glob("*.json"))
+before = set(Path(sys.argv[4]).read_text(encoding="utf-8").splitlines())
+paths = [path for path in Path(sys.argv[1]).glob("*.json") if str(path.resolve()) not in before]
 try:
     if len(paths) != 1:
         raise ValueError("missing task spend readback")
     data = json.loads(paths[0].read_text(encoding="utf-8"))
-    if data.get("agent") != "pi/deepseek/deepseek-flash":
+    spec = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+    if data.get("agent") != spec["agent"]["name"]:
         raise ValueError("unexpected agent in task spend readback")
     rows = data.get("tasks") or []
     if not rows or data.get("aborted"):
@@ -258,18 +259,17 @@ except (KeyError, ValueError, TypeError, ArithmeticError):
     print("task spend missing, unknown, inconsistent or total budget exhausted")
     raise SystemExit(2)
 PY_BUDGET
-    ); then
-      printf 'dialogs unverified: %s\n' "$remaining" >> "$GAPS"
-      status=2
-      run_dialogs=false
-    fi
-    # The task runner already used the cap; dialogs receive only its remainder.
-    for ((i=0; i<${#common[@]}; i++)); do
-      if [[ "$run_dialogs" == true && "${common[$i]}" == --total-cap-usd ]]; then
-        common[$((i + 1))]=$remaining
-      fi
-    done
+  ); then
+    printf 'dialogs unverified: %s\n' "$remaining" >> "$GAPS"
+    status=2
+    run_dialogs=false
   fi
+  # The task runner already used the cap; dialogs receive only its remainder.
+  for ((i=0; i<${#common[@]}; i++)); do
+    if [[ "$run_dialogs" == true && "${common[$i]}" == --total-cap-usd ]]; then
+      common[$((i + 1))]=$remaining
+    fi
+  done
   if [[ "$run_dialogs" == true ]]; then
     dialog_status=0
     run_bounded dialogs uv run --extra test python -m evals.prompt_regression dialogs \

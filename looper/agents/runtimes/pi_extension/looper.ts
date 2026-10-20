@@ -220,7 +220,7 @@ function requestOnce(
     try {
       req = transport({
         protocol: target.protocol,
-        hostname: target.hostname,
+        hostname: target.hostname.replace(/^\[|\]$/g, ""),
         port: target.port === "" ? undefined : target.port,
         path: `${target.pathname}${target.search}`,
         method,

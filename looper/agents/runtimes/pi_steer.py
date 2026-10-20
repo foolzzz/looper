@@ -191,9 +191,7 @@ class PiChannel:
 
     def _failure(self, message: str) -> dict[str, Any]:
         self._finish()
-        return {"type": "result", "subtype": "error_during_execution", "is_error": True,
-                **({"session_id": self._stream.session_id} if self._stream.session_id else {}),
-                "result": "", "errors": [f"Pi RPC: {message}"]}
+        return self._stream.failure(f"Pi RPC: {message}")
 
     async def send(self, text: str, *, uuid: str | None = None) -> None:
         """Only a queued ACK means acceptance; neither timeout nor rejection is retried."""

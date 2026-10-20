@@ -562,6 +562,10 @@ class PiStream:
         return {"type": "assistant", **self._base(), "parent_tool_use_id": None, "message": {
             "role": "assistant", "model": message.get("model") or self.model, "content": blocks}}
 
+    def failure(self, message: str) -> dict[str, Any]:
+        """Keep all observed usage when the transport fails outside the Pi event stream."""
+        return {**self._result(aborted=True), "errors": [message]}
+
     def _result(self, *, aborted: bool) -> dict[str, Any]:
         model_usage = {model: {
             "inputTokens": tokens.input_tokens, "outputTokens": tokens.output_tokens,

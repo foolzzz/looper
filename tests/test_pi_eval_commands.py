@@ -68,7 +68,18 @@ def _environment(tmp_path: Path, **updates: str | None) -> dict[str, str]:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     uv = bindir / "uv"
-    uv.write_text(FAKE_UV, encoding="utf-8")
+    uv.write_text(FAKE_UV + '''
+if not destination and "dialogs" not in sys.argv:
+    args = sys.argv[1:]
+    spec = json.loads(Path(args[args.index("--register-agent") + 1]).read_text())
+    out = Path(args[args.index("--out-dir") + 1])
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "pi-responses-command-fixture.json").write_text(json.dumps({
+        "agent": spec["agent"]["name"], "total_cost_usd": 0.2,
+        "tasks": [{"id": "single_step", "rep": 1, "success": True, "cost_usd": 0.2,
+                   "cost_basis": {"provider_price": 1}, "tokens": {"input": 11, "output": 3}}],
+    }))
+''', encoding="utf-8")
     uv.chmod(uv.stat().st_mode | stat.S_IEXEC)
     env = {
         "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -150,7 +161,7 @@ def test_assembles_runner_commands_from_explicit_env(tmp_path: Path) -> None:
         assert _flag(argv, "--mode") == "real"
         assert _flag(argv, "--reps") == "2"
         assert _flag(argv, "--jobs") == "3"
-        assert _flag(argv, "--total-cap-usd") == TOTAL
+        assert _flag(argv, "--total-cap-usd") == (TOTAL if argv is run_argv else "2.3")
         assert _flag(argv, "--case-budget-usd") == CASE
         assert _flag(argv, "--max-budget-usd") == CASE
         assert _flag(argv, "--pg-url") == PG_URL
@@ -265,7 +276,8 @@ def test_zero_catalog_cost_is_not_recorded_as_free(tmp_path: Path) -> None:
     })
     env = _environment(tmp_path, PI_EVAL_FAKE_RUN_JSON=str(FIXTURE_JSON), PI_EVAL_FAKE_RUN_BODY=body)
     completed = _run(tmp_path, env)
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 2, completed.stderr
+    assert len(_invocations(tmp_path)) == 1
     gaps = (STATE / "gaps.txt").read_text(encoding="utf-8")
     assert "pricing unverified: single_step rep 1" in gaps
     assert "catalog cost 0 is not a free run" in gaps

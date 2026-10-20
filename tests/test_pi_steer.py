@@ -109,6 +109,14 @@ if scenario in ('handled', 'queued', 'missing_disposition', 'fail_prompt', 'fast
 ack(dict(id='unknown', type='prompt'), success=False)
 ack(requests[0])
 ack(request, data=dict(disposition='started'))
+if scenario.startswith('usage_'):
+    for input_tokens, output_tokens, cache_read, cache_write in [(100, 4, 11, 3), (23, 3, 2, 1)]:
+        emit(dict(type='message_end', message=dict(role='assistant', model='test-model',
+            stopReason='toolUse', content=[], usage=dict(input=input_tokens, output=output_tokens,
+                cacheRead=cache_read, cacheWrite=cache_write))))
+    scenario = scenario.removeprefix('usage_')
+    if scenario == 'eof':
+        sys.exit(2)
 if scenario.startswith('steer_'):
     emit(dict(type='steer_ready'))
     waiting = []
@@ -265,6 +273,23 @@ def test_startup_and_protocol_failures_are_explicit(tmp_path: Path, scenario: st
     assert error in ' '.join(result['errors'])
     assert 'SECRET-test' not in str(events)
     assert any(r.get('type') == 'prompt' for r in _records(tmp_path)) is prompt_sent
+
+
+@pytest.mark.parametrize('scenario', ['usage_eof', 'usage_extension_error', 'usage_invalid_json',
+                                     'usage_parse_error', 'fast_rejected', 'fast_timeout'])
+def test_rpc_failures_preserve_accumulated_model_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                     scenario: str) -> None:
+    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 0.15)
+    events = asyncio.run(_run(tmp_path, scenario))
+    result, = [event for event in events if event['type'] == 'result']
+    assert result['is_error'] is True
+    assert result['session_id'] == 'rpc-session'
+    assert result['modelUsage'] == {'test-model': {
+        'inputTokens': 123 if scenario.startswith('usage_') else 7,
+        'outputTokens': 7 if scenario.startswith('usage_') else 3,
+        'cacheReadInputTokens': 13 if scenario.startswith('usage_') else 0,
+        'cacheCreationInputTokens': 4 if scenario.startswith('usage_') else 0,
+    }}
 
 
 @pytest.mark.parametrize('scenario', ['setup_timeout', 'setup_noise_timeout', 'prompt_timeout', 'fast_timeout'])

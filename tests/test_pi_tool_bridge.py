@@ -10,10 +10,12 @@ skip, not a pass.
 
 from __future__ import annotations
 
+import errno
 import http.client
 import json
 import os
 import shutil
+import socket
 import socketserver
 import subprocess
 import threading
@@ -378,6 +380,54 @@ def test_an_empty_tool_list_registers_nothing(agent_api: _AgentAPIServer, tmp_pa
     _assert_loaded_from_pi(result)
     assert result["tools"] == []
     assert [item["path"] for item in seen] == ["/api/agent/v1/tools"]
+
+
+def test_ipv6_binding_passes_unbracketed_host_to_node(tmp_path: Path) -> None:
+    preload = tmp_path / "inspect-host.cjs"
+    preload.write_text('''
+const {Agent} = require('node:http');
+Agent.prototype.createConnection = function(options) {
+  const error = new Error('stop before connecting');
+  error.code = options.host === '::1' ? 'IPV6_HOST_OK' : 'IPV6_HOST_INVALID';
+  throw error;
+};
+''')
+    result, _seen, _stderr = _run(None, tmp_path, binding={
+        "LOOPER_AGENT_URL": "http://[::1]:12345", "LOOPER_AGENT_TOKEN": "test-token",
+    }, env_extra={"NODE_OPTIONS": f"--require={preload}"})
+    _assert_startup_failure(result, "IPV6_HOST_OK")
+
+
+def test_ipv6_binding_lists_and_calls_tools(tmp_path: Path) -> None:
+    class IPv6Server(_AgentAPIServer):
+        address_family = socket.AF_INET6
+
+    try:
+        server = IPv6Server(("::1", 0), _AgentAPI)
+    except OSError as error:
+        if error.errno not in {errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPERM, errno.EACCES}:
+            raise
+        pytest.skip(f"IPv6 loopback unavailable: {error}")
+    server.state = _State()
+    server.state.get = (200, {"tools": [_tool("looper_tasks", "IPv6 probe", {})]}, {})
+    server.state.posts["looper_tasks"] = (200, {"status": "ok", "tasks": []})
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result, seen, _stderr = _run(server, tmp_path, binding={
+            "LOOPER_AGENT_URL": f"http://[::1]:{server.server_port}",
+            "LOOPER_AGENT_TOKEN": server.state.token,
+        }, calls=[{"name": "mcp__looper__looper_tasks", "arguments": {}}])
+        _assert_loaded_from_pi(result)
+        assert [(item["method"], item["path"]) for item in seen] == [
+            ("GET", "/api/agent/v1/tools"), ("POST", "/api/agent/v1/ops/looper_tasks"),
+        ]
+        assert all(item["authorization"] == f"Bearer {server.state.token}" for item in seen)
+        assert result["calls"][0]["isError"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_a_duplicate_name_fails_startup_with_no_tools(agent_api: _AgentAPIServer, tmp_path: Path) -> None:
