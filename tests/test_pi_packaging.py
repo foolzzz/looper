@@ -10,6 +10,7 @@ import sys
 import threading
 import zipfile
 from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,11 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str], timeout: int = 6
 
 @pytest.fixture(scope="module")
 def installed(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, dict[str, str]]:
-    work = tmp_path_factory.mktemp("pi-wheel")
+    return install_wheel(tmp_path_factory.mktemp("pi-wheel"))
+
+
+def install_wheel(work: Path) -> tuple[Path, Path, dict[str, str]]:
+    """Shared by the packaging tests and examples/pi/isolated-smoke.py."""
     env = {"PATH": os.environ["PATH"], "HOME": str(work / "home"), "TMPDIR": str(work),
            "LANG": "C.UTF-8", "UV_CACHE_DIR": str(work / "cache")}
     # Callers can supply a disposable, pre-populated cache for offline validation.
@@ -110,6 +115,8 @@ class _ColdStartAPI(BaseHTTPRequestHandler):
         state = self.server.state
         state["gets"].append((self.path, self.headers.get("Authorization")))
         status, body = state["catalog"]
+        if "token" in state and self.headers.get("Authorization") != "Bearer " + state["token"]:
+            status, body = 401, {"error": "unauthorized"}
         data = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -133,10 +140,18 @@ class _ColdStartAPI(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def api() -> Iterator[_ColdStartServer]:
-    try:
-        server = _ColdStartServer(("127.0.0.1", 0), _ColdStartAPI)
-    except PermissionError:
-        pytest.skip("local HTTP listeners unavailable; cold-start not verified")
+    with ExitStack() as cleanup:
+        try:
+            server = cleanup.enter_context(cold_start_api())
+        except PermissionError:
+            pytest.skip("local HTTP listeners unavailable; cold-start not verified")
+        yield server
+
+
+@contextmanager
+def cold_start_api() -> Iterator[_ColdStartServer]:
+    """A counted local provider/tool endpoint, including its positive control."""
+    server = _ColdStartServer(("127.0.0.1", 0), _ColdStartAPI)
     server.state = {"requests": [], "gets": [], "catalog": (200, {"tools": []})}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -166,7 +181,7 @@ from pathlib import Path
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.library import AgentLibrary
 from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
-from looper.agents.runtimes import ApiProtocol, AuthKind
+from looper.agents.runtimes import ApiProtocol, AuthKind, Capability
 from looper.agents.runtimes.pi import PiRuntime
 root, url, executable, mode, bound = sys.argv[1:]
 root = Path(root)
@@ -175,7 +190,10 @@ prompt.parent.mkdir(parents=True)
 prompt.write_text('Packaging probe')
 provider = ProviderSpec(id='local', name='local', auth=AuthKind.API_KEY,
     protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}), base_url=url + '/v1', api_key='local-key')
-profile = AgentProfile('pi-test', 'pi-test', RuntimeSpec('rt-pi', 'pi', 'pi', executable), provider, 'selected', '')
+# RPC is the steered launch. steer_command refuses a runtime whose probe did not record steer.
+capabilities = frozenset({Capability.STEER}) if mode == 'rpc' else frozenset()
+profile = AgentProfile('pi-test', 'pi-test', RuntimeSpec('rt-pi', 'pi', 'pi', executable, capabilities),
+                       provider, 'selected', '')
 config = root / 'mcp.json'
 config.write_text(json.dumps({'mcpServers': {'looper': {'env': {
     'LOOPER_AGENT_URL': url, 'LOOPER_AGENT_TOKEN': 'scoped-test-token'}}}}))

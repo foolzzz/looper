@@ -28,7 +28,7 @@ from fake_claude import fake_claude
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec, servable_roles
 from looper.agents.runtimes import (
-    ADAPTERS, ApiProtocol, AuthKind, Probe, RuntimeAdapter, RuntimeUnsupported, adapter,
+    ADAPTERS, ApiProtocol, AuthKind, Capability, Probe, RuntimeAdapter, RuntimeUnsupported, adapter,
 )
 from looper.agents.runtimes.pi import PROBE_HELP_TOKENS, PiRuntime
 
@@ -752,12 +752,17 @@ def test_every_launch_path_loads_the_same_packaged_extension(tmp_path: Path, rea
     (owner / "saved.jsonl").write_text(json.dumps({"type": "session", "id": "saved"}) + "\n")
     resident._session = "saved"
     resumed = resident._turn_argv()
+    # steer_command is the probed RPC path; the other commands stay on the unprobed launch.
+    steered_runtime = replace(launch.profile.runtime, capabilities=frozenset({Capability.STEER}))
+    steered = replace(launch, settings=replace(launch.settings, profile=replace(
+        launch.profile, runtime=steered_runtime)))
+    steer_kwargs = {**kwargs, "launch": steered}
     commands = [PI.launch_args(launch), PI.run_command("pi", **kwargs),
                 PI.run_command("pi", **kwargs, session_dir=sessions), base, first_turn, resumed,
                 PI.consult_command("pi", **kwargs, session_id="saved", session_dir=sessions,
                                    fork_dir=tmp_path / "consult"),
-                PI.steer_command("pi", **kwargs),
-                PI.steer_command("pi", **kwargs, session_dir=sessions)]
+                PI.steer_command("pi", **steer_kwargs),
+                PI.steer_command("pi", **steer_kwargs, session_dir=sessions)]
     resource = Path(str(files("looper.agents.runtimes").joinpath("pi_extension/looper.ts")))
     assert resource.is_absolute() and resource.is_file()
     for command in commands:
