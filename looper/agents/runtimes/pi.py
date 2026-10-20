@@ -2,8 +2,9 @@
 
 pi is a fifth runtime type (the pi runtime RFC, sections 1, 3 and 6). Registering
 it discovers ``rt-pi`` when ``pi`` is on PATH. Launch commands use private,
-content-addressed homes and separate session directories. Sessions, streams
-and the tool bridge are not implemented yet, so capabilities stay empty.
+content-addressed homes and separate session directories. JSON events are
+translated independently of OMP. Sessions and the tool bridge are not
+implemented yet, so capabilities stay empty.
 There is no pi login and no schema change.
 
 A probe runs only ``--version`` and ``--help``, in a temporary home, agent
@@ -28,6 +29,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
@@ -256,10 +258,22 @@ class PiRuntime(RuntimeAdapter):
         self._refuse()
 
     def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
-        self._refuse()
+        return PiStream(model=model).events(stdout)
 
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
-        self._refuse()
+        if tool_name == "bash":
+            return f"Running: {str(tool_input.get('command') or '')[:80]}"
+        if tool_name in EDIT_TOOLS:
+            paths = edited_paths(tool_name, tool_input)
+            action = "Writing" if tool_name == "write" else "Editing"
+            return f"{action}: {paths[0][:80] if paths else '?'}"
+        if tool_name in ("read", "ls"):
+            path = tool_input.get("path")
+            action = "Reading" if tool_name == "read" else "Listing"
+            return f"{action}: {path[:80] if isinstance(path, str) and path else '?'}"
+        if tool_name in ("grep", "find"):
+            return f"{tool_name}: {str(tool_input.get('pattern') or tool_input.get('path') or '')[:60]}"
+        return f"Tool: {tool_name}"
 
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
         self._refuse()
@@ -271,6 +285,156 @@ class PiRuntime(RuntimeAdapter):
         """Inject the project's files once; pi's own context-file discovery stays disabled."""
         return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
             cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+
+
+EDIT_TOOLS = frozenset({"write", "edit"})
+
+
+def edited_paths(tool_name: str, tool_input: Mapping[str, Any]) -> list[str]:
+    """Pi write and edit both name a single file in ``path``; edit is not an OMP patch."""
+    path = tool_input.get("path")
+    return [path] if tool_name in EDIT_TOOLS and isinstance(path, str) and path.strip() and "://" not in path else []
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(block["text"] for block in content if isinstance(block, Mapping)
+                     and block.get("type") == "text" and isinstance(block.get("text"), str))
+
+
+def _opaque_diagnostic(value: Any) -> Any:
+    """Unknown payloads have no trusted string schema; keep structure and numeric diagnostics only."""
+    if isinstance(value, Mapping):
+        return {key: _opaque_diagnostic(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_opaque_diagnostic(item) for item in value]
+    return "***" if isinstance(value, str) else value
+
+
+@dataclass
+class PiStream:
+    """One Pi run as internal stream-json events, with final messages and settled as authorities.
+
+    Deltas and execution events repeat message content. ``agent_end`` can precede
+    automatic recovery, so only ``agent_settled`` emits a result, once. EOF (including
+    a truncated record) never supplies a result. A corrupt record before settled
+    makes that result fail because a final message may have been lost.
+    """
+
+    model: str | None = None
+    session_id: str | None = None
+    _last_text: str = ""
+    _last_stop: str | None = None
+    _last_error: str | None = None
+    _protocol_error: str | None = None
+    _settled: bool = False
+
+    _DROPPED: ClassVar[frozenset[str]] = frozenset({
+        "agent_start", "agent_end", "turn_start", "turn_end", "message_start", "message_update",
+        "tool_execution_start", "tool_execution_update", "tool_execution_end",
+    })
+
+    async def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
+        from ..claude_cli import iter_lines
+
+        # Split bytes only on LF, before UTF-8 decoding; no readline size limit or Unicode splitlines.
+        async for line in iter_lines(stdout):
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raw = None
+            events = self.translate(raw) if isinstance(raw, Mapping) else self._invalid_record()
+            for event in events:
+                yield event
+
+    def _base(self) -> dict[str, Any]:
+        return {"session_id": self.session_id} if self.session_id else {}
+
+    def _diagnostic(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+        event = _opaque_diagnostic(raw)
+        kind = raw.get("type")
+        if isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", kind):
+            event["type"] = kind
+        return [{"type": "system", "subtype": "pi_event", **self._base(), "event": event}]
+
+    def _invalid_record(self) -> list[dict[str, Any]]:
+        if self._settled:
+            return []
+        self._protocol_error = "pi emitted an invalid JSON record"
+        return self._diagnostic({"type": "invalid_record"})
+
+    def translate(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if self._settled:
+            return []
+        kind = raw.get("type")
+        if not isinstance(kind, str) or not kind:
+            return self._invalid_record()
+        if kind == "session":
+            self.session_id = str(raw.get("id") or "") or None
+            return [{"type": "system", "subtype": "init", **self._base(), "runtime": "pi",
+                     "model": self.model, "cwd": raw.get("cwd")}]
+        if kind in self._DROPPED:
+            return []
+        if kind == "message_end":
+            message = raw.get("message")
+            if not isinstance(message, Mapping):
+                return self._invalid_record()
+            role = message.get("role")
+            if role == "assistant":
+                if not isinstance(message.get("content"), list):
+                    return self._invalid_record()
+                return [self._assistant(message)]
+            if role == "toolResult":
+                return [{"type": "user", **self._base(), "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": str(message.get("toolCallId") or ""),
+                     "content": _message_text(message.get("content")), "is_error": bool(message.get("isError"))}]}}]
+            if role in ("user", "system"):
+                return []  # Input already supplied by Looper.
+        if kind == "agent_settled":
+            if not isinstance(raw.get("aborted"), bool):
+                self._protocol_error = "pi emitted agent_settled without a boolean aborted flag"
+            self._settled = True
+            return [self._result(aborted=raw.get("aborted") is True)]
+        return self._diagnostic(raw)
+
+    def _assistant(self, message: Mapping[str, Any]) -> dict[str, Any]:
+        blocks: list[dict[str, Any]] = []
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, Mapping):
+                continue
+            if block.get("type") == "text":
+                blocks.append({"type": "text", "text": str(block.get("text") or "")})
+            elif block.get("type") == "thinking":
+                blocks.append({"type": "thinking", "thinking": str(block.get("thinking") or "")})
+            elif block.get("type") == "toolCall":
+                arguments = block.get("arguments")
+                blocks.append({"type": "tool_use", "id": str(block.get("id") or ""),
+                               "name": str(block.get("name") or ""),
+                               "input": dict(arguments) if isinstance(arguments, Mapping) else {}})
+        # An empty final response replaces progress just as a nonempty one does.
+        self._last_text = _message_text(content)
+        self._last_stop = str(message.get("stopReason") or "") or None
+        self._last_error = str(message.get("errorMessage") or "") or None
+        return {"type": "assistant", **self._base(), "parent_tool_use_id": None, "message": {
+            "role": "assistant", "model": message.get("model") or self.model, "content": blocks}}
+
+    def _result(self, *, aborted: bool) -> dict[str, Any]:
+        error = self._protocol_error
+        if not error and aborted:
+            error = "the pi run was aborted"
+        if not error and self._last_stop != "stop":
+            error = self._last_error or f"the pi run ended without a completed assistant: {self._last_stop or 'missing'}"
+        if error:
+            return {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                    **self._base(), "result": "", "errors": [error]}
+        return {"type": "result", "subtype": "success", "is_error": False,
+                **self._base(), "result": self._last_text}
 
 
 def runtime_notes() -> str:

@@ -1,6 +1,6 @@
 """pi's identity, private launch commands and API-key configuration (RFC sections 1, 2, 3 and 6).
 
-Sessions and stream are refused. Capabilities stay empty. A probe
+Sessions are refused. Capabilities stay empty. A probe
 runs only ``--version`` and ``--help``, offline, in temporary directories.
 Provider requests are checked with installed pi 1.3 against a local fake
 Responses service and, separately, an injected fetch transport.
@@ -215,8 +215,6 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
     lambda: PI.resident_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3),  # type: ignore[arg-type]
     lambda: PI.resume_args("session"),
     lambda: PI.resident_session("manager"),
-    lambda: PI.parse(None),  # type: ignore[arg-type]
-    lambda: PI.tool_summary("read", {}),
     lambda: PI.cost(None, None),  # type: ignore[arg-type]
     lambda: PI.budget_error(None),
     lambda: PI.steer_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3,  # type: ignore[arg-type]
