@@ -99,3 +99,37 @@ def _repo(repo: Path) -> None:
     commit = git("commit-tree", tree, text="init\n")
     git("update-ref", "HEAD", commit)
 
+
+
+def test_dsh_room_sessions_are_managed_and_cleanup_keeps_active_tasks(tmp_path: Path) -> None:
+    from looper.agents.room import remove_run_sessions, run_session_dir, sweep_run_sessions
+
+    directories = {}
+    for task in ("active", "recent", "expired"):
+        directory = run_session_dir(tmp_path, "dsh", task, "worker-1")
+        assert directory is not None
+        directory.mkdir(parents=True)
+        (directory / "history").write_bytes(b"opaque session")
+        directories[task] = directory
+    owners = tmp_path / ".local/dsh/owners/resident"
+    owners.mkdir(parents=True)
+    removed = sweep_run_sessions(tmp_path, keep=["active", "recent"])
+    assert removed == [directories["expired"].parent]
+    assert directories["active"].is_dir() and directories["recent"].is_dir() and owners.is_dir()
+    remove_run_sessions(tmp_path, "recent")
+    assert not directories["recent"].exists()
+    assert directories["active"].is_dir() and owners.is_dir()
+
+
+def test_dsh_room_cleanup_does_not_follow_a_linked_managed_parent(tmp_path: Path) -> None:
+    from looper.agents.room import remove_run_sessions, sweep_run_sessions
+
+    outside = tmp_path / "outside"
+    (outside / "expired").mkdir(parents=True)
+    (outside / "expired/history").write_bytes(b"untouched")
+    parent = tmp_path / ".local/dsh"
+    parent.mkdir(parents=True)
+    (parent / "run-sessions").symlink_to(outside, target_is_directory=True)
+    assert sweep_run_sessions(tmp_path, keep=[]) == []
+    remove_run_sessions(tmp_path, "expired")
+    assert (outside / "expired/history").read_bytes() == b"untouched"

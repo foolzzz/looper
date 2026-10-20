@@ -903,13 +903,18 @@ def _run_prompt_file(tmp_path):
 
 
 def _resident_dsh_stand_in(tmp_path):
-    """An opaque test store; this deliberately knows nothing about DSH's durable log format."""
+    """An opaque test store; this deliberately knows nothing about DSH's durable log format.
+
+    The store keeps the stdin bytes. ``DshRuntime.write_turn`` terminates that prompt with one
+    newline, so the echoed final answer drops that terminator and nothing else.
+    """
     from fake_claude import fake_claude
 
     return fake_claude(tmp_path / "resident-dsh", '''
 import json, os, pathlib, sys, uuid
 args = sys.argv[1:]
 text = sys.stdin.read()
+answer = text[:-1] if text.endswith('\\n') else text
 home = pathlib.Path(os.environ['DSH_HOME'])
 store = home / 'opaque-test-store'
 sessions = json.loads(store.read_text()) if store.exists() else {}
@@ -945,7 +950,7 @@ if text == 'hang':
 print(json.dumps({'type': 'status', 'phase': 'step_end', 'turn': len(sessions[sid]['turns']), 'step': 1,
                   'usage': {'inputTokens': 10, 'outputTokens': 4, 'cacheReadTokens': 7, 'cacheWriteTokens': 2}}))
 print(json.dumps({'type': 'status', 'phase': 'turn_end', 'reason': {'kind': 'completed'}}))
-print(json.dumps({'type': 'final', 'text': text}))
+print(json.dumps({'type': 'final', 'text': answer}))
 ''')
 
 
@@ -1142,7 +1147,7 @@ def test_dsh_real_launch_reads_full_stdin_eof_and_validates_exit(tmp_path, exit_
         process = await proc_tree.spawn(*command, cwd=tmp_path, env=launch.environment(),
                                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                         stderr=asyncio.subprocess.PIPE)
-        channel = runtime.run_channel(process, launch=launch, cwd=tmp_path)
+        channel = runtime.run_channel(process, launch=launch, cwd=tmp_path, session_dir=tmp_path / "kept")
         try:
             await channel.start("first line\n中文 second line")
             with pytest.raises(RuntimeError):
@@ -1158,7 +1163,8 @@ def test_dsh_real_launch_reads_full_stdin_eof_and_validates_exit(tmp_path, exit_
     assert result["is_error"] is (exit_code != 0)
     seen = json.loads((tmp_path / "seen.json").read_text())
     assert seen["prompt"] == "first line\n中文 second line\n"
-    assert Path(seen["home"]).is_relative_to(tmp_path / ".local" / "dsh" / "owners")
+    assert Path(seen["home"]) == tmp_path / "kept/home"
+    assert Path(seen["dsh_home"]) == tmp_path / "kept/dsh"
     assert result["session_id"] == "stand-in-session" and result["cost_basis"] == "observed"
     assert result["observed_cost_usd"] == pytest.approx(0.000008442)
     assert result["usage_complete"] is False
@@ -1437,3 +1443,249 @@ sys.exit(7)
     pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
     outcome = asyncio.run(asyncio.wait_for(pool._execute(envelope), 5))
     assert outcome["status"] == "completed" and outcome["summary"] == "legacy result"
+
+
+def _tree_bytes(directory):
+    return {str(path.relative_to(directory)): path.read_bytes()
+            for path in directory.rglob("*") if path.is_file()}
+
+
+def _kept_dsh_run(tmp_path, *, task_id="task"):
+    from looper.agents.room import run_session_dir
+
+    runtime = runtimes.adapter("dsh")
+    launch = _run_launch(tmp_path)
+    executable = _resident_dsh_stand_in(tmp_path)
+    prompt = _run_prompt_file(tmp_path)
+    directory = run_session_dir(tmp_path, "dsh", task_id, "worker-1")
+    assert directory is not None
+    command = runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch,
+                                  session_dir=directory)
+    done = subprocess.run(command, input="original history", text=True, capture_output=True,
+                          env=launch.environment(), cwd=tmp_path, timeout=5)
+    assert done.returncode == 0, done.stderr
+    sid = json.loads(done.stdout.splitlines()[0])["sessionId"]
+    return runtime, launch, executable, prompt, directory, command, sid
+
+
+def test_dsh_kept_command_names_the_actual_managed_owner(tmp_path):
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    assert runtime.kept_session_dir(command) == directory
+    home = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("DSH_HOME=")))
+    assert home == directory / "dsh"
+    assert json.loads((home / "opaque-test-store").read_text())[sid]["turns"] == ["original history"]
+    before = _tree_bytes(directory)
+    prompt.write_text("updated consult instructions")
+    changed = runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch,
+                                  session_dir=directory)
+    assert runtime.kept_session_dir(changed) == directory
+    assert (home / "opaque-test-store").read_bytes() == before["dsh/opaque-test-store"]
+
+
+@pytest.mark.parametrize("command", [[], ["dsh", "DSH_HOME=/untrusted"],
+    ["env", "DSH_HOME=/untrusted/dsh", "dsh", "--json", "-"],
+    ["env", "HOME=/other/home", "DSH_HOME=/untrusted/dsh", "dsh", "--patch", "/other/config", "--json", "-"]])
+def test_dsh_kept_owner_rejects_commands_outside_its_layout(command):
+    assert runtimes.adapter("dsh").kept_session_dir(command) is None
+
+
+def test_dsh_parallel_consults_resume_opaque_copies_and_leave_owner_unchanged(tmp_path, monkeypatch):
+    from looper.agents.runtimes import ReadOnly
+
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    # This slice checks session isolation; execution guard is implemented and verified separately.
+    monkeypatch.setattr(runtime, "read_only", ReadOnly.PERMISSIONS)
+    source = _tree_bytes(directory)
+    prompt.write_text("fresh consult system prompt")
+    mcp = Path(launch.library.mcp_config)
+    mcp.write_text(mcp.read_text().replace("test-run-token", "fresh-consult-token"))
+    consult = replace(launch, consult=True)
+
+    def ask(number):
+        fork = tmp_path / f"fork-{number}"
+        argv = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=consult,
+                                       session_id=sid, session_dir=directory, fork_dir=fork)
+        assert runtime.kept_session_dir(argv) == fork
+        assert argv[-3:] == ["--session-id", sid, "-"]
+        done = subprocess.run(argv, input=f"consult {number}", text=True, capture_output=True,
+                              env=consult.environment(), cwd=tmp_path, timeout=5)
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout.splitlines()[0])["sessionId"] == sid
+        turns = json.loads((fork / "dsh/opaque-test-store").read_text())[sid]["turns"]
+        assert turns == ["original history", f"consult {number}"]
+        module = Path(argv[argv.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
+        assert "fresh consult system prompt" in module
+        assert "fresh-consult-token" not in str(_tree_bytes(fork))
+        assert "fresh-consult-token" in consult.environment().values()
+        return fork
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        forks = list(executor.map(ask, (1, 2)))
+    assert forks[0] != forks[1]
+    assert _tree_bytes(directory) == source
+
+
+@pytest.mark.parametrize("invalid", ["missing", "empty", "missing-lock", "root-link", "file-link", "directory-link", "fifo"])
+def test_dsh_consult_refuses_invalid_snapshot_without_creating_a_fork(tmp_path, monkeypatch, invalid):
+    from looper.agents.runtimes import ReadOnly
+
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    monkeypatch.setattr(runtime, "read_only", ReadOnly.PERMISSIONS)
+    if invalid == "missing":
+        shutil.rmtree(directory)
+    elif invalid == "empty":
+        shutil.rmtree(directory / "dsh")
+        (directory / "dsh").mkdir()
+    elif invalid == "missing-lock":
+        (directory / ".session.lock").unlink()
+    elif invalid == "root-link":
+        link = tmp_path / "linked-owner"
+        link.symlink_to(directory, target_is_directory=True)
+        directory = link
+    elif invalid in ("file-link", "directory-link"):
+        (directory / "dsh/escape").symlink_to(prompt if invalid == "file-link" else tmp_path,
+                                              target_is_directory=invalid == "directory-link")
+    else:
+        os.mkfifo(directory / "dsh/pipe")
+    fork = tmp_path / "fork"
+    with pytest.raises(RuntimeUnsupported):
+        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+                                session_id=sid, session_dir=directory, fork_dir=fork)
+    assert not fork.exists()
+
+
+def test_dsh_consult_copy_or_launch_failure_cleans_only_its_new_fork(tmp_path, monkeypatch):
+    from looper.agents.runtimes import ReadOnly, dsh
+
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    monkeypatch.setattr(runtime, "read_only", ReadOnly.PERMISSIONS)
+    before = _tree_bytes(directory)
+    copytree = dsh.shutil.copytree
+
+    def failed_copy(source, destination, **kwargs):
+        Path(destination).mkdir(parents=True)
+        (Path(destination) / "partial").write_bytes(b"partial")
+        raise OSError("copy failed")
+
+    for fail_copy in (True, False):
+        fork = tmp_path / f"failed-{fail_copy}"
+        monkeypatch.setattr(dsh.shutil, "copytree", failed_copy if fail_copy else copytree)
+        with pytest.raises((RuntimeUnsupported, OSError)):
+            runtime.consult_command(executable if fail_copy else str(tmp_path / "absent"), cwd=tmp_path,
+                                    prompt_file=prompt, launch=replace(launch, consult=True), session_id=sid,
+                                    session_dir=directory, fork_dir=fork)
+        assert not fork.exists()
+        assert _tree_bytes(directory) == before
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    (existing / "keep").write_bytes(b"keep")
+    with pytest.raises((RuntimeUnsupported, FileExistsError)):
+        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+                                session_id=sid, session_dir=directory, fork_dir=existing)
+    assert (existing / "keep").read_bytes() == b"keep"
+
+
+def test_dsh_consult_refuses_an_active_source_and_accepts_it_after_exit(tmp_path, monkeypatch):
+    from looper.agents.runtimes import ReadOnly
+
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    monkeypatch.setattr(runtime, "read_only", ReadOnly.PERMISSIONS)
+
+    async def check():
+        process = await asyncio.create_subprocess_exec(*command, cwd=tmp_path, env=launch.environment(),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        channel = runtime.run_channel(process, launch=launch, cwd=tmp_path, session_dir=directory)
+        before = _tree_bytes(directory)
+        try:
+            with pytest.raises(RuntimeUnsupported, match="active"):
+                runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+                                        session_id=sid, session_dir=directory, fork_dir=tmp_path / "active-fork")
+            assert not (tmp_path / "active-fork").exists()
+            assert _tree_bytes(directory) == before
+            await channel.start("finished turn")
+            events = [event async for event in channel.events()]
+            assert _dsh_result(events)["is_error"] is False
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+                                session_id=sid, session_dir=directory, fork_dir=tmp_path / "ended-fork")
+
+    asyncio.run(asyncio.wait_for(check(), 8))
+
+
+def test_dsh_consult_remains_disabled_until_the_read_only_guard_is_available(tmp_path):
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    with pytest.raises(RuntimeUnsupported, match="guard"):
+        runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=replace(launch, consult=True),
+                                session_id=sid, session_dir=directory, fork_dir=tmp_path / "fork")
+    assert not (tmp_path / "fork").exists()
+
+
+def test_dsh_failed_native_restore_cleans_the_fork_and_preserves_source(tmp_path, monkeypatch):
+    from looper.agents.consult import _cleanup
+    from looper.agents.runtimes import ReadOnly
+
+    runtime, launch, executable, prompt, directory, command, sid = _kept_dsh_run(tmp_path)
+    monkeypatch.setattr(runtime, "read_only", ReadOnly.PERMISSIONS)
+    before = _tree_bytes(directory)
+    fork = tmp_path / "failed-restore"
+    readonly = replace(launch, consult=True)
+    argv = runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=readonly,
+                                   session_id="not-in-the-snapshot", session_dir=directory, fork_dir=fork)
+
+    async def restore():
+        process = await asyncio.create_subprocess_exec(*argv, cwd=tmp_path, env=readonly.environment(),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            channel = runtime.run_channel(process, launch=readonly, cwd=tmp_path, session_dir=fork)
+            await channel.start("question")
+            events = [event async for event in channel.events()]
+            result = _dsh_result(events)
+            assert result["is_error"] is True
+            assert not any(event.get("subtype") == "init" for event in events)
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            _cleanup(None, fork)
+
+    asyncio.run(asyncio.wait_for(restore(), 8))
+    assert not fork.exists()
+    assert _tree_bytes(directory) == before
+
+
+@pytest.mark.parametrize("verify", [False, True])
+def test_finished_dsh_room_worker_keeps_its_home_and_opening_session_id(tmp_path, monkeypatch, agent_db, verify):
+    from unittest.mock import AsyncMock
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.ops.room import RoomOps
+    from looper.agents.room import RoomService, run_session_dir
+    from looper.agents.tiers import worker
+
+    launch = _run_launch(tmp_path, role="reviewer" if verify else "worker")
+    final = json.dumps({"passed": True, "findings": [], "summary": "reviewed"} if verify else
+                       {"status": "completed", "changed_files": {}, "summary": "finished"})
+    executable = _headless_stand_in(tmp_path, final=final)
+    settings = replace(launch.settings, profile=replace(launch.profile,
+                       runtime=replace(launch.profile.runtime, executable=executable)))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
+    monkeypatch.setattr(worker, "load_installed", AsyncMock(return_value=launch.library))
+    room = RoomService()
+    monkeypatch.setattr(room, "first_turn", AsyncMock(return_value="room context"))
+    workers = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+    workers.room_ops = RoomOps(room, url="http://127.0.0.1:19999")
+    envelope = MessageEnvelope.create(source=planner_address("task"), target=worker_address("worker-1"),
+        message_type=MessageType.VERIFY_REQUEST if verify else MessageType.WORK_ITEM,
+        payload={"task_id": "step", "parent_task_id": "task", "step_key": "s1", "instruction": "run",
+                 "context": {"work_dir": str(tmp_path)}})
+    result = asyncio.run(asyncio.wait_for(workers._execute(envelope, is_verify=verify), 8))
+    assert result.get("passed") is True if verify else result.get("status") == "completed"
+    kept = run_session_dir(tmp_path, "dsh", "task", "worker-1")
+    assert kept is not None and kept.is_dir()
+    command = agent_db.start_record.call_args.kwargs["metadata"]["command"]
+    assert launch.runtime.kept_session_dir(command) == kept
+    seen = json.loads((tmp_path / "seen.json").read_text())
+    assert Path(seen["dsh_home"]) == kept / "dsh"
+    assert agent_db.finish_record.call_args.kwargs["session_id"] == "stand-in-session"

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -20,7 +22,7 @@ from ... import child_env
 from ..run_usage import Usage
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ResidentTransport, RunCost,
-    RuntimeAdapter, RuntimeUnsupported, instructions, runtime_prompt_text,
+    ReadOnly, RuntimeAdapter, RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession
@@ -336,27 +338,93 @@ class DshRuntime(RuntimeAdapter):
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                     max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
         owner = str(Path(session_dir).absolute()) if session_dir is not None else uuid4().hex
-        return self._command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch, owner=owner)
+        return self._command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch, owner=owner,
+                             directory=session_dir)
 
     def _command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                 owner: str) -> list[str]:
+                 owner: str, directory: Path | None = None) -> list[str]:
         self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        if launch.read_only:
+        if launch.read_only and launch.read_only_mode is ReadOnly.CHECK:
             raise RuntimeUnsupported("DSH read-only runs require the execution guard")
         local = Path(prompt_file).absolute().parent.parent
         files = bootstrap_files(executable, Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
         # Resolve the required runner from an already-published immutable bundle. The final patch includes
         # its absolute module URI and policy, so either change selects a new bundle under the same owner.
-        bootstrap = write_home(local, files, owner=owner)
+        bootstrap = write_home(local, files, owner=owner, directory=directory)
         runner = {**bootstrap_entry(bootstrap), "inject": ["headlessStartup"],
                   "config": {name: {"__jsExpr": f"ctx.headlessStartup.{name}"}
                              for name in ("task", "sessionId", "json")}}
         # In rc.2 a patch's name is a match guard, not a replacement. Inserting the same stable id
         # selects its last definition in EntryGroup.update; only this required runner is activated.
         patch = [*_launch_patch(launch, cwd), {"insert": [runner]}]
-        home = write_home(local, {**files, "looper.yml": json.dumps(patch, ensure_ascii=False)}, owner=owner)
+        home = write_home(local, {**files, "looper.yml": json.dumps(patch, ensure_ascii=False)}, owner=owner,
+                          directory=directory)
         return ["env", *(f"{name}={value}" for name, value in home.paths.items()), executable,
                 *self.launch_args(launch), "--patch", str(home.config / "looper.yml"), "--json", "-"]
+
+    def kept_session_dir(self, command: Sequence[str]) -> Path | None:
+        """Read only the controlled env/patch layout, never a path mentioned in a prompt or app argument."""
+        if not command or command[0] != "env":
+            return None
+        paths: dict[str, str] = {}
+        index = 1
+        while index < len(command) and "=" in command[index]:
+            name, value = command[index].split("=", 1)
+            if name in paths:
+                return None
+            paths[name] = value
+            index += 1
+        args = list(command[index + 1:])
+        try:
+            owner = Path(paths["DSH_HOME"]).parent
+            if not owner.is_absolute() or ".." in owner.parts:
+                return None
+            if any(paths.get(name) != value for name, value in DshHome(owner, owner).paths.items()):
+                return None
+            if args[:3] != ["--profile", "headless", "--patch"] or args[-1:] != ["-"]:
+                return None
+            patch = Path(args[3])
+            if patch.parent.parent != owner / "configs" or patch.name != "looper.yml":
+                return None
+            return owner
+        except (KeyError, IndexError):
+            return None
+
+    def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                        session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
+        """Adopt the ended root Session only inside an opaque copy; never rewrite its id or durable log."""
+        if not launch.consult or not launch.read_only:
+            raise RuntimeUnsupported("DSH session consult requires a read-only consult launch")
+        if not session_id or session_dir is None:
+            raise RuntimeUnsupported("the run kept no DSH snapshot to resume")
+        source, fork = Path(session_dir).absolute(), Path(fork_dir).absolute()
+        _snapshot_tree(source)
+        if not (source / "dsh").is_dir() or not any((source / "dsh").iterdir()):
+            raise RuntimeUnsupported("the run kept no DSH snapshot to resume")
+        if source == fork or source in fork.parents or fork in source.parents:
+            raise RuntimeUnsupported("DSH consult fork must be separate from its source")
+        if not (source / ".session.lock").is_file():
+            raise RuntimeUnsupported("the run kept no managed DSH snapshot to resume")
+        # A managed channel holds this inode locked until the process exits. Reading it changes no owner bytes.
+        with (source / ".session.lock").open("rb") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeUnsupported("cannot snapshot an active DSH session") from None
+            _snapshot_parent(fork.parent)
+            fork.mkdir(mode=0o700)  # Claim only a fresh destination; never clean somebody else's fork.
+            try:
+                # Preserve links long enough to reject them in the copy too; never dereference a newly added link.
+                shutil.copytree(source / "dsh", fork / "dsh", symlinks=True)
+                _snapshot_tree(fork / "dsh")
+                command = self._command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch,
+                                        owner=str(fork), directory=fork)
+                return [*command[:-1], *self.resume_args(session_id), "-"]
+            except BaseException as exc:
+                shutil.rmtree(fork)
+                if isinstance(exc, OSError):
+                    raise RuntimeUnsupported("cannot copy or prepare the DSH snapshot") from None
+                raise
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -371,7 +439,10 @@ class DshRuntime(RuntimeAdapter):
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
                     session_dir: Path | None = None) -> DshChannel:
-        return DshChannel(self, process, launch=launch)
+        channel = DshChannel(self, process, launch=launch)
+        if session_dir is not None:
+            channel.keep_session(session_dir)
+        return channel
 
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
         if stdin.is_closing():
@@ -499,6 +570,25 @@ class DshChannel:
         self._runtime, self._process = runtime, process
         self._stream = DshStream(model=launch.model)
         self._spend = RunSpend(launch.profile.provider, launch.model, launch.max_budget_usd)
+        self._session_lock = None
+
+    def keep_session(self, directory: Path) -> None:
+        """Hold the owner's lock through process exit, including when nobody drains its events."""
+        lock = (directory / ".session.lock").open("rb")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            raise RuntimeUnsupported("DSH session owner is active") from None
+        self._session_lock = lock
+
+        async def release() -> None:
+            try:
+                await self._process.wait()
+            finally:
+                lock.close()
+
+        self._release_lock = asyncio.create_task(release())
 
     async def start(self, prompt: str) -> None:
         assert self._process.stdin is not None
@@ -542,6 +632,8 @@ class DshChannel:
         finally:
             stderr.cancel()
             await asyncio.gather(stderr, return_exceptions=True)
+            if self._session_lock is not None:
+                await self._release_lock
 
 
 def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
@@ -764,8 +856,29 @@ def _write_private(path: Path, text: str) -> None:
         Path(building).unlink(missing_ok=True)
 
 
-def write_home(local: Path, files: Mapping[str, str], *, owner: str | None = None) -> DshHome:
-    """Materialize already-rendered, secret-free overlay/modules below ``<local>/dsh/owners/<owner hash>``.
+def _snapshot_parent(path: Path) -> None:
+    """Create private parents without changing permissions on an existing ancestor."""
+    if path.is_symlink() or ".." in path.parts:
+        raise RuntimeUnsupported("DSH snapshot path cannot contain a symlink or parent traversal")
+    if path.parent != path:
+        _snapshot_parent(path.parent)
+    path.mkdir(mode=0o700, exist_ok=True)
+
+
+def _snapshot_tree(path: Path) -> None:
+    """Fail closed on missing, linked or special files without interpreting Session's durable format."""
+    if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_dir():
+        raise RuntimeUnsupported("DSH snapshot is missing or contains a symlink")
+    for parent, directories, files in os.walk(path, followlinks=False):
+        for name in (*directories, *files):
+            mode = (Path(parent) / name).lstat().st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                raise RuntimeUnsupported("DSH snapshot contains a symlink or special file")
+
+
+def write_home(local: Path, files: Mapping[str, str], *, owner: str | None = None,
+               directory: Path | None = None) -> DshHome:
+    """Materialize secret-free overlay/modules in a private owner, or directly in a managed run directory.
 
     Pass the complete resident owner label (or the kept run's session_dir identity); omit it only for a new run.
     Content changes select a new configs bundle, never a new Session root. Secrets must be environment references.
@@ -779,13 +892,23 @@ def write_home(local: Path, files: Mapping[str, str], *, owner: str | None = Non
     content_key = hashlib.sha256(json.dumps([HOME_LAYOUT_ID, dict(files)], ensure_ascii=False,
                                           sort_keys=True).encode("utf-8")).hexdigest()
     local = Path(local).absolute()
-    root = local / "dsh" / "owners" / owner_key
+    root = Path(directory).absolute() if directory is not None else local / "dsh" / "owners" / owner_key
+    if directory is not None:
+        _snapshot_parent(root.parent)
+    boundary = root if directory is not None else local
     config = root / "configs" / content_key
     home = DshHome(root, config)
-    for directory in (local, local / "dsh", root.parent, root, config.parent):
-        _private_dir(directory, root=local)
+    directories = (root, config.parent) if directory is not None else (local, local / "dsh", root.parent, root, config.parent)
+    for path in directories:
+        _private_dir(path, root=boundary)
     for path in home.paths.values():
-        _private_dir(Path(path), root=local)
+        _private_dir(Path(path), root=boundary)
+    # The file is immutable; its advisory lock belongs to a running channel, never to a copied home.
+    lock = root / ".session.lock"
+    if lock.is_symlink():
+        raise RuntimeUnsupported("DSH session lock cannot be a symlink")
+    fd = os.open(lock, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
     if config.is_symlink():
         raise RuntimeUnsupported("DSH configuration bundle cannot be a symlink")
     if config.is_dir():
