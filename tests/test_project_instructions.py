@@ -5,7 +5,7 @@ What each runtime reads itself was found with Claude Code 2.1.285, Codex
 0.162.0 and omp 18.4.3 under Looper's isolation (the multi-runtime RFC,
 section 9), and with Grok 1.0.62 (the Grok runtime RFC, section 2); these tests check Looper's side: the files each runtime is said to
 be given, the Codex config that makes it read CLAUDE.md, the text Looper adds
-to omp's system prompt, and the run's record of them.
+to OMP's and pi's system prompts, and the run's record of them.
 """
 
 from __future__ import annotations
@@ -56,10 +56,17 @@ def _native(*paths: str) -> list[dict[str, str]]:
     return [{"path": path, "delivery": "native"} for path in paths]
 
 
-def _omp_prompt(cwd: Path, root: Path) -> str:
-    """The system prompt file an omp run in ``cwd`` is started with."""
-    command = adapter("omp").run_command("omp", cwd=cwd, prompt_file=SystemPrompt(LOOPER_PROMPT).write_file(root),
-                                         launch=_launch("omp"))
+def _injected(path: str, text: str) -> dict[str, Any]:
+    data = text.encode()
+    return {"path": path, "delivery": "injected",
+            "sha256": hashlib.sha256(data[:INJECTED_MAX_BYTES].decode().strip().encode()).hexdigest(),
+            "bytes": len(data), "clipped_bytes": max(len(data) - INJECTED_MAX_BYTES, 0)}
+
+
+def _runtime_prompt(runtime: str, cwd: Path, root: Path) -> str:
+    """The system prompt file an OMP or pi run in ``cwd`` is started with."""
+    command = adapter(runtime).run_command(runtime, cwd=cwd, prompt_file=SystemPrompt(LOOPER_PROMPT).write_file(root),
+                                           launch=_launch(runtime))
     return Path(command[command.index("--append-system-prompt") + 1]).read_text(encoding="utf-8")
 
 
@@ -80,7 +87,9 @@ def test_each_runtime_is_given_one_file_of_the_repository_read_by_itself(
     tmp_path: Path, files: dict[str, str], expected: dict[str, list[str]],
 ) -> None:
     repo = _repository(tmp_path, **files)
-    assert _given(repo) == {runtime: _native(*paths) for runtime, paths in expected.items()}
+    expected_records = {runtime: _native(*paths) for runtime, paths in expected.items()}
+    expected_records["pi"] = [_injected(name, files[name]) for name in ("AGENTS.md", "CLAUDE.md") if name in files][:1]
+    assert _given(repo) == expected_records
 
 
 def test_below_the_root_claude_code_reads_the_projects_claude_md_and_the_others_one_file_a_directory(
@@ -93,7 +102,8 @@ def test_below_the_root_claude_code_reads_the_projects_claude_md_and_the_others_
     assert _given(repo / "pkg") == {"claude-code": _native("../CLAUDE.md"),
                                     "codex": _native("../CLAUDE.md", "AGENTS.md"),
                                     "omp": _native("../CLAUDE.md", "AGENTS.md"),
-                                    "grok": _native("../CLAUDE.md", "AGENTS.md")}
+                                    "grok": _native("../CLAUDE.md", "AGENTS.md"),
+                                    "pi": [_injected("../CLAUDE.md", "root\n"), _injected("AGENTS.md", "pkg\n")]}
 
 
 def test_codex_reads_claude_md_where_a_directory_has_no_agents_md(
@@ -115,9 +125,52 @@ def test_codex_reads_claude_md_where_a_directory_has_no_agents_md(
 
 def test_in_a_repository_omp_reads_the_file_itself(tmp_path: Path) -> None:
     repo = _repository(tmp_path, **{"CLAUDE.md": "REPOSITORY CLAUDE.md\n"})
-    prompt = _omp_prompt(repo, tmp_path / "rt")
+    prompt = _runtime_prompt("omp", repo, tmp_path / "rt")
     assert "REPOSITORY CLAUDE.md" not in prompt and "# Project instructions" not in prompt
     assert prompt.startswith("# Runtime notes (OMP)") and prompt.endswith(LOOPER_PROMPT)
+
+
+def test_pi_injects_one_file_per_directory_in_order_and_stops_at_repository_root(tmp_path: Path) -> None:
+    repo = _repository(tmp_path, **{"AGENTS.md": "ROOT RULES", "CLAUDE.md": "IGNORED ROOT RULES"})
+    package = repo / "pkg"
+    work = package / "src"
+    work.mkdir(parents=True)
+    (package / "CLAUDE.md").write_text("PACKAGE RULES")
+    (work / "AGENTS.md").write_text("WORK RULES")
+    (work / "CLAUDE.md").write_text("IGNORED WORK RULES")
+    (work / "AGENTS.override.md").write_text("IGNORED OVERRIDE")
+    (work / ".pi").mkdir()
+    for name in ("SYSTEM.md", "APPEND_SYSTEM.md"):
+        (work / ".pi" / name).write_text(f"IGNORED {name}")
+    command = adapter("pi").run_command("pi", cwd=work, launch=_launch("pi"),
+                                         prompt_file=SystemPrompt(LOOPER_PROMPT).write_file(tmp_path / "rt"))
+    prompt = Path(command[command.index("--append-system-prompt") + 1]).read_text()
+    assert "--no-context-files" in command and "--no-approve" in command
+    assert "IGNORED" not in prompt and "ABOVE THE REPOSITORY" not in prompt
+    parts = [prompt.index(text) for text in ("ROOT RULES", "PACKAGE RULES", "WORK RULES",
+                                           "# Runtime notes (pi)", LOOPER_PROMPT)]
+    assert parts == sorted(parts)
+    assert record(adapter("pi").instruction_files(work), work) == [
+        _injected("../../AGENTS.md", "ROOT RULES"), _injected("../CLAUDE.md", "PACKAGE RULES"),
+        _injected("AGENTS.md", "WORK RULES"),
+    ]
+
+
+def test_pi_clips_each_repository_instruction_file_independently(tmp_path: Path) -> None:
+    root_text = "ROOT " + "r" * INJECTED_MAX_BYTES + "ROOT END"
+    repo = _repository(tmp_path, **{"AGENTS.md": root_text})
+    work = repo / "pkg"
+    work.mkdir()
+    work_text = "WORK " + "w" * INJECTED_MAX_BYTES + "WORK END"
+    (work / "CLAUDE.md").write_text(work_text)
+    prompt = _runtime_prompt("pi", work, tmp_path / "rt")
+    assert "ROOT END" not in prompt and "WORK END" not in prompt
+    assert "r" * (INJECTED_MAX_BYTES - 5) in prompt
+    assert "w" * (INJECTED_MAX_BYTES - 5) in prompt
+    assert prompt.count("[clipped:") == 2
+    assert record(adapter("pi").instruction_files(work), work) == [
+        _injected("../AGENTS.md", root_text), _injected("CLAUDE.md", work_text),
+    ]
 
 
 # --- Outside a repository: omp's discovery is off, so Looper gives it the work directory's file ---
@@ -128,19 +181,20 @@ def test_in_a_repository_omp_reads_the_file_itself(tmp_path: Path) -> None:
     ({"AGENTS.md": "WORK AGENTS.md\n"}, "AGENTS.md"),
     ({"CLAUDE.md": "WORK CLAUDE.md\n", "AGENTS.md": "WORK AGENTS.md\n"}, "AGENTS.md"),
 ], ids=["only CLAUDE.md", "only AGENTS.md", "both"])
-def test_outside_a_repository_omp_gets_the_work_directorys_file_in_its_system_prompt(
-    tmp_path: Path, files: dict[str, str], given: str,
+@pytest.mark.parametrize("runtime,label", [("omp", "OMP"), ("pi", "pi")])
+def test_outside_a_repository_runtime_gets_the_work_directorys_file_in_its_system_prompt(
+    tmp_path: Path, files: dict[str, str], given: str, runtime: str, label: str,
 ) -> None:
     (tmp_path / "CLAUDE.md").write_text("ABOVE THE WORK DIRECTORY\n")
     work = tmp_path / "work"
     work.mkdir()
     for name, text in files.items():
         (work / name).write_text(text)
-    prompt = _omp_prompt(work, tmp_path / "rt")
+    prompt = _runtime_prompt(runtime, work, tmp_path / "rt")
 
-    # The file comes first, saying where it is from; then omp's runtime notes and Looper's prompt, last.
+    # The file comes first, then the runtime notes and Looper's prompt, last.
     assert prompt.startswith(f"# Project instructions: {given}\n") and str(work / given) in prompt
-    at = [prompt.index(part) for part in (f"WORK {given}", "# Runtime notes (OMP)", LOOPER_PROMPT)]
+    at = [prompt.index(part) for part in (f"WORK {given}", f"# Runtime notes ({label})", LOOPER_PROMPT)]
     assert at == sorted(at) and prompt.endswith(LOOPER_PROMPT)
     assert "ABOVE THE WORK DIRECTORY" not in prompt
     assert [text for name, text in files.items() if name != given and text.strip() in prompt] == []
@@ -149,40 +203,53 @@ def test_outside_a_repository_omp_gets_the_work_directorys_file_in_its_system_pr
     assert entries["claude-code"] == _native("CLAUDE.md" if "CLAUDE.md" in files else "AGENTS.md")
     assert entries["codex"] == _native(given)
     assert entries["grok"] == _native(*(name for name in ("CLAUDE.md", "AGENTS.md") if name in files))
-    (omp,) = entries["omp"]
+    (entry,) = entries[runtime]
     text = files[given].strip()
-    assert omp == {"path": given, "delivery": "injected", "sha256": hashlib.sha256(text.encode()).hexdigest(),
-                   "bytes": len(files[given].encode()), "clipped_bytes": 0}
+    assert entry == {"path": given, "delivery": "injected", "sha256": hashlib.sha256(text.encode()).hexdigest(),
+                     "bytes": len(files[given].encode()), "clipped_bytes": 0}
+    assert entries["pi"] == entries["omp"]
 
 
-def test_outside_a_repository_without_either_file_omp_gets_no_project_section(tmp_path: Path) -> None:
-    prompt = _omp_prompt(tmp_path, tmp_path / "rt")
-    assert prompt.startswith("# Runtime notes (OMP)") and _given(tmp_path)["omp"] == []
+@pytest.mark.parametrize("runtime,label", [("omp", "OMP"), ("pi", "pi")])
+def test_outside_a_repository_without_either_file_runtime_gets_no_project_section(
+    tmp_path: Path, runtime: str, label: str,
+) -> None:
+    prompt = _runtime_prompt(runtime, tmp_path, tmp_path / "rt")
+    assert prompt.startswith(f"# Runtime notes ({label})") and _given(tmp_path)[runtime] == []
 
 
-def test_an_oversized_file_is_clipped_and_the_record_says_by_how_much(tmp_path: Path) -> None:
-    text = "# Rules\n" + "r" * INJECTED_MAX_BYTES + "THE END\n"
+@pytest.mark.parametrize("runtime", ["omp", "pi"])
+@pytest.mark.parametrize("character", ["r", "规"])
+def test_an_oversized_file_is_clipped_and_the_record_says_by_how_much(
+    tmp_path: Path, runtime: str, character: str,
+) -> None:
+    text = "# Rules\n" + character * INJECTED_MAX_BYTES + "THE END\n"
     (tmp_path / "AGENTS.md").write_text(text)
-    prompt = _omp_prompt(tmp_path, tmp_path / "rt")
+    prompt = _runtime_prompt(runtime, tmp_path, tmp_path / "rt")
 
     clipped = len(text.encode()) - INJECTED_MAX_BYTES
     assert "THE END" not in prompt and f"[clipped: {clipped} more bytes; read the file for the rest]" in prompt
-    (omp,) = _given(tmp_path)["omp"]
-    assert omp["bytes"] == len(text.encode()) and omp["clipped_bytes"] == clipped
-    assert omp["sha256"] == hashlib.sha256(text[:INJECTED_MAX_BYTES].strip().encode()).hexdigest()
+    (entry,) = _given(tmp_path)[runtime]
+    assert entry["bytes"] == len(text.encode()) and entry["clipped_bytes"] == clipped
+    expected = text.encode()[:INJECTED_MAX_BYTES].decode("utf-8", errors="replace").strip()
+    assert entry["sha256"] == hashlib.sha256(expected.encode()).hexdigest()
+    assert expected in prompt
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
-def test_a_file_that_cannot_be_read_is_left_out_and_the_record_says_why(tmp_path: Path) -> None:
+@pytest.mark.parametrize("runtime,label", [("omp", "OMP"), ("pi", "pi")])
+def test_a_file_that_cannot_be_read_is_left_out_and_the_record_says_why(
+    tmp_path: Path, runtime: str, label: str,
+) -> None:
     (tmp_path / "CLAUDE.md").write_text("UNREADABLE\n")
     os.chmod(tmp_path / "CLAUDE.md", 0)
     try:
-        prompt = _omp_prompt(tmp_path, tmp_path / "rt")
-        (omp,) = _given(tmp_path)["omp"]
+        prompt = _runtime_prompt(runtime, tmp_path, tmp_path / "rt")
+        (entry,) = _given(tmp_path)[runtime]
     finally:
         os.chmod(tmp_path / "CLAUDE.md", 0o600)
-    assert prompt.startswith("# Runtime notes (OMP)")
-    assert omp["delivery"] == "injected" and omp["error"].startswith("PermissionError") and "sha256" not in omp
+    assert prompt.startswith(f"# Runtime notes ({label})")
+    assert entry["delivery"] == "injected" and entry["error"].startswith("PermissionError") and "sha256" not in entry
 
 
 # --- The run's record ---
@@ -190,7 +257,7 @@ def test_a_file_that_cannot_be_read_is_left_out_and_the_record_says_why(tmp_path
 
 def test_a_runs_record_names_the_files_its_runtime_was_given(tmp_path: Path, agent_db: Any) -> None:
     (tmp_path / "CLAUDE.md").write_text("WORK CLAUDE.md\n")
-    for runtime, delivery in (("omp", "injected"), ("codex", "native")):
+    for runtime, delivery in (("omp", "injected"), ("codex", "native"), ("pi", "injected")):
         recorder = ClaudeRunRecorder(agent_id="worker-1", task_id=None, command=[runtime], cwd=str(tmp_path),
                                      input_text="go", launch=_launch(runtime))
         asyncio.run(recorder.start())

@@ -212,7 +212,6 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
 
 
 @pytest.mark.parametrize("call", [
-    lambda: PI.prompt_blocks(None, "prompt"),  # type: ignore[arg-type]
     lambda: PI.resident_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3),  # type: ignore[arg-type]
     lambda: PI.resume_args("session"),
     lambda: PI.resident_session("manager"),
@@ -220,7 +219,6 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
     lambda: PI.tool_summary("read", {}),
     lambda: PI.cost(None, None),  # type: ignore[arg-type]
     lambda: PI.budget_error(None),
-    lambda: PI.instruction_files("."),
     lambda: PI.steer_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3,  # type: ignore[arg-type]
                              session_dir=Path("sessions")),
     lambda: PI.consult_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, session_id="s",  # type: ignore[arg-type]
@@ -267,11 +265,14 @@ def test_json_launch_uses_pi_flags_and_private_directories(tmp_path: Path) -> No
     command = _command(tmp_path)
     env = _command_env(command)
     args = command[command.index("pi") + 1:]
+    prompt = Path(args[args.index("--append-system-prompt") + 1])
+    assert prompt.parent == tmp_path / ".local/pi/prompts"
+    assert prompt.read_text().endswith("Looper prompt")
     assert args == [
         "-p", "--mode", "json", "--offline", "--no-approve", "--no-context-files", "--no-extensions",
         "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes",
         "--provider", "looper", "--model", "selected", "--thinking", "high",
-        "--append-system-prompt", str(tmp_path / ".local/prompts/prompt.md"), "--no-session",
+        "--append-system-prompt", str(prompt), "--no-session",
     ]
     assert not {"--config", "--no-ui", "-e"} & set(args)
     assert "PI_SHELL_PREFIX" not in env

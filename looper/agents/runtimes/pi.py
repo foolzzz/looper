@@ -35,9 +35,9 @@ from ... import child_env
 from ..system_prompt_mode import SystemPromptMode
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, RunCost, RuntimeAdapter,
-    RuntimeUnsupported,
+    RuntimeUnsupported, instructions, runtime_prompt_text,
 )
-from .instructions import InstructionFile
+from .instructions import Delivery, InstructionFile
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -120,6 +120,7 @@ class PiRuntime(RuntimeAdapter):
     # API keys only. pi's own /login and OAuth are not providers Looper binds.
     auth_kinds = frozenset({AuthKind.API_KEY})
     isolation_id = HOME_LAYOUT_ID
+    can_replace_system_prompt = True
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({
         *_PI_DIRS, *_PI_ENV, *_PLATFORM_ENV, "PI_SHELL_PREFIX", "PI_CONFIG_FILES", "PI_CONFIG_DIR",
     })
@@ -180,7 +181,10 @@ class PiRuntime(RuntimeAdapter):
         raise RuntimeUnsupported("pi does not implement this yet; only version and help probes run")
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
-        self._refuse()
+        looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch, cwd=cwd),
+                             "system prompt file")
+        return ([looper] if launch.system_prompt_mode is SystemPromptMode.REPLACE else
+                [PromptBlock("Default prompt", "runtime", None, "pi's default prompt (not shown)"), looper])
 
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return list(_ISOLATION_FLAGS)
@@ -232,12 +236,16 @@ class PiRuntime(RuntimeAdapter):
             if session.resolve().is_relative_to((local / "pi" / "homes").resolve()):
                 raise RuntimeUnsupported("pi session directories must be outside shared homes")
             _private_dir(session)
+        text = _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
+        prompt = local / "pi" / "prompts" / f"{hashlib.sha256(text.encode('utf-8')).hexdigest()}.md"
+        _private_dir(prompt.parent)
+        _write_private(prompt, text)
         prompt_flag = ("--system-prompt" if launch.system_prompt_mode is SystemPromptMode.REPLACE
                        else "--append-system-prompt")
         return [
             "env", f"HOME={home}", f"PI_CODING_AGENT_DIR={home / 'agent'}",
             f"PI_CODING_AGENT_SESSION_DIR={session}", executable, *self.launch_args(launch),
-            prompt_flag, str(prompt_file),
+            prompt_flag, str(prompt),
             *(["--no-session"] if session_dir is None else ["--session-dir", str(session)]),
         ]
 
@@ -260,7 +268,28 @@ class PiRuntime(RuntimeAdapter):
         self._refuse()
 
     def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
-        self._refuse()
+        """Inject the project's files once; pi's own context-file discovery stays disabled."""
+        return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
+            cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+
+
+def runtime_notes() -> str:
+    """pi-specific guidance, leaving the shared role prompts unchanged."""
+    return "\n".join([
+        "# Runtime notes (pi)",
+        "",
+        "Looper runs you through pi. The instructions after these notes are Looper's.",
+        "",
+        "- Looper reads only your final message. When the instructions ask for a reply or a report in a given shape "
+        "(such as a JSON block), put all of it in that final message.",
+        "- Looper's platform tools use the mcp__looper__ prefix.",
+    ])
+
+
+def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
+    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label)
+               if cwd is not None else "")
+    return runtime_prompt_text(launch, looper_prompt, project, runtime_notes(), keep_empty=False)
 
 
 def provider_api(provider: ProviderSpec) -> str:
