@@ -1,5 +1,5 @@
 """A task's Planner opens a wait once its dependencies are done, keeps it out of the Workers, and saves, reads
-and shows it.
+and shows it. A wait that timed out or that the user cancelled is a [WAIT] turn: extend, proceed or fail.
 
 The Planner's Claude is a stand-in (``planner_claude``); the Workers are a stand-in pool
 (``tests.test_planner_agent.Harness``); the plan and its waits are kept in memory (``agent_db.store``).
@@ -17,13 +17,18 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents import waits
-from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
+from looper.agents.message import (
+    TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, channel_address,
+)
 from looper.agents.tiers import planner as planner_module
-from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
+from looper.agents.tiers.planner_protocol import TurnKind
 from looper.agents.waits import (
     GithubPrCheck, ReadyWhen, Wait, WaitLimits, WaitOutcome, WaitSpec, WaitState, WaitView,
 )
-from tests.test_planner_agent import WORK_OK, _project, activity, always, decide, drive, plan, reply, step
+from tests.test_planner_agent import (
+    FINAL, FINAL_RESULT, WORK_OK, _project, activity, always, decide, drive, plan, reply, step,
+)
 
 TOPIC = "Author pushes fixes"
 CHECK = {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}
@@ -661,27 +666,6 @@ def test_claude_stays_while_a_step_runs_and_a_wait_is_open(
     assert len(claude.argvs()) == 1
 
 
-@pytest.mark.parametrize("state", ["timed_out", "cancel_requested"])
-def test_a_wait_that_is_not_ready_is_left_for_later(planner_claude: Any, agent_db: Any, state: str) -> None:
-    claude = planner_claude(plan(wait_step("w1")))
-
-    async def scenario(h: Any) -> None:
-        await h.start()
-        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
-        turns = len(claude.turns())
-        _stored_wait(agent_db, "w1").update(state=state)
-        await _wake(h)
-        await asyncio.sleep(0.05)
-        assert len(claude.turns()) == turns
-
-    h = drive(claude, _hold, scenario)
-
-    assert _stored_wait(agent_db, "w1")["state"] == state
-    assert _step(h, "w1").wait.state is WaitState.WAITING
-    assert _step(h, "w1").status == "waiting"
-    assert not any("[WAIT]" in turn["text"] for turn in claude.turns())
-
-
 def test_a_wait_read_that_fails_is_logged_and_the_wait_stays(
     planner_claude: Any, agent_db: Any, caplog: Any,
 ) -> None:
@@ -722,3 +706,505 @@ def test_a_ready_row_for_an_unknown_step_is_skipped(planner_claude: Any, agent_d
     assert _stored_wait(agent_db, "w1")["state"] == "done"
     assert _step(h, "w1").result == {"status": "ready", "summary": "real"}
     assert not any(item.payload.get("step_key") == "ghost" for item in h.work_items)
+
+
+# --- A timed-out or cancelled wait is one [WAIT] turn ---
+
+
+def _wait_reply(action: str, answer: str = "going on", *, chat: str = "none", **fields: Any) -> str:
+    """A [WAIT] reply. ``max_wait_seconds``, ``resolution`` and ``reason`` belong to the wait; the rest is CHAT."""
+    wait = {"action": action}
+    for key in ("max_wait_seconds", "resolution", "reason"):
+        if key in fields:
+            wait[key] = fields.pop(key)
+    return reply({"reply": answer, "action": chat, "wait": wait, **fields})
+
+
+def _arm(agent_db: Any, key: str, state: str, **fields: Any) -> None:
+    """Move the stored wait ``key`` to ``state`` the way the loop or the user would, without telling the Planner."""
+    _stored_wait(agent_db, key).update(state=state, **fields)
+
+
+def _wait_turns(claude: Any) -> list[str]:
+    """The [WAIT] decision turns (a repair turn starts with ``[WAIT]`` too, but not ``[WAIT] Wait``)."""
+    return [turn["text"] for turn in claude.turns() if turn["text"].startswith("[WAIT] Wait ")]
+
+
+def _entries(agent_db: Any, kind: str, key: str | None = None) -> list[dict[str, Any]]:
+    rows = agent_db.store.journal.get("t1", [])
+    if key is not None:
+        step_id = _stored_steps(agent_db)[key]["id"]
+        rows = [entry for entry in rows if entry.get("step_id") == step_id]
+    return [entry for entry in rows if entry["kind"] == kind]
+
+
+async def _open_then(h: Any, agent_db: Any, key: str, state: str, **fields: Any) -> None:
+    """Wait until ``key`` is waiting, then move its row and wake the Planner."""
+    await h.start()
+    await h.until(lambda: _wait_state(h, key) is WaitState.WAITING)
+    _arm(agent_db, key, state, **fields)
+    await _wake(h)
+
+
+def test_a_timed_out_wait_is_extended(planner_claude: Any, agent_db: Any) -> None:
+    answer = "R" * 350
+    claude = planner_claude(plan(wait_step("w1")), _wait_reply("extend", answer, max_wait_seconds=86400))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        goals = len(_goals(h))
+        # Two recorded failures, and the second automatic retry (300 s) is already due, so this event decides.
+        _arm(agent_db, "w1", "timed_out", failures=2,
+             failed_at=datetime.now(timezone.utc) - timedelta(seconds=301))
+        await _wake(h)
+        await h.until(lambda: _stored_wait(agent_db, "w1")["state"] == "waiting"
+                      and _stored_wait(agent_db, "w1")["extensions"] == 1)
+        assert len(_goals(h)) > goals
+
+    drive(claude, _hold, scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert stored["failures"] == 0 and stored["failed_at"] is None
+    assert abs((stored["deadline_at"] - stored["next_check_at"]).total_seconds() - 86400) < 2
+    assert abs((stored["next_check_at"] - datetime.now(timezone.utc)).total_seconds()) < 30
+    assert _stored_steps(agent_db)["w1"]["status"] == "waiting"
+    assert _entries(agent_db, "wait_extended", "w1")[0]["summary"].startswith(f"wait extended by 1 d: {answer[:20]}")
+    lines = activity(agent_db)
+    assert f"Planner on wait w1 (extend): {'R' * 299}…" in lines
+    assert "Wait w1 extended by 1 d" in lines
+    message = _wait_turns(claude)[0]
+    assert message.startswith(
+        '[WAIT] Wait w1 "Author pushes fixes" timed out: it waited 3 d (max_wait_seconds 259200) '
+        "and its check never reported ready.")
+    assert "Allowed actions: none, add_steps, replan." in message
+    assert "forward (to a running step)" not in message
+
+
+def test_proceeding_starts_the_steps_that_depend_on_the_wait(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(
+        plan(wait_step("w1"), step("s2", "w1")),
+        _wait_reply("proceed", "the author will not push", resolution="head will not change"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: any(item.payload.get("step_key") == "s2" for item in h.work_items))
+        return h
+
+    h = drive(claude, _hold, scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert (stored["state"], stored["outcome"], stored["resolution"]) == ("done", "proceeded", "head will not change")
+    assert stored["closed_at"] is not None
+    assert _stored_steps(agent_db)["w1"]["status"] == "verified"
+    assert _step(h, "w1").result == {"status": "proceeded", "summary": "head will not change"}
+    assert _closed(agent_db, "w1")[-1]["summary"] == "wait done (proceeded): head will not change"
+    assert "Planner on wait w1 (proceed): the author will not push" in activity(agent_db)
+    report = next(item.payload for item in h.work_items if item.payload.get("step_key") == "s2")
+    assert report["dependencies"] == [{"step": "w1", "summary": "head will not change", "changed_files": []}]
+
+
+def test_failing_a_wait_fails_the_task_with_the_reason(planner_claude: Any, agent_db: Any) -> None:
+    reason = "the pull request was closed"
+    claude = planner_claude(plan(wait_step("w1")), _wait_reply("fail", "stopping", reason=reason))
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.finished()
+
+    h = drive(claude, _hold, scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert stored["state"] == "failed" and stored["outcome"] is None and stored["closed_at"] is not None
+    assert _stored_steps(agent_db)["w1"]["status"] == "failed"
+    assert _step(h, "w1").result == {"status": "failed", "summary": reason, "error": reason}
+    assert _closed(agent_db, "w1")[-1]["summary"] == f"wait failed: {reason}"
+    assert not _entries(agent_db, "step_failed")
+    final = h.final()
+    assert final is not None and final.payload["status"] == "failed"
+    assert f"Wait w1: {reason}" in final.payload["summary"]
+    assert f"- w1 (failed): failed: {reason}" in final.payload["summary"]
+    assert f"Task failed: Wait w1: {reason}" in activity(agent_db)
+    assert "Planner on wait w1 (fail): stopping" in activity(agent_db)
+
+
+def test_extending_a_cancelled_wait_is_repaired(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(
+        plan(wait_step("w1")),
+        _wait_reply("extend", "more time", max_wait_seconds=86400),
+        _wait_reply("fail", "stopping", reason="the user cancelled"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        h.planner._plan.origin_channel_id = channel_address("lark").agent_id
+        _arm(agent_db, "w1", "cancel_requested", notice="sent")
+        await _wake(h)
+        await h.finished()
+
+    h = drive(claude, _hold, scenario)
+
+    message = _wait_turns(claude)[0]
+    assert message.startswith(
+        '[WAIT] Wait w1 "Author pushes fixes": the user cancelled this wait from the dashboard.')
+    assert "The user was told" not in message and "The task page shows it." not in message
+    repair = next(turn["text"] for turn in claude.turns() if "broke the reply contract" in turn["text"])
+    assert "the user cancelled this wait: proceed, fail, or change the plan" in repair
+    assert h.final() is not None and h.final().payload["status"] == "failed"
+
+
+def test_proceeding_on_the_last_open_step_needs_a_final_summary(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(
+        plan(wait_step("w1")),
+        _wait_reply("proceed", "go", resolution="done waiting"),
+        _wait_reply("proceed", "go", resolution="done waiting", final=FINAL),
+    )
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.finished()
+
+    h = drive(claude, _hold, scenario)
+
+    message = _wait_turns(claude)[0]
+    assert ('This wait is the task\'s last open step: proceeding without adding steps completes the task, '
+            'and then the reply must carry "final", the task\'s final summary.') in message
+    repair = next(turn["text"] for turn in claude.turns() if "broke the reply contract" in turn["text"])
+    assert 'proceeding without adding steps completes the task, so the reply must carry "final"' in repair
+    final = h.final()
+    assert final is not None and final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
+
+
+def test_a_final_summary_is_refused_while_another_step_is_open(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(
+        plan(wait_step("w1"), step("s2", "w1")),
+        _wait_reply("proceed", "go", resolution="go on", final=FINAL),
+        _wait_reply("proceed", "go", resolution="go on"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: any(item.payload.get("step_key") == "s2" for item in h.work_items))
+
+    h = drive(claude, _hold, scenario)
+
+    assert "last open step" not in _wait_turns(claude)[0]
+    repair = next(turn["text"] for turn in claude.turns() if "broke the reply contract" in turn["text"])
+    assert "final is only for proceeding when this wait is the last open step and no steps are added" in repair
+    assert h.final() is None
+    assert _stored_steps(agent_db)["s2"]["status"] == "dispatched"
+
+
+def test_steps_added_as_a_wait_proceeds_are_saved_with_it(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import plans
+
+    claude = planner_claude(
+        plan(wait_step("w1")),
+        _wait_reply("proceed", "adding", resolution="need one more", chat="add_steps", steps=[step("s2")]),
+    )
+    save = plans.save
+    saves: list[dict[str, Any]] = []
+
+    async def recorded(task_id: str, **kwargs: Any) -> None:
+        saves.append(kwargs)
+        await save(task_id, **kwargs)
+
+    monkeypatch.setattr(plans, "save", recorded)
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: "s2" in _stored_steps(agent_db))
+
+    drive(claude, _hold, scenario)
+
+    matches = [item for item in saves
+               if any(wait.get("state") == "done" and wait.get("outcome") == "proceeded"
+                      for wait in item.get("waits") or ())
+               and any(row.get("key") == "s2" for row in item.get("steps") or ())]
+    assert len(matches) == 1
+    (close,) = matches
+    assert close["waits"][0]["expect"] == ["timed_out"]
+    assert {row["key"] for row in close["steps"]} == {"w1", "s2"}
+    assert [entry["kind"] for entry in close["journal"]] == ["wait_closed", "decision"]
+
+
+def test_an_empty_replan_after_proceeding_completes_the_task(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(
+        plan(wait_step("w1"), step("s2", "w1")),
+        _wait_reply("proceed", "drop the rest", resolution="nothing else to do", chat="replan", steps=[],
+                    final=FINAL),
+    )
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.finished()
+
+    h = drive(claude, _hold, scenario)
+
+    assert _stored_steps(agent_db)["s2"]["status"] == "skipped"
+    assert _stored_wait(agent_db, "w1")["outcome"] == "proceeded"
+    final = h.final()
+    assert final is not None and final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
+
+
+def test_a_wait_reply_can_forward_to_a_running_step(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1")),
+        _wait_reply("extend", "still waiting", max_wait_seconds=86400, chat="forward", step="s1",
+                    text="look at the new comment"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held and _wait_state(h, "w1") is WaitState.WAITING)
+        _arm(agent_db, "w1", "timed_out")
+        await _wake(h)
+        await h.until(lambda: h.forwarded)
+
+    h = drive(claude, _hold, scenario)
+
+    message = _wait_turns(claude)[0]
+    assert "Allowed actions: none, add_steps, replan, forward (to a running step)." in message
+    assert "last open step" not in message
+    assert h.forwarded[-1].payload["text"] == (
+        "A message from the user, passed on by the Planner while you work on this step. "
+        "Take it into account, then continue:\n\nlook at the new comment")
+    assert any("look at the new comment" in line for line in activity(agent_db))
+    assert _stored_wait(agent_db, "w1")["state"] == "waiting"
+    assert _stored_wait(agent_db, "w1")["extensions"] == 1
+
+
+def test_a_failed_wait_turn_retries_twice_then_again_on_a_later_event(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(waits, "RETRY_WAIT_SEC", (0.4, 0.4))
+    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 0.3)
+    broken = reply({"reply": "hmm", "action": "none"})
+    claude = planner_claude(plan(wait_step("w1")), *[broken] * 8)
+    seen: list[str] = []
+
+    async def scenario(h: Any) -> None:
+        publish = h.bus.publish
+
+        async def spy(envelope: MessageEnvelope, *args: Any, **kwargs: Any) -> Any:
+            if envelope.message_type is MessageType.SYSTEM_EVENT:
+                seen.append(str(envelope.payload.get("type")))
+            return await publish(envelope, *args, **kwargs)
+
+        h.bus.publish = spy
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: _stored_wait(agent_db, "w1").get("failures") == 1)
+        await _wake(h)
+        await asyncio.sleep(0.05)
+        assert _stored_wait(agent_db, "w1")["failures"] == 1
+        await h.until(lambda: _stored_wait(agent_db, "w1").get("failures") == 3)
+        stalled = len(claude.turns())
+        await asyncio.sleep(0.5)
+        assert _stored_wait(agent_db, "w1")["failures"] == 3 and len(claude.turns()) == stalled
+        await _wake(h)
+        await h.until(lambda: _stored_wait(agent_db, "w1").get("failures") == 4)
+
+    drive(claude, _hold, scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert stored["state"] == "timed_out" and stored["failed_at"] is not None
+    assert _stored_steps(agent_db)["w1"]["status"] == "waiting"
+    reason = "invalid reply after a repair turn: wait must be an object"
+    for number in range(1, 5):
+        assert f"Planner could not decide on wait w1 (failure {number}): {reason}" in activity(agent_db)
+    assert "gate_retry" in seen and "wait_retry" not in seen
+
+
+def test_a_failed_wait_turn_does_not_save_when_the_wait_moved(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import plans
+
+    claude = planner_claude(plan(wait_step("w1")), reply({"reply": "unused", "action": "none"}))
+    save = plans.save
+    saves: list[dict[str, Any]] = []
+    original = PlannerAgent._ask
+
+    async def ask(self: PlannerAgent, kind: TurnKind, message: str, parse: Any, run: Any = None) -> Any:
+        if kind is TurnKind.WAIT:
+            _stored_wait(agent_db, "w1")["state"] = "waiting"
+            raise PlannerTurnError("nope")
+        return await original(self, kind, message, parse, run)
+
+    async def recorded(task_id: str, **kwargs: Any) -> None:
+        saves.append(kwargs)
+        await save(task_id, **kwargs)
+
+    monkeypatch.setattr(PlannerAgent, "_ask", ask)
+    monkeypatch.setattr(plans, "save", recorded)
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: any("could not decide on wait w1" in line for line in activity(agent_db)))
+
+    drive(claude, _hold, scenario)
+
+    stored = _stored_wait(agent_db, "w1")
+    assert stored["state"] == "waiting" and int(stored.get("failures") or 0) == 0
+    assert "Planner could not decide on wait w1 (failure 1): nope" in activity(agent_db)
+    assert any(wait.get("expect") == ["timed_out"] for item in saves for wait in item.get("waits") or ())
+
+
+_EXTEND_RULE = ('- wait "extend": wait max_wait_seconds more from now (1 to 604800); the check goes on. '
+                "Not after the user cancelled.")
+_PROCEED_RULE = ('- wait "proceed": stop waiting; the steps that depend on it start now. '
+                 '"resolution" (required) says why; they read it.')
+_FAIL_RULE = '- wait "fail": the task cannot go on; "reason" (required).'
+_GATE_RULE = '- To ask the user first, proceed and add a gate (action "replan") that the waiting steps depend on.'
+_ACTION_RULE = ('- action: as in [CHAT]. "final" as in [DECISION], when the message says proceeding without new '
+                "steps completes the task.")
+_WAIT_JSON = '{"reply": "...", "action": "none", "wait": {"action": "extend", "max_wait_seconds": 86400}}'
+_LAST_OPEN = ('This wait is the task\'s last open step: proceeding without adding steps completes the task, '
+              'and then the reply must carry "final", the task\'s final summary.')
+
+
+def test_the_wait_message_reports_a_checked_timeout(planner_claude: Any, agent_db: Any) -> None:
+    output = "HEAD\n" + ("x" * 3000) + "\nTAIL"
+    claude = planner_claude(
+        plan(step("s1"), wait_step("w1", "s1"), step("s2", "w1")),
+        decide("accept"),
+        _wait_reply("extend", "more time", max_wait_seconds=86400),
+    )
+    checked = datetime(2026, 10, 19, 9, 10, tzinfo=timezone.utc)
+    seen: dict[str, Any] = {}
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        seen["deadline"] = _step(h, "w1").wait.deadline_at
+        h.planner._plan.origin_channel_id = channel_address("lark").agent_id
+        _arm(agent_db, "w1", "timed_out", checks=431, last_checked_at=checked, last_result="not_ready",
+             last_output=output, last_error="disk full\nstill full", notice="sent")
+        await _wake(h)
+        await h.until(lambda: _wait_turns(claude))
+
+    drive(claude, always(WORK_OK), scenario)
+    deadline = seen["deadline"]
+
+    message = _wait_turns(claude)[0]
+    order = [
+        '[WAIT] Wait w1 "Author pushes fixes" timed out: it waited 3 d (max_wait_seconds 259200) '
+        "and its check never reported ready.",
+        "Check: github_pr owner/name#12, ready_when head_changed, every 600 s; 431 checks, "
+        "the last at 09:10 UTC: not ready.",
+        "Last output (capped):",
+        "Last error: disk full\nstill full",
+        "The user was told in their Lark chat.",
+        f"- w1 [wait timed_out: {DESCRIBE}, deadline {_stamp(deadline)}]",
+        "Running now: none",
+        "Progress and findings",
+        "Steps waiting for it: s2.",
+        'Reply in the CHAT shape plus "wait":',
+        _WAIT_JSON,
+        _EXTEND_RULE,
+        _PROCEED_RULE,
+        _FAIL_RULE,
+        _GATE_RULE,
+        _ACTION_RULE,
+        "Allowed actions: none, add_steps, replan.",
+        "Reply with the WAIT JSON.",
+    ]
+    at = [message.index(part) for part in order]
+    assert at == sorted(at)
+    capped = message.split("Last output (capped): ", 1)[1].split("\nLast error:", 1)[0]
+    assert "HEAD" not in message and capped.endswith("\nTAIL") and "\n" in capped
+    assert len(capped.encode("utf-8")) <= 2048
+    progress = message.split("Progress and findings", 1)[1].split("Steps waiting for it:", 1)[0]
+    assert "did it" in progress
+    assert _LAST_OPEN not in message
+    assert claude.prompts()
+    assert all(_WAIT_JSON not in prompt for prompt in claude.prompts())
+
+
+def test_the_wait_message_for_a_timeout_without_a_check(planner_claude: Any, agent_db: Any) -> None:
+    claude = planner_claude(plan(time_wait("w1")), _wait_reply("extend", "more time", max_wait_seconds=86400))
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: _wait_turns(claude))
+
+    drive(claude, _hold, scenario)
+
+    message = _wait_turns(claude)[0]
+    assert message.startswith(
+        '[WAIT] Wait w1 "Author pushes fixes" timed out: it waited 1 d (max_wait_seconds 86400) '
+        "and its time passed.")
+    assert "Check:" not in message and "Last output" not in message and "Last error" not in message
+    assert "The user was told" not in message and "The task page shows it." not in message
+
+
+def test_the_wait_message_describes_a_command_check(
+    planner_claude: Any, agent_db: Any,
+) -> None:
+    command = {"id": "w1", "kind": "wait", "topic": TOPIC, "depends_on": [], "max_wait_seconds": 3600,
+               "every_seconds": 300, "check": {"type": "command", "command": "test -f ready"}}
+    claude = planner_claude(plan(command), _wait_reply("extend", "more time", max_wait_seconds=3600))
+    agent_db.get_task_project.return_value = {**_project(), "wait_commands": "on"}
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out", checks=2,
+                         last_checked_at=datetime(2026, 10, 19, 9, 10, tzinfo=timezone.utc), last_result="error")
+        await h.until(lambda: _wait_turns(claude))
+
+    drive(claude, _hold, scenario)
+
+    message = _wait_turns(claude)[0]
+    assert message.startswith(
+        '[WAIT] Wait w1 "Author pushes fixes" timed out: it waited 1 h (max_wait_seconds 3600) '
+        "and its check never reported ready.")
+    assert ("Check: command `test -f ready`, every 300 s; 2 checks, the last at 09:10 UTC: error." in message)
+
+
+@pytest.mark.parametrize(("notice", "channel", "expected"), [
+    ("sent", "web", "The user was told."),
+    ("sent", "telegram", "The user was told in their Telegram chat."),
+    ("dashboard", "web", "The task page shows it."),
+    ("failed", "web", "Telling the user failed. The task page shows it."),
+])
+def test_the_wait_message_says_where_the_timeout_notice_went(
+    planner_claude: Any, agent_db: Any, notice: str, channel: str, expected: str,
+) -> None:
+    claude = planner_claude(plan(time_wait("w1")), _wait_reply("extend", "more time", max_wait_seconds=86400))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        h.planner._plan.origin_channel_id = channel_address(channel).agent_id
+        _arm(agent_db, "w1", "timed_out", notice=notice)
+        await _wake(h)
+        await h.until(lambda: _wait_turns(claude))
+
+    drive(claude, _hold, scenario)
+
+    message = _wait_turns(claude)[0]
+    assert expected in message
+    if notice != "sent":
+        assert "The user was told" not in message
+
+
+@pytest.mark.parametrize("project", [{"user_gates": "off"}, {"task_schedule_id": "sched-1"}])
+def test_the_wait_message_omits_the_gate_hint_when_gates_are_not_allowed(
+    planner_claude: Any, agent_db: Any, project: dict[str, Any],
+) -> None:
+    claude = planner_claude(plan(wait_step("w1")), _wait_reply("extend", "more time", max_wait_seconds=86400))
+    agent_db.get_task_project.return_value = {**_project(), **project}
+
+    async def scenario(h: Any) -> None:
+        await _open_then(h, agent_db, "w1", "timed_out")
+        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1)
+
+    drive(claude, _hold, scenario)
+
+    message = _wait_turns(claude)[0]
+    assert _GATE_RULE not in message
+    assert _EXTEND_RULE in message and _PROCEED_RULE in message and _FAIL_RULE in message
+    assert "Reply with the WAIT JSON." in message

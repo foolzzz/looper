@@ -90,8 +90,11 @@ of the plan runs. It takes no Worker and is not reviewed. Opening it is saved
 with the plan; a restart reads the wait back. While an open wait is the only
 live thing, the Planner reports the task as ``waiting``. A ready wait is
 verified from the row (no model turn); cancelling waits happens before the
-reply's action. With no step in flight, an open wait stops Claude the same
-way a gate does, and the next turn resumes the session.
+reply's action. A wait that timed out or that the user cancelled is a [WAIT]
+turn at the end of the event: extend it, proceed, or fail the task. A turn
+that fails is tried again on its own after each of ``waits.RETRY_WAIT_SEC``,
+then at the end of every later event. With no step in flight, an open wait
+stops Claude the same way a gate does, and the next turn resumes the session.
 """
 
 from __future__ import annotations
@@ -102,7 +105,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
@@ -139,6 +142,7 @@ from ..task_roles import RoleKind, TaskRole
 from .. import waits
 from ..waits import (
     Wait,
+    WaitAction,
     WaitOutcome,
     WaitPolicy,
     WaitSpec,
@@ -148,6 +152,7 @@ from ..waits import (
     effective_every,
     open_times,
 )
+from ..task_notice import NotifyChannel, notify_channel
 from ..user_gates import (
     MESSAGE_MAX_CHARS,
     RETRY_WAIT_SEC,
@@ -194,6 +199,7 @@ from .planner_protocol import (
     SuperviseAction,
     TurnKind,
     WaitChange,
+    WaitContext,
     parse_chat,
     parse_decision,
     parse_gate,
@@ -202,6 +208,7 @@ from .planner_protocol import (
     parse_vault,
     parse_plan,
     parse_supervise,
+    parse_wait,
     parse_wrap_up,
     reply_contract,
 )
@@ -646,6 +653,52 @@ def _retry_due(gate: Gate, now: datetime) -> bool:
     return due is not None and now >= due
 
 
+def _wait_turn_due(wait: Wait, now: datetime) -> bool:
+    """Whether a [WAIT] turn runs now: no failure yet, its automatic retry is due, or those retries are spent
+    (every later event tries again). ``waits.RETRY_WAIT_SEC`` is read now, so a test can shorten it."""
+    if wait.failures <= 0:
+        return True
+    due = wait.retry_at(waits.RETRY_WAIT_SEC)
+    return due is None or now >= due
+
+
+def _wait_retry_due(wait: Wait, now: datetime) -> bool:
+    """Whether the idle loop should wake a failed [WAIT] turn: an automatic retry is left and its wait is over.
+
+    Once those retries are spent, ``retry_at`` is None and the loop stops; a later event tries again instead.
+    """
+    if wait.state not in (WaitState.TIMED_OUT, WaitState.CANCEL_REQUESTED):
+        return False
+    due = wait.retry_at(waits.RETRY_WAIT_SEC)
+    return due is not None and now >= due
+
+
+def _clock(value: Any) -> str | None:
+    """``value`` as ``HH:MM UTC``, when it is a time."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%H:%M UTC")
+
+
+def _tail_text(text: str, limit: int) -> str:
+    """The newest ``limit`` bytes of ``text``, dropping a character split by the cut."""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    tail = raw[-limit:]
+    start = 0
+    while start < len(tail) and tail[start] & 0xC0 == 0x80:
+        start += 1
+    return tail[start:].decode("utf-8", errors="ignore")
+
+
 def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int) -> list[str]:
     """``messages`` as ``_message_line`` shows them, the newest that fit in ``limit`` characters, oldest first,
     after a note on how many older ones were left out."""
@@ -955,7 +1008,7 @@ class PlannerAgent:
                 await self._handle_system_event(envelope)
         # Every change waiting reaches Claude once the event's turns are done: one that arrived meanwhile, or
         # one a failed turn or a restart left undelivered; then the user's messages in its gates, the room, and
-        # a wait the service or the user moved to ready.
+        # a wait the service or the user moved to ready, timed out, or cancel requested.
         if self._plan is not None:
             await self._deliver_changes(self._plan)
             await self._deliver_gate_messages(self._plan)
@@ -1352,8 +1405,12 @@ class PlannerAgent:
         return cancelled
 
     async def _deliver_waits(self, plan: TaskPlan) -> None:
-        """Take this plan's waits the service or the user moved to ready. ``timed_out`` and ``cancel_requested``
-        stay as they are for a later turn."""
+        """Take this plan's waits the loop or the user moved to ready, timed out, or cancel requested.
+
+        A ready row is verified with no model turn. A timed-out or cancelled one is a [WAIT] turn, unless its
+        failed turn is still inside an automatic retry (``waits.RETRY_WAIT_SEC``). Once those retries are spent,
+        every later event tries again.
+        """
         if plan.status not in _LIVE:
             return
         try:
@@ -1362,14 +1419,20 @@ class PlannerAgent:
             logger.warning("planner %s cannot read its waits", self.agent_id, exc_info=True)
             return
         for row in rows:
-            if row.get("state") != "ready" or not row.get("outcome") or plan.status not in _LIVE:
-                continue
+            if plan.status not in _LIVE:
+                return
             step = plan.step(str(row.get("step_id") or ""))
             if step is None or step.wait is None:
                 continue
-            await self._finish_wait(plan, step, row)
-            if plan.status not in _LIVE:
-                return
+            state = str(row.get("state") or "")
+            if state == "ready":
+                if not row.get("outcome"):
+                    continue
+                await self._finish_wait(plan, step, row)
+            elif state in ("timed_out", "cancel_requested"):
+                self._adopt_wait_trigger(step, row)
+                if _wait_turn_due(step.wait, datetime.now(timezone.utc)):
+                    await self._wait_turn(plan, step, row)
 
     async def _finish_wait(self, plan: TaskPlan, step: PlanStep, row: Mapping[str, Any]) -> None:
         """A ready wait is done: keep its outcome and resolution, verify the step, and start what depends on it.
@@ -1401,14 +1464,208 @@ class PlannerAgent:
         await self._activity("phase", note)
         await self._settle_plan(plan)
 
+    @staticmethod
+    def _adopt_wait_trigger(step: PlanStep, row: Mapping[str, Any]) -> None:
+        """Copy the row's trigger onto ``step``'s wait. The in-memory wait stays ``waiting`` until this event reads
+        the row, and a save writes that state back, so the turn and its due check use the row."""
+        wait = step.wait
+        assert wait is not None
+        wait.state = WaitState(str(row.get("state")))
+        wait.failures = int(row.get("failures") or 0)
+        failed_at = row.get("failed_at")
+        if isinstance(failed_at, str):
+            try:
+                failed_at = datetime.fromisoformat(failed_at)
+            except ValueError:
+                failed_at = None
+        wait.failed_at = failed_at if isinstance(failed_at, datetime) else None
+        step.status = wait.state.step_status
+
+    async def _wait_turn(self, plan: TaskPlan, step: PlanStep, row: Mapping[str, Any]) -> None:
+        """One [WAIT] turn on ``step``'s wait, which the row moved to ``timed_out`` or ``cancel_requested``.
+
+        A turn that fails counts and is saved only while the row is still in that state, then waits for its
+        automatic retry or a later event.
+        """
+        wait = step.wait
+        assert wait is not None
+        trigger = wait.state
+        others = [other for other in plan.steps if other is not step and other.status not in ("verified", "skipped")]
+        context = WaitContext(step.label, trigger, last_open=not others)
+        view = self._checked(plan.view())
+        try:
+            reply = await self._ask(TurnKind.WAIT, self._wait_message(plan, step, row, context),
+                                    lambda text: parse_wait(text, context, view))
+        except PlannerTurnError as exc:
+            wait.failures += 1
+            wait.failed_at = datetime.now(timezone.utc)
+            await self._activity("error", f"Planner could not decide on wait {step.label} "
+                                          f"(failure {wait.failures}): {exc}"[:500])
+            await self._save(plan, step, expect={step.step_id: [trigger.value]})
+            return
+        await self._close_wait(plan, step, reply, trigger)
+
+    async def _close_wait(self, plan: TaskPlan, step: PlanStep, reply: Any, trigger: WaitState) -> None:
+        """Do ``reply`` to ``step``'s wait, saving added steps with that change, then the rest of its CHAT action."""
+        wait = step.wait
+        assert wait is not None
+        now = datetime.now(timezone.utc)
+        action = reply.action
+        if reply.final is not None:
+            plan.final_summary = reply.final.markdown()
+        entries: list[JournalEntry] = []
+        if action is WaitAction.EXTEND:
+            seconds = int(reply.max_wait_seconds or 0)
+            wait.state = WaitState.WAITING
+            wait.deadline_at = now + timedelta(seconds=seconds)
+            wait.next_check_at = now
+            wait.extensions += 1
+            wait.failures, wait.failed_at = 0, None
+            step.status = wait.state.step_status
+            dur = waits._duration(seconds)
+            entries.append(JournalEntry(step.step_id, step.label, journal.clip(
+                f"wait extended by {dur}: {reply.chat.reply}", journal.SUMMARY_MAX_CHARS),
+                kind=JournalKind.WAIT_EXTENDED))
+        elif action is WaitAction.PROCEED:
+            wait.state = WaitState.DONE
+            wait.outcome = WaitOutcome.PROCEEDED
+            wait.resolution = reply.resolution
+            wait.closed_at = now
+            wait.failures, wait.failed_at = 0, None
+            step.status = wait.state.step_status
+            step.result = {"status": "proceeded", "summary": reply.resolution}
+            entries.append(JournalEntry(step.step_id, step.label, journal.clip(
+                f"wait done (proceeded): {reply.resolution}", journal.SUMMARY_MAX_CHARS),
+                kind=JournalKind.WAIT_CLOSED))
+        else:
+            wait.state = WaitState.FAILED
+            wait.outcome = None
+            wait.closed_at = now
+            step.status = wait.state.step_status
+            step.result = {"status": "failed", "summary": reply.reason, "error": reply.reason}
+            plan.fail_reason = f"Wait {step.label}: {reply.reason}"
+            entries.append(JournalEntry(step.step_id, step.label, journal.clip(
+                f"wait failed: {reply.reason}", journal.SUMMARY_MAX_CHARS), kind=JournalKind.WAIT_CLOSED))
+        added: list[PlanStep] = []
+        if reply.chat.action is ChatAction.ADD_STEPS:
+            # Saved with the wait: a proceed never lands without the steps its reply added.
+            added = self._add_steps(plan, reply.chat.steps)
+            entries.append(self._added_entry(plan, added, reply.chat, f"wait {step.label}"))
+        await self._save(plan, step, *added, entries=entries, expect={step.step_id: [trigger.value]})
+        await self._activity("phase", f"Planner on wait {step.label} ({action.value}): "
+                                      f"{_clip(reply.chat.reply, 300)}")
+        if action is WaitAction.EXTEND:
+            dur = waits._duration(int(reply.max_wait_seconds or 0))
+            await self._activity("phase", f"Wait {step.label} extended by {dur}")
+        if added:
+            await self._activity("phase", f"Steps added at wait {step.label}: {self._describe(plan, added)}")
+        elif reply.chat.action is not ChatAction.NONE:
+            await self._apply_chat(plan, reply.chat, None, at=f"wait {step.label}")
+        await self._settle_plan(plan)
+
+    def _wait_message(self, plan: TaskPlan, step: PlanStep, row: Mapping[str, Any], context: WaitContext) -> str:
+        """A [WAIT] turn's message. Its shape is in the message; the standing reply contract does not gain it."""
+        wait = step.wait
+        assert wait is not None
+        spec = wait.spec
+        lines = [self._wait_opening(step, context.state)]
+        if spec.check is not None:
+            lines.append(self._check_line(spec, row))
+        output = row.get("last_output")
+        if isinstance(output, str) and output:
+            lines.append("Last output (capped): " + _tail_text(output, waits.OUTPUT_MAX_BYTES))
+        error = row.get("last_error")
+        if isinstance(error, str) and error:
+            lines.append(f"Last error: {error}")
+        if context.state is WaitState.TIMED_OUT:
+            notice = self._notice_line(row.get("notice"), plan.origin_channel_id)
+            if notice:
+                lines.append(notice)
+        running = [other for other in plan.steps if other.status == "dispatched"]
+        running_text = ", ".join(f"{other.label} ({other.worker_id})" for other in running) or "none"
+        waiting = [other.label for other in plan.steps
+                   if step.step_id in other.depends_on and other.status != "skipped"]
+        actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
+        limit = waits.limits().max_wait_seconds
+        lines += ["", *self._plan_lines(plan), f"Running now: {running_text}", *self._progress_lines(plan),
+                  f"Steps waiting for it: {', '.join(waiting) or 'none'}."]
+        if context.last_open:
+            lines += ["", 'This wait is the task\'s last open step: proceeding without adding steps completes the '
+                          'task, and then the reply must carry "final", the task\'s final summary.']
+        lines += [
+            "",
+            'Reply in the CHAT shape plus "wait":',
+            '{"reply": "...", "action": "none", "wait": {"action": "extend", "max_wait_seconds": 86400}}',
+            f'- wait "extend": wait max_wait_seconds more from now (1 to {limit}); the check goes on. '
+            "Not after the user cancelled.",
+            '- wait "proceed": stop waiting; the steps that depend on it start now. "resolution" (required) '
+            "says why; they read it.",
+            '- wait "fail": the task cannot go on; "reason" (required).',
+        ]
+        if self._gate_policy is GatePolicy.ALLOWED:
+            lines.append('- To ask the user first, proceed and add a gate (action "replan") that the waiting '
+                         "steps depend on.")
+        lines += [
+            '- action: as in [CHAT]. "final" as in [DECISION], when the message says proceeding without new '
+            "steps completes the task.",
+            f"Allowed actions: {', '.join(actions)}.",
+            "Reply with the WAIT JSON.",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _wait_opening(step: PlanStep, state: WaitState) -> str:
+        """The first line of a [WAIT] turn: the user cancelled it, or it timed out with or without a check."""
+        wait = step.wait
+        assert wait is not None
+        if state is WaitState.CANCEL_REQUESTED:
+            return f'[WAIT] Wait {step.label} "{wait.topic}": the user cancelled this wait from the dashboard.'
+        why = ("and its check never reported ready." if wait.spec.check is not None else "and its time passed.")
+        return (f'[WAIT] Wait {step.label} "{wait.topic}" timed out: '
+                f"it waited {waits._duration(wait.spec.max_wait_seconds)} "
+                f"(max_wait_seconds {wait.spec.max_wait_seconds}) {why}")
+
+    @staticmethod
+    def _check_line(spec: WaitSpec, row: Mapping[str, Any]) -> str:
+        """How often the check ran, and what it last saw."""
+        every = spec.every_seconds if spec.every_seconds is not None else effective_every(spec, waits.limits())
+        check = spec.check
+        if isinstance(check, waits.GithubPrCheck):
+            what = f"github_pr {check.repo}#{check.number}, ready_when {check.ready_when.value}"
+        elif isinstance(check, waits.CommandCheck):
+            what = f"command `{check.command}`"
+        else:
+            what = "check"
+        every_text = f", every {every} s" if every is not None else ""
+        count = int(row.get("checks") or 0)
+        last = _clock(row.get("last_checked_at"))
+        when = f", the last at {last}" if last else ""
+        result = str(row.get("last_result") or "").replace("_", " ")
+        outcome = f": {result}" if result else ""
+        return f"Check: {what}{every_text}; {count} checks{when}{outcome}."
+
+    @staticmethod
+    def _notice_line(notice: Any, origin_channel_id: str) -> str | None:
+        """Where a timeout was told, only for a timed-out wait. A cancel says so in its first line."""
+        if notice == "dashboard":
+            return "The task page shows it."
+        if notice == "failed":
+            return "Telling the user failed. The task page shows it."
+        if notice != "sent":
+            return None
+        channel = notify_channel(origin_channel_id)
+        name = {NotifyChannel.LARK: "Lark", NotifyChannel.LARK_BOT: "Lark",
+                NotifyChannel.TELEGRAM: "Telegram"}.get(channel) if channel is not None else None
+        return f"The user was told in their {name} chat." if name else "The user was told."
+
     async def _settle_plan(self, plan: TaskPlan) -> None:
-        """After a change that may have finished the last open step (a gate closed or cancelled): finish the task,
-        or start what is ready."""
+        """After a change that may have finished the last open step (a gate closed or cancelled, a wait decided):
+        finish the task, or start what is ready. A failure keeps the reason already stored on the plan."""
         if plan.status not in _LIVE:
             return
         await self._report_progress(plan)
         if plan.has_failed:
-            await self._fail_plan(plan)
+            await self._fail_plan(plan, reason=plan.fail_reason)
         elif plan.is_complete:
             await self._complete_plan(plan)
         else:
@@ -1421,7 +1678,7 @@ class PlannerAgent:
 
     async def _idle_loop(self) -> None:
         """Wake every ``GATE_IDLE_CHECK_SEC`` and post the tick ``_idle_tick`` decides on, in the message loop: a
-        retry tick's event ends with the gates' messages, an idle tick stops Claude."""
+        retry tick's event ends with the gates' messages and the waits, an idle tick stops Claude."""
         while self._running:
             try:
                 await asyncio.sleep(GATE_IDLE_CHECK_SEC)
@@ -1430,18 +1687,21 @@ class PlannerAgent:
             try:
                 await self._idle_tick()
             except Exception:
-                # The loop drives the gates' automatic retries: it keeps going.
+                # The loop drives the gates' and the waits' automatic retries: it keeps going.
                 logger.warning("planner %s: the idle check failed", self.agent_id, exc_info=True)
 
     async def _idle_tick(self) -> None:
-        """Post a ``gate_retry`` tick when a gate's failed turn is due for its retry, else an ``idle`` one when the task
-        has only waited for the user for ``GATE_IDLE_STOP_SEC`` with Claude resident."""
+        """Post a ``gate_retry`` tick when a gate's or a wait's failed turn is due for its retry, else an ``idle`` one
+        when the task has only waited for ``GATE_IDLE_STOP_SEC`` with Claude resident. The tick keeps its name: the
+        event's end delivers the waits, and there is no ``wait_retry`` event."""
         assert self._bus is not None
         plan = self._plan
         if plan is None:
             return
         now = datetime.now(timezone.utc)
-        if any(_retry_due(s.gate, now) for s in plan.waiting_gates() if s.gate is not None):
+        retrying = any(_retry_due(s.gate, now) for s in plan.waiting_gates() if s.gate is not None) or any(
+            _wait_retry_due(s.wait, now) for s in plan.steps if s.wait is not None)
+        if retrying:
             tick = "gate_retry"
         elif self._claude.started and self._idle_waiting(plan) and \
                 time.monotonic() - self._last_turn_at >= GATE_IDLE_STOP_SEC:
@@ -2672,7 +2932,7 @@ class PlannerAgent:
             await self._supervise()
         elif event_type == "idle":
             await self._stop_idle_claude()
-        # "gate_retry": the event's end gives the gates' messages, the retry among them.
+        # "gate_retry": the event's end gives the gates' messages and delivers the waits, the retry among them.
 
     # --- Supervising the Workers running now ---
 
