@@ -89,6 +89,7 @@ PROBE_HELP_TOKENS = (
     "--no-session",
     "--session-dir",
     "--session",
+    "--fork",
 )
 HOME_LAYOUT_ID = "pi-home/v1"
 # Keep shells in the private HOME as well: nested runtimes must not discover personal logins.
@@ -285,7 +286,7 @@ class PiRuntime(RuntimeAdapter):
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
-        """Resume only the requested private session, copied into the consult's disposable storage."""
+        """Fork an exact session snapshot into a new pi session, leaving the seat's file untouched."""
         source = _session_file(session_dir, session_id) if session_dir is not None else None
         if source is None:
             raise RuntimeUnsupported("pi's saved session has no unique file in the run's directory")
@@ -295,10 +296,10 @@ class PiRuntime(RuntimeAdapter):
         try:
             copied = fork_dir / source.name
             shutil.copyfile(source, copied)
-            copied.chmod(0o600)
+            copied.chmod(0o400)
             command = self.run_command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch,
                                        max_turns=max_turns, session_dir=fork_dir)
-            return [*command, "--session", str(copied)]
+            return [*command, "--fork", str(copied)]
         except BaseException:
             shutil.rmtree(fork_dir, ignore_errors=True)
             raise

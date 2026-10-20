@@ -6,20 +6,21 @@ its answers in the room as the seat (``via`` ``consult``, the Planner seeing the
 to the Planner with the reason (``room.FallbackReason``), as in R1a.
 
 - **What it resumes.** The pinned, finished record of the seat's last run (its step's Worker, or Reviewer): its
-  session id, its runtime and provider, its system prompt. Claude Code keeps every session itself; Codex and OMP only the
+  session id, its runtime and provider, its system prompt. Claude Code keeps every session itself; Codex, OMP and pi only the
   sessions of runs in a room (``room.run_session_dir``); Grok in the home its recorded command names. The seat's Agent Profile must still run on that runtime and
   provider (a session belongs to both, as the Planner's does), else ``runtime_cannot``. A newer record of that run
   makes the pin unusable (``no_session``), checked before and again after the session is copied (a seat's run
   writes its session only after its record exists), so a session being written is not consulted.
 - **A fork.** Claude Code ``--resume <id> --fork-session``; Codex and OMP a copy of the run's session directory;
-  Grok a home of its own with a copy of that one session, resumed with ``--fork-session``. The run's own session
+  Grok a home of its own with a copy of that one session, resumed with ``--fork-session``; pi ``--fork`` of a
+  read-only copy of the exact session file, creating a new session id in the consult's directory. The run's own session
   stays as it was. Claude Code keeps the fork in its own session store, like every Claude Code session, and Looper
   leaves it there (it never changes anything in Claude Code's own directory); the other runtimes' forks are in the
   consult's ``fork_dir``, which is removed.
 - **Read only.** The consult's system prompt is the run's, with ``CONSULT_CONTRACT`` in place of its contract.
   Claude Code has only Read, Glob and Grep, with Bash and writing tools refused (its init tool list was Glob, Grep
   and Read, checked on a real run with Claude Code and haiku);
-  Codex has its read-only sandbox, Grok its reading tools. They run where the step ran. OMP has only its reading
+  Codex has its read-only sandbox, Grok and pi their reading tools. They run where the step ran. OMP has only its reading
   tools (``--tools read,glob,grep``, checked on a real run with OMP 18.4.3) in a detached checkout of the task directory's
   branch, removed afterwards. The checkout keeps writes out of the task directory and ``wrote_files`` catches
   changes inside it. It is not a sandbox: OMP runs as the operator's user, so writes outside the checkout (another
@@ -71,7 +72,7 @@ GIT_TIMEOUT_SEC = 30
 TREE_WATCH_SEC = 0.2  # how often a running consult's process tree is read
 # The runtimes with their own read-only restriction, so a consult runs where its step ran; the others run in a
 # throwaway checkout.
-RUNTIME_READ_ONLY = ("claude-code", "codex", "grok")
+RUNTIME_READ_ONLY = ("claude-code", "codex", "grok", "pi")
 
 CONSULT_CONTRACT = """\
 ## Your answer (required; code reads it)

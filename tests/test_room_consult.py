@@ -112,7 +112,7 @@ def _digests(directory: Path) -> dict[str, str]:
             for path in directory.rglob("*") if path.is_file()}
 
 
-def test_a_pi_consult_resumes_only_the_requested_session_copy(tmp_path: Path) -> None:
+def test_a_pi_consult_forks_only_the_requested_session_copy(tmp_path: Path) -> None:
     from fake_claude import fake_claude
 
     launch = _pi_launch(consult=True)
@@ -121,33 +121,44 @@ def test_a_pi_consult_resumes_only_the_requested_session_copy(tmp_path: Path) ->
     _pi_session(source, "unrelated-session", "other.jsonl")
     (source / "settings.json").write_text("private state that must not be copied")
     before = _digests(source)
+    original_stat = session.stat()
     prompt = tmp_path / ".local" / "prompts" / "consult.md"
     prompt.parent.mkdir(parents=True)
     prompt.write_text("consult instructions")
     fork = tmp_path / "fork"
     executable = fake_claude(tmp_path / "pi", '''
-import json, os, pathlib, sys
+import json, os, pathlib, sys, uuid
 args = sys.argv[1:]
 def flag(name):
     return args[args.index(name) + 1]
 directory = pathlib.Path(flag('--session-dir'))
-session = pathlib.Path(flag('--session'))
+session = pathlib.Path(flag('--fork'))
 assert session.is_absolute() and session.parent == directory
 assert os.environ['PI_CODING_AGENT_SESSION_DIR'] == str(directory)
-assert not any(x in args for x in ('--no-session', '--resume', '--session-id', '--fork'))
+assert not any(x in args for x in ('--no-session', '--resume', '--session-id', '--session', '--continue'))
 assert set(flag('--tools').split(',')) == {'read', 'grep', 'find', 'ls', 'mcp__looper__*'}
-assert json.loads(session.read_text().splitlines()[0])['id'] == 'source-session'
-with session.open('a') as saved:
+rows = [json.loads(line) for line in session.read_text().splitlines()]
+assert rows[0]['id'] == 'source-session'
+fork_id = str(uuid.uuid4())
+rows[0].update(id=fork_id, parentSession=str(session), cwd=os.getcwd())
+fork = directory / (fork_id + '.jsonl')
+fork.write_text(''.join(json.dumps(row) + '\\n' for row in rows))
+with fork.open('a') as saved:
     saved.write(json.dumps({'text': sys.stdin.read()}) + '\\n')
 ''')
     command = launch.runtime.consult_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch,
                                              session_id="source-session", session_dir=source, fork_dir=fork)
     assert list(fork.iterdir()) == [fork / session.name]
     assert (fork / session.name).read_bytes() == session.read_bytes()
+    assert (fork / session.name).stat().st_mode & 0o777 == 0o400
     subprocess.run(command, cwd=tmp_path, env=launch.environment(), input="question", text=True, check=True,
                    capture_output=True, timeout=10)
-    assert (fork / session.name).read_bytes() != session.read_bytes()
+    assert (fork / session.name).read_bytes() == session.read_bytes()
+    forked = next(path for path in fork.iterdir() if path.name != session.name)
+    assert json.loads(forked.read_text().splitlines()[0])["id"] != "source-session"
+    assert json.loads(forked.read_text().splitlines()[-1]) == {"text": "question"}
     assert _digests(source) == before
+    assert session.stat().st_mtime_ns == original_stat.st_mtime_ns
 
 
 @pytest.mark.parametrize("missing", ["directory", "session", "prefix", "ambiguous", "linked-file", "linked-directory"])
@@ -225,16 +236,21 @@ def test_pi_limits_tools_only_for_planners_and_consults(tmp_path: Path, role: st
             assert "--tools" not in command
 
 
-@pytest.mark.parametrize("outcome", ["answer", "exception", "cancel", "write", "missing-session"])
+@pytest.mark.parametrize("git_checkout", [False, True])
+@pytest.mark.parametrize("outcome", ["answer", "exception", "cancel", "missing-session"])
 def test_pi_consult_service_cleans_up_and_keeps_source_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, git_checkout: bool,
 ) -> None:
     from looper.agents import consult
     from looper.agents.agent_settings import AgentType
     from looper.agents.room import FallbackReason, MemberKind
 
     repo = tmp_path / "repo"
-    _repo(repo)
+    if git_checkout:
+        _repo(repo)
+    else:
+        (repo / "app").mkdir(parents=True)
+        (repo / "app" / "a.py").write_text("x = 1\n")
     launch = _pi_launch(role=AgentType.WORKER)
     room = SimpleNamespace(finish_consult=AsyncMock())
     service = ConsultService(room=room, worker_pool=None, runtime_root=tmp_path)
@@ -260,16 +276,15 @@ def test_pi_consult_service_cleans_up_and_keeps_source_state(
 
     async def execute(*args: Any) -> Any:
         command, cwd = args[3], Path(args[4])
-        assert cwd == snapshot / "app" and cwd != repo / "app"
-        copied = Path(command[command.index("--session") + 1])
+        assert cwd == repo / "app"
+        assert not snapshot.exists()
+        copied = Path(command[command.index("--fork") + 1])
         assert copied == fork / session.name and copied.read_bytes() == session.read_bytes()
-        copied.write_text(copied.read_text() + '{"text":"consult"}\n')
+        (fork / "new-session.jsonl").write_text(copied.read_text() + '{"text":"consult"}\n')
         if outcome == "exception":
             raise OSError("execution failed")
         if outcome == "cancel":
             raise asyncio.CancelledError()
-        if outcome == "write":
-            (cwd / "a.py").write_text("changed\n")
         return {"result": '{"answers":[{"reply_to":17,"body":"answer"}]}'}, True, False
 
     executed = AsyncMock(side_effect=execute)
@@ -280,18 +295,17 @@ def test_pi_consult_service_cleans_up_and_keeps_source_state(
             expected = pytest.raises(OSError, match="execution failed")
         elif outcome == "cancel":
             expected = pytest.raises(asyncio.CancelledError)
-        elif outcome in ("write", "missing-session"):
+        elif outcome == "missing-session":
             expected = pytest.raises(consult._Failed)
         else:
             await service._consult(1, "task", "worker@s1", MemberKind.WORK, AgentType.WORKER,
                                    {"id": "s1", "step_key": "s1", "status": "verified"}, "consult-1")
             assert room.finish_consult.await_args.kwargs["state"] == "answered"
+            assert room.finish_consult.await_args.kwargs["columns"]["read_only"] == "runtime"
             return
         with expected as error:
             await service._consult(1, "task", "worker@s1", MemberKind.WORK, AgentType.WORKER,
                                    {"id": "s1", "step_key": "s1", "status": "verified"}, "consult-1")
-        if outcome == "write":
-            assert error.value.reason is FallbackReason.WROTE_FILES
         if outcome == "missing-session":
             assert error.value.reason is FallbackReason.RUNTIME_CANNOT
             executed.assert_not_awaited()
@@ -301,8 +315,9 @@ def test_pi_consult_service_cleans_up_and_keeps_source_state(
     assert _digests(source) == before
     assert (repo / "app" / "a.py").read_text() == "x = 1\n"
     assert not fork.exists() and not snapshot.exists()
-    assert "consult-1" not in subprocess.run(["git", "worktree", "list"], cwd=repo,
-                                             capture_output=True, text=True, check=True, timeout=10).stdout
+    if git_checkout:
+        assert "consult-1" not in subprocess.run(["git", "worktree", "list"], cwd=repo,
+                                                 capture_output=True, text=True, check=True, timeout=10).stdout
 
 
 def _repo(repo: Path) -> None:

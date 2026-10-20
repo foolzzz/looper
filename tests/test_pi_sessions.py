@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -39,12 +40,19 @@ with (home / 'argv.jsonl').open('a') as log:
     log.write(json.dumps({'pid': os.getpid(), 'args': args, 'message': message}) + '\\n')
 if message == 'no-session':
     sys.exit(1)
-path = pathlib.Path(flag('--session')) if flag('--session') else None
+path = pathlib.Path(flag('--fork') or flag('--session')) if flag('--fork') or flag('--session') else None
 if path:
     assert path.is_absolute() and path.parent == directory and path.is_file()
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     session_id = rows[0]['id']
     history = [row['text'] for row in rows[1:]]
+    if flag('--fork'):
+        assert '--session' not in args
+        assert set(flag('--tools').split(',')) == {'read', 'grep', 'find', 'ls', 'mcp__looper__*'}
+        session_id = str(uuid.uuid4())
+        rows[0].update(id=session_id, parentSession=str(path), cwd=os.getcwd())
+        path = directory / (session_id + '.jsonl')
+        path.write_text(''.join(json.dumps(row) + '\\n' for row in rows))
 else:
     session_id = str(uuid.uuid4())
     path = directory / ('2026-10-20T00-00-00-000Z_' + session_id + '.jsonl')
@@ -112,6 +120,42 @@ async def _ignore(event: dict[str, Any]) -> None:
 async def _start(session: Any, command: list[str], root: Path, **kwargs: Any) -> None:
     await session.start(command, cwd=str(root), signature=tuple(command), env=PI.environment(_launch()),
                         price=lambda model, usage: PRICE.cost(usage) if model == 'selected' else None, **kwargs)
+
+
+def test_consult_forks_a_finished_seat_with_history_and_read_only_tools(tmp_path: Path) -> None:
+    executable = fake_claude(tmp_path / 'pi', _FAKE_PI)
+    command = _command(tmp_path, executable)
+
+    async def run() -> None:
+        seat = PI.resident_session('worker-seat')
+        await _start(seat, command, tmp_path)
+        turn = await seat.run_turn('seat history', _ignore)
+        await seat.stop()
+        source = next(_sessions(tmp_path, 'worker-seat').glob('*.jsonl'))
+        before, modified = source.read_bytes(), source.stat().st_mtime_ns
+        fork_dir = tmp_path / 'consult'
+        consult = PI.consult_command(
+            executable, cwd=tmp_path, prompt_file=tmp_path / '.local' / 'prompts' / 'prompt.md',
+            launch=replace(_launch(), consult=True), session_id=turn.result_event['session_id'],
+            session_dir=source.parent, fork_dir=fork_dir)
+        process = await asyncio.create_subprocess_exec(
+            *consult, cwd=tmp_path, env=PI.environment(_launch()), stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            await PI.write_turn(process.stdin, 'consult question')
+            events = [event async for event in PI.parse(process.stdout, model='selected')]
+            assert await process.wait() == 0, (await process.stderr.read()).decode()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        result = next(event for event in events if event['type'] == 'result')
+        assert not result['is_error']
+        assert result['session_id'] != turn.result_event['session_id']
+        assert json.loads(result['result'])['history'] == ['seat history', 'consult question']
+        assert source.read_bytes() == before and source.stat().st_mtime_ns == modified
+
+    asyncio.run(asyncio.wait_for(run(), 10))
 
 
 def test_each_turn_gets_a_new_pid_and_resumes_the_exact_session_after_restart(tmp_path: Path) -> None:

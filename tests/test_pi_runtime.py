@@ -55,7 +55,7 @@ def test_the_probe_requires_the_launch_flags() -> None:
         "-p", "--mode", "json", "rpc", "--offline", "--no-approve", "--no-context-files", "--no-extensions",
         "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes", "-e", "--provider", "--model",
         "--thinking", "--system-prompt", "--append-system-prompt", "--tools", "--no-session", "--session-dir",
-        "--session",
+        "--session", "--fork",
     )
 
 
