@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.12.2] - 2026-10-19
+
+### Highlights
+
+- **Non-parallel schedules keep one Planner conversation across runs.** Each trigger still creates its own task, with its own run record, budget and timeout. Each run's requirement is also kept in the conversation, so later runs can remember earlier inputs. Reset the stored session from the dashboard, API or the Manager's confirmed schedules action; failures and edits do not reset it. ([#249](https://github.com/foolzzz/looper/pull/249))
+- **Session fallback protects other live runs.** Parallel runs, an unresumable session, another live holder or a failed session check produce activity explaining why a run starts fresh. Reset and restore cannot give two live Planners the same session; a run giving up the shared session keeps its own storage label across restart, and a holder's replacement session is saved for later runs. ([#249](https://github.com/foolzzz/looper/pull/249))
+
+### Behavior changes
+
+- **After upgrade, every non-parallel schedule continues its Planner from its second run onward.** There is no activation switch. Reset makes the next run fresh; it does not disable future continuity. Prompt caching mainly helps closely spaced runs; a long-lived conversation can cost more per run over time. There is no automatic threshold handoff. Claude Code compacts its own context; other runtimes' long-session behavior needs verification. Cross-run resume on Codex, Grok and OMP has stand-in coverage only. Changing overlap to parallel during a run can leave a stale cost baseline for the next run.
+
+See the [bilingual release notes](docs/releases/v2.12.2.md) for verification, reset controls, fallback activity and validation limits.
+
 ## [2.12.1] - 2026-10-19
 
 ### Fixes
