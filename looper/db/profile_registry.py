@@ -250,7 +250,7 @@ async def delete_provider(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Conn
 async def insert_model(conn: asyncpg.Connection, fields: Mapping[str, Any]) -> str:
     """Insert a model under its account lock; the endpoint FK is never bypassed."""
     await lock_provider(conn, fields["provider_id"])
-    model_id = new_id("model")
+    model_id = f"model-{uuid.uuid4()}"
     columns = [c for c in ("provider_id", "name", "protocol", "context_window", "input_usd_per_mtok",
                            "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok",
                            "efforts", "background_model", "catalog_order") if c in fields]
@@ -258,6 +258,27 @@ async def insert_model(conn: asyncpg.Connection, fields: Mapping[str, Any]) -> s
     await conn.execute(f"INSERT INTO llm_models (id, {', '.join(columns)}) VALUES ($1, {values})",
                        model_id, *[fields[c] for c in columns])
     return model_id
+
+
+async def update_model(conn: asyncpg.Connection, model_id: str, fields: Mapping[str, Any]) -> None:
+    """Update settings only, retaining the immutable provider/name/protocol identity."""
+    await lock_model(conn, model_id)
+    columns = [c for c in ("context_window", "input_usd_per_mtok", "output_usd_per_mtok",
+                           "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts",
+                           "background_model") if c in fields]
+    sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
+    await conn.execute(f"UPDATE llm_models SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
+                       model_id, *[fields[c] for c in columns])
+
+
+async def delete_model(model_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
+    """Delete only the live model; profile FKs restrict deletion, historical snapshots remain."""
+    from .connection import _connection
+
+    pool = pool or get_pool()
+    async with _connection(pool) as conn, conn.transaction():
+        await lock_model(conn, model_id)
+        return await conn.execute("DELETE FROM llm_models WHERE id = $1", model_id) == "DELETE 1"
 
 
 # --- Agent Profiles ---

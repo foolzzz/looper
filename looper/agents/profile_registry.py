@@ -787,11 +787,29 @@ def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]
 
 def model_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """A callable model's identity, settings and usage, without account secrets."""
+    from .runtimes.pricing import model_price
+
+    account = row["provider"]
+    provider = LegacyProviderSpec(
+        account["id"], account["name"], AuthKind(account["auth"]),
+        frozenset({ApiProtocol(row["protocol"])}), account.get("oauth_runtime_type"),
+        row["endpoint"]["base_url"], (CatalogModel.from_entry(row),))
+    effective = model_price(provider, row["name"])
+    prices = {name: {"override": row[name], "effective": getattr(effective, name),
+                     "source": "override" if row[name] is not None else
+                     "builtin" if getattr(effective, name) is not None else "unknown"}
+              for name in PRICE_FIELDS}
+    warnings = []
+    if not effective.complete:
+        warnings.append("This model has no full price: runs may record tokens only and spend caps may not apply.")
+    if row["protocol"] != ApiProtocol.ANTHROPIC_MESSAGES.value:
+        warnings += _context_suffix_warnings(name for name in (row["name"], row["background_model"]) if name)
     return {
         "model_id": row["id"], "provider_id": row["provider_id"], "provider_name": row["provider_name"],
         "protocol": row["protocol"], **{name: row[name] for name in MODEL_FIELDS},
         "catalog_order": row["catalog_order"], "builtin": row["builtin"],
         "profile_count": row["profile_count"], "endpoint": dict(row["endpoint"]),
+        "prices": prices, "warnings": warnings,
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
 
@@ -1252,6 +1270,122 @@ async def delete_provider(provider_id: str) -> dict[str, Any]:
         raise RegistryConflict(f"provider {row['name']!r} still serves models: remove them first") \
             from None
     return {"deleted": provider_id}
+
+
+# --- Models ---
+
+_MODEL_SETTINGS = MODEL_FIELDS[1:]
+_MODEL_FIELDS = ("provider_id", "name", "protocol", *_MODEL_SETTINGS)
+
+
+def _resolved_model(row: Mapping[str, Any]) -> ResolvedModel:
+    model = ModelSpec.from_entry({name: row[name] for name in ModelSpec.__dataclass_fields__})
+    return ResolvedModel(model, provider_spec(row["provider"]), Endpoint.from_entry(row["endpoint"]))
+
+
+async def _existing_model(model_id: str, conn: Any = None) -> dict[str, Any]:
+    from ..db import profile_registry as db
+
+    row = await db.get_model(model_id, pool=conn)
+    if row is None:
+        raise RegistryNotFound(f"no model {model_id!r}")
+    return row
+
+
+async def list_models(*, provider_id: str | None = None, runtime_id: str | None = None) -> dict[str, Any]:
+    """List exact saved models, optionally restricted to pairings a runtime can run."""
+    from ..db import profile_registry as db
+
+    runtime = runtime_spec(await _existing_runtime(runtime_id)) if runtime_id is not None else None
+    models = []
+    for row in await db.list_models(provider_id=provider_id):
+        if runtime is not None:
+            try:
+                _resolved_model(row).check_runtime(runtime)
+            except RegistryError:
+                continue
+        models.append(model_view(row))
+    return {"models": models}
+
+
+async def get_model(model_id: str) -> dict[str, Any]:
+    model = model_view(await _existing_model(model_id))
+    return {"model": model, "warnings": model["warnings"]}
+
+
+async def create_model(data: Any) -> dict[str, Any]:
+    """Register one exact account/name/protocol triple with explicit endpoint validation."""
+    import asyncpg
+
+    from ..db import profile_registry as db
+    from ..db.connection import transaction
+
+    data = _fields(data, _MODEL_FIELDS)
+    provider_id = data.get("provider_id")
+    if not isinstance(provider_id, str) or not provider_id:
+        raise RegistryError("a model needs a provider_id")
+    model = ModelSpec.from_entry({"id": "draft", **data})
+    fields = {name: getattr(model, name) for name in _MODEL_FIELDS}
+    try:
+        async with transaction() as conn:
+            await db.lock_provider(conn, provider_id)
+            provider = await _existing_provider(provider_id, conn)
+            endpoint = next((e for e in provider["endpoints"] if e["protocol"] == model.protocol.value), None)
+            if endpoint is None:
+                raise RegistryError("the model's protocol needs an endpoint on this provider")
+            ResolvedModel(model, provider_spec(provider), Endpoint.from_entry(endpoint))
+            model_id = await db.insert_model(conn, fields)
+            answer = model_view(await _existing_model(model_id, conn))
+    except asyncpg.UniqueViolationError:
+        raise RegistryConflict("a model with this provider, exact name and protocol already exists") from None
+    return {"model": answer, "warnings": answer["warnings"]}
+
+
+async def update_model(model_id: str, data: Any) -> dict[str, Any]:
+    """Change settings under the account lock and revalidate every referring profile before committing."""
+    from ..db import profile_registry as db
+    from ..db.connection import transaction
+
+    data = _fields(data, _MODEL_SETTINGS)
+    if not data:
+        raise RegistryError(f"give at least one of {', '.join(_MODEL_SETTINGS)}")
+    async with transaction() as conn:
+        row = await db.lock_model(conn, model_id)
+        if row is None:
+            raise RegistryNotFound(f"no model {model_id!r}")
+        _not_builtin(row, "model")
+        checked = _resolved_model(row).model.updated(**data)
+        await db.update_model(conn, model_id, {name: getattr(checked, name) for name in data})
+        resolved = _resolved_model(await _existing_model(model_id, conn))
+        for profile_row in await db.list_profiles(pool=conn, provider_id=row["provider_id"]):
+            if profile_row["model_id"] != model_id:
+                continue
+            try:
+                profile = AgentProfile.from_row(profile_row)
+                resolved.check_runtime(profile.runtime)
+                check_roles(profile, await _selected_roles(profile.id, conn))
+            except RegistryError as exc:
+                raise RegistryError(f"Agent Profile {profile_row['name']!r} uses this model: {exc}") from None
+        answer = model_view(await _existing_model(model_id, conn))
+    return {"model": answer, "warnings": answer["warnings"]}
+
+
+async def delete_model(model_id: str) -> dict[str, Any]:
+    import asyncpg
+
+    from ..db import profile_registry as db
+    from ..db.connection import transaction
+
+    try:
+        async with transaction() as conn:
+            row = await db.lock_model(conn, model_id)
+            if row is None:
+                raise RegistryNotFound(f"no model {model_id!r}")
+            _not_builtin(row, "model")
+            await db.delete_model(model_id, pool=conn)
+    except asyncpg.ForeignKeyViolationError:
+        raise RegistryConflict("this model still has Agent Profile references: remove or repoint them first") from None
+    return {"deleted": model_id}
 
 
 # --- Agent Profiles ---
