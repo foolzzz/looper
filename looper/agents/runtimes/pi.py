@@ -269,6 +269,8 @@ class PiRuntime(RuntimeAdapter):
 
     def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                       max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        if not launch.steers:
+            raise RuntimeUnsupported("this pi version cannot steer a run; upgrade pi and probe again")
         # Keep resource and private-directory bindings identical to JSON launches.
         command = self.run_command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch,
                                    max_turns=max_turns, session_dir=session_dir)

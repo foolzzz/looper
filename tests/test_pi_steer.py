@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents.runtimes import Capability, StreamChannel
+from looper.agents.runtimes import Capability, RuntimeUnsupported, StreamChannel
 from looper.agents.runtimes import pi_steer
 from looper.agents.runtimes.pi_steer import PiChannel
 from tests.test_pi_runtime import PI, _launch, _provider
@@ -109,6 +109,46 @@ if scenario in ('handled', 'queued', 'missing_disposition', 'fail_prompt', 'fast
 ack(dict(id='unknown', type='prompt'), success=False)
 ack(requests[0])
 ack(request, data=dict(disposition='started'))
+if scenario.startswith('steer_'):
+    emit(dict(type='steer_ready'))
+    waiting = []
+    while not os.path.exists(record_path + '.finish'):
+        if not select.select([sys.stdin], [], [], 0.005)[0]:
+            if waiting and os.path.exists(record_path + '.ack'):
+                for pending in reversed(waiting):
+                    ack(pending, data=dict(disposition='queued'))
+                waiting.clear()
+                record(dict(late_acked=True))
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            sys.exit(0)
+        steer = json.loads(line)
+        record(steer)
+        assert steer['type'] == 'steer'
+        if scenario == 'steer_eof':
+            sys.exit(2)
+        if scenario in ('steer_wait', 'steer_late'):
+            waiting.append(steer)
+        elif scenario == 'steer_concurrent':
+            waiting.append(steer)
+            if len(waiting) == 3:
+                for pending in reversed(waiting):
+                    ack(pending, data=dict(disposition='queued'))
+                waiting.clear()
+        elif scenario == 'steer_settled':
+            finish()
+            ack(steer, data=dict(disposition='queued'))
+        else:
+            disposition = scenario.removeprefix('steer_')
+            ack(steer, success=disposition != 'rejected', error='SECRET-rejection',
+                command='prompt' if disposition == 'wrong_command' else 'steer',
+                data={} if disposition == 'missing' else dict(disposition=disposition))
+    if scenario != 'steer_settled':
+        finish()
+    assert sys.stdin.read() == b''
+    record(dict(stdin_closed=True))
+    sys.exit(0)
 if scenario == 'extension_error':
     emit(dict(type='extension_error', error='extension failed'))
 elif scenario == 'invalid_json':
@@ -255,3 +295,193 @@ def test_runtime_selects_rpc_channel_and_preserves_private_launch(tmp_path: Path
     assert any(arg.startswith('HOME=') for arg in args)
     assert isinstance(PI.run_channel(None, launch=launch, cwd=tmp_path), PiChannel)
     assert isinstance(PI.run_channel(None, launch=plain, cwd=tmp_path), StreamChannel)
+
+
+def test_runtime_without_steer_capability_rejects_rpc_command(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeUnsupported, match='steer'):
+        PI.steer_command('pi', cwd=tmp_path, prompt_file=tmp_path / 'prompt', launch=_launch(_provider()))
+
+
+async def _steering_run(tmp_path: Path, scenario: str, check: Any, *, early_send: bool = False) -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, '-u', '-c', _RPC, scenario, str(tmp_path / 'requests.jsonl'),
+        cwd=tmp_path, env={**os.environ, 'HOME': str(tmp_path)},
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    channel = PiChannel(process, model='test-model', cwd=str(tmp_path))
+    ready = asyncio.Event()
+    ended = asyncio.Event()
+    events: list[dict[str, Any]] = []
+
+    async def consume() -> None:
+        async for event in channel.events():
+            events.append(event)
+            if event.get('event', {}).get('type') == 'steer_ready':
+                ready.set()
+            if event['type'] == 'result':
+                ended.set()
+                channel.end_input()
+
+    await channel.start('initial prompt')
+    early = asyncio.create_task(channel.send('during startup')) if early_send else None
+    reader = asyncio.create_task(consume())
+    try:
+        async with asyncio.timeout(5):
+            await ready.wait()
+            if early is not None:
+                await early
+            await check(channel, events, ended)
+            (tmp_path / 'requests.jsonl.finish').touch()
+            await reader
+            await process.wait()
+            assert process.stderr is not None
+            assert await process.stderr.read() == b''
+            assert not channel._pending
+            assert not channel._steers
+            with pytest.raises(RuntimeError, match='ended'):
+                await channel.send('after completion')
+    finally:
+        channel.end_input()
+        reader.cancel()
+        tasks = [reader, *([early] if early is not None else [])]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+
+
+def test_concurrent_steers_correlate_out_of_order_ack_and_only_acceptance(tmp_path: Path) -> None:
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        await asyncio.gather(*(channel.send(f'next {i}', uuid=f'reminder-{i}') for i in range(3)))
+        assert not ended.is_set()  # queued says nothing about model execution or completion.
+        assert not channel._pending and not channel._steers
+        requests = [r for r in _records(tmp_path) if 'id' in r]
+        assert len({r['id'] for r in requests}) == 6
+        assert {r['message'] for r in requests if r['type'] == 'steer'} == {'next 0', 'next 1', 'next 2'}
+
+    asyncio.run(_steering_run(tmp_path, 'steer_concurrent', check))
+
+
+def test_worker_input_during_setup_waits_until_prompt_started(tmp_path: Path) -> None:
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        requests = [r for r in _records(tmp_path) if 'id' in r]
+        assert [r['type'] for r in requests] == ['get_state', 'set_steering_mode', 'prompt', 'steer']
+        assert requests[-1]['message'] == 'during startup'
+        assert not ended.is_set()
+
+    asyncio.run(_steering_run(tmp_path, 'steer_queued', check, early_send=True))
+
+
+@pytest.mark.parametrize('disposition', ['handled', 'rejected', 'started', 'missing', 'wrong_command'])
+def test_steer_requires_a_matching_queued_ack(tmp_path: Path, disposition: str) -> None:
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        with pytest.raises(RuntimeError, match='not queued' if disposition == 'handled' else 'steer'):
+            await channel.send('change course')
+        assert not ended.is_set()
+        assert not channel._pending and not channel._steers
+        assert 'SECRET-rejection' not in str(events)
+
+    asyncio.run(_steering_run(tmp_path, 'steer_' + disposition, check))
+
+
+@pytest.mark.parametrize('blocked', ['ack', 'lock', 'drain'])
+def test_steer_has_one_deadline_and_never_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                blocked: str) -> None:
+    monkeypatch.setattr(pi_steer, '_STEER_TIMEOUT_SEC', 0.08, raising=False)
+
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        if blocked == 'lock':
+            await channel._lock.acquire()
+        elif blocked == 'drain':
+            monkeypatch.setattr(channel._process.stdin, 'drain', asyncio.Event().wait)
+        try:
+            with pytest.raises(RuntimeError, match='in time'):
+                await channel.send('once')
+        finally:
+            if blocked == 'lock':
+                channel._lock.release()
+        assert not channel._pending and not channel._steers
+        (tmp_path / 'requests.jsonl.ack').touch()
+        # Observe the late response being processed before asserting it cannot alter the result.
+        if blocked != 'lock':
+            while not any(r.get('late_acked') for r in _records(tmp_path)):
+                await asyncio.sleep(0.005)
+        assert not ended.is_set()
+        assert sum(r.get('type') == 'steer' for r in _records(tmp_path)) == (blocked != 'lock')
+
+    asyncio.run(_steering_run(tmp_path, 'steer_late', check))
+
+
+@pytest.mark.parametrize('scenario', ['steer_eof', 'steer_settled'])
+def test_pending_steer_fails_at_eof_or_settled_and_late_ack_cannot_accept(tmp_path: Path, scenario: str) -> None:
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        with pytest.raises((RuntimeError, ConnectionResetError), match='ended'):
+            await channel.send('racing completion')
+        await ended.wait()
+        result, = [event for event in events if event['type'] == 'result']
+        assert result['is_error'] is (scenario == 'steer_eof')
+        assert not channel._pending and not channel._steers
+
+    asyncio.run(_steering_run(tmp_path, scenario, check))
+
+
+def test_settled_wins_against_a_send_waiting_for_the_lock(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        settled_seen = asyncio.Event()
+        translate = channel._stream.translate
+
+        def observe(raw: dict[str, Any]) -> list[dict[str, Any]]:
+            if raw.get('type') == 'agent_settled':
+                settled_seen.set()
+            return translate(raw)
+
+        monkeypatch.setattr(channel._stream, 'translate', observe)
+        await channel._lock.acquire()
+        (tmp_path / 'requests.jsonl.finish').touch()
+        # Let the reader reach the terminal transition first, then queue a sender behind it.
+        await settled_seen.wait()
+        send = asyncio.create_task(channel.send('too late'))
+        await asyncio.sleep(0)
+        channel._lock.release()
+        with pytest.raises(RuntimeError, match='ended'):
+            await send
+        await ended.wait()
+        assert not any(r.get('type') == 'steer' for r in _records(tmp_path))
+
+    asyncio.run(_steering_run(tmp_path, 'steer_wait', check))
+
+
+@pytest.mark.parametrize('error', [BrokenPipeError, ConnectionResetError])
+def test_steer_pipe_failure_cleans_the_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                             error: type[Exception]) -> None:
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        async def broken() -> None:
+            raise error('pipe closed')
+
+        monkeypatch.setattr(channel._process.stdin, 'drain', broken)
+        with pytest.raises(error):
+            await channel.send('broken write')
+        assert not channel._pending and not channel._steers
+
+    asyncio.run(_steering_run(tmp_path, 'steer_wait', check))
+
+
+def test_cancelled_send_and_end_input_clear_pending(tmp_path: Path) -> None:
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        send = asyncio.create_task(channel.send('cancel this wait'))
+        while not any(r.get('type') == 'steer' for r in _records(tmp_path)):
+            await asyncio.sleep(0.005)
+        send.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await send
+        assert not channel._pending and not channel._steers
+        other = asyncio.create_task(channel.send('pending on close'))
+        while len([r for r in _records(tmp_path) if r.get('type') == 'steer']) != 2:
+            await asyncio.sleep(0.005)
+        channel.end_input()
+        channel.end_input()
+        with pytest.raises((RuntimeError, ConnectionResetError), match='ended'):
+            await other
+        assert not channel._pending and not channel._steers
+
+    asyncio.run(_steering_run(tmp_path, 'steer_wait', check))

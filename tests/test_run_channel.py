@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,14 +14,19 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
+from looper.agents import proc_tree
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+from looper.agents.profile_registry import CatalogModel
 from looper.agents.runtimes import ADAPTERS, CLAUDE_CODE, Capability, RuntimeUnsupported, StreamChannel, adapter
 from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+from looper.agents.runtimes.pi import PiRuntime
+from looper.agents.runtimes.pi_steer import PiChannel
 from looper.agents.tiers import worker
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from tests.test_agent_planner_worker import _LISTENING_CLAUDE, _fake_claude, _work_item
+from tests.test_pi_runtime import _launch as _pi_launch, _provider as _pi_provider
 
 CODEX = adapter("codex")
 
@@ -187,3 +194,246 @@ def test_worker_uses_its_run_channel_over_the_bus(
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+_WORKER_PI = r'''
+import select, signal, subprocess
+from pathlib import Path
+
+scenario = sys.argv[1]
+root = Path.cwd()
+sys.stdin = open(0, 'rb', buffering=0, closefd=False)
+
+def record(value):
+    with open(root / 'pi-requests.jsonl', 'a') as out:
+        out.write(json.dumps(value) + '\n')
+
+def emit(value):
+    print(json.dumps(value), flush=True)
+
+def ack(request, **data):
+    emit(dict(type='response', id=request['id'], command=request['type'], success=True, data=data))
+
+def finish():
+    answer = json.dumps(dict(status='completed', changed_files={}, summary='got: second instruction'))
+    emit(dict(type='message_end', message=dict(role='assistant', model='selected', stopReason='stop',
+        content=[dict(type='text', text=answer)])))
+    emit(dict(type='agent_settled', aborted=False))
+
+while True:
+    if not select.select([sys.stdin], [], [], .005)[0]:
+        continue
+    line = sys.stdin.readline()
+    if not line:
+        record(dict(stdin_closed=True))
+        if scenario != 'normal':
+            while True:
+                time.sleep(1)
+        break
+    request = json.loads(line)
+    record(request)
+    kind = request['type']
+    if kind == 'get_state':
+        ack(request, sessionId='worker-pi-session')
+    elif kind == 'prompt':
+        ack(request, disposition='started')
+        if scenario != 'normal':
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            child = subprocess.Popen(['/bin/sh', '-c',
+                'trap "" TERM; sleep 60 & echo $! > pi-grandchild.pid; wait'],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            pid_file = root / 'pi-grandchild.pid'
+            while not pid_file.exists() or not pid_file.read_text().strip():
+                time.sleep(.005)
+            record(dict(tree=[os.getpid(), child.pid, int(pid_file.read_text())]))
+        record(dict(ready=True))
+    elif kind == 'steer':
+        record(dict(steer_received=True))
+        gate = root / ('pi-ack' if scenario == 'normal' else 'pi-cap')
+        while not gate.exists():
+            time.sleep(.005)
+        if scenario == 'normal':
+            ack(request, disposition='queued')
+            while not (root / 'pi-finish').exists():
+                time.sleep(.005)
+            finish()
+        else:
+            emit(dict(type='message_end', message=dict(role='assistant', model='selected', stopReason='toolUse',
+                content=[dict(type='text', text='over the cap')], usage=dict(input=100, output=10))))
+    else:
+        ack(request)
+'''
+
+
+def _pi_worker_records(root: Path) -> list[dict[str, Any]]:
+    path = root / 'pi-requests.jsonl'
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+async def _pi_worker_record(root: Path, key: str) -> dict[str, Any]:
+    async with asyncio.timeout(5):
+        while True:
+            if matches := [row for row in _pi_worker_records(root) if key in row]:
+                return matches[-1]
+            await asyncio.sleep(.005)
+
+
+def _pi_worker_running(pids: list[int]) -> list[int]:
+    running = []
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        running.append(pid)
+    return running
+
+
+async def _pi_worker_tree_ended(pids: list[int]) -> None:
+    async with asyncio.timeout(5):
+        while _pi_worker_running(pids):
+            await asyncio.sleep(.01)
+
+
+def _pi_worker_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str) -> None:
+    executable = _fake_claude(tmp_path, _WORKER_PI)
+
+    class Runtime(PiRuntime):
+        def run_command(self, executable: str, **kwargs: Any) -> list[str]:
+            raise AssertionError('a steering-capable Worker must use the RPC command')
+
+        def steer_command(self, executable: str, **kwargs: Any) -> list[str]:
+            return [executable, scenario]
+
+    monkeypatch.setitem(ADAPTERS, 'pi', Runtime())
+    provider = _pi_provider(catalog=(CatalogModel('selected', input_usd_per_mtok=1,
+                                                 output_usd_per_mtok=1),))
+    launch = _pi_launch(provider)
+    runtime = replace(launch.profile.runtime, executable=executable,
+                      capabilities=frozenset({Capability.RUN, Capability.STEER}))
+    settings = replace(launch.settings, profile=replace(launch.profile, runtime=runtime),
+                       max_budget_usd=.00001 if scenario == 'cap' else None)
+    monkeypatch.setattr(worker, 'load_agent_settings', AsyncMock(return_value=settings))
+    monkeypatch.setattr(worker, '_load_settings', AsyncMock(return_value=worker.WorkerSettings(
+        1 if scenario == 'timeout' else 0, 0, 'work')))
+
+
+async def _pi_worker_result(bus: MessageBus) -> MessageEnvelope:
+    async with asyncio.timeout(10):
+        queue = bus.get_queue('planner-t1')
+        while True:
+            result = await queue.get()
+            if result.message_type == MessageType.WORK_RESULT:
+                return result
+
+
+def test_pi_worker_input_waits_for_queued_ack_then_settled_closes_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    _pi_worker_settings(tmp_path, monkeypatch, 'normal')
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        await pool.start(bus)
+        reply: asyncio.Task[MessageEnvelope] | None = None
+        try:
+            await asyncio.sleep(0)
+            await bus.publish(_work_item(tmp_path))
+            await _pi_worker_record(tmp_path, 'ready')
+            channel = pool._inputs['w1']
+            assert isinstance(channel, PiChannel)
+            reply = asyncio.create_task(bus.request(MessageEnvelope.create(
+                source=planner_address('t1'), target=worker_address('w1'),
+                message_type=MessageType.WORKER_INPUT, payload={'text': 'second instruction'},
+            ), timeout=5))
+            await _pi_worker_record(tmp_path, 'steer_received')
+            assert not reply.done()
+            assert channel._steers
+            (tmp_path / 'pi-ack').touch()
+            response = await asyncio.wait_for(reply, 5)
+            assert response.payload['delivered'] is True
+            assert pool.accepts_input('w1')
+            assert not channel._steers
+            assert not any(row.get('stdin_closed') for row in _pi_worker_records(tmp_path))
+            (tmp_path / 'pi-finish').touch()
+            result = await _pi_worker_result(bus)
+            assert result.payload['status'] == 'completed'
+            assert result.payload['summary'] == 'got: second instruction'
+            assert (await _pi_worker_record(tmp_path, 'stdin_closed'))['stdin_closed'] is True
+            assert not pool.accepts_input('w1')
+            assert not await pool.send_input('w1', 'too late')
+            assert channel._pending == {} and channel._steers == {}
+            sent = [row for row in _pi_worker_records(tmp_path) if row.get('type') == 'steer']
+            assert len(sent) == 1 and sent[0]['message'] == 'second instruction'
+        finally:
+            if reply is not None and not reply.done():
+                reply.cancel()
+                await asyncio.gather(reply, return_exceptions=True)
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+
+
+@pytest.mark.parametrize('reason', ['cancel', 'timeout', 'cap'])
+def test_pi_worker_stops_its_process_tree_and_clears_unacknowledged_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, reason: str,
+) -> None:
+    _pi_worker_settings(tmp_path, monkeypatch, reason)
+    monkeypatch.setattr(proc_tree, 'TERM_GRACE_SEC', .1)
+    tree: list[int] = []
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        await pool.start(bus)
+        reply: asyncio.Task[MessageEnvelope] | None = None
+        try:
+            await asyncio.sleep(0)
+            await bus.publish(_work_item(tmp_path))
+            tree.extend((await _pi_worker_record(tmp_path, 'tree'))['tree'])
+            assert _pi_worker_running(tree) == tree
+            assert all(os.getpgid(pid) == tree[0] for pid in tree)
+            await _pi_worker_record(tmp_path, 'ready')
+            channel = pool._inputs['w1']
+            reply = asyncio.create_task(bus.request(MessageEnvelope.create(
+                source=planner_address('t1'), target=worker_address('w1'),
+                message_type=MessageType.WORKER_INPUT, payload={'text': 'never acknowledged'},
+            ), timeout=5))
+            await _pi_worker_record(tmp_path, 'steer_received')
+            assert channel._steers and not reply.done()
+            if reason == 'cancel':
+                assert await pool.kill('w1')
+            else:
+                if reason == 'cap':
+                    (tmp_path / 'pi-cap').touch()
+                result = await _pi_worker_result(bus)
+                assert result.payload['status'] == 'failed'
+                if reason == 'timeout':
+                    assert 'timeout_seconds' in result.payload['error']
+                else:
+                    assert 'per-run spend cap' in result.payload['error']
+            response = await asyncio.wait_for(reply, 5)
+            assert response.payload['delivered'] is False
+            assert not pool.accepts_input('w1')
+            assert channel._pending == {} and channel._steers == {}
+            await _pi_worker_tree_ended(tree)
+            assert _pi_worker_running(tree) == []
+        finally:
+            if reply is not None and not reply.done():
+                reply.cancel()
+                await asyncio.gather(reply, return_exceptions=True)
+            await pool.stop()
+            await bus.shutdown()
+
+    try:
+        asyncio.run(asyncio.wait_for(run(), 15))
+    finally:
+        # Also clean up descendants when an assertion fails before Worker shutdown.
+        for pid in _pi_worker_running(tree):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

@@ -13,6 +13,7 @@ from .pi import PiStream
 
 _SETUP_TIMEOUT_SEC = 10.0
 _PROMPT_TIMEOUT_SEC = 10.0
+_STEER_TIMEOUT_SEC = 4.0
 
 
 class _Phase(Enum):
@@ -31,21 +32,33 @@ class PiChannel:
         self._stream = PiStream(model=model)
         self._cwd = cwd
         self._lock = asyncio.Lock()
+        self._ready = asyncio.Event()
         self._next_id = 0
         self._pending: dict[str, str] = {}
+        self._steers: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._phase = _Phase.NEW
         self._prompt = ""
         self._deadline: float | None = None
         self._startup_error: str | None = None
         self._early_result: dict[str, Any] | None = None
 
-    async def _write(self, command: str, **params: Any) -> None:
+    async def _write(self, command: str, **params: Any) -> tuple[str, asyncio.Future[dict[str, Any]] | None]:
         assert self._process.stdin is not None
         self._next_id += 1
         request_id = str(self._next_id)
         self._pending[request_id] = command
-        self._process.stdin.write((json.dumps({"id": request_id, "type": command, **params}) + "\n").encode())
-        await self._process.stdin.drain()
+        future: asyncio.Future[dict[str, Any]] | None = None
+        if command == "steer":
+            future = self._steers[request_id] = asyncio.get_running_loop().create_future()
+        try:
+            self._process.stdin.write((json.dumps({"id": request_id, "type": command, **params}) + "\n").encode())
+            await self._process.stdin.drain()
+        except BaseException:
+            self._pending.pop(request_id, None)
+            if (future := self._steers.pop(request_id, None)) is not None:
+                future.cancel()
+            raise
+        return request_id, future
 
     async def start(self, prompt: str) -> None:
         if self._phase is not _Phase.NEW:
@@ -106,6 +119,11 @@ class PiChannel:
                             yield self._failure("Pi could not parse an RPC command")
                             return
                         continue
+                    if command == "steer":
+                        future = self._steers.get(request_id)
+                        if future is not None and not future.done():
+                            future.set_result(raw)
+                        continue
                     if raw.get("command") != command or raw.get("success") is not True:
                         yield self._failure(f"{command} rejected or returned an invalid acknowledgement")
                         return
@@ -131,8 +149,10 @@ class PiChannel:
                             return
                         self._phase = _Phase.RUNNING
                         self._deadline = None
+                        self._ready.set()
                         if self._early_result is not None:
-                            self._phase = _Phase.FINISHED
+                            async with self._lock:
+                                self._finish()
                             yield self._early_result
                     continue
                 for event in self._stream.translate(raw):
@@ -145,28 +165,71 @@ class PiChannel:
                         if self._phase is not _Phase.RUNNING:
                             yield self._failure("agent_settled before the prompt was sent")
                             return
-                        self._phase = _Phase.FINISHED
+                        async with self._lock:
+                            self._finish()
                     yield event
         except TimeoutError:
             yield self._failure("prompt write timed out")
         except (BrokenPipeError, ConnectionResetError):
             yield self._failure("the process ended while sending the prompt")
         finally:
-            self._phase = _Phase.FINISHED
-            self._pending.clear()
+            async with self._lock:
+                self._finish()
             await lines.aclose()
 
-    def _failure(self, message: str) -> dict[str, Any]:
+    def _finish(self) -> None:
         self._phase = _Phase.FINISHED
         self._deadline = None
+        self._ready.set()
+        self._pending.clear()
+        for future in self._steers.values():
+            if not future.done():
+                future.set_exception(ConnectionResetError("the Pi run has ended"))
+                # A write may still be draining and get cancelled before awaiting its ACK.
+                future.exception()
+        self._steers.clear()
+
+    def _failure(self, message: str) -> dict[str, Any]:
+        self._finish()
         return {"type": "result", "subtype": "error_during_execution", "is_error": True,
                 **({"session_id": self._stream.session_id} if self._stream.session_id else {}),
                 "result": "", "errors": [f"Pi RPC: {message}"]}
 
     async def send(self, text: str, *, uuid: str | None = None) -> None:
-        raise RuntimeError("Pi RPC steering is not available")
+        """Only a queued ACK means acceptance; neither timeout nor rejection is retried."""
+        assert self._process.stdin is not None
+        request_id: str | None = None
+        try:
+            # One deadline covers lock contention, pipe backpressure and the response.
+            async with asyncio.timeout(_STEER_TIMEOUT_SEC):
+                if self._phase is _Phase.NEW:
+                    raise RuntimeError("Pi cannot steer before the run has started")
+                # Worker registers inputs just after start(), before events() has read setup ACKs.
+                await self._ready.wait()
+                async with self._lock:
+                    if self._phase is _Phase.FINISHED or self._process.stdin.is_closing():
+                        raise RuntimeError("the Pi run has ended")
+                    request_id, future = await self._write("steer", message=text)
+                    assert future is not None
+                response = await future
+        except TimeoutError:
+            raise RuntimeError("Pi did not accept the steer in time; acceptance is unknown") from None
+        finally:
+            if request_id is not None:
+                self._pending.pop(request_id, None)
+                if (pending := self._steers.pop(request_id, None)) is not None:
+                    pending.cancel()
+        if response.get("command") != "steer" or response.get("success") is not True:
+            raise RuntimeError("Pi rejected the steer or returned an invalid acknowledgement")
+        data = response.get("data")
+        disposition = data.get("disposition") if isinstance(data, dict) else None
+        if disposition != "queued":
+            if disposition == "handled":
+                raise RuntimeError("Pi handled the steer; it was not queued")
+            raise RuntimeError("Pi returned an invalid steer disposition; expected queued")
 
     def end_input(self) -> None:
         assert self._process.stdin is not None
+        self._finish()
         if not self._process.stdin.is_closing():
             self._process.stdin.close()
