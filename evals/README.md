@@ -238,7 +238,7 @@ every role on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
 "provider": {"name", "protocols", "auth", "base_url"?, "api_key_env"?},
 "agent": {"name", "model", "effort"?}}`, its `agent` being the profile;
 runtimes are built in, so the profile runs on the runtime of that name or the
-built-in one of that type, such as `codex`, `omp` or `grok` when on PATH, and
+built-in one of that type, such as `codex`, `omp`, `grok` or `pi` when on PATH, and
 the provider's key is read from the variable `api_key_env` names, never from
 the file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in
 Codex login instead, the operator's own ChatGPT login on this machine, and
@@ -319,6 +319,29 @@ the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the 
 --manager-effort xhigh --max-budget-usd 3.0 --case-budget-usd 3.0
 --total-cap-usd 12` (about $7.91). `--jobs` above 1 under a total cap needs
 `--case-budget-usd`. The baselines are refreshed from these runs.
+
+#### Pi
+
+`--register-agent` can target the built-in runtime type `pi` (API key only:
+`openai-responses`, or `openai-chat`, which pi calls `openai-completions`).
+Example specs are `evals/agents/pi-cpa.example.json` and
+`evals/agents/pi-deepseek.example.json`. The registered `base_url` is passed
+through. The entry scripts are `examples/pi/eval-responses.sh`,
+`examples/pi/eval-deepseek.sh` and `examples/pi/eval-prompt-comparison.sh`.
+They follow the tiers above. The comparison script scopes 13 distinct cases
+across 4 tiers, 48 case/reps, and exits before `uv` when `ANTHROPIC_API_KEY`
+is absent.
+
+This change did not run those real tiers. The Claude CLI comparison is 0
+passed, 0 failed and 48 unverified because the API key was absent. The two
+provider scripts were not run against a live Responses or Chat provider.
+Tests of the scripts with a fake `uv` (83 passed) check command, budget and
+gap boundaries only. A syntax pass stays short of acceptance, and a pytest
+skip when no disposable database is available stays unverified. Baselines
+stay as they are. The scripts also leave unverified: steering, worker session
+resume, the cancel tree, a raw Responses readback of optional parameters and
+`strict`, the `operator_notes_stale` and `schedule_*` dialogs, and a shared
+prompt or contract comparison against the baseline commit.
 
 #### Running cases in parallel
 
@@ -425,7 +448,7 @@ costliest single dialog `task_cost` at about $0.46; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd` such as 12),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
-OMP or Grok agent checks that runtime's tool calls), `--reps` (as for `run`),
+OMP, Grok or Pi agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is
 `baselines/dialogs-real-<model>.json` by the Manager's model: `haiku`, and
 `opus` for the run with the Manager on opus at xhigh), `--max-budget-usd`,

@@ -1,0 +1,9 @@
+{"type":"session","version":3,"id":"retry-session","cwd":"workspace"}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","stopReason":"error","errorMessage":"Synthetic temporary failure.","content":[]}}
+{"type":"agent_end","messages":[],"willRetry":true}
+{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":1,"errorMessage":"Synthetic temporary failure."}
+{"type":"agent_start"}
+{"type":"message_end","message":{"role":"assistant","model":"test-model","stopReason":"stop","content":[{"type":"text","text":"Recovered."}]}}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"auto_retry_end","success":true,"attempt":1}
+{"type":"agent_settled","aborted":false}

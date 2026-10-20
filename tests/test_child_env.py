@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import replace
@@ -23,6 +25,7 @@ from test_agent_settings import _profile as claude_profile
 from test_codex_runtime import _launch as codex_launch, _login_provider, _operator_login
 from test_grok_runtime import LOGIN, _launch as grok_launch, _operator
 from test_omp_runtime import _launch as omp_launch
+from test_pi_runtime import _command as pi_command, _launch as pi_launch, _provider as pi_provider
 
 KEPT = (
     "PATH", "HOME", "LANG", "LC_ALL", "TZ", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "SSL_CERT_FILE",
@@ -211,3 +214,95 @@ def test_process_spawn_defaults_to_child_environment(
     actual = json.loads(asyncio.run(run()))
     assert actual["PATH"] == server_environment["PATH"]
     assert not set(DROPPED) & actual.keys()
+
+
+def test_pi_main_and_nested_shell_keep_personal_config_and_server_secrets_out(
+    server_environment: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operator = Path(server_environment["HOME"])
+    sentinels = {}
+    for name in (".pi/agent/settings.json", ".pi/agent/auth.json", ".claude/settings.json",
+                 ".codex/auth.json", ".grok/settings.json"):
+        path = operator / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"personal_sentinel": name}))
+        sentinels[path] = path.read_bytes()
+    for name in (*child_env.RUNTIMES, "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_PACKAGE_DIR",
+                 "PI_CONFIG_FILES", "PI_SHELL_PREFIX", "XDG_CONFIG_HOME", "XDG_DATA_DIRS"):
+        monkeypatch.setenv(name, str(operator))
+    launch = pi_launch(pi_provider(env=(("PROVIDER_SETTING", "explicit"), ("PROVIDER_SECRET", "private-key"))))
+    launch = replace(launch, settings=replace(launch.settings, env=(("RUN_SETTING", "configured"),)))
+    command = pi_command(tmp_path, launch)
+    executable = tmp_path / "stand-in-pi"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, subprocess, sys\nfrom pathlib import Path\n"
+        "home = Path(os.environ['HOME'])\nagent = Path(os.environ['PI_CODING_AGENT_DIR'])\n"
+        "settings = json.loads((agent / 'settings.json').read_text())\n"
+        f"nested = settings['shellCommandPrefix'] + {shlex.quote(sys.executable)!r} + "
+        f"' -c ' + {shlex.quote('import json, os; print(json.dumps(dict(os.environ)))')!r}\n"
+        "shell = subprocess.run(['/bin/sh', '-c', nested], capture_output=True, text=True, check=True, timeout=10)\n"
+        "print(json.dumps({'env': dict(os.environ), 'shell': json.loads(shell.stdout),\n"
+        " 'personal': any((home / name).exists() for name in "
+        "('.pi/agent/auth.json', '.claude/settings.json', '.codex/auth.json', '.grok/settings.json'))}))\n")
+    executable.chmod(0o700)
+    command[command.index("pi")] = str(executable)
+    main_env = launch.environment()
+    done = subprocess.run(command, cwd=tmp_path, env=main_env, text=True, capture_output=True, check=True, timeout=15)
+    actual = json.loads(done.stdout)
+    assert actual["personal"] is False
+    assert actual["env"]["HOME"] != str(operator)
+    assert actual["shell"]["HOME"] == actual["env"]["HOME"]
+    assert actual["env"]["LOOPER_PROVIDER_API_KEY"] == pi_provider().api_key
+    assert actual["env"]["PROVIDER_SECRET"] == "private-key"
+    assert actual["env"]["PROVIDER_SETTING"] == "explicit"
+    for env in (actual["env"], actual["shell"]):
+        assert env["RUN_SETTING"] == "configured"
+        assert env["PATH"] == server_environment["PATH"]
+        assert not set(DROPPED) & env.keys()
+        assert not set(child_env.RUNTIMES) & env.keys()
+        assert not any(name.startswith("XDG_") for name in env)
+    assert {name: actual["env"][name] for name in ("PI_OFFLINE", "PI_TELEMETRY", "PI_SKIP_VERSION_CHECK")} == {
+        "PI_OFFLINE": "1", "PI_TELEMETRY": "0", "PI_SKIP_VERSION_CHECK": "1"}
+    assert not any(name.startswith(("PI_", "LOOPER_", "LOOPX_", "PROVIDER_")) for name in actual["shell"])
+    assert os.environ["HOME"] == str(operator)
+    assert all(path.read_bytes() == content for path, content in sentinels.items())
+
+
+def test_pi_bash_tool_scrubs_credentials_and_session_metadata(
+    server_environment: dict[str, str], tmp_path: Path,
+) -> None:
+    from test_pi_runtime import _command_env
+
+    executable, node = shutil.which("pi"), shutil.which("node")
+    if not executable or not node:
+        pytest.skip("installed pi and Node are required for the real bash tool check")
+    package = next((p for p in Path(executable).resolve().parents if (p / "package.json").exists()), None)
+    if package is None or json.loads((package / "package.json").read_text()).get("version") != "1.3.0":
+        pytest.skip("the bash tool check targets installed pi 1.3.0")
+    launch = pi_launch(pi_provider(env=(("PROVIDER_SECRET", "provider-secret"),)))
+    env = {**launch.environment(), **_command_env(pi_command(tmp_path, launch)),
+           "LOOPER_AGENT_URL": "http://127.0.0.1:1", "LOOPER_AGENT_TOKEN": "bridge-secret"}
+    script = tmp_path / "bash-tool.mjs"
+    script.write_text('''
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+const [pkg, cwd, command] = process.argv.slice(2);
+const { createBashToolDefinition } = await import(pathToFileURL(join(pkg, 'dist/core/tools/bash.js')));
+const settings = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR, 'settings.json'), 'utf8'));
+const tool = createBashToolDefinition(cwd, {commandPrefix: settings.shellCommandPrefix});
+const result = await tool.execute('check-env', {command, timeout: 10}, undefined, undefined, {
+  cwd, model: {provider: 'looper', id: 'selected'}, thinkingLevel: 'high',
+  sessionManager: {getSessionId: () => 'private-session', getSessionFile: () => '/private/session.jsonl'},
+});
+if (result.isError) throw new Error(JSON.stringify(result));
+console.log(result.structuredContent.output);
+''')
+    command = shlex.join([sys.executable, "-c", "import os, json; print(json.dumps(dict(os.environ)))"])
+    done = subprocess.run([node, str(script), str(package), str(tmp_path), command], env=env, cwd=tmp_path,
+                          capture_output=True, text=True, check=True, timeout=20)
+    nested = json.loads(done.stdout)
+    assert nested["HOME"] == env["HOME"] != server_environment["HOME"]
+    assert not any(name.startswith(("PI_", "LOOPER_", "LOOPX_", "PROVIDER_")) for name in nested)
+    assert not set(DROPPED) & nested.keys()

@@ -561,6 +561,82 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
     _run(_test, monkeypatch)
 
 
+def _version_pi(path: Path) -> str:
+    """A stand-in pi 1.3.0 whose help lists the flags the probe requires."""
+    from looper.agents.runtimes.pi import PROBE_HELP_TOKENS
+
+    help_text = " ".join(PROBE_HELP_TOKENS)
+    return fake_claude(path, (
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('1.3.0')\n    sys.exit(0)\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        f"    print({help_text!r})\n    sys.exit(0)\n"
+        "sys.exit(9)\n"
+    ))
+
+
+def test_pi_on_path_is_discovered_once_offers_every_role_and_refuses_other_auth_and_protocols(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents.profile_registry import register_found_runtimes
+    from looper.agents.runtimes.pi import PiRuntime
+
+    capabilities = sorted(capability.value for capability in PiRuntime.capabilities)
+    roles = ["manager", "planner", "worker", "reviewer"]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _version_pi(bin_dir / "pi")
+
+    async def _test(_pool: Any) -> None:
+        monkeypatch.setenv("PATH", str(bin_dir))
+        assert await register_found_runtimes() == ["pi"]
+        assert await register_found_runtimes() == []  # once
+        registry = await _registry()
+        runtime = _by_name(registry["runtimes"], "pi")
+        assert (runtime["runtime_id"], runtime["builtin"], runtime["executable"], runtime["version"],
+                runtime["type_label"], runtime["protocols"], runtime["capabilities"], runtime["roles"],
+                runtime["probe_error"]) == (
+            "rt-pi", True, "", "1.3.0", "pi", ["openai-chat", "openai-responses"], capabilities, roles, None)
+        kind = next(item for item in registry["runtime_types"] if item["type"] == "pi")
+        assert (kind["label"], kind["default_executable"], kind["runtime_id"], kind["auth_kinds"],
+                kind["protocols"], kind["capabilities"], kind["roles"]) == (
+            "pi", "pi", "rt-pi", ["api_key"], ["openai-chat", "openai-responses"], capabilities, roles)
+        assert all(provider["oauth_runtime_type"] != "pi" for provider in registry["providers"])
+
+        async def profile(provider_id: str, model: str = "gpt-6.1-sol") -> tuple[int, Any]:
+            return await _call("POST", "/api/agent-profiles", {
+                "name": f"pi-{provider_id}", "model": model, "runtime_id": "rt-pi", "provider_id": provider_id})
+
+        # Both supported protocols pair and can be selected for every role.
+        made = []
+        for name, protocols in (("responses", ["openai-responses"]), ("chat", ["openai-chat"])):
+            provider_id = await _provider({"name": name, "protocols": protocols, "auth": "api_key",
+                                           "api_key": SECRET})
+            status, payload = await profile(provider_id)
+            assert status == 201, payload
+            assert payload["profile"]["roles"] == roles
+            made.append(payload["profile"]["profile_id"])
+        for profile_id in made:
+            await _ok("PUT", "/api/agent-settings/system", {"profile_id": profile_id})
+            for role in roles:
+                await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile_id})
+
+        # OAuth is not a pi login. A provider pi does not speak does not pair.
+        # Protocol intersection is checked first. Claude's subscription serves
+        # only anthropic-messages, so that check is the one that fires.
+        status, payload = await _call("POST", "/api/providers", {
+            "name": "pi-login", "protocols": ["openai-responses"], "auth": "oauth", "oauth_runtime_type": "pi"})
+        assert status == 400 and "no login of its own" in payload["error"]
+        anthropic = await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key"})
+        status, payload = await profile(anthropic)
+        assert status == 400 and "share no protocol" in payload["error"]
+        status, payload = await profile("prov-claude-subscription")
+        assert status == 400 and "share no protocol" in payload["error"]
+
+    _run(_test, monkeypatch)
+
+
 def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:

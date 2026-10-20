@@ -38,7 +38,7 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
 # ``interrupted`` instead).
 RECORD_FAILED = "failed"
 # Claude Code's file-editing tools, each naming one file; Codex's patches (``runtimes.codex``), naming each file
-# they change; and OMP's (``runtimes.omp.edited_paths``).
+# they change; Pi's write/edit tools name a path directly; OMP also has patches (``runtimes.omp.edited_paths``).
 FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", *OMP_EDIT_TOOLS})
 
 _BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE|GATE|VAULT) contract \(")
@@ -352,10 +352,11 @@ def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path, refused
             if (isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS
                     and block.get("id") not in refused):
                 tool_input = block.get("input") or {}
-                named = [tool_input.get("file_path") or tool_input.get("notebook_path"),
+                named = [tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path"),
                          *(c.get("path") for c in tool_input.get("changes") or [] if isinstance(c, Mapping)),
                          *omp_edited_paths(str(block.get("name")), tool_input)]
-                paths += [_relative(str(path), work_dir) for path in named if path]
+                paths += [_relative(path, work_dir) for path in dict.fromkeys(
+                    str(path) for path in named if path and "://" not in str(path))]
     return paths
 
 

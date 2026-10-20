@@ -17,6 +17,7 @@ export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
   codex: { kind: "CLI", title: "Codex CLI", install: "npm install -g @openai/codex" },
   omp: { kind: "CLI", title: "OMP CLI" },
   grok: { kind: "CLI", title: "Grok CLI" },
+  pi: { kind: "CLI", title: "Pi CLI", install: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent" },
 };
 
 /** How the operator checks a runtime's own login on the server's machine, and signs in again (`how`: with what). */
