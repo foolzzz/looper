@@ -32,6 +32,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
+from urllib.parse import urlsplit
 
 from ... import child_env
 from ..run_usage import Usage, run_usage
@@ -47,6 +48,7 @@ from .pricing import usage_event
 if TYPE_CHECKING:
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
+    from ..library import AgentLibrary
     from ..profile_registry import ProviderSpec
 
 _PROBE_TIMEOUT_SEC = 10.0
@@ -96,7 +98,9 @@ _PI_ENV = {
 _PI_DIRS = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
 # pi's bash tool adds these after launch, even when none came from the parent environment.
 _PI_SHELL_METADATA = ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL")
-_PLATFORM_ENV = ("LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", KEY_ENV)
+BRIDGE_URL_ENV = "LOOPER_PI_AGENT_URL"
+BRIDGE_TOKEN_ENV = "LOOPER_PI_AGENT_TOKEN"
+_PLATFORM_ENV = ("LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", BRIDGE_URL_ENV, BRIDGE_TOKEN_ENV, KEY_ENV)
 _ISOLATION_FLAGS = (
     "--offline", "--no-approve", "--no-context-files", "--no-extensions", "--no-mcp",
     "--no-skills", "--no-prompt-templates", "--no-themes",
@@ -213,7 +217,8 @@ class PiRuntime(RuntimeAdapter):
         _check_explicit_env(launch.env)
         visible = {**child_env.inherited(), **dict(launch.env), **dict(binding.env)}
         # HOME and the two directory bindings need the prompt/session paths; run_command sets them via env.
-        return {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV}
+        return {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV,
+                **bridge_env(launch.library)}
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -319,6 +324,24 @@ class PiRuntime(RuntimeAdapter):
         """Inject the project's files once; pi's own context-file discovery stays disabled."""
         return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
             cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+
+    def launch_record(self, launch: Launch) -> dict[str, Any]:
+        """Catalog items Pi leaves unloaded; only Looper's own server supplies the bridge."""
+        from ..library import ItemKind
+
+        servers = _mcp_servers(launch.library)
+        skipped = []
+        recorded_servers = set()
+        for item in launch.library.items:
+            if item.kind is ItemKind.MCP:
+                recorded_servers.add(item.name)
+                if item.name == "looper":
+                    continue
+            kind = "MCP server" if item.kind is ItemKind.MCP else item.kind.value
+            skipped.append(f"{kind} {item.name}: pi does not load catalog MCP servers, skills or plugins")
+        skipped.extend(f"MCP server {name}: pi does not load catalog MCP servers"
+                       for name in servers if name != "looper" and name not in recorded_servers)
+        return {"runtime_catalog": {"runtime": self.type, "skipped": skipped}} if skipped else {}
 
 
 EDIT_TOOLS = frozenset({"write", "edit"})
@@ -698,6 +721,49 @@ def _check_explicit_env(entries: tuple[tuple[str, str], ...]) -> None:
             raise RuntimeUnsupported("pi environment variable names must be shell identifiers")
         if name in _HIDDEN_DIRS or name.startswith(("PI_", "LOOPER_", "LOOPX_")):
             raise RuntimeUnsupported(f"pi owns {name}; provider and role environments cannot override it")
+
+
+def _mcp_servers(library: AgentLibrary) -> dict[str, Any]:
+    if not library.mcp_config:
+        return {}
+    try:
+        config = json.loads(Path(library.mcp_config).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise RuntimeUnsupported("pi cannot read the launch's MCP configuration") from None
+    if not isinstance(config, dict) or not isinstance(config.get("mcpServers", {}), dict):
+        raise RuntimeUnsupported("pi requires an MCP configuration with an mcpServers object")
+    return config.get("mcpServers", {})
+
+
+def bridge_env(library: AgentLibrary) -> dict[str, str]:
+    """Extract this launch's scoped credentials, without starting any configured command.
+
+    Only the explicit extension receives these names. They never contribute to
+    home contents, provider hashes or argv, and shell children unset them.
+    """
+    servers = _mcp_servers(library)
+    if "looper" not in servers:
+        return {}
+    server = servers["looper"]
+    env = server.get("env") if isinstance(server, dict) else None
+    if not isinstance(env, dict):
+        raise RuntimeUnsupported("pi's looper MCP entry requires an env object with URL and TOKEN")
+    url, token = env.get("LOOPER_AGENT_URL"), env.get("LOOPER_AGENT_TOKEN")
+    valid_url = False
+    if isinstance(url, str) and url and not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        try:
+            parsed = urlsplit(url)
+            valid_url = (parsed.scheme in ("http", "https") and bool(parsed.hostname)
+                         and parsed.username is None and parsed.password is None
+                         and not parsed.query and not parsed.fragment and "\\" not in url
+                         and (parsed.port is None or parsed.port > 0))
+        except ValueError:
+            pass
+    if not valid_url:
+        raise RuntimeUnsupported("pi's looper MCP env requires a valid HTTP(S) LOOPER_AGENT_URL")
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
+        raise RuntimeUnsupported("pi's looper MCP env requires a valid Bearer LOOPER_AGENT_TOKEN")
+    return {BRIDGE_URL_ENV: url, BRIDGE_TOKEN_ENV: token}
 
 
 def _isolated_env(visible: Mapping[str, str]) -> dict[str, str]:

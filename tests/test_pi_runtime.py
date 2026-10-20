@@ -1,6 +1,6 @@
 """pi's identity, private launch commands and API-key configuration (RFC sections 1, 2, 3 and 6).
 
-Sessions are refused. Capabilities stay empty. A probe
+Capabilities stay empty. A probe
 runs only ``--version`` and ``--help``, offline, in temporary directories.
 Provider requests are checked with installed pi 1.3 against a local fake
 Responses service and, separately, an injected fetch transport.
@@ -212,24 +212,14 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
 
 
 @pytest.mark.parametrize("call", [
-    lambda: PI.resident_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3),  # type: ignore[arg-type]
-    lambda: PI.resume_args("session"),
-    lambda: PI.resident_session("manager"),
-    lambda: PI.cost(None, None),  # type: ignore[arg-type]
-    lambda: PI.budget_error(None),
     lambda: PI.steer_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3,  # type: ignore[arg-type]
                              session_dir=Path("sessions")),
     lambda: PI.consult_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, session_id="s",  # type: ignore[arg-type]
                                session_dir=Path("sessions"), fork_dir=Path("fork"), max_turns=3),
 ])
-def test_an_unimplemented_path_is_refused(call: object) -> None:
+def test_an_unsupported_or_missing_session_path_is_refused(call: object) -> None:
     with pytest.raises(RuntimeUnsupported, match="pi"):
         call()  # type: ignore[operator]
-
-
-def test_a_turn_write_is_refused() -> None:
-    with pytest.raises(RuntimeUnsupported, match="does not implement this yet"):
-        asyncio.run(PI.write_turn(None, "hello"))  # type: ignore[arg-type]
 
 
 KEY = "sk-test-pi-provider-only"
@@ -257,6 +247,144 @@ def _command(tmp_path: Path, launch: Launch | None = None, session_dir: Path | N
 def _command_env(command: list[str]) -> dict[str, str]:
     assert command[0] == "env"
     return dict(arg.split("=", 1) for arg in command[1:] if "=" in arg)
+
+
+def _with_mcp(tmp_path: Path, config: Any, launch: Launch | None = None) -> Launch:
+    from looper.agents.library import AgentLibrary
+
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps(config))
+    return replace(launch or _launch(_provider()), library=AgentLibrary(mcp_config=str(path)))
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_bridge_uses_the_scoped_library_credentials_only(tmp_path: Path, role: str,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.agent_settings import AgentType
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.planner import PlannerOps
+    from looper.agents.ops.service import ManagerOps
+
+    url, token = "http://127.0.0.1:19321", f"scoped-{role}-token"
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", "operator-token")
+    monkeypatch.setenv("LOOPER_PI_AGENT_TOKEN", "stale-extension-token")
+    if role == "manager":
+        library = asyncio.run(ManagerOps(None, url=url, token=token).library_with_server(AgentLibrary(), tmp_path))
+    else:
+        library = asyncio.run(PlannerOps(None, url=url).library_with_server(AgentLibrary(), tmp_path, token))
+    launch = replace(_launch(_provider()), library=library, role=AgentType(role))
+    assert launch.env == ()
+    env = launch.environment()
+    assert env["LOOPER_PI_AGENT_URL"] == url
+    assert env["LOOPER_PI_AGENT_TOKEN"] == token
+    assert "LOOPER_AGENT_URL" not in env and "LOOPER_AGENT_TOKEN" not in env
+    command = _command(tmp_path, launch)
+    home = Path(_command_env(command)["HOME"])
+    exposed = repr(command) + json.dumps(launch.record()) + repr(PI.prompt_blocks(launch, "Looper prompt"))
+    exposed += "".join(p.read_text() for p in home.rglob("*") if p.is_file())
+    for secret in (url, token, "operator-token", "stale-extension-token"):
+        assert secret not in exposed
+    settings = json.loads((home / "agent/settings.json").read_text())
+    assert "LOOPER_PI_AGENT_URL" in settings["shellCommandPrefix"]
+    assert "LOOPER_PI_AGENT_TOKEN" in settings["shellCommandPrefix"]
+    shell = subprocess.run(["/bin/sh", "-c", settings["shellCommandPrefix"] + " env"],
+                           env=env, capture_output=True, text=True, timeout=5, check=True)
+    assert url not in shell.stdout and token not in shell.stdout
+
+
+@pytest.mark.parametrize("config", [None, {}, {"mcpServers": {}}, {"mcpServers": {"other": {"command": "false"}}}])
+def test_bridge_is_absent_without_a_looper_entry(tmp_path: Path, config: Any,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOOPER_AGENT_URL", "http://operator.invalid")
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", "operator-token")
+    launch = _launch(_provider()) if config is None else _with_mcp(tmp_path, config)
+    assert not {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", "LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN"} \
+        & launch.environment().keys()
+    assert "operator-token" not in repr(_command(tmp_path, launch)) + json.dumps(launch.record())
+
+
+@pytest.mark.parametrize("entry", [
+    None, [], "bad", {}, {"env": None}, {"env": []}, {"env": "bad"},
+    {"env": {"LOOPER_AGENT_URL": "http://localhost:19321"}},
+    {"env": {"LOOPER_AGENT_TOKEN": "secret"}},
+    *({"env": {"LOOPER_AGENT_URL": value, "LOOPER_AGENT_TOKEN": "secret"}}
+      for value in (None, 3, "", " ", "localhost:19321", "file:///tmp/bridge", "http://", "http://x:bad",
+                    "http://user:password@localhost", "http://x?secret", "http://x#secret", "http://x\n")),
+    *({"env": {"LOOPER_AGENT_URL": "http://localhost:19321", "LOOPER_AGENT_TOKEN": value}}
+      for value in (None, 3, "", " ", "secret\nheader", "secret\x00", " secret")),
+])
+def test_invalid_bridge_credentials_fail_before_launch(tmp_path: Path, entry: Any) -> None:
+    launch = _with_mcp(tmp_path, {"mcpServers": {"looper": entry}})
+    with pytest.raises(RuntimeUnsupported, match="looper.*(env|URL|TOKEN)") as error:
+        launch.environment()
+    assert "secret" not in str(error.value) and "password" not in str(error.value)
+    with pytest.raises(RuntimeUnsupported):
+        _command(tmp_path, launch)
+    assert not (tmp_path / ".local/pi").exists()
+
+
+@pytest.mark.parametrize("contents", ["{broken secret", "[]", '{"mcpServers": []}', '{"mcpServers": null}'])
+def test_invalid_mcp_configuration_fails_closed(tmp_path: Path, contents: str) -> None:
+    launch = _with_mcp(tmp_path, {})
+    path = Path(launch.library.mcp_config)
+    path.write_text(contents)
+    with pytest.raises(RuntimeUnsupported, match="MCP") as error:
+        _command(tmp_path, launch)
+    assert "secret" not in str(error.value)
+    path.unlink()
+    with pytest.raises(RuntimeUnsupported, match="MCP"):
+        launch.environment()
+
+
+@pytest.mark.parametrize("source", ["provider", "role"])
+@pytest.mark.parametrize("name", ["LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", "LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN"])
+def test_explicit_env_cannot_replace_the_bridge(tmp_path: Path, source: str, name: str) -> None:
+    launch = _launch(_provider(env=((name, "malicious"),)) if source == "provider" else _provider())
+    if source == "role":
+        launch = replace(launch, settings=replace(launch.settings, env=((name, "malicious"),)))
+    launch = _with_mcp(tmp_path, {"mcpServers": {"looper": {
+        "command": "never-run", "env": {"LOOPER_AGENT_URL": "http://localhost:19321", "LOOPER_AGENT_TOKEN": "scoped"},
+    }}}, launch)
+    with pytest.raises(RuntimeUnsupported, match=name):
+        _command(tmp_path, launch)
+    assert not (tmp_path / ".local/pi").exists()
+
+
+def test_catalog_items_are_skipped_without_running_commands_or_loading_plugins(tmp_path: Path) -> None:
+    from looper.agents.library import ItemKind, LoadedItem
+
+    sentinel = tmp_path / "command-was-run"
+    launch = _with_mcp(tmp_path, {"mcpServers": {
+        "looper": {"command": "touch", "args": [str(sentinel)], "env": {
+            "LOOPER_AGENT_URL": "https://localhost:19321", "LOOPER_AGENT_TOKEN": "scoped",
+            "UNTRUSTED": "must-not-propagate"}},
+        "other": {"command": "touch", "args": [str(sentinel)]},
+    }})
+    items = (LoadedItem(ItemKind.MCP, "looper", "builtin", plugin="", scope="builtin"),
+             LoadedItem(ItemKind.MCP, "other", "mcp", plugin=""),
+             LoadedItem(ItemKind.SKILL, "guide", "skill"), LoadedItem(ItemKind.PLUGIN, "helper", "plugin"))
+    launch = replace(launch, library=replace(launch.library, items=items, plugin_dirs=(str(tmp_path / "plugin"),)))
+    command = _command(tmp_path, launch)
+    assert "UNTRUSTED" not in launch.environment()
+    assert not sentinel.exists()
+    skipped = launch.record()["runtime_catalog"]["skipped"]
+    assert len(skipped) == 3
+    assert all(any(name in entry for entry in skipped) for name in ("other", "guide", "helper"))
+    assert all("looper" not in entry for entry in skipped)
+    assert "--mcp-config" not in command and "--plugin-dir" not in command
+    assert "must-not-propagate" not in repr(command) + json.dumps(launch.record())
+
+
+def test_bridge_rotation_does_not_put_credentials_in_home_or_provider_hash(tmp_path: Path) -> None:
+    first = _with_mcp(tmp_path, {"mcpServers": {"looper": {"env": {
+        "LOOPER_AGENT_URL": "http://localhost:19321", "LOOPER_AGENT_TOKEN": "manager-token"}}}})
+    first_env, first_command = first.environment(), _command(tmp_path, first)
+    second = _with_mcp(tmp_path, {"mcpServers": {"looper": {"env": {
+        "LOOPER_AGENT_URL": "http://localhost:19321", "LOOPER_AGENT_TOKEN": "task-token"}}}})
+    assert first_env["LOOPER_PI_AGENT_TOKEN"] == "manager-token"
+    assert second.environment()["LOOPER_PI_AGENT_TOKEN"] == "task-token"
+    assert first.binding_sha256 == second.binding_sha256
+    assert _command_env(first_command)["HOME"] == _command_env(_command(tmp_path, second))["HOME"]
 
 
 def test_json_launch_uses_pi_flags_and_private_directories(tmp_path: Path) -> None:
