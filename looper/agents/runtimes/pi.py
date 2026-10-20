@@ -4,7 +4,7 @@ pi is a fifth runtime type (the pi runtime RFC, sections 1, 3 and 6). Registerin
 it discovers ``rt-pi`` when ``pi`` is on PATH. Launch commands use private,
 content-addressed homes and separate session directories. JSON events are
 translated independently of OMP. Residents resume one JSON process per turn;
-capabilities stay empty until the tool bridge is implemented.
+the packaged tool bridge loads explicitly, while execution capabilities remain gated.
 There is no pi login and no schema change.
 
 A probe runs only ``--version`` and ``--help``, in a temporary home, agent
@@ -30,6 +30,7 @@ import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlsplit
@@ -98,9 +99,9 @@ _PI_ENV = {
 _PI_DIRS = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
 # pi's bash tool adds these after launch, even when none came from the parent environment.
 _PI_SHELL_METADATA = ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL")
-BRIDGE_URL_ENV = "LOOPER_PI_AGENT_URL"
-BRIDGE_TOKEN_ENV = "LOOPER_PI_AGENT_TOKEN"
-_PLATFORM_ENV = ("LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", BRIDGE_URL_ENV, BRIDGE_TOKEN_ENV, KEY_ENV)
+BRIDGE_URL_ENV = "LOOPER_AGENT_URL"
+BRIDGE_TOKEN_ENV = "LOOPER_AGENT_TOKEN"
+_PLATFORM_ENV = (BRIDGE_URL_ENV, BRIDGE_TOKEN_ENV, "LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN", KEY_ENV)
 _ISOLATION_FLAGS = (
     "--offline", "--no-approve", "--no-context-files", "--no-extensions", "--no-mcp",
     "--no-skills", "--no-prompt-templates", "--no-themes",
@@ -209,7 +210,7 @@ class PiRuntime(RuntimeAdapter):
 
     def launch_args(self, launch: Launch) -> list[str]:
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        return ["-p", "--mode", "json", *_ISOLATION_FLAGS,
+        return ["-p", "--mode", "json", *_ISOLATION_FLAGS, "-e", str(bridge_extension()),
                 *(["--tools", "read,grep,find,ls,mcp__looper__*"] if launch.read_only else []), *binding.args]
 
     def environment(self, launch: Launch) -> dict[str, str]:
@@ -264,6 +265,17 @@ class PiRuntime(RuntimeAdapter):
 
     def resident_session(self, label: str) -> ResidentPi:
         return ResidentPi(label=label)
+
+    def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                      max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        # Keep resource and private-directory bindings identical to JSON launches.
+        command = self.run_command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch,
+                                   max_turns=max_turns, session_dir=session_dir)
+        start = 5  # env HOME=... PI_CODING_AGENT_DIR=... PI_CODING_AGENT_SESSION_DIR=... <pi>
+        args = command[start:]
+        args.remove("-p")
+        args[args.index("--mode") + 1] = "rpc"
+        return [*command[:start], *args]
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
@@ -345,6 +357,18 @@ class PiRuntime(RuntimeAdapter):
 
 
 EDIT_TOOLS = frozenset({"write", "edit"})
+
+
+def bridge_extension() -> Path:
+    """The installed wheel's resource; never discover an extension from the working directory.
+
+    Wheels are installed unpacked. Keep this path alive for the child process,
+    rather than returning a temporary ``as_file`` path after its context closes.
+    """
+    path = Path(str(files(__package__).joinpath("pi_extension/looper.ts")))
+    if not path.is_absolute() or not path.is_file():
+        raise RuntimeUnsupported("pi's packaged Looper tool bridge is missing; reinstall Looper")
+    return path
 
 
 def edited_paths(tool_name: str, tool_input: Mapping[str, Any]) -> list[str]:

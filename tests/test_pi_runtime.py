@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -212,8 +213,6 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
 
 
 @pytest.mark.parametrize("call", [
-    lambda: PI.steer_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, max_turns=3,  # type: ignore[arg-type]
-                             session_dir=Path("sessions")),
     lambda: PI.consult_command("pi", cwd=".", prompt_file=Path("prompt"), launch=None, session_id="s",  # type: ignore[arg-type]
                                session_dir=Path("sessions"), fork_dir=Path("fork"), max_turns=3),
 ])
@@ -275,9 +274,9 @@ def test_bridge_uses_the_scoped_library_credentials_only(tmp_path: Path, role: s
     launch = replace(_launch(_provider()), library=library, role=AgentType(role))
     assert launch.env == ()
     env = launch.environment()
-    assert env["LOOPER_PI_AGENT_URL"] == url
-    assert env["LOOPER_PI_AGENT_TOKEN"] == token
-    assert "LOOPER_AGENT_URL" not in env and "LOOPER_AGENT_TOKEN" not in env
+    assert env["LOOPER_AGENT_URL"] == url
+    assert env["LOOPER_AGENT_TOKEN"] == token
+    assert "LOOPER_PI_AGENT_URL" not in env and "LOOPER_PI_AGENT_TOKEN" not in env
     command = _command(tmp_path, launch)
     home = Path(_command_env(command)["HOME"])
     exposed = repr(command) + json.dumps(launch.record()) + repr(PI.prompt_blocks(launch, "Looper prompt"))
@@ -381,8 +380,8 @@ def test_bridge_rotation_does_not_put_credentials_in_home_or_provider_hash(tmp_p
     first_env, first_command = first.environment(), _command(tmp_path, first)
     second = _with_mcp(tmp_path, {"mcpServers": {"looper": {"env": {
         "LOOPER_AGENT_URL": "http://localhost:19321", "LOOPER_AGENT_TOKEN": "task-token"}}}})
-    assert first_env["LOOPER_PI_AGENT_TOKEN"] == "manager-token"
-    assert second.environment()["LOOPER_PI_AGENT_TOKEN"] == "task-token"
+    assert first_env["LOOPER_AGENT_TOKEN"] == "manager-token"
+    assert second.environment()["LOOPER_AGENT_TOKEN"] == "task-token"
     assert first.binding_sha256 == second.binding_sha256
     assert _command_env(first_command)["HOME"] == _command_env(_command(tmp_path, second))["HOME"]
 
@@ -397,10 +396,11 @@ def test_json_launch_uses_pi_flags_and_private_directories(tmp_path: Path) -> No
     assert args == [
         "-p", "--mode", "json", "--offline", "--no-approve", "--no-context-files", "--no-extensions",
         "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes",
+        "-e", str(files("looper.agents.runtimes").joinpath("pi_extension/looper.ts")),
         "--provider", "looper", "--model", "selected", "--thinking", "high",
         "--append-system-prompt", str(prompt), "--no-session",
     ]
-    assert not {"--config", "--no-ui", "-e"} & set(args)
+    assert not {"--config", "--no-ui"} & set(args)
     assert "PI_SHELL_PREFIX" not in env
     home = Path(env["HOME"])
     assert home.parent == tmp_path / ".local/pi/homes"
@@ -728,3 +728,76 @@ console.log(JSON.stringify({requests, contextWindow: model.contextWindow, maxTok
         assert "strict" not in tool  # positive control: pi's default omits the flag
     assert defaults["contextWindow"] > 0 and defaults["maxTokens"] > 0
     assert KEY not in models_path.read_text() + script.read_text()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_every_launch_path_loads_the_same_packaged_extension(tmp_path: Path, read_only: bool) -> None:
+    launch = replace(_launch(_provider()), consult=read_only)
+    _command(tmp_path, launch)
+    prompt = tmp_path / ".local/prompts/prompt.md"
+    sessions = tmp_path / "saved"
+    sessions.mkdir()
+    (sessions / "source.jsonl").write_text(json.dumps({"type": "session", "id": "saved"}) + "\n")
+    kwargs = dict(cwd=tmp_path, prompt_file=prompt, launch=launch)
+    resident = PI.resident_session("manager")
+    base = PI.resident_command("pi", **kwargs)
+
+    async def start() -> None:
+        await resident.start(base, cwd=str(tmp_path), signature=tuple(base), env=launch.environment())
+
+    asyncio.run(start())
+    first_turn = resident._turn_argv()
+    owner = resident._session_dir()
+    (owner / "saved.jsonl").write_text(json.dumps({"type": "session", "id": "saved"}) + "\n")
+    resident._session = "saved"
+    resumed = resident._turn_argv()
+    commands = [PI.launch_args(launch), PI.run_command("pi", **kwargs),
+                PI.run_command("pi", **kwargs, session_dir=sessions), base, first_turn, resumed,
+                PI.consult_command("pi", **kwargs, session_id="saved", session_dir=sessions,
+                                   fork_dir=tmp_path / "consult"),
+                PI.steer_command("pi", **kwargs),
+                PI.steer_command("pi", **kwargs, session_dir=sessions)]
+    resource = Path(str(files("looper.agents.runtimes").joinpath("pi_extension/looper.ts")))
+    assert resource.is_absolute() and resource.is_file()
+    for command in commands:
+        assert command.count("-e") == 1
+        assert command[command.index("-e") + 1] == str(resource)
+        assert "--no-extensions" in command and "--no-mcp" in command
+        if read_only:
+            assert command[command.index("--tools") + 1] == "read,grep,find,ls,mcp__looper__*"
+    for command in commands[-2:]:
+        assert command[command.index("--mode") + 1] == "rpc"
+        assert "-p" not in command and "--no-ui" not in command
+
+
+def test_resident_signature_tracks_agent_directory_and_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import looper.agents.runtimes.pi as pi
+
+    _command(tmp_path)
+    kwargs = dict(cwd=tmp_path, prompt_file=tmp_path / ".local/prompts/prompt.md", launch=_launch(_provider()))
+    base = PI.resident_command("pi", **kwargs)
+    resident = PI.resident_session("manager")
+    asyncio.run(resident.start(base, cwd=str(tmp_path), signature=tuple(base)))
+    assert not resident.stale(tuple(PI.resident_command("pi", **kwargs)))
+    other = tmp_path / "installed" / "looper.ts"
+    other.parent.mkdir()
+    other.write_text("export default function () {}")
+    monkeypatch.setattr(pi, "bridge_extension", lambda: other)
+    changed = PI.resident_command("pi", **kwargs)
+    assert changed[changed.index("-e") + 1] == str(other)
+    assert resident.stale(tuple(changed))
+    monkeypatch.undo()
+    changed = PI.resident_command("pi", **{**kwargs, "launch": _launch(_provider(api_key="rotated"))})
+    assert _command_env(changed)["PI_CODING_AGENT_DIR"] != _command_env(base)["PI_CODING_AGENT_DIR"]
+    assert resident.stale(tuple(changed))
+
+
+@pytest.mark.parametrize("resource", ["missing", "directory"])
+def test_a_missing_packaged_bridge_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource: str) -> None:
+    from looper.agents.runtimes.pi import bridge_extension
+
+    if resource == "directory":
+        (tmp_path / "pi_extension/looper.ts").mkdir(parents=True)
+    monkeypatch.setattr("looper.agents.runtimes.pi.files", lambda _: tmp_path)
+    with pytest.raises(RuntimeUnsupported, match="packaged Looper tool bridge is missing"):
+        bridge_extension()
