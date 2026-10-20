@@ -83,7 +83,12 @@ with the user's next message. A DECISION or CHAT reply may update a gate or
 cancel it (``gates``). While a gate waits the Planner reports the task as
 ``waiting_user``; when nothing else runs and no turn came for
 ``GATE_IDLE_STOP_SEC``, its resident Claude stops, and the next turn resumes
-its session (a new session's resume brief carries the gates' discussions).
+its session (a new session's resume brief carries the gates' discussions). A
+step may also be a wait (``waits``): once the steps it depends on are done it
+opens and waits, and the steps that depend on it wait with it, while the rest
+of the plan runs. It takes no Worker and is not reviewed. Opening it is saved
+with the plan; a restart reads the wait back. While an open wait is the only
+live thing, the Planner reports the task as ``waiting``.
 """
 
 from __future__ import annotations
@@ -129,7 +134,16 @@ from ..session_switch import SessionSwitch
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
 from .. import waits
-from ..waits import WaitPolicy
+from ..waits import (
+    Wait,
+    WaitPolicy,
+    WaitSpec,
+    WaitState,
+    WaitView,
+    describe,
+    effective_every,
+    open_times,
+)
 from ..user_gates import (
     MESSAGE_MAX_CHARS,
     RETRY_WAIT_SEC,
@@ -403,6 +417,8 @@ class PlanStep:
     review_position: int | None = None  # in a role's review: the index of that role in review_roles
     # A gate step's gate (``user_gates``): its instruction is its topic, and no Worker runs it.
     gate: Gate | None = None
+    # A wait step's wait (``waits``): its instruction is its topic, and no Worker runs it.
+    wait: Wait | None = None
     # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
     # started (task_steps.started_at).
     started_at: datetime | None = None
@@ -420,7 +436,9 @@ class PlanStep:
 
     @property
     def started(self) -> bool:
-        """A work step started when its first Worker did, a gate when it opened."""
+        """A work step started when its first Worker did, a gate when it opened, a wait when it left pending."""
+        if self.wait is not None:
+            return self.wait.state is not WaitState.PENDING
         if self.gate is not None:
             return self.status != "pending"
         return self.worker_id is not None
@@ -503,11 +521,16 @@ class TaskPlan:
             running=frozenset(s.label for s in live if s.status == "dispatched"),
             done=frozenset(s.label for s in live if s.started and s.status == "verified"),
             gates={s.label: GateView(s.gate.state, s.gate.agenda) for s in live if s.gate is not None},
+            waits={s.label: WaitView(s.wait.state) for s in live if s.wait is not None},
         )
 
     def waiting_gates(self) -> list[PlanStep]:
         """The gate steps that wait for the user, in plan order."""
         return [s for s in self.steps if s.gate is not None and s.gate.state.waiting]
+
+    def open_waits(self) -> list[PlanStep]:
+        """The wait steps that are open, in plan order."""
+        return [s for s in self.steps if s.wait is not None and s.wait.state.open]
 
     def progress_summary(self) -> str:
         live = [s for s in self.steps if s.status != "skipped"]
@@ -515,12 +538,15 @@ class TaskPlan:
         done = sum(1 for s in live if s.status == "verified")
         running = sum(1 for s in live if s.status in ("dispatched", "deciding", "completed"))
         failed = sum(1 for s in live if s.status == "failed")
-        waiting = sum(1 for s in live if s.status == WAITING_USER)
+        waiting_user = sum(1 for s in live if s.status == WAITING_USER)
+        waiting = sum(1 for s in live if s.wait is not None and s.wait.state.open)
         parts = [f"{done}/{total} 完成"]
         if running:
             parts.append(f"{running} 执行中")
+        if waiting_user:
+            parts.append(f"{waiting_user} 等待用户")
         if waiting:
-            parts.append(f"{waiting} 等待用户")
+            parts.append(f"{waiting} 等待中")
         if failed:
             parts.append(f"{failed} 失败")
         return ", ".join(parts)
@@ -563,7 +589,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "review_roles": [item.row() for item in step.review_roles],
         "review_stage": step.review_stage.value if step.review_stage else None,
         "review_position": step.review_position,
-        "kind": "gate" if step.gate is not None else "work",
+        "kind": "gate" if step.gate is not None else "wait" if step.wait is not None else "work",
         "started_at": step.started_at,
     }
 
@@ -657,7 +683,20 @@ def result_outcome(result: Mapping[str, Any]) -> str:
 
 # How a closing note names a step that is not done, by its status.
 _NOT_DONE = {"pending": "not started", "dispatched": "was running", "deciding": "awaiting a decision",
-             "completed": "awaiting review", "failed": "failed", WAITING_USER: "a gate waiting for the user"}
+             "completed": "awaiting review", "failed": "failed", WAITING_USER: "a gate waiting for the user",
+             waits.WAITING: "a wait not over"}
+
+
+def _reported_status(plan: TaskPlan) -> str:
+    """The task status a progress report publishes: a gate waiting for the user, else an open wait with nothing
+    in flight, else the plan's own status."""
+    if plan.status not in _LIVE:
+        return plan.status
+    if plan.waiting_gates():
+        return WAITING_USER
+    if plan.open_waits() and not any(step.status in _IN_FLIGHT for step in plan.steps):
+        return waits.WAITING
+    return plan.status
 
 
 def closing_note(why: str, steps: Iterable[tuple[str, str, Mapping[str, Any] | None]]) -> str:
@@ -1002,12 +1041,19 @@ class PlannerAgent:
                 by_label[spec.id] = step
             step.instruction = spec.instruction
             step.acceptance_criteria = list(spec.acceptance_criteria)
-            # A gate is never reviewed, whatever the project's review policy.
-            step.review = spec.gate is None and (spec.review or self._execution.review_all)
+            # A gate or a wait is never reviewed, whatever the project's review policy.
+            step.review = (spec.gate is None and spec.wait is None
+                           and (spec.review or self._execution.review_all))
             step.role = spec.role
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             if spec.gate is not None:
                 step.gate = Gate(spec.gate.topic, spec.gate.agenda, spec.gate.findings)
+            if spec.wait is not None:
+                # Freeze the check interval now, so a later change of the system limits does not rewrite it.
+                step.wait = Wait(replace(spec.wait, every_seconds=effective_every(spec.wait, waits.limits())))
+                step.instruction = spec.wait.topic
+                step.acceptance_criteria = []
+                step.review = False
             changed.append(step)
         for spec, step in zip(specs, changed):
             step.depends_on = [by_label[label].step_id for label in spec.depends_on]
@@ -1028,25 +1074,30 @@ class PlannerAgent:
         return ", ".join(parts)
 
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
-        # Every ready gate opens; every ready step starts, and the worker pool runs them within its project's
-        # Worker limit.
+        # Every ready gate and wait opens; every ready work step starts, and the worker pool runs the work
+        # within its project's Worker limit. A wait takes no Worker and joins no workspace round. Progress is
+        # reported once the work is in flight, so an open wait does not report the task as waiting first.
         ready = plan.ready_steps()
-        gates = [step for step in ready if step.gate is not None]
-        for gate in gates:
+        opened = False
+        for step in [s for s in ready if s.gate is not None or s.wait is not None]:
             if plan.status not in _LIVE:
                 return
-            await self._open_gate(plan, gate)
-        if gates:
-            await self._report_progress(plan)
-        ready = [step for step in ready if step.gate is None]
+            if step.gate is not None:
+                await self._open_gate(plan, step)
+            else:
+                await self._open_wait(plan, step)
+            opened = True
+        work = [step for step in ready if step.gate is None and step.wait is None]
         base: _RoundBase | None = None
-        if ready and self._execution.isolate_steps:
-            ready, base = await self._plan_round(plan, ready)
-        for step in ready:
+        if work and self._execution.isolate_steps:
+            work, base = await self._plan_round(plan, work)
+        for step in work:
             if plan.status not in _LIVE:
-                return  # the task stopped at its spend cap
+                break  # the task stopped at its spend cap
             if step.status == "pending":  # a decision on an earlier step of the round may have started it
                 await self._dispatch_step(plan, step, base=base)
+        if opened:
+            await self._report_progress(plan)
 
     # --- User gates ---
 
@@ -1062,6 +1113,23 @@ class PlannerAgent:
         await self._save(plan, step, entries=[entry],
                          gate_messages=[self._looper_message(step, MessageKind.OPENED, f"Gate opened: {gate.topic}")])
         await self._activity("phase", f"Gate {step.label} opened: {gate.topic}"[:500])
+
+    async def _open_wait(self, plan: TaskPlan, step: PlanStep) -> None:
+        """The steps ``step``, a wait, depends on are done: it opens and waits."""
+        wait = step.wait
+        assert wait is not None
+        opened_at = datetime.now(timezone.utc)
+        due_at, deadline_at, next_check_at = open_times(wait.spec, opened_at)
+        wait.state = WaitState.WAITING
+        wait.opened_at, wait.due_at, wait.deadline_at, wait.next_check_at = (
+            opened_at, due_at, deadline_at, next_check_at)
+        step.status = wait.state.step_status
+        text = describe(wait.spec, effective_every(wait.spec, waits.limits()))
+        entry = JournalEntry(step.step_id, step.label, journal.clip(
+            f"wait opened: {wait.topic} ({text})", journal.SUMMARY_MAX_CHARS),
+            kind=JournalKind.WAIT_OPENED)
+        await self._save(plan, step, entries=[entry])
+        await self._activity("phase", f"Wait {step.label} opened: {wait.topic} ({text})"[:500])
 
     @staticmethod
     def _looper_message(step: PlanStep, kind: MessageKind, text: str) -> dict[str, Any]:
@@ -3143,6 +3211,9 @@ class PlannerAgent:
             if step.gate is not None:
                 lines += self._gate_lines(step, deps)
                 continue
+            if step.wait is not None:
+                lines.append(self._wait_line(step))
+                continue
             roles = (f"; role: {step.role}" if step.role else "") + \
                 (f"; review roles: {', '.join(item.label for item in step.review_roles)}" if step.review_roles else "")
             lines.append(
@@ -3171,6 +3242,20 @@ class PlannerAgent:
         elif gate.state is GateState.CANCELLED:
             lines.append(f"  cancelled: {_clip(gate.resolution, 300)}")
         return lines
+
+    @staticmethod
+    def _wait_line(step: PlanStep) -> str:
+        """A wait's plan line: pending until it opens, then its state, what it waits for and its deadline."""
+        wait = step.wait
+        assert wait is not None
+        shown = describe(wait.spec, effective_every(wait.spec, waits.limits()))
+        if wait.state is WaitState.PENDING:
+            return f"- {step.label} [wait, not opened: {shown}]"
+        deadline = ""
+        if wait.deadline_at is not None:
+            deadline = wait.deadline_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        when = f", deadline {deadline}" if deadline else ""
+        return f"- {step.label} [wait {wait.state.value}: {shown}{when}]"
 
     @staticmethod
     def _progress_lines(plan: TaskPlan) -> list[str]:
@@ -3628,8 +3713,8 @@ class PlannerAgent:
                 "task_id": self._task_id,
                 "goal_id": plan.goal_id,
                 "plan_id": plan.plan_id,
-                # While a gate waits for the user the task waits for them, whatever else runs meanwhile.
-                "status": WAITING_USER if plan.status in _LIVE and plan.waiting_gates() else plan.status,
+                # A gate waiting for the user wins. Otherwise an open wait, with nothing in flight, is waiting.
+                "status": _reported_status(plan),
                 "progress": plan.progress_summary(),
                 "summary": f"进度更新: {plan.progress_summary()}",
             },
@@ -3875,23 +3960,34 @@ class PlannerAgent:
     async def _save(
         self, plan: TaskPlan, *steps: PlanStep, plan_row: bool = False, entries: Sequence[JournalEntry] = (),
         gate_messages: Sequence[Mapping[str, Any]] = (),
+        expect: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
-        """Save ``steps`` (a gate step with its gate), with ``plan_row`` the plan's own state, the journal
-        ``entries`` (added to the plan's journal first) and the messages a gate's discussion gets, in one
-        transaction.
+        """Save ``steps`` (a gate step with its gate, a wait step with its wait), with ``plan_row`` the plan's own
+        state, the journal ``entries`` (added to the plan's journal first) and the messages a gate's discussion
+        gets, in one transaction.
 
-        A failed write is logged and the task goes on from memory; only a
-        restart would miss it.
+        ``expect``, when given, maps a wait's step id to the states its saved row may still be in. It applies
+        only to this write and does not change the loop's check columns. A failed write is logged and the task
+        goes on from memory; only a restart would miss it.
         """
         plan.journal.extend(entries)
         unique = list({id(step): step for step in steps}.values())
         gates = [step.gate.row(step.step_id) for step in unique if step.gate is not None]
+        wait_rows = []
+        for step in unique:
+            if step.wait is None:
+                continue
+            row = step.wait.row(step.step_id)
+            if expect is not None and step.step_id in expect:
+                row["expect"] = list(expect[step.step_id])
+            wait_rows.append(row)
         try:
             await db_plans.save(self._task_id, plan=plan.row() if plan_row else None,
                                 steps=[_step_row(step) for step in unique],
                                 journal=[entry.row() for entry in entries],
                                 **({"gates": gates} if gates else {}),
-                                **({"gate_messages": list(gate_messages)} if gate_messages else {}))
+                                **({"gate_messages": list(gate_messages)} if gate_messages else {}),
+                                **({"waits": wait_rows} if wait_rows else {}))
         except Exception:
             logger.exception("failed to save the plan of task %s", self._task_id)
 
@@ -3912,6 +4008,19 @@ class PlannerAgent:
             return None
         row = gates.get(step["id"])
         return Gate.from_row(row) if row else Gate(str(step.get("instruction") or ""), ())
+
+    def _stored_wait(
+        self, step: Mapping[str, Any], rows: Mapping[str, Mapping[str, Any]],
+    ) -> tuple[Wait | None, str | None]:
+        """A stored wait step's wait, and a status to force when its row is missing. ``(None, None)`` otherwise."""
+        if step.get("kind") != "wait":
+            return None, None
+        row = rows.get(step["id"])
+        if row:
+            return Wait.from_row(row), None
+        logger.warning("planner %s: wait step %s has no saved row; keeping it pending",
+                       self.agent_id, step.get("step_key") or step.get("id"))
+        return Wait(WaitSpec(str(step.get("instruction") or ""), waits.limits().max_wait_seconds)), "pending"
 
     async def _load_plan(self, statuses: tuple[str, ...] = ("planning", *db_plans.LIVE_STATUSES)) -> None:
         """Read back the task's plan in one of ``statuses`` (a live one by default) and the Planner's session."""
@@ -3944,6 +4053,7 @@ class PlannerAgent:
             start_commit=row.get("start_commit") or "",
         )
         for sd in stored["steps"]:
+            wait, forced_status = self._stored_wait(sd, stored.get("waits") or {})
             plan.steps.append(PlanStep(
                 step_id=sd["id"],
                 index=int(sd.get("step_index") or 0),
@@ -3954,7 +4064,7 @@ class PlannerAgent:
                 acceptance_criteria=list(sd.get("acceptance_criteria") or []),
                 depends_on=list(sd.get("depends_on") or []),
                 review=bool(sd.get("review")),
-                status=sd.get("status") or "pending",
+                status=forced_status or sd.get("status") or "pending",
                 result=sd.get("result"),
                 worker_id=sd.get("worker_id"),
                 reviewer_id=sd.get("reviewer_id"),
@@ -3967,6 +4077,7 @@ class PlannerAgent:
                 review_stage=ReviewStage(sd["review_stage"]) if sd.get("review_stage") else None,
                 review_position=sd.get("review_position"),
                 gate=self._stored_gate(sd, stored.get("gates") or {}),
+                wait=wait,
                 started_at=sd.get("started_at"),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
