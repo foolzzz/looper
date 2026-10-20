@@ -214,6 +214,60 @@ def test_each_fallback_records_its_reason_and_only_unusable_sessions_are_replace
     _run(test, monkeypatch, tmp_path)
 
 
+def test_restarted_holder_stores_the_replacement_session_and_the_next_run_continues_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, planner_claude: Any,
+) -> None:
+    """The holder restarts, and its stored session cannot be resumed because the provider changed.
+
+    The schedule stores the new session, and the next run resumes it.
+    """
+    first = planner_claude(plan(step("a")))
+    restarted_claude = planner_claude("kept")
+    following = planner_claude(plan(step("next")))
+
+    async def test(env: Any) -> None:
+        sid = (await env.schedule())["schedule_id"]
+        label = f"planner-schedule-{sid}"
+        await _task(env, sid, "task-holder")
+        await _plan(env, "task-holder", first)
+        await env.pool.execute(
+            "UPDATE schedules SET planner_session_id = 'old-session', planner_session_provider = 'other-provider' "
+            "WHERE id = $1", sid)
+        await env.pool.execute(
+            "UPDATE agent_sessions SET session_id = 'old-session', provider_id = 'other-provider' "
+            "WHERE agent_id = 'planner-task-holder'")
+        agent = PlannerAgent(task_id="task-holder", runtime_root=Path(env.work_dir) / "restart",
+                             claude_bin=restarted_claude.bin)
+        agent._bus = env.bus
+        agent._dispatch_ready = AsyncMock()
+        try:
+            await agent._load_plan()
+            assert agent._plan is not None and agent._plan.session_id == "old-session"
+            assert agent._schedule_session_writes is True and not agent._schedule_directory_adopted
+            assert await agent._turn("Continue after the provider change") == "kept"
+            assert agent._claude.label == label
+            assert agent._schedule_session_writes is True and agent._schedule_directory_adopted is True
+        finally:
+            await agent._claude.stop()
+        assert "--resume" not in restarted_claude.argvs()[0]
+        row = await _row(env, sid)
+        assert row["planner_session_id"] == "sess-p"
+        assert row["planner_session_task_id"] == "task-holder"
+        assert row["planner_session_provider"] == "prov-claude-subscription"
+        assert await env.pool.fetchval(
+            "SELECT planner_session_label FROM tasks WHERE id = 'task-holder'") == label
+        await env.pool.execute("UPDATE tasks SET status = 'completed' WHERE id = 'task-holder'")
+        await _task(env, sid, "task-after")
+        await _plan(env, "task-after", following)
+        argv = following.argvs()[0]
+        assert argv[argv.index("--resume") + 1] == "sess-p"
+        assert await env.pool.fetchval(
+            "SELECT continues_schedule_session FROM tasks WHERE id = 'task-after'") is True
+        assert (await _row(env, sid))["planner_session_id"] == "sess-p"
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_active_holder_is_not_stolen_and_handoff_replacement_survives_edits_and_deletion(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, planner_claude: Any,
 ) -> None:

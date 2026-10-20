@@ -182,6 +182,60 @@ def test_loaded_schedule_plan_respects_current_session_holder(
                if "another task" in line)
 
 
+def test_restarted_holder_writes_its_replacement_session_back(
+    monkeypatch, agent_db, planner_claude, tmp_path,
+):
+    """After a restart the holder cannot resume its session, because the provider changed.
+
+    The old session is cleared and the replacement is stored on the schedule, in the schedule
+    directory. The run did not give the session up, so it keeps the write-through.
+    """
+    from looper.db import schedules
+    from tests.test_planner_agent import _project
+
+    session = "old-session"
+    shared = "planner-schedule-sched-a"
+    agent_db.get_task_project.return_value = {**_project(), "task_schedule_id": "sched-a",
+                                              "task_planner_session_label": shared}
+    monkeypatch.setattr(schedules, "get_schedule", AsyncMock(return_value={
+        "planner_session_id": session, "planner_session_task_id": "task-old",
+    }))
+    save = AsyncMock()
+    monkeypatch.setattr(schedules, "save_planner_session", save)
+    claude = planner_claude("reply retained")
+
+    async def check():
+        old = PlannerAgent(task_id="task-old", runtime_root=tmp_path)
+        plan = TaskPlan(plan_id="p", goal_id="g", requirement="do it", work_dir=str(tmp_path), status="failed",
+                        session_id=session, session_runtime="claude-code", session_provider="other-provider",
+                        steps=[PlanStep("step-a", 0, "do it")])
+        await old._save(plan, *plan.steps, plan_row=True)
+        await old._save_session(plan)
+        # The stand-in session store does not keep the provider; the restarted holder must still see it.
+        agent_db.store.sessions["planner-task-old"]["provider_id"] = "other-provider"
+        agent_db.store.tasks["task-old"] = {"requirement": "do it", "work_dir": str(tmp_path)}
+        agent = PlannerAgent(task_id="task-old", runtime_root=tmp_path, claude_bin=claude.bin)
+        try:
+            await agent._load_plan(("failed",))
+            assert agent._plan is not None and agent._plan.session_id == session
+            assert agent._schedule_session_writes is True
+            assert not agent._schedule_directory_adopted
+            assert await agent._turn("Continue the saved plan") == "reply retained"
+            assert agent._claude.label == shared
+            assert agent._schedule_session_writes is True
+            assert agent._schedule_directory_adopted is True
+        finally:
+            await agent._claude.stop()
+
+    asyncio.run(check())
+    written = [call.args[1] for call in save.await_args_list]
+    assert written[0] is None and written[-1] == "sess-p"
+    assert save.await_args_list[-1].kwargs["provider_id"] == "prov-claude-subscription"
+    assert all(call.args[0] == "task-old" for call in save.await_args_list)
+    assert "--resume" not in claude.argvs()[0]
+    assert "task-old" not in agent_db.store.planner_session_labels
+
+
 def test_restore_after_reset_does_not_resume_a_session_a_live_run_still_has(
     monkeypatch, agent_db, planner_claude, tmp_path,
 ):

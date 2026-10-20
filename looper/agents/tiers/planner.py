@@ -2797,10 +2797,13 @@ class PlannerAgent:
             await self._switch_session(plan, switch, settings.timeout_seconds)
         label = self._directory_label(plan)
         if label == self.agent_id and not plan.session_id:
-            # This fresh session is the task's, not the schedule's. Do not publish it back onto the
-            # schedule. Store the own label before the process starts when the row still names another
-            # directory, so the next resume and cleanup follow this directory. The label above was
-            # already chosen; a persisted value does not replace it.
+            # This fresh session is the task's, not the schedule's: the run gave the session up, it is
+            # not the holder, or a restart found nothing to resume. Do not publish it back onto the
+            # schedule. A holder replacing a session it cannot resume has adopted the schedule directory
+            # in ``_drop_session``, so it does not come through here and still writes the replacement.
+            # Store the own label before the process starts when the row still names another directory,
+            # so the next resume and cleanup follow this directory. The label above was already chosen;
+            # a persisted value does not replace it.
             self._schedule_session_writes = False
             if self._planner_session_label not in (None, self.agent_id):
                 await self._use_own_session_label(stop_turn=True)
@@ -3052,6 +3055,12 @@ class PlannerAgent:
         plan.session_id, plan.session_totals = None, Usage()  # its totals go with it
         await self._save_session(plan)
         self._pending_switch, self._pending_handoff = switch, handoff
+        if (self._schedule_session_writes and self._schedule_id and not self._own_session_label
+                and not self._own_label_pending):
+            # This run still holds the schedule session, so the one that replaces it is the schedule's
+            # too: it is written back, and it lives in the schedule directory. Giving the session up
+            # clears the adoption in ``_use_own_session_label``; a non-holder never sets it.
+            self._schedule_directory_adopted = True
         handed = "; its previous session wrote a handoff" if handoff else ""
         await self._activity("phase", f"The Planner starts a new session ({switch.describe()}){handed}"[:500])
 
@@ -4004,10 +4013,12 @@ class PlannerAgent:
         """The directory label for the session this turn starts.
 
         The schedule label is used only while this process is writing the stored schedule session it
-        claimed (resuming it, creating it, or replacing it). Resuming any other saved session uses the
-        persisted label, which is where that session's files already are. Every fresh session — a first
-        turn with nothing to resume, after giving the schedule session up, after a reset, after an error,
-        after a restart that found an empty session — uses this task's own label, whatever was persisted.
+        claimed (resuming it, creating it, or replacing it). Dropping a session this run still holds
+        adopts that directory, including after a restart, so the replacement is written there; giving
+        the session up clears the adoption. Resuming any other saved session uses the persisted label,
+        which is where that session's files already are. Every fresh session — a first turn with nothing
+        to resume, after giving the schedule session up, after a reset, after an error, after a restart
+        that found an empty session — uses this task's own label, whatever was persisted.
         """
         if self._schedule_directory_adopted and self._schedule_session_writes and self._schedule_id:
             return db_schedules.planner_storage_label(self._schedule_id)
