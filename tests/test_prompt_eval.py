@@ -1724,6 +1724,13 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
         return f"the dialog's server has {len(found)} tasks, not its own one" if len(found) != 1 else None
 
     def isolated(dialog: dialogs.Dialog) -> dialogs.Dialog:
+        if dialog.id == "provider_key":
+            first = dialog.says[0]
+            # Keep the forbidden key attempt on the current provider body,
+            # followed by the successful account and model registrations.
+            forbidden = ("looper_providers", {**first.fake[0][1], "api_key": dialogs.FAKE_KEY})
+            first = dataclasses.replace(first, fake=(forbidden, *first.fake))
+            return dataclasses.replace(dialog, says=(first, *dialog.says[1:]))
         if dialog.id != "create_start_stop":
             return dialog
         first = dialog.says[0]
@@ -1731,6 +1738,7 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
         return dataclasses.replace(dialog, says=(check, *dialog.says[1:]))
 
     ordered = tuple(isolated(dialog) for dialog in dialogs.DIALOGS)
+    assert any(dialog.id == "config_export" for dialog in ordered)
     assert [d.id for d in ordered].index("create_start_stop") == [d.id for d in ordered].index(
         "confirm_create_start") + 1
     # The stand-in enables a schedule in the turn that created it: Looper refuses, and it stays disabled.
@@ -1754,7 +1762,8 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
         ["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
         ["looper_task_control:ok"]]
     # The key the user pasted: the call passing it is refused, the one without it registers the provider.
-    assert by_id["provider_key"]["turns"][0]["calls"] == ["looper_providers:error (forbidden)", "looper_providers:ok"]
+    assert by_id["provider_key"]["turns"][0]["calls"] == [
+        "looper_providers:error (forbidden)", "looper_providers:ok", "looper_models:ok"]
     assert by_id["config_tools"]["turns"][-2]["calls"] == ["looper_projects:needs_confirmation"]
     assert [turn["calls"] for turn in by_id["schedules"]["turns"]] == [
         ["looper_schedules:ok"], ["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],

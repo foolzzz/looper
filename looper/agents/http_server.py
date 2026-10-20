@@ -640,7 +640,8 @@ class AgentHTTPServer:
         elif path == "/api/config/export" and method == "GET":
             await self._handle_config_export(query, writer)
         elif (m := self._RE_CONFIG_IMPORT_APPLY.match(path)) and method == "POST":
-            await self._handle_config_import(writer, HTTP_200, lambda imports: self._apply_import(imports, m.group(1)))
+            await self._handle_config_import(writer, HTTP_200,
+                                             lambda imports: self._apply_import(imports, m.group(1), body))
         elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
             await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
         elif path == "/api/catalog" and method == "GET":
@@ -1736,8 +1737,10 @@ class AgentHTTPServer:
             await self._recheck_concurrency()
         return result
 
-    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str) -> Any:
+    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, body: bytes = b"") -> Any:
         """Apply an import; its layers may raise a concurrency limit."""
+        if body:
+            raise config_transfer.ConfigFileError("apply takes no request body; the server recomputes the import plan")
         result = await imports.apply(import_id)
         await self._recheck_concurrency()
         return result

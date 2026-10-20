@@ -159,6 +159,7 @@ class Change:
     action: Action
     fields: tuple[str, ...] = ()
     reason: str = ""
+    code: str = ""
 
 
 @dataclass(frozen=True)
@@ -203,7 +204,8 @@ class Plan:
             "counts": self.counts(),
             "changes": [{"section": c.section, "key": c.key, "action": c.action.value,
                          **({"fields": list(c.fields)} if c.fields else {}),
-                         **({"reason": c.reason} if c.reason else {})}
+                         **({"reason": c.reason} if c.reason else {}),
+                         **({"code": c.code} if c.code else {})}
                         for c in self.changes if c.action is not Action.UNCHANGED],
             "need_secret": [{"section": n.section, "key": n.key, "names": list(n.names),
                              **({"target": {"kind": n.target[0], "id": n.target[1]}} if targets and n.target else {})}
@@ -1000,8 +1002,35 @@ class _Importer:
                 self.blocked_profiles.add(label)
         return [entry for entry in entries if key(entry) not in duplicates]
 
-    def record(self, section: str, key: str, action: Action, fields: Sequence[str] = (), reason: str = "") -> None:
-        self.plan.changes.append(Change(section, key, action, tuple(fields), reason))
+    def record(self, section: str, key: str, action: Action, fields: Sequence[str] = (), reason: str = "",
+               code: str = "") -> None:
+        self.plan.changes.append(Change(section, key, action, tuple(fields), reason, code))
+
+    def legacy_failure(self, section: str, key: str, exc: Exception) -> None:
+        from .registry_migration import MigrationBlocked
+        from .profile_registry import RegistryError
+
+        code = getattr(exc, "code", "invalid_legacy_value" if isinstance(exc, RegistryError) else "")
+        reason = str(exc)
+        if isinstance(exc, MigrationBlocked):
+            reason = {
+                "invalid_legacy_value": "a legacy value is invalid; check the provider and Agent Profile fields",
+                "bad_provider_reference": "the legacy Agent Profile refers to a missing provider",
+                "bad_runtime_reference": "the legacy Agent Profile refers to a missing runtime",
+                "incompatible_auth": "the runtime cannot use this provider's authentication kind",
+                "incompatible_login": "a login provider can only use its own runtime",
+                "incompatible_protocol": "the runtime and provider share no supported protocol",
+                "model_outside_catalog": "the Agent Profile's model is not in its provider's model catalog",
+                "invalid_protocols": "the provider needs a non-empty list of supported protocols",
+                "unknown_protocol": "the provider uses an unsupported protocol",
+                "unknown_runtime": "the Agent Profile uses an unsupported runtime",
+                "unknown_login": "the provider uses an unsupported runtime login",
+                "unknown_default_endpoint": "the provider needs an explicit endpoint URL on this machine",
+                "default_endpoint_conflict": "the provider's default endpoint conflicts with its saved configuration",
+                "invalid_id": "a legacy registry entry needs a non-empty identifier",
+                "duplicate_id": "the file gives the same legacy registry identifier twice",
+            }.get(code, "the legacy registry cannot be converted safely; check its provider and Agent Profile fields")
+        self.record(section, key, Action.SKIPPED, reason=reason, code=code)
 
     def outcome(self, section: str, key: str, current: Any, changed: Sequence[str]) -> Action:
         action = Action.ADDED if current is None else Action.CHANGED if changed else Action.UNCHANGED
@@ -1054,7 +1083,7 @@ class _Importer:
         never candidates for opportunistic account merging.
         """
         from . import registry_migration as migration
-        from .profile_registry import RegistryError, default_agent_teams, entry_name
+        from .profile_registry import AgentProfile, RegistryError, default_agent_teams, entry_name, _model
 
         runtimes = list({spec.id: spec for _, spec in self.runtimes.values()}.values())
         accounts, rows, sources = {}, [], {}
@@ -1078,9 +1107,27 @@ class _Importer:
                 accounts[name] = row
             except (RegistryError, _Skip) as exc:
                 self.blocked_providers.add(label)
-                self.record("providers", label, Action.SKIPPED, reason=str(exc))
+                self.legacy_failure("providers", label, exc)
         profile_sources = {}
-        for entry in data.get("profiles", []):
+        profile_entries = list(data.get("profiles", []))
+        profile_names = {entry["name"] for entry in profile_entries
+                         if isinstance(entry, Mapping) and isinstance(entry.get("name"), str)}
+        layers = list(data.get("settings", {}).get("layers", []))
+        for project in data.get("projects", []):
+            if isinstance(project, Mapping) and isinstance(project.get("layers"), list):
+                layers.extend(project["layers"])
+        # Before profiles existed, a layer explicitly selected a Claude model.
+        # Convert that choice through the same registry converter as v1 profiles.
+        for layer in layers:
+            if not isinstance(layer, Mapping) or "profile" in layer or not isinstance(layer.get("model"), str):
+                continue
+            model = layer["model"]
+            name = f"{_MODEL_PROFILE_PREFIX}{model}"
+            if name not in self.profiles and name not in profile_names and name not in self.blocked_profiles:
+                profile_entries.append({"name": name, "runtime": "claude-code", "provider": "claude-subscription",
+                                        "model": model})
+                profile_names.add(name)
+        for entry in profile_entries:
             label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
             try:
                 entry = _mapping(entry, "a legacy Agent Profile")
@@ -1097,7 +1144,7 @@ class _Importer:
                 runtime = self.runtimes.get(_string(entry.get("runtime"), "runtime", required=True))
                 provider = _string(entry.get("provider"), "provider", required=True)
                 if runtime is None or entry["runtime"] in self.blocked_runtimes:
-                    raise _Skip("no valid runtime here or in the file")
+                    raise _Skip(f"no runtime {entry['runtime']!r} here or in the file")
                 if provider in self.blocked_providers:
                     raise _Skip("provider was skipped")
                 if provider not in accounts:
@@ -1127,11 +1174,16 @@ class _Importer:
                        "model": entry.get("model"), "effort": entry.get("effort"),
                        "agent_teams": entry.get("agent_teams", default_agent_teams(runtime[1])),
                        "custom_prompt": entry.get("custom_prompt", "")}
+                # Keep the public validators' actionable messages before the
+                # migration converter reduces failures to safe report codes.
+                _model(row["model"])
+                AgentProfile(row["id"], name, runtime[1], "legacy-model", row["effort"],
+                             row["agent_teams"], row["custom_prompt"])
                 migration.convert(runtimes, [accounts[provider]], [row])
                 rows.append(row)
             except (RegistryError, _Skip) as exc:
                 self.blocked_profiles.add(label)
-                self.record("profiles", label, Action.SKIPPED, reason=str(exc))
+                self.legacy_failure("profiles", label, exc)
         converted = migration.convert(runtimes, list(accounts.values()), rows)
         for name, row in accounts.items():
             canonical = converted.provider_map[row["id"]]
@@ -1814,10 +1866,13 @@ class _Importer:
                     items.append(item_id)
             profile_id = None
             if profile is not None:
-                if profile in self.blocked_profiles or profile not in self.profiles:
+                if profile in self.blocked_profiles:
                     self.record(section, f"{label}{key}", Action.SKIPPED,
                                 reason=f"no valid Agent Profile {profile!r} here or in the file")
                     continue
+                elif profile not in self.profiles:
+                    self.plan.notes.append(f"{label}role template {key}: no Agent Profile {profile!r} here or in "
+                                           "the file; imported without one")
                 else:
                     try:
                         check_roles(self.profiles[profile][1], (kind.agent.value,))
