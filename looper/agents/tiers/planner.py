@@ -777,9 +777,10 @@ class PlannerAgent:
         # The session directory claimed for this task (planner-schedule-<id>). Set for this process when the
         # claim succeeds, and read back with the task after a restart. Unset tasks keep self.agent_id.
         # Giving the conversation up switches this to the task's own label and keeps a project read from
-        # putting the shared directory back.
+        # putting the shared directory back. Until that label is stored, a turn does not start a session.
         self._planner_session_label: str | None = None
         self._own_session_label = False
+        self._own_label_pending = False
         self._idle_task: asyncio.Task[Any] | None = None
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
@@ -2748,6 +2749,10 @@ class PlannerAgent:
         """
         plan = self._plan
         assert plan is not None
+        if self._own_label_pending:
+            # The shared directory stays unused until this run's own label is stored. A failed write stops
+            # the turn; the next one tries again.
+            await self._use_own_session_label(stop_turn=True)
         settings = await load_settings()
         knowledge = await self._load_knowledge(plan)
         library = await self._load_installed(plan)
@@ -3978,24 +3983,35 @@ class PlannerAgent:
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
 
-    async def _use_own_session_label(self) -> None:
+    async def _use_own_session_label(self, *, stop_turn: bool = False) -> None:
         """This run's session directory is its own (``planner-<task>``), not the schedule's.
 
-        The run that holds the conversation keeps ``planner-schedule-<id>``. Persisting this task's label keeps
-        a later project read, and the per-turn cleanup of a new session, off that directory.
+        The run that holds the conversation keeps ``planner-schedule-<id>``. The label is stored before any new
+        session starts. A failed write leaves it pending. With ``stop_turn`` the turn stops and is retried the
+        usual way; it does not continue in the shared directory. The next turn tries the write again.
         """
-        self._planner_session_label = self.agent_id
-        self._own_session_label = True
+        self._own_label_pending = True
         try:
             await db_tasks.set_planner_session_label(self._task_id, self.agent_id)
-        except Exception:
+        except Exception as exc:
             logger.exception("planner %s cannot persist its own session label", self.agent_id)
+            if not stop_turn:
+                return
+            detail = f"{type(exc).__name__}: {exc}"
+            message = (f"Planner could not store its own session label ({detail}); this turn stops and will be "
+                       "retried. The schedule's shared session directory is left alone.")[:500]
+            await self._activity("error", message)
+            raise PlannerTurnError(message) from None
+        self._planner_session_label = self.agent_id
+        self._own_session_label = True
+        self._own_label_pending = False
 
     async def _refuse_stored_session(self, plan: TaskPlan, detail: str) -> None:
         """Do not resume the stored session: this run starts fresh in its own directory.
 
         A failed holder or occupancy check is the same as finding the session held elsewhere. Writing the
-        schedule's session stays off, so the failure cannot clear it.
+        schedule's session stays off, so the failure cannot clear it. The fresh session waits until this run's
+        own label is stored.
         """
         self._schedule_session_writes = False
         if plan.session_id:
