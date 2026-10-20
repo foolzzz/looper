@@ -28,7 +28,12 @@ import json
 import math
 import os
 import re
+import subprocess
+import sys
+import tempfile
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -39,11 +44,225 @@ STATE_FIELDS = frozenset({"session", "totals", "price", "cap"})
 FIELDS = frozenset({"argv", "env", "unset", "first_input"}) | LAUNCH_FIELDS | STATE_FIELDS
 TIME_PATHS = frozenset({("session", "created_at"), ("session", "updated_at")})
 
+# The last old-schema main after both preset patches, before model splitting.
+# A new resolver must never manufacture the expected side of this contract.
+CLAUDE_LEGACY_REVISION = "252e736725c427d4b19e3a427e9f044077781ef8"
+
+# Public, synthetic inputs shared by the source capture and its coverage tests.
+CLAUDE_CASES = {
+    "oauth-default": ("oauth", "", None, True, None, "role"),
+    "official-key-append": ("api_key", "https://api.anthropic.com/", None, False, "append", "role"),
+    "empty-url-key-replace": ("api_key", "", None, True, "replace", "role"),
+    "proxy-key-background-append": ("api_key", "https://proxy.example.test/messages/", "side-model",
+                                     True, "append", "role"),
+    "proxy-key-task-replace": ("api_key", "https://proxy.example.test/messages/", None,
+                               False, "replace", "task"),
+}
+
+
+class LegacyBaselineUnavailable(RuntimeError):
+    """A baseline cannot be generated from the required, patched v2 source."""
+
+
+def claude_legacy_source(checkout: Path) -> dict[str, str]:
+    """Verify a clean old checkout; return public provenance, never local paths.
+
+    Call this in the generator subprocess before importing Looper. Supplying
+    the current checkout, a dirty adapter or an unpatched revision is an error,
+    not permission to update expected from the implementation under test.
+    """
+    if not checkout.is_dir() or not (checkout / ".git").exists():
+        raise LegacyBaselineUnavailable("patched Claude baseline requires an old checkout")
+
+    def git(*args: str) -> str:
+        try:
+            result = subprocess.run(["git", "-C", str(checkout), *args], capture_output=True,
+                                    text=True, timeout=10, check=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise LegacyBaselineUnavailable("cannot verify old checkout revision") from exc
+        return result.stdout.strip()
+
+    revision = git("rev-parse", "HEAD")
+    if revision != CLAUDE_LEGACY_REVISION:
+        raise LegacyBaselineUnavailable("Claude baseline requires the pinned patched v2 revision")
+    git("diff", "--exit-code", "HEAD", "--", "looper", "tests/agent_launch_parity.py", "tests/fake_claude.py")
+    return {"revision": revision, "tree": git("rev-parse", "HEAD^{tree}"),
+            "adapter_blob": git("rev-parse", "HEAD:looper/agents/runtimes/claude_code.py"),
+            "registry_blob": git("rev-parse", "HEAD:looper/agents/profile_registry.py")}
+
+
+def generate_claude_baseline(checkout: Path, output: Path) -> None:
+    """Run only the pinned source in a fresh interpreter; write after all cases succeed.
+
+    Usage: ``python tests/model_launch_parity.py --checkout OLD --output FIXTURE``
+    with LOOPER_TEST_DATABASE_URL set to a disposable PostgreSQL database.
+    A missing prerequisite is an error, never a reason to synthesize expected.
+    """
+    checkout = checkout.resolve()
+    source = claude_legacy_source(checkout)
+    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
+        raise LegacyBaselineUnavailable("Claude baseline requires a disposable test database")
+    interpreter = checkout / ".venv/bin/python"
+    if not interpreter.is_file():
+        raise LegacyBaselineUnavailable("Claude baseline requires the old checkout's test venv")
+    result = subprocess.run(
+        [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout), "--capture"],
+        cwd=checkout, capture_output=True, text=True, timeout=180, check=True,
+    )
+    baseline = json.loads(result.stdout)
+    if baseline["source"] != source or baseline["captures"].keys() != CLAUDE_CASES.keys():
+        raise LegacyBaselineUnavailable("legacy capture returned inconsistent source or cases")
+    for records in baseline["captures"].values():
+        if len(records) != 4:
+            raise LegacyBaselineUnavailable("legacy capture did not run all four tiers")
+        for record in records:
+            _fields(record, FIELDS)
+    # Do not truncate a previous baseline when capture or validation fails.
+    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+            stream.close()
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+async def _capture_legacy_claude(checkout: Path) -> dict[str, Any]:
+    """Child-only driver: real old settings, SQL persistence, tiers and adapter."""
+    source = claude_legacy_source(checkout)
+    # -I ignores PYTHONPATH and the caller's test imports. The old checkout wins
+    # over any editable installation in the interpreter's site-packages.
+    sys.path[:0] = [str(checkout), str(checkout / "tests")]
+    import asyncpg
+    import looper
+    import agent_launch_parity as tiers
+    from looper.agents import claude_cli
+    from looper.db import agent_sessions, connection
+
+    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
+            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
+        raise LegacyBaselineUnavailable("legacy capture imported a different checkout")
+    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
+    if not dsn:
+        raise LegacyBaselineUnavailable("Claude baseline requires a disposable test database")
+    captures = {}
+    for name, (account, url, background, teams, mode, scope) in CLAUDE_CASES.items():
+        schema = f"looper_claude_baseline_{uuid.uuid4().hex}"
+        admin = await asyncpg.connect(dsn)
+        pool = None
+        try:
+            await admin.execute(f'CREATE SCHEMA "{schema}"')
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
+                                            server_settings={"search_path": schema})
+            await connection.ensure_schema(pool)
+            connection._pool = pool
+            await tiers.seed_projects(pool)
+            catalog = [{"name": "main-model[1m]", "context_window": 1_000_000,
+                        "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2,
+                        "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 1,
+                        "efforts": ["high", "low"], "background_model": background}]
+            await pool.execute(
+                "INSERT INTO llm_providers (id, name, auth, protocols, oauth_runtime_type, base_url, models, env) "
+                "VALUES ('prov-capture', 'capture', $1, ARRAY['anthropic-messages'], $2, $3, $4::jsonb, $5::jsonb)",
+                account, "claude-code" if account == "oauth" else None, url, json.dumps(catalog),
+                json.dumps([{"key": "API_TIMEOUT_MS", "value": "3000000"}]),
+            )
+            if account == "api_key":
+                await pool.execute("INSERT INTO llm_provider_secrets VALUES ('prov-capture', 'sk-test-capture')")
+            await pool.execute(
+                "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams) "
+                "VALUES ('profile-capture', 'capture', 'rt-claude-code', 'prov-capture', 'main-model[1m]', 'high', $1)",
+                teams,
+            )
+            await pool.execute(
+                "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd) "
+                "VALUES ('system', 'profile-capture', 0.5)")
+            with tempfile.TemporaryDirectory(prefix="looper-claude-baseline-", dir="/tmp") as directory:
+                root = Path(directory).resolve()
+                environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
+                               "CLAUDE_CONFIG_DIR": str(root / "login"),
+                               "ANTHROPIC_API_KEY": "sk-test-inherited-key",
+                               "ANTHROPIC_AUTH_TOKEN": "sk-test-inherited-token",
+                               "ANTHROPIC_BASE_URL": "https://inherited.example.test/",
+                               "ANTHROPIC_DEFAULT_HAIKU_MODEL": "inherited-side",
+                               "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
+                login = root / "login/.credentials.json"
+                login.parent.mkdir()
+                login.write_text('{"synthetic":true}\n', encoding="utf-8")
+                states: list[dict[str, Any]] = []
+                original_capture = tiers.capture
+
+                async def exercise(*args: Any) -> Any:
+                    result = await original_capture(*args)
+                    records = await pool.fetch(
+                        "SELECT session_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, "
+                        "cost_usd, status FROM llm_records ORDER BY id")
+                    if len(records) != 4 or any(row["status"] != "completed" for row in records):
+                        raise LegacyBaselineUnavailable("legacy tiers did not persist four completed runs")
+                    for index, row in enumerate(records):
+                        owner = "manager" if index == 0 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+                        session = await agent_sessions.get_session(owner) if index < 2 else {
+                            "session_id": row["session_id"]}
+                        states.append({"session": session, "totals": {key: row[key] for key in
+                                       ("input_tokens", "output_tokens", "cache_read_tokens",
+                                        "cache_creation_tokens", "cost_usd")}})
+                    return result
+
+                cli = tiers._CLAUDE.replace(
+                    "'total_cost_usd': 0,", "'total_cost_usd': 0.25, 'modelUsage': {{'main-model[1m]': "
+                    "{{'inputTokens': 100, 'outputTokens': 40, 'cacheReadInputTokens': 5, "
+                    "'cacheCreationInputTokens': 2}}}},")
+                from itertools import count
+                ids = count(1)
+                with patch.dict(os.environ, environment, clear=True), patch.object(tiers, "_CLAUDE", cli), \
+                        patch.object(tiers, "capture", exercise), \
+                        patch.object(claude_cli, "uuid4", lambda: uuid.UUID(int=next(ids))):
+                    await tiers.seed_rest("unconfigured", root)
+                    if mode is not None:
+                        for role in ("manager", "planner", "worker", "reviewer"):
+                            if scope == "task" and role != "manager":
+                                await pool.execute(
+                                    "INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
+                                    "VALUES ('role', $1, 'append')", role)
+                                await pool.execute("INSERT INTO task_system_prompt_modes VALUES ($1, $2, $3)",
+                                                   tiers.TASKS[tiers.PROJECT_A], role, mode)
+                            else:
+                                await pool.execute(
+                                    "INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
+                                    "VALUES ('role', $1, $2)", role, mode)
+                    records = await capture_claude_tiers(root, "unconfigured", read_state=states.__getitem__)
+                    captures[name] = [normalize(record, root=root) for record in records]
+        finally:
+            connection._pool = None
+            if pool is not None:
+                await pool.close()
+            try:
+                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            finally:
+                await admin.close()
+    return {"source": source, "captures": captures}
+
 
 def _fields(value: Mapping[str, Any], expected: frozenset[str]) -> None:
     if not isinstance(value, dict) or value.keys() != expected:
         actual = set(value) if isinstance(value, dict) else set()
         raise ValueError(f"capture fields: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}")
+
+
+def _public_data(value: Any) -> Any:
+    """Turn adapter tuples into the lists their stored JSON uses.
+
+    Catalog efforts stay a tuple on the provider object. The capture contract
+    accepts only JSON types, so convert them explicitly at the adapter boundary.
+    """
+    if isinstance(value, tuple):
+        return [_public_data(item) for item in value]
+    if isinstance(value, list):
+        return [_public_data(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _public_data(item) for key, item in value.items()}
+    return value
 
 
 def _json_copy(value: Any) -> Any:
@@ -236,3 +455,84 @@ async def capture(
         if not record["first_input"]:
             raise ValueError(f"launch {index} has no first input")
     return records
+
+
+async def capture_claude_tiers(
+    root: Path, scenario: str, *, read_state: Callable[[int], dict[str, Any]], timeout: float = 30,
+) -> list[dict[str, Any]]:
+    """Capture the existing four-tier driver without replacing adapter behavior.
+
+    ``read_state`` returns ``session`` and ``totals`` from the driver's
+    persistence *after* the exercise. The other fields are read from the
+    actual Launch at subprocess creation, including explicit binding removals.
+    Imports are lazy so this same helper can be copied into the old checkout.
+    Login bytes are never read: only the path Claude will consult is recorded.
+    """
+    import agent_launch_parity as tiers
+    from looper.agents.runtimes import CLAUDE_CODE
+
+    launches: list[Any] = []
+    environment = CLAUDE_CODE.environment
+
+    def observe(launch: Any) -> dict[str, str]:
+        result = environment(launch)
+        launches.append(launch)
+        return result
+
+    def inspect(argv: list[str], env: dict[str, str], cwd: str) -> dict[str, Any]:
+        launch = launches[-1]
+        provider = launch.profile.provider
+        protocols = provider.protocols & CLAUDE_CODE.protocols
+        if len(protocols) != 1:
+            raise ValueError("Claude capture requires one actual protocol")
+        prompt_flag = next(flag for flag in ("--append-system-prompt-file", "--system-prompt-file") if flag in argv)
+        prompt = Path(argv[argv.index(prompt_flag) + 1])
+        settings = argv[argv.index("--settings") + 1]
+        mcp = Path(argv[argv.index("--mcp-config") + 1]) if "--mcp-config" in argv else None
+        login = Path(env.get("CLAUDE_CONFIG_DIR", str(Path(env["HOME"]) / ".claude"))) / ".credentials.json"
+        config = {"settings": settings, "protocol": next(iter(protocols)).value,
+                  "model": launch.model, "effort": launch.effort,
+                  "catalog": [asdict(entry) for entry in provider.catalog]}
+        # Catalog efforts are tuples in Python but lists in their stored JSON.
+        config = _json_copy(_public_data(config))
+        permissions = {}
+        for flag in ("--permission-mode", "--permission-prompts", "--disallowedTools", "--allowedTools"):
+            permissions[flag] = argv[argv.index(flag) + 1] if flag in argv else None
+        permissions["--dangerously-skip-permissions"] = "--dangerously-skip-permissions" in argv
+        return {"unset": list(CLAUDE_CODE.bind_provider(provider, launch.model, launch.effort).unset),
+                "config": config, "prompt": prompt.read_text("utf-8"), "permissions": permissions,
+                "isolation": json.loads(settings), "mcp": mcp.read_text("utf-8") if mcp else None,
+                "login_target": str(login.resolve()) if login.exists() else None}
+
+    def readback(index: int) -> dict[str, Any]:
+        state = read_state(index)
+        _fields(state, frozenset({"session", "totals"}))
+        launch = launches[index]
+        return {**state, "price": {"source": launch.cost_source.value,
+                                   "catalog": _json_copy(_public_data([asdict(entry) for entry in
+                                                                      launch.profile.provider.catalog]))},
+                "cap": launch.max_budget_usd}
+
+    with patch.object(CLAUDE_CODE, "environment", observe):
+        records = await capture(root, lambda: tiers.capture(root, scenario), inspect_launch=inspect,
+                                readback=readback, timeout=timeout)
+    roles = [case.partition("@")[0] for case in tiers.SCENARIOS[scenario]["cases"]]
+    if len(launches) != len(records) or [launch.role.value for launch in launches] != roles:
+        raise ValueError("Claude capture did not observe each scenario tier's real adapter launch")
+    return records
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Capture the patched old Claude baseline without model calls")
+    parser.add_argument("--checkout", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--capture", action="store_true", help=argparse.SUPPRESS)
+    options = parser.parse_args()
+    if options.capture:
+        print(json.dumps(asyncio.run(_capture_legacy_claude(options.checkout.resolve()))))
+    elif options.output is None:
+        parser.error("--output is required")
+    else:
+        generate_claude_baseline(options.checkout, options.output)
