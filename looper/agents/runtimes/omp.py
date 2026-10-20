@@ -92,7 +92,7 @@ from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
 if TYPE_CHECKING:
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..library import AgentLibrary
 
@@ -117,7 +117,7 @@ RESTORED_VARS = ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "
 # The discovery sources that look for a project's content above the work directory: turned off outside a git
 # repository, where they would climb to the filesystem's root.
 CLIMBING_SOURCES = ("native", "claude", "agents", "agents-md", "claude-md")
-# Each protocol's API in models.yml, in the order one is chosen from a provider's protocols.
+# The resolved model's exact protocol maps to one API in models.yml.
 API_NAMES: tuple[tuple[ApiProtocol, str], ...] = (
     (ApiProtocol.OPENAI_RESPONSES, "openai-responses"),
     (ApiProtocol.OPENAI_CHAT, "openai-completions"),
@@ -215,7 +215,11 @@ class OmpRuntime(RuntimeAdapter):
         ``models.yml`` (``models_yml``)."""
         if provider.auth is not AuthKind.API_KEY:
             raise RuntimeUnsupported(f"OMP runs with an API key provider only; provider {provider.name!r} is not one")
-        provider_api(provider)
+        if len(provider.protocols) != 1:
+            raise RuntimeUnsupported("OMP requires one resolved model protocol")
+        _api(next(iter(provider.protocols)))
+        if len(provider.catalog) != 1 or provider.catalog[0].name != model:
+            raise RuntimeUnsupported("OMP requires one resolved model matching the launch model")
         if not provider.api_key:
             raise RuntimeUnsupported(f"provider {provider.name!r} has no API key: set one in Settings")
         return ProviderBinding(
@@ -246,6 +250,7 @@ class OmpRuntime(RuntimeAdapter):
 
     def _command(self, executable: str, cwd: str | Path, prompt_file: Path, launch: Launch, *,
                  mode: tuple[str, ...] = ("-p", "--mode", "json")) -> list[str]:
+        args = self.launch_args(launch, mode=mode)
         local = _local_dir(prompt_file)
         visible = {**child_env.inherited(), **dict(launch.env)}
         mcp = mcp_config(launch.library, visible)
@@ -255,7 +260,7 @@ class OmpRuntime(RuntimeAdapter):
         prompt_flag = ("--system-prompt" if launch.system_prompt_mode is SystemPromptMode.REPLACE
                        else "--append-system-prompt")
         return [
-            "env", f"HOME={home}", executable, *self.launch_args(launch, mode=mode),
+            "env", f"HOME={home}", executable, *args,
             "--config", str(home / OVERLAY), prompt_flag, str(prompt),
             *(["--plugin-dir", str(home / "plugins" / MCP_PLUGIN)] if mcp else []),
         ]
@@ -386,29 +391,27 @@ class OmpRuntime(RuntimeAdapter):
 # --- The provider and the settings ---
 
 
-def provider_api(provider: ProviderSpec) -> str:
-    """The API in ``models.yml`` for ``provider``: the first of ``API_NAMES`` it serves."""
-    api = next((name for protocol, name in API_NAMES if protocol in provider.protocols), None)
+def _api(protocol: ApiProtocol) -> str:
+    """The API in ``models.yml`` for the resolved model's exact protocol."""
+    api = dict(API_NAMES).get(protocol)
     if api is None:
-        raise RuntimeUnsupported(f"OMP speaks {', '.join(sorted(p.value for p, _ in API_NAMES))}; provider "
-                                 f"{provider.name!r} serves none of them")
+        raise RuntimeUnsupported(f"OMP does not support model protocol {protocol!r}")
     return api
 
 
 def models_yml(launch: Launch) -> dict[str, Any]:
     """The home's ``models.yml``: the provider ``looper`` with the agent's model, priced at nothing (Looper prices
-    the tokens). Its context window comes from the provider's catalog when it gives one; a model the catalog lists
-    without effort levels does not reason."""
-    provider = launch.profile.provider
-    api = provider_api(provider)
-    entry = provider.catalog_model(launch.model)
+    the tokens). Its context window and reasoning come from the resolved model, without a catalog lookup."""
+    resolved = launch.settings.resolved_model
+    entry = resolved.model
+    api = _api(entry.protocol)
     model: dict[str, Any] = {
         "id": launch.model, "name": launch.model,
-        "reasoning": not (entry is not None and entry.efforts is not None and not entry.efforts),
+        "reasoning": entry.efforts != (),
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
     }
-    if entry is not None and entry.context_window:
+    if entry.context_window:
         model["contextWindow"] = entry.context_window
     if api == "openai-responses":
         # omp leaves strict out of a tool unless it knows the endpoint (api.openai.com, a few others) takes strict
@@ -416,7 +419,7 @@ def models_yml(launch: Launch) -> dict[str, Any]:
         # makes up a value for each optional one. Saying the endpoint takes them makes omp send the MCP tools as
         # strict: false, and its own tools strict, converted by omp as for api.openai.com.
         model["compat"] = {"supportsStrictMode": True}
-    return {"providers": {PROVIDER_ID: {"baseUrl": provider.base_url or DEFAULT_BASE_URLS[api], "apiKey": KEY_ENV,
+    return {"providers": {PROVIDER_ID: {"baseUrl": resolved.endpoint.base_url or DEFAULT_BASE_URLS[api], "apiKey": KEY_ENV,
                                         "api": api, "models": [model]}}}
 
 

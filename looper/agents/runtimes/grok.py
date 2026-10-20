@@ -84,7 +84,7 @@ from .pricing import usage_event
 
 if TYPE_CHECKING:
     from . import ResidentSession
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..library import AgentLibrary
 
@@ -170,6 +170,10 @@ class GrokRuntime(RuntimeAdapter):
         what would replace it is removed from the environment."""
         if provider.auth is not AuthKind.OAUTH or provider.oauth_runtime_type != self.type:
             raise RuntimeUnsupported(f"Grok runs with its own login only; provider {provider.name!r} is not it")
+        if provider.protocols != self.protocols:
+            raise RuntimeUnsupported("Grok requires the exact openai-responses model protocol")
+        if len(provider.catalog) != 1 or provider.catalog[0].name != model:
+            raise RuntimeUnsupported("Grok requires one resolved model matching the launch model")
         if effort and effort not in ("low", "medium", "high", "xhigh"):
             raise RuntimeUnsupported(f"Grok does not support effort {effort!r}; use one of: low, medium, high, xhigh")
         return ProviderBinding(args=("-m", model, *(("--effort", effort) if effort else ())), env=provider.env,
