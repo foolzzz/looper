@@ -12,13 +12,18 @@ import { errorText, useAction } from "@/lib/use-action";
 const LIMIT = 10;
 const linkClass = "rounded-sm text-primary hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 type Waiting = { task: TaskDetail; gate: UserGate };
+type Reply = { taskId: string; stepId: string; text: string; turns: number };
+const gateKey = (taskId: string, stepId: string) => `${taskId}/${stepId}`;
 
-function GateReply({ task, gate, onChanged }: Waiting & { onChanged: (gate: UserGate) => void }) {
+function GateReply({ task, gate, reply, onChanged }: Waiting & {
+  reply?: Reply; onChanged: (gate: UserGate, text: string) => void;
+}) {
   const [text, setText] = useState("");
   const { busy, error, run } = useAction();
   const input = useRef<HTMLTextAreaElement>(null);
   const href = `#tasks/${encodeURIComponent(task.task_id)}`;
   const id = `${task.task_id}-${gateAnchor(gate.step)}`;
+  const plannerAnswering = gateWaitsOn(gate, isActiveTask(task)) === "planner";
   const question = gate.agenda.find((item) => item.status === "open");
   return (
     <article aria-labelledby={`${id}-topic`} className="min-w-0">
@@ -30,13 +35,15 @@ function GateReply({ task, gate, onChanged }: Waiting & { onChanged: (gate: User
         </div>
         <h3 id={`${id}-topic`} className="text-sm font-semibold">{gate.topic}</h3>
         {question && <p className="whitespace-pre-wrap text-sm">{question.question}</p>}
+        {reply && <p role="status" className="whitespace-pre-wrap text-sm">You replied: {reply.text}</p>}
+        {plannerAnswering && <p className="text-xs text-muted-foreground">Planner answering</p>}
         <form className="space-y-2" onSubmit={async (event) => {
           event.preventDefault();
           if (busy || !text.trim() || text.length > GATE_MESSAGE_MAX_CHARS) return;
           await run(async () => {
             const posted = await postGateMessage(task.task_id, gate.step, { text });
             setText("");
-            onChanged(posted.gate);
+            onChanged(posted.gate, text);
           });
           input.current?.focus();
         }}>
@@ -68,57 +75,99 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const latest = useRef(0);
+  const [replies, setReplies] = useState<Reply[]>([]);
+  const pendingReplies = useRef<Reply[]>([]);
+  const loading = useRef(false);
+  const queued = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => () => {
+    latest.current++;
+    queued.current = null;
+  }, []);
   useEffect(() => {
-    const request = ++latest.current;
-    if (!needsYou) {
-      setTasks([]);
-      setMoreTasks(0);
-      setError("");
-      return;
-    }
-    void (async () => {
+    // Polls replace the queued refresh, never the read already in flight.
+    queued.current = async () => {
+      const request = latest.current;
       try {
-        const page = await fetchTasks({ group: "needs_you", limit: LIMIT });
-        const found = await Promise.all(page.tasks.slice(0, LIMIT).map((task) => fetchTaskDetail(task.task_id)));
+        const page = needsYou ? await fetchTasks({ group: "needs_you", limit: LIMIT })
+          : { tasks: [], counts: {} };
+        const pageIds = page.tasks.slice(0, LIMIT).map((task) => task.task_id);
+        // A sent reply stays visible even when its task leaves the first page (or Needs you).
+        const ids = [...new Set([...pageIds, ...pendingReplies.current.map((reply) => reply.taskId)])];
+        const found = await Promise.all(ids.map((id) => fetchTaskDetail(id)));
         if (request !== latest.current) return;
+        pendingReplies.current = pendingReplies.current.filter((reply) => {
+          const task = found.find((task) => task.task_id === reply.taskId);
+          const gate = task?.gates.find((gate) => gate.step_id === reply.stepId);
+          return task?.group !== "completed" && gate && isGateWaiting(gate) && gate.turns <= reply.turns;
+        });
+        setReplies(pendingReplies.current);
         setTasks(found);
-        // Each task beyond this bounded read has at least one waiting gate; more may be found on Tasks.
-        setMoreTasks(Math.max(0, Object.values(page.counts).reduce((sum, n) => sum + n, 0) - found.length));
+        // Needs-you counts tasks, including those waiting for the Planner, not user gates.
+        const readTasks = pageIds.length + found.filter((task) =>
+          !pageIds.includes(task.task_id) && task.group === "needs_you").length;
+        setMoreTasks(Math.max(0, Object.values(page.counts).reduce((sum, n) => sum + n, 0) - readTasks));
         setError("");
       } catch (err) {
         if (request === latest.current) setError(errorText(err));
       }
-    })();
-    return () => { latest.current++; };
+    };
+    const drain = async () => {
+      if (loading.current) return;
+      loading.current = true;
+      try {
+        while (queued.current) {
+          const read = queued.current;
+          queued.current = null;
+          await read();
+        }
+      } finally {
+        loading.current = false;
+      }
+    };
+    void drain();
   }, [needsYou, revision, refresh]);
 
   const waiting = tasks.flatMap((task) => task.group === "completed" ? [] : task.gates
-    .filter((gate) => isGateWaiting(gate) && gateWaitsOn(gate, isActiveTask(task)) === "user")
+    .filter((gate) => isGateWaiting(gate) && (gateWaitsOn(gate, isActiveTask(task)) === "user"
+      || replies.some((reply) => reply.taskId === task.task_id && reply.stepId === gate.step_id)))
     .map((gate) => ({ task, gate })))
     .sort((a, b) => (Date.parse(b.gate.opened_at ?? "") || 0) - (Date.parse(a.gate.opened_at ?? "") || 0));
-  const more = Math.max(0, waiting.length - LIMIT) + moreTasks;
+  const replyByGate = new Map(replies.map((reply) => [gateKey(reply.taskId, reply.stepId), reply]));
+  // Keep pending receipts in the bounded card list when newer waiting gates arrive.
+  waiting.sort((a, b) => Number(replyByGate.has(gateKey(b.task.task_id, b.gate.step_id)))
+    - Number(replyByGate.has(gateKey(a.task.task_id, a.gate.step_id))));
+  const more = Math.max(0, waiting.length - LIMIT);
   const failure = error && <p role="alert" className="text-xs text-destructive [overflow-wrap:anywhere]">
     Cannot refresh waiting gates ({error}). <a href="#tasks?group=needs_you" className={linkClass}>View tasks needing you</a>
   </p>;
-  if (!needsYou || !waiting.length) return failure || null;
+  if (!waiting.length && !moreTasks) return failure || null;
   return (
     <section aria-label="Waiting for you" className="space-y-3">
       <h2 className="text-sm font-semibold">Waiting for you</h2>
       {failure}
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
         {waiting.slice(0, LIMIT).map(({ task, gate }) => (
-          <GateReply key={`${task.task_id}/${gate.step}`} task={task} gate={gate} onChanged={(updated) => {
-            // A poll started before the send must not restore the previous turn.
-            latest.current++;
-            setTasks((current) => current.map((t) => t.task_id !== task.task_id ? t : {
-              ...t, gates: t.gates.map((g) => g.step_id === updated.step_id ? updated : g),
-            }));
-            setRefresh((n) => n + 1);
-          }} />
+          <GateReply key={`${task.task_id}/${gate.step}`} task={task} gate={gate}
+            reply={replyByGate.get(gateKey(task.task_id, gate.step_id))} onChanged={(updated, text) => {
+              // A poll started before the send must not restore the previous turn.
+              latest.current++;
+              pendingReplies.current = [
+                ...pendingReplies.current.filter((reply) => reply.taskId !== task.task_id || reply.stepId !== updated.step_id),
+                { taskId: task.task_id, stepId: updated.step_id, text, turns: updated.turns },
+              ];
+              setReplies(pendingReplies.current);
+              setTasks((current) => current.map((t) => t.task_id !== task.task_id ? t : {
+                ...t, gates: t.gates.map((g) => g.step_id === updated.step_id ? updated : g),
+              }));
+              setRefresh((n) => n + 1);
+            }} />
         ))}
       </div>
       {more > 0 && <a href="#tasks?group=needs_you" className={`inline-flex min-h-11 items-center text-sm ${linkClass}`}>
-        and {moreTasks > 0 ? "at least " : ""}{more} more
+        and {more} more
+      </a>}
+      {moreTasks > 0 && <a href="#tasks?group=needs_you" className={`inline-flex min-h-11 items-center text-sm ${linkClass}`}>
+        View {moreTasks} more {moreTasks === 1 ? "task" : "tasks"} needing you
       </a>}
     </section>
   );

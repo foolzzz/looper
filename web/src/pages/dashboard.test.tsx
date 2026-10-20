@@ -42,7 +42,7 @@ describe("Dashboard waiting gates", () => {
       spend_today: { since: "", provider_priced_usd: 0, equivalent_usd: 0, runs: 0, running: 0, unpriced_runs: 0 },
     } as unknown as Overview;
     vi.mocked(fetchOverview).mockImplementation(async () => ({ ...overview }));
-    vi.mocked(fetchTasks).mockImplementation(async () => ({ tasks: details, next_before: null, counts: { waiting_user: details.length } }));
+    vi.mocked(fetchTasks).mockImplementation(async () => ({ tasks: details.slice(0, 10), next_before: details.length > 10 ? "next-page" : null, counts: { waiting_user: details.length } }));
     vi.mocked(fetchTaskDetail).mockImplementation(async (id) => details.find((t) => t.task_id === id)!);
     container = document.createElement("div");
     document.body.append(container);
@@ -131,13 +131,26 @@ describe("Dashboard waiting gates", () => {
     expect(more?.textContent).toBe("and 3 more");
   });
 
-  it("removes a gate after a reply hands the turn to the Planner", async () => {
+  it("keeps the sent reply until the Planner answers, even outside the needs-you page", async () => {
     details = [task("a", [gate("g1")])];
     await show();
     const input = await answer("My answer");
     details = [task("a", [gate("g1", { state: "discussing", waiting_on: "planner" })])];
     vi.mocked(postGateMessage).mockResolvedValue({ gate: details[0].gates[0] } as GatePosted);
     await act(async () => input.form!.requestSubmit());
+    expect(section()!.textContent).toContain("You replied: My answer");
+    expect(section()!.textContent).toContain("Planner answering");
+    const pending = details[0];
+    details = [];
+    overview.tasks.needs_you = 0;
+    vi.mocked(fetchTaskDetail).mockResolvedValue(pending);
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(section()!.textContent).toContain("You replied: My answer");
+    expect(fetchTaskDetail).toHaveBeenLastCalledWith("a");
+    vi.mocked(fetchTaskDetail).mockResolvedValue(task("a", [gate("g1", {
+      state: "passed", waiting_on: null, turns: 1,
+    })]));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
     expect(section()).toBeNull();
   });
 
@@ -170,14 +183,100 @@ describe("Dashboard waiting gates", () => {
     expect(postGateMessage).not.toHaveBeenCalled();
   });
 
-  it("bounds per-task reads and labels unseen tasks as a lower bound on more gates", async () => {
-    details = Array.from({ length: 12 }, (_, i) => task(`task-${i}`, [gate(`g${i}`)]));
+  it.each(["user", "planner"] as const)("labels unread tasks separately from gates, even if they all wait for %s", async (waiting_on) => {
+    details = Array.from({ length: 12 }, (_, i) => task(`task-${i}`, [gate(`g${i}`, { state: "discussing", waiting_on: i < 10 ? "user" : waiting_on })]));
     overview.tasks.needs_you = 12;
     await show();
     expect(fetchTaskDetail).toHaveBeenCalledTimes(10);
     expect(section()!.querySelectorAll("article")).toHaveLength(10);
     expect(section()!.querySelector('a[href="#tasks?group=needs_you"]')?.textContent?.trim())
-      .toBe("and at least 2 more");
+      .toBe("View 2 more tasks needing you");
+  });
+
+  it("keeps the more-tasks entry when the first ten tasks all wait for the Planner", async () => {
+    details = Array.from({ length: 11 }, (_, i) => task(`task-${i}`, [gate(`g${i}`, {
+      state: "discussing", waiting_on: i < 10 ? "planner" : "user",
+    })]));
+    overview.tasks.needs_you = 11;
+    await show();
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(10);
+    expect(section()!.querySelectorAll("article")).toHaveLength(0);
+    expect(section()!.querySelector('a[href="#tasks?group=needs_you"]')?.textContent?.trim())
+      .toBe("View 1 more task needing you");
+  });
+
+  it("keeps known extra gates separate from unread task counts", async () => {
+    details = Array.from({ length: 12 }, (_, i) => task(`task-${i}`, [gate(`g${i}`)]));
+    details[0].gates.push(gate("extra-1"), gate("extra-2"));
+    overview.tasks.needs_you = 12;
+    await show();
+    expect(section()!.querySelectorAll("article")).toHaveLength(10);
+    const links = [...section()!.querySelectorAll('a[href="#tasks?group=needs_you"]')];
+    expect(links.map((link) => link.textContent?.trim())).toEqual([
+      "and 2 more", "View 2 more tasks needing you",
+    ]);
+  });
+
+  it("publishes slow reads and coalesces polls instead of invalidating the in-flight read", async () => {
+    details = [task("a", [gate("g1")])];
+    const releases: ((task: TaskDetail) => void)[] = [];
+    vi.mocked(fetchTaskDetail).mockImplementation(() => new Promise((resolve) => releases.push(resolve)));
+    await show();
+    for (let poll = 0; poll < 3; poll++) {
+      await act(async () => vi.advanceTimersByTimeAsync(5000));
+      expect(fetchTaskDetail).toHaveBeenCalledTimes(1);
+    }
+    await act(async () => releases[0](task("a", [gate("g1", { topic: "Slow result" })])));
+    expect(section()!.textContent).toContain("Slow result");
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
+    for (let poll = 0; poll < 2; poll++) {
+      await act(async () => vi.advanceTimersByTimeAsync(5000));
+      expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
+    }
+    await act(async () => releases[1](task("a", [gate("g1", { topic: "Next result" })])));
+    expect(section()!.textContent).toContain("Next result");
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a sent reply after a failed Planner turn and clears it after a successful answer", async () => {
+    details = [task("a", [gate("g1")])];
+    await show();
+    const input = await answer("My answer");
+    details = [task("a", [gate("g1", { state: "discussing", waiting_on: "planner" })])];
+    vi.mocked(postGateMessage).mockResolvedValue({ gate: details[0].gates[0] } as GatePosted);
+    await act(async () => input.form!.requestSubmit());
+    details = [task("a", [gate("g1", { state: "discussing", not_delivered: 1 })])];
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(section()!.textContent).toContain("You replied: My answer");
+    details = [task("a", [gate("g1", { state: "discussing", turns: 1, topic: "Follow-up" })])];
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(section()!.textContent).toContain("Follow-up");
+    expect(section()!.textContent).not.toContain("You replied:");
+  });
+
+  it("keeps a sent card when newer tasks fill the page and excludes its read task from the unread count", async () => {
+    details = [task("a", [gate("g1")])];
+    await show();
+    const input = await answer("My answer");
+    const pending = task("a", [gate("g1", { state: "discussing", waiting_on: "planner" })]);
+    details = [pending];
+    vi.mocked(postGateMessage).mockResolvedValue({ gate: pending.gates[0] } as GatePosted);
+    await act(async () => input.form!.requestSubmit());
+    details = [
+      ...Array.from({ length: 10 }, (_, i) => task(`new-${i}`, [gate(`new-g${i}`, {
+        opened_at: "2026-10-20T10:15:00Z",
+      })])),
+      pending, task("hidden", [gate("hidden", { state: "discussing", waiting_on: "planner" })]),
+    ];
+    overview.tasks.needs_you = 12;
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(section()!.querySelectorAll("article")).toHaveLength(10);
+    expect(section()!.textContent).toContain("You replied: My answer");
+    expect(fetchTaskDetail).toHaveBeenLastCalledWith("a");
+    const links = [...section()!.querySelectorAll('a[href="#tasks?group=needs_you"]')];
+    expect(links.map((link) => link.textContent?.trim())).toEqual([
+      "and 1 more", "View 1 more task needing you",
+    ]);
   });
 
   it("ignores a read started before a successful reply", async () => {
