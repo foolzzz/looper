@@ -64,6 +64,7 @@ from dataclasses import dataclass, field, fields
 from typing import Any
 
 from . import runtimes
+from .model_names import parse_model_name
 from .runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported
 
 NAME_MAX_CHARS = 240
@@ -628,6 +629,33 @@ def cost_warnings(profile: AgentProfile) -> list[str]:
     return warnings
 
 
+def _context_suffix_warnings(models: Iterable[str]) -> list[str]:
+    names = [name for name in dict.fromkeys(models) if parse_model_name(name).context_suffix is not None]
+    if not names:
+        return []
+    return [f"models {_listed(names)} carry a context suffix: this is a Claude Code convention; other runtimes "
+            "send these names verbatim to the API, which may reject them. Use suffix-free model names and set "
+            "context_window in the provider's catalog"]
+
+
+def provider_warnings(provider: ProviderSpec) -> list[str]:
+    """An API without Anthropic messages cannot rely on Claude Code interpreting its catalog's suffixes."""
+    if ApiProtocol.ANTHROPIC_MESSAGES in provider.protocols:
+        return []
+    return _context_suffix_warnings(name for model in provider.catalog
+                                    for name in (model.name, model.background_model) if name)
+
+
+def profile_warnings(profile: AgentProfile) -> list[str]:
+    """Warnings about this profile's prices and the model names its runtime sends."""
+    warnings = cost_warnings(profile)
+    if profile.runtime.type != runtimes.CLAUDE_CODE.type:
+        entry = profile.provider.catalog_model(profile.model)
+        warnings += _context_suffix_warnings([profile.model, *([entry.background_model]
+                                                              if entry and entry.background_model else [])])
+    return warnings
+
+
 # Where nothing selects a profile.
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}
 
@@ -854,7 +882,8 @@ async def _provider_answer(provider_id: str) -> dict[str, Any]:
     from ..db import profile_registry as db
 
     rows = {r["id"]: r for r in await db.list_providers()}
-    return {"provider": provider_view(rows[provider_id], await _logins([rows[provider_id]]))}
+    row = rows[provider_id]
+    return {"provider": provider_view(row, await _logins([row])), "warnings": provider_warnings(provider_spec(row))}
 
 
 async def create_provider(data: Any) -> dict[str, Any]:
@@ -975,13 +1004,13 @@ async def create_profile(data: Any) -> dict[str, Any]:
 
 
 async def _profile_answer(profile_id: str) -> dict[str, Any]:
-    """The profile, and what registering it as it is should warn about (``cost_warnings``)."""
+    """The profile, and what registering it as it is should warn about (``profile_warnings``)."""
     from ..db import profile_registry as db
 
     row = await _existing_profile(profile_id)
     uses = await db.profile_usage(profile_id)
     return {"profile": profile_view(row, uses.get(profile_id, NOT_USED)),
-            "warnings": cost_warnings(AgentProfile.from_row(row))}
+            "warnings": profile_warnings(AgentProfile.from_row(row))}
 
 
 async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:

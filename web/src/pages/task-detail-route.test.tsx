@@ -3,6 +3,7 @@ import { act } from "react";
 import { type Root, createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetailRoute } from "@/pages/task-detail";
+import { TasksPage } from "@/pages/tasks";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -84,6 +85,64 @@ describe("TaskDetailRoute", () => {
     expect(container.textContent).not.toContain("Build the A parser.");
   });
 
+  const phaseCard = () =>
+    [...container.querySelectorAll("p")].find((p) => p.textContent === "Phase" || p.textContent === "Last phase")?.parentElement;
+
+  const taskWith = (status: string, phase: string, topic?: string) => ({
+    ...detail("task-a"), status, group: status === "failed" ? "attention" : "in_progress", phase,
+    waits: topic ? [{
+      step: "w1", step_id: "step-w1", state: "waiting", outcome: null, topic,
+      check: null, every_seconds: null, opened_at: "2026-10-20T08:00:00Z", due_at: "2026-10-21T08:00:00Z",
+      deadline_at: "2026-10-27T08:00:00Z", next_check_at: null, last_checked_at: null,
+      checks: 0, last_result: null, last_output: "", last_error: "", resolution: "", notice: null,
+      closed_at: null, depends_on: [],
+    }] : [],
+  });
+  const stubTask = (body: ReturnType<typeof taskWith>) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-a")) return Response.json(body);
+      return Response.json(answer(url));
+    }));
+  };
+
+  it("shows the waiting phase while the task is waiting", async () => {
+    stubTask(taskWith("waiting", "executing", "CI finishes"));
+    await show("task-a");
+    expect(phaseCard()?.textContent).toContain("Waiting: CI finishes");
+    expect(phaseCard()?.querySelector(".animate-spin")).toBeNull();
+    // The header and the phase card both name the wait. The stored "executing" phase is not shown.
+    expect(container.textContent?.split("Waiting: CI finishes").length).toBe(3);
+    expect(container.textContent).not.toContain("Worker Executing");
+  });
+
+  it.each([
+    ["running", "executing", "Worker Executing"],
+    ["running", "planning", "Planning"],
+    ["running", "verifying", "Verifying"],
+    ["failed", "failed", "Failed"],
+  ])("keeps a %s task's %s phase (%s)", async (status, phase, label) => {
+    stubTask(taskWith(status, phase));
+    await show("task-a");
+    expect(phaseCard()?.textContent).toContain(label);
+    expect(container.textContent).not.toContain("Waiting:");
+  });
+
+  it("renders a wait step with its own badge in the steps list", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/tasks/task-a") return Response.json({ ...detail("task-a"), steps: [{
+        id: "step-w1", task_id: "task-a", step_key: "w1", step_index: 0, kind: "wait", status: "pending",
+        instruction: "Wait for a revision", depends_on: [], acceptance_criteria: [], target_files: [], review_roles: [],
+      }] });
+      return Response.json(answer(String(input)));
+    }));
+    await show("task-a");
+    const row = container.querySelector("#step-step-w1");
+    expect(row?.textContent).toContain("wait w1");
+    expect(row?.textContent).toContain("Not open yet");
+    expect(row?.querySelector(".lucide-hourglass")).not.toBeNull();
+  });
+
   it("does not show the previous task's data while the next one loads", async () => {
     await show("task-a");
     let release = () => {};
@@ -93,6 +152,35 @@ describe("TaskDetailRoute", () => {
     await act(async () => root.render(<TaskDetailRoute taskId="task-b" onBack={() => {}} />));
     expect(container.textContent).not.toContain("Build the A parser.");
     release();
+  });
+
+  it("opens a dashboard discussion link on its task and focuses the requested gate", async () => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    const closed = (step: string) => ({
+      step, step_id: step, state: "passed", waiting_on: null, topic: `Topic ${step}`,
+      agenda: [], summary: { decisions: [], assumptions: [], open: [] }, plan_change: null,
+      channel_posts: null, closed_at: null,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/tasks/task-a")) return Response.json({ ...detail("task-a"),
+        gates: [closed("choice"), closed("later")],
+        steps: [{ id: "choice", step_key: "choice", kind: "gate", step_index: 0, status: "verified", instruction: "Decide", depends_on: [] }],
+      });
+      if (url === "/api/tasks") return Response.json({ tasks: [], counts: {}, next_before: null });
+      return Response.json(answer(url));
+    }));
+    try {
+      await act(async () => root.render(<TasksPage sub="task-a?gate=choice" />));
+      await settle();
+      const target = container.querySelector<HTMLDetailsElement>("#gate-choice");
+      expect(target?.open).toBe(true);
+      expect(document.activeElement).toBe(target!.querySelector("summary"));
+      expect(scroll).toHaveBeenCalled();
+      expect(container.textContent).toContain("Build the A parser.");
+    } finally {
+      scroll.mockRestore();
+    }
   });
 
   it("clears the mounted room and reads from zero after Start over", async () => {

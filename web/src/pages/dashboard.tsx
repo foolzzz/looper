@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { DashboardGates } from "@/components/dashboard-gates";
 import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
 import {
   fetchOverview,
@@ -431,6 +432,7 @@ export function DashboardPage() {
         <Health unhealthy={overview.health.unhealthy} />
       </div>
       <TaskCounts tasks={overview.tasks} />
+      <DashboardGates needsYou={overview.tasks.needs_you} revision={overview} />
       <Agents agents={overview.agents} />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}

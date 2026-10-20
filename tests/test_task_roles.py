@@ -36,9 +36,27 @@ from looper.agents.tiers.planner_protocol import (
 from looper.agents.tiers.worker import RunOutcome, judge_result, run_outcome
 from tests.test_planner_agent import plan, reply, step
 
-# The built-in harness and the reply contract as main had them before roles: unchanged, byte for byte.
+# The built-in harness as main had it before roles. The reply-contract pin is that contract plus the PLAN
+# wait section below (how a wait is written, and how "waits" cancels one). Dropping the section is the previous pin.
 MAIN_HARNESS_SHA256 = "3140e3ed78dceb72af395f9d2e1d9438e1e0cae06abccad6f216f683ce95b340"
-MAIN_REPLY_CONTRACT_SHA256 = "eaf7d704210243ea908d0dac3b50ab65a5597f1bb35e609ef6eff5ebd4e3bed8"
+MAIN_REPLY_CONTRACT_SHA256 = "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588"
+_PREVIOUS_REPLY_CONTRACT_SHA256 = "eaf7d704210243ea908d0dac3b50ab65a5597f1bb35e609ef6eff5ebd4e3bed8"
+_PLAN_WAIT_SECTION = """\
+- Waits: when something outside the task must happen before some steps can
+  run (a pull request's author pushes fixes, CI finishes, another system's
+  job ends), a step may be a wait instead of a Worker that polls:
+  {"id": "w1", "kind": "wait", "topic": "...", "depends_on": ["s1"], "max_wait_seconds": 259200, "check": {"type": "github_pr", "repo": "owner/name", "number": 12, "ready_when": "head_changed"}, "every_seconds": 600}
+  It opens when the steps it depends on are done. Looper runs the check every
+  every_seconds (at least 300, default 600) with no turn of yours, and the
+  steps that depend on it start once it is ready; they read why. check:
+  github_pr ("ready_when": "head_changed", "checks_finished" or
+  "new_comments"). Without a check, give "not_before_seconds" (or
+  "not_before", an ISO time) and it ends then. Always set max_wait_seconds
+  (at most 604800): when it passes, the user is told and you get a [WAIT]
+  turn. Prefer a typed check. Never wait for what a step of this task does:
+  depend on that step. In [DECISION] and [CHAT], "waits": [{"id": "w1",
+  "action": "cancel", "resolution": "..."}] ends a wait now; it counts as done.
+"""
 
 TESTER = TaskRole("tester", RoleKind.WORK, 2, "You are the task's tester: write the tests first.")
 TASK = "## Task\nYour step: s1\nwrite the tests\nWorking directory: /w"
@@ -56,10 +74,13 @@ def _prompt(role: TaskRole = TESTER, harness: Harness = Harness(DEFAULT_HARNESS_
                              task_kind="work", task_id="t1", step_id="step-1")
 
 
-def test_the_built_in_harness_and_the_reply_contract_are_as_before() -> None:
+def test_the_built_in_harness_is_unchanged_and_the_reply_contract_adds_only_the_plan_wait_section() -> None:
     assert _sha(DEFAULT_HARNESS_PROMPT) == MAIN_HARNESS_SHA256
     assert DEFAULT_HARNESS_PROMPT == WORKING_STYLE.replace(
         "\n\n## Communication", f"\n\n## Boundaries\n{HARNESS_BOUNDARIES}\n\n## Communication")
+    assert _PLAN_WAIT_SECTION in REPLY_CONTRACT
+    assert ', or {"type": "command", "command": "..."}' not in REPLY_CONTRACT
+    assert _sha(REPLY_CONTRACT.replace(_PLAN_WAIT_SECTION, "", 1)) == _PREVIOUS_REPLY_CONTRACT_SHA256
     assert _sha(REPLY_CONTRACT) == _sha(reply_contract(roles=False)) == MAIN_REPLY_CONTRACT_SHA256
     assert "review_roles" not in REPLY_CONTRACT and "review_roles" in reply_contract(roles=True)
 

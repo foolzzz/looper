@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any
 
+from ..model_names import parse_model_name
 from ..run_usage import Price, Usage
 from . import AuthKind, CostSource, RunCost
 
@@ -141,13 +142,12 @@ CLAUDE_CODE_ALIASES: Mapping[str, str] = {
 }
 _CLAUDE_CODE = "claude-code"  # the Claude Code runtime's type, whose own login a provider may be
 
-_SUFFIX = re.compile(r"\[[^\]]*\]$")
 _DATE = re.compile(r"-\d{8}$")
 
 
 def base_model(name: str) -> str:
     """``name`` without a context-window suffix (``[1m]``) or a date suffix (``-20251001``), lower case."""
-    return _DATE.sub("", _SUFFIX.sub("", name.strip())).lower()
+    return _DATE.sub("", parse_model_name(name).base).lower()
 
 
 def model_price(provider: ProviderSpec, model: str) -> ModelPrice:

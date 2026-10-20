@@ -18,6 +18,48 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.12.4] - 2026-10-20
+
+### Highlights
+
+- **A Planner can wait for an external event inside its plan.** A `kind: "wait"` step waits for a time and an optional typed `github_pr` check, or a shell `command` only when the project's `wait_commands` is On (Off by default). Only dependent steps wait; readiness continues them without a model turn, Worker or Worker/Reviewer concurrency slot held for the wait. ([#247](https://github.com/foolzzz/looper/pull/247))
+
+### Behavior changes
+
+- **Waits have system limits and respect scheduled-run timeouts.** Settings → Scheduler → Waits sets the longest wait (built-in seven days) and shortest check interval (built-in 300 seconds); the Manager can view or change these with confirmation. A scheduled wait cannot outlast the run's remaining timeout. GitHub conditions cover head changes, finished checks and new comments; finished checks do not imply success. Command checks run as the server user in the task directory, require explicit project permission and are limited to 60 seconds and 2 KiB of retained output.
+- **Timeout, Resume now and Cancel have distinct outcomes.** Timeout records a notice, routes it to the originating Telegram/Lark chat when available, and gives the Planner a `[WAIT]` turn to extend, proceed, fail or adjust the plan. Resume now bypasses the condition without a model turn; Cancel requests a Planner decision. Dashboard actions apply only to waiting rows of active tasks. Saved waits recover after restart with their deadlines intact; stopped tasks are not checked or notified. A task with only waits reports `waiting` in In progress.
+- **The Planner reply contract and wait-step guide change what the model sees.** They add the wait shape, limits and DECISION/CHAT cancellation list; `[WAIT]` messages carry their own reply shape, check details and remaining scheduled-run time. Manager task reads include waits and step kinds; settings reads and the confirmed `waits` action expose limits. Dashboard chat, Telegram and Lark share the Manager tools; user wait actions remain on the dashboard. No new CLI command is added.
+
+### Validation
+
+- Codex review rounds for #247 ended not blocking. Opus Planner tier passed 40/40 on the 20 shared tasks; the broader run was 46/47, with the re-review wait miss fixed and a focused wait-task rerun passing 4/4. Opus Manager dialogs passed 54/54. A disposable real run with a sonnet Planner and haiku Workers covered a ready command check, timeout notice and `[WAIT]` turn, Resume now and Cancel, with no Worker running while waiting; headless screenshots covered waiting and timed-out steps. These are retained implementation reports, not runtime checks rerun for this draft.
+
+See the [bilingual release notes](docs/releases/v2.12.4.md) for activation, permissions, verification, rollback and validation limits.
+
+## [2.12.3] - 2026-10-20
+
+### Highlights
+
+- **Reply to user gates from the dashboard.** Waiting for you shows the task, topic, first open question and elapsed wait, with an inline reply and a link to the discussion. Up to ten cards are shown, with overflow links to Needs you tasks; a sent reply stays visible while the Planner owes it an answer. End discussion remains on the task page. ([#255](https://github.com/foolzzz/looper/pull/255))
+- **OpenCode and Sub2API provider presets, with models per API.** OpenCode uses its official inference endpoints and separates Responses/GPT, Chat Completions/DeepSeek, GLM and Kimi, and Anthropic/Claude catalogs. Sub2API defaults to a local self-hosted gateway; adjust its address and models to match the gateway. ([#257](https://github.com/foolzzz/looper/pull/257))
+- **DeepSeek Responses and Manager provider editing.** The DeepSeek preset offers Responses and Chat Completions at one base URL. The Manager can list presets, register from a preset and chosen API, and update a provider by id or name without accepting its key. Retained model names keep their catalog metadata; unknown vendor models and missing prices produce separate warnings. Thanks to @michaelx1993 for the report. ([#254](https://github.com/foolzzz/looper/pull/254), fixes [#251](https://github.com/foolzzz/looper/issues/251))
+
+### Behavior changes
+
+- **OpenAI-format preset models have no Claude Code context suffix.** GLM, Kimi and DeepSeek keep `[1m]` only on Anthropic-format entries, retaining context windows on suffix-free OpenAI entries. Kimi K3's preset window changes from 1,048,576 to 1,000,000. Existing providers and profiles are not rewritten. Saving a provider without Anthropic Messages or a non-Claude-Code profile warns about suffixed foreground/background names; the provider form displays saved warnings until acknowledged. ([#257](https://github.com/foolzzz/looper/pull/257), closes [#253](https://github.com/foolzzz/looper/issues/253))
+- **The Manager's provider tool changes what the model sees.** `looper_providers` describes preset discovery, registration, updates and warnings; its schema adds `update`, `provider`, `preset`, `api` and nullable `base_url`, and its answers include preset catalogs and warnings. Dashboard chat, Telegram and Lark share the change. Keys remain dashboard-only. There is no new CLI command. ([#254](https://github.com/foolzzz/looper/pull/254), [#257](https://github.com/foolzzz/looper/pull/257))
+
+### Fixes
+
+- **OMP failures carry the API error.** Available provider error text and HTTP status reach Manager, Planner and Worker/Reviewer failure reasons, with credential redaction before error-event recording and bounded displayed details. RPC error enrichment preserves session and usage data; streamed assistant text does not make an errored Manager turn successful. Startup failures name the runtime that could not start. ([#257](https://github.com/foolzzz/looper/pull/257))
+- **Waiting gate cards keep refreshing through slow reads and deleted tasks.** Refreshes queue instead of invalidating in-flight reads; one missing task does not block other cards, and pending reply receipts survive unrelated Planner turns. ([#255](https://github.com/foolzzz/looper/pull/255))
+
+### Validation
+
+- Codex review rounds for #255, #257 and #254 all ended not blocking after fixes. Opus Manager dialogs for #251 / #254 passed 54/54, two repetitions, on `b7500a892`, before the final review fixes. #255 has headless screenshots from a disposable server. These are retained implementation validations, not runtime checks rerun for this release draft; live provider calls and a full final-head prompt eval were not rerun.
+
+See the [bilingual release notes](docs/releases/v2.12.3.md) for activation, verification, authority boundaries, rollback and validation limits.
+
 ## [2.12.2] - 2026-10-19
 
 ### Highlights

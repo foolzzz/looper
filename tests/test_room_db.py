@@ -324,7 +324,7 @@ def test_a_room_turned_off_or_a_task_ended_takes_no_messages(monkeypatch: pytest
         assert await _refused(room.post("task-r", BACKEND, kind="info", body="x", to=["all"])) is ErrorCode.FORBIDDEN
         await pool.execute("UPDATE projects SET agent_room = NULL")
         await room.post("task-r", BACKEND, kind="info", body="x", to=["all"])
-        for status in ("executing", "verifying", "waiting_user"):  # the Planner's statuses for a running task
+        for status in ("executing", "verifying", "waiting_user", "waiting"):  # still running: its work, a gate, or a wait
             await pool.execute("UPDATE tasks SET status = $1", status)
             await room.inbox("task-r", BACKEND)
             await room.watch("task-r", FE, kind="announce")

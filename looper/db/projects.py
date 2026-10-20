@@ -25,7 +25,7 @@ from .tasks import ACTIVE_STATUSES
 # How the project's task agents run; NULL inherits (looper/agents/project_execution.py).
 EXECUTION_COLUMNS = (
     "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
-    "distill_lessons", "step_workspaces", "workspace_links", "max_step_retries", "planner_roles",
+    "distill_lessons", "step_workspaces", "workspace_links", "max_step_retries", "planner_roles", "wait_commands",
     "role_text_max_chars", "user_gates", "gate_reminder_hours", "agent_room", "room_post_per_minute",
     "room_broadcasts_per_run", "room_message_max_chars", "room_messages_per_task", "room_ping_pong_rounds",
     "room_wait_max_seconds", "room_consult_budget_usd", "room_consult_timeout_seconds", "room_consults_per_task",
