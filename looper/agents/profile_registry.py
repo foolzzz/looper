@@ -8,9 +8,9 @@ runtime compatibility. ``AgentProfile`` references a model id and runtime,
 with effort, agent teams and custom prompt as its only runtime options.
 
 Registry reads and account/profile writes use the normalized account,
-endpoint and model tables. The v2 launch functions still use
-``LegacyProviderSpec`` and ``LegacyAgentProfile`` until their migrations switch them. ``CatalogModel``
-also adapts saved model settings for the existing cost calculation. API keys
+endpoint and model tables. ``ResolvedAgentProfile`` snapshots that explicit
+binding for a launch; adapters receive a ``LegacyProviderSpec`` projection
+containing only its endpoint and model. ``CatalogModel`` also adapts saved model settings for the existing cost calculation. API keys
 remain separate from stored account metadata and are omitted from reprs.
 
 The built-ins exist on every installation and are read-only: the
@@ -202,8 +202,7 @@ BUILTIN_PROFILE = LegacyAgentProfile("agent-claude-code-opus", "claude-code/opus
                                "opus", agent_teams=True)
 
 
-# The v3 declarations below do not carry the v2 provider catalog or resolved
-# profile fields. Persistence and runtime binding switch in subsequent slices.
+# The normalized declarations keep account metadata, endpoint identity and model settings separate.
 
 
 def _entry_values(cls: type, entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -358,6 +357,15 @@ class ResolvedModel:
         if self.provider.auth is AuthKind.OAUTH and self.provider.oauth_runtime_type != runtime.type:
             raise RegistryError("a login provider can only use its own runtime")
 
+    def binding_provider(self) -> LegacyProviderSpec:
+        """The adapter input: exactly this endpoint and model, never an account catalog."""
+        model = CatalogModel(**{name: getattr(self.model, name) for name in MODEL_FIELDS})
+        return LegacyProviderSpec(
+            self.provider.id, self.provider.name, self.provider.auth, frozenset({self.model.protocol}),
+            self.provider.oauth_runtime_type, self.endpoint.base_url, (model,), self.provider.env,
+            self.provider.api_key,
+        )
+
 
 @dataclass(frozen=True)
 class AgentProfile:
@@ -399,6 +407,51 @@ class AgentProfile:
     def record(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "model_id": self.model_id, "custom_prompt": self.custom_prompt,
                 "runtime": {"id": self.runtime.id, "name": self.runtime.name, "type": self.runtime.type}}
+
+
+@dataclass(frozen=True, kw_only=True)
+class ResolvedAgentProfile(AgentProfile):
+    """A launch snapshot of the profile and its single explicit model binding."""
+
+    resolved_model: ResolvedModel
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.model_id != self.resolved_model.model.id:
+            raise RegistryError("profile and resolved model references must match")
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> ResolvedAgentProfile:
+        profile = AgentProfile.from_row(row)
+        model = ModelSpec.from_entry({name: row["model"][name] for name in ModelSpec.__dataclass_fields__})
+        resolved = ResolvedModel(model, provider_spec(row["provider"]), Endpoint.from_entry(row["endpoint"]))
+        return cls(profile.id, profile.name, profile.runtime, profile.model_id, profile.effort,
+                   profile.agent_teams, profile.custom_prompt, resolved_model=resolved)
+
+    @property
+    def model(self) -> str:
+        return self.resolved_model.model.name
+
+    @property
+    def provider(self) -> LegacyProviderSpec:
+        self.resolved_model.check_runtime(self.runtime)
+        return self.resolved_model.binding_provider()
+
+    def record(self) -> dict[str, Any]:
+        provider = self.resolved_model.provider
+        return {**super().record(), "model": self.model,
+                "provider": {"id": provider.id, "name": provider.name, "auth": provider.auth.value}}
+
+
+def builtin_resolved_profile() -> ResolvedAgentProfile:
+    """The offline fallback; normal loads read the built-in's current model settings from the DB."""
+    provider = ProviderSpec(BUILTIN_PROVIDER.id, BUILTIN_PROVIDER.name, VendorType.CLAUDE_SUBSCRIPTION,
+                            AuthKind.OAUTH, "claude-code", builtin=True)
+    model = ModelSpec("model-84f4b69e-12a7-5fd7-b665-a9b7d01568eb", provider.id, "opus",
+                      ApiProtocol.ANTHROPIC_MESSAGES, builtin=True)
+    return ResolvedAgentProfile(BUILTIN_PROFILE.id, BUILTIN_PROFILE.name, BUILTIN_RUNTIME, model.id,
+                                agent_teams=True,
+                                resolved_model=ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, "")))
 
 
 # --- Validation: each raises RegistryError ---

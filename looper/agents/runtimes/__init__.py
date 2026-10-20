@@ -70,7 +70,7 @@ from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
 from .channel import RunChannel as RunChannel, StreamChannel as StreamChannel
 
 if TYPE_CHECKING:
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
     from ..run_usage import Price, Usage
@@ -315,8 +315,11 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
-        """What points a run at ``provider``, ``model`` and ``effort`` beside the runtime's own flags; raises
-        ``RuntimeUnsupported`` when it cannot."""
+        """Bind the loader's exact endpoint and singleton model catalog, with its launch-only key.
+
+        ``ResolvedModel`` checks runtime compatibility before producing this input; adapters never select
+        another endpoint or model from the account. Raises ``RuntimeUnsupported`` when it cannot bind.
+        """
 
     @abstractmethod
     def launch_args(self, launch: Launch) -> list[str]:

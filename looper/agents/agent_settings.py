@@ -65,7 +65,9 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .profile_registry import BUILTIN_PROFILE, AgentProfile
+from .profile_registry import (
+    BUILTIN_PROFILE, PRICE_FIELDS, AgentProfile, ResolvedAgentProfile, ResolvedModel, builtin_resolved_profile,
+)
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
 from .runtimes import AuthKind, Capability, CostSource, ReadOnly
@@ -382,9 +384,16 @@ def _stored_profile(raw: Any) -> AgentProfile:
     """A stored profile (``db.profile_registry.PROFILE_JSON``). Whether it can run is checked when it launches
     (``load_agent_settings``), so a layer's profile is never silently replaced by an earlier layer's."""
     try:
-        return AgentProfile.from_row(raw)
+        profile = AgentProfile.from_row(raw)
     except (KeyError, TypeError, ValueError, AttributeError):
-        raise SettingsError(f"not an Agent Profile: {str(raw)[:80]}") from None
+        raise SettingsError("not a valid Agent Profile binding") from None
+    if isinstance(profile, AgentProfile):
+        try:
+            return ResolvedAgentProfile.from_row(raw)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            # Preserve the selected profile: an invalid model binding must fail the launch, not inherit another.
+            return profile
+    return profile
 
 
 def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict[str, Any]:
@@ -498,6 +507,11 @@ class AgentSettings:
     # Why the profile cannot run this role (its runtime and provider no longer pair, or the runtime lacks a
     # capability the role needs): the run fails with it rather than run another profile.
     profile_error: str | None = field(default=None, compare=False)
+
+    @property
+    def resolved_model(self) -> ResolvedModel:
+        """The exact model/account/endpoint snapshot prepared for this run."""
+        return self.profile.resolved_model
 
     @property
     def model(self) -> str:
@@ -715,8 +729,19 @@ async def load_agent_settings(
     except Exception as exc:
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
         # The built-in defaults of this role, including its built-in system prompt mode.
-        return replace(resolve(role, {}, project_id), error=f"cannot read the agent settings ({type(exc).__name__})")
+        return replace(resolve(role, {}, project_id), profile=builtin_resolved_profile(),
+                       error=f"cannot read the agent settings ({type(exc).__name__})")
     settings = resolve(role, index_layers(rows, project_id), project_id)
+    if settings.profile_source is Layer.BUILTIN:
+        from ..db import profile_registry
+
+        try:
+            row = await profile_registry.get_profile(BUILTIN_PROFILE.id)
+            profile = ResolvedAgentProfile.from_row(row) if row else builtin_resolved_profile()
+        except Exception as exc:
+            return replace(settings, profile=builtin_resolved_profile(),
+                           profile_error=f"cannot read the built-in model binding ({type(exc).__name__})")
+        settings = replace(settings, profile=profile)
     problem = profile_problem(settings.profile, AgentType(role))
     if problem is None and settings.profile.provider.auth is AuthKind.API_KEY:
         settings, problem = await _with_api_key(settings)
@@ -742,12 +767,16 @@ async def _with_api_key(settings: AgentSettings) -> tuple[AgentSettings, str | N
     try:
         key = await profile_registry.get_api_key(provider.id)
     except Exception as exc:
-        logger.warning("cannot read the API key of provider %s", provider.id, exc_info=True)
+        logger.warning("cannot read the API key of provider %s (%s)", provider.id, type(exc).__name__)
         return settings, f"Agent Profile {profile.name!r} cannot run: the API key of provider {provider.name!r} " \
                          f"could not be read ({type(exc).__name__})"
     if not key:
         return settings, f"Agent Profile {profile.name!r} cannot run: provider {provider.name!r} has no API key; " \
                          "set one in Settings"
+    if isinstance(profile, ResolvedAgentProfile):
+        resolved = profile.resolved_model
+        return replace(settings, profile=replace(profile, resolved_model=replace(
+            resolved, provider=replace(resolved.provider, api_key=key)))), None
     return replace(settings, profile=replace(profile, provider=replace(provider, api_key=key))), None
 
 
@@ -756,11 +785,16 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
     from .profile_registry import RegistryError, check_pairing, check_roles
     from .runtimes import ADAPTERS
 
+    if isinstance(profile, AgentProfile) and not isinstance(profile, ResolvedAgentProfile):
+        return f"Agent Profile {profile.name!r} cannot run: its model binding is missing or invalid"
     if profile.runtime.type not in ADAPTERS:
         return (f"Agent Profile {profile.name!r} runs on a {profile.runtime.type!r} runtime, which this version "
                 "cannot run")
     try:
-        check_pairing(profile.runtime, profile.provider, profile.model)
+        if isinstance(profile, ResolvedAgentProfile):
+            profile.resolved_model.check_runtime(profile.runtime)
+        else:
+            check_pairing(profile.runtime, profile.provider, profile.model)
         check_roles(profile, [role.value])
     except RegistryError as exc:
         return f"Agent Profile {profile.name!r} cannot run: {exc}"
@@ -866,20 +900,42 @@ class Launch:
 
     def args(self) -> list[str]:
         """The runtime's flags for these settings, installed items and knowledge (``RuntimeAdapter.launch_args``)."""
+        self._check_binding()
         return self.runtime.launch_args(self)
 
     def environment(self) -> dict[str, str]:
         """The subprocess environment: ``child_env.inherited()`` with the run's own variables; never the server's whole
         environment."""
+        self._check_binding()
         return self.runtime.environment(self)
+
+    def _check_binding(self) -> None:
+        from .runtimes import RuntimeUnsupported
+
+        if self.settings.profile_error:
+            raise RuntimeUnsupported(self.settings.profile_error)
+        if isinstance(self.profile, ResolvedAgentProfile):
+            self.profile.resolved_model.check_runtime(self.profile.runtime)
 
     @property
     def binding_sha256(self) -> str:
         """One hash of what points the run at its provider (``RuntimeAdapter.bind_provider``): a resident process
         whose provider, key or binding changed is started again."""
+        self._check_binding()
         binding = self.runtime.bind_provider(self.profile.provider, self.model, self.effort)
-        return sha256_text(json.dumps([self.profile.provider.id, list(binding.args), sorted(binding.env),
-                                       list(binding.unset)], ensure_ascii=False, separators=(",", ":")))
+        model = self.profile.resolved_model if isinstance(self.profile, ResolvedAgentProfile) else None
+        effective = None if model is None else [
+            model.model.name, model.model.protocol.value, model.model.context_window, model.model.efforts,
+            model.model.background_model, model.endpoint.base_url, model.endpoint.use_runtime_default,
+            # Resident sessions retain their pricer until restarted; refresh it for the next turn as well.
+            [getattr(model.model, name) for name in PRICE_FIELDS],
+        ]
+        # Internal comparison only: never record or log this secret-sensitive digest.
+        return sha256_text(json.dumps([
+            self.profile.runtime.type, self.profile.provider.id, self.model, self.effort,
+            self.system_prompt_mode.value, self.agent_teams, self.profile.custom_prompt, effective,
+            list(binding.args), sorted(binding.env), list(binding.unset),
+        ], ensure_ascii=False, separators=(",", ":")))
 
     @property
     def cost_source(self) -> CostSource:
