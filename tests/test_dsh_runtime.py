@@ -1,10 +1,12 @@
 """DeepSeek policy, without registering an executable DSH adapter."""
 
+import asyncio
 import hashlib
 import json
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -476,3 +478,247 @@ def test_dsh_mcp_rejects_duplicate_or_missing_platform_bridge(tmp_path, monkeypa
     source.write_text(raw)
     with pytest.raises(RuntimeUnsupported):
         dsh.mcp_config(AgentLibrary(mcp_config=str(source), role="planner"))
+
+
+DSH_JSON = Path(__file__).parent / "fixtures" / "dsh_json"
+
+
+async def _dsh_output(tmp_path, payload, *, exit_code=0, verify_exit=True, cancelled=False):
+    """Replay synthetic bytes through a real pipe, with a small reader limit to exercise long finals."""
+    from looper.agents.runtimes.dsh import DshStream
+
+    source = tmp_path / "synthetic.jsonl"
+    source.write_bytes(payload)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-I", "-c",
+        "import os,pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes()); "
+        "sys.stdout.buffer.flush(); code=int(sys.argv[2]); "
+        "os.kill(os.getpid(), -code) if code < 0 else sys.exit(code)",
+        str(source), str(exit_code), stdout=asyncio.subprocess.PIPE, cwd=tmp_path,
+        env={"HOME": str(tmp_path)}, limit=1024,
+    )
+    stream = DshStream(model="deepseek-flash")
+    if cancelled:
+        stream.cancel()
+    try:
+        events = [event async for event in stream.events(process.stdout, process=process if verify_exit else None)]
+        await process.wait()
+        return events
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+
+
+def _dsh_replay(tmp_path, fixture, **kwargs):
+    return asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, (DSH_JSON / fixture).read_bytes(), **kwargs), 5))
+
+
+def _dsh_result(events):
+    results = [event for event in events if event["type"] == "result"]
+    assert len(results) == 1
+    assert events[-1] == results[0]
+    return results[0]
+
+
+def test_dsh_projects_headless_events_and_only_final_is_the_result(tmp_path):
+    from looper.agents.claude_cli import answer_text
+
+    events = _dsh_replay(tmp_path, "success.jsonl")
+    assert events[0] == {"type": "system", "subtype": "init", "session_id": "synthetic-session",
+                         "runtime": "dsh", "model": "deepseek-flash", "cwd": "/synthetic/project"}
+    content = [block for event in events if event["type"] == "assistant" for block in event["message"]["content"]]
+    assert {"type": "thinking", "thinking": "Plan the synthetic check."} in content
+    assert {"type": "text", "text": "Checking progress; this is not the answer."} in content
+    calls = [block for block in content if block["type"] == "tool_use"]
+    assert calls == [{"type": "tool_use", "id": "call-a", "name": "read", "input": {"path": "sample.txt"}},
+                     {"type": "tool_use", "id": "call-b", "name": "shell", "input": "invalid arguments"}]
+    replies = [event["message"]["content"][0] for event in events if event["type"] == "user"]
+    assert replies == [{"type": "tool_result", "tool_use_id": "call-b", "content": "synthetic tool failure", "is_error": True},
+                       {"type": "tool_result", "tool_use_id": "call-a", "content": "synthetic contents", "is_error": False}]
+    assert all(event["session_id"] == "synthetic-session" for event in events)
+    result = _dsh_result(events)
+    assert result["subtype"] == "success" and result["is_error"] is False
+    assert result["result"] == "最终答复 only."
+    assert answer_text(result, ["earlier progress"]) == result["result"]
+    assert result["stop_reason"] == {"kind": "completed"}
+
+
+@pytest.mark.parametrize(("fixture", "exit_code", "error"), [
+    ("error_final.jsonl", 0, "synthetic provider failed"),
+    ("error_final.jsonl", 1, "exit code 1"),
+    ("only_error.jsonl", 0, "synthetic startup failure"),
+    ("only_error.jsonl", 1, "synthetic startup failure"),
+    ("bad_json.jsonl", 0, "JSON"),
+    ("no_final.jsonl", 0, "final"),
+    ("success.jsonl", 3, "exit code 3"),
+    ("success.jsonl", -15, "exit code -15"),
+])
+def test_dsh_terminal_failures_keep_original_final_and_never_succeed(tmp_path, fixture, exit_code, error):
+    result = _dsh_result(_dsh_replay(tmp_path, fixture, exit_code=exit_code))
+    assert result["subtype"] == "error_during_execution" and result["is_error"] is True
+    assert error in "\n".join(result["errors"])
+    finals = [json.loads(line)["text"] for line in (DSH_JSON / fixture).read_text().splitlines()
+              if line.startswith("{\"type\": \"final\"")]
+    assert result["result"] == (finals[-1] if finals else "")
+
+
+@pytest.mark.parametrize("reason", [None, "completed", {}, {"kind": "cancelled"}, {"kind": "unknown"}])
+def test_dsh_requires_a_completed_reason_object(tmp_path, reason):
+    payload = "\n".join(json.dumps(event) for event in [
+        {"type": "status", "phase": "turn_end", "reason": reason}, {"type": "final", "text": "kept final"},
+    ]).encode()
+    events = asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5))
+    result = _dsh_result(events)
+    assert result["is_error"] is True
+    assert result["result"] == "kept final"
+
+
+@pytest.mark.parametrize("line", [b'[]', b'null', b'{"type":"text","text":', b'\xff',
+                                  b'{"type":"future","value":NaN}',
+                                  b'{"type":"final","text":null}', b'{"type":"error"}'])
+def test_dsh_malformed_records_are_errors_even_if_a_valid_final_follows(tmp_path, line):
+    payload = line + b'\n' + (DSH_JSON / "success.jsonl").read_bytes()
+    result = _dsh_result(asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5)))
+    assert result["is_error"] is True
+    assert result["result"] == "最终答复 only."
+
+
+@pytest.mark.parametrize("field", ["type", "payload"])
+def test_dsh_unknown_events_are_bounded_diagnostics_and_do_not_invent_compaction(tmp_path, field):
+    unknown = json.dumps({"type": "future", field: "synthetic" * 10000}).encode() + b'\n'
+    events = asyncio.run(asyncio.wait_for(
+        _dsh_output(tmp_path, unknown * 40 + (DSH_JSON / "unknown.jsonl").read_bytes()), 5))
+    diagnostics = [event for event in events if event.get("subtype") == "dsh_event"]
+    unknowns = [event for event in diagnostics if event.get("event_type") != "status"]
+    assert 1 <= len(unknowns) <= 8
+    assert all(len(json.dumps(event, ensure_ascii=False).encode()) < 4096 for event in diagnostics)
+    assert not any(event.get("subtype") == "compact_boundary" for event in events)
+    result = _dsh_result(events)
+    assert result["is_error"] is False
+    assert result["result"] == "Answer after unknown events."
+
+
+def test_dsh_unknown_diagnostic_limit_does_not_drop_known_truncation_markers(tmp_path):
+    payload = b'{"type":"future"}\n' * 20 + (DSH_JSON / "truncated.jsonl").read_bytes()
+    events = asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5))
+    assert len([event for event in events if event.get("truncated") is True]) == 7
+    assert _dsh_result(events)["is_error"] is False
+
+
+def test_dsh_errors_are_bounded_and_do_not_replace_a_preceding_final(tmp_path):
+    error = json.dumps({"type": "error", "message": "synthetic failure" * 1000}).encode() + b'\n'
+    payload = (DSH_JSON / "success.jsonl").read_bytes() + error * 40
+    events = asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5))
+    result = _dsh_result(events)
+    assert result["is_error"] is True and result["result"] == "最终答复 only."
+    assert 1 <= len(result["errors"]) <= 8
+    assert all(len(message.encode()) <= 2048 for message in result["errors"])
+
+
+@pytest.mark.parametrize("payload", [b'', b'{"type":"final","text":"kept"}\n',
+                                    b'{"type":"status","phase":"turn_end","truncated":true}\n'
+                                    b'{"type":"final","text":"kept"}\n',
+                                    b'{"type":"status","phase":"turn_end","reason":{"kind":"completed"}}\n'
+                                    b'{"type":"final","text":"cut","truncated":true}\n'])
+def test_dsh_incomplete_terminal_evidence_fails_even_with_zero_exit(tmp_path, payload):
+    result = _dsh_result(asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5)))
+    assert result["is_error"] is True
+
+
+def test_dsh_a_new_turn_cannot_reuse_a_previous_turns_completed_reason(tmp_path):
+    payload = b'{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"completed"}}\n' \
+              b'{"type":"status","phase":"turn_start","turn":2}\n' \
+              b'{"type":"final","text":"unterminated second turn"}\n'
+    result = _dsh_result(asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5)))
+    assert result["is_error"] is True
+    assert result["result"] == "unterminated second turn"
+
+
+def test_dsh_empty_final_stays_empty_and_duplicate_final_does_not_replace_it(tmp_path):
+    payload = b'{"type":"text","text":"progress"}\n' \
+              b'{"type":"status","phase":"turn_end","reason":{"kind":"completed"}}\n' \
+              b'{"type":"final","text":""}\n'
+    result = _dsh_result(asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5)))
+    assert result["is_error"] is False and result["result"] == ""
+    payload += b'{"type":"final","text":"duplicate"}\n'
+    result = _dsh_result(asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5)))
+    assert result["is_error"] is True and result["result"] == ""
+
+
+def test_dsh_keeps_truncation_markers_and_does_not_invent_dropped_tool_input(tmp_path):
+    events = _dsh_replay(tmp_path, "truncated.jsonl")
+    truncated = [event for event in events if event.get("truncated") is True]
+    assert len(truncated) == 7
+    blocks = [block for event in truncated if event["type"] in ("assistant", "user")
+              for block in event["message"]["content"]]
+    assert all(block.get("truncated") is True for block in blocks)
+    call = next(block for block in blocks if block["type"] == "tool_use")
+    assert call["id"] == "cut-call" and call.get("input") is None
+    assert _dsh_result(events)["is_error"] is False
+
+
+@pytest.mark.parametrize("suffix", [b'\n', b''])
+def test_dsh_reads_complete_large_final_without_line_limit_or_required_newline(tmp_path, suffix):
+    payload = (DSH_JSON / "large_final.jsonl").read_bytes().rstrip(b'\n') + suffix
+    final = json.loads(payload.splitlines()[-1])["text"]
+    assert len(final.encode()) > 32 * 1024
+    result = _dsh_result(asyncio.run(asyncio.wait_for(_dsh_output(tmp_path, payload), 5)))
+    assert result["is_error"] is False and result["result"] == final
+
+
+@pytest.mark.parametrize(("verify_exit", "cancelled"), [(False, False), (True, True)])
+def test_dsh_unverified_exit_or_cancelled_run_cannot_succeed_with_a_late_final(tmp_path, verify_exit, cancelled):
+    result = _dsh_result(_dsh_replay(tmp_path, "success.jsonl", verify_exit=verify_exit, cancelled=cancelled))
+    assert result["is_error"] is True
+    assert ("cancel" if cancelled else "exit") in "\n".join(result["errors"]).lower()
+    assert result["result"] == "最终答复 only."
+
+
+@pytest.mark.parametrize(("exit_code", "cancelled"), [(0, False), (7, False), (0, True)])
+def test_dsh_waits_for_process_exit_after_stdout_eof_before_publishing_result(tmp_path, exit_code, cancelled):
+    async def check():
+        from looper.agents.runtimes.dsh import DshStream
+
+        source = tmp_path / "source.jsonl"
+        source.write_bytes((DSH_JSON / "success.jsonl").read_bytes())
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-I", "-c",
+            "import os,pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes()); "
+            "sys.stdout.buffer.flush(); os.close(1); sys.stderr.write(\"ready\\n\"); sys.stderr.flush(); "
+            "sys.stdin.buffer.read(1); sys.exit(int(sys.argv[2]))",
+            str(source), str(exit_code), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, env={"HOME": str(tmp_path)}, cwd=tmp_path,
+        )
+        collected = []
+        stream = DshStream()
+
+        async def collect():
+            async for event in stream.events(process.stdout, process=process):
+                collected.append(event)
+
+        reader = asyncio.create_task(collect())
+        try:
+            assert await process.stderr.readline() == b'ready\n'
+            # Consume progress before allowing the child to exit; final must stay buffered.
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(reader), 0.05)
+            assert collected
+            assert not any(event["type"] == "result" for event in collected)
+            assert not reader.done() and process.returncode is None
+            if cancelled:
+                stream.cancel()
+            process.stdin.write(b'x')
+            await process.stdin.drain()
+            process.stdin.close()
+            await reader
+            result = _dsh_result(collected)
+            assert result["is_error"] is (cancelled or exit_code != 0)
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(check(), 5))

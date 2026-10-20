@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -45,6 +46,149 @@ _DIRECTORY_VARS = frozenset({
     "PI_CONFIG_FILES", "AGENTS_HOME", "AGENT_HOME", "AGENT_DIR", "AGENT_DIRS",
 })
 _OWNED_PREFIXES = ("DSH_", "XDG_", "DEEPSEEK_", "ANTHROPIC_", "OPENAI_")
+
+
+@dataclass
+class DshStream:
+    """Project headless JSONL, withholding the result until EOF and a verified process exit.
+
+    Fields follow the installed ``dsh-headless/json-stream`` projection, not Session's durable log.
+    ``final`` is lossless answer text, even on failure. It is never itself success evidence.
+    The caller owns process cleanup, timeout and stderr draining; without ``process`` this parser
+    fails closed. The executable adapter/channel and resident integration are not registered yet.
+    Consumers must keep an empty result empty; ``answer_text``'s generic fallback would reuse progress.
+    """
+
+    model: str | None = None
+    session_id: str | None = None
+    _final: str | None = field(default=None, init=False)
+    _reason: dict[str, Any] | None = field(default=None, init=False)
+    _errors: list[str] = field(default_factory=list, init=False)
+    _diagnostics: int = field(default=0, init=False)
+    _cancelled: bool = field(default=False, init=False)
+
+    _DIAGNOSTIC_LIMIT: ClassVar[int] = 8
+    _DIAGNOSTIC_BYTES: ClassVar[int] = 2048
+
+    def cancel(self) -> None:
+        """Latch a caller's stop before terminating the process; a late final cannot clear it."""
+        self._cancelled = True
+
+    async def events(self, stdout: asyncio.StreamReader, *,
+                     process: asyncio.subprocess.Process | None = None) -> AsyncIterator[dict[str, Any]]:
+        from ..claude_cli import iter_lines
+
+        def invalid_constant(value: str) -> None:
+            raise ValueError(f"Invalid JSON constant: {value}")
+
+        try:
+            # stream_events skips malformed JSON; headless must instead report it as a failed run.
+            # iter_lines also handles the unbounded final, beyond StreamReader's line limit.
+            async for line in iter_lines(stdout):
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line, parse_constant=invalid_constant)
+                    if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
+                        raise ValueError("expected an event object")
+                except (ValueError, UnicodeError):
+                    self._error("Invalid DSH JSON event")
+                    continue
+                for event in self.translate(raw):
+                    yield event
+            returncode = await process.wait() if process is not None else None
+        except asyncio.CancelledError:
+            self.cancel()
+            raise
+        yield self._result(returncode)
+
+    def _base(self) -> dict[str, Any]:
+        return {"session_id": self.session_id} if self.session_id else {}
+
+    def _bounded(self, text: str) -> str:
+        return text.encode("utf-8", errors="replace")[:self._DIAGNOSTIC_BYTES].decode("utf-8", errors="ignore")
+
+    def _error(self, message: str) -> None:
+        if len(self._errors) < self._DIAGNOSTIC_LIMIT:
+            self._errors.append(self._bounded(message))
+
+    def _diagnostic(self, raw: Mapping[str, Any], *, limited: bool = False) -> list[dict[str, Any]]:
+        if limited:
+            if self._diagnostics >= self._DIAGNOSTIC_LIMIT:
+                return []
+            self._diagnostics += 1
+        text = json.dumps(raw, ensure_ascii=False)
+        preview = self._bounded(text)
+        return [{"type": "system", "subtype": "dsh_event", **self._base(),
+                 "event_type": str(raw.get("type"))[:64], "event": preview,
+                 "truncated": raw.get("truncated") is True or preview != text}]
+
+    def _assistant(self, block: dict[str, Any], flags: dict[str, Any]) -> list[dict[str, Any]]:
+        return [{"type": "assistant", **self._base(), **flags, "parent_tool_use_id": None,
+                 "message": {"role": "assistant", "model": self.model, "content": [{**block, **flags}]}}]
+
+    def translate(self, raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Project one committed record. Only ``events`` publishes a terminal result."""
+        kind = raw.get("type")
+        flags = {"truncated": True} if raw.get("truncated") is True else {}
+        if kind == "final":
+            if not isinstance(raw.get("text"), str):
+                self._error("Invalid DSH final text")
+            elif self._final is not None:
+                self._error("Duplicate DSH final")
+            else:
+                self._final = raw["text"]
+            if flags:
+                self._error("DSH final is truncated")
+            return []
+        if kind == "error":
+            self._error(str(raw.get("message") or "DSH error event without a message"))
+            return self._diagnostic(raw, limited=True)
+        if kind == "status":
+            phase = raw.get("phase")
+            if phase == "turn_start":
+                self._reason = None
+            elif phase == "turn_end":
+                reason = raw.get("reason")
+                self._reason = dict(reason) if isinstance(reason, Mapping) else None
+            return self._diagnostic(raw, limited=phase not in ("turn_start", "step_start", "step_end", "turn_end"))
+        if kind == "session" and isinstance(raw.get("sessionId"), str) and raw["sessionId"]:
+            self.session_id = raw["sessionId"]
+            return [{"type": "system", "subtype": "init", **self._base(), **flags, "runtime": "dsh",
+                     "model": self.model, "cwd": raw.get("cwd")}]
+        if kind in ("text", "thinking") and isinstance(raw.get("text"), str):
+            return self._assistant({"type": kind, "thinking" if kind == "thinking" else "text": raw["text"]}, flags)
+        if kind == "tool_call" and isinstance(raw.get("callId"), str) and isinstance(raw.get("tool"), str):
+            if "input" in raw or flags:
+                # Invalid JSON arguments remain a string in headless; a bounded event can omit input.
+                return self._assistant({"type": "tool_use", "id": raw["callId"], "name": raw["tool"],
+                                        "input": raw.get("input")}, flags)
+        if kind == "tool_result" and isinstance(raw.get("callId"), str) and raw.get("status") in ("completed", "error"):
+            if isinstance(raw.get("result"), str) or flags:
+                return [{"type": "user", **self._base(), **flags, "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": raw["callId"], "content": raw.get("result"),
+                     "is_error": raw["status"] == "error", **flags}]}}]
+        if kind in ("session", "text", "thinking", "tool_call", "tool_result") and not flags:
+            self._error(f"Invalid DSH {kind} event")
+        # Unknown types are diagnostic only; never infer a compaction boundary from them.
+        # Bounded ordinary records may legitimately retain only their type and truncated flag.
+        return self._diagnostic(raw, limited=kind not in ("session", "text", "thinking", "tool_call", "tool_result"))
+
+    def _result(self, returncode: int | None) -> dict[str, Any]:
+        errors = list(self._errors)
+        if self._cancelled:
+            errors.append("DSH run was cancelled")
+        if returncode is None:
+            errors.append("DSH process exit was not verified")
+        elif returncode != 0:
+            errors.append(f"DSH process failed with exit code {returncode}")
+        if self._final is None:
+            errors.append("DSH stream ended without final")
+        if not self._reason or self._reason.get("kind") != "completed":
+            errors.append("DSH turn did not complete: " + self._bounded(json.dumps(self._reason, ensure_ascii=False)))
+        return {"type": "result", "subtype": "error_during_execution" if errors else "success",
+                "is_error": bool(errors), "result": self._final if self._final is not None else "",
+                **self._base(), "stop_reason": self._reason, **({"errors": errors} if errors else {})}
 
 
 class DshRuntime(RuntimeAdapter):
