@@ -1,4 +1,4 @@
-"""Argument and budget boundaries of the Pi Responses eval script.
+"""Argument and budget boundaries of the Pi provider eval scripts.
 
 A fake ``uv`` records every invocation. Missing keys, endpoints and budgets
 must fail before that ``uv`` runs. The script is not a new eval engine.
@@ -48,6 +48,8 @@ if destination:
 delay = os.environ.get("PI_EVAL_FAKE_UV_SLEEP")
 if delay:
     time.sleep(float(delay))
+if os.environ.get("PI_EVAL_FAKE_UV_EXIT"):
+    sys.exit(int(os.environ["PI_EVAL_FAKE_UV_EXIT"]))
 """
 
 
@@ -89,9 +91,10 @@ def _environment(tmp_path: Path, **updates: str | None) -> dict[str, str]:
     return env
 
 
-def _run(tmp_path: Path, env: dict[str, str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
+def _run(tmp_path: Path, env: dict[str, str], *, timeout: float = 30,
+         script: Path = SCRIPT) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(SCRIPT)], cwd=tmp_path, env=env, text=True,
+        ["bash", str(script)], cwd=tmp_path, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
     )
 
@@ -268,3 +271,157 @@ def test_zero_catalog_cost_is_not_recorded_as_free(tmp_path: Path) -> None:
     assert "catalog cost 0 is not a free run" in gaps
     assert "readback agent: pi/cpa/gpt-6.1-sol" in gaps
     assert "outcome pass" in gaps
+
+
+DEEPSEEK_SCRIPT = REPO / "examples" / "pi" / "eval-deepseek.sh"
+DEEPSEEK_STATE = REPO / ".local" / "pi-eval-deepseek"
+DEEPSEEK_EXAMPLE = REPO / "evals" / "agents" / "pi-deepseek.example.json"
+DEEPSEEK_AGENT = "pi/deepseek/deepseek-flash"
+
+
+@pytest.fixture
+def deepseek_env(tmp_path: Path):
+    env = _environment(tmp_path, DEEPSEEK_API_KEY=KEY, PI_EVAL_API_KEY="wrong-provider-key",
+                       PI_EVAL_BASE_URL="https://wrong-provider.invalid/v1")
+    # Emit one priced result into the requested output directory, like the real runner.
+    uv = tmp_path / "bin" / "uv"
+    uv.write_text(FAKE_UV + '''
+if os.environ.get("PI_EVAL_FAKE_NO_RESULT") != "1":
+    args = sys.argv[1:]
+    phase = "dialogs" if "dialogs" in args else "tasks"
+    body = json.loads(os.environ.get("PI_EVAL_FAKE_RESULT", "null"))
+    if body is None:
+        body = {"agent": "pi/deepseek/deepseek-flash", "total_cost_usd": 0.2,
+                phase: [{"id": "status" if phase == "dialogs" else "single_step", "rep": 1,
+                         "outcome": "pass", "cost_usd": 0.2,
+                         "cost_basis": {"provider_price": 1, "unpriced": 0},
+                         "tokens": {"input": 11, "cache_read": 5, "output": 3}}]}
+    out = Path(args[args.index("--out-dir") + 1])
+    out.mkdir(parents=True, exist_ok=True)
+    (out / (phase + ".json")).write_text(json.dumps(body))
+''', encoding="utf-8")
+    if DEEPSEEK_STATE.exists():
+        shutil.rmtree(DEEPSEEK_STATE)
+    yield env
+    if DEEPSEEK_STATE.exists():
+        shutil.rmtree(DEEPSEEK_STATE)
+
+
+def test_deepseek_commands_use_chat_spec_and_fresh_results(tmp_path: Path, deepseek_env) -> None:
+    before = DEEPSEEK_EXAMPLE.read_bytes()
+    FIXTURE_JSON.parent.mkdir(parents=True, exist_ok=True)
+    FIXTURE_JSON.write_text(json.dumps({"agent": "pi/cpa/gpt-6.1-sol", "total_cost_usd": 999}))
+    for _ in range(2):
+        completed = _run(tmp_path, deepseek_env, script=DEEPSEEK_SCRIPT)
+        assert completed.returncode == 0, completed.stderr
+    invocations = _invocations(tmp_path)
+    assert len(invocations) == 4
+    outputs = []
+    for pair in (invocations[:2], invocations[2:]):
+        tasks, dialogs = _command(pair, "run"), _command(pair, "dialogs")
+        outputs.append(_flag(tasks, "--out-dir"))
+        assert _flag(tasks, "--out-dir") == _flag(dialogs, "--out-dir")
+        assert Path(outputs[-1]).is_relative_to(DEEPSEEK_STATE)
+        assert _flag(tasks, "--tasks") == TASKS
+        assert _flag(dialogs, "--dialogs") == DIALOGS
+        assert float(_flag(tasks, "--total-cap-usd")) == float(TOTAL)
+        assert float(_flag(dialogs, "--total-cap-usd")) == pytest.approx(float(TOTAL) - 0.2)
+        for argv in (tasks, dialogs):
+            assert _flag(argv, "--mode") == "real"
+            assert _flag(argv, "--reps") == "2"
+            assert _flag(argv, "--jobs") == "3"
+            assert _flag(argv, "--case-budget-usd") == CASE
+            assert _flag(argv, "--max-budget-usd") == CASE
+            assert _flag(argv, "--pg-url") == PG_URL
+            assert "--baseline" not in argv
+            assert KEY not in " ".join(argv)
+            spec = json.loads(Path(_flag(argv, "--register-agent")).read_text())
+            assert spec["runtime"] == {"type": "pi"}
+            assert spec["agent"] == {"name": DEEPSEEK_AGENT, "model": "deepseek-flash"}
+            assert spec["provider"]["protocols"] == ["openai-chat"]
+            assert spec["provider"]["auth"] == "api_key"
+            assert spec["provider"]["base_url"] == "https://api.deepseek.com"
+            assert spec["provider"]["api_key_env"] == "DEEPSEEK_API_KEY"
+            assert KEY not in json.dumps(spec)
+    assert outputs[0] != outputs[1]
+    assert all(record["telegram"] == "" for record in invocations)
+    assert DEEPSEEK_EXAMPLE.read_bytes() == before
+    gaps = (DEEPSEEK_STATE / "gaps.txt").read_text()
+    assert "readback agent: pi/cpa/" not in gaps
+    assert "usage input 11 cache_read 5 output 3" in gaps
+    for term in ("steering", "session", "cancel", "schema", "read_only", "CPA", "provider/API",
+                 "input", "cache_read", "output", "pricing", "unverified"):
+        assert term in gaps
+    subprocess.run(["bash", "-n", str(DEEPSEEK_SCRIPT)], check=True, timeout=5)
+
+
+@pytest.mark.parametrize("updates", [
+    {"DEEPSEEK_API_KEY": None}, {"DEEPSEEK_API_KEY": ""}, {"DEEPSEEK_API_KEY": "   "},
+    {"PI_EVAL_TOTAL_CAP_USD": None}, {"PI_EVAL_CASE_BUDGET_USD": None},
+    {"PI_EVAL_TOTAL_CAP_USD": "0"}, {"PI_EVAL_TOTAL_CAP_USD": "-1"},
+    {"PI_EVAL_CASE_BUDGET_USD": "0"}, {"PI_EVAL_CASE_BUDGET_USD": "nan"},
+    {"PI_EVAL_TOTAL_CAP_USD": "inf"}, {"PI_EVAL_TOTAL_CAP_USD": "1e309"},
+    {"PI_EVAL_CASE_BUDGET_USD": "nope"},
+    {"PI_EVAL_CASE_BUDGET_USD": "3", "PI_EVAL_TOTAL_CAP_USD": "1"},
+    {"PI_EVAL_DEADLINE_SECONDS": "1501"}, {"PI_EVAL_DEADLINE_SECONDS": "0"},
+    {"PI_EVAL_DEADLINE_SECONDS": "nan"},
+    {"LOOPER_EVAL_DATABASE_URL": None},
+    {"LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/loopx"},
+    {"LOOPER_EVAL_DATABASE_URL": "postgresql://db.example.com/postgres"},
+])
+def test_deepseek_preflight_rejects_before_uv(tmp_path: Path, deepseek_env, updates) -> None:
+    deepseek_env.update({name: value for name, value in updates.items() if value is not None})
+    for name, value in updates.items():
+        if value is None:
+            deepseek_env.pop(name, None)
+    completed = _run(tmp_path, deepseek_env, script=DEEPSEEK_SCRIPT)
+    assert completed.returncode != 0
+    assert _invocations(tmp_path) == []
+    assert KEY not in completed.stdout + completed.stderr
+    assert "unverified" in (DEEPSEEK_STATE / "gaps.txt").read_text()
+    assert not (DEEPSEEK_STATE / "agent.json").exists()
+
+
+@pytest.mark.parametrize("result", [
+    None,
+    {"agent": DEEPSEEK_AGENT, "total_cost_usd": 0, "tasks": [
+        {"id": "single_step", "rep": 1, "success": True, "cost_usd": None,
+         "cost_basis": {"unpriced": 1}, "tokens": {"input": 11, "output": 3}}]},
+    {"agent": DEEPSEEK_AGENT, "total_cost_usd": 2.5, "tasks": [
+        {"id": "single_step", "rep": 1, "success": True, "cost_usd": 2.5,
+         "cost_basis": {"provider_price": 1}, "tokens": {"input": 11, "output": 3}}]},
+    {"agent": "pi/cpa/gpt-6.1-sol", "total_cost_usd": 0.1, "tasks": []},
+])
+def test_deepseek_missing_unknown_or_exhausted_spend_stops_dialogs(tmp_path: Path, deepseek_env, result) -> None:
+    if result is None:
+        deepseek_env["PI_EVAL_FAKE_NO_RESULT"] = "1"
+    else:
+        deepseek_env["PI_EVAL_FAKE_RESULT"] = json.dumps(result)
+    completed = _run(tmp_path, deepseek_env, script=DEEPSEEK_SCRIPT)
+    assert completed.returncode != 0
+    assert len(_invocations(tmp_path)) == 1
+    gaps = (DEEPSEEK_STATE / "gaps.txt").read_text()
+    assert "dialogs unverified" in gaps
+    assert "catalog cost 0 is not a free run" in gaps
+    if result and result.get("tasks") and result["tasks"][0].get("cost_usd") is None:
+        assert "pricing unverified: single_step rep 1" in gaps
+
+
+def test_deepseek_unavailable_runner_is_unverified(tmp_path: Path, deepseek_env) -> None:
+    deepseek_env["PI_EVAL_FAKE_UV_EXIT"] = "1"
+    completed = _run(tmp_path, deepseek_env, script=DEEPSEEK_SCRIPT)
+    assert completed.returncode != 0
+    assert len(_invocations(tmp_path)) == 1
+    gaps = (DEEPSEEK_STATE / "gaps.txt").read_text()
+    assert "real readback: unverified" in gaps
+    assert "dialogs unverified" in gaps
+
+
+def test_deepseek_deadline_terminates_runner(tmp_path: Path, deepseek_env) -> None:
+    deepseek_env.update(PI_EVAL_DEADLINE_SECONDS="1", PI_EVAL_FAKE_UV_SLEEP="30")
+    started = time.monotonic()
+    completed = _run(tmp_path, deepseek_env, script=DEEPSEEK_SCRIPT, timeout=20)
+    assert time.monotonic() - started < 15
+    assert completed.returncode == 124
+    assert len(_invocations(tmp_path)) == 1
+    assert "deadline" in (DEEPSEEK_STATE / "gaps.txt").read_text()
