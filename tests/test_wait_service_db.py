@@ -55,7 +55,7 @@ async def _open(pool: Any, *, task_id: str = "task-a", check: Any = None, earlie
                           check=check, every_seconds=every if check else None)
     due, deadline, next_check = waits.open_times(spec, NOW)
     row = waits.Wait(spec, state=waits.WaitState.WAITING, opened_at=NOW, due_at=due,
-                     deadline_at=deadline, next_check_at=next_check if check else None).row(f"step-{task_id}")
+                     deadline_at=deadline, next_check_at=next_check).row(f"step-{task_id}")
     await _plan_with_wait(pool, task_id, row.pop("step_id"), **row)
     return project
 
@@ -93,9 +93,9 @@ def test_time_only_wait_before_and_after_due(monkeypatch: pytest.MonkeyPatch) ->
         await _open(pool, earliest=60)
         bus = Bus()
         loop = _loop(bus)
-        assert await loop.run_once(NOW + timedelta(seconds=59)) == 0
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=59)) == 0
         assert (await _row())["state"] == "waiting" and not bus.messages
-        assert await loop.run_once(NOW + timedelta(seconds=60)) == 1
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=60)) == 1
         row = await _row()
         assert (row["state"], row["outcome"], row["checks"]) == ("ready", "ready", 0)
         assert row["resolution"] == "Ready: the time it waited for came (2026-10-19 12:01 UTC)."
@@ -103,7 +103,7 @@ def test_time_only_wait_before_and_after_due(monkeypatch: pytest.MonkeyPatch) ->
         assert message.message_type is MessageType.WAIT_EVENT
         assert message.target == planner_address("task-a")
         assert message.payload == {"task_id": "task-a", "wait": "w1"}
-        assert await loop.run_once(NOW + timedelta(hours=2)) == 0
+        assert await loop.run_once(clock=lambda: NOW + timedelta(hours=2)) == 0
         assert len(bus.messages) == 1
 
     _run(test, monkeypatch)
@@ -120,13 +120,13 @@ def test_first_github_check_only_baselines_then_unchanged_then_changed(
         loop = _loop(bus, gh=gh)
         _view(payload)
         for tick in (0, 300):
-            assert await loop.run_once(NOW + timedelta(seconds=tick)) == 0
+            assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=tick)) == 0
             row = await _row()
             assert row["state"] == "waiting" and row["last_result"] == "not_ready"
         assert row["baseline"] == {"head": "abcdef012345", "comments": 0}
         assert row["checks"] == 2 and row["next_check_at"] == NOW + timedelta(seconds=600)
         _view(payload, headRefOid="new-head")
-        assert await loop.run_once(NOW + timedelta(seconds=600)) == 1
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=600)) == 1
         row = await _row()
         assert (row["state"], row["outcome"], row["checks"], row["last_result"]) == ("ready", "ready", 3, "ready")
         assert "changed" in row["resolution"]
@@ -152,12 +152,12 @@ def test_github_first_success_is_only_baseline_even_if_already_ready(
         await _open(pool, check=_check(when))
         _view(payload, **({} if when == "new_comments" else changes))
         loop = _loop(gh=gh)
-        assert await loop.run_once(NOW) == 0
+        assert await loop.run_once(clock=lambda: NOW) == 0
         row = await _row()
         assert (row["checks"], row["last_result"], row["last_output"]) == (
             1, "not_ready", "baseline: head abcdef0, 0 comments")
         _view(payload, **changes)
-        assert await loop.run_once(NOW + timedelta(seconds=300)) == 1
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=300)) == 1
         assert (await _row())["last_result"] == "ready"
 
     _run(test, monkeypatch)
@@ -170,12 +170,12 @@ def test_github_errors_keep_waiting_and_retry(monkeypatch: pytest.MonkeyPatch, t
     async def test(pool: Any) -> None:
         await _open(pool, check=_check())
         payload.write_text(output)
-        assert await _loop(gh=gh).run_once(NOW) == 0
+        assert await _loop(gh=gh).run_once(clock=lambda: NOW) == 0
         row = await _row()
         assert (row["state"], row["last_result"], row["checks"], row["baseline"]) == ("waiting", "error", 1, None)
         assert row["next_check_at"] == NOW + timedelta(seconds=300)
         _view(payload)
-        assert await _loop(gh=gh).run_once(NOW + timedelta(seconds=300)) == 0
+        assert await _loop(gh=gh).run_once(clock=lambda: NOW + timedelta(seconds=300)) == 0
         assert (await _row())["baseline"] == {"head": "abcdef012345", "comments": 0}
 
     _run(test, monkeypatch)
@@ -188,7 +188,7 @@ def test_ready_check_waits_for_earliest_time_and_records_before_move(
         project = await _open(pool, check=waits.CommandCheck("true"), earliest=600, directory=tmp_path)
         await projects.update_project(project["id"], execution={"wait_commands": "on"})
         loop = _loop()
-        assert await loop.run_once(NOW) == 0
+        assert await loop.run_once(clock=lambda: NOW) == 0
         assert (await _row())["last_result"] == "ready"
         move = db_waits.move
 
@@ -200,7 +200,7 @@ def test_ready_check_waits_for_earliest_time_and_records_before_move(
             return await move(step_id, **kwargs)
 
         monkeypatch.setattr(db_waits, "move", observed)
-        assert await loop.run_once(NOW + timedelta(seconds=600)) == 1
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=600)) == 1
         assert (await _row())["state"] == "ready"
 
     _run(test, monkeypatch)
@@ -215,13 +215,13 @@ def test_github_change_before_earliest_time_keeps_original_baseline(
         await _open(pool, check=_check(), earliest=600)
         loop = _loop(gh=gh)
         _view(payload)
-        assert await loop.run_once(NOW) == 0
+        assert await loop.run_once(clock=lambda: NOW) == 0
         _view(payload, headRefOid="new-head")
-        assert await loop.run_once(NOW + timedelta(seconds=300)) == 0
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=300)) == 0
         row = await _row()
         assert row["last_result"] == "ready" and row["state"] == "waiting"
         assert row["baseline"] == {"head": "abcdef012345", "comments": 0}
-        assert await loop.run_once(NOW + timedelta(seconds=600)) == 1
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=600)) == 1
         assert "changed" in (await _row())["resolution"]
 
     _run(test, monkeypatch)
@@ -243,7 +243,7 @@ def test_concurrent_user_move_wins_and_does_not_wake_or_notify(
 
         monkeypatch.setattr(db_waits, "record_check" if race == "record" else "move", competing)
         bus = Bus()
-        assert await _loop(bus).run_once(NOW + timedelta(seconds=60)) == 0
+        assert await _loop(bus).run_once(clock=lambda: NOW + timedelta(seconds=60)) == 0
         row = await _row()
         assert row["state"] == "cancel_requested" and row["notice"] is None
         assert row["checks"] == (0 if race == "record" else 1)
@@ -269,7 +269,7 @@ def test_command_result_output_environment_and_working_directory(
     async def test(pool: Any) -> None:
         project = await _open(pool, check=waits.CommandCheck(command), directory=tmp_path)
         await projects.update_project(project["id"], execution={"wait_commands": "on"})
-        assert await _loop().run_once(NOW) == (1 if code == 0 else 0)
+        assert await _loop().run_once(clock=lambda: NOW) == (1 if code == 0 else 0)
         row = await _row()
         assert row["last_result"] == ("ready" if code == 0 else "not_ready")
         assert len(row["last_output"].encode()) == 2048
@@ -289,7 +289,7 @@ def test_command_policy_is_read_again_at_runtime(monkeypatch: pytest.MonkeyPatch
         await projects.update_project(project["id"], execution={"wait_commands": "on"})
         loop = _loop()
         await projects.update_project(project["id"], execution={"wait_commands": "off"})
-        assert await loop.run_once(NOW) == 0
+        assert await loop.run_once(clock=lambda: NOW) == 0
         row = await _row()
         assert (row["state"], row["last_result"], row["last_error"]) == ("waiting", "error", "wait_commands is off")
         assert not (tmp_path / "forbidden").exists()
@@ -303,7 +303,7 @@ def test_command_timeout_stays_waiting(monkeypatch: pytest.MonkeyPatch, tmp_path
     async def test(pool: Any) -> None:
         project = await _open(pool, check=waits.CommandCheck("sleep 30"), directory=tmp_path)
         await projects.update_project(project["id"], execution={"wait_commands": "on"})
-        assert await _loop().run_once(NOW) == 0
+        assert await _loop().run_once(clock=lambda: NOW) == 0
         row = await _row()
         assert (row["state"], row["last_result"], row["checks"]) == ("waiting", "error", 1)
         assert "timed out" in row["last_error"]
@@ -320,7 +320,7 @@ def test_stopped_tasks_are_untouched_with_active_positive_control(
                                   check=waits.CommandCheck(f"touch {name}"), maximum=60)
             await projects.update_project(project["id"], execution={"wait_commands": "on"})
         bus = Bus()
-        assert await _loop(bus).run_once(NOW + timedelta(seconds=60)) == 1
+        assert await _loop(bus).run_once(clock=lambda: NOW + timedelta(seconds=60)) == 1
         row = await _row("stopped")
         assert (row["state"], row["checks"], row["notice"]) == ("waiting", 0, None)
         assert not (tmp_path / "stopped").exists() and (tmp_path / "active").exists()
@@ -335,7 +335,7 @@ def test_no_planner_leaves_ready_in_database(monkeypatch: pytest.MonkeyPatch) ->
         await _open(pool, earliest=60)
         bus = Bus()
         loop = service.WaitService(bus=bus, has_planner=lambda _: False)
-        assert await loop.run_once(NOW + timedelta(seconds=60)) == 1
+        assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=60)) == 1
         assert (await _row())["state"] == "ready" and not bus.messages
 
     _run(test, monkeypatch)
@@ -348,7 +348,7 @@ def test_ready_wins_over_deadline_in_same_tick(monkeypatch: pytest.MonkeyPatch, 
                               check=waits.CommandCheck("true") if kind == "command" else None)
         await projects.update_project(project["id"], execution={"wait_commands": "on"})
         bus = Bus()
-        assert await _loop(bus).run_once(NOW + timedelta(seconds=60)) == 1
+        assert await _loop(bus).run_once(clock=lambda: NOW + timedelta(seconds=60)) == 1
         row = await _row()
         assert (row["state"], row["notice"]) == ("ready", None)
         assert [m.message_type for m in bus.messages] == [MessageType.WAIT_EVENT]
@@ -373,7 +373,7 @@ def test_timeout_notice_and_activity_precede_planner_event(
                                channel_address(channel).agent_id, "长" * 50)
         bus = Bus(fail=fail)
         loop = _loop(bus, dashboard_url="https://looper.example.com")
-        assert await loop.run_once(NOW + timedelta(hours=1)) == 1
+        assert await loop.run_once(clock=lambda: NOW + timedelta(hours=1)) == 1
         row = await _row()
         assert (row["state"], row["notice"], row["outcome"], row["resolution"]) == (
             "timed_out", notice, None, "Timed out after 1 h.")
@@ -391,7 +391,7 @@ def test_timeout_notice_and_activity_precede_planner_event(
             assert "https://looper.example.com/#tasks/task-a" in lines[3] and len(lines) == 4
         else:
             assert not notices
-        assert await loop.run_once(NOW + timedelta(hours=2)) == 0
+        assert await loop.run_once(clock=lambda: NOW + timedelta(hours=2)) == 0
         assert len(await activity.list_activity("task-a")) == 1
         assert "PRIVATE_NOTICE_TEXT" not in caplog.text
         if fail:
@@ -418,7 +418,7 @@ def test_unsatisfied_check_is_recorded_before_timeout(
 
         monkeypatch.setattr(service, "run_github_pr", check)
         bus = Bus()
-        assert await _loop(bus).run_once(NOW + timedelta(seconds=maximum)) == 1
+        assert await _loop(bus).run_once(clock=lambda: NOW + timedelta(seconds=maximum)) == 1
         row = await _row()
         assert (row["checks"], row["last_result"], row["state"], row["notice"]) == (
             1, result.value, "timed_out", "sent")
@@ -443,7 +443,7 @@ def test_error_activity_only_on_transition_and_error_is_clipped(monkeypatch: pyt
         monkeypatch.setattr(service, "run_github_pr", check)
         loop = _loop()
         for tick in range(4):
-            assert await loop.run_once(NOW + timedelta(seconds=tick * 300)) == 0
+            assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=tick * 300)) == 0
             assert len(await activity.list_activity("task-a")) == (1 if tick < 3 else 2)
         assert [a["summary"] for a in await activity.list_activity("task-a")] == [
             "Wait w1 check failed: " + "e" * 200] * 2
@@ -475,7 +475,7 @@ def test_one_row_failure_does_not_block_others_and_checks_are_bounded(
                 running -= 1
 
         monkeypatch.setattr(service, "run_github_pr", check)
-        assert await _loop().run_once(NOW) == 0
+        assert await _loop().run_once(clock=lambda: NOW) == 0
         assert calls == 9 and peak == 4 and running == 0
         counts = [int((await _row(f"task-{n}"))["checks"]) for n in range(9)]
         assert sum(counts) == 8 and counts.count(0) == 1
@@ -509,7 +509,7 @@ def test_queued_check_rereads_wait_and_task_before_running(
             return rows
 
         monkeypatch.setattr(db_waits, "due", selected)
-        running = asyncio.create_task(loop.run_once(NOW))
+        running = asyncio.create_task(loop.run_once(clock=lambda: NOW))
         try:
             await asyncio.wait_for(listed.wait(), 2)
             await pool.execute("UPDATE tasks SET status = $2 WHERE id = $1", "task-a", task_status)
@@ -542,11 +542,11 @@ def test_default_interval_is_opened_from_real_settings_and_persisted(monkeypatch
 
             monkeypatch.setattr(service, "run_github_pr", check)
             loop = _loop()
-            assert await loop.run_once(NOW) == 0
+            assert await loop.run_once(clock=lambda: NOW) == 0
             assert (await _row())["next_check_at"] == NOW + timedelta(seconds=900)
-            assert await loop.run_once(NOW + timedelta(seconds=899)) == 0
+            assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=899)) == 0
             assert (await _row())["checks"] == 1
-            assert await loop.run_once(NOW + timedelta(seconds=900)) == 0
+            assert await loop.run_once(clock=lambda: NOW + timedelta(seconds=900)) == 0
             assert (await _row())["checks"] == 2
         finally:
             await waits.update({"min_check_seconds": None, "max_wait_seconds": None})

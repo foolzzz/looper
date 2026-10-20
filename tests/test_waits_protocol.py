@@ -350,6 +350,8 @@ def test_wait_times_rows_descriptions_and_retry() -> None:
     opened = datetime(2026, 10, 19, tzinfo=timezone.utc)
     spec = WaitSpec("fixes", 3 * 86400, check=GithubPrCheck("owner/name", 12, ReadyWhen.HEAD_CHANGED))
     assert open_times(spec, opened) == (opened, opened + timedelta(days=3), opened)
+    assert open_times(replace(spec, check=None, not_before_seconds=60), opened) == (
+        opened + timedelta(seconds=60), opened + timedelta(days=3), None)
     assert open_times(replace(spec, not_before_seconds=90), opened)[0] == opened + timedelta(seconds=90)
     absolute = opened + timedelta(hours=1)
     assert open_times(replace(spec, not_before_seconds=90, not_before=absolute), opened)[0] == absolute

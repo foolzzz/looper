@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 import tracemalloc
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -359,6 +359,33 @@ def test_command_timeout_ends_the_process_tree(tmp_path: Path, monkeypatch: pyte
                 pass
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("inherit_output", [True, False])
+def test_command_exit_ends_background_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int, inherit_output: bool,
+) -> None:
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
+    child = tmp_path / "child.pid"
+    redirect = "" if inherit_output else ">/dev/null 2>&1"
+    command = f"sleep 120 {redirect} & echo $! > {shlex.quote(str(child))}; exit {exit_code}"
+
+    async def test() -> None:
+        try:
+            result, output, error, extra = await run_command(CommandCheck(command), tmp_path, project_allows=True)
+            assert result is (CheckResult.READY if exit_code == 0 else CheckResult.NOT_READY)
+            assert output == error == "" and extra["exit_code"] == exit_code
+            assert _running([int(child.read_text())]) == []
+        finally:
+            if child.exists():
+                try:
+                    os.kill(int(child.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await asyncio.sleep(0.05)  # Close inherited pipes before the test's event loop exits.
+
+    asyncio.run(test())
+
+
 def test_command_does_not_run_when_the_project_disallows_it(tmp_path: Path) -> None:
     work = tmp_path / "work"
     work.mkdir()
@@ -437,7 +464,10 @@ def test_command_is_recorded_until_reaped(
         async def observed_capture(process: asyncio.subprocess.Process, *args: Any, **kwargs: Any) -> Any:
             observed.append(process)
             entered.set()
-            return await capture(process, *args, **kwargs)
+            outcome = await capture(process, *args, **kwargs)
+            await asyncio.sleep(0)  # Let the normal-exit record removal run, unless cleanup owns it.
+            assert (records / f"{process.pid}.json").is_file()
+            return outcome
 
         monkeypatch.setattr(wait_service, "_capture", observed_capture)
         command = CommandCheck("sleep 30" if finish == "cancel" else "sleep 0.2")
@@ -452,6 +482,10 @@ def test_command_is_recorded_until_reaped(
             if finish == "cancel":
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            if finish == "exit":
+                assert task.result()[0] is CheckResult.READY
+            else:
+                assert task.cancelled()
             if proc_tree._forgetting:
                 await asyncio.gather(*proc_tree._forgetting)
             assert not path.exists() and process.pid not in proc_tree._recorded
@@ -506,7 +540,7 @@ def test_queued_command_is_not_dispatched_after_state_changes(
 
         monkeypatch.setattr(service, "_run_wait", execute)
         await service._semaphore.acquire()
-        pending = asyncio.create_task(service.run_once(datetime.now(timezone.utc)))
+        pending = asyncio.create_task(service.run_once())
         try:
             await asyncio.wait_for(selected.wait(), 2)
             current["changed"]["state"] = wait_state
@@ -516,6 +550,79 @@ def test_queued_command_is_not_dispatched_after_state_changes(
         assert await asyncio.wait_for(pending, 5) == 1
         assert not (tmp_path / "changed").exists()
         assert (tmp_path / "control").is_file()
+
+    asyncio.run(test())
+
+
+@pytest.mark.parametrize(("queued", "result", "earliest", "deadline", "moved_to"), [
+    (True, CheckResult.READY, 60, 1200, "ready"),
+    (True, CheckResult.NOT_READY, 1200, 60, "timed_out"),
+    (False, CheckResult.READY, 60, 1200, "ready"),
+    (False, CheckResult.NOT_READY, 1200, 60, "timed_out"),
+    (False, CheckResult.NOT_READY, 1200, 1800, None),
+])
+def test_wait_uses_execution_and_completion_times(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, queued: bool, result: CheckResult,
+    earliest: int, deadline: int, moved_to: str | None,
+) -> None:
+    async def test() -> None:
+        opened = datetime(2026, 10, 19, tzinfo=timezone.utc)
+        current = opened
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> datetime:
+                return current
+
+        monkeypatch.setattr(wait_service, "datetime", Clock)
+        spec = wait_service.waits.WaitSpec("ready", 1800, check=CommandCheck("true"), every_seconds=300)
+        row = {"step_id": "step-w1", "task_id": "task-a", "step_key": "w1", "state": "waiting",
+               "topic": spec.topic, "spec": spec.row(), "opened_at": opened, "next_check_at": opened,
+               "due_at": opened + timedelta(seconds=earliest), "deadline_at": opened + timedelta(seconds=deadline),
+               "baseline": None, "last_result": None}
+        selected = asyncio.Event()
+
+        async def due(*_args: Any) -> Any:
+            selected.set()
+            return [row]
+
+        async def check(*_args: Any, **_kwargs: Any) -> Any:
+            nonlocal current
+            if queued:
+                assert current == opened + timedelta(seconds=650)
+            else:
+                current = opened + timedelta(seconds=650)
+            return result, "", "", {"baseline": None, "resolution": "Ready.", "exit_code": 0}
+
+        recorded = AsyncMock(return_value=True)
+        moved = AsyncMock(return_value={"state": moved_to})
+        monkeypatch.setattr(wait_service.db_waits, "due", due)
+        monkeypatch.setattr(wait_service.db_waits, "get", AsyncMock(return_value=row))
+        monkeypatch.setattr(wait_service.db_tasks, "get_task", AsyncMock(return_value={
+            "status": "waiting", "work_dir": str(tmp_path)}))
+        monkeypatch.setattr(wait_service, "_commands_allowed", AsyncMock(return_value=True))
+        monkeypatch.setattr(wait_service, "run_command", check)
+        monkeypatch.setattr(wait_service.db_waits, "record_check", recorded)
+        monkeypatch.setattr(wait_service.db_waits, "move", moved)
+        monkeypatch.setattr(wait_service.db_activity, "insert_activity", AsyncMock())
+        service = wait_service.WaitService(bus=None, has_planner=lambda _: False)
+        monkeypatch.setattr(service, "_notify_timeout", AsyncMock())
+        # Hold every slot until the batch has been selected.
+        service._semaphore = asyncio.Semaphore(0)
+        running = asyncio.create_task(service.run_once())
+        await asyncio.wait_for(selected.wait(), 2)
+        if queued:
+            # A previous check rescheduled this row while it was queued; it is due again at execution.
+            row["next_check_at"] = opened + timedelta(seconds=60)
+            current = opened + timedelta(seconds=650)
+        service._semaphore.release()
+        assert await asyncio.wait_for(running, 2) == int(moved_to is not None)
+        assert recorded.await_args.kwargs["at"] == current
+        assert recorded.await_args.kwargs["next_check_at"] == current + timedelta(seconds=300)
+        if moved_to is None:
+            moved.assert_not_awaited()
+        else:
+            assert moved.await_args.kwargs["to"] == moved_to
 
     asyncio.run(test())
 
@@ -535,7 +642,7 @@ def test_ready_command_keeps_output_out_of_the_resolution(monkeypatch: pytest.Mo
         monkeypatch.setattr(wait_service.db_waits, "record_check", recorded)
         monkeypatch.setattr(wait_service.db_waits, "move", moved)
         service = wait_service.WaitService(bus=None, has_planner=lambda _: False)
-        assert await service._run_wait(row, now) == 1
+        assert await service._run_wait(row, lambda: now) == 1
         assert recorded.await_args.kwargs["output"] == OUTPUT_MARKER
         assert moved.await_args.kwargs["resolution"] == "Ready: the command exited 0."
         assert OUTPUT_MARKER not in moved.await_args.kwargs["resolution"]

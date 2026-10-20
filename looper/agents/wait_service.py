@@ -355,10 +355,10 @@ async def run_github_pr(check: GithubPrCheck, baseline: Mapping[str, Any] | None
     return _from_view(check, baseline, data, code)
 
 
-async def _end_command(process: asyncio.subprocess.Process) -> None:
+async def _end_command(process: asyncio.subprocess.Process, known: proc_tree.Tree | None = None) -> None:
     """End the command and every process it started, the way a run of Claude is ended."""
-    known = await proc_tree.begin_end(process)
-    await proc_tree.end(process, label="wait command", known=known)
+    current = await proc_tree.begin_end(process)
+    await proc_tree.end(process, label="wait command", known={**(known or {}), **current})
 
 
 async def run_command(check: CommandCheck, work_dir: str | os.PathLike[str], *, project_allows: bool) -> Outcome:
@@ -371,7 +371,13 @@ async def run_command(check: CommandCheck, work_dir: str | os.PathLike[str], *, 
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except OSError:
         return _done(CheckResult.ERROR, "", "the check could not start", _extra())
-    data, timed_out, _ = await _capture(process, CHECK_TIMEOUT_SEC, lambda: _end_command(process))
+    known: proc_tree.Tree = {}
+    try:
+        # Keep the record until cleanup, even if the shell exits before its background children.
+        known = await proc_tree.begin_end(process)
+        data, timed_out, _ = await _capture(process, CHECK_TIMEOUT_SEC, lambda: _end_command(process, known))
+    finally:
+        await _end_command(process, known)
     output = _tail(data)
     if timed_out:
         return _done(CheckResult.ERROR, output, _timeout_error(), _extra())
@@ -422,13 +428,13 @@ class WaitService:
                 logger.warning("the wait loop failed; trying again later")
             await asyncio.sleep(self._interval)
 
-    async def run_once(self, now: datetime | None = None) -> int:
-        """Check waits due at ``now`` (UTC now when omitted); how many rows moved."""
-        now = now or datetime.now(timezone.utc)
-        rows = await db_waits.due(now, db_tasks.ACTIVE_STATUSES)
-        return sum(await asyncio.gather(*(self._run_row(row, now) for row in rows)))
+    async def run_once(self, *, clock: Callable[[], datetime] | None = None) -> int:
+        """Check due waits; how many rows moved. ``clock`` supplies UTC now when given."""
+        clock = clock or (lambda: datetime.now(timezone.utc))
+        rows = await db_waits.due(clock(), db_tasks.ACTIVE_STATUSES)
+        return sum(await asyncio.gather(*(self._run_row(row, clock) for row in rows)))
 
-    async def _run_row(self, row: Mapping[str, Any], now: datetime) -> int:
+    async def _run_row(self, row: Mapping[str, Any], clock: Callable[[], datetime]) -> int:
         async with self._semaphore:
             try:
                 # The queue may outlive a user action, a Planner transition or the task itself.
@@ -438,13 +444,14 @@ class WaitService:
                         or current["state"] != waits.WaitState.WAITING.value
                         or task is None or task["status"] not in db_tasks.ACTIVE_STATUSES):
                     return 0
-                return await self._run_wait({**current, "work_dir": task["work_dir"]}, now)
+                return await self._run_wait({**current, "work_dir": task["work_dir"]}, clock)
             except Exception:
                 # Exceptions may contain command output or notice text. Only the row's id belongs in the log.
                 logger.warning("wait step %s failed; trying again later", row["step_id"])
                 return 0
 
-    async def _run_wait(self, row: Mapping[str, Any], now: datetime) -> int:
+    async def _run_wait(self, row: Mapping[str, Any], clock: Callable[[], datetime]) -> int:
+        now = clock()
         step_id, task_id = row["step_id"], row["task_id"]
         spec = waits.WaitSpec.from_row(row["topic"], row["spec"])
         check = spec.check
@@ -455,6 +462,7 @@ class WaitService:
             else:
                 result, output, error, extra = await run_command(
                     check, row["work_dir"], project_allows=await _commands_allowed(task_id))
+            now = clock()
             # Keep the first view as the baseline: a change before due_at must still count afterwards.
             baseline = None
             if isinstance(check, GithubPrCheck) and row["baseline"] is None and result is not CheckResult.ERROR:

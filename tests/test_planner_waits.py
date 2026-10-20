@@ -1191,7 +1191,7 @@ def test_the_wait_message_for_a_timeout_without_a_check(planner_claude: Any, age
 
     async def scenario(h: Any) -> None:
         await _open_then(h, agent_db, "w1", "timed_out")
-        await h.until(lambda: _wait_turns(claude))
+        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1)
 
     drive(claude, _hold, scenario)
 
@@ -1201,6 +1201,7 @@ def test_the_wait_message_for_a_timeout_without_a_check(planner_claude: Any, age
         "and its time passed.")
     assert "Check:" not in message and "Last output" not in message and "Last error" not in message
     assert "The user was told" not in message and "The task page shows it." not in message
+    assert _stored_wait(agent_db, "w1")["next_check_at"] is None
 
 
 def test_the_wait_message_describes_a_command_check(

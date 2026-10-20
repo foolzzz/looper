@@ -107,6 +107,29 @@ def test_due_waits_are_waiting_due_and_in_active_tasks(monkeypatch: pytest.Monke
     _run(test, monkeypatch)
 
 
+def test_future_time_waits_do_not_fill_the_due_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.waits import Wait, WaitSpec, WaitState, open_times
+        from looper.db import waits
+
+        project = await _project(pool)
+        for number in range(101):
+            task_id = f"task-{number}"
+            await _task(pool, task_id, "running", project)
+            spec = WaitSpec("time", 3600 if number < 100 else 7200,
+                            not_before_seconds=600 if number < 100 else 60)
+            due_at, deadline_at, next_check_at = open_times(spec, NOW)
+            row = Wait(spec, state=WaitState.WAITING, opened_at=NOW, due_at=due_at,
+                       deadline_at=deadline_at, next_check_at=next_check_at).row(f"step-{number}")
+            await _plan_with_wait(pool, task_id, row.pop("step_id"), **row)
+
+        for _ in range(2):
+            rows = await waits.due(NOW + timedelta(seconds=60), ["running"], pool=pool)
+            assert [row["task_id"] for row in rows] == ["task-100"]
+
+    _run(test, monkeypatch)
+
+
 def test_check_record_and_move_only_apply_in_the_expected_state(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         from looper.db import waits

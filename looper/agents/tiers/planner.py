@@ -1561,7 +1561,7 @@ class PlannerAgent:
                 deadline_at = min(deadline_at, self._run_deadline)
             wait.state = WaitState.WAITING
             wait.deadline_at = deadline_at
-            wait.next_check_at = now
+            wait.next_check_at = now if wait.spec.check else None
             wait.extensions += 1
             wait.failures, wait.failed_at = 0, None
             step.status = wait.state.step_status

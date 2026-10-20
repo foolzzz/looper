@@ -298,10 +298,10 @@ def effective_every(spec: WaitSpec, limits: WaitLimits) -> int | None:
             max(limits.min_check_seconds, min(DEFAULT_EVERY_SECONDS, spec.max_wait_seconds)))
 
 
-def open_times(spec: WaitSpec, opened_at: datetime) -> tuple[datetime, datetime, datetime]:
+def open_times(spec: WaitSpec, opened_at: datetime) -> tuple[datetime, datetime, datetime | None]:
     """The earliest time, deadline and first check time of a wait opened at ``opened_at``."""
     due_at = max(opened_at + timedelta(seconds=spec.not_before_seconds or 0), spec.not_before or opened_at)
-    return due_at, opened_at + timedelta(seconds=spec.max_wait_seconds), opened_at
+    return due_at, opened_at + timedelta(seconds=spec.max_wait_seconds), opened_at if spec.check else None
 
 
 def _duration(seconds: int) -> str:
