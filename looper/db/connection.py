@@ -70,6 +70,56 @@ def schema_fingerprint(sql: str) -> str:
 # this lock first, so two processes starting together cannot both create a table or migrate.
 _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 
+# Backport the guard (with support set to 2) to the old-layout patch release
+# before deploying v3. Unpatched v2.12.2 binaries cannot protect a v3 database.
+REGISTRY_SCHEMA_VERSION = 3
+
+
+class RegistrySchemaVersionError(RuntimeError):
+    """The registry cannot be opened safely by this binary."""
+
+
+async def check_registry_schema_version(conn: asyncpg.Connection, *, supported_version: int) -> int | None:
+    """Read-only forward guard, also usable by the old-layout patch release.
+
+    Call under the schema lock before executing any initialization DDL. A
+    missing table is an unversioned database; an empty version table is an
+    incomplete initialization, never permission to initialize over it.
+    """
+    if not await conn.fetchval("SELECT to_regclass('registry_schema_version') IS NOT NULL"):
+        return None
+    version = await conn.fetchval("SELECT version FROM registry_schema_version WHERE id = TRUE")
+    if version is None:
+        raise RegistrySchemaVersionError("registry schema version is missing; initialization refused")
+    if version > supported_version:
+        raise RegistrySchemaVersionError(
+            f"registry schema version {version} exceeds supported version {supported_version}; startup refused")
+    return version
+
+
+async def _check_registry_upgrade(conn: asyncpg.Connection, sql: str) -> None:
+    version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
+    if version is not None and version < REGISTRY_SCHEMA_VERSION:
+        raise RegistrySchemaVersionError("registry schema upgrade is not available; keep using the old-layout patch")
+    if version is None and await _has_schema_tables(conn, sql):
+        raise RegistrySchemaVersionError("unversioned registry schema upgrade is not available; database unchanged")
+
+
+async def _has_schema_tables(conn: asyncpg.Connection, sql: str) -> bool:
+    tables = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
+    # Earlier releases called agent_profiles/role_configs by these names.
+    tables.extend(("agents", "agent_configs", "task_agent_overrides", "schema_fingerprint"))
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) AS t(name) WHERE to_regclass(t.name) IS NOT NULL)", tables)
+
+
+def _schema_phases(sql: str) -> dict[str, str]:
+    parts = re.split(r"(?m)^-- registry-phase: (\w+)\n", sql)
+    phases = dict(zip(parts[1::2], parts[2::2]))
+    if list(phases) != ["expand", "legacy", "convert", "contract", "builtin"]:
+        raise ValueError("schema.sql must declare expand, legacy, convert, contract and builtin phases in order")
+    return phases
+
 
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     from ..agents import layer_effort
@@ -77,13 +127,23 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
 
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    # One transaction: the lock is held throughout, the migrations written in Python (layer_effort, which computes
-    # how the layers resolved; task_concurrency, which logs what it converts) run after the file's, and the
-    # fingerprint is recorded only together with the schema it names.
+    # Keep the old columns through every historical SQL/Python migration.
+    # The v2 converter is not wired yet: reject old databases before any DDL.
+    # Version and fingerprint commit only with the complete target schema.
     async with _connection(pool) as conn, conn.transaction():
-        await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK});\n{sql}")
+        await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
+        await _check_registry_upgrade(conn, sql)
+        phases = _schema_phases(sql)
+        await conn.execute(phases["expand"])
+        await conn.execute(phases["legacy"])
         await layer_effort.migrate(conn)
         await task_concurrency.migrate(conn)
+        await conn.execute(phases["convert"])
+        await conn.execute(phases["contract"])
+        await conn.execute(phases["builtin"])
+        await conn.execute("INSERT INTO registry_schema_version (id, version) VALUES (TRUE, $1) "
+                           "ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version "
+                           "WHERE registry_schema_version.version <> EXCLUDED.version", REGISTRY_SCHEMA_VERSION)
         await conn.execute(_RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
     logger.info("schema ensured")
 
@@ -103,13 +163,16 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
     True when one of schema.sql's tables exists but the recorded fingerprint
     is missing or differs from the current file's. A database without Looper
     tables is new: applying the schema loses nothing.
+
+    Unsupported versions and legacy upgrades are refused before requesting a
+    backup, using the same locked, read-only gate as ``ensure_schema``.
     """
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    tables = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
-    if not await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) AS t(name) WHERE to_regclass(t.name) IS NOT NULL)", tables
-    ):
-        return False
-    if not await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL"):
-        return True
-    return await conn.fetchval("SELECT sha256 FROM schema_fingerprint") != schema_fingerprint(sql)
+    async with conn.transaction():
+        await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
+        await _check_registry_upgrade(conn, sql)
+        if not await _has_schema_tables(conn, sql):
+            return False
+        if not await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL"):
+            return True
+        return await conn.fetchval("SELECT sha256 FROM schema_fingerprint") != schema_fingerprint(sql)
