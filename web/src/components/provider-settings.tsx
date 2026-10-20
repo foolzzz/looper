@@ -28,7 +28,7 @@ import {
 } from "@/lib/api";
 import { LOGIN_HELP, loginUsable } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
-import { useAction } from "@/lib/use-action";
+import { errorText, useAction } from "@/lib/use-action";
 import { formatUsd } from "@/lib/usage";
 import { useRegistry } from "@/lib/use-registry";
 import { useSettingsTarget } from "@/lib/settings-target";
@@ -150,8 +150,9 @@ function envEntries(raw: string) {
     });
 }
 
-/** A new provider's draft from one API of a preset: everything but the key. */
-function presetDraft(preset: ProviderPreset, api: ProviderPreset["apis"][number], registry: Registry): ProviderDraft {
+/** A vendor starts with its first API selected: everything but the key. */
+function presetDraft(preset: ProviderPreset, registry: Registry): ProviderDraft {
+  const api = preset.apis[0];
   return {
     ...providerDraft(null, registry),
     name: preset.name,
@@ -162,6 +163,16 @@ function presetDraft(preset: ProviderPreset, api: ProviderPreset["apis"][number]
     // The vendor's Claude Code variables matter only to an Anthropic-format API.
     env: api.protocols.includes("anthropic-messages") ? envText(preset.env) : "",
   };
+}
+
+/** A provider has one address, even when several of a vendor's APIs share that address. */
+function selectedAddresses(preset: ProviderPreset, protocols: string[]) {
+  const addresses = new Map<string, string[]>();
+  for (const api of preset.apis) {
+    const selected = api.protocols.filter((protocol) => protocols.includes(protocol));
+    if (selected.length) addresses.set(api.base_url, [...new Set([...(addresses.get(api.base_url) ?? []), ...selected])]);
+  }
+  return [...addresses].map(([base_url, protocols]) => ({ base_url, protocols }));
 }
 
 function providerDraft(provider: Provider | null, registry: Registry): ProviderDraft {
@@ -212,24 +223,87 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
     set({ models: draft.models.map((m, i) => (i === index ? { ...m, ...change } : m)) });
   const priceFields = registry.limits.price_fields;
   const keyStored = !!provider?.api_key;
+  const [presetKey, setPresetKey] = useState("");
+  const preset = !provider && draft.auth === "api_key"
+    ? registry.provider_presets.find((p) => p.preset_id === presetKey)
+    : undefined;
+  const addresses = preset ? selectedAddresses(preset, draft.protocols) : [];
+  const split = addresses.length > 1;
+  const [results, setResults] = useState<{ body: ProviderFields; error: string | null }[] | null>(null);
+
+  const createMany = (bodies: ProviderFields[]) => action.run(async () => {
+    const outcomes = await Promise.allSettled(bodies.map((body) => createProvider(body)));
+    const next = outcomes.map((outcome, index) => ({
+      body: bodies[index], error: outcome.status === "rejected" ? errorText(outcome.reason) : null,
+    }));
+    setResults((previous) => [...(previous ?? []).filter((r) => !bodies.includes(r.body)), ...next]);
+  });
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (action.busy || (preset && !draft.protocols.length) || results) return;
     const body = providerBody(draft, provider, registry);
+    if (split && preset) {
+      const format = (protocols: string[]) => protocols.includes("anthropic-messages") ? "Anthropic" : "OpenAI";
+      await createMany(addresses.map((api) => {
+        const label = format(api.protocols);
+        // Some vendors serve Chat and Responses at separate OpenAI-format addresses.
+        const suffix = addresses.filter((a) => format(a.protocols) === label).length > 1
+          ? `${label} ${api.protocols.includes("openai-chat") ? "Chat" : "Responses"}` : label;
+        return {
+          ...body, name: `${body.name} (${suffix})`, protocols: api.protocols, base_url: api.base_url,
+          env: api.protocols.includes("anthropic-messages") ? body.env
+            : body.env?.filter((entry) => !preset.env.some((e) => e.key === entry.key)),
+        };
+      }));
+      return;
+    }
     const done = await action.run(() => (provider ? updateProvider(provider.provider_id, body) : createProvider(body)));
     if (done) onDone();
   };
 
-  const [presetKey, setPresetKey] = useState("");
-  const preset = registry.provider_presets.find((p) => presetKey.startsWith(`${p.preset_id}:`));
   const choosePreset = (key: string) => {
     setPresetKey(key);
-    const [presetId, index] = key.split(":");
-    const chosen = registry.provider_presets.find((p) => p.preset_id === presetId);
-    if (chosen) setDraft(presetDraft(chosen, chosen.apis[Number(index)], registry));
+    const chosen = registry.provider_presets.find((p) => p.preset_id === key);
+    setDraft(chosen ? presetDraft(chosen, registry) : providerDraft(null, registry));
   };
-  const apiLabel = (protocols: string[]) =>
-    protocols.includes("anthropic-messages") ? "Anthropic API, for Claude Code" : `OpenAI API (${protocols.join(", ")})`;
+  const toggleProtocol = (protocol: string, checked: boolean) => {
+    const protocols = registry.limits.protocols.filter((p) => p === protocol ? checked : draft.protocols.includes(p));
+    if (!preset) return set({ protocols });
+    const nextAddresses = selectedAddresses(preset, protocols);
+    const sameAddress = addresses.length === 1 && nextAddresses.length === 1
+      && addresses[0].base_url === nextAddresses[0].base_url;
+    const env = envEntries(draft.env).filter((entry) => !preset.env.some((e) => e.key === entry.key));
+    if (protocols.includes("anthropic-messages")) {
+      env.unshift(...preset.env.map((entry) => envEntries(draft.env).find((e) => e.key === entry.key) ?? entry));
+    }
+    set({ protocols, baseUrl: sameAddress ? draft.baseUrl : nextAddresses.length === 1 ? nextAddresses[0].base_url : "",
+      env: envText(env) });
+  };
+
+  if (results) {
+    const failed = results.filter((r) => r.error !== null);
+    return (
+      <div className="space-y-3">
+        <ul role="status" className="space-y-1 text-xs">
+          {results.map((result) => (
+            <li key={result.body.base_url} className={result.error === null ? "text-muted-foreground" : "text-destructive"}>
+              {result.body.name}: {result.error === null ? "Created" : `Failed — ${result.error}`}
+              <span className="block break-all font-mono">{result.body.base_url}</span>
+            </li>
+          ))}
+        </ul>
+        <div className="flex gap-2">
+          {failed.length > 0 && (
+            <Button type="button" size="sm" disabled={action.busy} onClick={() => createMany(failed.map((r) => r.body))}>
+              Retry failed
+            </Button>
+          )}
+          <Button type="button" variant="ghost" size="sm" disabled={action.busy} onClick={onDone}>Done</Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={save} aria-label={provider ? `Edit provider ${provider.name}` : "Add a provider"} className="space-y-3">
@@ -238,13 +312,9 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
           <label htmlFor={`${id}-preset`} className={LABEL}>Start from a preset</label>
           <select id={`${id}-preset`} value={presetKey} onChange={(e) => choosePreset(e.target.value)} className={SELECT}>
             <option value="">None: fill in every field</option>
-            {registry.provider_presets.map((p) =>
-              p.apis.map((api, index) => (
-                <option key={`${p.preset_id}:${index}`} value={`${p.preset_id}:${index}`}>
-                  {p.label} · {apiLabel(api.protocols)}
-                </option>
-              )),
-            )}
+            {registry.provider_presets.map((p) => (
+              <option key={p.preset_id} value={p.preset_id}>{p.label}</option>
+            ))}
           </select>
           {preset && (
             <p className="text-[11px] text-muted-foreground">
@@ -286,7 +356,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
         ) : (
           <div className="space-y-1">
             <label htmlFor={`${id}-base`} className={LABEL}>Base URL</label>
-            <Input id={`${id}-base`} value={draft.baseUrl} onChange={(e) => set({ baseUrl: e.target.value })} placeholder="The protocol's own endpoint" spellCheck={false} autoCapitalize="none" className="font-mono" />
+            <Input id={`${id}-base`} value={draft.baseUrl} disabled={split} onChange={(e) => set({ baseUrl: e.target.value })} placeholder={split ? "One provider per address" : "The protocol's own endpoint"} spellCheck={false} autoCapitalize="none" className="font-mono" />
           </div>
         )}
       </div>
@@ -294,25 +364,31 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
       <div className="grid gap-3 sm:grid-cols-3">
         <fieldset className="space-y-1 sm:col-span-2">
           <legend className={LABEL}>Protocols *</legend>
-          <div className="flex flex-wrap gap-x-4 gap-y-1">
-            {registry.limits.protocols.map((protocol) => (
-              <label key={protocol} className="flex items-center gap-1.5 font-mono text-xs">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 accent-primary"
-                  checked={draft.protocols.includes(protocol)}
-                  onChange={(e) =>
-                    set({
-                      protocols: e.target.checked
-                        ? registry.limits.protocols.filter((p) => p === protocol || draft.protocols.includes(p))
-                        : draft.protocols.filter((p) => p !== protocol),
-                    })
-                  }
-                />
-                {protocol}
-              </label>
-            ))}
-          </div>
+          {(preset?.apis ?? [{ base_url: "", protocols: registry.limits.protocols }]).map((api, index) => (
+            <fieldset key={`${api.base_url}:${index}`} className="space-y-1">
+              {preset && (
+                <legend className="break-all text-[11px] text-muted-foreground">
+                  {api.base_url}{api.protocols.includes("anthropic-messages") && " · for Claude Code"}
+                </legend>
+              )}
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                {api.protocols.map((protocol) => (
+                  <label key={protocol} className={`flex items-center gap-1.5 font-mono text-xs ${preset ? "min-h-11" : ""}`}>
+                    <input type="checkbox" className="h-4 w-4 accent-primary"
+                      checked={draft.protocols.includes(protocol)}
+                      onChange={(e) => toggleProtocol(protocol, e.target.checked)} />
+                    {protocol}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ))}
+          {split && (
+            <p className="text-[11px] text-muted-foreground">
+              served at {addresses.length === 2 ? "two" : addresses.length} addresses: Looper adds one provider per address
+            </p>
+          )}
+          {preset && !draft.protocols.length && <p className="text-xs text-destructive">Choose at least one protocol.</p>}
         </fieldset>
         <div className="space-y-1">
           <label htmlFor={`${id}-concurrency`} className={LABEL}>Max concurrent runs</label>
