@@ -4,16 +4,15 @@ pi is a fifth runtime type (the pi runtime RFC, sections 1, 3 and 6). Registerin
 it discovers ``rt-pi`` when ``pi`` is on PATH. Launch commands use private,
 content-addressed homes and separate session directories. JSON events are
 translated independently of OMP. Residents resume one JSON process per turn;
-the packaged tool bridge loads explicitly, while execution capabilities remain gated.
+the packaged tool bridge loads explicitly for all four roles.
 There is no pi login and no schema change.
 
 A probe runs only ``--version`` and ``--help``, in a temporary home, agent
 directory and session directory, offline, with a 10 second deadline. 1.3.0 is
 the oldest version that passes. An older version, a version that cannot be
 read, or help that lacks a flag the launch needs is reported and gives the
-runtime nothing it can do. Capabilities stay empty until the remaining
-execution paths, including the Looper tool bridge, exist. The later ``mcp``
-capability is that bridge only, not a general MCP client.
+runtime nothing it can do. The ``mcp`` capability is the Looper tool bridge
+only, not a general MCP client.
 """
 
 from __future__ import annotations
@@ -119,13 +118,14 @@ class _ProbeFailure(Exception):
 
 
 class PiRuntime(RuntimeAdapter):
-    """pi's type; launch construction is available, execution capabilities remain gated."""
+    """pi's four-role runtime, with the scoped Looper platform tool bridge."""
 
     type = "pi"
     label = "pi"
     default_executable = "pi"
-    # Empty until all execution paths and the Looper tool bridge exist. Not a general MCP client.
-    capabilities = frozenset()
+    # MCP means the Looper platform bridge only; catalog MCP is recorded as skipped.
+    capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME, Capability.STEER,
+                              Capability.READ_TOOLS, Capability.COMPACTION_EVENTS, Capability.MCP})
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT})
     # API keys only. pi's own /login and OAuth are not providers Looper binds.
     auth_kinds = frozenset({AuthKind.API_KEY})
@@ -137,15 +137,10 @@ class PiRuntime(RuntimeAdapter):
     })
 
     def capabilities_for(self, version: str | None) -> frozenset[Capability]:
-        """Nothing is advertised yet, whatever ``version`` the probe read.
-
-        The later set is run, a resident session, resume, steer, read tools,
-        compaction events, and mcp for the Looper tool bridge only. That is
-        not a general MCP client, and none of it is enabled until those paths
-        exist.
-        """
-        del version
-        return frozenset()
+        """Only versions at least 1.3.0 implement the launch and bridge contract."""
+        found = _VERSION.search(version or "")
+        return (self.capabilities if found and tuple(int(part) for part in found.groups()) >= MIN_VERSION
+                else frozenset())
 
     def probe(self, executable: str) -> Probe:
         """``executable --version`` and, when that is new enough, ``--help``.
@@ -177,13 +172,13 @@ class PiRuntime(RuntimeAdapter):
             try:
                 help_done = _run(executable, "--help", env, home)
             except _ProbeFailure as failure:
-                return Probe(shown, self.capabilities_for(shown), f"{failure.message}; probe again")
+                return Probe(shown, frozenset(), f"{failure.message}; probe again")
             help_text = f"{help_done.stdout or ''}{help_done.stderr or ''}"
             if help_done.returncode != 0 or not help_text.strip():
-                return Probe(shown, self.capabilities_for(shown), _help_failure(executable, help_done.returncode, help_text))
+                return Probe(shown, frozenset(), _help_failure(executable, help_done.returncode, help_text))
             missing = [token for token in PROBE_HELP_TOKENS if not _has_token(help_text, token)]
             if missing:
-                return Probe(shown, self.capabilities_for(shown), _missing_flags(executable, missing))
+                return Probe(shown, frozenset(), _missing_flags(executable, missing))
             return Probe(shown, self.capabilities_for(shown))
         finally:
             shutil.rmtree(root, ignore_errors=True)

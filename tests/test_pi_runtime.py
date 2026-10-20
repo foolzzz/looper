@@ -1,7 +1,7 @@
 """pi's identity, private launch commands and API-key configuration (RFC sections 1, 2, 3 and 6).
 
-Capabilities stay empty. A probe
-runs only ``--version`` and ``--help``, offline, in temporary directories.
+A successful 1.3.0+ probe enables all four roles. The probe runs only
+``--version`` and ``--help``, offline, in temporary directories.
 Provider requests are checked with installed pi 1.3 against a local fake
 Responses service and, separately, an injected fetch transport.
 """
@@ -38,15 +38,16 @@ PI = PiRuntime()
 def test_the_module_imports_and_pi_runtime_can_be_constructed() -> None:
     assert isinstance(PI, RuntimeAdapter)
     assert (PI.type, PI.label, PI.default_executable) == ("pi", "pi", "pi")
-    assert PI.capabilities == frozenset()
-    assert PI.capabilities_for("1.3.0") == frozenset()
+    assert {capability.value for capability in PI.capabilities} == {
+        "run", "resident_session", "resume", "steer", "read_tools", "compaction_events", "mcp"}
+    assert PI.capabilities_for("1.3.0") == PI.capabilities
     assert PI.capabilities_for(None) == frozenset()
     assert PI.protocols == frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT})
     assert ApiProtocol.ANTHROPIC_MESSAGES not in PI.protocols
     assert PI.auth_kinds == frozenset({AuthKind.API_KEY})
     assert AuthKind.OAUTH not in PI.auth_kinds
     assert adapter("pi") is ADAPTERS["pi"]
-    assert servable_roles(PI.capabilities) == []
+    assert servable_roles(PI.capabilities) == ["manager", "planner", "worker", "reviewer"]
 
 
 def test_the_probe_requires_the_launch_flags() -> None:
@@ -81,9 +82,9 @@ def _fake(path: Path, *, version: str = "1.3.0", help_text: str | None = None, e
 
 
 @pytest.mark.parametrize("version", ["1.3.0", "1.10.0", "2.0.0"])
-def test_a_new_enough_pi_with_the_flags_probes_clean_and_offers_nothing(tmp_path: Path, version: str) -> None:
+def test_a_new_enough_pi_with_the_flags_probes_clean_and_offers_every_role(tmp_path: Path, version: str) -> None:
     probe = PI.probe(_fake(tmp_path / "pi", version=version))
-    assert probe == Probe(version, frozenset())
+    assert probe == Probe(version, PI.capabilities)
 
 
 def test_a_missing_command_is_refused(tmp_path: Path) -> None:
@@ -193,7 +194,7 @@ def test_a_probe_uses_a_private_offline_home_and_only_version_and_help(
     )
     executable = fake_claude(tmp_path / "pi", body)
     probe = PI.probe(executable)
-    assert probe == Probe("1.3.0", frozenset())
+    assert probe == Probe("1.3.0", PI.capabilities)
     entries = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
     assert [entry["argv"] for entry in entries] == [["--version"], ["--help"]]
     home, agent, session = Path(entries[0]["home"]), Path(entries[0]["agent"]), Path(entries[0]["session"])
