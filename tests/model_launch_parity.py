@@ -24,15 +24,19 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import fcntl
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +51,198 @@ TIME_PATHS = frozenset({("session", "created_at"), ("session", "updated_at")})
 # The last old-schema main after both preset patches, before model splitting.
 # A new resolver must never manufacture the expected side of this contract.
 CLAUDE_LEGACY_REVISION = "252e736725c427d4b19e3a427e9f044077781ef8"
+CODEX_LEGACY_REVISION = CLAUDE_LEGACY_REVISION
+CODEX_CASES = {
+    "key-default": ("api_key", "", "", "append", True),
+    "key-proxy": ("api_key", "https://proxy.example.test/responses/v1/", "high", "replace", True),
+    "login-home": ("oauth", "", "low", "append", False),
+    "login-codex-home": ("oauth", "", "high", "replace", True),
+}
+CODEX_CATALOG = {"name": "capture-codex", "context_window": 128000,
+                 "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2,
+                 "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1,
+                 "efforts": ["high", "low"]}
+CODEX_TOTALS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd")
+
+
+@contextmanager
+def codex_capture_root() -> Any:
+    """Lease one stable temporary path so content-addressed filenames compare byte for byte.
+
+    The lock serializes concurrent captures. Refuse an existing directory rather
+    than deleting someone else's files; only our newly created root is removed.
+    No adapter hash, config byte or launch argument is normalized away.
+    """
+    root = Path("/tmp/looper-codex-launch-parity-v2")
+    with root.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        root.mkdir(mode=0o700)
+        try:
+            yield root
+        finally:
+            shutil.rmtree(root)
+
+
+def codex_environment(root: Path, *, explicit_home: bool) -> dict[str, str]:
+    """An entirely synthetic login, never the operator's home or credentials."""
+    login_home = root / ("login" if explicit_home else "home/.codex")
+    login_home.mkdir(parents=True)
+    (login_home / "auth.json").write_text('{"auth_mode":"chatgpt","tokens":"synthetic"}\n')
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
+                   "CODEX_API_KEY": "sk-test-inherited", "CODEX_ACCESS_TOKEN": "synthetic-token"}
+    if explicit_home:
+        environment["CODEX_HOME"] = str(login_home)
+    return environment
+
+
+def codex_executable(root: Path) -> str:
+    from fake_claude import fake_claude
+
+    (root / "bin").mkdir(exist_ok=True)
+    # The runtime's existing stand-in protocol: one process per turn, cumulative
+    # usage kept in the isolated home. Nothing invokes a paid model or network.
+    return fake_claude(root / "bin/codex", '''import json, os, sys
+home = os.environ['CODEX_HOME']
+args = sys.argv[1:]
+assert args[0] == 'exec' and args[-1] == '-', args
+message = sys.stdin.read()
+state = os.path.join(home, 'capture-thread.json')
+turns = json.load(open(state)) if 'resume' in args else 0
+if 'resume' in args:
+    assert args[args.index('resume') + 1] == 'thread-capture'
+turns += 1
+json.dump(turns, open(state, 'w'))
+reply = json.dumps({'status':'completed', 'summary':'ok', 'passed':True, 'findings':[]})
+for event in [
+    {'type':'thread.started', 'thread_id':'thread-capture'},
+    {'type':'turn.started'},
+    {'type':'item.completed', 'item':{'id':'item_0', 'type':'agent_message', 'text':reply}},
+    {'type':'turn.completed', 'usage':{'input_tokens':100*turns, 'cached_input_tokens':40*turns,
+      'cache_write_input_tokens':0, 'output_tokens':10*turns, 'reasoning_output_tokens':0}},
+]:
+    print(json.dumps(event), flush=True)
+''')
+
+
+def codex_legacy_source(checkout: Path) -> dict[str, str]:
+    source = claude_legacy_source(checkout)
+    result = subprocess.run(["git", "-C", str(checkout), "rev-parse",
+                             "HEAD:looper/agents/runtimes/codex.py"],
+                            capture_output=True, text=True, timeout=10, check=True)
+    return {**source, "adapter_blob": result.stdout.strip()}
+
+
+def generate_codex_baseline(checkout: Path, output: Path) -> None:
+    """Generate expected exclusively in the verified old interpreter and SQL store."""
+    checkout = checkout.resolve()
+    source = codex_legacy_source(checkout)
+    if not os.environ.get("LOOPER_TEST_DATABASE_URL"):
+        raise LegacyBaselineUnavailable("Codex baseline requires a disposable test database")
+    interpreter = checkout / ".venv/bin/python"
+    if not interpreter.is_file():
+        raise LegacyBaselineUnavailable("Codex baseline requires the old checkout's test venv")
+    result = subprocess.run(
+        [str(interpreter), "-I", str(Path(__file__).resolve()), "--checkout", str(checkout),
+         "--runtime", "codex", "--capture"], cwd=checkout, capture_output=True, text=True,
+        timeout=180, check=True,
+    )
+    baseline = json.loads(result.stdout)
+    if baseline["source"] != source or baseline["captures"].keys() != CODEX_CASES.keys():
+        raise LegacyBaselineUnavailable("legacy Codex capture returned inconsistent source or cases")
+    for records in baseline["captures"].values():
+        if len(records) != 6:
+            raise LegacyBaselineUnavailable("Codex capture requires four tiers and two resumed turns")
+        for record in records:
+            _fields(record, FIELDS)
+    with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, encoding="utf-8", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(json.dumps(baseline, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+            stream.close()
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+async def _capture_legacy_codex(checkout: Path) -> dict[str, Any]:
+    source = codex_legacy_source(checkout)
+    sys.path[:0] = [str(checkout), str(checkout / "tests")]
+    import asyncpg
+    import looper
+    import agent_launch_parity as tiers
+    from looper.db import agent_sessions, connection
+
+    if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
+            or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
+        raise LegacyBaselineUnavailable("legacy Codex capture imported a different checkout")
+    dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
+    if not dsn:
+        raise LegacyBaselineUnavailable("Codex baseline requires a disposable test database")
+    captures = {}
+    for case, (account, url, effort, mode, explicit_home) in CODEX_CASES.items():
+        schema = f"looper_codex_baseline_{uuid.uuid4().hex}"
+        admin = await asyncpg.connect(dsn, timeout=10)
+        pool = None
+        try:
+            await admin.execute(f'CREATE SCHEMA "{schema}"')
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
+                                            server_settings={"search_path": schema}, command_timeout=15)
+            await connection.ensure_schema(pool)
+            connection._pool = pool
+            await tiers.seed_projects(pool)
+            with codex_capture_root() as root:
+                executable = codex_executable(root)
+                # The patched v2 schema ships Claude Code only. Codex is registered
+                # when its executable is found (rt-<type>), which this capture supplies.
+                from looper.agents.runtimes import adapter as runtime_adapter
+                codex = runtime_adapter("codex")
+                await pool.execute(
+                    "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
+                    "VALUES ('rt-codex', 'codex', 'codex', $1, $2, true)",
+                    executable, sorted(capability.value for capability in codex.capabilities),
+                )
+                await pool.execute(
+                    "INSERT INTO llm_providers (id, name, auth, protocols, oauth_runtime_type, base_url, models, env) "
+                    "VALUES ('prov-capture', 'capture', $1, ARRAY['openai-responses'], $2, $3, $4::jsonb, $5::jsonb)",
+                    account, "codex" if account == "oauth" else None, url, json.dumps([CODEX_CATALOG]),
+                    json.dumps([{"key": "CAPTURE_SETTING", "value": "provider"}]))
+                if account == "api_key":
+                    await pool.execute("INSERT INTO llm_provider_secrets VALUES ('prov-capture', 'sk-test-capture')")
+                await pool.execute(
+                    "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) "
+                    "VALUES ('profile-capture', 'capture', 'rt-codex', 'prov-capture', 'capture-codex', $1)",
+                    effort or None)
+                await pool.execute(
+                    "INSERT INTO agent_setting_layers (scope, profile_id, run_budget_usd, env) "
+                    "VALUES ('system', 'profile-capture', 0.5, $1::jsonb)",
+                    json.dumps([{"key": "CAPTURE_SETTING", "value": "settings"}]))
+                for role in ("manager", "planner", "worker", "reviewer"):
+                    await pool.execute("INSERT INTO agent_setting_layers (scope, role, system_prompt_mode) "
+                                       "VALUES ('role', $1, $2)", role, mode)
+
+                async def read_state(index: int) -> dict[str, Any]:
+                    rows = await pool.fetch("SELECT session_id, input_tokens, output_tokens, cache_read_tokens, "
+                                            "cache_creation_tokens, cost_usd, status FROM llm_records ORDER BY id")
+                    if len(rows) != index + 1 or rows[-1]["status"] != "completed":
+                        raise LegacyBaselineUnavailable("Codex tier did not persist a completed run")
+                    owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+                    session = await agent_sessions.get_session(owner) if index < 4 else {
+                        "session_id": rows[-1]["session_id"]}
+                    return {"session": session, "totals": {key: rows[-1][key] for key in CODEX_TOTALS}}
+
+                with patch.dict(os.environ, codex_environment(root, explicit_home=explicit_home), clear=True):
+                    await tiers.seed_rest("unconfigured", root)
+                    records = await capture_codex_tiers(root, read_state=read_state)
+                    captures[case] = [normalize(record, root=root) for record in records]
+        finally:
+            connection._pool = None
+            if pool is not None:
+                await pool.close()
+            try:
+                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            finally:
+                await admin.close()
+    return {"source": source, "captures": captures}
 
 # Public, synthetic inputs shared by the source capture and its coverage tests.
 CLAUDE_CASES = {
@@ -522,6 +718,95 @@ async def capture_claude_tiers(
     return records
 
 
+async def capture_codex_tiers(
+    root: Path, *, read_state: Callable[[int], Awaitable[dict[str, Any]]], timeout: float = 45,
+) -> list[dict[str, Any]]:
+    """Observe real Manager/Planner restarts and Worker/Reviewer launches.
+
+    Read the SQL (or positive-control memory store) after every completed tier
+    call, before a resumed turn overwrites its saved session totals. Configuration
+    and login symlinks are read at subprocess creation, never reconstructed.
+    """
+    import agent_launch_parity as tiers
+    from looper.agents.runtimes import adapter
+
+    runtime = adapter("codex")
+    environment = runtime.environment
+    launches: list[Any] = []
+    states: list[dict[str, Any]] = []
+
+    def observe(launch: Any) -> dict[str, str]:
+        result = environment(launch)
+        launches.append(launch)
+        return result
+
+    def inspect(argv: list[str], env: dict[str, str], cwd: str) -> dict[str, Any]:
+        launch = launches[-1]
+        provider = launch.profile.provider
+        protocols = provider.protocols & runtime.protocols
+        if len(protocols) != 1:
+            raise ValueError("Codex capture requires one actual protocol")
+        home = Path(env["CODEX_HOME"])
+        text = (home / "config.toml").read_text("utf-8")
+        config = tomllib.loads(text)
+        agents = (home / "AGENTS.md").read_text("utf-8")
+        instructions = config.get("model_instructions_file")
+        prompt = Path(instructions).read_text("utf-8") if instructions else agents
+        login = home / "auth.json"
+        if login.exists() and not login.is_symlink():
+            raise ValueError("Codex login must be a symlink, never a copied credential")
+        return {"unset": list(runtime.bind_provider(provider, launch.model, launch.effort).unset),
+                "config": {"toml": text, "agents_md": agents, "protocol": next(iter(protocols)).value,
+                           "model": launch.model, "effort": launch.effort,
+                           "catalog": _public_data([asdict(entry) for entry in provider.catalog])},
+                "prompt": prompt,
+                "permissions": {"read_only": launch.read_only,
+                                "bypass": "--dangerously-bypass-approvals-and-sandbox" in argv},
+                "isolation": {"CODEX_HOME": str(home), "shell_environment_policy": config["shell_environment_policy"],
+                              "features": config["features"], "skills": config["skills"],
+                              "project_doc_fallback_filenames": config["project_doc_fallback_filenames"]},
+                "mcp": config.get("mcp_servers"),
+                "login_target": os.readlink(login) if login.is_symlink() else None}
+
+    async def exercise() -> None:
+        from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+
+        executable = str(root / "bin/codex")
+        tiers._work_dir(root, tiers.PROJECT_A).mkdir(parents=True, exist_ok=True)
+        planner = PlannerAgent(task_id=tiers.TASKS[tiers.PROJECT_A], runtime_root=root / "runtime",
+                               claude_bin=executable)
+        plan = TaskPlan(plan_id="plan-parity", goal_id="", requirement=tiers.REQUIREMENT,
+                        work_dir=str(tiers._work_dir(root, tiers.PROJECT_A)), project_id=tiers.PROJECT_A)
+        planner._plan = plan
+        await planner._refresh_project(plan)
+        for index, role in enumerate(("manager", "manager", "planner", "planner", "worker", "reviewer")):
+            if role == "manager":
+                await tiers._manager(executable, root)
+            elif role == "planner":
+                try:
+                    await planner._run_turn(planner._plan_message(plan))
+                finally:
+                    await planner._claude.stop()
+            else:
+                await tiers._worker(executable, root, tiers.PROJECT_A, verify=role == "reviewer")
+            states.append(_json_copy(await read_state(index)))
+
+    def readback(index: int) -> dict[str, Any]:
+        _fields(states[index], frozenset({"session", "totals"}))
+        launch = launches[index]
+        return {**states[index], "price": {"source": launch.cost_source.value,
+                                          "catalog": _public_data([asdict(entry) for entry in
+                                                                   launch.profile.provider.catalog])},
+                "cap": launch.max_budget_usd}
+
+    with patch.object(runtime, "environment", observe):
+        records = await capture(root, exercise, inspect_launch=inspect, readback=readback, timeout=timeout)
+    if ([launch.role.value for launch in launches] !=
+            ["manager", "manager", "planner", "planner", "worker", "reviewer"] or len(records) != 6):
+        raise ValueError("Codex capture did not observe all four real tiers and resumed launches")
+    return records
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -529,10 +814,13 @@ if __name__ == "__main__":
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--capture", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--runtime", choices=("claude", "codex"), default="claude")
     options = parser.parse_args()
     if options.capture:
-        print(json.dumps(asyncio.run(_capture_legacy_claude(options.checkout.resolve()))))
+        driver = _capture_legacy_codex if options.runtime == "codex" else _capture_legacy_claude
+        print(json.dumps(asyncio.run(driver(options.checkout.resolve()))))
     elif options.output is None:
         parser.error("--output is required")
     else:
-        generate_claude_baseline(options.checkout, options.output)
+        generate = generate_codex_baseline if options.runtime == "codex" else generate_claude_baseline
+        generate(options.checkout, options.output)

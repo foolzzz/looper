@@ -1,7 +1,7 @@
-"""Claude launch captures must come from real tiers and a patched v2 checkout.
+"""Launch captures must come from real tiers and a patched v2 checkout.
 
 Only the database tests need LOOPER_TEST_DATABASE_URL. The stand-in CLI never
-calls a model; all authentication below is synthetic and local to tmp_path.
+calls a model; all authentication below is synthetic and in temporary roots.
 """
 
 from __future__ import annotations
@@ -27,6 +27,171 @@ import model_launch_parity as parity
 
 
 FIXTURE = Path(__file__).parent / "fixtures/model_launch_parity_v2_claude.json"
+CODEX_FIXTURE = FIXTURE.with_name("model_launch_parity_v2_codex.json")
+
+
+@pytest.mark.parametrize("case", ["key-default", "key-proxy", "login-home", "login-codex-home"])
+def test_codex_capture_observes_real_tiers_and_resume(
+    case: str, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    from looper.agents import agent_settings, profile_registry as registry
+    from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
+    from looper.db import profile_registry as db_registry
+    from unittest.mock import AsyncMock
+
+    account, url, effort, mode, explicit_home = parity.CODEX_CASES[case]
+    with parity.codex_capture_root() as root:
+        executable = parity.codex_executable(root)
+        provider_type = getattr(registry, "LegacyProviderSpec", registry.ProviderSpec)
+        profile_type = getattr(registry, "LegacyAgentProfile", registry.AgentProfile)
+        provider = provider_type(
+            "prov-capture", "capture", AuthKind(account), frozenset({ApiProtocol.OPENAI_RESPONSES}),
+            oauth_runtime_type="codex" if account == "oauth" else None, base_url=url,
+            catalog=(registry.CatalogModel(**parity.CODEX_CATALOG),), api_key="sk-test-capture",
+            env=(("CAPTURE_SETTING", "provider"),),
+        )
+        profile = profile_type("profile-capture", "capture",
+                               registry.RuntimeSpec("rt-codex", "codex", "codex", executable,
+                                                    adapter("codex").capabilities),
+                               provider, "capture-codex", effort or None)
+        original = agent_settings.resolve
+        monkeypatch.setattr(agent_settings, "resolve",
+                            lambda *a, **kw: replace(original(*a, **kw), profile=profile))
+        monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-capture"))
+        agent_db.list_layers.return_value = [
+            {"scope": "system", "role": None, "env": [{"key": "CAPTURE_SETTING", "value": "settings"}],
+             "run_budget_usd": 0.5},
+            *({"scope": "role", "role": role, "system_prompt_mode": mode, "env": []}
+              for role in ("manager", "planner", "worker", "reviewer")),
+        ]
+        projects = [{"id": pid, "name": name, "background": background, "description": "", "work_dir": ""}
+                    for pid, (name, background) in tiers.PROJECTS.items()]
+        agent_db.list_projects.return_value = projects
+        agent_db.get_task_project.side_effect = lambda _: projects[0]
+        save = agent_db.save_session.side_effect
+
+        async def save_session(owner: str, *args: Any, **kwargs: Any) -> None:
+            await save(owner, *args, **kwargs)
+            agent_db.store.sessions[owner]["provider_id"] = kwargs.get("provider_id")
+
+        agent_db.save_session.side_effect = save_session
+
+        async def read_state(index: int) -> dict[str, Any]:
+            owner = "manager" if index < 2 else f"planner-{tiers.TASKS[tiers.PROJECT_A]}"
+            finished = agent_db.finish_record.call_args_list[index].kwargs
+            return {"session": copy.deepcopy(agent_db.store.sessions[owner]) if index < 4 else
+                    {"session_id": finished["session_id"]},
+                    "totals": {key: finished.get(key) for key in parity.CODEX_TOTALS}}
+
+        with monkeypatch.context() as env:
+            env.setattr("os.environ", parity.codex_environment(root, explicit_home=explicit_home))
+            asyncio.run(tiers.seed_rest("unconfigured", root))
+            captures = asyncio.run(parity.capture_codex_tiers(root, read_state=read_state))
+        assert len(captures) == 6
+        assert agent_db.finish_record.call_count == 6
+        for index, record in enumerate(captures):
+            assert record.keys() == parity.FIELDS
+            assert record["config"]["protocol"] == "openai-responses"
+            assert record["config"]["model"] == "capture-codex"
+            assert record["config"]["effort"] == effort
+            assert record["config"]["catalog"][0]["context_window"] == 128000
+            assert record["config"]["catalog"][0]["efforts"] == ["high", "low"]
+            assert record["env"]["CAPTURE_SETTING"] == "provider"
+            assert record["prompt"] and record["first_input"]
+            assert record["totals"]["input_tokens"] == 60
+            assert record["totals"]["output_tokens"] == 10
+            assert record["totals"]["cache_read_tokens"] == 40
+            assert record["totals"]["cost_usd"] == pytest.approx(0.000062)
+            assert record["price"]["source"] == "provider_price" and record["cap"] == 0.5
+            assert record["permissions"]["read_only"] == (index in (2, 3))
+            assert ("resume" in record["argv"]) == (index in (1, 3))
+            assert ("--ephemeral" in record["argv"]) == (index >= 4)
+            if index < 4:
+                assert record["session"]["runtime_type"] == "codex"
+                assert record["session"]["session_totals"]["output_tokens"] == (20 if index % 2 else 10)
+            if account == "oauth":
+                assert record["login_target"] == str(root / ("login" if explicit_home else "home/.codex") / "auth.json")
+                assert {"CODEX_API_KEY", "CODEX_ACCESS_TOKEN"} <= set(record["unset"])
+                assert "model_provider" not in record["config"]["toml"]
+            else:
+                assert record["login_target"] is None
+                assert record["env"]["LOOPER_PROVIDER_API_KEY"] == "sk-test-capture"
+                assert f'base_url = "{url or "https://api.openai.com/v1"}"' in record["config"]["toml"]
+            assert ("model_instructions_file" in record["config"]["toml"]) == (mode == "replace")
+        # Prove the comparator sees real launch mutations before loading the
+        # expected side, which can only be generated on the old SQL checkout.
+        parity.assert_parity(captures, copy.deepcopy(captures), expected_root=root, actual_root=root)
+        for field, key, value in (("config", "protocol", "openai-chat"),
+                                  ("config", "toml", captures[0]["config"]["toml"] +
+                                   '\nbase_url = "https://changed.example.test/"\n')):
+            mutated = copy.deepcopy(captures)
+            mutated[0][field][key] = value
+            with pytest.raises(AssertionError, match=key):
+                parity.assert_parity(captures, mutated, expected_root=root, actual_root=root)
+        assert CODEX_FIXTURE.is_file(), "generate the Codex baseline on the patched v2 checkout with a disposable DB"
+        expected = json.loads(CODEX_FIXTURE.read_text())["captures"][case]
+        parity.assert_parity(expected, captures, expected_root=root, actual_root=root)
+
+
+def test_codex_baseline_requires_patched_old_source(tmp_path: Path) -> None:
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="checkout"):
+        parity.codex_legacy_source(tmp_path / "missing")
+    output = tmp_path / "baseline.json"
+    output.write_text("preserve previous baseline\n")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.generate_codex_baseline(Path(__file__).resolve().parents[1], output)
+    assert output.read_text() == "preserve previous baseline\n"
+
+
+def test_codex_generation_preserves_output_without_database_or_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parity, "codex_legacy_source", lambda _: {})
+    monkeypatch.delenv("LOOPER_TEST_DATABASE_URL", raising=False)
+    output = tmp_path / "baseline.json"
+    output.write_text("previous baseline\n")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="database"):
+        parity.generate_codex_baseline(tmp_path, output)
+    monkeypatch.setenv("LOOPER_TEST_DATABASE_URL", "postgresql://synthetic.invalid/disposable")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="venv"):
+        parity.generate_codex_baseline(tmp_path, output)
+    assert output.read_text() == "previous baseline\n"
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
+                    reason="legacy SQL capture needs a disposable LOOPER_TEST_DATABASE_URL")
+def test_old_codex_checkout_reproduces_pinned_full_contract(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "legacy"
+    subprocess.run(["git", "clone", "--shared", "--no-checkout", str(repository), str(checkout)],
+                   check=True, capture_output=True, timeout=15)
+    subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", parity.CODEX_LEGACY_REVISION],
+                   check=True, capture_output=True, timeout=15)
+    venv.EnvBuilder(with_pip=False).create(checkout / ".venv")
+    packages = checkout / ".venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    (packages / "test-dependencies.pth").write_text("\n".join(site.getsitepackages()) + "\n")
+    original = CODEX_FIXTURE.read_bytes()
+    output = tmp_path / "captured.json"
+    parity.generate_codex_baseline(checkout, output)
+    assert json.loads(output.read_text()) == json.loads(original)
+    assert CODEX_FIXTURE.read_bytes() == original
+
+
+def test_codex_fixture_source_is_the_patched_adapter() -> None:
+    assert CODEX_FIXTURE.is_file(), "generate the Codex baseline on the patched v2 checkout with a disposable DB"
+    pinned = json.loads(CODEX_FIXTURE.read_text())
+    assert pinned["source"]["revision"] == parity.CODEX_LEGACY_REVISION
+    repository = Path(__file__).resolve().parents[1]
+    for key, expression in {
+        "tree": "{revision}^{{tree}}", "adapter_blob": "{revision}:looper/agents/runtimes/codex.py",
+        "registry_blob": "{revision}:looper/agents/profile_registry.py",
+    }.items():
+        result = subprocess.run(["git", "-C", str(repository), "rev-parse",
+                                 expression.format(revision=parity.CODEX_LEGACY_REVISION)],
+                                check=True, capture_output=True, text=True, timeout=10)
+        assert pinned["source"][key] == result.stdout.strip()
+    assert pinned["captures"].keys() == parity.CODEX_CASES.keys()
+    assert all(len(records) == 6 for records in pinned["captures"].values())
 
 
 @pytest.fixture
@@ -227,6 +392,10 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
     source = parity.claude_legacy_source(checkout)
     assert source["revision"] == parity.CLAUDE_LEGACY_REVISION
     assert all(len(value) == 40 for value in source.values())
+    codex_source = parity.codex_legacy_source(checkout)
+    assert codex_source["revision"] == parity.CODEX_LEGACY_REVISION
+    assert codex_source["tree"] == source["tree"]
+    assert codex_source["adapter_blob"] != source["adapter_blob"]
     # A verified checkout alone cannot manufacture persisted session/totals.
     # Failure must preserve any existing output rather than partially refresh it.
     output = tmp_path / "baseline.json"
@@ -250,9 +419,16 @@ def test_only_clean_patched_v2_source_passes_the_generation_gate(tmp_path: Path)
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.claude_legacy_source(checkout)
     git("-C", str(checkout), "restore", "looper/agents/runtimes/claude_code.py")
+    codex = checkout / "looper/agents/runtimes/codex.py"
+    codex.write_text(codex.read_text() + "\n# synthetic Codex adapter mutation\n")
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.codex_legacy_source(checkout)
+    git("-C", str(checkout), "restore", "looper/agents/runtimes/codex.py")
     git("-C", str(checkout), "checkout", "--detach", "95c399431")
     with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
         parity.claude_legacy_source(checkout)
+    with pytest.raises(parity.LegacyBaselineUnavailable, match="revision"):
+        parity.codex_legacy_source(checkout)
 
 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"),
