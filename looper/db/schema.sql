@@ -1154,6 +1154,62 @@ END $$;
 -- A step's kind: 'work', which a Worker runs, or 'gate', where the user and the task's Planner discuss what only
 -- the user can decide before the steps that depend on it run (looper/agents/user_gates.py).
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'gate'));
+-- Once (wait steps): a wait joins work and gate as a step kind.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_steps_kind_wait') THEN
+        ALTER TABLE task_steps DROP CONSTRAINT IF EXISTS task_steps_kind_check;
+        ALTER TABLE task_steps ADD CONSTRAINT task_steps_kind_check CHECK (kind IN ('work', 'gate', 'wait'));
+        INSERT INTO schema_migrations (name) VALUES ('task_steps_kind_wait');
+    END IF;
+END $$;
+-- Once (waits): a wait opening, being extended and closing join the journal kinds.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_waits') THEN
+        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
+        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
+            'handoff', 'progress', 'profile_choice', 'concurrency_change', 'role_defined', 'gate_opened',
+            'gate_updated', 'gate_cancelled', 'gate_closed', 'wait_opened', 'wait_extended', 'wait_closed'));
+        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_waits');
+    END IF;
+END $$;
+-- Whether a project's Planners may run a shell command as a wait's check; NULL, like 'off', refuses it.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS wait_commands TEXT CHECK (wait_commands IN ('off', 'on'));
+-- A wait step's wait (looper/agents/waits.py). The Planner writes the spec, state, times and resolution;
+-- the loop writes its checks, baseline and notice, and moves 'waiting' to 'ready' or 'timed_out'; the user's
+-- actions move 'waiting' to 'ready' or 'cancel_requested'. Every transition checks the state it read.
+CREATE TABLE IF NOT EXISTS task_waits (
+    step_id          TEXT PRIMARY KEY REFERENCES task_steps(id) ON DELETE CASCADE,
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    topic            TEXT NOT NULL CHECK (topic <> ''),
+    spec             JSONB NOT NULL,   -- max_wait_seconds, not_before_seconds, not_before, check, every_seconds
+    state            TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'waiting', 'ready', 'timed_out',
+                     'cancel_requested', 'done', 'failed', 'skipped')),
+    outcome          TEXT CHECK (outcome IN ('ready', 'resumed', 'proceeded', 'cancelled')),
+    opened_at        TIMESTAMPTZ,
+    due_at           TIMESTAMPTZ,
+    deadline_at      TIMESTAMPTZ,
+    next_check_at    TIMESTAMPTZ,
+    baseline         JSONB,            -- github_pr: {"head", "comments"}
+    checks           INTEGER NOT NULL DEFAULT 0,
+    last_checked_at  TIMESTAMPTZ,
+    last_result      TEXT CHECK (last_result IN ('ready', 'not_ready', 'error')),
+    last_output      TEXT NOT NULL DEFAULT '',   -- at most 2,048 bytes
+    last_error       TEXT NOT NULL DEFAULT '',
+    resolution       TEXT NOT NULL DEFAULT '',
+    notice           TEXT CHECK (notice IN ('sent', 'dashboard', 'failed')),
+    extensions       INTEGER NOT NULL DEFAULT 0,
+    failures         INTEGER NOT NULL DEFAULT 0, -- [WAIT] turns in a row that failed
+    failed_at        TIMESTAMPTZ,
+    closed_at        TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT task_waits_outcome_done CHECK ((outcome IS NOT NULL) = (state = 'done'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_waits_task ON task_waits (task_id);
+CREATE INDEX IF NOT EXISTS idx_task_waits_due ON task_waits (next_check_at) WHERE state = 'waiting';
 -- A gate step's gate. The Planner writes all but first_reply_at, which the user's first message sets with the
 -- state's move from 'open' to 'discussing', and the reminders' columns; a closed gate ('passed', 'cancelled',
 -- 'skipped') stays closed. agenda: [{id, question, options, status, answer}]. summary: what a gate that passed

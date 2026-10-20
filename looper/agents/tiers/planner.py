@@ -128,6 +128,8 @@ from ..runtimes import CLAUDE_CODE, ReadOnly
 from ..session_switch import SessionSwitch
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
+from .. import waits
+from ..waits import WaitPolicy
 from ..user_gates import (
     MESSAGE_MAX_CHARS,
     RETRY_WAIT_SEC,
@@ -948,7 +950,9 @@ class PlannerAgent:
             return
         try:
             reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
-                                    lambda text: parse_plan(text, self._roles, gate_policy=self._gate_policy))
+                                    lambda text: parse_plan(
+                                        text, self._roles, gate_policy=self._gate_policy,
+                                        wait_policy=WaitPolicy(waits.limits(), self._execution.wait_commands_on)))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
@@ -2700,7 +2704,8 @@ class PlannerAgent:
 
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
-        return replace(view, roles=self._roles, gate_policy=self._gate_policy)
+        return replace(view, roles=self._roles, gate_policy=self._gate_policy,
+                       wait_policy=WaitPolicy(waits.limits(), self._execution.wait_commands_on))
 
     @property
     def _gate_policy(self) -> GatePolicy:
@@ -3120,7 +3125,8 @@ class PlannerAgent:
             contract=reply_contract(self._execution.step_retries, roles=self._execution.roles_on,
                                     gates=self._gate_policy is GatePolicy.ALLOWED
                                     or any(s.gate is not None and not s.gate.state.closed for s in plan.steps),
-                                    room=self._room is not None)
+                                    room=self._room is not None, wait_commands=self._execution.wait_commands_on,
+                                    wait_limits=waits.limits())
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
                                          vault=planner_guide(self._vault) if self._vault else "")
                if self._ops else ""),
