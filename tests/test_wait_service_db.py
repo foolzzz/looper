@@ -566,3 +566,128 @@ def test_stop_reaps_a_running_command(monkeypatch: pytest.MonkeyPatch, tmp_path:
         assert (await _row())["checks"] == 0
 
     _run(test, monkeypatch)
+
+
+def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Run the composition function with inert services: no listener, child process or user runtime."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    import looper.db as db
+    from looper.agents import (
+        consult, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
+        scheduler_settings, serve, state_import, step_workspaces, task_workspaces,
+    )
+    from looper.agents.ops import planner as planner_ops, room as room_ops, service as manager_ops
+    from looper.agents.runtimes import codex_login, grok_login
+    from looper.db import channel_configs, llm_records, room as db_room, system_settings
+
+    monkeypatch.setattr(waits, "_limits", waits.WaitLimits())
+    monkeypatch.setattr(waits, "_sources", {})
+
+    async def test(pool: Any) -> None:
+        events: list[str] = []
+        await system_settings.put_settings({waits.MAX_WAIT_KEY: "7200", waits.MIN_CHECK_KEY: "900"})
+
+        def fake(name: str) -> Any:
+            async def start() -> None:
+                events.append(name + ".start")
+                assert waits.limits() == waits.WaitLimits(7200, 900)
+
+            async def stop() -> None:
+                events.append(name + ".stop")
+
+            return SimpleNamespace(start=start, stop=stop, start_all=start, stop_all=stop,
+                                   register=MagicMock(), resume_all=AsyncMock(), notify=AsyncMock(),
+                                   post=AsyncMock(), task_ended=AsyncMock(), list_channels=lambda: [])
+
+        bus = SimpleNamespace(shutdown=AsyncMock())
+        router = SimpleNamespace(has_planner=lambda task_id: task_id == "task-active")
+        for name in ("Broadcaster", "ManagerConfig", "WorkerConfig"):
+            monkeypatch.setattr(serve, name, MagicMock())
+        for name, value in (("MessageBus", bus), ("AgentSupervisor", fake("supervisor")),
+                            ("ChannelRegistry", fake("registry")), ("WebChannelAdapter", fake("web")),
+                            ("ManagerAgent", fake("manager")), ("Scheduler", fake("scheduler")),
+                            ("GateReminders", fake("gates")), ("GateCourier", fake("courier")),
+                            ("TaskRouter", router), ("WorkerPool", fake("workers")),
+                            ("AgentHTTPServer", fake("http"))):
+            constructor = MagicMock(return_value=value)
+            if name == "ChannelRegistry":
+                value.register = AsyncMock()
+            monkeypatch.setattr(serve, name, constructor)
+
+        class WaitService:
+            def __init__(self, **kwargs: Any) -> None:
+                assert kwargs["bus"] is bus
+                assert kwargs["has_planner"] is router.has_planner
+                assert kwargs["has_planner"]("task-active") and not kwargs["has_planner"]("task-stopped")
+                assert kwargs["dashboard_url"] == "https://looper.example.com"
+                events.append("waits.created")
+
+            async def start(self) -> None:
+                events.append("waits.start")
+                assert waits.limits() == waits.WaitLimits(7200, 900)
+
+            async def stop(self) -> None:
+                events.append("waits.stop")
+
+        # The service may be imported at module scope or locally; both references remain inert.
+        monkeypatch.setattr(service, "WaitService", WaitService)
+        monkeypatch.setattr(serve, "WaitService", WaitService, raising=False)
+        monkeypatch.setattr(db, "init_pool", AsyncMock(return_value=pool))
+        monkeypatch.setattr(db, "ensure_schema", AsyncMock())
+        monkeypatch.setattr(db, "close_pool", AsyncMock())
+        monkeypatch.setattr(operator_auth, "ensure_token", lambda _: "unused-test-token")
+        monkeypatch.setattr(operator_notes, "configure_root", lambda _: None)
+        for module, name, result in (
+            (serve, "_back_up_before_schema_change", None), (serve, "seed_role_configs", None),
+            (serve, "seed_channel_configs", None), (profile_registry, "register_found_runtimes", []),
+            (state_import, "import_file_state", None), (proc_tree, "sweep", None),
+            (serve, "tasks_left_running", SimpleNamespace(resumable=[], starting=[])),
+            (llm_records, "end_unfinished_records", 0), (step_workspaces, "sweep", 0),
+            (task_workspaces, "sweep", 0), (codex_login, "inspect_at_start", None),
+            (grok_login, "inspect_at_start", None), (read_only_copies, "reclaim_unused", None),
+            (db_room, "tasks_keeping_sessions", []), (channel_configs, "get_config", None),
+            (serve, "carry_on_tasks", None),
+        ):
+            monkeypatch.setattr(module, name, AsyncMock(return_value=result))
+        monkeypatch.setattr(room, "sweep_run_sessions", lambda *args: None)
+        for module, name in ((manager_ops, "Platform"), (manager_ops, "ManagerOps"),
+                             (planner_ops, "PlannerOps"), (room_ops, "RoomOps"), (room, "RoomService")):
+            monkeypatch.setattr(module, name, MagicMock())
+        monkeypatch.setattr(consult, "ConsultService", MagicMock(return_value=fake("consults")))
+        check = SimpleNamespace(status=serve.self_check.OK, to_dict=lambda: {})
+        for name in ("check_database", "codex_login_check", "grok_login_check"):
+            monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=check))
+        monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [])
+        for name in ("check_lark_cli", "check_git"):
+            monkeypatch.setattr(serve.self_check, name, lambda *args: check)
+        monkeypatch.setattr(serve.self_check, "log_problems", lambda _: None)
+        load = waits.load
+
+        async def load_waits() -> Any:
+            events.append("waits.load")
+            return await load()
+
+        async def load_scheduler() -> None:
+            events.append("scheduler.load")
+
+        monkeypatch.setattr(waits, "load", load_waits)
+        monkeypatch.setattr(scheduler_settings, "load", load_scheduler)
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "add_signal_handler", lambda sig, callback: (
+            loop.call_soon(callback) if sig == serve.signal.SIGINT else None))
+        ops = SimpleNamespace(host="127.0.0.1", port=9876, public_url="https://looper.example.com",
+                              operator_notes_root=tmp_path, database_url=DSN)
+        await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path,
+                                                      work_dir=tmp_path), 3)
+        assert events[:3] == ["scheduler.load", "waits.load", "waits.created"]
+        assert events[events.index("gates.start") + 1] == "waits.start"
+        assert events[events.index("gates.stop") + 1] == "waits.stop"
+        assert events.count("waits.start") == events.count("waits.stop") == 1
+        assert events.index("http.start") < events.index("waits.start")
+        assert events.index("waits.stop") < events.index("supervisor.stop")
+
+    _run(test, monkeypatch)

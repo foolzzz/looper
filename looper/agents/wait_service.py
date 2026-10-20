@@ -35,6 +35,7 @@ from .bus import MessageBus
 from .links import task_link
 from .message import AgentAddress, MessageEnvelope, MessageType, channel_address, planner_address
 from .project_execution import ProjectExecution
+from .projects import RequestError
 from .task_notice import Notice, NotifyTarget, link_line, notify_channel
 from .tiers.journal import clip
 from .waits import (
@@ -50,6 +51,81 @@ _POLL_SEC = 0.05
 _DRAIN_SEC = 2.0
 
 Outcome = tuple[CheckResult, str, str, dict[str, Any]]
+
+
+def wait_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A wait on the task page, including its persisted check spec and latest result."""
+    spec = row["spec"]
+    return {
+        "step": row.get("step_key"), "step_id": row["step_id"], "state": row["state"],
+        "outcome": row.get("outcome"), "topic": row["topic"], "check": spec.get("check"),
+        "every_seconds": spec.get("every_seconds"),
+        **{key: row.get(key) for key in ("opened_at", "due_at", "deadline_at", "next_check_at",
+                                       "last_checked_at", "last_result", "notice", "closed_at")},
+        "checks": row.get("checks") or 0, "last_output": row.get("last_output") or "",
+        "last_error": row.get("last_error") or "", "resolution": row.get("resolution") or "",
+        "depends_on": list(row.get("depends_on") or []),
+    }
+
+
+async def waits_view(task_id: str) -> list[dict[str, Any]]:
+    """The task's waits in plan order."""
+    return [wait_view(row) for row in await db_waits.list_for_task(task_id)]
+
+
+async def resume(task_id: str, label: str, *, has_planner: bool, bus: MessageBus,
+                 source: AgentAddress) -> dict[str, Any]:
+    """Make a waiting step ready on the user's request; its Planner settles it next."""
+    return await _user_move(task_id, label, cancel=False, has_planner=has_planner, bus=bus, source=source)
+
+
+async def cancel(task_id: str, label: str, *, has_planner: bool, bus: MessageBus,
+                 source: AgentAddress) -> dict[str, Any]:
+    """Ask the Planner to decide what follows the user's cancellation of a waiting step."""
+    return await _user_move(task_id, label, cancel=True, has_planner=has_planner, bus=bus, source=source)
+
+
+async def _user_move(task_id: str, label: str, *, cancel: bool, has_planner: bool, bus: MessageBus,
+                     source: AgentAddress) -> dict[str, Any]:
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError("404 Not Found", "task not found")
+    current = await db_waits.get(task_id, label)
+    if current is None:
+        raise RequestError("404 Not Found", f"task {task_id} has no wait {label}")
+    if db_tasks.task_group(task.get("status")) in (db_tasks.TaskGroup.COMPLETED, db_tasks.TaskGroup.CANCELLED):
+        raise RequestError("409 Conflict", "the task has ended: its waits no longer take user actions")
+    state = waits.WaitState(current["state"])
+    if state is not waits.WaitState.WAITING:
+        reason = f"wait {label} is {state.value}"
+        if state in (waits.WaitState.TIMED_OUT, waits.WaitState.CANCEL_REQUESTED):
+            reason += ": its Planner decides what happens next"
+        raise RequestError("409 Conflict", reason)
+    verb = "cancelled" if cancel else "resumed"
+    moved = await db_waits.move(
+        current["step_id"], to="cancel_requested" if cancel else "ready", expect=("waiting",),
+        outcome=None if cancel else "resumed", resolution=f"{verb.capitalize()} by the user from the dashboard.")
+    if moved is None:
+        raise RequestError("409 Conflict", f"wait {label} changed before this action: refresh and try again")
+    await db_activity.insert_activity(task_id=task_id, worker="planner", kind="phase",
+                                      summary=f"Wait {label} {verb} by the user")
+    if has_planner:
+        await bus.publish(MessageEnvelope.create(
+            source=source, target=planner_address(task_id), message_type=MessageType.WAIT_EVENT,
+            payload={"task_id": task_id, "wait": label}))
+    # move returns the wait table's columns; retain the step label and dependency labels read above.
+    return {"task_id": task_id, "wait": wait_view({**current, **moved})}
+
+
+async def settings_view() -> dict[str, Any]:
+    return await waits.settings_view()
+
+
+async def update_settings(body: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return await waits.update(body)
+    except ValueError as exc:
+        raise RequestError("400 Bad Request", str(exc)) from None
 
 
 def _tail(data: bytes) -> str:
