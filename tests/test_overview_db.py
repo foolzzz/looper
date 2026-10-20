@@ -204,16 +204,25 @@ def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytes
     _run(test, monkeypatch)
 
 
-def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("model_metadata", [False, True])
+def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(
+    monkeypatch: pytest.MonkeyPatch, model_metadata: bool,
+) -> None:
+    from looper.agents.agent_settings import AgentSettings, Launch
     from looper.agents.overview import local_midnight
+    from looper.agents.profile_registry import builtin_resolved_profile
     from looper.db import llm_records
 
     async def test(pool: Any) -> None:
         async def record(auth: str | None, source: str | None, cost: float | None, *,
-                         status: str = "completed", at: datetime | None = None) -> None:
+                         status: str = "completed", at: datetime | None = None, legacy: bool = False) -> None:
+            metadata = {"agent" if legacy else "profile": {"provider": {"auth": auth}}} if auth else {}
+            if model_metadata and not legacy:
+                snapshot = Launch(AgentSettings(profile=builtin_resolved_profile())).record()
+                metadata.update({k: snapshot[k] for k in ("llm_model", "pricing")})
             record_id = await llm_records.start_record(
                 agent_id="worker-1", task_id="task-1", pool=pool,
-                metadata={"profile": {"provider": {"auth": auth}}} if auth else None)
+                metadata=metadata or None)
             if status != "running":
                 await llm_records.finish_record(record_id, status=status, cost_usd=cost, cost_source=source, pool=pool)
             if at is not None:
@@ -223,7 +232,7 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(monkeyp
         await record("oauth", "provider_price", 0.5)  # Codex's login, at the built-in prices
         await record(None, "runtime", 0.25)  # a run from before Agent Profiles: Claude Code's login
         await record("api_key", "runtime", 0.2)  # Anthropic's API
-        await record("api_key", "provider_price", 0.1)  # another provider's API
+        await record("api_key", "provider_price", 0.1, legacy=True)  # old metadata.agent stays compatible
         await record("api_key", "provider_price", None)  # ended without a cost
         await record("api_key", None, None, status="running")
         await record("api_key", "provider_price", 9.0, at=local_midnight() - timedelta(minutes=1))  # yesterday

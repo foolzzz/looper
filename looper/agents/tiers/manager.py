@@ -893,9 +893,11 @@ class ManagerAgent:
         """The reset as one of the Manager's runs, under the session it ended (``metadata.session_reset``: who
         asked, from which channel and chat); a database error is logged, as for any run."""
         try:
+            launch = self._process.launch if self._process is not None else Launch(
+                await self._load_agent_settings(), role=AgentType.MANAGER)
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=previous, input_text=str(envelope.payload.get("text", "")),
-                metadata={"session_reset": {**origin, "previous_session_id": previous}},
+                metadata={**launch.record(), "session_reset": {**origin, "previous_session_id": previous}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=NEW_SESSION_REPLY,
                                                cost_usd=0.0, duration_ms=0)

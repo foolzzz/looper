@@ -76,8 +76,8 @@ from .runtimes import AuthKind, Capability, CostSource, ReadOnly
 from .system_prompt_mode import SystemPromptMode, system_prompt_mode
 
 if TYPE_CHECKING:
-    from .run_usage import Price
     from .runtimes import RuntimeAdapter
+    from .runtimes.pricing import PriceSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -964,7 +964,7 @@ class Launch:
         return self.runtime.cost_source(self.profile.provider)
 
     @cached_property
-    def price(self) -> Price | None:
+    def price(self) -> PriceSnapshot | None:
         """What prices the run's tokens at its provider's prices; None when its runtime's own figure is used."""
         from .runtimes.pricing import pricer
 
@@ -990,6 +990,24 @@ class Launch:
             "profile": {**self.profile.record(), "source": self.settings.profile_source.value},
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
             "settings_sources": self.settings.sources(),
+        }
+        if isinstance(self.profile, ResolvedAgentProfile):
+            model = self.profile.resolved_model.model
+            record["llm_model"] = {"model_id": model.id, "provider_id": model.provider_id,
+                                   "name": model.name, "protocol": model.protocol.value}
+        from .runtimes.pricing import PRICES_AS_OF
+
+        # Audit the same frozen prices used by usage events and the final result. Never serialize a provider
+        # or endpoint here: they may carry credentials. Historical costs remain the stored run's figures.
+        price = self.price
+        record["pricing"] = {
+            "cost_source": self.cost_source.value,
+            "rule": "exact_normalized_builtin_v1" if price is not None else "runtime_reported",
+            "builtin_prices_as_of": PRICES_AS_OF,
+            **({"exact": {name: value.view() for name, value in price.exact.items()},
+                "normalized": {name: value.view() for name, value in price.normalized.items()},
+                "builtin": {name: value.view() for name, value in price.builtin.items()},
+                "aliases": dict(price.aliases)} if price is not None else {}),
         }
         if self.read_only:
             record["read_only"] = self.read_only_mode.value  # how it is kept from changing files
