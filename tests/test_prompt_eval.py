@@ -10,6 +10,8 @@ import asyncio
 import dataclasses
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +26,9 @@ from evals.prompt_regression import __main__ as cli
 from evals.prompt_regression import compare, fake_claude, metrics, runner
 from evals.prompt_regression import tasks as task_list
 from evals.prompt_regression.tasks import TASKS, EvalTask
+from looper.agents import agent_settings, profile_registry
+from looper.agents.runtimes import ApiProtocol, AuthKind
+from looper.agents.runtimes.pi import PiRuntime, PiStream
 from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
 from looper.agents.tiers.planner_protocol import TurnKind, parse_plan, parse_vault
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool, judge_result
@@ -127,6 +132,257 @@ def test_edit_tool_paths_are_relative_and_never_local_paths(tmp_path: Path) -> N
               omp("edit", {"input": "[h.txt#A1B2]\nPUT 1:\n+x\n"}), omp("read", {"path": "i.txt"})]
     assert metrics.edit_tool_paths(events, tmp_path) == [
         "a.txt", "sub/c.txt", "<outside the working directory>/d.txt", "e.txt", "f.txt", "g.txt", "h.txt"]
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+@pytest.mark.parametrize("location", ["relative", "absolute", "outside"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_pi_file_edits_reach_the_planners_metrics(
+    tmp_path: Path, tool: str, location: str, failed: bool,
+) -> None:
+    path = {"relative": "sub/plan.md", "absolute": str(tmp_path / "sub/plan.md"),
+            "outside": "/elsewhere/private/plan.md"}[location]
+    arguments = {"path": path, **({"content": "new"} if tool == "write" else
+                                 {"oldText": "old", "newText": "new"})}
+    stream = PiStream(model="selected")
+    raw = [
+        {"type": "message_end", "message": {"role": "assistant", "content": [
+            {"type": "toolCall", "id": "edit-1", "name": tool, "arguments": arguments}]}},
+        {"type": "message_end", "message": {"role": "toolResult", "toolCallId": "edit-1",
+            "isError": failed, "content": [{"type": "text", "text": "denied" if failed else "done"}]}},
+    ]
+    events = [{"event": event} for row in raw for event in stream.translate(row)]
+    expected = [] if failed else ["<outside the working directory>/plan.md" if location == "outside"
+                                 else "sub/plan.md"]
+    assert metrics.edit_tool_paths(events, tmp_path) == expected
+    # No filesystem diff can hide a missed tool: the actual task metric must see the event alone.
+    result = metrics.task_metrics(
+        detail={"status": "completed", "steps": []}, activity=[],
+        records=[_record(1, "planner-task-1")], events={1: events}, changes={}, work_dir=tmp_path,
+        check_problem=None, expect={"max_planner_modified_files": 0}, now=0.0)
+    assert result["planner_edit_tool_paths"] == expected
+    assert result["planner_modified_files"] == int(not failed)
+    assert result["problems"] == ([] if failed else ["planner_modified_files 1 > 0"])
+
+
+# --- Explicit eval Agent Profiles ----------------------------------------------------------------------
+
+
+_PI_SPECS = [("pi-cpa.example.json", "openai-responses", "gpt-6.1-sol"),
+             ("pi-deepseek.example.json", "openai-chat", "deepseek-flash")]
+
+
+@pytest.fixture
+def eval_registry(tmp_path: Path) -> Any:
+    """In-memory persistence and scripted Pi subprocesses; registration, settings and adapters are real."""
+    from fake_claude import fake_claude as executable
+
+    pi = executable(tmp_path / "pi", """import json, sys
+from pathlib import Path
+role = sys.stdin.read()
+if role == 'worker':
+    Path('done.txt').write_text('done\\n')
+reply = {'worker': json.dumps({'status': 'completed', 'changed_files': {'done.txt': 'done'},
+                              'deleted_files': [], 'summary': 'ok'}),
+         'reviewer': json.dumps({'passed': True}), 'planner': 'planned', 'manager': 'ok'}[role]
+model = sys.argv[sys.argv.index('--model') + 1]
+print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', 'model': model,
+                 'content': [{'type': 'text', 'text': reply}], 'stopReason': 'stop'}}))
+print(json.dumps({'type': 'agent_settled', 'aborted': False}))
+""")
+
+    class Registry:
+        def __init__(self) -> None:
+            self.providers: dict[str, Any] = {}
+            self.profiles = [{"profile_id": "builtin", "name": "claude-code/opus", "builtin": True}]
+            self.layers: dict[Any, Any] = {}
+            self.posts: list[tuple[str, Any]] = []
+            self.launches: list[tuple[str, str, str]] = []
+            self.records: list[dict[str, Any]] = []
+            self.events: dict[int, list[dict[str, Any]]] = {}
+            self.messages: list[dict[str, Any]] = []
+            self.work = tmp_path
+            self.runtime = profile_registry.RuntimeSpec("rt-pi", "pi", "pi", pi, PiRuntime.capabilities)
+
+        def launch(self, role: str) -> str:
+            kind = agent_settings.AgentType(role)
+            launch = agent_settings.Launch(agent_settings.resolve(kind, self.layers), role=kind)
+            prompt = tmp_path / "prompt.md"
+            prompt.write_text("Disposable eval stand-in", encoding="utf-8")
+            command = launch.runtime.run_command(launch.executable("must-not-run-claude"), cwd=self.work,
+                                                 prompt_file=prompt, launch=launch)
+            done = subprocess.run(command, cwd=self.work, env=launch.environment(), input=role,
+                                  capture_output=True, text=True, check=True, timeout=10)
+
+            async def read() -> list[dict[str, Any]]:
+                stdout = asyncio.StreamReader()
+                stdout.feed_data(done.stdout.encode())
+                stdout.feed_eof()
+                return [event async for event in launch.runtime.parse(stdout, model=launch.model)]
+
+            events = asyncio.run(read())
+            record_id = len(self.records) + 1
+            self.records.append({**_record(record_id, f"{role}-eval", step_id="s1" if role == "worker" else None),
+                                 "model": launch.model})
+            self.events[record_id] = [{"seq": i, "event": event} for i, event in enumerate(events, 1)]
+            self.launches.append((role, launch.runtime.type, launch.model))
+            return next(event["result"] for event in events if event["type"] == "result")
+
+        def get(self, path: str, **_: Any) -> dict[str, Any]:
+            if path == "/api/registry":
+                return {"runtimes": [{"runtime_id": "rt-claude-code", "name": "claude-code",
+                                      "type": "claude-code", "builtin": True},
+                                     {"runtime_id": "rt-pi", "name": "pi", "type": "pi", "builtin": True}],
+                        "providers": [], "profiles": self.profiles}
+            if path == "/api/tasks":
+                return {"tasks": []}
+            if path == "/api/tasks/task-eval":
+                return {"status": "completed", "steps": [{"id": "s1"}]}
+            if path == "/api/tasks/task-eval/activity":
+                return {"activity": []}
+            if path == "/api/llm-records":
+                return {"records": self.records}
+            if path.endswith("/events"):
+                return {"events": self.events[int(path.split("/")[-2])]}
+            assert path == "/api/chat/messages", path
+            return {"messages": self.messages}
+
+        def post(self, path: str, body: Any) -> dict[str, Any]:
+            self.posts.append((path, body))
+            if path == "/api/providers":
+                assert "api_key_env" not in body
+                self.providers["provider-eval"] = profile_registry.ProviderSpec(
+                    "provider-eval", body["name"], AuthKind(body["auth"]),
+                    frozenset(ApiProtocol(p) for p in body["protocols"]), base_url=body["base_url"],
+                    api_key=body["api_key"])
+                return {"provider": {"provider_id": "provider-eval"}}
+            if path == "/api/agent-profiles":
+                assert body["runtime_id"] == self.runtime.id
+                profile_registry.check_pairing(self.runtime, self.providers[body["provider_id"]], body["model"])
+                profile = {"profile_id": "profile-eval", **body}
+                self.profiles.append(profile)
+                return {"profile": profile}
+            if path == "/api/projects":
+                self.work = Path(body["work_dir"])
+                return {"project_id": "project-eval"}
+            if path == "/api/tasks/create":
+                self.work = Path(body["project"]["work_dir"])
+                return {"task_id": "task-eval", "project_id": "project-eval"}
+            if path == "/api/tasks/start":
+                for role in ("planner", "worker", "reviewer"):
+                    self.launch(role)
+                return {}
+            assert path == "/api/chat/send", path
+            self.messages.append({"message_id": f"{body['message_id']}:reply", "content": self.launch("manager")})
+            return {}
+
+        def put(self, path: str, body: Any) -> None:
+            assert path == "/api/agent-settings/system"
+            profile = next(p for p in self.profiles if p["profile_id"] == body["profile_id"])
+            chosen = profile_registry.AgentProfile(profile["profile_id"], profile["name"], self.runtime,
+                                                    self.providers[profile["provider_id"]], profile["model"])
+            profile_registry.check_roles(chosen, [role.value for role in agent_settings.AgentType])
+            self.layers[agent_settings.Layer.SYSTEM, None] = agent_settings.LayerValues(profile=chosen)
+
+    return Registry()
+
+
+@pytest.mark.parametrize(("filename", "protocol", "model"), _PI_SPECS)
+def test_pi_eval_specs_register_without_exposing_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    eval_registry: Any, filename: str, protocol: str, model: str,
+) -> None:
+    spec_path = runner.REPO_ROOT / "evals" / "agents" / filename
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    assert spec["runtime"] == {"type": "pi"}
+    assert spec["provider"]["auth"] == "api_key"
+    assert spec["provider"]["protocols"] == [protocol]
+    assert spec["agent"]["model"] == model
+    assert "api_key" not in spec["provider"]
+    assert spec["provider"]["base_url"] == ("http://127.0.0.1:8080/v1" if protocol == "openai-responses"
+                                               else "https://api.deepseek.com/v1")
+    original = json.dumps(spec)
+    secret = "sk-disposable-eval-secret"
+    variable = spec["provider"]["api_key_env"]
+    monkeypatch.delenv(variable, raising=False)
+    with pytest.raises(runner.EvalError, match=variable):
+        runner.register_agent(eval_registry, spec)
+    assert eval_registry.posts == []
+    monkeypatch.setenv(variable, secret)
+    registered = runner.register_agent(eval_registry, spec)
+    chosen = runner.select_agent(eval_registry, agent=registered["name"], model=None)
+    assert chosen["runtime_id"] == "rt-pi" and chosen["model"] == model
+    assert eval_registry.providers["provider-eval"].api_key == secret
+    assert json.dumps(spec) == original  # adding the key must not mutate a shareable spec
+    report = {"agent": chosen, "tasks": []}
+    saved = tmp_path / "result.json"
+    runner.write_result(report, saved, roots=(tmp_path,), rows="tasks")
+    print(compare.markdown({"mode": "fake", "agent": chosen["name"], "git": {}, "tasks": []}))
+    captured = capsys.readouterr()
+    assert secret not in saved.read_text() + captured.out + captured.err + repr(chosen)
+
+
+def test_registering_pi_without_its_runtime_does_not_fall_back_to_claude(
+    monkeypatch: pytest.MonkeyPatch, eval_registry: Any,
+) -> None:
+    registry = eval_registry.get("/api/registry")
+    registry["runtimes"] = [runtime for runtime in registry["runtimes"] if runtime["type"] != "pi"]
+    monkeypatch.setattr(eval_registry, "get", lambda _: registry)
+    spec = json.loads((runner.REPO_ROOT / "evals/agents/pi-cpa.example.json").read_text(encoding="utf-8"))
+    with pytest.raises(runner.EvalError, match="no 'pi' runtime"):
+        runner.register_agent(eval_registry, spec)
+    assert eval_registry.posts == [] and eval_registry.launches == []
+
+
+@pytest.mark.parametrize(("filename", "protocol", "model"), _PI_SPECS)
+@pytest.mark.parametrize("suite", ["task", "dialog"])
+def test_registered_pi_runs_a_fake_eval_task_or_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, eval_registry: Any,
+    capsys: pytest.CaptureFixture[str], filename: str, protocol: str, model: str, suite: str,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    spec = json.loads((runner.REPO_ROOT / "evals" / "agents" / filename).read_text(encoding="utf-8"))
+    secret = "sk-disposable-eval-secret"
+    monkeypatch.setenv(spec["provider"]["api_key_env"], secret)
+
+    @contextmanager
+    def database(_: str) -> Any:
+        yield "disposable", 0.0
+
+    @contextmanager
+    def server(**_: Any) -> Any:
+        yield eval_registry
+
+    harness = runner if suite == "task" else dialogs
+    monkeypatch.setattr(harness, "fresh_database", database)
+    monkeypatch.setattr(harness, "running_server", server)
+    monkeypatch.setattr(harness, "_git", lambda: {})
+    if suite == "task":
+        task = EvalTask("pi_smoke", "Create done.txt.", lambda work: None if
+                        (work / "done.txt").read_text() == "done\n" else "wrong file", expect={"min_reviews": 1})
+        result, path = runner.run(mode="fake", tasks=(task,), register=spec,
+                                  admin_url="disposable", out_dir=tmp_path / "results", task_timeout=10)
+        roles = ["planner", "worker", "reviewer"]
+    else:
+        monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+        monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+        monkeypatch.setattr(dialogs, "_usage", lambda *_: (0.0, {
+            "manager": sorted({record["model"] for record in eval_registry.records})}))
+        dialog = dialogs.Dialog("pi_smoke", (dialogs.Say("Status?", lambda look: None if look.reply == "ok"
+                                                        else "wrong reply"),))
+        result, path = dialogs.run(mode="fake", dialogs=(dialog,), register=spec,
+                                   admin_url="disposable", out_dir=tmp_path / "results", timeout=10)
+        roles = ["manager"]
+        assert result["manager_agent"] == spec["agent"]["name"]
+    assert result["aborted"] is None
+    (row,) = result["tasks" if suite == "task" else "dialogs"]
+    assert row["outcome"] == "pass", row
+    assert row["models"] == {role: [model] for role in roles}
+    assert eval_registry.launches == [(role, "pi", model) for role in roles]
+    assert result["agent"] == spec["agent"]["name"]
+    captured = capsys.readouterr()
+    assert secret not in path.read_text(encoding="utf-8") + captured.out + captured.err
 
 
 def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
