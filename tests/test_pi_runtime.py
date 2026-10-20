@@ -733,6 +733,7 @@ console.log(JSON.stringify({requests, contextWindow: model.contextWindow, maxTok
 
 @pytest.mark.parametrize("read_only", [False, True])
 def test_every_launch_path_loads_the_same_packaged_extension(tmp_path: Path, read_only: bool) -> None:
+    executable = _fake(tmp_path / "pi")
     launch = replace(_launch(_provider()), consult=read_only)
     _command(tmp_path, launch)
     prompt = tmp_path / ".local/prompts/prompt.md"
@@ -741,7 +742,7 @@ def test_every_launch_path_loads_the_same_packaged_extension(tmp_path: Path, rea
     (sessions / "source.jsonl").write_text(json.dumps({"type": "session", "id": "saved"}) + "\n")
     kwargs = dict(cwd=tmp_path, prompt_file=prompt, launch=launch)
     resident = PI.resident_session("manager")
-    base = PI.resident_command("pi", **kwargs)
+    base = PI.resident_command(executable, **kwargs)
 
     async def start() -> None:
         await resident.start(base, cwd=str(tmp_path), signature=tuple(base), env=launch.environment())
@@ -757,12 +758,12 @@ def test_every_launch_path_loads_the_same_packaged_extension(tmp_path: Path, rea
     steered = replace(launch, settings=replace(launch.settings, profile=replace(
         launch.profile, runtime=steered_runtime)))
     steer_kwargs = {**kwargs, "launch": steered}
-    commands = [PI.launch_args(launch), PI.run_command("pi", **kwargs),
-                PI.run_command("pi", **kwargs, session_dir=sessions), base, first_turn, resumed,
-                PI.consult_command("pi", **kwargs, session_id="saved", session_dir=sessions,
+    commands = [PI.launch_args(launch), PI.run_command(executable, **kwargs),
+                PI.run_command(executable, **kwargs, session_dir=sessions), base, first_turn, resumed,
+                PI.consult_command(executable, **kwargs, session_id="saved", session_dir=sessions,
                                    fork_dir=tmp_path / "consult"),
-                PI.steer_command("pi", **steer_kwargs),
-                PI.steer_command("pi", **steer_kwargs, session_dir=sessions)]
+                PI.steer_command(executable, **steer_kwargs),
+                PI.steer_command(executable, **steer_kwargs, session_dir=sessions)]
     resource = Path(str(files("looper.agents.runtimes").joinpath("pi_extension/looper.ts")))
     assert resource.is_absolute() and resource.is_file()
     for command in commands:
@@ -779,21 +780,22 @@ def test_every_launch_path_loads_the_same_packaged_extension(tmp_path: Path, rea
 def test_resident_signature_tracks_agent_directory_and_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import looper.agents.runtimes.pi as pi
 
+    executable = _fake(tmp_path / "pi")
     _command(tmp_path)
     kwargs = dict(cwd=tmp_path, prompt_file=tmp_path / ".local/prompts/prompt.md", launch=_launch(_provider()))
-    base = PI.resident_command("pi", **kwargs)
+    base = PI.resident_command(executable, **kwargs)
     resident = PI.resident_session("manager")
     asyncio.run(resident.start(base, cwd=str(tmp_path), signature=tuple(base)))
-    assert not resident.stale(tuple(PI.resident_command("pi", **kwargs)))
+    assert not resident.stale(tuple(PI.resident_command(executable, **kwargs)))
     other = tmp_path / "installed" / "looper.ts"
     other.parent.mkdir()
     other.write_text("export default function () {}")
     monkeypatch.setattr(pi, "bridge_extension", lambda: other)
-    changed = PI.resident_command("pi", **kwargs)
+    changed = PI.resident_command(executable, **kwargs)
     assert changed[changed.index("-e") + 1] == str(other)
     assert resident.stale(tuple(changed))
     monkeypatch.undo()
-    changed = PI.resident_command("pi", **{**kwargs, "launch": _launch(_provider(api_key="rotated"))})
+    changed = PI.resident_command(executable, **{**kwargs, "launch": _launch(_provider(api_key="rotated"))})
     assert _command_env(changed)["PI_CODING_AGENT_DIR"] != _command_env(base)["PI_CODING_AGENT_DIR"]
     assert resident.stale(tuple(changed))
 
