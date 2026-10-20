@@ -63,7 +63,7 @@
 | **M2** | **规划者自己决定加等待**，在系统限制之内（最长等待、最短检查间隔）。等待在任务活动和 Dashboard 上可见 | 维护者定的 |
 | **M3** | **只在超时时通知用户**（最长等待过了、条件一直没满足），经任务的渠道路由，和别的任务通知一样；然后规划者得到一轮来决定。正常结束不通知 | 维护者定的 |
 | D1 | **等待是步骤，形状照关卡。** PLAN、DECISION 的 `replan`、CHAT 的 `add_steps` 和 `replan` 里都能放；打开的等待算已开始，`replan` 不能去掉它，要结束就用 `waits` 取消 | 派发、并行和重启沿用同一套代码；关卡已经证明了这个形状 |
-| D2 | **所有任务都能加等待**，包括定时任务建出的任务；不加项目开关。只有 `command` 检查要项目开 `wait_commands` | 等待不需要人在场；`github_pr` 只读、参数固定，不扩大规划者的权限 |
+| D2 | **所有任务都能加等待**，包括定时任务建出的任务；不加项目开关。只有 `command` 检查要项目开 `wait_commands`。**定时运行里的等待不能比运行超时活得长**（维护者 2026-10-19 补充）：运行有超时（#237 的 `run_timeout_seconds`，按定时任务继承、自定或不限）时，等待的有效上限是运行剩下的时间，规划者要得更长就在校验里拒绝，说明原因；打开时截止时间取两者中早的那个（第 7.5 节） | 等待不需要人在场；`github_pr` 只读、参数固定，不扩大规划者的权限。定时运行到了超时会被调度器停掉，等待要是比它长，就会无声地白等 |
 | D3 | **`command` 检查默认关闭**（项目设置 `wait_commands`，为空即 `off`）。关闭时协议拒绝它，修复回合说明原因和做法；约定里也不提它 | 规划者是只读角色，这条命令以服务的用户身份在工作目录里运行，等于给了它执行任意命令的能力，只能由项目明确打开 |
 | D4 | **`max_wait_seconds` 必填。** 1 到系统最长等待 | 维护者要求「总要设最长等待」；必填比默认值更不容易让任务无声地等七天 |
 | D5 | **检查和超时由服务里的一个循环（`WaitService`）负责，计划的改动只由规划者做。** 循环把等待的行从 `waiting` 改为 `ready` 或 `timed_out`（有条件的 `UPDATE … WHERE state = 'waiting'`），再唤醒规划者（`WAIT_EVENT`）；规划者在事件末尾读到它，把步骤标为完成、派出依赖它的步骤，或者开一轮 `[WAIT]` | 规划者在内存里持有计划，外部直接改步骤会和它不一致；关卡的消息也是这样先写库、再唤醒 |
@@ -111,7 +111,7 @@ skipped                                                     ├─ extend → wa
 | `failed` | 规划者 | `failed` | 任务失败 |
 | `skipped` | 规划者 | `skipped` | 和它一起被重新规划 |
 
-- 映射只在一处（`waits.py` 的 `STEP_STATUS`）。`done` 记一个结局 `outcome`：`ready`（时间到或检查就绪）、`resumed`（用户立即继续）、`proceeded`（规划者在 `[WAIT]` 回合里继续）、`cancelled`（规划者在 `waits` 里取消）。
+- 映射只在一处（`waits.py` 的 `STEP_STATUS`）。`ready` 和 `done` 记一个结局 `outcome`（`ready` 的行由写它的一方填 `ready` 或 `resumed`，规划者读到后照抄）：`ready`（时间到或检查就绪）、`resumed`（用户立即继续）、`proceeded`（规划者在 `[WAIT]` 回合里继续）、`cancelled`（规划者在 `waits` 里取消）。
 - `ready`、`timed_out`、`cancel_requested` 是「等规划者读」的状态，规划者每个事件末尾读一次；任务没在跑时，留到重启。
 - 规划者读到 `ready` 时步骤可能已经完成（它刚在 `waits` 里取消了），那就只把行标为 `done`。
 - 规划者从这些状态的转换都带条件（期望的旧状态）；条件不成立说明别人先改了，下一个事件重读。
@@ -206,6 +206,14 @@ PLAN 的说明里，关卡说明之后多一段（`{command}` 只在 `wait_comma
 
 `{command}` 为：`, or {"type": "command", "command": "..."}: a shell command run in the working directory, exit 0 is ready`。
 
+### 7.5 定时运行里的等待
+
+- 规划者对定时任务建出的任务，在每轮校验前读它正在跑的运行（`schedule_runs` 里 `status` 为 `running` 的那一条）：有 `run_timeout_seconds` 时，运行的截止时间是 `fired_at + run_timeout_seconds`，放进 `WaitPolicy.run_deadline`；没有超时（`none`）时为空，只受系统最长等待限制。
+- 校验（PLAN、`replan`、`add_steps`，和 `[WAIT]` 的 `extend`）：`max_wait_seconds` 不能超过运行剩下的秒数，`not_before_seconds` 和 `not_before` 也不能落在运行截止之后。拒绝的消息：「this task is a scheduled run that is stopped at <截止时间 UTC> (its run timeout): a wait may last at most <剩下的秒数> s from now; wait less, or decide without waiting」。
+- 打开时 `deadline_at = min(opened_at + max_wait_seconds, run_deadline)`：依赖它的步骤做得久、等待开得晚时，它仍在运行停止之前超时，超时通知和 `[WAIT]` 回合照常；规划者来不及决定时，调度器按今天的规则停掉任务、把运行记为 `timed_out`。
+- 约定的文字不变（数字仍是系统限制）；`[WAIT]` 消息在定时运行里多一行「This scheduled run is stopped at <时间> (its run timeout): extend by at most <N> s.」。
+- **和重叠策略的关系**：等待中的任务状态是 `waiting`，在 `ACTIVE_STATUSES` 里，所以对调度器来说这次运行还在跑。下一次触发按定时任务的 `overlap` 处理，和今天一个跑得久的运行一样：`skip` 记为 `skipped_overlap`；`queue` 排成唯一的一个 `queued` 运行，等这次结束再开始；`parallel` 在 `max_parallel_runs` 之内另起一个。长的等待因此会让后面的触发被跳过或排队，配置定时任务时要按运行超时和等待时长来定。
+
 ## 8. 规划者里的流程（代码）
 
 - `PlanStep.wait: Wait | None`，像 `gate`。`started`：等待的状态不是 `pending`。`_add_steps` 给等待建 `Wait`，`review` 恒为假。
@@ -291,7 +299,7 @@ CREATE TABLE IF NOT EXISTS task_waits (
     closed_at        TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT task_waits_outcome_done CHECK ((outcome IS NOT NULL) = (state = 'done'))
+    CONSTRAINT task_waits_outcome CHECK ((outcome IS NOT NULL) = (state IN ('ready', 'done')))
 );
 CREATE INDEX IF NOT EXISTS idx_task_waits_task ON task_waits (task_id);
 CREATE INDEX IF NOT EXISTS idx_task_waits_due ON task_waits (next_check_at) WHERE state = 'waiting';
@@ -312,6 +320,7 @@ CREATE INDEX IF NOT EXISTS idx_task_waits_due ON task_waits (next_check_at) WHER
 
 - 协议：每个键的校验（必填、范围、二选一、类型化检查的每个字段、未知键）；`wait_commands` 关闭时拒绝 `command`；`waits` 取消的校验；`parse_wait` 的三种动作、`extend` 的范围、取消后拒绝 `extend`、`final` 的要求。
 - `WaitService.run_once`（真 PG）：只按时间结束；检查就绪；先未就绪后就绪；检查出错、超时；`github_pr` 的固定参数（`gh` 替身记下 argv）、基线和三种 `ready_when`；`command` 用 `child_env` 的环境和 2 KiB 上限、输出不进日志；超时写 `timed_out` 并发通知（有渠道和没有渠道）；停掉的任务不检查；限制来自设置。
+- 定时运行：有运行超时时 `max_wait_seconds`、`not_before*` 和 `extend` 超过剩下的时间被拒绝；打开时截止时间取运行截止；没有超时时只受系统限制。
 - 规划者：等待打开不派执行者、不占并发；就绪后依赖它的步骤派出、读到结果；超时 → `[WAIT]` 回合 → 延长 / 继续 / 失败；立即继续；取消 → `[WAIT]`；`waits` 取消；重启后接着等；任务状态 `waiting` 的选择。
 - 接口：两个按钮的 200、404、409；设置的读写和校验。
 
