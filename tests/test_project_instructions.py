@@ -88,7 +88,9 @@ def test_each_runtime_is_given_one_file_of_the_repository_read_by_itself(
 ) -> None:
     repo = _repository(tmp_path, **files)
     expected_records = {runtime: _native(*paths) for runtime, paths in expected.items()}
-    expected_records["pi"] = [_injected(name, files[name]) for name in ("AGENTS.md", "CLAUDE.md") if name in files][:1]
+    # DSH disables native discovery and injects one file per directory, preferring AGENTS.md, like pi.
+    for runtime in ("pi", "dsh"):
+        expected_records[runtime] = [_injected(name, files[name]) for name in ("AGENTS.md", "CLAUDE.md") if name in files][:1]
     assert _given(repo) == expected_records
 
 
@@ -103,6 +105,8 @@ def test_below_the_root_claude_code_reads_the_projects_claude_md_and_the_others_
                                     "codex": _native("../CLAUDE.md", "AGENTS.md"),
                                     "omp": _native("../CLAUDE.md", "AGENTS.md"),
                                     "grok": _native("../CLAUDE.md", "AGENTS.md"),
+                                    # DSH injects the same per-directory selection, from the repository root down.
+                                    "dsh": [_injected("../CLAUDE.md", "root\n"), _injected("AGENTS.md", "pkg\n")],
                                     "pi": [_injected("../CLAUDE.md", "root\n"), _injected("AGENTS.md", "pkg\n")]}
 
 

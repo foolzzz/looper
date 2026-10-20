@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -439,7 +438,8 @@ class ManagerAgent:
             await self._claude.stop()
 
     def is_healthy(self) -> bool:
-        return self._running and bool(shutil.which(self._config.claude_bin))
+        # Runtime availability is checked per launch; Claude is optional for other profiles.
+        return self._running and self._task is not None and not self._task.done()
 
     @property
     def busy(self) -> bool:
@@ -707,6 +707,10 @@ class ManagerAgent:
                     await recorder.finish(output_text=None, result_event=None,
                                           error=f"Cannot start {launch.runtime.label}: {exc}")
                     return f"无法启动 {launch.runtime.label}，请检查安装。"
+                if self._claude.command != command:
+                    # A per-turn runtime may materialize its owner's home at start.
+                    command = self._claude.command
+                    await recorder.annotate({"command": command})
                 self._process = _Process(command, signature, system_prompt, launch)
 
             text_parts: list[str] = []
@@ -810,6 +814,7 @@ class ManagerAgent:
             exited = result_event is None
             # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
             over_cap = launch.runtime.budget_error(result_event)
+            succeeded = not exited and not result_event.get("is_error") and result_event.get("subtype") == "success"
             # is_error fails the turn. Assistant text already streamed stays on the record; the chat gets
             # failure_detail (an OMP HTTP 400, for example).
             failed: str | None = None
@@ -818,7 +823,7 @@ class ManagerAgent:
                 label = launch.runtime.label
                 failed = (f"{label} turn did not succeed: {detail}"[:500] if detail else
                           f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
-            replied = failed is None and not exited and not over_cap and bool(final_text)
+            replied = succeeded and failed is None and not over_cap and bool(final_text)
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
             # keeps what it spent.
             await recorder.finish(

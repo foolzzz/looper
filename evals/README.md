@@ -283,6 +283,81 @@ comparison again:
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]
 ```
 
+### DSH validation
+
+[DSH's RFC](../docs/architecture/rfcs/dsh-runtime-v0.zh-CN.md#9-验收与边界)
+tracks passed, failed and untested separately. Local fake responses and the
+installed package's offline checks do not establish real-model acceptance.
+The opt-in launcher is [examples/dsh/validate.py](../examples/dsh/validate.py),
+using [agent-spec.json](../examples/dsh/agent-spec.json): DSH 0.2.1-rc.2,
+DeepSeek Messages, `deepseek-flash`, effort `high`, effective append. It
+registers a DSH Profile for all four roles; `--provider-preset deepseek`
+would create a Claude Code Profile instead.
+
+From the checkout root, these commands make no model calls:
+
+```sh
+uv run --extra test python -m examples.dsh.validate --help
+uv run --extra test python -m examples.dsh.validate preflight --help
+uv run --extra test python -m examples.dsh.validate preflight \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+```
+
+The URL is an example for a dedicated, disposable local PostgreSQL instance;
+replace it with yours, never an operator or production database. Preflight
+requires an explicit local `/postgres` management URL, rejects port 8767,
+checks the interpreter/checkout, exact DSH version, help and process-tree
+observation, and uses temporary private homes for the probe. It neither reads
+the key nor connects to PostgreSQL: `credentials`, `database_connection` and
+`real_validation` remain `untested` even when preflight passes. Missing or
+unsupported dependencies are a failed preflight, not model acceptance.
+
+The following are **pending, paid acceptance commands**, each requiring an
+explicit `--real`; they were not run for this documentation change:
+
+```sh
+uv run --extra test python -m examples.dsh.validate task-basic --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+uv run --extra test python -m examples.dsh.validate task-review --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+uv run --extra test python -m examples.dsh.validate manager --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+uv run --extra test python -m examples.dsh.validate smoke --real \
+  --disposable-pg-url postgresql://eval:password@127.0.0.1:55432/postgres
+```
+
+Only the launcher captures the key at runtime from the configured interactive
+zsh into memory, then supplies the eval provider through `api_key_env`; do not
+expand, echo or paste it into a shell command, spec, report or artifact. Empty
+or failed capture stops the run. Eval artifacts stay in ignored
+`evals/runs/dsh/`; smoke uses a disposable root and fresh database, closes
+external channels and starts its own server away from 8767. It checks two
+Manager turns, two tasks, all four roles, room consults and API/DB readback.
+Channel stand-ins do not establish Telegram/Lark delivery to real accounts.
+
+The eval commands select `single_step,dependent_steps`,
+`reviewed_step,planner_plan_file` and Manager `status,confirm_create_start`,
+respectively, each at `jobs=1`, `reps=2`. Manager results include actual launch,
+Session and root usage readback plus the existing per-turn tool audit. Missing
+evidence cannot establish acceptance; repeated MCP success alone does not
+prove a changed run token was applied. Each invocation sets a $0.50 per-run
+soft cap, a $4 total observed-spend cap, 300 seconds per task/dialog (per stage
+for smoke), and 20 minutes outside the workflow plus cleanup grace. With one
+job, **`--case-budget-usd` is not enforced**; the launcher does not pass it or
+promise a per-case cap. Root observed cost is not a complete bill: summary,
+search, child-session and consult coverage remains unknown, including when
+the official Session reader returns observations. These are not hard billing
+limits; unknown cost causing a consult refusal is a failed smoke, not a pass.
+
+For an eval command, optional `--baseline path/to/real-append.json` must point
+to an existing real result with the same case and explicit
+`validation.effective_system_prompt_mode=append`. Missing or incompatible
+evidence is a gap; the launcher neither starts Claude/OMP nor updates public
+baselines. Existing Claude/OMP/pi workflows remain independent. The RFC's
+broader two-repetition task/dialog comparison is still pending; these three
+one-case commands do not cover `dependent_steps`, `planner_plan_file` or
+`confirm_create_start`.
+
 ### Which tier to run
 
 A pull request runs real mode only on what its change touches, and pastes the

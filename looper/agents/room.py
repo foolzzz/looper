@@ -1136,7 +1136,7 @@ def _commit_exists(work_dir: str | None, commit: str) -> bool | None:
 
 # The runtime types that keep a run's session only when told where (``RuntimeAdapter.run_command``'s
 # ``session_dir``); Claude Code keeps every run's session in its own place.
-SESSION_KEEPING_RUNTIMES = ("codex", "omp", "pi")
+SESSION_KEEPING_RUNTIMES = ("codex", "omp", "dsh", "pi")
 RUN_SESSIONS = "run-sessions"
 # How long the kept sessions of a task that ended stay (the server's start removes older ones).
 RUN_SESSIONS_KEPT_DAYS = 7
@@ -1156,7 +1156,7 @@ def remove_run_sessions(runtime_root: Path, task_id: str) -> None:
 
     for runtime_type in SESSION_KEEPING_RUNTIMES:
         directory = runtime_root.absolute() / ".local" / runtime_type / RUN_SESSIONS / task_id
-        if directory.is_dir() and not directory.is_symlink():
+        if directory.is_dir() and not _linked_session_path(directory, runtime_root.absolute()):
             shutil.rmtree(directory, ignore_errors=True)
 
 
@@ -1168,12 +1168,19 @@ def sweep_run_sessions(runtime_root: Path, keep: Iterable[str]) -> list[Path]:
     removed: list[Path] = []
     for runtime_type in SESSION_KEEPING_RUNTIMES:
         parent = runtime_root.absolute() / ".local" / runtime_type / RUN_SESSIONS
+        if _linked_session_path(parent, runtime_root.absolute()):
+            continue
         for directory in sorted(parent.iterdir()) if parent.is_dir() else []:
             if directory.name in keep or directory.is_symlink() or not directory.is_dir():
                 continue
             shutil.rmtree(directory, ignore_errors=True)
             removed.append(directory)
     return removed
+
+
+def _linked_session_path(path: Path, root: Path) -> bool:
+    """Never follow a replaced managed parent when deleting saved sessions."""
+    return any(part.is_symlink() for part in (path, *path.parents) if part == root or root in part.parents)
 
 
 # --- What the task page and the Manager see ---

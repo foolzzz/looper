@@ -12,7 +12,7 @@ import pytest
 
 from looper.agents.runtimes import RuntimeAdapter, adapter
 
-ADAPTER_TYPES = ("claude-code", "codex", "omp", "grok", "pi")
+ADAPTER_TYPES = ("claude-code", "codex", "omp", "grok", "dsh", "pi")
 METHODS = [name for name, member in vars(RuntimeAdapter).items()
            if getattr(member, "__isabstractmethod__", False) and name.endswith("_command")]
 

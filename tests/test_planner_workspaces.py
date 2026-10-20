@@ -435,3 +435,44 @@ class TestStepWorkspaces:
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
         assert asked == [(str(h.work_dir.resolve()), "looper/t1/s2-2")]  # the repository's top level
         assert "previous_branch" not in seen["s2"][1]["workspace"]
+
+
+def test_dsh_guard_denials_reach_run_metadata_and_planner_activity(tmp_path, agent_db, monkeypatch):
+    import asyncio
+
+    from looper.agents import log_redaction
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from looper.agents.runtimes.dsh import DshStream, READ_ONLY_DENIAL
+    from test_dsh_runtime import _run_launch
+
+    monkeypatch.setattr(log_redaction, "_secrets", ("test-private-marker",))
+    launch = _run_launch(tmp_path, role="planner")
+    stream = DshStream()
+    events = []
+    for raw in [
+        {"type": "tool_call", "callId": "write-denied", "tool": "write",
+         "input": {"file_path": "plan.md", "content": "test-private-marker"}},
+        {"type": "tool_result", "callId": "write-denied", "status": "error", "result": READ_ONLY_DENIAL},
+        {"type": "final", "text": "Plan returned without writing"},
+        {"type": "status", "phase": "turn_end", "reason": {"kind": "completed"}},
+    ]:
+        events.extend(stream.translate(raw))
+    result = stream._result(0)
+    assert not result["is_error"]  # A refused tool does not fail an otherwise successful turn.
+    planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+
+    async def check():
+        async with ClaudeRunRecorder(agent_id="planner-t1", task_id="t1", command=[], cwd=str(tmp_path),
+                                     input_text="plan", launch=launch) as recorder:
+            for event in events:
+                await recorder.record(event)
+            await recorder.finish(output_text=result["result"], result_event=result)
+        await planner._report_read_only(launch.runtime.permission_denials(result), None)
+
+    asyncio.run(asyncio.wait_for(check(), 5))
+    metadata = agent_db.finish_record.await_args.kwargs["metadata"]
+    assert metadata["permission_denials"][0]["tool"] == "write"
+    assert metadata["permission_denials"][0]["id"] == "write-denied"
+    line, = activity(agent_db)
+    assert "Looper refused 1 of its tool calls" in line and "write:" in line
+    assert "test-private-marker" not in line

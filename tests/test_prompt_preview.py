@@ -120,6 +120,54 @@ def test_preview_includes_project_instructions_without_writes(monkeypatch, tmp_p
     assert list(tmp_path.iterdir()) == [tmp_path / "AGENTS.md"]
 
 
+def test_preview_dsh_uses_bootstrap_builder_and_reports_effective_append(monkeypatch, tmp_path):
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.runtimes import dsh
+    from tests.test_dsh_runtime import _register_prompt_runtime, _node
+
+    _register_prompt_runtime(monkeypatch)
+    module, profile, layers = _dependencies(monkeypatch, "dsh", "replace")
+    profile = replace(profile, model="deepseek-flash")
+    module.db_profiles.get_profile.return_value = {**_row(profile), "custom_prompt": profile.custom_prompt}
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text('Project {{unknown}}: 中文 "quote"\nsecond line')
+    project = {"id": "proj-demo", "name": "Demo", "work_dir": str(tmp_path)}
+    monkeypatch.setattr(module.db_projects, "get_project", AsyncMock(return_value=project))
+    monkeypatch.setattr(module.db_documents, "list_documents", AsyncMock(return_value=[]))
+    result = asyncio.run(module.preview(profile.id, "worker", "proj-demo"))
+    assert result["system_prompt_mode"] == "append"
+    assert result["role_system_prompt_mode"] == "replace"
+    assert layers.return_value[1]["system_prompt_mode"] == "replace"
+    assert [b["owner"] for b in result["blocks"]] == ["runtime", "looper"]
+    assert result["blocks"][0]["text"] is None
+    text = result["blocks"][1]["text"]
+    assert text.startswith("My profile identity\n\n# Runtime notes (DSH)")
+    assert text.index("# Runtime notes") < text.index("Project {{unknown}}") < text.index("Project harness")
+    from looper.agents.system_prompt import WORK_CONTRACT, compose_system_prompt
+    looper = compose_system_prompt("Configured role", harness="Project harness", custom_prompt=profile.custom_prompt,
+                                   project_name=project["name"], contract=WORK_CONTRACT)
+    launch = Launch(AgentSettings(profile=profile), role=AgentType.WORKER)
+    assert text == dsh._prompt_text(looper, launch, cwd=tmp_path)
+    assert text.endswith(WORK_CONTRACT)
+    # The actual launch materialization calls the same builder, not a preview-only formatter.
+    executable = tmp_path / "dsh"
+    executable.touch()
+    files = dsh.bootstrap_files(str(executable), looper, launch, cwd=tmp_path)
+    assert set(tmp_path.iterdir()) == {tmp_path / ".git", tmp_path / "AGENTS.md", executable}
+    # Inspect the generated module through a minimal exports-only runner.
+    package = tmp_path / "node_modules" / "@deepseek-ai" / "dsh-headless"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text('{"type":"module","exports":"./index.mjs"}')
+    (package / "index.mjs").write_text("export const name='headless-runner', Config={}, inject=[]; export function apply() {}")
+    home = dsh.write_home(tmp_path / "local", files)
+    done = _node(tmp_path, '''
+const plugin = await import(process.argv[2]);
+plugin.apply({systemPrompt: {section(value) {console.log(JSON.stringify(value.text));}}}, {});
+''', dsh.bootstrap_entry(home)["name"])
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == text
+
+
 @pytest.mark.parametrize("mode", ["append", "replace"])
 def test_pi_preview_matches_the_final_prompt_file(monkeypatch, tmp_path, mode):
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch

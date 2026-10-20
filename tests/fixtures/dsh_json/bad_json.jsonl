@@ -1,0 +1,3 @@
+{invalid json
+{"type": "status", "phase": "turn_end", "reason": {"kind": "completed"}}
+{"type": "final", "text": "Original final after invalid JSON."}

@@ -389,7 +389,7 @@ def _listed(values: Iterable[Any]) -> str:
     return ", ".join(sorted(getattr(v, "value", str(v)) for v in values))
 
 
-def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> None:
+def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
     """Refuse a profile of ``runtime``, ``provider`` and ``model`` that could not run (the module's rules)."""
     try:
         adapter = runtimes.adapter(runtime.type)
@@ -411,6 +411,10 @@ def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> N
     if provider.models and model not in provider.models:
         raise RegistryError(f"provider {provider.name!r} lists the models {', '.join(provider.models)}; "
                             f"{model!r} is not one of them")
+    try:
+        adapter.check_pairing(provider, model, effort)
+    except RuntimeUnsupported as exc:
+        raise RegistryError(str(exc)) from None
 
 
 def default_agent_teams(runtime: RuntimeSpec) -> bool:
@@ -515,6 +519,7 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
             "protocols": sorted(p.value for p in adapter.protocols),
             "capabilities": sorted(c.value for c in adapter.capabilities),
             "roles": servable_roles(adapter.capabilities),
+            "supported_models": sorted(adapter.supported_models) if adapter.supported_models is not None else None,
             "can_replace_system_prompt": adapter.can_replace_system_prompt,
             "replace_system_prompt_refusal": runtimes.replace_refusal(adapter),
             "auth_kinds": sorted(a.value for a in adapter.auth_kinds)}
@@ -868,7 +873,7 @@ async def _check_provider_profiles(conn: Any, provider: Mapping[str, Any]) -> No
     for row in await db.list_profiles(pool=conn, provider_id=provider["id"]):
         profile = AgentProfile.from_row(row)
         try:
-            check_pairing(profile.runtime, spec, profile.model)
+            check_pairing(profile.runtime, spec, profile.model, profile.effort)
         except RegistryError as exc:
             raise RegistryError(f"Agent Profile {profile.name!r} uses this provider: {exc}") from None
 
@@ -989,7 +994,7 @@ async def create_profile(data: Any) -> dict[str, Any]:
               "custom_prompt": _custom_prompt(data.get("custom_prompt", ""))}
     runtime, provider = await _parts(fields["runtime_id"], fields["provider_id"])
     fields["agent_teams"] = _agent_teams(data["agent_teams"]) if "agent_teams" in data else default_agent_teams(runtime)
-    check_pairing(runtime, provider, fields["model"])
+    check_pairing(runtime, provider, fields["model"], fields["effort"])
     check_agent_teams(runtime, fields["agent_teams"])
     try:
         profile_id = await db.insert_profile(fields)
@@ -1039,7 +1044,7 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
     if "agent_teams" not in fields and runtime.type != row["runtime_type"]:
         # A profile moved to a runtime of another type takes that type's default, unless the change says.
         fields["agent_teams"] = default_agent_teams(runtime)
-    check_pairing(runtime, provider, model)
+    check_pairing(runtime, provider, model, fields.get("effort", row.get("effort")))
     check_agent_teams(runtime, fields.get("agent_teams", bool(row.get("agent_teams"))))
     check_roles(AgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),
                 await _selected_roles(profile_id))

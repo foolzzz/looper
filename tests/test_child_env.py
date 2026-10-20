@@ -18,11 +18,12 @@ from looper import child_env
 from looper.agents import proc_tree, schedule_gate
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.channels import lark_cli
-from looper.agents.profile_registry import ProviderSpec
+from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported
 from looper.agents.runtimes.grok import FIXED_ENV
 from test_agent_settings import _profile as claude_profile
 from test_codex_runtime import _launch as codex_launch, _login_provider, _operator_login
+from test_dsh_runtime import PROVIDER as DSH_PROVIDER, dsh_policy  # noqa: F401 (fixture)
 from test_grok_runtime import LOGIN, _launch as grok_launch, _operator
 from test_omp_runtime import _launch as omp_launch
 from test_pi_runtime import _command as pi_command, _launch as pi_launch, _provider as pi_provider
@@ -38,7 +39,7 @@ KEPT = (
 DROPPED = (
     "LOOPER_DATABASE_URL", "LOOPX_DATABASE_URL", "PGPASSWORD", "PGHOST", "LOOPER_TELEGRAM_BOT_TOKEN",
     "LOOPER_AGENT_TOKEN", "LOOPER_RUNTIME_ROOT", "LOOPER_PUBLIC_URL", "CLAUDECODE", "AWS_SECRET_ACCESS_KEY",
-    "SOME_SECRET",
+    "SOME_SECRET", "DEEPSEEK_API_KEY", "DSH_HOME", "DSH_AGENTS_HOME", "DSH_TOOLS_MODE",
 )
 CASES = (
     ("claude-code", "login"), ("claude-code", "api-key"), ("claude-code", "endpoint"),
@@ -214,6 +215,97 @@ def test_process_spawn_defaults_to_child_environment(
     actual = json.loads(asyncio.run(run()))
     assert actual["PATH"] == server_environment["PATH"]
     assert not set(DROPPED) & actual.keys()
+
+
+def test_dsh_child_uses_private_homes_and_explicit_binding(tmp_path, monkeypatch, dsh_policy):
+    from looper.agents.runtimes import dsh
+
+    names = ("HOME", "DSH_HOME", "DSH_AGENTS_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+             "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_DIRS", "XDG_DATA_DIRS")
+    relatives = ("marker", ".env", ".dsh/profiles/marker", ".agents/marker")
+    operator = {}
+    for name in names:
+        directory = tmp_path / "operator" / name
+        directory.mkdir(parents=True)
+        for relative in relatives:
+            path = directory / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("operator-only-" + name)
+        operator[name] = str(directory)
+        monkeypatch.setenv(name, str(directory))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ambient-key")
+    monkeypatch.setenv("DSH_PROFILE", "operator-profile")
+    before = {str(p): (p.stat().st_mode, p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+              for p in (tmp_path / "operator").rglob("*")}
+    # Positive control: this child really can read the markers with the operator environment.
+    reader = ("import json, os; from pathlib import Path; "
+              f"names = {names!r}; relatives = {relatives!r}; "
+              "print(json.dumps({k: {r: (Path(os.environ[k]) / r).read_text() "
+              "if (Path(os.environ[k]) / r).exists() else None for r in relatives} for k in names}))")
+    control = subprocess.run([sys.executable, "-c", reader], env={**child_env.inherited(), **operator},
+                             cwd=tmp_path, text=True, capture_output=True, check=True, timeout=10)
+    assert json.loads(control.stdout) == {name: dict.fromkeys(relatives, "operator-only-" + name) for name in names}
+    overrides = tuple(operator.items()) + (("DSH_PROFILE", "foreign"), ("DSH_TOOLS_MODE", "ptc"),
+        ("DEEPSEEK_API_KEY", "foreign-key"), ("DEEPSEEK_BASE_URL", "https://wrong.invalid"),
+        ("ANTHROPIC_BASE_URL", "https://wrong.invalid"), ("OPENAI_BASE_URL", "https://wrong.invalid"),
+        ("CLAUDE_CONFIG_DIR", operator["HOME"]), ("PI_CODING_AGENT_DIR", operator["HOME"]),
+        ("AGENTS_HOME", operator["HOME"]))
+    token = "synthetic-run-token"
+    provider = replace(DSH_PROVIDER, env=overrides + (("PROVIDER_SETTING", "bound"), ("LOOPER_AGENT_TOKEN", token)))
+    profile = AgentProfile("test", "test", RuntimeSpec("test", "test", dsh_policy.type), provider, "deepseek-flash")
+    launch = Launch(AgentSettings(profile=profile, env=overrides + (("RUN_SETTING", "configured"),)))
+    home = dsh.write_home(tmp_path / ".local", {"looper.yml": '{"apiKeyEnv":"DEEPSEEK_API_KEY"}\n',
+                          "prompt.md": "A synthetic prompt with {{literal}} text.\n"}, owner="child")
+    # Exercise Launch.environment's adapter contract without registering an unfinished DSH runtime.
+    monkeypatch.setattr(dsh_policy, "environment", lambda run: dsh.environment(run, home))
+    actual = launch.environment()
+    assert actual["DEEPSEEK_API_KEY"] == DSH_PROVIDER.api_key
+    assert actual["LOOPER_AGENT_TOKEN"] == token
+    assert actual["RUN_SETTING"] == "configured" and actual["PROVIDER_SETTING"] == "bound"
+    assert not {"DSH_PROFILE", "DSH_TOOLS_MODE", "DEEPSEEK_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
+                "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "AGENTS_HOME"} & actual.keys()
+    assert dsh.validate_provider(launch.profile.provider, launch.model).base_url == DSH_PROVIDER.base_url
+    command = [sys.executable, "-c", reader]
+    isolated = subprocess.run(command, env=actual, cwd=tmp_path, text=True,
+                              capture_output=True, check=True, timeout=10)
+    assert json.loads(isolated.stdout) == dict.fromkeys(names, dict.fromkeys(relatives))
+    assert actual | home.paths == actual
+    rotated = replace(launch, settings=replace(launch.settings, profile=replace(profile, provider=replace(
+        provider, api_key="rotated-dsh-key", env=(("LOOPER_AGENT_TOKEN", "rotated-run-token"),)))))
+    rotated_env = rotated.environment()
+    assert {name: rotated_env[name] for name in names} == home.paths
+    assert rotated_env["DEEPSEEK_API_KEY"] == "rotated-dsh-key"
+    assert rotated_env["LOOPER_AGENT_TOKEN"] == "rotated-run-token"
+    for secret in (DSH_PROVIDER.api_key, token, "rotated-dsh-key", "rotated-run-token", "foreign-key", "ambient-key"):
+        assert secret not in repr(command)
+        assert secret not in repr(launch.record())
+        assert secret not in repr(rotated.record())
+        assert secret not in repr(dsh.bind_provider(provider, "deepseek-flash"))
+        assert secret not in repr(home)
+        assert all(secret not in p.read_text() for p in home.config.rglob("*") if p.is_file())
+    for path in home.config.rglob("*"):
+        if path.is_file():
+            assert "operator-only-" not in path.read_text()
+            assert all(value not in path.read_text() for value in operator.values())
+    assert before == {str(p): (p.stat().st_mode, p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None)
+                      for p in (tmp_path / "operator").rglob("*")}
+
+
+@pytest.mark.parametrize("key", [None, "", "   "])
+def test_dsh_missing_binding_key_cannot_fall_back_to_project_dotenv(tmp_path, monkeypatch, key):
+    from looper.agents.runtimes import dsh
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ambient-key")
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=synthetic-project-key\n")
+    assert "synthetic-project-key" in (tmp_path / ".env").read_text()
+    home = dsh.write_home(tmp_path / ".local", {"looper.yml": "{}\n"})
+    launch = omp_launch(provider=replace(DSH_PROVIDER, api_key=key))
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, model="deepseek-flash")))
+    with pytest.raises(RuntimeUnsupported, match="API key") as failure:
+        dsh.environment(launch, home)
+    assert "synthetic-project-key" not in repr(failure.value)
+    assert "ambient-key" not in repr(failure.value)
 
 
 def test_pi_main_and_nested_shell_keep_personal_config_and_server_secrets_out(

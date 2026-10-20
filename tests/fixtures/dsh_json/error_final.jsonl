@@ -1,0 +1,3 @@
+{"type": "session", "sessionId": "synthetic-error", "cwd": "/synthetic/project"}
+{"type": "status", "phase": "turn_end", "turn": 1, "reason": {"kind": "error", "error": {"code": "synthetic_failure", "message": "synthetic provider failed"}}}
+{"type": "final", "text": "Original final survives the error."}

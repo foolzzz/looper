@@ -31,6 +31,19 @@ from looper.agents.run_usage import Usage, compaction, reported_totals, request_
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_stream"
 
 
+@pytest.mark.parametrize("priced", [False, True])
+def test_explicitly_incomplete_result_retains_known_tokens_without_pricing_a_total(priced):
+    from looper.agents.run_usage import run_usage
+
+    result = {"type": "result", "usage_complete": False, "total_cost_usd": 4.2,
+              "modelUsage": {"deepseek-flash": {"inputTokens": 10, "outputTokens": 4}}}
+    price = (lambda model, usage: 0.0000078) if priced else None
+    assert reported_totals(result, price) == Usage(input_tokens=10, output_tokens=4)
+    assert run_usage(result, price=price) == Usage(input_tokens=10, output_tokens=4)
+    result.pop("usage_complete")
+    assert reported_totals(result, price).cost_usd == (0.0000078 if priced else 4.2)
+
+
 def _turns(name: str) -> list[list[dict[str, Any]]]:
     """The fixture's events, cut after each result: one list per turn."""
     turns: list[list[dict[str, Any]]] = [[]]

@@ -27,6 +27,7 @@ function registry(pi: Runtime | null): Registry {
   return {
     runtime_types: [{
       type: "pi", label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+      supported_models: null,
       protocols: ["openai-chat", "openai-responses"],
       capabilities: ["run", "resident_session", "resume", "steer", "read_tools", "compaction_events", "mcp"],
       roles: [...ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null,

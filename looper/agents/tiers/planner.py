@@ -3401,7 +3401,7 @@ class PlannerAgent:
         return ClaudeRunRecorder(
             agent_id=self.agent_id,
             task_id=self._task_id,
-            command=process.command,
+            command=self._claude.command if self._claude.started else process.command,
             cwd=plan.work_dir,
             input_text=text,
             session_id=plan.session_id,

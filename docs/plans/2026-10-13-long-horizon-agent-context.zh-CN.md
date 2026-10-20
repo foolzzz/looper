@@ -774,6 +774,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 
+- **DSH 四角色运行时**（本分支实现，待真实验收，未标已交付）：Profile 支持 DeepSeek Messages、精确模型和 effort；private homes、逐轮 Session、append only、只读 guard、平台 MCP stdio 桥及 catalog 加载/省略见 [dsh RFC](../architecture/rfcs/dsh-runtime-v0.zh-CN.md)，不改变 Claude/OMP/pi。文档切片的定向离线回归为 75 passed、1 skipped（未配置 disposable PG），不等于四角色真实闭环通过；installed 包完整 bootstrap/resume/guard 验证未在本切片重跑，结果分级见 RFC §9。
+  [validate.py 的安全入口](../../evals/README.md#dsh-validation)保留无 key、无数据库连接的 preflight。既有 smoke 已通过两任务、四角色、consult 和 API/DB 回读；`task-basic`、`task-review` 既有产物各 4 pass、无 fail/error/skipped。Manager 既有真实产物亦为 4 pass：MCP 读回、确认建任务/开始和同一 Session 连续三轮均有证据；修复已启动 Planner 尚无 Session 导致的误报后，回读 evidence gaps 为空，launcher 回归 116 passed、1 skipped（未配置 disposable PG）。本次指定真实命令仍因 sandbox 禁止进程树观察而 exit 2，显式 token 轮换真实验收保持待完成；root 用量未知比例 20%，观测金额未知。没有可比 append 基线，辅助费用仍未知；无 busy steer、append only 限制不变。CLI 无专属参数，Dashboard/Telegram/Lark 共用 adapter，未真发；本次未启动服务，UI 截图未取得。main/open PR 远端查询失败，本地 main 已分叉，pi 集成冲突尚未排除；不据此标为已交付。
+
 - **定时任务共用 Planner 会话**（本分支实现，待集成验证）：按会话 RFC 第 14 节，在一次性数据库、端口和 runtime root 上用真实 Claude（sonnet）验证首轮只在对话中记下的事实能在第二轮取回、重置后的第三轮不再记得；补相关 Planner haiku/opus 与 Manager haiku/opus xhigh 的定向真实评测。真实模型路径及评测尚未运行，替身验证不替代真实模型验证。
 - **Pi 的真实协议与 Claude 对照（M9g）**：`examples/pi/eval-responses.sh`、`examples/pi/eval-deepseek.sh` 和 `examples/pi/eval-prompt-comparison.sh` 已写好。真实 Responses 和真实 DeepSeek 都没有跑。假 `uv` 下的命令、预算和缺口边界测试 83 项通过，只证明脚本形状。Claude CLI 对照在缺少 API key 时退出：48 个真实用例通过 0、失败 0、未验证 48，基线保持原样。合成 SSE 上两种协议的未缓存 input 口径已核对，真实账单对账没有做。评测脚本仍把 steering、worker 会话续接、取消进程树、Responses 的 strict/optional 原始请求读回、`operator_notes_stale` 和 `schedule_*` 标为未验证。数据库不可用时跳过的 pytest 留在缺口里。
 

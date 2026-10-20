@@ -72,7 +72,7 @@ GIT_TIMEOUT_SEC = 30
 TREE_WATCH_SEC = 0.2  # how often a running consult's process tree is read
 # The runtimes with their own read-only restriction, so a consult runs where its step ran; the others run in a
 # throwaway checkout.
-RUNTIME_READ_ONLY = ("claude-code", "codex", "grok", "pi")
+RUNTIME_READ_ONLY = ("claude-code", "codex", "grok", "dsh", "pi")
 
 CONSULT_CONTRACT = """\
 ## Your answer (required; code reads it)
@@ -467,7 +467,7 @@ class ConsultService:
 
         async def read() -> None:
             nonlocal result, started, known
-            async for event in runtime.parse(process.stdout, model=launch.model):
+            async for event in runtime.parse_process(process, model=launch.model, launch=launch):
                 if event.get("type") == "result":
                     # Read before the record is awaited, which a stop may cut short.
                     known.update(proc_tree.tree_of(process))
