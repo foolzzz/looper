@@ -146,7 +146,9 @@ from ..user_gates import (
     gate_policy,
     resolved,
 )
-from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
+from ..system_prompt import (
+    SystemPrompt, _requirement as clip_task_requirement, build_system_prompt, is_recommended, plan_task_section,
+)
 from ..message import (
     TASK_ROUTER_ADDRESS,
     AgentAddress,
@@ -200,6 +202,10 @@ from ...db.tasks import FailKind, update_task_phase
 
 # How long to wait for the worker pool to confirm a forwarded user turn.
 WORKER_INPUT_TIMEOUT = 5.0
+# A schedule run's requirement, repeated in its PLAN user message. The Task section is not part of the
+# session transcript, so a later run that continues the conversation would not see what this run was asked,
+# including the gate output. Clipped with the Task section's limit and marker.
+SCHEDULE_RUN_REQUIREMENT_HEADING = "This run's requirement (kept in the conversation for later runs):"
 # A Planner turn's time limit without a readable ``planner`` config row.
 DEFAULT_TURN_TIMEOUT_SEC = 1200
 # How often the Planner looks at the Workers running now when no result has
@@ -3242,15 +3248,21 @@ class PlannerAgent:
         added = journal.supplements(
             plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
                                 "later one changes it)")
-        return ((continuing_run_preface(self._task_id, self._schedule_previous) + "\n\n")
-                if self._schedule_session_id and self._schedule_session_id == plan.session_id else "") + "\n".join([
+        # Continuing a stored session, or holding one this run claimed (the first run, or a replacement it
+        # still writes). Parallel runs and runs that did not claim leave the message as it was.
+        continuing = bool(self._schedule_session_id) and self._schedule_session_id == plan.session_id
+        parts = [continuing_run_preface(self._task_id, self._schedule_previous)] if continuing else []
+        if self._schedule_session_writes or continuing:
+            parts.append(f"{SCHEDULE_RUN_REQUIREMENT_HEADING}\n{clip_task_requirement(plan.requirement)}")
+        parts.append("\n".join([
             "[PLAN] Plan the task in the Task section of your instructions"
             + (", with the supplements below." if added else "."),
             *(["", *added] if added else []),
             *(["", *templates] if templates else []),
             "",
             "You may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
-        ])
+        ]))
+        return "\n\n".join(parts)
 
     def _work_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:
         role = f" (as role {step.role} v{step.role_version})" if step.role and step.role_version else ""

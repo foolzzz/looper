@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents.scheduler import continuing_run_preface
-from looper.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
+from looper.agents.system_prompt import TASK_REQUIREMENT_LIMIT, _requirement
+from looper.agents.tiers.planner import SCHEDULE_RUN_REQUIREMENT_HEADING, PlanStep, PlannerAgent, TaskPlan
 
 
 OPENING = (
@@ -19,6 +20,13 @@ FRESH = (
     "[PLAN] Plan the task in the Task section of your instructions.\n\n"
     "You may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step."
 )
+# The requirement as the Task section clips it, under the heading later runs read back from the transcript.
+REQUIREMENT = "Watch the gate.\n\n## 定时运行上下文\n\n- 前置检查的输出就是这一轮的输入：\nsecret-gate-fact"
+
+
+def with_run_requirement(requirement: str, preface: str = "") -> str:
+    block = f"{SCHEDULE_RUN_REQUIREMENT_HEADING}\n{requirement}"
+    return f"{preface}\n\n{block}\n\n{FRESH}" if preface else f"{block}\n\n{FRESH}"
 
 
 @pytest.mark.parametrize(("previous", "middle"), [
@@ -35,10 +43,36 @@ def test_continuing_run_preface(previous, middle):
 def test_fresh_plan_message_is_byte_identical(tmp_path: Path):
     agent = PlannerAgent(task_id="task-new", runtime_root=tmp_path)
     plan = TaskPlan(plan_id="p", goal_id="g", requirement="do it", work_dir=str(tmp_path))
+    # An ordinary task, and a parallel schedule run (scheduled, but it did not claim the session).
     assert agent._plan_message(plan).encode() == FRESH.encode()
+    agent._scheduled = True
+    assert agent._plan_message(plan).encode() == FRESH.encode()
+    assert SCHEDULE_RUN_REQUIREMENT_HEADING == (
+        "This run's requirement (kept in the conversation for later runs):")
+    # The first run that claims the session has no stored session yet. Its requirement, gate output included,
+    # is in the user message, or the next run's continued conversation never sees it.
+    agent._schedule_session_writes = True
+    plan.requirement = REQUIREMENT
+    assert agent._plan_message(plan) == with_run_requirement(REQUIREMENT)
+    assert "secret-gate-fact" in agent._plan_message(plan)
+    # Continuing the stored session: the preface, then this run's requirement, then the same PLAN body.
+    preface = OPENING + "\n\n" + CLOSING
     agent._schedule_session_id = plan.session_id = "stored"
-    assert agent._plan_message(plan) == OPENING + "\n\n" + CLOSING + "\n\n" + FRESH
+    assert agent._plan_message(plan) == with_run_requirement(REQUIREMENT, preface)
+    # Clipped with the Task section's limit and marker.
+    long = "secret-gate-fact " + ("y" * (TASK_REQUIREMENT_LIMIT + 25))
+    plan.requirement = long
+    clipped = agent._plan_message(plan)
+    assert clipped == with_run_requirement(_requirement(long), preface)
+    assert "secret-gate-fact" in clipped
+    assert f"[clipped: {len(long) - TASK_REQUIREMENT_LIMIT} more characters]" in clipped
+    assert "y" * TASK_REQUIREMENT_LIMIT not in clipped
+    # Giving the session up is the old message again.
+    agent._schedule_session_writes = False
     agent._schedule_session_id = None
+    plan.session_id = None
+    agent._scheduled = False
+    plan.requirement = "do it"
     assert agent._plan_message(plan).encode() == FRESH.encode()
 
 
@@ -90,12 +124,21 @@ def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets
         assert first[first.index("--resume") + 1] == "sess-p"
     continued = [call.args[1] for call in mark.await_args_list if call.args[1]]
     assert continued == ([True] if mode in ("continuing", "mark_error") else [])
+    text = claude.turns()[0]["text"]
+    asked = "build the calc package"
+    if mode in ("continuing", "different_id", "mark_error"):
+        assert text == with_run_requirement(asked, continuing_run_preface("t1", None))
+    elif mode in ("fresh", "profile", "lost"):
+        # Claimed, including a replacement session this run still writes: the requirement is in the message
+        # and the continuing preface is not (there is no stored session, or it could not be resumed).
+        assert text == with_run_requirement(asked)
+        assert "这是这个定时任务的一次新运行" not in text
+    else:
+        assert text == FRESH
     if mode == "continuing":
-        assert claude.turns()[0]["text"] == continuing_run_preface("t1", None) + "\n\n" + FRESH
         assert "Continuing the schedule's Planner session" in activity(agent_db)
-    elif mode not in ("different_id", "lost", "mark_error"):
-        assert claude.turns()[0]["text"] == FRESH
     assert all("这是这个定时任务的一次新运行" not in prompt for prompt in claude.prompts())
+    assert all(SCHEDULE_RUN_REQUIREMENT_HEADING not in prompt for prompt in claude.prompts())
     lines = activity(agent_db)
     if mode == "parallel":
         assert "Schedule Planner session left as stored: this run overlaps (parallel) and starts fresh" in lines
@@ -104,7 +147,7 @@ def test_planner_runtime_receives_resume_and_only_an_actual_matching_resume_sets
                    and "other-provider" in line for line in lines)
     if mode == "lost":
         assert "--resume" not in claude.argvs()[1]
-        assert claude.turns()[0]["text"] == FRESH
+        assert claude.turns()[0]["text"] == with_run_requirement(asked)
         assert any("Schedule Planner session replaced: the stored session could not be resumed (" in line
                    for line in lines)
         assert all("sess-p" not in line for line in lines if "could not be resumed" in line)

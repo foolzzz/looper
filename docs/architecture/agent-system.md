@@ -2202,8 +2202,15 @@ dashboard only). A new schedule is disabled.
   runs are memory, this task's requirement and gate output are in its Task
   section, and its steps need new ids; it includes the previous finished
   run's status and up to 300 characters of summary or error when available.
-  The system prompt and reply contract are unchanged, as is the PLAN
-  message for an ordinary task or a fresh run. Only a runtime-confirmed
+  Every run that claims or continues the session also puts that run's
+  requirement into the PLAN user message, under "This run's requirement
+  (kept in the conversation for later runs):", clipped the same way as the
+  Task section. The text is the requirement as given: the schedule's
+  requirement plus the run context, including the gate output. A later
+  run's continued conversation therefore contains every earlier run's
+  input. The system prompt and reply contract are unchanged. The PLAN
+  message of an ordinary task or a parallel run stays byte-identical.
+  Only a runtime-confirmed
   resume of the claimed id sets `tasks.continues_schedule_session` and
   records `Continuing the schedule's Planner session` in phase activity.
   A changed runtime or provider, or a runtime unable to resume, uses the

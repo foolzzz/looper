@@ -16,7 +16,7 @@ from looper.agents.session_switch import session_lost
 from looper.agents.tiers.planner import PlannerAgent
 from looper.db import agent_sessions, connection, projects, schedules, tasks
 from tests.test_planner_agent import plan, step
-from tests.test_schedule_planner_session import FRESH
+from tests.test_schedule_planner_session import FRESH, SCHEDULE_RUN_REQUIREMENT_HEADING, with_run_requirement
 from tests.test_schedules_db import DSN, _run
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -82,13 +82,16 @@ def test_second_and_later_runs_resume_the_stored_id_with_own_cost_baseline(
             if index:
                 assert argv[argv.index("--resume") + 1] == "sess-p"
                 assert message.endswith(FRESH) and message.startswith("这是这个定时任务的一次新运行")
+                assert f"{SCHEDULE_RUN_REQUIREMENT_HEADING}\nCheck the new input." in message
                 assert "上一轮：完成 · previous result" in message
                 assert row["planner_session_since"] == since
                 assert "Continuing the schedule's Planner session" in await _phases(env, task_id)
             else:
-                assert "--resume" not in argv and message == FRESH
+                assert "--resume" not in argv
+                assert message == with_run_requirement("Check the new input.")
                 since = row["planner_session_since"]
             assert "这是这个定时任务的一次新运行" not in claude.prompts()[index]
+            assert SCHEDULE_RUN_REQUIREMENT_HEADING not in claude.prompts()[index]
             records = await env.pool.fetch("SELECT cost_usd FROM llm_records WHERE task_id = $1", task_id)
             assert [r["cost_usd"] for r in records] == [0.25]
             await env.pool.execute("UPDATE tasks SET status = 'completed' WHERE id = $1", task_id)
@@ -123,7 +126,7 @@ def test_reset_revokes_write_through_but_preserves_the_inflight_tasks_session(
         await _task(env, sid, "task-next")
         await _plan(env, "task-next", claude)
         assert "--resume" not in claude.argvs()[-1]
-        assert claude.turns()[-1]["text"] == FRESH
+        assert claude.turns()[-1]["text"] == with_run_requirement("Check the new input.")
         # Even after another run claims it, an old writer cannot overwrite the new holder's session.
         await agent._save_session(agent._plan)
         assert json.loads((await _row(env, sid))["planner_session_totals"])["cost_usd"] == 0.25
@@ -203,7 +206,14 @@ def test_each_fallback_records_its_reason_and_only_unusable_sessions_are_replace
             replacement = planner_claude(plan(step("replacement")))
             await _plan(env, "task-after", replacement)
             assert replacement.argvs()[0][replacement.argvs()[0].index("--resume") + 1] == "sess-p"
-        assert claude.turns()[-1]["text"] == FRESH
+        sent = claude.turns()[-1]["text"]
+        if fallback == "claim":
+            assert sent == FRESH
+        else:
+            # The stored session could not be resumed. This run still writes the replacement, so its
+            # requirement is in the new session and the continuing preface is not.
+            assert sent == with_run_requirement("Check the new input.")
+            assert "这是这个定时任务的一次新运行" not in sent
         if fallback == "missing":
             assert claude.argvs()[0][claude.argvs()[0].index("--resume") + 1] == "obsolete-session"
             assert "--resume" not in claude.argvs()[1]

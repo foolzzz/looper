@@ -106,9 +106,11 @@ WHERE id = $6 AND planner_session_task_id = $7
 不要沿用更早一次运行的步骤编号；这个任务的步骤用新的编号。
 ```
 
-非定时任务、以及没有续上已存会话的定时运行（第一次、重置之后、第 7 节的四种回退）：`_plan_message` 的输出与今天逐字节相同，用测试钉住。
+认领或续接了会话的非并行运行（第一次、续接、重置之后的下一次，以及换会话后仍写穿的那一次），PLAN 用户消息在正文前再放这一轮的需求原文（定时任务需求加上运行上下文，含前置检查输出）。标题固定为 `This run's requirement (kept in the conversation for later runs):`。截断与 Task 节相同（`TASK_REQUIREMENT_LIMIT`，超出时同一句 `[clipped: N more characters]`）。后来续上的会话里因此有每一次更早运行的输入。系统提示不变。
 
-组消息的时机：`profile_switch` 在送出之前就判定不能续时，不附加这两段，输出与今天相同，换会话仍走 `_run_turn` 里的现有路径。`_SessionNotResumed` 的重试改用清掉续接标记之后的 `_plan_message`，不把已经带说明的那一份再送一遍。今天的重试复用同一份消息；这一处分支只在「复制来的会话没能续上」时发生。
+非定时任务、并行运行、认领失败、holder 被占用：`_plan_message` 与今天逐字节相同，用测试钉住。
+
+组消息的时机：`profile_switch` 在送出之前就判定不能续时，不附加上面那两段续接说明；需求原文仍在，因为这次运行仍写穿替换后的会话。`_SessionNotResumed` 的重试改用清掉续接标记之后的 `_plan_message`：没有续接说明，仍带这一轮的需求，不把已经带说明的那一份再送一遍。今天的重试复用同一份消息；这一处分支只在「复制来的会话没能续上」时发生。
 
 **未采用：** 把这段写进系统提示。常驻进程的系统提示一变就要重启再续接，回复约定也会变；这段只属于续接的那一轮用户消息。每次运行改开新会话、只把上一轮总结塞进去：`run_context` 已经带了最近三次，新会话丢掉原话和缓存，与 M1 相反。
 
@@ -219,9 +221,9 @@ WHERE id = $6 AND planner_session_task_id = $7
 - 第二次及以后的运行：认领把已存会话复制进 `planner-<task_id>`，第一轮的命令带 `resume_args`，`continues_schedule_session` 为 true，写穿更新累计且 `planner_session_since` 不变；第三次续的是第二次写下的 id。
 - 第 7 节四种回退各一条：活动里有那一行 `phase` 和其中的原因；(a)(d) 不改已存会话；(b)(c) 的新会话 id 写进定时任务，这次任务的 `continues_schedule_session` 为 false，再下一次运行续接替换后的 id。
 - `parallel` 的两次运行都不读、不写已存会话，两个 `agent_sessions` 行彼此不同。
-- 重置：`cleared` 与清空后的列；进行中的运行之后的 `_save_session` 不写回；它自己的会话还在；下一次运行的 `_plan_message` 与今天逐字节相同。
+- 重置：`cleared` 与清空后的列；进行中的运行之后的 `_save_session` 不写回；它自己的会话还在；下一次运行的 `_plan_message` 没有续接说明，并带上这一轮的需求原文。
 - 交接：一次运行中途走 `_drop_session` 再写下新会话，定时任务上的 id 换成新的；下一次运行复制的是新 id。这不算重置（holder 仍是发生交接的那次任务，直到它结束）。
-- 非定时任务，以及定时任务的全新运行：`_plan_message` 与今天的拼接逐字节相同。续接运行的消息等于 `continuing_run_preface` 加今天的正文。系统提示不含这段中文。
+- 非定时任务和并行运行：`_plan_message` 与今天的拼接逐字节相同。第一次认领：用户消息带这一轮的需求原文，没有续接说明。续接运行的消息等于 `continuing_run_preface`、这一轮的需求原文、今天的正文。系统提示不含这段中文，也不含需求标题。
 - 导出的定时任务对象没有 `planner_session` 各列；导入不写入它们。
 - `POST /api/schedules/<id>/reset-planner-session` 的 200 和 404；管家工具未确认时 `needs_confirmation`，确认后清掉，与删除同一套 `high` 约定。
 - 迁移跑两遍，第二遍不改列、不报错。
