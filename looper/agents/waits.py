@@ -18,6 +18,7 @@ checks need their project's explicit permission.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -62,6 +63,19 @@ _limits = WaitLimits()
 _KEYS = {"max_wait_seconds": MAX_WAIT_KEY, "min_check_seconds": MIN_CHECK_KEY}
 _RANGES = {"max_wait_seconds": MAX_WAIT_RANGE, "min_check_seconds": MIN_CHECK_RANGE}
 _sources: dict[str, str] = {}
+# Serializes a settings change: read, cross-field check, store and refresh. Rebuilt when the running loop changes.
+_update_lock: asyncio.Lock | None = None
+_update_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _settings_lock() -> asyncio.Lock:
+    """The update lock for the running loop (tests build a new loop per call)."""
+    global _update_lock, _update_lock_loop
+    loop = asyncio.get_running_loop()
+    if _update_lock is None or _update_lock_loop is not loop:
+        _update_lock = asyncio.Lock()
+        _update_lock_loop = loop
+    return _update_lock
 
 
 def limits() -> WaitLimits:
@@ -106,7 +120,11 @@ async def settings_view() -> dict[str, Any]:
 
 
 async def update(body: Mapping[str, Any]) -> dict[str, Any]:
-    """Store and apply one or both limits (null: the built-in); a refused body changes nothing."""
+    """Store and apply one or both limits (null: the built-in); a refused body changes nothing.
+
+    Reading the current limits, the cross-field check, the store and the refresh share one lock, and the store
+    is one transaction, so two updates cannot leave ``min_check_seconds`` above ``max_wait_seconds``.
+    """
     if not isinstance(body, Mapping):
         raise ValueError("wait settings must be an object")
     if unknown := [key for key in body if key not in _KEYS]:
@@ -114,14 +132,15 @@ async def update(body: Mapping[str, Any]) -> dict[str, Any]:
     if not body:
         raise ValueError(f"give at least one of {', '.join(_KEYS)} (null: the built-in)")
     values = {name: None if raw is None else _seconds(raw, name) for name, raw in body.items()}
-    after = {name: (getattr(WaitLimits(), name) if values[name] is None else values[name])
-             if name in values else getattr(_limits, name) for name in _KEYS}
-    if after["min_check_seconds"] > after["max_wait_seconds"]:
-        raise ValueError("min_check_seconds must not exceed max_wait_seconds")
-    await db_settings.put_settings({_KEYS[name]: None if value is None else str(value)
-                                    for name, value in values.items()})
-    await load()
-    return await settings_view()
+    async with _settings_lock():
+        after = {name: (getattr(WaitLimits(), name) if values[name] is None else values[name])
+                 if name in values else getattr(_limits, name) for name in _KEYS}
+        if after["min_check_seconds"] > after["max_wait_seconds"]:
+            raise ValueError("min_check_seconds must not exceed max_wait_seconds")
+        await db_settings.put_settings({_KEYS[name]: None if value is None else str(value)
+                                        for name, value in values.items()})
+        await load()
+        return await settings_view()
 
 
 class WaitState(str, Enum):
@@ -303,9 +322,19 @@ def describe(spec: WaitSpec, every: int | None) -> str:
 class WaitPolicy:
     limits: WaitLimits = WaitLimits()
     commands: bool = False
+    # A scheduled run's stop time. A wait may not last past it (RFC 7.5).
+    run_deadline: datetime | None = None
 
     command_refusal = ("this project does not let a wait run a command (wait_commands is off): "
                        "use a github_pr check, or a time only (not_before_seconds)")
+
+    def run_refusal(self, now: datetime) -> str:
+        """Why a wait may not outlast the scheduled run that stops at ``run_deadline``."""
+        deadline = self.run_deadline or now
+        remaining = max(0, int((deadline - now).total_seconds()))
+        stamp = deadline.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return (f"this task is a scheduled run that is stopped at {stamp} (its run timeout): "
+                f"a wait may last at most {remaining} s from now; wait less, or decide without waiting")
 
 
 @dataclass

@@ -224,8 +224,10 @@ def test_open_wait_replan_keeps_it_and_pending_ids_keep_kind() -> None:
     ({"action": "fail", "reason": "cannot go"}, WaitAction.FAIL),
 ])
 def test_wait_turn_actions(wait: dict[str, Any], action: WaitAction) -> None:
+    # Another step stays open, so proceeding does not complete the task.
+    view = replace(OPEN, pending={"s2": ()})
     result = parse_wait(reply({"reply": "ok", "action": "none", "wait": wait}),
-                        WaitContext("w1", WaitState.TIMED_OUT), OPEN)
+                        WaitContext("w1", WaitState.TIMED_OUT), view)
     assert result.action is action and result.chat.reply == "ok"
     assert result.max_wait_seconds == wait.get("max_wait_seconds")
     assert result.resolution == wait.get("resolution", "") and result.reason == wait.get("reason", "")
@@ -263,10 +265,61 @@ def test_wait_final_only_when_proceeding_completes_task() -> None:
     with pytest.raises(ProtocolError, match='proceeding without adding steps completes the task'):
         parse_wait(reply(data), context, OPEN)
     assert parse_wait(reply({**data, "final": FINAL}), context, OPEN).final is not None
+    # The plan after proceed still has a step, so final is refused even though the turn was told it was last.
+    staying = replace(OPEN, pending={"s2": ()})
     with pytest.raises(ProtocolError, match="final is only"):
-        parse_wait(reply({**data, "final": FINAL}), replace(context, last_open=False), OPEN)
+        parse_wait(reply({**data, "final": FINAL}), context, staying)
+    # Judged on the plan after proceed: an empty plan needs final even when last_open was false.
+    with pytest.raises(ProtocolError, match='proceeding without adding steps completes the task'):
+        parse_wait(reply(data), replace(context, last_open=False), OPEN)
     work = {"id": "s2", "instruction": "go", "depends_on": ["w1"], "acceptance_criteria": [], "review": False}
     assert parse_wait(reply({**data, "action": "add_steps", "steps": [work]}), context, OPEN).final is None
+
+
+def test_proceed_plus_replan_that_leaves_nothing_requires_final() -> None:
+    """A timed-out wait plus one pending step: proceed and a replan of no steps completes the task."""
+    view = replace(OPEN, pending={"s2": ("w1",)}, waits={"w1": WaitView(WaitState.TIMED_OUT)})
+    data = {"reply": "done waiting", "action": "replan", "steps": [],
+            "wait": {"action": "proceed", "resolution": "the fix landed"}}
+    context = WaitContext("w1", WaitState.TIMED_OUT, last_open=False)
+    with pytest.raises(ProtocolError, match='proceeding without adding steps completes the task'):
+        parse_wait(reply(data), context, view)
+    result = parse_wait(reply({**data, "final": FINAL}), context, view)
+    assert result.final is not None and result.action is WaitAction.PROCEED
+    assert result.chat.action.value == "replan" and result.chat.steps == ()
+
+
+def test_proceed_plus_replan_stop_that_leaves_nothing_requires_final() -> None:
+    view = replace(OPEN, started={"w1": (), "s1": ()}, running=frozenset({"s1"}),
+                   waits={"w1": WaitView(WaitState.TIMED_OUT)})
+    data = {"reply": "stop it", "action": "replan", "steps": [], "stop": ["s1"],
+            "wait": {"action": "proceed", "resolution": "go"}}
+    context = WaitContext("w1", WaitState.TIMED_OUT, last_open=False)
+    with pytest.raises(ProtocolError, match='proceeding without adding steps completes the task'):
+        parse_wait(reply(data), context, view)
+    assert parse_wait(reply({**data, "final": FINAL}), context, view).final is not None
+
+
+def test_proceed_plus_replan_that_leaves_a_step_refuses_final() -> None:
+    """Final follows the plan after proceed and the replan, including a step that was not stopped."""
+    work = {"id": "s3", "instruction": "go", "depends_on": [], "acceptance_criteria": [], "review": False}
+    view = replace(OPEN, pending={"s2": ("w1",)}, waits={"w1": WaitView(WaitState.TIMED_OUT)})
+    data = {"reply": "keep going", "action": "replan", "steps": [work],
+            "wait": {"action": "proceed", "resolution": "the fix landed"}, "final": FINAL}
+    context = WaitContext("w1", WaitState.TIMED_OUT, last_open=True)
+    with pytest.raises(ProtocolError, match="final is only"):
+        parse_wait(reply(data), context, view)
+    kept = parse_wait(reply({key: value for key, value in data.items() if key != "final"}), context, view)
+    assert kept.final is None and kept.chat.steps[0].id == "s3"
+
+    running = replace(OPEN, started={"w1": (), "s1": ()}, running=frozenset({"s1"}),
+                      waits={"w1": WaitView(WaitState.TIMED_OUT)})
+    empty = {"reply": "leave s1", "action": "replan", "steps": [],
+             "wait": {"action": "proceed", "resolution": "go"}, "final": FINAL}
+    with pytest.raises(ProtocolError, match="final is only"):
+        parse_wait(reply(empty), context, running)
+    left = parse_wait(reply({key: value for key, value in empty.items() if key != "final"}), context, running)
+    assert left.final is None and left.chat.steps == () and "s1" not in left.chat.stop
 
 
 def test_wait_contract_in_every_contract_with_conditional_command_and_live_limits() -> None:
@@ -438,6 +491,70 @@ def test_bad_project_wait_command_setting_is_refused(raw: Any) -> None:
     from looper.agents.project_execution import execution_fields
     with pytest.raises(ValueError, match="wait_commands"):
         execution_fields({"wait_commands": raw})
+
+
+def _run_policy(deadline: datetime | None) -> WaitPolicy:
+    return WaitPolicy(WaitLimits(7 * 86400, 60), commands=False, run_deadline=deadline)
+
+
+def test_scheduled_run_deadline_refuses_a_wait_that_outlasts_the_run() -> None:
+    now = datetime.now(timezone.utc)
+    deadline = now + timedelta(hours=1)
+    policy = _run_policy(deadline)
+    with pytest.raises(ProtocolError, match="scheduled run that is stopped at"):
+        plan(step(max_wait_seconds=3 * 3600, not_before_seconds=30), policy)
+    raw = step(max_wait_seconds=1800, not_before=(deadline + timedelta(minutes=5)).isoformat())
+    raw.pop("not_before_seconds")
+    with pytest.raises(ProtocolError, match="a wait may last at most"):
+        plan(raw, policy)
+    # not_before_seconds past the run, with a max wait that also passes the run (the earliest time is the refusal).
+    with pytest.raises(ProtocolError, match="wait less, or decide without waiting"):
+        plan(step(max_wait_seconds=7200, not_before_seconds=7000), policy)
+    accepted = plan(step(max_wait_seconds=1800, not_before_seconds=30), policy)
+    assert accepted.steps[0].wait.max_wait_seconds == 1800
+    # No run deadline: the same long wait is only the system limit.
+    assert plan(step(max_wait_seconds=3 * 3600, not_before_seconds=30), _run_policy(None)).steps[0].wait.max_wait_seconds == 3 * 3600
+
+
+def test_extend_refuses_a_wait_past_the_scheduled_run_deadline() -> None:
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=30)
+    view = replace(OPEN, wait_policy=_run_policy(deadline))
+    data = {"reply": "more time", "action": "none", "wait": {"action": "extend", "max_wait_seconds": 3600}}
+    with pytest.raises(ProtocolError, match="scheduled run that is stopped at"):
+        parse_wait(reply(data), WaitContext("w1", WaitState.TIMED_OUT), view)
+    ok = {**data, "wait": {"action": "extend", "max_wait_seconds": 60}}
+    assert parse_wait(reply(ok), WaitContext("w1", WaitState.TIMED_OUT), view).max_wait_seconds == 60
+    # Without a run deadline the hour-long extend is within the policy limit.
+    open_view = replace(OPEN, wait_policy=_run_policy(None))
+    assert parse_wait(reply(data), WaitContext("w1", WaitState.TIMED_OUT), open_view).max_wait_seconds == 3600
+
+
+def test_concurrent_wait_updates_cannot_store_an_invalid_pair(settings: dict[str, str],
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    async def slow_put(values: Any) -> None:
+        # Yield so the two updates overlap between reading the limits and storing them.
+        await asyncio.sleep(0)
+        for key, value in values.items():
+            if value is None:
+                settings.pop(key, None)
+            else:
+                settings[key] = value
+
+    monkeypatch.setattr(waits.db_settings, "put_settings", slow_put)
+
+    async def run() -> None:
+        results = await asyncio.gather(
+            waits.update({"max_wait_seconds": 3600}),
+            waits.update({"min_check_seconds": 10000}),
+            return_exceptions=True,
+        )
+        errors = [item for item in results if isinstance(item, ValueError)]
+        assert len(errors) == 1 and len(results) - len(errors) == 1
+        assert waits.limits().min_check_seconds <= waits.limits().max_wait_seconds
+        stored_max = int(settings.get(waits.MAX_WAIT_KEY, WaitLimits().max_wait_seconds))
+        stored_min = int(settings.get(waits.MIN_CHECK_KEY, WaitLimits().min_check_seconds))
+        assert stored_min <= stored_max
+    asyncio.run(run())
 
 
 def test_invalid_stored_limits_combination_falls_back(settings: dict[str, str], caplog: Any) -> None:

@@ -621,17 +621,46 @@ def parse_wait(text: str, context: WaitContext, plan: PlanView) -> WaitReply:
     else:
         _only_keys(raw, {"action", "reason"}, "wait")
         reason = _limited_text(raw, "reason", REASON_MAX_CHARS, "wait", required=True)
+    if action is WaitAction.EXTEND and plan.wait_policy.run_deadline is not None:
+        now = datetime.now(timezone.utc)
+        remaining = max(0, int((plan.wait_policy.run_deadline - now).total_seconds()))
+        if seconds is not None and seconds > remaining:
+            raise ProtocolError(plan.wait_policy.run_refusal(now))
     chat = _chat_action(data, plan)
     final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
         if "final" in data else None
-    adds = chat.action is ChatAction.ADD_STEPS or (chat.action is ChatAction.REPLAN and bool(chat.steps))
-    completes = action is WaitAction.PROCEED and context.last_open and not adds
+    completes = _wait_completes(plan, context, action, chat)
     if completes and final is None:
         raise ProtocolError('proceeding without adding steps completes the task, so the reply must carry '
                             '"final": ' + ", ".join(FINAL_FIELDS))
     if final is not None and not completes:
         raise ProtocolError('final is only for proceeding when this wait is the last open step and no steps are added')
     return WaitReply(action, chat, seconds, resolution, reason, final)
+
+
+def _wait_completes(plan: PlanView, context: WaitContext, action: WaitAction, chat: ChatReply) -> bool:
+    """True when proceeding, then the reply's chat action (stops included), leaves no open step."""
+    if action is not WaitAction.PROCEED:
+        return False
+    started = dict(plan.started)
+    pending = dict(plan.pending)
+    done = set(plan.done)
+    if context.wait in pending:
+        started[context.wait] = pending.pop(context.wait)
+    done.add(context.wait)
+    if chat.action is ChatAction.REPLAN:
+        for label in chat.stop:
+            started.pop(label, None)
+            done.discard(label)
+        keep = {spec.id for spec in chat.steps}
+        pending = {label: deps for label, deps in pending.items() if label in keep}
+        for spec in chat.steps:
+            if spec.id not in started and spec.id not in pending:
+                pending[spec.id] = spec.depends_on
+    elif chat.action is ChatAction.ADD_STEPS:
+        for spec in chat.steps:
+            pending[spec.id] = spec.depends_on
+    return not (set(started) - done) and not pending
 
 
 def _chat_action(data: Mapping[str, Any], plan: PlanView) -> ChatReply:
@@ -1048,7 +1077,7 @@ def _wait_step(value: Mapping[str, Any], where: str) -> StepSpec:
 
 
 def _check_wait_policy(label: str, spec: WaitSpec, policy: WaitPolicy) -> None:
-    """Check a new wait against the system limits and its project's command permission."""
+    """Check a new wait against the system limits, a scheduled run's stop time, and command permission."""
     maximum = policy.limits.max_wait_seconds
     minimum = policy.limits.min_check_seconds
     if spec.max_wait_seconds > maximum:
@@ -1059,6 +1088,15 @@ def _check_wait_policy(label: str, spec: WaitSpec, policy: WaitPolicy) -> None:
         raise ProtocolError(f"step {label}.not_before must be at most {maximum} seconds from now")
     if isinstance(spec.check, CommandCheck) and not policy.commands:
         raise ProtocolError(f"step {label}: {WaitPolicy.command_refusal}")
+    deadline = policy.run_deadline
+    if deadline is None:
+        return
+    now = datetime.now(timezone.utc)
+    remaining = max(0, int((deadline - now).total_seconds()))
+    over = (spec.max_wait_seconds > remaining or (spec.not_before_seconds or 0) > remaining
+            or (spec.not_before is not None and spec.not_before > deadline))
+    if over:
+        raise ProtocolError(f"step {label}: {policy.run_refusal(now)}")
 
 
 def _wait_changes(data: Mapping[str, Any], plan: PlanView) -> tuple[WaitChange, ...]:
