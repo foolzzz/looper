@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid5
 
@@ -22,6 +23,7 @@ from .profile_registry import (
     MODEL_FIELDS, SECRET_MASK, AgentProfile, CatalogModel, Endpoint, LegacyProviderSpec,
     ModelSpec, ProviderSpec, RegistryError, ResolvedModel,
     RuntimeSpec, _models,
+    provider_spec,
 )
 from .provider_presets import PRESETS
 from .runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType
@@ -100,6 +102,160 @@ class Conversion:
     model_map: dict[tuple[str, str, ApiProtocol], tuple[str, str]] = field(default_factory=dict)
     retained: dict[str, tuple[RetentionReason, ...]] = field(default_factory=dict)
     report: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LegacySnapshot:
+    """Private in-memory input, including the old effective binding and price inputs.
+
+    Never serialize this object. Only ``ConversionPlan.report`` may leave the
+    preflight boundary. Capturing does not discover runtimes or read logins.
+    """
+
+    runtimes: tuple[RuntimeSpec, ...] = field(repr=False)
+    providers: tuple[Mapping[str, Any], ...] = field(repr=False)
+    profiles: tuple[Mapping[str, Any], ...] = field(repr=False)
+    session_provider_ids: tuple[str | None, ...] = field(repr=False)
+    bindings: Mapping[str, tuple[Any, ...]] = field(repr=False)
+    pricing: Mapping[str, LegacyProviderSpec] = field(repr=False)
+    rules: LegacyRules = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ConversionPlan:
+    """A shared DB/importer preflight, not authorization to reuse it for apply.
+
+    An applying caller must capture a fresh snapshot and recompute this plan
+    inside its write transaction; this module does not apply any changes.
+    """
+
+    conversion: Conversion | None = field(repr=False)
+    report: dict[str, Any]
+    _blocked: bool = field(repr=False)
+
+    @property
+    def applicable(self) -> bool:
+        r = self.report
+        return (not self._blocked and self.conversion is not None
+                and r["profiles_before"] == r["profiles_after"] == r["profiles_mapped"]
+                and all(r[key] == 0 for key in ("unresolved_profiles", "binding_mismatches", "pricing_mismatches")))
+
+
+def _launch_inputs(runtime: RuntimeSpec, provider: LegacyProviderSpec, row: Mapping[str, Any],
+                   protocol: ApiProtocol, actual_url: str | None) -> tuple[Any, ...]:
+    # Missing credentials are not permission to discover a key or login. A
+    # local sentinel compares binding structure while preserving missingness.
+    adapter = ADAPTERS[runtime.type]
+    binding = adapter.bind_provider(replace(provider, api_key=provider.api_key or "migration-static-missing"),
+                                    row["model"], row.get("effort") or "")
+    config = None
+    if runtime.type == "omp":
+        from .runtimes.omp import models_yml
+
+        # Pure config generation also checks the old multi-protocol selection;
+        # binding flags alone do not contain OMP's API or context window.
+        config = models_yml(SimpleNamespace(profile=SimpleNamespace(provider=provider), model=row["model"]))
+    entry = provider.catalog_model(row["model"])
+    return (runtime, protocol, provider.auth, provider.oauth_runtime_type, actual_url,
+            provider.base_url, provider.api_key, dict(provider.env),
+            provider.name if runtime.type == "codex" and provider.auth is AuthKind.API_KEY else None,
+            row["model"], row.get("effort"), row.get("agent_teams", False), row.get("custom_prompt", ""),
+            tuple(getattr(entry, k) if entry else None for k in ("context_window", "efforts", "background_model")),
+            binding.args, dict(binding.env), frozenset(binding.unset), config)
+
+
+def snapshot(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, Any]],
+             profiles: Iterable[Mapping[str, Any]], *, session_provider_ids: Iterable[str | None] = (),
+             rules: LegacyRules = LEGACY_RULES) -> LegacySnapshot:
+    """Capture old effective inputs independently of the target converter."""
+    runtime_rows = tuple(runtimes)
+    accounts, rows = deepcopy(tuple(providers)), deepcopy(tuple(profiles))
+    runtime_by_id = {r.id: r for r in runtime_rows}
+    account_by_id = {r.get("id"): r for r in accounts}
+    bindings, pricing = {}, {}
+    for row in rows:
+        try:
+            runtime = runtime_by_id[row["runtime_id"]]
+            saved = account_by_id[row["provider_id"]]
+            account = replace(provider_spec({"oauth_runtime_type": None, "base_url": "", "models": [], **saved}),
+                              api_key=_saved_key(saved.get("api_key")))
+            protocol = next(p for p in rules.protocol_priority[runtime.type] if p in account.protocols)
+            actual_url = account.base_url or (rules.default_urls.get((runtime.type, protocol))
+                                              if account.auth is AuthKind.API_KEY else None)
+            bindings[row["id"]] = _launch_inputs(runtime, account, row, protocol, actual_url)
+            pricing[row["id"]] = account
+        except (RegistryError, RuntimeUnsupported, KeyError, ValueError, TypeError, StopIteration):
+            # The plan counts invalid profiles; never expose validator messages.
+            continue
+    return LegacySnapshot(runtime_rows, accounts, rows, tuple(session_provider_ids), bindings, pricing, rules)
+
+
+def plan(old: LegacySnapshot) -> ConversionPlan:
+    """Compute the same static plan for a DB snapshot or normalized legacy import.
+
+    The public report is an explicit RFC 9.1 allowlist. Partial conversions are
+    useful only for counts: any invalid input blocks the entire application.
+    """
+    blocked = False
+    try:
+        converted = convert(old.runtimes, old.providers, old.profiles, rules=old.rules)
+    except MigrationBlocked:
+        blocked = True
+        valid = []
+        for row in old.profiles:
+            try:
+                convert(old.runtimes, old.providers, [row], rules=old.rules)
+            except MigrationBlocked:
+                continue
+            valid.append(row)
+        try:
+            converted = convert(old.runtimes, old.providers, valid, rules=old.rules)
+        except MigrationBlocked:
+            converted = None
+    r = converted.report if converted else {}
+    mapped = len(converted.profiles) if converted else 0
+    report = {
+        "providers_before": len(old.providers), "providers_after": r.get("providers_after", 0),
+        "endpoints_after": r.get("endpoints_after", 0), "models_after": r.get("models_after", 0),
+        "profiles_before": len(old.profiles), "profiles_after": mapped, "profiles_mapped": mapped,
+        "models_from_open_catalog": r.get("models_from_open_catalog", 0),
+        "providers_merged": r.get("providers_merged", 0),
+        "providers_kept_separate_by_reason": {reason.value: r.get(f"retained_{reason.value}", 0)
+                                               for reason in RetentionReason},
+        "legacy_default_endpoints": r.get("legacy_default_endpoints", 0),
+        "unresolved_profiles": len(old.profiles) - mapped, "binding_mismatches": 0,
+        "pricing_mismatches": 0, "session_references_remapped": 0,
+    }
+    if converted is not None:
+        rows = {row.get("id"): row for row in old.profiles}
+        for identity, profile in converted.profiles.items():
+            model = converted.models[profile.model_id]
+            account = converted.providers[model.provider_id]
+            endpoint = converted.endpoints[(account.id, model.protocol)]
+            target = LegacyProviderSpec(account.id, account.name, account.auth, frozenset({model.protocol}),
+                                        account.oauth_runtime_type, endpoint.base_url,
+                                        _catalog_models(m for m in converted.models.values()
+                                                        if m.provider_id == account.id and m.protocol is model.protocol),
+                                        account.env, account.api_key)
+            row = {**rows[identity], "model": model.name, "effort": profile.effort,
+                   "agent_teams": profile.agent_teams, "custom_prompt": profile.custom_prompt}
+            actual_url = endpoint.base_url or converted.default_urls.get((account.id, model.protocol))
+            try:
+                binding = _launch_inputs(profile.runtime, target, row, model.protocol, actual_url)
+                same_binding = identity in old.bindings and old.bindings[identity] == binding
+            except (RuntimeUnsupported, RegistryError, KeyError, ValueError, TypeError):
+                same_binding = False
+            report["binding_mismatches"] += int(not same_binding)
+            previous = old.pricing.get(identity)
+            same_price = (previous is not None and _same_prices(previous.catalog, target.catalog)
+                          and model_price(previous, rows[identity]["model"]) == model_price(target, model.name)
+                          and ADAPTERS[profile.runtime.type].cost_source(previous)
+                          == ADAPTERS[profile.runtime.type].cost_source(target))
+            report["pricing_mismatches"] += int(not same_price)
+        report["session_references_remapped"] = sum(
+            identity in converted.provider_map and converted.provider_map[identity] != identity
+            for identity in old.session_provider_ids)
+    return ConversionPlan(converted, report, blocked)
 
 
 def _index(rows: Iterable[Any], *, runtimes: bool = False) -> dict[str, Any]:

@@ -27,6 +27,134 @@ def profile(runtime="omp", **changes):
 RUNTIMES = [RuntimeSpec(f"rt-{name}", name, name) for name in ("omp", "claude-code", "codex", "grok")]
 
 
+REPORT_FIELDS = {
+    "providers_before", "providers_after", "endpoints_after", "models_after", "profiles_before",
+    "profiles_after", "profiles_mapped", "models_from_open_catalog", "providers_merged",
+    "providers_kept_separate_by_reason", "legacy_default_endpoints", "unresolved_profiles",
+    "binding_mismatches", "pricing_mismatches", "session_references_remapped",
+}
+
+
+def test_count_only_plan_has_a_nonempty_positive_control_and_no_identity_values():
+    from looper.agents.registry_migration import RetentionReason, plan, snapshot
+
+    old = snapshot(RUNTIMES, [provider(api_key="private-test-key")], [profile()])
+    result = plan(old)
+    assert result.applicable
+    assert result.report.keys() == REPORT_FIELDS
+    assert result.report["profiles_before"] == result.report["profiles_after"] == result.report["profiles_mapped"] == 1
+    assert result.report["models_from_open_catalog"] == 1
+    assert result.report["providers_kept_separate_by_reason"].keys() == {r.value for r in RetentionReason}
+
+    def counts_only(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                counts_only(item)
+        else:
+            assert type(value) is int and value >= 0
+
+    counts_only(result.report)
+    assert old.bindings and old.pricing  # A saved old baseline, not two reads of the target.
+
+
+@pytest.mark.parametrize("changes", [{"runtime_id": "missing"}, {"provider_id": "missing"},
+                                         {"effort": "invalid"}, {"model": "outside"}])
+def test_bad_profile_is_counted_and_never_silently_dropped(changes):
+    from looper.agents.registry_migration import plan, snapshot
+
+    rows = [profile(model="allowed"), profile(**{"id": "agent-bad", "model": "allowed", **changes})]
+    result = plan(snapshot(RUNTIMES, [provider(models=[{"name": "allowed"}])], rows))
+    assert not result.applicable
+    assert result.report["profiles_before"] == 2
+    assert result.report["profiles_mapped"] == 1
+    assert result.report["unresolved_profiles"] == 1
+
+
+@pytest.mark.parametrize("kind", ["binding", "pricing"])
+def test_plan_detects_deliberate_target_mismatch_against_saved_old_inputs(monkeypatch, kind):
+    from looper.agents import registry_migration as migration
+
+    old = migration.snapshot(RUNTIMES, [provider(api_key="private-test-key")], [profile()])
+    original = migration.convert
+
+    def broken(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if kind == "binding":
+            key = ("prov-test", P.OPENAI_RESPONSES)
+            result.endpoints[key] = replace(result.endpoints[key], base_url="https://wrong.invalid")
+        else:
+            identity = result.profiles["agent-test"].model_id
+            result.models[identity] = replace(result.models[identity], input_usd_per_mtok=123)
+        return result
+
+    monkeypatch.setattr(migration, "convert", broken)
+    result = migration.plan(old)
+    assert not result.applicable
+    assert result.report[f"{kind}_mismatches"] == 1
+    assert result.report["profiles_mapped"] == 1
+
+
+def test_plan_recomputes_and_counts_both_session_reference_kinds():
+    from looper.agents.registry_migration import plan, snapshot
+
+    accounts = [provider(id="prov-a", vendor_type="deepseek", api_key="same"),
+                provider(id="prov-b", vendor_type="deepseek", api_key="same")]
+    rows = [profile(provider_id="prov-b")]
+    old = snapshot(RUNTIMES, accounts, rows, session_provider_ids=["prov-b", "prov-b", "prov-a", None])
+    assert plan(old).applicable
+    assert plan(old).report["session_references_remapped"] == 2
+    accounts[1]["api_key"] = "changed"
+    assert plan(snapshot(RUNTIMES, accounts, rows)).report["providers_merged"] == 0
+    assert plan(old).report["providers_merged"] == 1  # The old snapshot is isolated from caller mutations.
+
+
+@pytest.mark.parametrize("runtime,protocol,auth", [
+    ("claude-code", P.ANTHROPIC_MESSAGES, "api_key"),
+    ("codex", P.OPENAI_RESPONSES, "api_key"),
+    ("omp", P.OPENAI_CHAT, "api_key"),
+    ("claude-code", P.ANTHROPIC_MESSAGES, "oauth"),
+    ("codex", P.OPENAI_RESPONSES, "oauth"),
+    ("grok", P.OPENAI_RESPONSES, "oauth"),
+])
+@pytest.mark.parametrize("key", [None, "***", "synthetic-private-key"])
+def test_static_preflight_accepts_unchanged_defaults_and_logins_without_discovery(monkeypatch, runtime, protocol, auth, key):
+    import subprocess
+    from looper.agents.registry_migration import plan, snapshot
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("static preflight must not launch any CLI")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    account = provider(auth=auth, oauth_runtime_type=runtime if auth == "oauth" else None,
+                       protocols=[protocol], base_url="", api_key=key if auth == "api_key" else None)
+    result = plan(snapshot(RUNTIMES, [account], [profile(runtime)]))
+    assert result.applicable
+    assert result.report["legacy_default_endpoints"] == int(auth == "api_key")
+
+
+def test_static_binding_comparison_checks_omp_generated_api_not_only_flags():
+    from looper.agents.registry_migration import plan, snapshot
+
+    # An intentionally incorrect conversion priority changes models.yml even
+    # though OMP's --model/--thinking flags and key environment stay equal.
+    rules = replace(LEGACY_RULES, protocol_priority={**LEGACY_RULES.protocol_priority,
+                    "omp": (P.OPENAI_CHAT, P.OPENAI_RESPONSES, P.ANTHROPIC_MESSAGES)})
+    result = plan(snapshot(RUNTIMES, [provider()], [profile()], rules=rules))
+    assert not result.applicable
+    assert result.report["binding_mismatches"] == 1
+
+
+def test_missing_profile_identity_is_unresolved_and_invalid_empty_input_cannot_apply():
+    from looper.agents.registry_migration import plan, snapshot
+
+    row = profile()
+    del row["id"]
+    result = plan(snapshot(RUNTIMES, [provider()], [row]))
+    assert not result.applicable
+    assert result.report["unresolved_profiles"] == 1
+    assert not plan(snapshot(RUNTIMES, [provider(protocols=["invalid"])], [])).applicable
+
+
 def run(account=None, profiles=None, **kwargs):
     return convert(RUNTIMES, [provider() if account is None else account],
                    [profile()] if profiles is None else profiles, **kwargs)
