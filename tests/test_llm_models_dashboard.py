@@ -1,7 +1,7 @@
 """Disposable real-server/browser smoke for Dashboard model configuration.
 
-Install with ``uv sync --extra test`` and
-``uv run --extra test python -m playwright install chromium``.
+Browser cases require optional Playwright and its Chromium browser; neither
+is part of the test dependency extra.
 Set LOOPER_TEST_DATABASE_URL to a disposable PostgreSQL server with CREATEDB.
 The URL is used only to create/drop a fresh database, never as the app database.
 """
@@ -153,7 +153,7 @@ def chromium_browser(dashboard_server, tmp_path, monkeypatch):
     # Keep the server outside Playwright's sync event loop: fresh_database uses
     # asyncio.run() both to create the database and to drop it on teardown.
     playwright = pytest.importorskip(
-        "playwright.sync_api", reason="UNTESTED: Playwright missing; run `uv sync --extra test`", exc_type=ImportError)
+        "playwright.sync_api", reason="UNTESTED: optional Playwright package missing", exc_type=ImportError)
     # Playwright finds its installed browser before HOME is isolated. Its driver
     # and Chromium then run with a throwaway HOME and profile.
     with playwright.sync_playwright() as driver:
@@ -203,7 +203,7 @@ def test_dashboard_server_is_isolated(dashboard_server, tmp_path):
 
 
 def test_browser_opens_own_dashboard_and_reads_seed(dashboard_page, dashboard_server):
-    from playwright.sync_api import expect
+    expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     # Readiness is the rendered database seed; background dashboard requests
     # must not make the smoke wait for the whole page's network to become idle.
@@ -286,24 +286,31 @@ def _registry_state(server):
         return executor.submit(run).result(timeout=15)
 
 
-def test_incompatible_protocol_cannot_create_profile(dashboard_server):
+@pytest.mark.parametrize("runtime, exact_model, compatible, incompatible", [
+    ("claude-code", MODEL_NAME, "anthropic-messages", "openai-chat"),
+    ("pi", MODEL_NAME, "openai-responses", "anthropic-messages"),
+    ("dsh", "deepseek-flash[1m]", "anthropic-messages", "openai-chat"),
+])
+def test_incompatible_protocol_cannot_create_profile(dashboard_server, runtime, exact_model, compatible, incompatible):
     """Negative control: the same name on a different protocol must not pair."""
     api = dashboard_server.api
+    if runtime != "claude-code":
+        _register_dashboard_runtimes(dashboard_server)
     provider = api.post("/api/providers", {"name": ACCOUNT, "vendor_type": "custom", "endpoints": [
         {"protocol": protocol, "base_url": "https://example.invalid/v1"}
-        for protocol in ("anthropic-messages", "openai-chat")]})["provider"]
+        for protocol in (compatible, incompatible)]})["provider"]
     models = {protocol: api.post("/api/models", {
-        "provider_id": provider["provider_id"], "name": MODEL_NAME, "protocol": protocol,
-    })["model"] for protocol in ("anthropic-messages", "openai-chat")}
+        "provider_id": provider["provider_id"], "name": exact_model, "protocol": protocol,
+    })["model"] for protocol in (compatible, incompatible)}
     before = _registry_state(dashboard_server)
     assert before["profiles"]  # Positive control for the DB readback.
     with pytest.raises(EvalError, match=r"answered 400:.*protocol"):
-        api.post("/api/agent-profiles", {"name": "Rejected profile", "runtime_id": "rt-claude-code",
-                                        "model_id": models["openai-chat"]["model_id"]})
+        api.post("/api/agent-profiles", {"name": "Rejected profile", "runtime_id": f"rt-{runtime}",
+                                        "model_id": models[incompatible]["model_id"]})
     assert _registry_state(dashboard_server) == before
-    profile = api.post("/api/agent-profiles", {"name": "Compatible profile", "runtime_id": "rt-claude-code",
-                                              "model_id": models["anthropic-messages"]["model_id"]})["profile"]
-    assert profile["model_id"] == models["anthropic-messages"]["model_id"]
+    profile = api.post("/api/agent-profiles", {"name": "Compatible profile", "runtime_id": f"rt-{runtime}",
+                                              "model_id": models[compatible]["model_id"]})["profile"]
+    assert profile["model_id"] == models[compatible]["model_id"]
     assert next(p for p in _registry_state(dashboard_server)["profiles"]
                 if p["id"] == profile["profile_id"])["model_id"] == profile["model_id"]
 
@@ -317,7 +324,7 @@ def _row(page, name):
 
 
 def _finish_form(form, submit):
-    from playwright.sync_api import expect
+    expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     with form.page.expect_response(lambda r: "/api/" in r.url and r.request.method in ("POST", "PUT")) as response:
         form.get_by_role("button", name=submit, exact=True).click()
@@ -332,7 +339,7 @@ def _finish_form(form, submit):
 
 @pytest.mark.parametrize("width", [1280, 768])
 def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server, tmp_path, width):
-    from playwright.sync_api import expect
+    expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     page, server = dashboard_page, dashboard_server
     page.set_viewport_size({"width": width, "height": 900})
@@ -517,7 +524,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
 
 
 def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboard_page, dashboard_server):
-    from playwright.sync_api import expect
+    expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     page, server = dashboard_page, dashboard_server
     _settings(page, server, "providers/new")
@@ -557,7 +564,7 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
 
 
 def test_invalid_import_displays_server_error_without_writing(dashboard_page, dashboard_server):
-    from playwright.sync_api import expect
+    expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     page, server = dashboard_page, dashboard_server
     _settings(page, server, "transfer")
@@ -571,3 +578,86 @@ def test_invalid_import_displays_server_error_without_writing(dashboard_page, da
     expect(page.get_by_role("alert").filter(has_text="invalid.json")).to_be_visible()
     expect(page.get_by_role("button", name=re.compile(r"^Apply \d+ changes?$"))).to_have_count(0)
     assert _registry_state(server) == before
+
+
+def _register_dashboard_runtimes(server):
+    """Persist detected-runtime rows; this UI test never probes or launches a CLI."""
+    async def insert():
+        import asyncpg
+
+        from looper.agents.runtimes import ADAPTERS
+
+        conn = await asyncpg.connect(server.database_url, timeout=5)
+        try:
+            for name in ("pi", "dsh"):
+                adapter = ADAPTERS[name]
+                await conn.execute(
+                    "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) "
+                    "VALUES ($1, $2, $2, '', $3, true)",
+                    f"rt-{name}", name, sorted(c.value for c in adapter.capabilities))
+        finally:
+            await conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(lambda: asyncio.run(asyncio.wait_for(insert(), timeout=10))).result(timeout=15)
+
+
+@pytest.mark.parametrize("width", [1280, 768])
+def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard_page, dashboard_server, width):
+    expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
+
+    page, server = dashboard_page, dashboard_server
+    page.set_viewport_size({"width": width, "height": 900})
+    _register_dashboard_runtimes(server)
+    provider = server.api.post("/api/providers", {
+        "name": "Runtime API account", "vendor_type": "custom", "endpoints": [
+            {"protocol": protocol, "base_url": f"https://example.invalid/{protocol}"}
+            for protocol in ("openai-responses", "openai-chat", "anthropic-messages")],
+    })["provider"]
+    pid = provider["provider_id"]
+    supported = ("deepseek-flash", "deepseek-flash[1m]", "deepseek-v4-pro", "deepseek-v4-pro[1m]")
+    models = [server.api.post("/api/models", {"provider_id": pid, "protocol": protocol, "name": name,
+                                            "input_usd_per_mtok": 0, "output_usd_per_mtok": 0,
+                                            "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0})["model"]
+              for protocol in ("openai-responses", "openai-chat", "anthropic-messages")
+              for name in (*supported, "unrestricted-model")]
+    _settings(page, server, "profiles/new")
+    form = page.get_by_role("form", name="New Agent Profile", exact=True)
+    form.get_by_label("Name *", exact=True).fill("Typed runtime smoke")
+    runtime = form.get_by_label("Runtime", exact=True)
+    choice = form.get_by_label("Model *", exact=True)
+    effort = form.get_by_label("Effort", exact=True)
+    providers = form.get_by_label("Provider", exact=True)
+    for name, protocols, efforts in (
+        ("pi", ("openai-responses", "openai-chat"), ("off", "minimal", "low", "medium", "high", "xhigh", "max")),
+        ("dsh", ("anthropic-messages",), ("low", "high", "max")),
+    ):
+        runtime.select_option(f"rt-{name}")
+        assert providers.locator("option").evaluate_all("nodes => nodes.map(n => n.value).filter(Boolean)") == [pid]
+        expected = {m["model_id"] for m in models
+                    if m["protocol"] in protocols and (name == "pi" or m["name"] in supported)}
+        assert set(choice.locator("option").evaluate_all("nodes => nodes.map(n => n.value).filter(Boolean)")) == expected
+        assert effort.locator("option").evaluate_all("nodes => nodes.map(n => n.value).filter(Boolean)") == list(efforts)
+        form.get_by_role("button", name="Add Agent Profile", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text("Choose a compatible model")
+        selected = next(m for m in models if m["protocol"] == protocols[0] and m["name"] == supported[-1])
+        choice.select_option(selected["model_id"])
+        effort.select_option("xhigh" if name == "pi" else "max")
+    # Switching from pi clears its incompatible model and effort instead of silently
+    # submitting a hidden xhigh value to DSH. Compatible settings remain selected.
+    runtime.select_option("rt-pi")
+    effort.select_option("xhigh")
+    runtime.select_option("rt-dsh")
+    expect(choice).to_have_value("")
+    expect(effort).to_have_value("")
+    selected = next(m for m in models if m["protocol"] == "anthropic-messages" and m["name"] == supported[-1])
+    choice.select_option(selected["model_id"])
+    effort.select_option("max")
+    form.get_by_label("Custom prompt", exact=True).fill("Typed runtime public marker")
+    _finish_form(form, "Add Agent Profile")
+    profile = next(p for p in server.api.get("/api/registry")["profiles"] if p["name"] == "Typed runtime smoke")
+    assert (profile["runtime_id"], profile["model_id"], profile["effort"], profile["agent_teams"],
+            profile["custom_prompt"]) == ("rt-dsh", selected["model_id"], "max", False, "Typed runtime public marker")
+    persisted = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile["profile_id"])
+    assert persisted["model_id"] == selected["model_id"] and persisted["effort"] == "max"
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

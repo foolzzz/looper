@@ -171,13 +171,16 @@ export function AgentProfileForm({
   const fitting = registry.providers.filter((p) => compatible.some((m) => m.provider_id === p.provider_id));
   const models = compatible.filter((m) => !providerFilter || m.provider_id === providerFilter);
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
+  const effortLevels = type?.effort_levels ?? registry.limits.effort_levels;
   // Agent teams are a Claude Code feature: the server refuses them on another runtime.
   const teams = type?.type === "claude-code";
   const undetected = registry.runtime_types.filter((t) => !registry.runtimes.some((r) => r.builtin && r.type === t.type));
 
   const chooseRuntime = (runtimeId: string) => {
     const next = registry.runtimes.find((r) => r.runtime_id === runtimeId);
-    const nextType = runtimeType(registry, next)?.type;
+    const nextContract = runtimeType(registry, next);
+    const nextType = nextContract?.type;
+    const nextEfforts = nextContract?.effort_levels ?? registry.limits.effort_levels;
     // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
@@ -185,6 +188,7 @@ export function AgentProfileForm({
     setModelError("");
     set({ runtime_id: runtimeId,
           model_id: model && pairs(registry, next, model) ? model.model_id : "",
+          effort: nextEfforts.includes(draft.effort) ? draft.effort : "",
           agent_teams: agentTeams });
   };
   const chooseProvider = (providerId: string) => {
@@ -261,7 +265,7 @@ export function AgentProfileForm({
           <label htmlFor={`${id}-effort`} className={LABEL}>Effort</label>
           <select id={`${id}-effort`} value={draft.effort} onChange={(e) => set({ effort: e.target.value })} className={SELECT}>
             <option value="">Runtime default</option>
-            {registry.limits.effort_levels.map((level) => (
+            {effortLevels.map((level) => (
               <option key={level} value={level}>{level}</option>
             ))}
           </select>

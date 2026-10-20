@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 PROVIDER_ID = "deepseek-official"
 KEY_ENV = "DEEPSEEK_API_KEY"
 DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
+EFFORT_LEVELS = ("low", "high", "max")
 MODEL_MAP = {
     "deepseek-flash": "deepseek-flash",
     "deepseek-flash[1m]": "deepseek-flash",
@@ -294,6 +295,7 @@ class DshRuntime(RuntimeAdapter):
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     auth_kinds = frozenset({AuthKind.API_KEY})
     supported_models = frozenset(MODEL_MAP)
+    effort_levels = EFFORT_LEVELS
     isolation_id = HOME_LAYOUT_ID
     provider_env_owned = frozenset({KEY_ENV, *_DIRECTORY_VARS})
     run_input = False
@@ -1161,7 +1163,7 @@ def validate_provider(provider: ProviderSpec, model: str, effort: str | None = N
         raise RuntimeUnsupported(f"model {model!r} is not in provider {provider.name!r}'s catalog")
     if model not in MODEL_MAP:
         raise RuntimeUnsupported(f"DSH supports only {', '.join(MODEL_MAP)}; got {model!r}")
-    if effort not in (None, "", "low", "high", "max"):
+    if effort not in (None, "", *EFFORT_LEVELS):
         raise RuntimeUnsupported("DSH effort must be low, high or max, or empty for high")
     try:
         _base_url(provider.base_url)

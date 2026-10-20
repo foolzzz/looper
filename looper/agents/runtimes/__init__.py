@@ -274,6 +274,8 @@ class RuntimeAdapter(ABC):
     auth_kinds: ClassVar[frozenset[AuthKind]]
     # Exact model ids when this runtime restricts them; None leaves the provider's catalog authoritative.
     supported_models: ClassVar[frozenset[str] | None] = None
+    # None uses the registry's shared effort levels; a tuple is this adapter's exact choices.
+    effort_levels: ClassVar[tuple[str, ...] | None] = None
     isolation_id: ClassVar[str]  # names its isolation flags in each run's record
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.

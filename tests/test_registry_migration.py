@@ -89,27 +89,34 @@ def test_bad_profile_is_counted_and_never_silently_dropped(changes):
     assert result.report["unresolved_profiles"] == 1
 
 
-@pytest.mark.parametrize("kind", ["binding", "pricing"])
-def test_plan_detects_deliberate_target_mismatch_against_saved_old_inputs(monkeypatch, kind):
+@pytest.mark.parametrize("runtime", ["omp", "pi", "dsh"])
+@pytest.mark.parametrize("kind", ["binding", "pricing", "effort", "custom_prompt"])
+def test_plan_detects_deliberate_target_mismatch_against_saved_old_inputs(monkeypatch, kind, runtime):
     from looper.agents import registry_migration as migration
 
-    old = migration.snapshot(RUNTIMES, [provider(api_key="private-test-key")], [profile()])
+    row = profile(runtime, model="deepseek-flash" if runtime == "dsh" else "Exact.Model[1m]")
+    old = migration.snapshot(RUNTIMES, [provider(api_key="private-test-key")], [row])
+    assert old.bindings and migration.plan(old).applicable
     original = migration.convert
 
     def broken(*args, **kwargs):
         result = original(*args, **kwargs)
+        identity = result.profiles["agent-test"].model_id
         if kind == "binding":
-            key = ("prov-test", P.OPENAI_RESPONSES)
+            model = result.models[identity]
+            key = (model.provider_id, model.protocol)
             result.endpoints[key] = replace(result.endpoints[key], base_url="https://wrong.invalid")
-        else:
-            identity = result.profiles["agent-test"].model_id
+        elif kind == "pricing":
             result.models[identity] = replace(result.models[identity], input_usd_per_mtok=123)
+        else:
+            result.profiles["agent-test"] = replace(result.profiles["agent-test"],
+                                                     **{kind: "low" if kind == "effort" else "Changed instructions."})
         return result
 
     monkeypatch.setattr(migration, "convert", broken)
     result = migration.plan(old)
     assert not result.applicable
-    assert result.report[f"{kind}_mismatches"] == 1
+    assert result.report[f"{'pricing' if kind == 'pricing' else 'binding'}_mismatches"] == 1
     assert result.report["profiles_mapped"] == 1
 
 
@@ -403,6 +410,16 @@ def test_invalid_legacy_pairings_block_the_whole_conversion(account, profiles, c
 def test_unknown_runtime_blocks_even_without_a_profile():
     with pytest.raises(MigrationBlocked, match="unknown_runtime"):
         convert([RuntimeSpec("rt-unknown", "unknown", "unknown")], [], [])
+
+
+def test_detected_pi_and_dsh_without_profiles_do_not_block_migration():
+    from looper.agents.registry_migration import plan, snapshot
+
+    runtimes = [RuntimeSpec(f"rt-{name}", name, name) for name in ("pi", "dsh")]
+    result = plan(snapshot(runtimes, [], []))
+    assert result.applicable
+    assert result.report["profiles_before"] == result.report["profiles_after"] == 0
+    assert result.conversion.profiles == {}
 
 
 @pytest.mark.parametrize("kind", ["runtime", "provider", "profile"])
@@ -716,6 +733,9 @@ def test_new_runtime_explicit_bindings_preserve_exact_model_effort_and_metadata(
     target = result.conversion
     saved = target.profiles[row["id"]]
     selected = target.models[saved.model_id]
+    assert selected.provider_id == row["provider_id"]
+    assert (saved.agent_teams, saved.custom_prompt) == (row["agent_teams"], row["custom_prompt"])
+    assert (selected.input_usd_per_mtok, selected.output_usd_per_mtok) == (0, 2)
     assert (saved.effort, selected.name, selected.protocol, selected.context_window, selected.efforts) == (
         effort, model, protocol, 1_000_000, (effort,))
     assert target.endpoints[(selected.provider_id, protocol)].base_url == "https://example.invalid/v1"

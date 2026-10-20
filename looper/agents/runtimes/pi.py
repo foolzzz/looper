@@ -130,6 +130,7 @@ class PiRuntime(RuntimeAdapter):
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT})
     # API keys only. pi's own /login and OAuth are not providers Looper binds.
     auth_kinds = frozenset({AuthKind.API_KEY})
+    effort_levels = THINKING_LEVELS
     isolation_id = HOME_LAYOUT_ID
     can_replace_system_prompt = True
     read_only = ReadOnly.TOOLS
@@ -193,13 +194,16 @@ class PiRuntime(RuntimeAdapter):
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return list(_ISOLATION_FLAGS)
 
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+        if effort and effort not in self.effort_levels:
+            raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(self.effort_levels)}, or empty")
+
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
         """Pin the private provider and selected model; the API key goes only in the child environment."""
         _check_provider(provider, model)
         _check_explicit_env(provider.env)
         assert provider.api_key is not None  # checked above; ProviderBinding.env contains strings only
-        if effort and effort not in THINKING_LEVELS:
-            raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(THINKING_LEVELS)}, or empty")
+        self.check_pairing(provider, model, effort)
         return ProviderBinding(
             args=("--provider", PROVIDER_ID, "--model", model, *(("--thinking", effort) if effort else ())),
             env=(*provider.env, (KEY_ENV, provider.api_key)),

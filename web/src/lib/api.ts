@@ -2487,6 +2487,8 @@ export interface RuntimeType {
   auth_kinds: ProviderAuth[];
   /** Exact accepted model ids, or null when the provider's catalog is unrestricted by the runtime. */
   supported_models: string[] | null;
+  /** Accepted effort levels, or null when the runtime uses the registry-wide choices. */
+  effort_levels?: string[] | null;
   can_replace_system_prompt: boolean;
   replace_system_prompt_refusal: string | null;
 }

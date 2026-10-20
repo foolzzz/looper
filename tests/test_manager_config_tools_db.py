@@ -194,6 +194,64 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("runtime,protocol,model_name,effort", [
+    ("pi", "openai-responses", "gpt-6.1-sol", "minimal"),
+    ("pi", "openai-chat", "deepseek-flash", "off"),
+    ("dsh", "anthropic-messages", "deepseek-flash", "low"),
+    ("dsh", "anthropic-messages", "deepseek-flash[1m]", "high"),
+    ("dsh", "anthropic-messages", "deepseek-v4-pro", "max"),
+    ("dsh", "anthropic-messages", "deepseek-v4-pro[1m]", "max"),
+])
+def test_pi_and_dsh_manager_models_profiles_and_config_import_share_pairing_rules(
+    monkeypatch, tmp_path, runtime, protocol, model_name, effort,
+):
+    from looper.agents import config_transfer as transfer
+    from tests.test_profile_registry_db import _runtime
+
+    async def test(pool):
+        runtime_id = await _runtime(runtime)
+        chat = _Chat(tmp_path)
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "gateway", "vendor_type": "custom", "endpoints": [
+                {"protocol": p, "base_url": "https://gateway.example.invalid"}
+                for p in ("anthropic-messages", "openai-chat", "openai-responses")]}))["provider"]
+        model = (await _tool(chat, "looper_models", action="create", provider=provider["provider_id"],
+                             name=model_name, protocol=protocol, input_usd_per_mtok=2.5))["model"]
+        incompatible_protocol = "anthropic-messages" if runtime == "pi" else "openai-chat"
+        wrong_protocol = await _model(model_name, provider["provider_id"], incompatible_protocol)
+        unsupported = await _model("unsupported-model", provider["provider_id"], protocol)
+        listed = await _tool(chat, "looper_models", action="list", runtime=runtime)
+        ids = {m["model_id"] for m in listed["models"]}
+        assert model["model_id"] in ids and wrong_protocol["model_id"] not in ids
+        assert (unsupported["model_id"] in ids) == (runtime == "pi")
+        created = await _tool(chat, "looper_agent_profiles", action="create", name="native", runtime=runtime,
+                              model=model["model_id"], effort=effort, custom_prompt="Keep this instruction.")
+        assert created["profile"]["runtime"] == runtime and created["profile"]["effort"] == effort
+        listed_profiles = await _tool(chat, "looper_agent_profiles", action="list")
+        kind = next(t for t in listed_profiles["runtime_types"] if t["type"] == runtime)
+        assert effort in kind["effort_levels"] and protocol in kind["protocols"]
+        assert kind["supported_models"] is None if runtime == "pi" else model_name in kind["supported_models"]
+        (refused,) = await chat.say("创建不兼容配方", ("looper_agent_profiles", {
+            "action": "create", "name": "bad", "runtime": runtime,
+            "model": wrong_protocol["model_id"]}))
+        assert _error(refused) == "invalid" and "exact protocol" in refused["error"]["message"]
+
+        data = {"format": transfer.FORMAT, "profiles": [{
+            "name": "imported", "runtime": runtime, "model": {
+                "provider": "gateway", "name": model_name, "protocol": protocol},
+            "effort": effort, "agent_teams": False, "custom_prompt": "Keep this instruction."}]}
+        async with pool.acquire() as conn:
+            plan = await transfer.run_import(conn, data, apply=True)
+        change = next(c for c in plan.changes if c.section == "profiles")
+        assert change.action == transfer.Action.ADDED
+        imported = next(p for p in (await _ok("GET", "/api/registry"))["profiles"] if p["name"] == "imported")
+        assert (imported["runtime_id"], imported["model_id"], imported["effort"], imported["agent_teams"],
+                imported["custom_prompt"]) == (runtime_id, model["model_id"], effort, False, "Keep this instruction.")
+        assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"]["input_usd_per_mtok"] == 2.5
+
+    _run(test, monkeypatch)
+
+
 def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

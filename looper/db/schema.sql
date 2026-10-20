@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     provider_id  TEXT NOT NULL REFERENCES llm_providers(id),
     model        TEXT NOT NULL CHECK (model <> ''),
     -- The effort of the profile's runs (no layer sets one). NULL: the runtime's own default.
-    effort       TEXT CHECK (effort IN ('low', 'medium', 'high', 'xhigh', 'max')),
+    effort       TEXT CHECK (effort IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')),
     builtin      BOOLEAN NOT NULL DEFAULT false,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -134,6 +134,15 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
 -- Existing profiles add no custom text and append the Looper prompt by default.
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS custom_prompt TEXT NOT NULL DEFAULT '';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'profile_runtime_effort_levels') THEN
+        ALTER TABLE agent_profiles DROP CONSTRAINT IF EXISTS agent_profiles_effort_check;
+        ALTER TABLE agent_profiles ADD CONSTRAINT agent_profiles_effort_check
+            CHECK (effort IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'));
+        INSERT INTO schema_migrations (name) VALUES ('profile_runtime_effort_levels');
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS registry_schema_version (
     id       BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),

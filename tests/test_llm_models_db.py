@@ -106,9 +106,10 @@ def test_update_schema_rejects_identity_before_accessing_database(changes):
 
 @pytest.mark.parametrize("runtime_type,protocols", [
     ("claude-code", {"anthropic-messages"}), ("codex", {"openai-responses"}),
-    ("omp", {"anthropic-messages", "openai-chat", "openai-responses"}), ("grok", set())])
+    ("omp", {"anthropic-messages", "openai-chat", "openai-responses"}), ("grok", set()),
+    ("pi", {"openai-chat", "openai-responses"}), ("dsh", {"anthropic-messages"})])
 def test_service_runtime_filter_obeys_adapter_pairing(runtime_type, protocols, monkeypatch):
-    rows = [_row(protocol=protocol.value) for protocol in service.ApiProtocol]
+    rows = [_row(name="deepseek-flash", protocol=protocol.value) for protocol in service.ApiProtocol]
     monkeypatch.setattr(db, "list_models", AsyncMock(return_value=rows))
     monkeypatch.setattr(db, "get_runtime", AsyncMock(return_value={
         "id": "rt-test", "name": "Test runtime", "type": runtime_type, "executable": "", "capabilities": []}))
@@ -116,6 +117,69 @@ def test_service_runtime_filter_obeys_adapter_pairing(runtime_type, protocols, m
         result = await service.list_models(runtime_id="rt-test")
         assert {m["protocol"] for m in result["models"]} == protocols
     asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@pytest.mark.parametrize("runtime_type,levels", [
+    ("pi", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+    ("dsh", ["low", "high", "max"]),
+])
+def test_runtime_type_offers_only_its_effort_levels(runtime_type, levels):
+    assert service.type_view(service.runtimes.ADAPTERS[runtime_type])["effort_levels"] == levels
+
+
+@pytest.mark.parametrize("runtime_type,protocol,model,effort,error", [
+    ("pi", "openai-responses", "gpt-6.1-sol", "extreme", "pi effort"),
+    ("dsh", "anthropic-messages", "deepseek-flash", "medium", "DSH effort"),
+    ("dsh", "anthropic-messages", "gpt-6.1-sol", "high", "DSH supports only"),
+    ("pi", "anthropic-messages", "deepseek-flash", None, "exact protocol"),
+    ("dsh", "openai-chat", "deepseek-flash", None, "exact protocol"),
+])
+def test_config_import_rejects_incompatible_runtime_model_and_effort(
+    monkeypatch, runtime_type, protocol, model, effort, error,
+):
+    from looper.agents import config_transfer as transfer
+
+    target = transfer._Target(runtimes={runtime_type: {
+        "id": f"rt-{runtime_type}", "name": runtime_type, "type": runtime_type,
+        "executable": "", "capabilities": [], "builtin": True}})
+    monkeypatch.setattr(transfer._Target, "read", AsyncMock(return_value=target))
+    data = {"format": transfer.FORMAT, "providers": [{
+        "name": "account", "vendor_type": "custom", "auth": "api_key",
+        "endpoints": {protocol: {"base_url": "https://example.invalid"}},
+    }], "models": [{"provider": "account", "name": model, "protocol": protocol}],
+        "profiles": [{"name": "imported", "runtime": runtime_type,
+                      "model": {"provider": "account", "name": model, "protocol": protocol},
+                      "effort": effort}]}
+
+    async def run():
+        plan = await transfer.import_config(None, data, apply=False)
+        change = next(c for c in plan.changes if c.section == "profiles")
+        assert change.action == transfer.Action.SKIPPED and error in change.reason
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@needs_db
+def test_existing_database_upgrades_profile_efforts_for_pi(monkeypatch):
+    async def test(pool):
+        # Recreate the pre-pi constraint and migration state on this disposable schema.
+        await pool.execute("ALTER TABLE agent_profiles DROP CONSTRAINT agent_profiles_effort_check; "
+                           "ALTER TABLE agent_profiles ADD CONSTRAINT agent_profiles_effort_check "
+                           "CHECK (effort IN ('low', 'medium', 'high', 'xhigh', 'max')); "
+                           "DELETE FROM schema_migrations WHERE name = 'profile_runtime_effort_levels'")
+        await connection.ensure_schema(pool)
+        await connection.ensure_schema(pool)
+        await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
+                           "VALUES ('rt-pi', 'pi', 'pi', 'pi', '{}')")
+        mid = (await service.create_model(_body(protocol="openai-chat")))["model"]["model_id"]
+        for effort in ("off", "minimal"):
+            profile = (await service.create_profile({"name": effort, "runtime_id": "rt-pi",
+                                                     "model_id": mid, "effort": effort}))["profile"]
+            assert profile["effort"] == effort
+        with pytest.raises(service.RegistryError, match="effort must"):
+            await service.create_profile({"name": "wrong-runtime", "runtime_id": "rt-claude-code",
+                                          "model_id": (await service.create_model(_body()))["model"]["model_id"],
+                                          "effort": "off"})
+    _run(test, monkeypatch)
 
 
 @needs_db

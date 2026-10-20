@@ -185,6 +185,7 @@ async def _profiles(call: Call) -> dict[str, Any]:
         return {"profiles": [_profile_listed(p) for p in registry["profiles"]],
                 "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"], "roles": r["roles"]}
                              for r in registry["runtimes"]],
+                "runtime_types": registry["runtime_types"],
                 "models": [{key: m[key] for key in ("model_id", "provider_id", "provider_name", "name", "protocol")}
                            for m in registry["models"]]}
     if action == "create":
@@ -513,7 +514,9 @@ TOOLS: tuple[Tool, ...] = (
                 "runtime": {"type": "string", "description": "A runtime's id, name or type."},
                 "model": _MODEL_REFERENCE,
                 "effort": {"type": ["string", "null"],
-                           "description": "low, medium, high, xhigh, max; null: the runtime's."},
+                           "description": "Choose from the runtime type's effort_levels returned by list; "
+                                          "when null, shared levels are low, medium, high, xhigh, max. "
+                                          "A null effort uses the runtime's default."},
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
                 "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
                                   "prompt, before the harness; empty adds nothing."},

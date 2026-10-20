@@ -1270,7 +1270,7 @@ class _Importer:
                 if old.provider.id != provider_id:
                     continue
                 resolved = ResolvedModel(old.model, spec, combined[old.model.protocol.value])
-                resolved.check_runtime(profile.runtime)
+                resolved.check_runtime(profile.runtime, profile.effort)
                 if resolved.endpoint != old.endpoint or resolved.provider.env != old.provider.env:
                     raise _Skip(f"endpoint or environment conflicts with Agent Profile {name!r}")
             values = {"name": spec.name, "vendor_type": spec.vendor_type.value, "auth": spec.auth.value,
@@ -1329,7 +1329,7 @@ class _Importer:
             resolved = ResolvedModel(model, self.providers[provider][1], self.endpoints[(provider, protocol)])
             for _, profile in self.profiles.values():
                 if profile.model_id == model.id:
-                    resolved.check_runtime(profile.runtime)
+                    resolved.check_runtime(profile.runtime, profile.effort)
             values = {k: getattr(model, k) for k in (*MODEL_FIELDS, "provider_id", "protocol", "catalog_order")}
             values["protocol"] = model.protocol.value
             values["efforts"] = list(model.efforts) if model.efforts is not None else None
@@ -1371,7 +1371,7 @@ class _Importer:
             spec = self._profile_spec(row["id"] if row else f"new:{name}", name, runtime, key,
                                       entry.get("effort"), entry.get("agent_teams", default_agent_teams(self.runtimes[runtime][1])),
                                       entry.get("custom_prompt", ""))
-            spec.resolved_model.check_runtime(spec.runtime)
+            spec.resolved_model.check_runtime(spec.runtime, spec.effort)
             values = {"runtime": spec.runtime.name, "provider": key[0], "model": key[1], "protocol": key[2],
                       "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt}
             current = {k: row[k] for k in values} if row else None

@@ -387,7 +387,7 @@ class AgentProfile:
         object.__setattr__(self, "name", entry_name(self.name, "Agent Profile"))
         if not isinstance(self.model_id, str) or not self.model_id or _CONTROL.search(self.model_id):
             raise RegistryError("an Agent Profile needs a model_id")
-        object.__setattr__(self, "effort", _effort(self.effort))
+        object.__setattr__(self, "effort", _effort(self.effort, self.runtime))
         _agent_teams(self.agent_teams)
         check_agent_teams(self.runtime, self.agent_teams)
         object.__setattr__(self, "custom_prompt", _custom_prompt(self.custom_prompt))
@@ -638,9 +638,17 @@ def _model(raw: Any) -> str:
     return model
 
 
-def _effort(raw: Any) -> str | None:
+def _effort(raw: Any, runtime: RuntimeSpec | None = None) -> str | None:
     from .agent_settings import SettingsError, effort_level
 
+    # Profiles can use adapter-specific choices beyond the shared settings levels.
+    adapter = runtimes.ADAPTERS.get(runtime.type) if runtime is not None else None
+    levels = (adapter.effort_levels if adapter is not None else
+              tuple(level for adapter in runtimes.ADAPTERS.values() for level in adapter.effort_levels or ()))
+    if adapter is not None and levels is not None and raw not in (None, "") and raw not in levels:
+        raise RegistryError(f"{adapter.label} effort must be one of {', '.join(levels)}, or empty for the runtime's own")
+    if levels is not None and isinstance(raw, str) and raw in levels:
+        return raw
     try:
         return effort_level(raw) or None
     except SettingsError as exc:
@@ -788,6 +796,7 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
             "capabilities": sorted(c.value for c in adapter.capabilities),
             "roles": servable_roles(adapter.capabilities),
             "supported_models": sorted(adapter.supported_models) if adapter.supported_models is not None else None,
+            "effort_levels": list(adapter.effort_levels) if adapter.effort_levels is not None else None,
             "can_replace_system_prompt": adapter.can_replace_system_prompt,
             "replace_system_prompt_refusal": runtimes.replace_refusal(adapter),
             "auth_kinds": sorted(a.value for a in adapter.auth_kinds)}

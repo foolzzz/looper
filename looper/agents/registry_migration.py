@@ -26,6 +26,8 @@ from .profile_registry import (
 )
 from .provider_presets import PRESETS
 from .runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType
+from .runtimes.dsh import DEFAULT_BASE_URL as DSH_DEFAULT_BASE_URL
+from .runtimes.pi import API_NAMES as PI_API_NAMES
 from .runtimes.pricing import base_model, model_price
 
 
@@ -62,8 +64,8 @@ LEGACY_RULES = LegacyRules(
         "codex": (ApiProtocol.OPENAI_RESPONSES,),
         "omp": (ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT, ApiProtocol.ANTHROPIC_MESSAGES),
         "grok": (ApiProtocol.OPENAI_RESPONSES,),
-        "pi": (ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT),
-        "dsh": (ApiProtocol.ANTHROPIC_MESSAGES,),
+        "pi": tuple(protocol for protocol, _ in PI_API_NAMES),
+        "dsh": tuple(ADAPTERS["dsh"].protocols),
     }),
     MappingProxyType({
         ("claude-code", ApiProtocol.ANTHROPIC_MESSAGES): "https://api.anthropic.com",
@@ -71,7 +73,7 @@ LEGACY_RULES = LegacyRules(
         ("omp", ApiProtocol.OPENAI_RESPONSES): "https://api.openai.com/v1",
         ("omp", ApiProtocol.OPENAI_CHAT): "https://api.openai.com/v1",
         ("omp", ApiProtocol.ANTHROPIC_MESSAGES): "https://api.anthropic.com",
-        ("dsh", ApiProtocol.ANTHROPIC_MESSAGES): "https://api.deepseek.com/anthropic",
+        ("dsh", ApiProtocol.ANTHROPIC_MESSAGES): DSH_DEFAULT_BASE_URL,
     }),
 )
 
@@ -159,7 +161,6 @@ def _launch_inputs(runtime: RuntimeSpec, provider: LegacyProviderSpec, row: Mapp
     adapter = ADAPTERS[runtime.type]
     if resolved is None and runtime.type in {"omp", "pi"}:
         from .runtimes.omp import API_NAMES as OMP_API_NAMES
-        from .runtimes.pi import API_NAMES as PI_API_NAMES
 
         priorities = OMP_API_NAMES if runtime.type == "omp" else PI_API_NAMES
 
@@ -371,9 +372,8 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
     """
     runtime_rows = _index(runtimes, runtimes=True)
     provider_rows, profile_rows = _index(providers), _index(profiles)
-    known_runtimes = {"claude-code", "codex", "omp", "grok", "pi", "dsh"}
     for runtime in runtime_rows.values():
-        if not isinstance(runtime.type, str) or runtime.type not in known_runtimes \
+        if not isinstance(runtime.type, str) or runtime.type not in ADAPTERS \
                 or runtime.type not in rules.protocol_priority:
             raise MigrationBlocked("unknown_runtime")
     account_runtimes: dict[str, set[str]] = {}
