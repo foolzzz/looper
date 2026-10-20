@@ -294,6 +294,42 @@ async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[st
     return _task(row)
 
 
+async def set_continues_schedule_session(task_id: str, continues: bool) -> None:
+    """Whether this run actually resumed the schedule's claimed Planner conversation."""
+    await get_pool().execute("UPDATE tasks SET continues_schedule_session = $2 WHERE id = $1", task_id, continues)
+
+
+async def set_planner_session_label(task_id: str, label: str) -> None:
+    """Persist the session-directory label this task's Planner uses.
+
+    Resume uses it to find that session's directory, and cleanup keeps the directory of every live task.
+    It is ``planner-schedule-<id>`` while the task is in the schedule's stored conversation, and the task's
+    own label (``planner-<task id>``) once a fresh session is its own, so that session's directory and
+    per-turn cleanup stay off the schedule's.
+    """
+    await get_pool().execute("UPDATE tasks SET planner_session_label = $2 WHERE id = $1", task_id, label)
+
+
+async def live_planner_session_labels(*, pool: asyncpg.Pool | None = None) -> list[tuple[str, str | None]]:
+    """``(planner_session_label, runtime_type)`` of every live task that persisted a Planner storage label.
+
+    The runtime is the one on that task's Planner session, when it has one. Startup cleanup keeps those
+    directories after a schedule reset clears the stored session. A task that is not live, including one
+    that was deleted, contributes nothing.
+    """
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.planner_session_label AS label, s.runtime_type
+        FROM tasks t
+        LEFT JOIN agent_sessions s ON s.agent_id = 'planner-' || t.id
+        WHERE t.planner_session_label IS NOT NULL AND t.status = ANY($1::text[])
+        """,
+        list(ACTIVE_STATUSES),
+    )
+    return [(row["label"], row["runtime_type"]) for row in rows]
+
+
 def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
     columns as lists."""

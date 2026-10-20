@@ -14,7 +14,7 @@ function detail(id: string) {
     task_id: id, name: id, requirement: REQUIREMENTS[id], goal_id: "", status: "failed", group: "attention",
     phase: "failed", planner_id: null, correlation_id: "", created_at: "2026-10-17T08:00:00Z",
     updated_at: "2026-10-17T08:01:00Z", completed_at: "2026-10-17T08:01:00Z", project_id: "p1", project_name: "P",
-    work_dir: "/w", cost: null, schedule_id: null, schedule_name: null, config: {}, origin_channel_id: "",
+    work_dir: "/w", cost: null, schedule_id: null, schedule_name: null, continues_schedule_session: false, config: {}, origin_channel_id: "",
     result_summary: null, error: "it failed", fail_kind: null, task_budget_usd: null, own_budget_usd: null,
     steps: [], journal: [], progress: [], gates: [], roles: [], builtin_role_stats: null, agents: null,
     requirement_versions: [], supplements: [], manager_actions: [], profile_overrides: {},
@@ -60,6 +60,18 @@ describe("TaskDetailRoute", () => {
     await act(async () => tab!.click());
     await settle();
   };
+
+  it.each([false, true])("shows the schedule session note only after a confirmed continuation (%s)", async (continues) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const data = url.endsWith("/tasks/task-a")
+        ? { ...detail("task-a"), schedule_id: "sched-a", schedule_name: "Daily check", continues_schedule_session: continues }
+        : answer(url);
+      return Response.json(data);
+    }));
+    await show("task-a");
+    expect(container.textContent?.includes("continues the schedule's Planner session")).toBe(continues);
+  });
 
   it("opens another task on its Overview, with none of the previous task's page", async () => {
     await show("task-a");

@@ -1,5 +1,5 @@
 """The Manager's schedules tool (Manager tools RFC, sections 7 and 7.1, T3): list, read, create, change, enable,
-disable, run now and delete schedules.
+disable, run now, reset a stored Planner session and delete schedules.
 
 Each action calls the code the dashboard's API calls (``agents.schedules``:
 the Schedules page's list, a schedule's view and its runs, ``create_schedule``,
@@ -8,7 +8,7 @@ and a refusal carries the dashboard's message. A schedule is named by its id or
 its name, ignoring case, within ``project`` when given; a name more than one
 project has is refused, naming each. Listing and reading are ``read``; the
 changes are ``write``, but for deleting, enabling, running now and a change that
-raises or removes a spend cap, which are ``high``: the user is shown what it does
+raises or removes a spend cap, and resetting a stored Planner session, which are ``high``: the user is shown what it does
 and confirms in the next message.
 
 A new schedule is disabled. Looper adds its configuration (the rule in words,
@@ -107,6 +107,11 @@ async def _schedules(call: Call) -> dict[str, Any]:
     _not_created_now(call, row)
     if action == "update":
         return await _update(call, row)
+    if action == "reset_planner_session":
+        result = await answered(schedules.reset_planner_session(row["id"]))
+        return {"schedule": row["name"], "schedule_id": row["id"], "project": row["project_name"], **result,
+                "note": "the next run starts a new Planner session; a run in progress keeps its own session "
+                        "until it ends and will not write it back"}
     if action == "run":
         if call.platform.scheduler is None:
             raise OpError(ErrorCode.UNAVAILABLE, "this server runs no scheduler; try again later")
@@ -205,6 +210,13 @@ async def _confirming(call: Call) -> str | None:
     action = call.arguments["action"]
     if action == "delete":
         return await _deleting(call)
+    if action == "reset_planner_session":
+        row = await _schedule(call.arguments)
+        return "\n".join([
+            f"要重置定时任务「{row['name']}」（项目 {row['project_name']}）的 Planner 会话吗？",
+            "已存会话会清掉，下一次运行从新会话开始。" if row.get("planner_session_id") else
+            "当前没有已存会话；下一次运行从新会话开始。",
+            "正在进行的运行留着自己的会话直到结束，并且不会写回。"])
     if action in ("enable", "run"):
         return await _starting(call)
     if action != "update":
@@ -389,12 +401,14 @@ TOOLS: tuple[Tool, ...] = (
         description="Schedules (a project's task on a time rule): list; get (with latest runs); create (disabled; "
                     "Looper shows it and asks whether to enable it); update; enable (its runs then start tasks "
                     "unattended; the user confirms first) or disable; run now (the user confirms first); delete "
-                    "(the user confirms first; its tasks stay).",
+                    "(the user confirms first; its tasks stay); reset_planner_session (the user confirms first; "
+                    "the next run starts fresh; a run in progress keeps its session and will not write it back).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
                 "action": {"type": "string",
-                           "enum": ["list", "get", "create", "update", "enable", "disable", "run", "delete"]},
+                           "enum": ["list", "get", "create", "update", "enable", "disable", "run", "delete",
+                                    "reset_planner_session"]},
                 "schedule": {"type": "string", "minLength": 1, "description": "Its id (sched-...) or name."},
                 "project": {**_PROJECT, "description": "create: its project; list: only its schedules; with a "
                                                        "schedule's name: its project."},

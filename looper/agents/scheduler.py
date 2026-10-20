@@ -176,6 +176,17 @@ def _snippet(text: str | None) -> str:
     return flat if len(flat) <= SUMMARY_CHARS else f"{flat[:SUMMARY_CHARS]}…"
 
 
+def continuing_run_preface(task_id: str, previous: Mapping[str, Any] | None) -> str:
+    """The user-message boundary between runs sharing one Planner conversation."""
+    lines = [f"这是这个定时任务的一次新运行，任务编号是 {task_id}。上面这段对话都是更早的运行；那些运行的任务编号、步骤、计划和关卡都不属于这个任务。"
+             "这个任务的需求和前置检查输出在后面（这一轮的 Task 一节）。做这次的需求；更早的运行只当作记忆。"]
+    if previous is not None:
+        status = previous["status"]
+        lines.append(f"上一轮：{_STATUS_WORDS.get(status, status)} · {_snippet(previous.get('summary') or previous.get('error'))}")
+    lines.append("不要沿用更早一次运行的步骤编号；这个任务的步骤用新的编号。")
+    return "\n\n".join(lines)
+
+
 @dataclass(frozen=True)
 class Carried:
     """The unfinished input of an earlier run, handed to this one."""

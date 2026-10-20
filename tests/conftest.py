@@ -96,6 +96,7 @@ class _PlanStore:
         self.plans: dict[str, dict[str, Any]] = {}
         self.steps: dict[str, dict[str, dict[str, Any]]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.planner_session_labels: dict[str, str] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.journal: dict[str, list[dict[str, Any]]] = {}
         self.ready: dict[str, dict[str, Any]] = {}
@@ -296,6 +297,24 @@ class _PlanStore:
     async def get_session(self, agent_id: str, **_: object) -> dict[str, Any] | None:
         saved = self.sessions.get(agent_id)
         return None if saved is None else {**saved, "session_totals": dict(saved["session_totals"])}
+
+    async def other_live_task_has_session(self, session_id: str, task_id: str, **_: object) -> bool:
+        """The in-memory form of ``agent_sessions.other_live_task_has_session``."""
+        from looper.db.tasks import ACTIVE_STATUSES
+
+        if not session_id:
+            return False
+        for other_id, task in self.tasks.items():
+            if other_id == task_id or task.get("status") not in ACTIVE_STATUSES:
+                continue
+            saved = self.sessions.get(f"planner-{other_id}")
+            if saved and saved.get("session_id") == session_id:
+                return True
+        return False
+
+    async def set_planner_session_label(self, task_id: str, label: str, **_: object) -> None:
+        """The in-memory form of ``tasks.set_planner_session_label``."""
+        self.planner_session_labels[task_id] = label
 
 
 async def _created_project(
@@ -559,6 +578,9 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         (plans, "save_plan", "save", store.save), (plans, "load_plan", "load", store.load),
         (agent_sessions, "save_session", "save_session", store.save_session),
         (agent_sessions, "get_session", "get_session", store.get_session),
+        (agent_sessions, "other_live_task_has_session", "other_live_task_has_session",
+         store.other_live_task_has_session),
+        (tasks, "set_planner_session_label", "set_planner_session_label", store.set_planner_session_label),
         (tasks, "create_task", "create_task", store.create_task),
         (tasks, "start_ready_task", "start_ready_task", store.start_ready_task),
         (step_workspaces, "next_workspace_id", "next_id", store.next_workspace_id),

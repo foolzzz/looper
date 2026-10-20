@@ -18,6 +18,28 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.12.2] - 2026-10-19
+
+### Highlights
+
+- **Non-parallel schedules keep one Planner conversation across runs.** Each trigger still creates its own task, with its own run record, budget and timeout. Each run's requirement is also kept in the conversation, so later runs can remember earlier inputs. Reset the stored session from the dashboard, API or the Manager's confirmed schedules action; failures and edits do not reset it. ([#249](https://github.com/foolzzz/looper/pull/249))
+- **Session fallback protects other live runs.** Parallel runs, an unresumable session, another live holder or a failed session check produce activity explaining why a run starts fresh. Reset and restore cannot give two live Planners the same session; a run giving up the shared session keeps its own storage label across restart, and a holder's replacement session is saved for later runs. ([#249](https://github.com/foolzzz/looper/pull/249))
+
+### Behavior changes
+
+- **After upgrade, every non-parallel schedule continues its Planner from its second run onward.** There is no activation switch. Reset makes the next run fresh; it does not disable future continuity. Prompt caching mainly helps closely spaced runs; a long-lived conversation can cost more per run over time. There is no automatic threshold handoff. Claude Code compacts its own context; other runtimes' long-session behavior needs verification. Cross-run resume on Codex, Grok and OMP has stand-in coverage only. Changing overlap to parallel during a run can leave a stale cost baseline for the next run.
+
+See the [bilingual release notes](docs/releases/v2.12.2.md) for verification, reset controls, fallback activity and validation limits.
+
+## [2.12.1] - 2026-10-19
+
+### Fixes
+
+- **Knowledge vault search matches any query word.** Notes no longer need every word in a query to appear in their path or text. Results rank by matched query words, then text hit count, then path, and include `words`; the model-visible tool description reflects the change. ([#245](https://github.com/foolzzz/looper/pull/245))
+- **Vault writes pass search-only ancestor directories.** The no-symlink walk uses `O_SEARCH` on macOS or `O_PATH` on Linux, removing v2.12.0's requirement to read every ancestor on those systems. The server still needs to enter each ancestor and read and search the vault itself. Saving settings returns HTTP 400 for an impassable vault path, an unreadable or unsearchable vault, or an unreachable writable folder, instead of failing at write time or with HTTP 500. ([#245](https://github.com/foolzzz/looper/pull/245))
+
+See the [bilingual release notes](docs/releases/v2.12.1.md) for verification, activation and remaining limits.
+
 ## [2.12.0] - 2026-10-19
 
 ### Highlights

@@ -196,6 +196,13 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
         "notify_target": target, "spent_today_usd": round(spent_today, 6),
         "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at")},
+        "planner_session": {
+            "active": bool(row.get("planner_session_id")),
+            **{key: row.get(column) if row.get("planner_session_id") else None for key, column in (
+                ("runtime", "planner_session_runtime"), ("profile", "planner_session_profile"),
+                ("last_task_id", "planner_session_task_id"), ("last_task_title", "planner_session_task_title"),
+                ("updated_at", "planner_session_since"))},
+        },
         "last_run": last_run,
     }
 
@@ -536,6 +543,14 @@ async def delete_schedule(schedule_id: str) -> dict[str, Any]:
     if not await db_schedules.delete_schedule(schedule_id):
         raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
     return {"deleted": schedule_id}
+
+
+async def reset_planner_session(schedule_id: str) -> dict[str, Any]:
+    """Clear the stored session and its holder; a task already running keeps its own session."""
+    cleared = await db_schedules.reset_planner_session(schedule_id)
+    if cleared is None:
+        raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+    return {"cleared": cleared}
 
 
 async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:
