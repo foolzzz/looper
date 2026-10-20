@@ -30,6 +30,7 @@ from looper.db import library as db_library
 from looper.db import project_documents as db_documents
 from looper.db import projects as db_projects
 from looper.db import schedules as db_schedules
+from looper.db import tasks as db_tasks
 
 
 def _sha(text: str) -> str:
@@ -46,6 +47,7 @@ class _Content:
         self.servers: dict[str, mcp.Server] = {}  # MCP servers installed globally for Workers, by name
         self.sessions: list[tuple[str, str | None]] = []  # each agent with a saved session, and its runtime type
         self.schedules: list[dict[str, Any]] = []
+        self.session_labels: list[tuple[str, str | None]] = []  # live tasks' persisted Planner storage labels
         self.fail = False
 
         async def list_projects(**_: Any) -> list[dict[str, Any]]:
@@ -98,6 +100,8 @@ class _Content:
 
         monkeypatch.setattr(db_agent_sessions, "saved_sessions", saved_sessions)
         monkeypatch.setattr(db_schedules, "list_schedules", AsyncMock(side_effect=lambda: self.schedules))
+        monkeypatch.setattr(db_tasks, "live_planner_session_labels",
+                            AsyncMock(side_effect=lambda: list(self.session_labels)))
 
     def project(self, project_id: str, *, documents: list[tuple[str, str]], skills: list[tuple[str, str]]) -> dict:
         project = {"id": project_id, "name": project_id, "work_dir": ""}

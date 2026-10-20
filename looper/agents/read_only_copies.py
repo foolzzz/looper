@@ -207,8 +207,9 @@ def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | Non
 
 async def reclaim_unused(runtime_root: Path) -> list[Path]:
     """Remove the copies under ``runtime_root`` that neither the current content nor a running process uses, and
-    the session directories of agents whose saved session is not of their runtime type."""
-    from ..db import agent_sessions, schedules
+    the session directories of agents whose saved session is not of their runtime type. A live task's persisted
+    Planner storage label is kept too, including after the schedule's stored session was reset."""
+    from ..db import agent_sessions, schedules, tasks
 
     try:
         keep = await current_copies(runtime_root)
@@ -218,6 +219,7 @@ async def reclaim_unused(runtime_root: Path) -> list[Path]:
         saved = await agent_sessions.saved_sessions()
         saved += [(f"planner-schedule-{row['id']}", row["planner_session_runtime"])
                   for row in await schedules.list_schedules() if row["planner_session_id"]]
+        saved += await tasks.live_planner_session_labels()
         lines = command_lines()
         removed = reclaim(runtime_root, keep=keep, command_lines=lines)
         removed += reclaim_sessions(runtime_root, saved=saved, command_lines=lines)

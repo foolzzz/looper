@@ -14,7 +14,7 @@ from looper.agents.message import MessageEnvelope, MessageType, TASK_ROUTER_ADDR
 from looper.agents.run_usage import Usage
 from looper.agents.session_switch import session_lost
 from looper.agents.tiers.planner import PlannerAgent
-from looper.db import agent_sessions, connection, schedules, tasks
+from looper.db import agent_sessions, connection, projects, schedules, tasks
 from tests.test_planner_agent import plan, step
 from tests.test_schedule_planner_session import FRESH
 from tests.test_schedules_db import DSN, _run
@@ -261,5 +261,63 @@ def test_migration_is_idempotent_and_keeps_saved_sessions(
         await connection.ensure_schema(env.pool)
         assert await _row(env, sid) == before
         assert await env.pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'schedule_planner_session'") == 1
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_claimed_label_survives_reset_and_only_a_live_task_occupies_the_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Claim persists the storage label; reset clears the holder and not that label.
+
+    A live task that still has the session occupies it. A failed or completed task, and a deleted one, does not.
+    """
+    session = "session-shared"
+
+    async def test(env: Any) -> None:
+        sid = (await env.schedule())["schedule_id"]
+        label = f"planner-schedule-{sid}"
+        await _task(env, sid, "task-a")
+        assert await env.pool.fetchval("SELECT planner_session_label FROM tasks WHERE id = 'task-a'") is None
+        assert (await schedules.claim_planner_session("task-a"))["claimed"] is True
+        assert await env.pool.fetchval("SELECT planner_session_label FROM tasks WHERE id = 'task-a'") == label
+        await _store("task-a", session)
+        await agent_sessions.save_session("planner-task-a", session, {}, runtime_type="claude-code")
+        await env.pool.execute("UPDATE tasks SET status = 'failed' WHERE id = 'task-a'")
+
+        await _task(env, sid, "task-b")
+        claimed = await schedules.claim_planner_session("task-b")
+        assert claimed["claimed"] is True and claimed["session_id"] == session
+        assert await env.pool.fetchval("SELECT planner_session_label FROM tasks WHERE id = 'task-b'") == label
+        assert (await agent_sessions.get_session("planner-task-b"))["session_id"] == session
+
+        await _task(env, sid, "task-denied")
+        denied = await schedules.claim_planner_session("task-denied")
+        assert denied == {"claimed": False, "reason": "another active task holds it"}
+        assert await env.pool.fetchval("SELECT planner_session_label FROM tasks WHERE id = 'task-denied'") is None
+
+        await _task(env, sid, "task-c")
+        await agent_sessions.save_session("planner-task-c", session, {}, runtime_type="claude-code")
+        await env.pool.execute(
+            "UPDATE tasks SET status = 'completed', planner_session_label = $2 WHERE id = $1",
+            "task-c", "planner-schedule-gone",
+        )
+
+        assert await schedules.reset_planner_session(sid) is True
+        row = await _row(env, sid)
+        assert row["planner_session_id"] is None and row["planner_session_task_id"] is None
+        assert await env.pool.fetchval("SELECT planner_session_label FROM tasks WHERE id = 'task-a'") == label
+        assert await env.pool.fetchval("SELECT planner_session_label FROM tasks WHERE id = 'task-b'") == label
+        assert await env.pool.fetchval("SELECT planner_session_label FROM tasks WHERE id = 'task-c'") == \
+            "planner-schedule-gone"
+        assert (await agent_sessions.get_session("planner-task-b"))["session_id"] == session
+
+        assert await agent_sessions.other_live_task_has_session(session, "task-a") is True
+        assert await agent_sessions.other_live_task_has_session(session, "task-b") is False
+        assert (await projects.get_task_project("task-b"))["task_planner_session_label"] == label
+        assert set(await tasks.live_planner_session_labels()) == {(label, "claude-code")}
+
+        assert await tasks.delete_task("task-b")
+        assert set(await tasks.live_planner_session_labels()) == set()
 
     _run(test, monkeypatch, tmp_path)

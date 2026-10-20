@@ -179,6 +179,11 @@ async def lock_schedule(conn: asyncpg.Connection, schedule_id: str) -> dict[str,
     return (await _with_overrides(conn, [row]))[0] if row else None
 
 
+def planner_storage_label(schedule_id: str) -> str:
+    """The session-directory label of a schedule's Planner conversation (``planner-schedule-<id>``)."""
+    return f"planner-schedule-{schedule_id}"
+
+
 async def claim_planner_session(task_id: str) -> dict[str, Any] | None:
     """Claim a new plan's schedule conversation, copying it atomically into the task's session.
 
@@ -208,6 +213,8 @@ async def claim_planner_session(task_id: str) -> dict[str, Any] | None:
             profile_id=row["planner_session_profile"], pool=conn,
         )
         await conn.execute("UPDATE schedules SET planner_session_task_id = $2 WHERE id = $1", schedule_id, task_id)
+        await conn.execute("UPDATE tasks SET planner_session_label = $2 WHERE id = $1", task_id,
+                           planner_storage_label(schedule_id))
         previous = await conn.fetchrow(
             "SELECT status, summary, error FROM schedule_runs WHERE schedule_id = $1 AND finished_at IS NOT NULL "
             "AND task_id IS DISTINCT FROM $2 ORDER BY finished_at DESC, id DESC LIMIT 1", schedule_id, task_id,

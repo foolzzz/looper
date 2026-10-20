@@ -774,6 +774,9 @@ class PlannerAgent:
         self._schedule_session_id: str | None = None
         self._schedule_previous: Mapping[str, Any] | None = None
         self._schedule_session_writes = False
+        # The session directory claimed for this task (planner-schedule-<id>). Set for this process when the
+        # claim succeeds, and read back with the task after a restart. Unset tasks keep self.agent_id.
+        self._planner_session_label: str | None = None
         self._idle_task: asyncio.Task[Any] | None = None
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
@@ -2782,8 +2785,7 @@ class PlannerAgent:
                 await self._activity("phase", ("Schedule Planner session replaced: the stored session cannot be "
                                               f"resumed ({switch.describe()}); this run starts fresh")[:500])
             await self._switch_session(plan, switch, settings.timeout_seconds)
-        label = (f"planner-schedule-{self._schedule_id}"
-                 if self._schedule_id and self._schedule_session_writes else self.agent_id)
+        label = self._planner_session_label or self.agent_id
         if launch.runtime is not self._claude_runtime or self._claude.label != label:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await self._claude.stop()
@@ -3702,6 +3704,8 @@ class PlannerAgent:
         self._execution = ProjectExecution.from_row(project)
         self._scheduled = project.get("task_schedule_id") is not None
         self._schedule_id = project.get("task_schedule_id")
+        if project.get("task_planner_session_label"):
+            self._planner_session_label = str(project["task_planner_session_label"])
         updated_at = project.get("updated_at")
         plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
 
@@ -3945,6 +3949,8 @@ class PlannerAgent:
                 await self._activity("phase", note)
                 return
             self._schedule_session_writes = True
+            if self._schedule_id:
+                self._planner_session_label = db_schedules.planner_storage_label(self._schedule_id)
             plan.session_id = self._schedule_session_id = claimed["session_id"]
             plan.session_totals = Usage.from_dict(claimed["session_totals"])
             plan.session_runtime, plan.session_provider = claimed["runtime_type"], claimed["provider_id"]
@@ -4059,4 +4065,15 @@ class PlannerAgent:
                         and holder is not None and holder != self._task_id):
                     await self._drop_session(plan, session_switch.session_lost(
                         "the stored session now belongs to another task", runtime=plan.session_runtime,
+                        profile=plan.session_profile))
+            if plan.session_id:
+                # Independent of the holder: reset clears it, and another live run may still have this session.
+                try:
+                    in_use = await db_agent_sessions.other_live_task_has_session(plan.session_id, self._task_id)
+                except Exception:
+                    logger.exception("planner %s cannot tell whether its session is in use", self.agent_id)
+                    in_use = False
+                if in_use:
+                    await self._drop_session(plan, session_switch.session_lost(
+                        "the stored session is in use by another run", runtime=plan.session_runtime,
                         profile=plan.session_profile))

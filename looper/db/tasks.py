@@ -297,6 +297,26 @@ async def set_continues_schedule_session(task_id: str, continues: bool) -> None:
     await get_pool().execute("UPDATE tasks SET continues_schedule_session = $2 WHERE id = $1", task_id, continues)
 
 
+async def live_planner_session_labels(*, pool: asyncpg.Pool | None = None) -> list[tuple[str, str | None]]:
+    """``(planner_session_label, runtime_type)`` of every live task that persisted a Planner storage label.
+
+    The runtime is the one on that task's Planner session, when it has one. Startup cleanup keeps those
+    directories after a schedule reset clears the stored session. A task that is not live, including one
+    that was deleted, contributes nothing.
+    """
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.planner_session_label AS label, s.runtime_type
+        FROM tasks t
+        LEFT JOIN agent_sessions s ON s.agent_id = 'planner-' || t.id
+        WHERE t.planner_session_label IS NOT NULL AND t.status = ANY($1::text[])
+        """,
+        list(ACTIVE_STATUSES),
+    )
+    return [(row["label"], row["runtime_type"]) for row in rows]
+
+
 def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
     columns as lists."""

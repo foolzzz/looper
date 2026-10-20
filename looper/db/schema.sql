@@ -1697,6 +1697,9 @@ BEGIN
         INSERT INTO schema_migrations (name) VALUES ('schedule_planner_session');
     END IF;
 END $$;
+-- The storage label a task took when it claimed the schedule conversation (planner-schedule-<id>). NULL until
+-- then. Reset clears the schedule's holder and does not clear this: an in-flight run keeps its directory.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planner_session_label TEXT;
 -- Who is told when the task ends (agents/task_notice.py): chat_id, the Telegram chat id, the Lark sender's open_id
 -- or the Lark group's id; NULL for a task asked for elsewhere (the web chat, the dashboard). chat_kind says which:
 -- 'user', a person, told in a direct message, or 'chat', a chat; chat_mention is who the notice @-mentions there

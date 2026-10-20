@@ -67,10 +67,13 @@ async def get_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> d
 async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     """The project task ``task_id`` belongs to now (it can move); None when there is no such task. Its
     ``task_budget_usd`` is the task's own cap when it has one (a scheduled run's ``run_budget_usd``), and
-    ``task_schedule_id`` the schedule that started the task (None for one a user started)."""
+    ``task_schedule_id`` the schedule that started the task (None for one a user started).
+    ``task_planner_session_label`` is the storage label the task persisted when it claimed that conversation
+    (None when it never became the holder)."""
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        "SELECT p.*, t.budget_usd AS task_own_budget_usd, t.schedule_id AS task_schedule_id "
+        "SELECT p.*, t.budget_usd AS task_own_budget_usd, t.schedule_id AS task_schedule_id, "
+        "t.planner_session_label AS task_planner_session_label "
         "FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1", task_id,
     )
     if row is None:
