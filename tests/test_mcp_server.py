@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import socket
 import subprocess
 import sys
@@ -27,6 +28,7 @@ import pytest
 from looper import __version__
 from looper.agents import mcp_server
 from looper.agents.mcp_server import AgentClient, LooperTimedOut, LooperUnavailable, handle, handle_line
+from looper.agents.runtimes import RuntimeUnsupported
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "agent-token-for-tests"
@@ -426,3 +428,231 @@ def test_the_process_exits_2_without_its_environment(overrides: dict[str, str], 
     )
     assert (proc.returncode, proc.stdout) == (2, "")
     assert expected in proc.stderr and TOKEN not in proc.stderr
+
+
+@pytest.fixture
+def dsh_mcp_state(tmp_path):
+    from types import SimpleNamespace
+    from looper.agents.ops.planner import TOOLS as PLANNER_TOOLS
+
+    # A real stdio subprocess uses the production JSON-RPC handler with a local fake API client.
+    # No TCP bind is needed, so startup failures remain testable in a network-restricted sandbox.
+    script = tmp_path / "fake_mcp.py"
+    script.write_text("""
+import json, os, sys
+from pathlib import Path
+from looper.agents.mcp_server import handle_line, LooperUnavailable
+state_path = Path(os.environ['TEST_MCP_STATE'])
+class Client:
+    def state(self):
+        state = json.loads(state_path.read_text())
+        if os.environ.get('LOOPER_AGENT_TOKEN') != state['current_token']:
+            raise LooperUnavailable('HTTP 401: invalid agent token')
+        if os.environ.get('LOOPER_AGENT_URL') != state['url']:
+            raise LooperUnavailable('wrong run URL')
+        return state
+    def list_tools(self):
+        state = self.state()
+        state['lists'] += 1
+        state_path.write_text(json.dumps(state))
+        return state['tools']
+    def call_tool(self, name, arguments):
+        state = self.state()
+        state['posts'].append({'path':'/api/agent/v1/ops/'+name, 'body':arguments})
+        state_path.write_text(json.dumps(state))
+        return {'status':'ok'}
+for line in sys.stdin:
+    answer = handle_line(line, Client())
+    if answer is not None:
+        print(json.dumps(answer), flush=True)
+""")
+    return SimpleNamespace(script=script, state=tmp_path / "state.json", posts=[], model_requests=0, lists=0,
+                           current_token=TOKEN, tools=[tool.listing() for tool in PLANNER_TOOLS],
+                           url="http://127.0.0.1:19997/")
+
+
+def _dsh_mcp_run(tmp_path, monkeypatch, server, *, token=TOKEN, mode="ok", reuse=None, role="planner"):
+    """Real Cordis startup audit, official MCP client and headless runner; fake agent/model only."""
+    from dataclasses import replace
+
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.service import server_config
+    from looper.agents.agent_settings import AgentType
+    from looper.agents.runtimes import dsh
+    from test_dsh_runtime import _prompt_launch
+
+    node, executable = shutil.which("node"), shutil.which("dsh")
+    if not node or not executable:
+        pytest.skip("Installed DSH and Node are required for the real MCP startup test")
+    source = tmp_path / "source.json"
+    server.state.write_text(json.dumps({key: getattr(server, key) for key in
+                                       ("posts", "model_requests", "lists", "current_token", "tools", "url")}))
+    bridge = server_config(server.url, token)
+    bridge["args"] = [str(server.script)]
+    bridge["env"]["TEST_MCP_STATE"] = str(server.state)
+    servers = {"looper": bridge}
+    if mode == "crashed":
+        servers["looper"]["args"] = ["-c", "raise SystemExit(7)"]
+    if mode == "optional":
+        servers["unavailable"] = {"command": sys.executable, "args": ["-c", "raise SystemExit(8)"]}
+    elif mode == "sse":
+        servers["unavailable"] = {"type": "sse", "url": "http://127.0.0.1:19996/sse"}
+    source.write_text(json.dumps({"mcpServers": servers}))
+    launch = replace(_prompt_launch(monkeypatch), role=AgentType(role),
+                     library=AgentLibrary(mcp_config=str(source), role=role))
+    try:
+        files = dsh.bootstrap_files(executable, "test prompt", launch)
+    except RuntimeUnsupported as error:
+        return None, {"error": str(error)}
+    home = dsh.write_home(tmp_path / "local", files, owner="planner")
+    module = dsh.bootstrap_entry(home)["name"] if reuse is None else reuse
+    report = tmp_path / "report.json"
+    config = tmp_path / "cordis.json"
+    program = r'''
+import {createRequire} from 'node:module';
+import {realpathSync, writeFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+import {spawnSync} from 'node:child_process';
+const [executable, moduleUrl, configPath, reportPath, apiUrl, mode] = process.argv.slice(2);
+const require = createRequire(realpathSync(executable));
+const load = name => import(pathToFileURL(require.resolve('@deepseek-ai/' + name)));
+const {boot} = await load('dsh-app-boot');
+const plugin = await import(moduleUrl);
+const official = await load('dsh-mcp-client');
+const runner = await load('dsh-headless');
+const {scrubbedParentEnv} = await load('dsh-subprocess');
+const scrubbed = scrubbedParentEnv();
+if (scrubbed.LOOPER_MCP_TEST_MARKER !== 'visible') throw new Error('scrub positive control missing');
+for (const key of Object.keys(process.env).filter(key => key.startsWith('LOOPER_DSH_MCP_SECRET_'))) {
+  if (key in scrubbed) throw new Error('MCP secret reference leaked to tool subprocess environment');
+}
+for (const dep of [...official.inject, ...runner.inject, 'systemPrompt']) {
+  if (!plugin.inject.includes(dep)) throw new Error('missing official dependency: '+dep);
+}
+if (new Set(plugin.inject).size !== plugin.inject.length) throw new Error('duplicate dependency');
+const entries = [
+  {id:'system-prompt', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-system-prompt')).href},
+  {id:'tools', name:pathToFileURL(require.resolve('@deepseek-ai/dsh-tools')).href, config:{mode:'native'}},
+  {id:'headless-runner', name:moduleUrl, config:{task:'exercise the bridge'}},
+];
+writeFileSync(configPath, JSON.stringify(entries));
+let context, finish;
+const exited = new Promise(resolve => {finish=resolve;});
+try {
+  context = await boot('dsh-test', configPath, [], async ctx => {
+    ctx.provide('appExit', code => finish(code));
+    ctx.provide('agentDefaultModel', {currentSelection: () => ({provider:'fake',model:'fake'})});
+    ctx.provide('sessions', {flush: async () => {}});
+    ctx.provide('agents', {async create() {
+      const events = [];
+      let pending = Promise.resolve();
+      const agent = {status:'idle', session:{get seq() {return events.length;}, eventAt:i=>events[i]},
+        whenIdle:()=>pending, followup() {
+          pending = (async () => {
+            const model = spawnSync(process.env.DSH_TEST_PYTHON, ['-c',
+              'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); s=json.loads(p.read_text()); s["model_requests"]+=1; p.write_text(json.dumps(s))',
+              process.env.DSH_TEST_STATE]);
+            if (model.status !== 0) throw new Error('fake model process failed');
+            const tool = ctx.tools.get('mcp__looper__'+process.env.DSH_TEST_CALL_TOOL);
+            if (!tool) throw new Error('platform tools missing before fake model request');
+            const answer = await tool.execute({}, {signal:new AbortController().signal});
+            if (!answer.content) throw new Error('MCP call did not return content');
+            events.push({type:'turn/start',data:{}}, {type:'turn/end',data:{reason:{kind:'completed'}}});
+          })();
+        }};
+      return {agent};
+    }});
+    if (mode === 'duplicate') await ctx.plugin(official, official.Config({
+      serverName:'looper', transport:'stdio', command:process.env.DSH_TEST_PYTHON,
+      args:[process.env.DSH_TEST_SCRIPT],
+      env:{LOOPER_AGENT_URL:apiUrl, LOOPER_AGENT_TOKEN:process.env.DSH_TEST_TOKEN, TEST_MCP_STATE:process.env.DSH_TEST_STATE},
+      failOnStartupError:true, reconnect:{enabled:false},
+    }));
+  });
+  const code = await exited;
+  writeFileSync(reportPath, JSON.stringify({code, platformTools:[...plugin.platformTools],
+                                           diagnostics:plugin.diagnostics, moduleUrl}));
+  process.exitCode = code;
+} catch(error) {
+  writeFileSync(reportPath, JSON.stringify({error:error.message}));
+  process.exitCode = 1;
+} finally {
+  await context?.fiber.dispose();
+}
+'''
+    env = {**dsh.environment(launch, home), "DSH_TEST_PYTHON": sys.executable, "DSH_TEST_TOKEN": token,
+           "PYTHONPATH": str(REPO_ROOT), "DSH_TEST_STATE": str(server.state),
+           "DSH_TEST_SCRIPT": str(server.script),
+           "LOOPER_MCP_TEST_MARKER": "visible",
+           "DSH_TEST_CALL_TOOL": server.tools[0]["name"] if server.tools else "missing"}
+    if mode == "missing-reference":
+        reference = dsh.mcp_config(launch.library).servers[0]["envRefs"]["LOOPER_AGENT_TOKEN"]
+        del env[reference]
+    done = subprocess.run([node, "--input-type=module", "-", executable, module, str(config), str(report),
+                           server.url, mode], input=program, env=env, cwd=tmp_path,
+                          capture_output=True, text=True, timeout=35)
+    for key, value in json.loads(server.state.read_text()).items():
+        setattr(server, key, value)
+    return done, json.loads(report.read_text()) if report.exists() else {"error": done.stderr}
+
+
+def _dsh_role_tools(state, role):
+    from looper.agents.ops import planner, room, service
+    from looper.agents.room import MemberKind
+
+    tools = {"manager": service.MANAGER_TOOLS, "planner": planner.TOOLS,
+             "worker": room.tools_for(MemberKind.WORK), "reviewer": room.tools_for(MemberKind.REVIEW)}
+    state.tools = [tool.listing() for tool in tools[role]]
+
+
+@pytest.mark.parametrize("role", ["manager", "planner", "worker", "reviewer"])
+def test_dsh_official_mcp_lists_calls_and_refreshes_token_before_model(tmp_path, monkeypatch, dsh_mcp_state, role):
+    _dsh_role_tools(dsh_mcp_state, role)
+    done, report = _dsh_mcp_run(tmp_path, monkeypatch, dsh_mcp_state, role=role)
+    assert done.returncode == 0, (done.stderr, report)
+    assert report["platformTools"] == sorted("mcp__looper__" + tool["name"] for tool in dsh_mcp_state.tools)
+    assert dsh_mcp_state.model_requests == 1 and dsh_mcp_state.lists >= 1
+    assert dsh_mcp_state.posts[-1]["path"] == "/api/agent/v1/ops/" + dsh_mcp_state.tools[0]["name"]
+    # Reuse the immutable module with a new process environment, as on a resumed turn.
+    dsh_mcp_state.current_token = "rotated-token"
+    updated, readback = _dsh_mcp_run(tmp_path, monkeypatch, dsh_mcp_state, token="rotated-token", reuse=report["moduleUrl"], role=role)
+    assert updated.returncode == 0, (updated.stderr, readback)
+    assert dsh_mcp_state.model_requests == 2
+    stale, failure = _dsh_mcp_run(tmp_path, monkeypatch, dsh_mcp_state, token=TOKEN, reuse=report["moduleUrl"], role=role)
+    assert stale.returncode != 0 and "headless-runner" in failure["error"]
+    assert dsh_mcp_state.model_requests == 2
+
+
+@pytest.mark.parametrize(("mode", "role"), [
+    ("missing-token", "planner"), ("auth", "planner"), ("missing-tool", "planner"),
+    ("crashed", "planner"), ("duplicate", "planner"), ("missing-tool", "manager"),
+    ("missing-tool", "worker"), ("missing-tool", "reviewer"), ("unexpected-tool", "planner"),
+    ("duplicate-tool", "planner"), ("empty-tools", "planner"), ("missing-reference", "planner"),
+])
+def test_dsh_mandatory_mcp_failure_stops_required_runner_with_zero_model_requests(
+    tmp_path, monkeypatch, dsh_mcp_state, mode, role,
+):
+    _dsh_role_tools(dsh_mcp_state, role)
+    if mode == "missing-tool":
+        dsh_mcp_state.tools = dsh_mcp_state.tools[:-1]
+    elif mode == "unexpected-tool":
+        dsh_mcp_state.tools.append({**dsh_mcp_state.tools[0], "name": "unexpected_platform_tool"})
+    elif mode == "duplicate-tool":
+        dsh_mcp_state.tools.append(dsh_mcp_state.tools[0])
+    elif mode == "empty-tools":
+        dsh_mcp_state.tools = []
+    token = "" if mode == "missing-token" else "wrong-token" if mode == "auth" else TOKEN
+    done, report = _dsh_mcp_run(tmp_path, monkeypatch, dsh_mcp_state, mode=mode, token=token, role=role)
+    assert done is None or done.returncode != 0, (done.stderr, report)
+    assert report.get("error")
+    if done is not None:
+        assert "headless-runner" in report["error"], report
+    assert dsh_mcp_state.model_requests == 0 and dsh_mcp_state.posts == []
+
+
+@pytest.mark.parametrize("mode", ["optional", "sse"])
+def test_dsh_optional_catalog_failure_keeps_diagnostic_and_runs_model(tmp_path, monkeypatch, dsh_mcp_state, mode):
+    done, report = _dsh_mcp_run(tmp_path, monkeypatch, dsh_mcp_state, mode=mode)
+    assert done.returncode == 0, (done.stderr, report)
+    assert dsh_mcp_state.model_requests == 1
+    assert report["diagnostics"] == [{"serverName": "unavailable", "status": "failed"}]

@@ -54,8 +54,18 @@ def _node(tmp_path, script, *args):
                           cwd=tmp_path, capture_output=True, text=True, timeout=20)
 
 
+@pytest.fixture
+def prompt_only_mcp(monkeypatch):
+    """Keep prompt unit checks independent of the mandatory bridge (covered with real processes below)."""
+    from looper.agents.runtimes import dsh
+
+    monkeypatch.setattr(dsh, "mcp_config", lambda *args, **kwargs: None)
+
+
 @pytest.mark.parametrize("custom", ["", 'Profile {{unknown}} 中文 "identity"\nsecond line'])
-def test_dsh_bootstrap_preserves_literal_prompt_and_delegates_after_registration(tmp_path, monkeypatch, custom):
+def test_dsh_bootstrap_preserves_literal_prompt_and_delegates_after_registration(
+    tmp_path, monkeypatch, custom, prompt_only_mcp,
+):
     from looper.agents.runtimes import dsh
 
     # An exports-only package at the detected executable's installation anchor.
@@ -124,7 +134,7 @@ def test_dsh_bootstrap_rejects_unavailable_installation(tmp_path, monkeypatch):
             dsh.bootstrap_files(str(executable), "literal prompt", launch)
 
 
-def test_dsh_bootstrap_rejects_incompatible_official_exports(tmp_path, monkeypatch):
+def test_dsh_bootstrap_rejects_incompatible_official_exports(tmp_path, monkeypatch, prompt_only_mcp):
     from looper.agents.runtimes import dsh
 
     package = tmp_path / "node_modules" / "@deepseek-ai" / "dsh-headless"
@@ -142,7 +152,7 @@ await assert.rejects(import(process.argv[2]), /Unsupported DSH headless exports/
     assert done.returncode == 0, done.stderr
 
 
-def test_dsh_bootstrap_imports_official_exports_and_renders_literal_text(tmp_path, monkeypatch):
+def test_dsh_bootstrap_imports_official_exports_and_renders_literal_text(tmp_path, monkeypatch, prompt_only_mcp):
     from looper.agents.runtimes import dsh
 
     executable = shutil.which("dsh")
@@ -402,3 +412,67 @@ def test_dsh_rejects_directory_links_without_touching_their_targets(tmp_path, re
     assert operator.stat().st_mode == before
     assert list(operator.iterdir()) == [operator / "marker"]
     assert (operator / "marker").read_text() == "operator-only"
+
+
+@pytest.mark.parametrize("role", ["manager", "planner", "worker", "reviewer"])
+def test_dsh_mcp_translation_keeps_stdio_and_secrets_in_child_environment(tmp_path, monkeypatch, role):
+    from looper.agents.library import AgentLibrary
+    from looper.agents.ops.service import server_config
+    from looper.agents.runtimes import dsh
+    from looper.agents.agent_settings import AgentType
+
+    source = tmp_path / "catalog.json"
+    source.write_text(json.dumps({"mcpServers": {
+        "looper": server_config("http://127.0.0.1:19999", "fresh-run-token"),
+        "catalog": {"type": "http", "url": "http://127.0.0.1:19998/mcp",
+                    "headers": {"Authorization": "Bearer catalog-secret"}},
+    }}))
+    library = AgentLibrary(mcp_config=str(source), role=role)
+    launch = replace(_prompt_launch(monkeypatch), library=library, role=AgentType(role))
+    translated = dsh.mcp_config(library)
+    own, catalog = translated.servers
+    assert own["serverName"] == "looper" and own["transport"] == "stdio"
+    assert own["command"] == server_config("", "")["command"]
+    assert own["args"] == ["-m", "looper.cli", "mcp-server"]
+    assert catalog["transport"] == "streamable-http"
+    executable = tmp_path / "dsh"
+    executable.touch()
+    files = dsh.bootstrap_files(str(executable), "prompt", launch)
+    home = dsh.write_home(tmp_path / "local", files)
+    env = dsh.environment(launch, home)
+    assert env[own["envRefs"]["LOOPER_AGENT_URL"]] == "http://127.0.0.1:19999"
+    assert env[own["envRefs"]["LOOPER_AGENT_TOKEN"]] == "fresh-run-token"
+    assert env[catalog["headerRefs"]["Authorization"]] == "Bearer catalog-secret"
+    assert all("SECRET" in reference for reference in translated.env)
+    for secret in ("fresh-run-token", "catalog-secret"):
+        assert secret not in repr(translated)
+        assert all(secret not in body for body in files.values())
+    source.write_text(source.read_text().replace("fresh-run-token", "rotated-run-token"))
+    updated = dsh.environment(launch, home)
+    assert updated[own["envRefs"]["LOOPER_AGENT_TOKEN"]] == "rotated-run-token"
+    assert "fresh-run-token" not in updated.values()
+
+
+def test_dsh_mcp_requires_platform_bridge_even_without_catalog(tmp_path, monkeypatch):
+    from looper.agents.library import AgentLibrary
+    from looper.agents.runtimes import dsh
+
+    with pytest.raises(RuntimeUnsupported, match="Looper stdio bridge"):
+        dsh.mcp_config(AgentLibrary(role="planner"))
+
+
+@pytest.mark.parametrize("raw", [
+    '{"mcpServers":{"looper":{},"looper":{}}}',
+    '{"mcpServers":{"looper":{"url":"http://127.0.0.1:19999"}}}',
+    '{"mcpServers":{"looper":{"command":"python","env":{"LOOPER_AGENT_URL":"http://127.0.0.1:19999"}}}}',
+    '{"mcpServers":{"catalog":{"command":"python"}}}',
+])
+def test_dsh_mcp_rejects_duplicate_or_missing_platform_bridge(tmp_path, monkeypatch, raw):
+    from looper.agents.library import AgentLibrary
+    from looper.agents.runtimes import dsh
+
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", "ambient-token-must-not-fill-a-missing-run-token")
+    source = tmp_path / "catalog.json"
+    source.write_text(raw)
+    with pytest.raises(RuntimeUnsupported):
+        dsh.mcp_config(AgentLibrary(mcp_config=str(source), role="planner"))

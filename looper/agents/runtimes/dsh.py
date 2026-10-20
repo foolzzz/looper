@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
 
 from ... import child_env
@@ -22,6 +23,7 @@ from .instructions import Delivery, InstructionFile
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
+    from ..library import AgentLibrary
     from ..profile_registry import ProviderSpec
 
 
@@ -89,10 +91,13 @@ def bootstrap_files(executable: str, looper_prompt: str, launch: Launch, *,
     except OSError:
         raise RuntimeUnsupported("DSH bootstrap requires an installed executable") from None
     module = Path(__file__).with_name("dsh_bootstrap.mjs").resolve().as_uri()
-    options = json.dumps({"executable": str(anchor), "text": _prompt_text(looper_prompt, launch, cwd=cwd)},
+    mcp = mcp_config(launch.library, role=launch.role.value)
+    options = json.dumps({"executable": str(anchor), "text": _prompt_text(looper_prompt, launch, cwd=cwd),
+                          "mcp": mcp.servers if mcp else []},
                          ensure_ascii=False)
     return {"looper-bootstrap.mjs": f"import {{ createBootstrap }} from {json.dumps(module)};\n"
-            f"export const {{ name, Config, inject, apply }} = await createBootstrap({options});\n"}
+            f"export const {{ name, Config, inject, apply, platformTools, diagnostics }} = "
+            f"await createBootstrap({options});\n"}
 
 
 def bootstrap_entry(home: DshHome) -> dict[str, str]:
@@ -102,6 +107,103 @@ def bootstrap_entry(home: DshHome) -> dict[str, str]:
 
 def _external_environment(values: Mapping[str, str]) -> dict[str, str]:
     return {k: v for k, v in values.items() if k not in _DIRECTORY_VARS and not k.startswith(_OWNED_PREFIXES)}
+
+
+@dataclass(frozen=True)
+class DshMcpConfig:
+    """Secret-free bootstrap inputs and values supplied only to this run's child environment."""
+
+    servers: tuple[dict[str, Any], ...]
+    env: dict[str, str] = field(repr=False)
+
+
+def _platform_tools(role: str) -> dict[str, Any]:
+    from ..ops import planner, room, service, vault
+    from ..room import MemberKind
+
+    if role == "manager":
+        required = allowed = {tool.name for tool in service.MANAGER_TOOLS}
+        groups = []
+    elif role == "planner":
+        required = {tool.name for tool in planner.TOOLS}
+        allowed = required | {tool.name for tool in planner.ROLE_TOOLS}
+    elif role in ("worker", "reviewer"):
+        required = set()
+        allowed = set()
+    else:
+        raise RuntimeUnsupported("DSH platform MCP requires a known agent role")
+    if role != "manager":
+        # Room and vault are independently enabled. A partially published group must fail startup too.
+        room_names = {tool.name for tool in room.tools_for(MemberKind.WORK if role == "worker" else MemberKind.REVIEW)}
+        allowed |= room_names | vault.TOOL_NAMES
+        groups = [{"any": sorted(room_names), "all": sorted(room_names)},
+                  {"any": sorted(vault.TOOL_NAMES), "all": [vault.SEARCH, vault.READ]}]
+    return {"requiredTools": sorted(required), "expectedTools": sorted(allowed), "toolGroups": groups}
+
+
+def mcp_config(library: AgentLibrary, *, role: str | None = None) -> DshMcpConfig:
+    """Translate the catalog's MCP map without persisting env/header values or mistaking the agent API for MCP.
+
+    References are stable across token rotation; every child gets freshly read run values, including on resume.
+    The required runner owns all entries, so there is no second, optional platform MCP activation.
+    """
+    if not library.mcp_config:
+        raise RuntimeUnsupported("DSH MCP configuration requires the Looper stdio bridge")
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise RuntimeUnsupported("DSH MCP configuration contains a duplicate name")
+            result[key] = value
+        return result
+
+    try:
+        raw = json.loads(Path(library.mcp_config).read_text(encoding="utf-8"), object_pairs_hook=unique)
+        servers = raw["mcpServers"]
+        if not isinstance(servers, dict) or "looper" not in servers:
+            raise ValueError
+    except (OSError, ValueError, KeyError, TypeError):
+        raise RuntimeUnsupported("DSH MCP configuration requires the Looper stdio bridge") from None
+    values: dict[str, str] = {}
+    translated = []
+    platform = _platform_tools(role or library.role or "")
+    for index, (name, server) in enumerate(sorted(servers.items(), key=lambda item: item[0] != "looper")):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name) or not isinstance(server, dict):
+            raise RuntimeUnsupported("DSH MCP server has an invalid name or configuration")
+        own = name == "looper"
+        transport = server.get("type", "stdio" if server.get("command") else "http")
+        config: dict[str, Any] = {"serverName": name}
+        if transport == "stdio" and isinstance(server.get("command"), str) and server["command"]:
+            args = server.get("args", [])
+            if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                raise RuntimeUnsupported("DSH MCP stdio args must be strings")
+            config.update(transport="stdio", command=server["command"], args=args)
+            if server.get("cwd"):
+                config["cwd"] = server["cwd"]
+            secret_field, reference_field = "env", "envRefs"
+        elif not own and transport in ("http", "sse") and isinstance(server.get("url"), str):
+            # DSH has no legacy SSE transport; its schema rejects that optional entry with a diagnostic.
+            config.update(transport="streamable-http" if transport == "http" else "sse", url=server["url"])
+            secret_field, reference_field = "headers", "headerRefs"
+        else:
+            raise RuntimeUnsupported("DSH Looper MCP requires stdio; catalog MCP requires a command or HTTP URL")
+        secrets = server.get(secret_field) or {}
+        if not isinstance(secrets, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                                   for k, v in secrets.items()):
+            raise RuntimeUnsupported("DSH MCP env and headers must contain string values")
+        if own and any(not secrets.get(key, "").strip() for key in ("LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN")):
+            raise RuntimeUnsupported("DSH Looper MCP needs this run's LOOPER_AGENT_URL and LOOPER_AGENT_TOKEN")
+        refs = {}
+        for number, (key, value) in enumerate(sorted(secrets.items())):
+            reference = f"LOOPER_DSH_MCP_SECRET_{index}_{secret_field.upper()}_{number}"
+            refs[key] = reference
+            values[reference] = value
+        config[reference_field] = refs
+        if own:
+            config.update(platform)
+        translated.append(config)
+    return DshMcpConfig(tuple(translated), values)
 
 
 @dataclass(frozen=True)
@@ -126,7 +228,9 @@ def environment(launch: Launch, home: DshHome) -> dict[str, str]:
     the validated ``baseURL`` and policy: dsh's launcher reads project .env independently of this environment."""
     binding = bind_provider(launch.profile.provider, launch.model, launch.effort)
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
-    return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env), **home.paths}
+    mcp = mcp_config(launch.library, role=launch.role.value)
+    return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
+            **(mcp.env if mcp else {}), **home.paths}
 
 
 def _private_dir(directory: Path, *, root: Path) -> None:
