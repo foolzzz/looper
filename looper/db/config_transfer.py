@@ -50,20 +50,31 @@ async def read_runtimes(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 async def read_providers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every provider with its API key (``api_key``, None without one)."""
     rows = await conn.fetch(
-        "SELECT p.id, p.name, p.protocols, p.auth, p.oauth_runtime_type, p.base_url, p.models, p.env, "
-        "p.max_concurrency, p.builtin, s.api_key "
+        "SELECT p.id, p.name, p.vendor_type, p.auth, p.oauth_runtime_type, p.env, "
+        "p.max_concurrency, p.builtin, s.api_key, "
+        "COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.protocol) FROM llm_provider_endpoints e "
+        "WHERE e.provider_id = p.id), '[]'::jsonb) AS endpoints "
         "FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id ORDER BY p.name COLLATE \"C\""
     )
-    return [{**dict(row), "models": _json(row["models"]), "env": _json(row["env"])} for row in rows]
+    return [{**dict(row), "endpoints": _json(row["endpoints"]), "env": _json(row["env"])} for row in rows]
+
+
+async def read_models(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Every model with its provider's natural key, in stable catalog order."""
+    rows = await conn.fetch(
+        "SELECT m.*, p.name AS provider FROM llm_models m JOIN llm_providers p ON p.id = m.provider_id "
+        "ORDER BY p.name COLLATE \"C\", m.catalog_order, m.name COLLATE \"C\", m.protocol"
+    )
+    return [dict(row) for row in rows]
 
 
 async def read_profiles(conn: asyncpg.Connection) -> list[dict[str, Any]]:
-    """Every Agent Profile, its runtime and provider by name."""
+    """Every Agent Profile, its runtime by name and its model's complete natural key."""
     rows = await conn.fetch(
-        "SELECT a.id, a.name, r.name AS runtime, p.name AS provider, a.model, a.effort, a.agent_teams, "
+        "SELECT a.id, a.name, r.name AS runtime, p.name AS provider, m.name AS model, m.protocol, a.effort, a.agent_teams, "
         "a.custom_prompt, a.builtin "
         "FROM agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
-        "JOIN llm_providers p ON p.id = a.provider_id "
+        "JOIN llm_models m ON m.id = a.model_id JOIN llm_providers p ON p.id = m.provider_id "
         "ORDER BY a.name COLLATE \"C\""
     )
     return [dict(row) for row in rows]

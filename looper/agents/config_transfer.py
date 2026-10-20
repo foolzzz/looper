@@ -1,6 +1,6 @@
 """Configuration export and import: one file that recreates an installation's agent configuration (M8e).
 
-**The file** is one JSON document, ``format: looper-config/v2``. A v1 file
+**The file** is one JSON document, ``format: looper-config/v3``. A v1 file
 (``looper-config/v1``, or ``loopx-config/v1`` from before the rename to Looper)
 is read too, as the same file under its older names (``_from_v1``): its Agent
 Profiles were ``agents``, and a layer named its profile ``agent``. Every catalog
@@ -8,8 +8,10 @@ file is UTF-8 text (acquiring an item refuses binary files), so JSON holds it
 as it is, and one readable file can be checked before it is shared. Its
 sections:
 
-- ``runtimes``, ``providers`` and ``profiles``: the registered ones (the
-  built-ins exist everywhere), each naming the others by name. The runtimes
+- ``runtimes``, ``providers``, ``models`` and ``profiles``: the registered ones (the
+  built-ins exist everywhere). Models name their provider; profiles reference a
+  model by provider name, exact model name and protocol. Providers carry their
+  protocol endpoints, without a model catalog. The runtimes
   are the ones registered by hand before runtimes were built in, which
   profiles still use; an import never adds or changes a runtime (see below);
 - ``settings``: the system and role layers of the agent settings (a layer
@@ -87,7 +89,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-FORMAT = "looper-config/v2"
+FORMAT = "looper-config/v3"
 # v1, and v1 under its name from before the rename to Looper (LoopX): read as v2 (``_from_v1``), never written.
 V1_FORMATS = ("looper-config/v1", "loopx-config/v1")
 # What the file holds in place of a secret value it leaves out.
@@ -136,7 +138,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "profiles", "settings.layers", "settings.roles", "settings.scheduler", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "settings.layers", "settings.roles", "settings.scheduler", "channels",
             "catalog", "installs",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs")
@@ -236,15 +238,26 @@ def runtime_entry(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, Any]:
-    from .profile_registry import catalog_entries
-
-    return {"name": row["name"], **{name: row[name] for name in _PROVIDER_FIELDS},
-            "protocols": list(row["protocols"]), "models": catalog_entries(row["models"]),
+    endpoints = {
+        endpoint["protocol"]: {"base_url": endpoint["base_url"],
+                               **({"use_runtime_default": True} if endpoint["use_runtime_default"] else {})}
+        for endpoint in row["endpoints"]
+    }
+    return {**{name: row[name] for name in ("name", "vendor_type", "auth", "oauth_runtime_type", "env",
+                                          "max_concurrency")}, "endpoints": endpoints,
             "api_key": None if row["api_key"] is None else _secret(row["api_key"], include_secrets)}
 
 
+def model_entry(row: Mapping[str, Any]) -> dict[str, Any]:
+    from .profile_registry import MODEL_FIELDS
+
+    return {"provider": row["provider"], "protocol": row["protocol"],
+            **{name: row[name] for name in MODEL_FIELDS}, "catalog_order": row["catalog_order"]}
+
+
 def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {**{name: row[name] for name in ("name", "runtime", "provider", "model", "effort", "agent_teams")},
+    return {**{name: row[name] for name in ("name", "runtime", "effort", "agent_teams")},
+            "model": {"provider": row["provider"], "name": row["model"], "protocol": row["protocol"]},
             "custom_prompt": row.get("custom_prompt", "")}
 
 
@@ -385,7 +398,7 @@ class ExportSummary:
 
 def _secret_count(entry: Mapping[str, Any]) -> int:
     """How many secret values a channel, MCP or provider entry holds, or stands in for."""
-    if "protocols" in entry:
+    if "api_key" in entry:
         return int(entry["api_key"] is not None)
     if "server" in entry:
         return len(entry["server"]["env"]) + len(entry["server"]["headers"])
@@ -422,6 +435,7 @@ async def export_chunks(
         "secrets": "included" if include_secrets else "omitted",
         "runtimes": [runtime_entry(r) for r in await db.read_runtimes(conn) if not r["builtin"]],
         "providers": providers,
+        "models": [model_entry(r) for r in await db.read_models(conn) if not r["builtin"]],
         "profiles": [profile_entry(r) for r in await db.read_profiles(conn) if not r["builtin"]],
         "settings": {"layers": [layer_entry(r) for r in layers if r["project_id"] is None],
                      "roles": [role_entry(r) for r in await db.read_roles(conn)]},
@@ -431,7 +445,8 @@ async def export_chunks(
     if scheduler := await stored_scheduler_settings(conn):  # only a stored setting is carried
         head["settings"]["scheduler"] = scheduler
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
-                           "profiles": len(head["profiles"]), "settings.layers": len(head["settings"]["layers"]),
+                           "models": len(head["models"]), "profiles": len(head["profiles"]),
+                           "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]),
                            "settings.scheduler": len(scheduler), "channels": len(channels),
                            "installs": len(head["installs"])})
