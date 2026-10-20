@@ -231,6 +231,199 @@ def test_restore_after_reset_does_not_resume_a_session_a_live_run_still_has(
     assert all(session not in line for line in lines)
 
 
+def _plant_held_session(root: Path, label: str, session: str) -> tuple[Path, Path]:
+    """B's session files in the OMP and Grok directories of ``label``, as those runtimes keep them."""
+    from looper.agents.runtimes.per_turn import session_dir_name
+
+    name = session_dir_name(label)
+    omp = root / ".local" / "omp" / "sessions" / name
+    omp.mkdir(parents=True)
+    (omp / f"2026-10-14T00-00-00-000Z_{session}.jsonl").write_text("held by B")
+    (omp / f"2026-10-14T00-00-00-000Z_{session}").mkdir()
+    grok = root / ".local" / "grok" / "sessions" / name / "sessions" / "work" / session
+    grok.mkdir(parents=True)
+    (grok / "state").write_text("held by B")
+    return omp, grok
+
+
+@pytest.mark.parametrize("reason", ["holder", "in_use"])
+def test_giving_up_a_held_session_persists_an_independent_label(
+    monkeypatch, agent_db, planner_claude, tmp_path, reason,
+):
+    """A gives up S because B holds it, then runs a turn. A's directory is its own label.
+
+    The real OMP and Grok per-turn cleanup, and read_only_copies reclaim, then leave B's session directory.
+    """
+    from looper.agents import read_only_copies
+    from looper.agents.runtimes.grok import prune_sessions as grok_prune
+    from looper.agents.runtimes.omp import prune_sessions as omp_prune
+    from looper.agents.runtimes.per_turn import session_dir_name
+    from looper.db import agent_sessions, schedules, tasks
+    from tests.test_planner_agent import _project, activity
+
+    session = "session-shared"
+    shared = "planner-schedule-sched-a"
+    own = "planner-task-a"
+    labels = {"task-a": shared, "task-b": shared}
+
+    def project(task_id: str) -> dict:
+        return {**_project(), "task_schedule_id": "sched-a", "task_planner_session_label": labels.get(task_id)}
+
+    async def set_label(task_id: str, label: str) -> None:
+        labels[task_id] = label
+
+    agent_db.get_task_project.side_effect = project
+    monkeypatch.setattr(tasks, "set_planner_session_label", set_label)
+    held = reason == "holder"
+    monkeypatch.setattr(schedules, "get_schedule", AsyncMock(return_value={
+        "planner_session_id": session if held else None,
+        "planner_session_task_id": "task-b" if held else None,
+    }))
+    monkeypatch.setattr(schedules, "save_planner_session", AsyncMock())
+    claude = planner_claude("reply retained")
+    agent_db.store.tasks["task-b"] = {"status": "running", "requirement": "the later run", "work_dir": str(tmp_path)}
+    agent_db.store.sessions["planner-task-b"] = {
+        "session_id": session, "session_totals": {}, "runtime_type": "claude-code",
+        "profile_id": None, "clean_start": False,
+    }
+    used: dict[str, str] = {}
+
+    async def check():
+        failed = PlannerAgent(task_id="task-a", runtime_root=tmp_path)
+        plan = TaskPlan(plan_id="p", goal_id="g", requirement="do it", work_dir=str(tmp_path), status="failed",
+                        session_id=session, session_runtime="claude-code",
+                        session_provider="prov-claude-subscription",
+                        steps=[PlanStep("step-a", 0, "do it")])
+        await failed._save(plan, *plan.steps, plan_row=True)
+        await failed._save_session(plan)
+        agent_db.store.tasks["task-a"] = {"status": "failed", "requirement": "do it", "work_dir": str(tmp_path)}
+        agent = PlannerAgent(task_id="task-a", runtime_root=tmp_path, claude_bin=claude.bin)
+        try:
+            await agent._load_plan(("failed",))
+            assert agent._plan is not None and agent._plan.session_id is None
+            assert labels["task-a"] == own and labels["task-b"] == shared
+            assert agent._planner_session_label == own
+            # A later event reads the project again. The persisted label must not come back as B's.
+            await agent._refresh_project(agent._plan)
+            assert agent._planner_session_label == own
+            assert await agent._turn("Continue the saved plan") == "reply retained"
+            used["label"] = agent._claude.label
+        finally:
+            await agent._claude.stop()
+
+    asyncio.run(check())
+    assert used["label"] == own
+    assert "--resume" not in claude.argvs()[0]
+    assert agent_db.store.sessions["planner-task-b"]["session_id"] == session
+    phrase = "another task" if held else "in use by another run"
+    lines = [line for line in activity(agent_db) if phrase in line]
+    assert lines and all(session not in line for line in lines)
+
+    # What the end of A's new OMP/Grok turn removes: other sessions in the directory of the label it ran under.
+    omp_held, grok_held = _plant_held_session(tmp_path, shared, session)
+    fresh = "sess-fresh"
+    omp_used = tmp_path / ".local" / "omp" / "sessions" / session_dir_name(used["label"])
+    omp_used.mkdir(parents=True, exist_ok=True)
+    (omp_used / f"2026-10-14T00-00-00-000Z_{fresh}.jsonl").write_text("A's new session")
+    omp_prune(omp_used, fresh)
+    grok_home = tmp_path / ".local" / "grok" / "sessions" / session_dir_name(used["label"])
+    (grok_home / "sessions" / "work" / fresh).mkdir(parents=True)
+    grok_prune(grok_home, fresh)
+    assert (omp_held / f"2026-10-14T00-00-00-000Z_{session}.jsonl").read_text() == "held by B"
+    assert (grok_held / "state").read_text() == "held by B"
+
+    decoy = tmp_path / ".local" / "omp" / "sessions" / session_dir_name("planner-schedule-gone")
+    decoy.mkdir()
+    (decoy / "state").write_text("old")
+    monkeypatch.setattr(agent_sessions, "saved_sessions", AsyncMock(return_value=[]))
+    monkeypatch.setattr(schedules, "list_schedules", AsyncMock(return_value=[]))
+
+    async def live_labels() -> list[tuple[str, str]]:
+        return [(label, runtime) for label in {labels["task-a"], labels["task-b"]}
+                for runtime in ("omp", "grok")]
+
+    monkeypatch.setattr(tasks, "live_planner_session_labels", live_labels)
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
+    removed = asyncio.run(read_only_copies.reclaim_unused(tmp_path))
+    grok_root = tmp_path / ".local" / "grok" / "sessions" / session_dir_name(shared)
+    assert decoy in removed and omp_held not in removed and grok_root not in removed
+    assert (omp_held / f"2026-10-14T00-00-00-000Z_{session}.jsonl").read_text() == "held by B"
+    assert (grok_held / "state").read_text() == "held by B"
+
+
+@pytest.mark.parametrize("failing", ["schedule", "occupancy"])
+def test_a_failed_session_check_starts_fresh_and_leaves_the_other_run(
+    monkeypatch, agent_db, planner_claude, tmp_path, failing,
+):
+    """A holder or occupancy query that raises does not resume the stored session, and B's session stays."""
+    from looper.db import agent_sessions, schedules
+    from tests.test_planner_agent import _project, activity
+
+    session = "session-shared"
+    own = "planner-task-a"
+    labels = {"task-a": "planner-schedule-sched-a"}
+
+    def project(task_id: str) -> dict:
+        return {**_project(), "task_schedule_id": "sched-a", "task_planner_session_label": labels.get(task_id)}
+
+    async def set_label(task_id: str, label: str) -> None:
+        labels[task_id] = label
+
+    agent_db.get_task_project.side_effect = project
+    from looper.db import tasks
+    monkeypatch.setattr(tasks, "set_planner_session_label", set_label)
+    save = AsyncMock()
+    monkeypatch.setattr(schedules, "save_planner_session", save)
+    if failing == "schedule":
+        monkeypatch.setattr(schedules, "get_schedule", AsyncMock(side_effect=ConnectionError("schedule unavailable")))
+    else:
+        monkeypatch.setattr(schedules, "get_schedule", AsyncMock(return_value={
+            "planner_session_id": None, "planner_session_task_id": None,
+        }))
+
+        async def boom(*_args: object, **_kwargs: object) -> bool:
+            raise ConnectionError("occupancy unavailable")
+
+        monkeypatch.setattr(agent_sessions, "other_live_task_has_session", boom)
+    claude = planner_claude("reply retained")
+    agent_db.store.tasks["task-b"] = {"status": "running", "requirement": "the later run", "work_dir": str(tmp_path)}
+    agent_db.store.sessions["planner-task-b"] = {
+        "session_id": session, "session_totals": {}, "runtime_type": "claude-code",
+        "profile_id": None, "clean_start": False,
+    }
+
+    async def check():
+        failed = PlannerAgent(task_id="task-a", runtime_root=tmp_path)
+        plan = TaskPlan(plan_id="p", goal_id="g", requirement="do it", work_dir=str(tmp_path), status="failed",
+                        session_id=session, session_runtime="claude-code",
+                        session_provider="prov-claude-subscription",
+                        steps=[PlanStep("step-a", 0, "do it")])
+        await failed._save(plan, *plan.steps, plan_row=True)
+        await failed._save_session(plan)
+        agent_db.store.tasks["task-a"] = {"status": "failed", "requirement": "do it", "work_dir": str(tmp_path)}
+        agent = PlannerAgent(task_id="task-a", runtime_root=tmp_path, claude_bin=claude.bin)
+        try:
+            await agent._load_plan(("failed",))
+            assert agent._plan is not None and agent._plan.session_id is None
+            assert agent_db.store.sessions["planner-task-a"]["session_id"] is None
+            assert agent_db.store.sessions["planner-task-b"]["session_id"] == session
+            assert labels["task-a"] == own
+            await agent._refresh_project(agent._plan)
+            assert agent._planner_session_label == own
+            assert await agent._turn("Continue the saved plan") == "reply retained"
+            assert agent._claude.label == own
+        finally:
+            await agent._claude.stop()
+
+    asyncio.run(check())
+    save.assert_not_awaited()
+    assert "--resume" not in claude.argvs()[0]
+    why = "schedule's session holder" if failing == "schedule" else "stored session is in use"
+    lines = [line for line in activity(agent_db) if why in line and "starts fresh" in line]
+    assert lines and all(session not in line for line in lines)
+    assert agent_db.store.sessions["planner-task-b"]["session_id"] == session
+
+
 def test_restart_after_reset_resumes_with_the_persisted_storage_label(
     monkeypatch, agent_db, planner_claude, tmp_path,
 ):

@@ -68,8 +68,9 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     """The project task ``task_id`` belongs to now (it can move); None when there is no such task. Its
     ``task_budget_usd`` is the task's own cap when it has one (a scheduled run's ``run_budget_usd``), and
     ``task_schedule_id`` the schedule that started the task (None for one a user started).
-    ``task_planner_session_label`` is the storage label the task persisted when it claimed that conversation
-    (None when it never became the holder)."""
+    ``task_planner_session_label`` is the storage label persisted for this task's Planner session: the
+    schedule's ``planner-schedule-<id>`` while the task holds that conversation, or the task's own
+    ``planner-<task id>`` once it gives the conversation up (None when it never became the holder)."""
     pool = pool or get_pool()
     row = await pool.fetchrow(
         "SELECT p.*, t.budget_usd AS task_own_budget_usd, t.schedule_id AS task_schedule_id, "

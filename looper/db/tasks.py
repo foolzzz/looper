@@ -297,6 +297,16 @@ async def set_continues_schedule_session(task_id: str, continues: bool) -> None:
     await get_pool().execute("UPDATE tasks SET continues_schedule_session = $2 WHERE id = $1", task_id, continues)
 
 
+async def set_planner_session_label(task_id: str, label: str) -> None:
+    """Persist the session-directory label this task's Planner uses.
+
+    A task that holds a schedule conversation stores ``planner-schedule-<id>``. One that gives that conversation
+    up stores its own label (``planner-<task id>``), so its session directory and per-turn cleanup stay off the
+    holder's.
+    """
+    await get_pool().execute("UPDATE tasks SET planner_session_label = $2 WHERE id = $1", task_id, label)
+
+
 async def live_planner_session_labels(*, pool: asyncpg.Pool | None = None) -> list[tuple[str, str | None]]:
     """``(planner_session_label, runtime_type)`` of every live task that persisted a Planner storage label.
 

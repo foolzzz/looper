@@ -776,7 +776,10 @@ class PlannerAgent:
         self._schedule_session_writes = False
         # The session directory claimed for this task (planner-schedule-<id>). Set for this process when the
         # claim succeeds, and read back with the task after a restart. Unset tasks keep self.agent_id.
+        # Giving the conversation up switches this to the task's own label and keeps a project read from
+        # putting the shared directory back.
         self._planner_session_label: str | None = None
+        self._own_session_label = False
         self._idle_task: asyncio.Task[Any] | None = None
         # The newest room message a failed [ROOM] turn had, and when it failed: the same messages go again only with
         # a newer one, or after ``ROOM_RETRY_SEC``.
@@ -3704,7 +3707,7 @@ class PlannerAgent:
         self._execution = ProjectExecution.from_row(project)
         self._scheduled = project.get("task_schedule_id") is not None
         self._schedule_id = project.get("task_schedule_id")
-        if project.get("task_planner_session_label"):
+        if project.get("task_planner_session_label") and not self._own_session_label:
             self._planner_session_label = str(project["task_planner_session_label"])
         updated_at = project.get("updated_at")
         plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
@@ -3949,6 +3952,7 @@ class PlannerAgent:
                 await self._activity("phase", note)
                 return
             self._schedule_session_writes = True
+            self._own_session_label = False
             if self._schedule_id:
                 self._planner_session_label = db_schedules.planner_storage_label(self._schedule_id)
             plan.session_id = self._schedule_session_id = claimed["session_id"]
@@ -3973,6 +3977,33 @@ class PlannerAgent:
                     profile_id=plan.session_profile)
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
+
+    async def _use_own_session_label(self) -> None:
+        """This run's session directory is its own (``planner-<task>``), not the schedule's.
+
+        The run that holds the conversation keeps ``planner-schedule-<id>``. Persisting this task's label keeps
+        a later project read, and the per-turn cleanup of a new session, off that directory.
+        """
+        self._planner_session_label = self.agent_id
+        self._own_session_label = True
+        try:
+            await db_tasks.set_planner_session_label(self._task_id, self.agent_id)
+        except Exception:
+            logger.exception("planner %s cannot persist its own session label", self.agent_id)
+
+    async def _refuse_stored_session(self, plan: TaskPlan, detail: str) -> None:
+        """Do not resume the stored session: this run starts fresh in its own directory.
+
+        A failed holder or occupancy check is the same as finding the session held elsewhere. Writing the
+        schedule's session stays off, so the failure cannot clear it.
+        """
+        self._schedule_session_writes = False
+        if plan.session_id:
+            await self._drop_session(plan, session_switch.session_lost(
+                detail, runtime=plan.session_runtime, profile=plan.session_profile))
+        else:
+            await self._activity("phase", f"Schedule Planner session not resumed: {detail}"[:500])
+        await self._use_own_session_label()
 
     @staticmethod
     def _stored_gate(step: Mapping[str, Any], gates: Mapping[str, Mapping[str, Any]]) -> Gate | None:
@@ -4055,8 +4086,11 @@ class PlannerAgent:
         if self._schedule_id:
             try:
                 schedule = await db_schedules.get_schedule(self._schedule_id)
-            except Exception:
+            except Exception as exc:
                 logger.exception("planner %s cannot read its schedule's session holder", self.agent_id)
+                await self._refuse_stored_session(
+                    plan, f"the schedule's session holder could not be read ({type(exc).__name__}: {exc}); "
+                          "this run starts fresh")
                 return
             if schedule:
                 holder = schedule["planner_session_task_id"]
@@ -4066,14 +4100,20 @@ class PlannerAgent:
                     await self._drop_session(plan, session_switch.session_lost(
                         "the stored session now belongs to another task", runtime=plan.session_runtime,
                         profile=plan.session_profile))
+                    await self._use_own_session_label()
             if plan.session_id:
                 # Independent of the holder: reset clears it, and another live run may still have this session.
+                # Either check failing closed means this run does not resume the stored session.
                 try:
                     in_use = await db_agent_sessions.other_live_task_has_session(plan.session_id, self._task_id)
-                except Exception:
+                except Exception as exc:
                     logger.exception("planner %s cannot tell whether its session is in use", self.agent_id)
-                    in_use = False
-                if in_use:
-                    await self._drop_session(plan, session_switch.session_lost(
-                        "the stored session is in use by another run", runtime=plan.session_runtime,
-                        profile=plan.session_profile))
+                    await self._refuse_stored_session(
+                        plan, f"whether the stored session is in use could not be read ({type(exc).__name__}: "
+                              f"{exc}); this run starts fresh")
+                else:
+                    if in_use:
+                        await self._drop_session(plan, session_switch.session_lost(
+                            "the stored session is in use by another run", runtime=plan.session_runtime,
+                            profile=plan.session_profile))
+                        await self._use_own_session_label()

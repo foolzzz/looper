@@ -321,3 +321,19 @@ def test_claimed_label_survives_reset_and_only_a_live_task_occupies_the_session(
         assert set(await tasks.live_planner_session_labels()) == set()
 
     _run(test, monkeypatch, tmp_path)
+
+
+def test_a_task_can_persist_its_own_planner_session_label(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Giving up a shared conversation stores ``planner-<task>`` where a project read finds it."""
+
+    async def test(env: Any) -> None:
+        sid = (await env.schedule())["schedule_id"]
+        await _task(env, sid, "task-a")
+        await tasks.set_planner_session_label("task-a", "planner-task-a")
+        assert await env.pool.fetchval(
+            "SELECT planner_session_label FROM tasks WHERE id = 'task-a'") == "planner-task-a"
+        assert (await projects.get_task_project("task-a"))["task_planner_session_label"] == "planner-task-a"
+
+    _run(test, monkeypatch, tmp_path)
