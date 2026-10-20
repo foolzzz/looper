@@ -356,3 +356,43 @@ def test_removing_a_session_directory_unlinks_its_login_link_and_leaves_the_logi
     # The links went with the directory; what they pointed at is untouched.
     assert not session.exists() and login.read_text() == "stand-in login"
     assert sorted(p.name for p in login.parent.iterdir()) == ["auth.json"]
+
+
+def test_dsh_owners_are_not_content_copies_and_cleanup_preserves_recoverable_state(
+    tmp_path: Path, content: _Content, monkeypatch,
+) -> None:
+    from looper.agents.runtimes.dsh import write_home
+
+    local = tmp_path / ".local"
+    active = write_home(local, {"looper.yml": "[]"}, owner="running")
+    saved = write_home(local, {"looper.yml": "[]"}, owner="resumable")
+    unknown = write_home(local, {"looper.yml": "[]"}, owner="no-proof-of-retirement")
+    operator = tmp_path / "operator/dsh"
+    operator.mkdir(parents=True)
+    (operator / "marker").write_text("operator state")
+    (local / "dsh/operator-link").symlink_to(operator, target_is_directory=True)
+    obsolete = _library_item(tmp_path, "obsolete", "old catalog")
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [f"dsh --patch {active.config / 'looper.yml'}"])
+    content.sessions = [("manager", "dsh")]
+    assert asyncio.run(reclaim_unused(tmp_path)) == [local / "library" / obsolete.sha256]
+    assert all((home.config / "looper.yml").read_text() == "[]" for home in (active, saved, unknown))
+    assert (operator / "marker").read_text() == "operator state"
+
+
+def test_dsh_materialized_skills_survive_catalog_copy_reclamation(tmp_path: Path, content: _Content, monkeypatch):
+    from looper.agents.runtimes.dsh import materialize
+    import shutil
+
+    if shutil.which("dsh") is None:
+        pytest.skip("Installed DSH is required for skill discovery")
+    content.project("proj-skills", documents=[], skills=[("deploy", "Read the managed deployment guide.")])
+    installed = asyncio.run(library.load_installed(tmp_path, "worker", "proj-skills"))
+    catalog = materialize(installed)
+    assert [row["name"] for row in catalog.loaded] == ["deploy"]
+    content.projects = []
+    monkeypatch.setattr(read_only_copies, "command_lines", lambda: [])
+    removed = asyncio.run(reclaim_unused(tmp_path))
+    assert removed  # positive control: the obsolete source catalog really was reclaimed
+    assert all(not Path(path).exists() for path in installed.plugin_dirs)
+    assert (Path(catalog.skill_dirs[0]) / "deploy/SKILL.md").read_text().endswith(
+        "Read the managed deployment guide.\n")

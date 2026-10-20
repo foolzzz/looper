@@ -905,6 +905,219 @@ def _run_prompt_file(tmp_path):
     return prompt
 
 
+def _installed_dsh_skills(tmp_path, monkeypatch, overrides=None):
+    from unittest.mock import AsyncMock
+    from looper.agents import library
+    from looper.db import library as db_library
+
+    def skill(name, extra=""):
+        return f"---\nname: {name}\ndescription: Test skill\n{extra}---\nManaged {name}.\n"
+
+    snapshots = {
+        "installed": {"SKILL.md": skill("installed"), "references/note.md": "Managed reference"},
+        "invalid": {"SKILL.md": skill("Bad_Name")},
+        "hidden": {"SKILL.md": skill("hidden", "disable-model-invocation: true\n")},
+        "bundle": {"skills/bundled/SKILL.md": skill("bundled"),
+                   "hooks/hooks.json": "{}", "commands/test.md": "command marker",
+                   "agents/test.md": "agent marker", "output-styles/test.md": "style marker",
+                   ".mcp.json": '{"mcpServers":{"duplicate":{"command":"never-run"}}}'},
+    }
+    snapshots.update(overrides or {})
+    rows, files = [], {}
+    for name, snapshot in snapshots.items():
+        files[name] = [{"path": path, "content": text, "sha256": hashlib.sha256(text.encode()).hexdigest(),
+                        "executable": False} for path, text in snapshot.items()]
+        rows.append({"id": name, "kind": "plugin" if name == "bundle" else "skill", "name": name,
+                     "sha256": library.item_sha256(files[name]), "origin": "ui", "scope": "global",
+                     "owner_project_id": None})
+    monkeypatch.setattr(db_library, "list_installed", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db_library, "get_item_files", AsyncMock(side_effect=lambda name: files[name]))
+    return asyncio.run(library.load_installed(tmp_path, "worker"))
+
+
+@pytest.mark.parametrize("frontmatter", [
+    "name: invalid\ndescription: test\ndisable-model-invocation: maybe",
+    "name: invalid\ndescription: test\nuserInvocable: false",
+    "name: invalid\ndescription: [not, a, string]",
+    "name: invalid\ndescription: test\nname: duplicate",
+])
+def test_dsh_incompatible_frontmatter_is_explicitly_omitted(tmp_path, monkeypatch, frontmatter):
+    from looper.agents.runtimes import dsh
+
+    if shutil.which("dsh") is None:
+        pytest.skip("Installed DSH is required for skill validation")
+    library = _installed_dsh_skills(tmp_path, monkeypatch, {
+        "invalid": {"SKILL.md": f"---\n{frontmatter}\n---\nNever advertise this skill."}})
+    catalog = dsh.materialize(library)
+    assert [row["name"] for row in catalog.loaded] == ["bundled", "installed"]
+    assert any(row["reason"] == "incompatible DSH skill frontmatter" for row in catalog.skipped)
+
+
+def test_dsh_installed_catalog_matches_official_loader_and_record(tmp_path, monkeypatch):
+    from looper.agents.runtimes import dsh
+
+    executable = shutil.which("dsh")
+    if executable is None:
+        pytest.skip("Installed DSH is required for skill discovery validation")
+    installed = _installed_dsh_skills(tmp_path, monkeypatch)
+    launch = _run_launch(tmp_path)
+    launch = replace(launch, library=replace(installed, mcp_config=launch.library.mcp_config))
+    for root in (tmp_path / ".dsh/skills", tmp_path / ".agents/skills",
+                 tmp_path / "operator/skills", tmp_path / "uninstalled"):
+        (root / "marker").mkdir(parents=True)
+        (root / "marker/SKILL.md").write_text("---\nname: marker\ndescription: Global marker\n---\nSECRET_MARKER")
+    monkeypatch.setenv("DSH_BUNDLED_SKILL_DIR", str(tmp_path / "uninstalled"))
+    command = launch.runtime.run_command(executable, cwd=tmp_path,
+                                         prompt_file=_run_prompt_file(tmp_path), launch=launch)
+    patch_path = Path(command[command.index("--patch") + 1])
+    patch = json.loads(patch_path.read_text())
+    config = next(row["config"] for row in patch if row.get("id") == "skill-filesystem")
+    record = launch.record()
+    assert record["runtime_catalog"]["loaded"] == [
+        {"name": "bundled", "kind": "skill"}, {"name": "installed", "kind": "skill"}]
+    reasons = json.dumps(record["runtime_catalog"]["skipped"])
+    for part in ("Bad_Name", "hidden", "hooks", "commands", "agents", "output-styles", ".mcp.json"):
+        assert part in reasons
+    done = _node(tmp_path, '''
+import {createRequire} from 'node:module';
+import {realpathSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const require = createRequire(realpathSync(process.argv[2]));
+const {apply} = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-skill-filesystem')));
+let provider;
+const control = {signal: new AbortController().signal, invalidate() {}};
+const ctx = {skills: {registerProvider(make) {provider = make(control);}},
+             get() {}, on() {}, effect() {}, logger: {warn() {}}};
+apply(ctx, {...JSON.parse(process.argv[3]), dshHome: process.argv[4], agentsHome: process.argv[4]});
+try {console.log(JSON.stringify(await provider.list({cwd: process.cwd()})));}
+finally {await provider.dispose();}
+''', executable, json.dumps(config), tmp_path / "operator")
+    assert done.returncode == 0, done.stderr
+    actual = json.loads(done.stdout)
+    assert sorted(row["name"] for row in actual) == [row["name"] for row in record["runtime_catalog"]["loaded"]]
+    for row in actual:
+        assert Path(row["locator"]["path"]).is_file()
+    manifest = json.loads(patch_path.with_name("launch-record.json").read_text())
+    assert manifest["runtime_catalog"] == record["runtime_catalog"]
+    assert manifest["runtime_config_sha256"] == hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    assert manifest["runtime_prompt_sha256"] == hashlib.sha256(
+        dsh._prompt_text(_run_prompt_file(tmp_path).read_text(), launch, cwd=tmp_path).encode()).hexdigest()
+    assert manifest["isolation"] == dsh.HOME_LAYOUT_ID
+    assert manifest["system_prompt_mode"] == "append"
+    assert manifest["usage_complete"] is False and manifest["web_search"] is False
+    generated = "\n".join(path.read_text() for path in (tmp_path / ".local/dsh").rglob("*") if path.is_file())
+    assert "SECRET_MARKER" not in generated
+    assert PROVIDER.api_key not in generated and "test-run-token" not in generated
+    assert "never-run" not in generated
+
+
+def test_dsh_duplicate_skill_names_are_recorded_and_plugin_mcp_is_not_mounted_twice(tmp_path, monkeypatch):
+    from looper.agents.runtimes import dsh
+
+    if shutil.which("dsh") is None:
+        pytest.skip("Installed DSH is required for skill validation")
+    installed = _installed_dsh_skills(tmp_path, monkeypatch, {
+        "duplicate": {"SKILL.md": "---\nname: bundled\ndescription: Duplicate\n---\nDuplicate body."}})
+    launch = _run_launch(tmp_path)
+    source = Path(launch.library.mcp_config)
+    servers = json.loads(source.read_text())
+    servers["mcpServers"]["duplicate"] = {"command": "catalog-mcp", "env": {"TOKEN": "synthetic-mcp-secret"}}
+    source.write_text(json.dumps(servers))
+    launch = replace(launch, library=replace(installed, mcp_config=str(source)))
+    catalog = dsh.materialize(launch.library)
+    assert [row["name"] for row in catalog.loaded] == ["bundled", "installed"]
+    assert any(row["reason"] == "duplicate DSH skill name" for row in catalog.skipped)
+    reversed_catalog = dsh.materialize(replace(launch.library, plugin_dirs=tuple(reversed(installed.plugin_dirs))))
+    assert reversed_catalog.skill_dirs != catalog.skill_dirs
+    assert (Path(reversed_catalog.skill_dirs[0]) / "bundled/SKILL.md").read_text().endswith("Duplicate body.")
+    assert [server["serverName"] for server in dsh.mcp_config(launch.library).servers] == ["looper", "duplicate"]
+    command = launch.runtime.run_command(shutil.which("dsh"), cwd=tmp_path,
+                                         prompt_file=_run_prompt_file(tmp_path), launch=launch)
+    patch = Path(command[command.index("--patch") + 1])
+    bootstrap = patch.with_name("looper-bootstrap.mjs").read_text()
+    assert bootstrap.count('"serverName": "duplicate"') == 1
+    assert "never-run" not in bootstrap and "synthetic-mcp-secret" not in bootstrap
+
+
+def test_dsh_injected_instructions_and_manifest_follow_resident_reconfiguration(tmp_path, monkeypatch):
+    from looper.agents.runtimes import dsh
+
+    launch = _run_launch(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("Project marker {{literal}}")
+    (tmp_path / "CLAUDE.md").write_text("Lower priority marker")
+    prompt = _run_prompt_file(tmp_path)
+    command = launch.runtime.resident_command(_headless_stand_in(tmp_path), cwd=tmp_path,
+                                               prompt_file=prompt, launch=launch)
+    resident = dsh.ResidentDsh(label="isolated-manager")
+    rebased, _, _ = resident._split(command)
+    patch_path = Path(rebased[rebased.index("--patch") + 1])
+    record = json.loads(patch_path.with_name("launch-record.json").read_text())
+    text = launch.runtime.prompt_blocks(launch, prompt.read_text(), cwd=tmp_path)[1].text
+    assert text.count("Project marker {{literal}}") == 1
+    assert "Lower priority marker" not in text
+    assert record["runtime_config_sha256"] == hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    assert record["runtime_prompt_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("value, enabled", [(None, False), ("false", False), ("true", True)])
+def test_dsh_search_policy_and_complete_budgets_ignore_project_dotenv(tmp_path, monkeypatch, value, enabled):
+    launch = _run_launch(tmp_path)
+    launch = replace(launch, settings=replace(launch.settings, env=() if value is None else
+                                            (("DSH_ALLOW_WEB_SEARCH", value),)))
+    (tmp_path / ".env").write_text("DSH_ALLOW_WEB_SEARCH=true\nDSH_TOOLS_MODE=ptc\nDSH_TELEMETRY_MODE=ALL\n")
+    monkeypatch.setenv("DSH_ALLOW_WEB_SEARCH", "true")
+    from looper.agents.runtimes import dsh
+
+    patch = dsh._launch_patch(launch, tmp_path)
+    configs = {row["id"]: row["config"] for row in patch if "config" in row}
+    assert configs["tool-web"] == {"fetch": True, "search": enabled, "searchTimeoutMs": 60000,
+                                   "fetchTimeoutMs": 30000, "fetchMaxOutputChars": 200000,
+                                   "searchMaxQueries": 4, "searchMaxResults": 8}
+    assert configs["compaction-basic"] == {"auto": True, "thresholdRatio": .8, "headroomTokens": 65536,
+        "retainRatio": .16, "maxTokens": 65536, "compactionRetries": 1, "maxOverflowRetries": 1,
+        "summarizationProvider": "deepseek-official", "summarizationModel": "deepseek-flash", "modelPolicies": []}
+    assert configs["skill-filesystem"] == {"includeDefaultRoots": False, "customSkillDirs": [], "watch": False}
+    for name in ("web-search-deepseek", "web-deepseek-api"):
+        assert next(row for row in patch if row.get("id") == name)["disabled"] is not enabled
+    assert launch.record()["web_search"] is enabled
+    executable = shutil.which("dsh")
+    if executable is not None:
+        command = launch.runtime.run_command(executable, cwd=tmp_path,
+                                             prompt_file=_run_prompt_file(tmp_path), launch=launch)
+        command = [*command[:command.index("--json")], "--dump-config"]
+        done = subprocess.run(command, cwd=tmp_path, env=launch.environment(), capture_output=True,
+                              text=True, timeout=10)
+        assert done.returncode == 0, done.stderr
+        parsed = _node(tmp_path, '''
+import {createRequire} from 'node:module';
+import {realpathSync} from 'node:fs';
+const require = createRequire(realpathSync(process.argv[2]));
+const {parse} = require('yaml');
+console.log(JSON.stringify(parse(process.argv[3])));
+''', executable, done.stdout)
+        assert parsed.returncode == 0, parsed.stderr
+        entries = json.loads(parsed.stdout)
+        by_id = {row["id"]: row for row in entries}
+        for name in ("tool-web", "tools", "skill-filesystem", "compaction-basic", "llm-deepseek"):
+            assert by_id[name]["config"] == configs[name]
+        for name in ("hmr", "settings", "config-editor", "plugin-manager", "tool-plugin-manager", "credentials",
+                     "authorization", "deepseek-account", "llm-deepseek-account", "llm-pi-ai", "otel",
+                     "session-log-deepseek", "plugin-package-inventory-deepseek", "session-title-llm",
+                     "agent-instructions", "session-telemetry-otel"):
+            assert by_id[name]["disabled"] is True
+        for name in ("web-search-deepseek", "web-deepseek-api"):
+            assert by_id[name]["disabled"] is not enabled
+
+
+@pytest.mark.parametrize("value", ["TRUE", "1", "yes", "", " false "])
+def test_dsh_rejects_invalid_search_policy_at_every_launch_boundary(tmp_path, value):
+    launch = _run_launch(tmp_path)
+    launch = replace(launch, settings=replace(launch.settings, env=(("DSH_ALLOW_WEB_SEARCH", value),)))
+    for check in (lambda: launch.environment(), lambda: launch.record()):
+        with pytest.raises(RuntimeUnsupported, match="DSH_ALLOW_WEB_SEARCH"):
+            check()
+
+
 def _resident_dsh_stand_in(tmp_path):
     """An opaque test store; this deliberately knows nothing about DSH's durable log format.
 

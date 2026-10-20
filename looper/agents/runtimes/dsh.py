@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
@@ -359,7 +360,8 @@ class DshRuntime(RuntimeAdapter):
         if launch.read_only and launch.read_only_mode is ReadOnly.CHECK:
             raise RuntimeUnsupported("DSH read-only runs require the execution guard")
         local = Path(prompt_file).absolute().parent.parent
-        files = bootstrap_files(executable, Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
+        text = _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch, cwd=cwd)
+        files = _bootstrap_files(executable, text, launch)
         # Resolve the required runner from an already-published immutable bundle. The final patch includes
         # its absolute module URI and policy, so either change selects a new bundle under the same owner.
         bootstrap = write_home(local, files, owner=owner, directory=directory)
@@ -369,7 +371,11 @@ class DshRuntime(RuntimeAdapter):
         # In rc.2 a patch's name is a match guard, not a replacement. Inserting the same stable id
         # selects its last definition in EntryGroup.update; only this required runner is activated.
         patch = [*_launch_patch(launch, cwd), {"insert": [runner]}]
-        home = write_home(local, {**files, "looper.yml": json.dumps(patch, ensure_ascii=False)}, owner=owner,
+        patch_text = json.dumps(patch, ensure_ascii=False)
+        record = {**self.launch_record(launch), "runtime_config_sha256": _sha256(patch_text),
+                  "runtime_prompt_sha256": _sha256(text)}
+        home = write_home(local, {**files, "looper.yml": patch_text,
+                                 "launch-record.json": json.dumps(record, ensure_ascii=False)}, owner=owner,
                           directory=directory)
         return ["env", *(f"{name}={value}" for name, value in home.paths.items()), executable,
                 *self.launch_args(launch), "--patch", str(home.config / "looper.yml"), "--json", "-"]
@@ -490,10 +496,14 @@ class DshRuntime(RuntimeAdapter):
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
+        catalog = materialize(launch.library, launch.profile.runtime.executable or self.default_executable)
         return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit"},
-                "usage_complete": False, "cost_basis": "observed",
-                **({"runtime_catalog": {"runtime": self.type, "skipped": list(mcp.omissions)}}
-                   if mcp and mcp.omissions else {})}
+                "usage_complete": False, "cost_basis": "observed", "isolation": HOME_LAYOUT_ID,
+                "system_prompt_mode": "append", "web_search": _web_search(launch),
+                "usage_limits": "Root steps only; compaction, search and child Session usage may be missing",
+                "runtime_catalog": {"runtime": self.type, "skill_dirs": list(catalog.skill_dirs),
+                                    "loaded": list(catalog.loaded),
+                                    "skipped": [*catalog.skipped, *(mcp.omissions if mcp else ())]}}
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         return [PromptBlock("Default prompt", "runtime", None, "DSH's default prompt (not shown; append only)"),
@@ -541,7 +551,13 @@ class ResidentDsh(PerTurnSession):
         owner = json.dumps([self._label, cwd], ensure_ascii=False)
         bootstrap = write_home(local, files, owner=owner)
         patch[-1]["insert"][0]["name"] = bootstrap_entry(bootstrap)["name"]
-        home = write_home(local, {**files, "looper.yml": json.dumps(patch, ensure_ascii=False)}, owner=owner)
+        patch_text = json.dumps(patch, ensure_ascii=False)
+        record_path = source.with_name("launch-record.json")
+        if record_path.is_file():
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["runtime_config_sha256"] = _sha256(patch_text)
+            files["launch-record.json"] = json.dumps(record, ensure_ascii=False)
+        home = write_home(local, {**files, "looper.yml": patch_text}, owner=owner)
         base = ["env", *(f"{name}={home.paths.get(name, value)}" for name, value in paths.items()), *command[index:]]
         base[patch_index] = str(home.config / "looper.yml")
         return base, session, command[index]
@@ -654,12 +670,18 @@ class DshChannel:
                 await self._release_lock
 
 
-def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
-    """Explicit deployment policy overrides launcher/project environment defaults; no secrets are serialized."""
-    policy = validate_provider(launch.profile.provider, launch.model, launch.effort)
+def _web_search(launch: Launch) -> bool:
     search = dict(launch.env).get("DSH_ALLOW_WEB_SEARCH", "false")
     if search not in ("true", "false"):
         raise RuntimeUnsupported("DSH_ALLOW_WEB_SEARCH must be true or false")
+    return search == "true"
+
+
+def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
+    """Complete rc.2 configs: a patch replaces each config, rather than merging its fields."""
+    policy = validate_provider(launch.profile.provider, launch.model, launch.effort)
+    search = _web_search(launch)
+    catalog = materialize(launch.library, launch.profile.runtime.executable or "dsh")
     disabled = ("hmr", "settings", "config-editor", "plugin-manager", "tool-plugin-manager", "credentials",
                 "authorization", "deepseek-account", "llm-deepseek-account", "llm-pi-ai", "otel",
                 "session-log-deepseek", "plugin-package-inventory-deepseek", "session-title-llm", "agent-instructions")
@@ -670,14 +692,130 @@ def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
         "tools": {"mode": "native"},
         "sandbox-policy": {"mode": "danger-full-access", "workspaceRoot": str(Path(cwd).absolute())},
         "approval": {"policy": "never"},
-        "skill-filesystem": {"includeDefaultRoots": False, "customSkillDirs": [], "watch": False},
+        "skill-filesystem": {"includeDefaultRoots": False, "customSkillDirs": list(catalog.skill_dirs), "watch": False},
         "session-telemetry-otel": {"mode": "DISABLED"},
-        "tool-web": {"fetch": True, "search": search == "true", "searchTimeoutMs": 60000},
+        "tool-web": {"fetch": True, "search": search, "searchTimeoutMs": 60000, "fetchTimeoutMs": 30000,
+                     "fetchMaxOutputChars": 200000, "searchMaxQueries": 4, "searchMaxResults": 8},
+        "compaction-basic": {"auto": True, "thresholdRatio": .8, "headroomTokens": 65536,
+                             "retainRatio": .16, "maxTokens": 65536, "compactionRetries": 1,
+                             "maxOverflowRetries": 1, "summarizationProvider": policy.route,
+                             "summarizationModel": policy.model, "modelPolicies": []},
     }
     return [*({"id": name, "disabled": True} for name in disabled),
             *({"id": name, "config": value} for name, value in config.items()),
             {"id": "session-telemetry-otel", "disabled": True},
-            *({"id": name, "disabled": search != "true"} for name in ("web-search-deepseek", "web-deepseek-api"))]
+            *({"id": name, "disabled": not search} for name in ("web-search-deepseek", "web-deepseek-api"))]
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class DshCatalog:
+    skill_dirs: tuple[str, ...] = ()
+    loaded: tuple[dict[str, str], ...] = ()
+    skipped: tuple[dict[str, str], ...] = ()
+
+
+@lru_cache(maxsize=64)
+def materialize(library: AgentLibrary, executable: str = "dsh") -> DshCatalog:
+    """Validate with the installed provider, then copy only supported, installed skill bundles.
+
+    No Claude plugin is mounted. The immutable copies live under the managed DSH root, so catalog GC cannot
+    remove resources underneath a live or resumable Session. Owner retirement is a separate lifecycle.
+    """
+    from ..library import ItemKind, write_once
+
+    skipped = ([{"name": "catalog", "reason": library.error}] if library.error else [])
+    roots = []
+    paths: dict[Path, str] = {}
+    for directory in map(Path, library.plugin_dirs):
+        items = [item for item in library.items if item.plugin == directory.name]
+        if not items:
+            continue
+        for part in ("hooks", "commands", "agents", "output-styles", ".mcp.json"):
+            if (directory / part).exists():
+                skipped.append({"name": f"{directory.name}/{part}",
+                                "reason": "Claude plugin component is not translated; MCP uses the catalog only"})
+        root = directory / "skills"
+        if not root.is_dir():
+            skipped.extend({"name": item.name, "reason": "no skill directory in the managed snapshot"}
+                           for item in items if item.kind is not ItemKind.MCP)
+            continue
+        roots.append(str(root))
+        for skill in sorted(root.iterdir()):
+            if not any(item.kind is ItemKind.PLUGIN or item.name == skill.name for item in items):
+                continue
+            path = skill / "SKILL.md" if skill.is_dir() else skill
+            if path.is_file() and (path.name == "SKILL.md" or path.suffix == ".md"):
+                paths[path.resolve()] = f"{directory.name}/{skill.name}"
+    if not paths:
+        return DshCatalog(skipped=tuple(skipped))
+    # Reuse the official YAML and invocation parser instead of maintaining a second interpretation.
+    script = '''
+import {createRequire} from 'node:module';
+import {realpathSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const require = createRequire(realpathSync(process.argv[1]));
+const {apply} = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-skill-filesystem')));
+let provider;
+const ctx = {skills: {registerProvider(make) {
+  provider = make({signal: new AbortController().signal, invalidate() {}});
+}}, get() {}, on() {}, effect() {}, logger: {warn() {}}};
+apply(ctx, {includeDefaultRoots: false, customSkillDirs: JSON.parse(process.argv[2]), watch: false});
+try {console.log(JSON.stringify(await provider.list({})));} finally {await provider.dispose();}
+'''
+    try:
+        anchor = shutil.which(executable) or executable
+        done = subprocess.run(["node", "--input-type=module", "-e", script, anchor, json.dumps(roots)],
+                              capture_output=True, text=True, timeout=20,
+                              env=_external_environment(child_env.inherited()))
+        candidates = json.loads(done.stdout) if done.returncode == 0 else None
+        if not isinstance(candidates, list):
+            raise ValueError
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise RuntimeUnsupported("cannot validate DSH catalog with the installed skill provider") from None
+    by_path = {Path(candidate["path"]).resolve(): candidate for candidate in candidates}
+    selected = {}
+    for path, label in paths.items():
+        candidate = by_path.get(path)
+        if candidate is None:
+            # The source label remains visible even when the native parser silently drops an invalid file.
+            from ..catalog_sources import split_skill_md
+
+            fields, _ = split_skill_md(path.read_text(encoding="utf-8"))
+            skipped.append({"name": fields.get("name") or label, "reason": "incompatible DSH skill frontmatter"})
+        elif not candidate["invocation"]["modelInvocable"]:
+            skipped.append({"name": candidate["name"], "reason": "model invocation disabled by skill frontmatter"})
+        elif candidate["name"] in selected:
+            skipped.append({"name": label, "reason": "duplicate DSH skill name"})
+        else:
+            selected[candidate["name"]] = path
+    if not selected:
+        return DshCatalog(skipped=tuple(skipped))
+    # The library's content-addressed tree identifies the runtime root; never scan user/default roots.
+    local = Path(library.plugin_dirs[0]).parent.parent.parent
+    key = _sha256(json.dumps([SUPPORTED_VERSION, library.sha256,
+                             sorted((name, str(path)) for name, path in selected.items())], ensure_ascii=False))
+    target = local / "dsh" / "catalog" / key
+    _private_dir(target.parent, root=local)
+    if target.is_symlink():
+        raise RuntimeUnsupported("DSH catalog directory cannot be a symlink")
+
+    def build(directory: Path) -> None:
+        for name, source in selected.items():
+            destination = directory / "skills" / name
+            if source.name == "SKILL.md":
+                _snapshot_tree(source.parent)
+                shutil.copytree(source.parent, destination)
+            else:
+                destination.mkdir(parents=True)
+                shutil.copyfile(source, destination / "SKILL.md")
+
+    write_once(target, build)
+    return DshCatalog((str(target / "skills"),),
+                      tuple({"name": name, "kind": "skill"} for name in sorted(selected)), tuple(skipped))
 
 
 def runtime_notes() -> str:
@@ -699,6 +837,10 @@ def bootstrap_files(executable: str, looper_prompt: str, launch: Launch, *,
     Config and launcher-provided task/session/json values stay owned by the official headless runner.
     Both launch materialization and preview use ``_prompt_text``; JSON encodes text without interpolation.
     """
+    return _bootstrap_files(executable, _prompt_text(looper_prompt, launch, cwd=cwd), launch)
+
+
+def _bootstrap_files(executable: str, text: str, launch: Launch) -> dict[str, str]:
     try:
         anchor = Path(shutil.which(executable) or executable).resolve(strict=True)
         if not anchor.is_file():
@@ -707,7 +849,7 @@ def bootstrap_files(executable: str, looper_prompt: str, launch: Launch, *,
         raise RuntimeUnsupported("DSH bootstrap requires an installed executable") from None
     module = Path(__file__).with_name("dsh_bootstrap.mjs").resolve().as_uri()
     mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
-    options = json.dumps({"executable": str(anchor), "text": _prompt_text(looper_prompt, launch, cwd=cwd),
+    options = json.dumps({"executable": str(anchor), "text": text,
                           "mcp": mcp.servers if mcp else [], "readOnly": launch.read_only,
                           "omissions": mcp.omissions if mcp else []},
                          ensure_ascii=False)
@@ -851,6 +993,7 @@ def environment(launch: Launch, home: DshHome) -> dict[str, str]:
 
 
 def _launch_environment(launch: Launch) -> dict[str, str]:
+    _web_search(launch)
     binding = bind_provider(launch.profile.provider, launch.model, launch.effort)
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
     mcp = mcp_config(launch.library, role=launch.role.value, read_only=launch.read_only)
