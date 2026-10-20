@@ -1,12 +1,12 @@
 # RFC：dsh 运行时 v0
 
-状态：待实现；2026-10-20。目标版本：`@deepseek-ai/dsh` **0.2.1-rc.2**。
+状态：本分支已实现 adapter 和验收入口；真实模型验收待执行，尚未交付；2026-10-20。支持版本：`@deepseek-ai/dsh` **0.2.1-rc.2**。
 
 ## 1. 目标与证据范围
 
-在 Claude Code、Codex、Grok、OMP 旁新增 `dsh`（DeepSeek Harness），Manager、Planner、Worker、Reviewer 都可选择它。保留并行接入的 pi；不迁移已有 Profile，不改现有默认运行时。本文是设计，不表示适配器已实现或模型验收通过。
+在 Claude Code、Codex、Grok、OMP 旁新增 `dsh`（DeepSeek Harness），Manager、Planner、Worker、Reviewer 都可选择它。保留并行接入的 pi；不迁移已有 Profile，不改现有默认运行时。本文记录实现契约；能力说明见 [agent-system](../agent-system.md#runtimes-llm-providers-and-agent-profiles)，验收证据与缺口见 §9，实现不等于真实模型验收通过。
 
-已检查本地 `main` / `origin/main` 与工作分支同为 `95c399431`，开发计划 §1、§5、架构和 UI 约定。远端 main 与 open PR 查询因网络不可用失败，**需要验证**；实施前重新核对，不能据本地 refs 声称没有重复工作。
+文档切片已对照本地 `origin/main`（`822688981`），合并这几份文档中 provider 预设和管家工具的更新。远端 fetch 受共享 Git 元数据写权限限制，open PR 查询因网络不可用失败，**远端最新 main 与重复工作仍需要验证**；这不是已完成分支合并的声明。
 
 证据来自已安装 npm 包的 README、组成 patch 与发布的 JavaScript。下表路径均指对应版本的 npm 包内容；链接便于在其他机器定位同一文档，不依赖本机安装绝对路径。
 
@@ -178,6 +178,21 @@ CLI 的 serve/PATH 探测已泛化，无新专属参数。Telegram/Lark 与 Dash
 5. **真实路径（最后执行，当前规划不执行）**：新 DB、非 8767 端口、throwaway runtime root、临时项目；确认 `sys.executable/looper.__file__`；启动本 worktree 的 serve，外部渠道全部关闭。只测 DeepSeek。
 6. **真实评测（最后执行）**：`--register-agent` 指向 dsh，不用固定创建 Claude Profile 的 `--provider-preset`。`single_step,dependent_steps,reviewed_step,planner_plan_file` 各 reps 2；Manager `status,confirm_create_start` 各 reps 2，每 run 观测费用软上限 $0.50、每张评测总观测金额软上限 $4、单任务/对话 300 秒、外层 20 分钟、单并发。`--case-budget-usd` 在 jobs=1 不生效，本方案不传它，不承诺每 case 上限；辅助费用未知时这些上限不代表完整账单的硬保证。对照相同任务和有效 append 的已有 Claude/OMP 基线；不同模型只能作描述比较，不能归因为 runtime 改进。无可比基线写明，不更新公共 baseline 伪造对照。[evals/README](../../../evals/README.md)
 
-真实 key 仅由验收 harness 在运行时以内存捕获 `zsh -ic 'printf %s "$DEEPSEEK_API_KEY"'`，再给被测 provider binding 或 eval 的 `api_key_env` 指定变量；不回显、不写文件、不进 subprocess argv/报告。spec 只含环境变量名。key 为空/命令失败则停止，不 fallback。脚本关闭 trace、避免输出捕获异常的 stdout 内容。真实产物只放 ignored 目录，公开报告只留脱敏汇总。
+真实 key 仅由验收 launcher 在运行时从交互 zsh 捕获到内存，再给被测 provider binding 或 eval 的 `api_key_env` 指定变量；不回显、不写文件、不进 argv/报告。spec 只含环境变量名，文档不提供 shell 展开 key 的示例。key 为空/命令失败则停止，不 fallback。脚本避免输出捕获异常的 stdout 内容。真实产物只放 ignored 目录，公开报告只留脱敏汇总。
 
-已完成的验证只有：已安装版本、README/代码只读核对；私有临时 home 下 `--help`、`--version`、headless/acp `--dump-config` 全部 exit 0。**没有调用模型，没有验证 adapter、bootstrap、真实 MCP、计费或 resume**。本轮只新增本文和仓库外任务卡，不修改计划状态、代码、operator 配置或记忆文件，不提交。
+### 当前验证记录（2026-10-20）
+
+结果限定到实际执行范围；测试存在、缓存记录或缺失失败记录均不代替通过证据。文档切片未调用真实模型、未发往真实外部账号，未连接数据库。可运行命令见 [evals/README 的 DSH validation](../../../evals/README.md#dsh-validation)。
+
+| 范围 | 结果 | 证据与限制 |
+|---|---|---|
+| 本地 fake / 离线 launcher、runtime signatures | **passed**：75 passed、1 skipped | 先于文档修改运行 `tests/test_dsh_validation.py tests/test_runtime_signatures.py`，120 秒外层超时；覆盖无副作用 help/preflight、显式 real opt-in、凭据脱敏、固定预算参数、基线判定、子进程超时清理、四角色 workflow 的替身读回和失败分支、Session reader 替身及 adapter 调用签名。负例被正确拒绝算回归通过，不是模型验收失败。 |
+| disposable serve/tiers/MCP 的 PG 集成 | **untested / skipped** | 本次未配置 `LOOPER_TEST_DATABASE_URL`，对应测试跳过；不能把 fake API/DB peer 当真实 PG 或四角色闭环证据。 |
+| 规划阶段已记录的 installed 包检查 | **passed（既有记录，本切片未重跑 dump）** | 已安装版本和包文档/代码只读核对；临时私有 home 下 `--help`、`--version`、headless/acp `--dump-config` exit 0。配置 dump 不证明 bootstrap、MCP、resume 或模型可用。 |
+| installed 包离线探测 | **passed**：精确版本与 help；**failed**：完整 preflight | `probe_dsh` 已通过精确版本 `0.2.1-rc.2` 与 `--help` 检查，随后因 sandbox 拒绝 `ps`，进程树观察不可用而 exit 2。未读 key、未连接 PG；`real_validation=untested`，此环境不能运行真实验收。 |
+| installed 包完整离线 bootstrap / resume / guard | **untested（本切片未重跑）** | [test_dsh_installed.py](../../../tests/test_dsh_installed.py)使用官方模块、本地假 Messages/MCP 与网络拒绝器；[test_dsh_runtime.py](../../../tests/test_dsh_runtime.py)含协议、隔离和 catalog 回归。本切片仅运行指定两份测试，没有可引用的这些套件完整结果，不据其存在声称通过；loopback 受限的 skip 也不是 pass。 |
+| 文档命令 help 与 preflight 负例 | **passed**：6 个 help exit 0、缺 URL exit 2 | 顶层及 `preflight/task-basic/task-review/manager/smoke` 的 help 均通过；缺 disposable URL 被拒且 `real_validation=untested`。带合法示例 URL 的完整 preflight 失败原因见上一行，未绕过进程树检查。 |
+| 真实 `task-basic` / `task-review` / `manager` / `smoke` | **untested，待验收** | [validate.py](../../../examples/dsh/validate.py) 已提供入口，分别是 `single_step`、`reviewed_step`、`status` 各 jobs=1/reps=1，以及四角色/consult 两任务 smoke；未执行 `--real`，不能标已交付。§9 第 6 项更广的 reps=2 集合尚未覆盖。 |
+| UI 浏览器、真实渠道和费用完整性 | **untested，待验收** | Dashboard/Telegram/Lark 共用 adapter；渠道仅替身，未真发。浏览器截图/build 本切片未重跑；有效 append 的 Claude/OMP 对照、官方 reader 与 root observed cost 的真实对账、summary/search/child/consult 费用覆盖均未知。 |
+
+尚无真实模型验收结果可归为 passed 或 failed；没有执行不能记作通过。已知失败/环境阻碍单列：preflight 进程树观察失败、远端同步/PR 查询失败；PG 集成跳过；任何 preflight、bootstrap、consult、超时或预算拒绝都不得用跳过/成功掩盖。CLI 无专属参数，Dashboard、Telegram、Lark 的共享入口无需新增渠道参数或发送逻辑。

@@ -1121,6 +1121,61 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   session directories (`codex/sessions/<agent>`, `omp/sessions/<agent>`,
   `grok/sessions/<agent>`) of agents whose saved session (`agent_sessions`)
   is not of that runtime.
+- **DSH** (`looper/agents/runtimes/dsh.py`, DeepSeek Harness
+  `@deepseek-ai/dsh` **0.2.1-rc.2**; [RFC and validation status](rfcs/dsh-runtime-v0.zh-CN.md))
+  is available to Manager, Planner, Worker and Reviewer through the same Agent
+  Profiles and role/project/task overrides. Put the supported `dsh` on the
+  server's PATH, re-detect it in Settings → Agent Runtimes, then create an
+  Agent Profile with an API-key provider serving `anthropic-messages`.
+  Only `deepseek-flash`, `deepseek-flash[1m]`, `deepseek-v4-pro` and
+  `deepseek-v4-pro[1m]` are accepted; the `[1m]` suffix is removed on the wire,
+  after checking membership in the provider's catalog. Effort is `low`, `high`
+  or `max`, default `high`; `off`, `medium` and `xhigh` are rejected. OAuth
+  and providers without Messages are rejected. The default endpoint is
+  `https://api.deepseek.com/anthropic`; an explicit Messages-compatible
+  gateway is preserved. Other runtimes' defaults and profiles are unchanged.
+
+  DSH declares `run`, `resident_session`, `resume` and `mcp`. It uses headless
+  JSONL, one process per turn, with the complete user turn on stdin. Manager
+  and each Planner resume their own persisted Session; a Worker or Reviewer
+  has its own owner, and an ended session's room consult resumes a separate,
+  read-only snapshot. Each owner has private `HOME`, `DSH_HOME`,
+  `DSH_AGENTS_HOME` and XDG directories under the runtime root; no operator
+  home or login is imported. Configuration refreshes each turn without
+  changing the owner's Session root. Looper's prompt is appended literally
+  to DSH's built-in prompt; replace is unavailable and Prompt Preview explains
+  the effective append mode. There is no busy steer, autonomous-turn or
+  structured-output capability, no compaction event projection and no native
+  `max_turns` enforcement.
+
+  A required bootstrap waits for `dsh-mcp-client` to mount the existing
+  `looper mcp-server` stdio bridge before starting the headless runner. The
+  bridge's HTTP API URL is not an MCP HTTP endpoint. Missing bridge tools or
+  failed bootstrap stop the run before any model request. Planner and consult
+  launches apply an execution guard allowing only `read`, `glob`, `grep` and
+  the exact registered Looper platform tools; shell, file mutations, subagents
+  and external catalog MCP are denied or omitted. This is a tool guard, not
+  a host sandbox. Installed catalog skills are validated by the official skill
+  provider and copied into managed roots with their resources. Claude plugin
+  hooks, commands, agents, output styles and plugin-local MCP discovery are
+  omitted; external catalog MCP uses stdio or Streamable HTTP in writable
+  runs. Unsupported frontmatter, disabled model invocation, duplicate skills
+  and other omissions appear in `metadata.runtime_catalog`. Session upload,
+  telemetry and title requests are disabled; web search is off unless
+  `DSH_ALLOW_WEB_SEARCH=true` is explicitly set.
+
+  Root step usage is priced with the existing provider price table and shown
+  as **observed cost** (`cost_basis=observed`). Missing buckets stay unknown;
+  root observations do not establish the total bill. Auxiliary coverage
+  (compaction summaries, search, child Sessions and consults) remains unknown,
+  so `cost_usd` may be null and a soft cap covers only reported root spend.
+  There is no hard billing cap. See the
+  [bounded validation commands](../../evals/README.md#dsh-validation) for
+  safe preflight and the pending real-model acceptance. The CLI has no DSH
+  flags: PATH discovery and existing Profile selection suffice. Dashboard,
+  Telegram and Lark share the same Manager/runtime adapter; DSH channel checks
+  use stand-ins, with no real account sends. Real-model acceptance remains
+  pending.
 - **Grok** (`looper/agents/runtimes/grok.py`, xAI's `grok` CLI, verified
   against Grok 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md))
   runs headless `grok --prompt-file /dev/stdin --output-format
@@ -1216,10 +1271,11 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   alias stays unpriced, since the provider's environment may map it to a
   model of its own.
   Presets (`provider_presets.py`: GLM on BigModel and on Z.ai, DeepSeek, Kimi
-  on Moonshot China and international, and the local CLIProxyAPI) fill a new
-  provider from one of a vendor's APIs (Anthropic-format for Claude Code, or
-  OpenAI-format), its common models with their background model, and the
-  extra environment its Claude Code guide sets; the user adds the key.
+  on Moonshot China and international, OpenCode Zen, a local CLIProxyAPI and a
+  local Sub2API) fill a new provider from one of a vendor's APIs
+  (Anthropic-format for Claude Code, or OpenAI-format), its common models with
+  their background model, and the extra environment its Claude Code guide sets;
+  the user adds the key.
 - **Agent Profiles** (`agent_profiles`): a name, a runtime, a provider, a
   model, the effort its runs use (none: the runtime's own; no layer sets one)
   and, for a Claude Code runtime only, whether its runs have agent teams (`agent_teams`, on by default for Claude Code profiles;
