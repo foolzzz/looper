@@ -18,6 +18,37 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.12.5] - 2026-10-20
+
+### Highlights
+
+- **Pi and DeepSeek Harness are optional runtimes for all four roles.** Manager, Planner, Worker and Reviewer can use pi (the pi coding agent CLI, minimum 1.3.0 with required launch flags) or exactly `@deepseek-ai/dsh` 0.2.1-rc.2. Both integrate with Agent Profiles, platform tools, events, usage, sessions and dashboard selection. Existing defaults and profile selections are unchanged. ([#252](https://github.com/foolzzz/looper/pull/252), [#256](https://github.com/foolzzz/looper/pull/256))
+
+### Behavior changes
+
+- **Pi supports API-key Responses and Chat Completions providers.** `openai-responses` includes CPA-style gateways; `openai-chat` includes DeepSeek, with Responses preferred when both are declared. Private homes, agent directories and separate sessions avoid operator configuration; discovery, telemetry and cache warming are disabled. Looper's bundled extension loads with `-e` and `--no-extensions`, preserving scoped tool descriptions, schemas, authorization and confirmation through the existing HTTP API. Catalog MCP/skills/plugins are skipped; Planner/consult reading-tool allowlists are not an OS sandbox. ([#252](https://github.com/foolzzz/looper/pull/252))
+- **Pi accounts new usage and resumes exact sessions.** JSON messages, tools, compaction and terminal events are normalized, with finalization on `agent_settled`, provider pricing and usage-based soft caps. Manager/Planner resume exact session files, room consults fork read-only copies, Worker RPC steering requires a correlated queued acknowledgement, and private storage participates in reclamation. ([#252](https://github.com/foolzzz/looper/pull/252))
+- **DSH binds DeepSeek API-key Messages providers to private runs.** `anthropic-messages` supports `deepseek-flash` and `deepseek-v4-pro`, including their `[1m]` catalog aliases; effort is low/high/max, default high. The key is supplied to the dsh process environment. Private `DSH_HOME` and immutable overlays pin the model, disable telemetry, uploads, title requests and default web search, append Looper's prompt and wire stdio MCP to the run's Looper endpoint. Compatible skills/external MCP are translated and omissions recorded. Planner/consult runs allow only reading tools and exact platform registrations; this is not a host sandbox. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **DSH has headless events and resumable owner sessions.** Success requires a completed turn, final response and verified successful exit. Resume refreshes launch configuration; read-only consults run in place with separate ended-session snapshots, refusing active-session snapshots. Active-run steering, autonomous turns, structured output and native `max_turns` enforcement are unsupported. Dashboard provider/model selections respect runtime compatibility and show the append-only limitation. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **Incomplete usage stays unknown.** DSH prices reported root steps at provider prices and stops capped runs when root usage cannot be verified; observed root spend is not a complete bill or a hard billing cap. Shared accounting honors explicit incomplete-usage markers, and the observed-root budget policy applies only when the runtime requests it; other runtimes keep their prior policy without those markers. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **Shared records and eval metrics improve.** Manager/Planner record materialized resident commands when available. Runtime cards retain probe errors beside versions for all runtimes. Eval edit accounting accepts `path`, deduplicates within a tool call and excludes URLs. The #256 description's managed-parent symlink cleanup protection, including Codex/OMP storage, is not present in merged code: cleanup skips symlinked session entries but does not check their managed parents. See the release notes' code-verification gap. ([#252](https://github.com/foolzzz/looper/pull/252), [#256](https://github.com/foolzzz/looper/pull/256))
+
+### Model-visible changes
+
+- **Manager profile tools list detected pi/dsh runtimes.** Pi notes require complete final replies/reports and identify `mcp__looper__`; its append/replace prompt modes receive scoped bridge tool definitions. DSH literally appends Looper instructions to its built-in prompt without rewriting saved role settings, requires complete final reports and tells Workers/Reviewers to finish rather than wait for later room questions. Both inject project instructions once with `AGENTS.md` preferred over `CLAUDE.md` per directory; DSH Prompt Preview includes effective content, compatible skills and role tools are exposed through DSH. Shared role prompts/contracts and existing runtimes' prompt content are unchanged. Dashboard chat, Telegram and Lark share these adapters/tools; no new product CLI subcommand or channel command is introduced. ([#252](https://github.com/foolzzz/looper/pull/252), [#256](https://github.com/foolzzz/looper/pull/256))
+
+### Fixes
+
+- **A missing unrelated runtime no longer restarts the pool and cancels active runs.** For every runtime, Manager and WorkerPool health checks inspect their own loop instead of requiring the `claude` binary on PATH; availability is checked at launch. ([#256](https://github.com/foolzzz/looper/pull/256))
+- **Failures are explicit across runtimes.** Manager requires a successful terminal result before treating text as a successful reply, so error results with text fail. Worker command-preparation errors become work/verification failures, and soft-budget stop results are retained in transcripts. ([#256](https://github.com/foolzzz/looper/pull/256))
+
+### Validation
+
+- Both PRs' Codex review rounds ended not blocking and CI passed. Pi real evals: CPA-style `openai-responses` tasks 18/18, DeepSeek `openai-chat` tasks 17/18 (one room-consult case passed 1 of 2 runs, model variance), Manager dialogs 8/8; installed tool-bridge checks used pi 1.3.0.
+- DSH real validation used a DeepSeek key: an earlier task-stage attempt timed out and remains an error, with unknown observed cost and auxiliary coverage, no hard billing cap, a USD 0.50 per-run soft cap and USD 4 total observed cap. Later task-basic, task-review and Manager-dialog summaries each report 4 pass and 0 fail/error/skipped/untested; no per-stage cost is claimed. A separate reported four-role smoke covered two tasks, two Manager turns, API/database readback and session resume, with about USD 0.02 observed spend, not a complete bill. These are retained implementation reports; runtime checks and a full final-head prompt suite were not rerun for this draft.
+
+See the [bilingual release notes](docs/releases/v2.12.5.md) for activation, verification, authority boundaries, rollback and validation limits.
+
 ## [2.12.4] - 2026-10-20
 
 ### Highlights
