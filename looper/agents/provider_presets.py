@@ -14,15 +14,17 @@ prices these models, and the provider's catalog can override it.
 The URLs, models and variables come from each vendor's official documentation
 (``docs``), read on 2026-10-14. OpenCode and Sub2API were read on 2026-10-20.
 ``[1m]`` asks Claude Code for a model's 1M context window, as the vendors'
-Claude Code guides write it; it is added to every model with a 1M window.
+Claude Code guides write it; only Anthropic-format APIs use it. OpenAI-format
+APIs use the suffix-free names and keep the catalog's context window.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from .model_names import parse_model_name
 from .runtimes import ApiProtocol
 
 _ANTHROPIC = (ApiProtocol.ANTHROPIC_MESSAGES,)
@@ -89,6 +91,13 @@ def api_models(preset: Mapping[str, Any], api: Mapping[str, Any]) -> list[dict[s
     return list(api["models"] if "models" in api else preset["models"])
 
 
+def _without_context_suffix(models: tuple[PresetModel, ...]) -> tuple[PresetModel, ...]:
+    """The same catalog for an API whose clients send model names verbatim."""
+    return tuple(replace(model, name=parse_model_name(model.name).base,
+                         background_model=parse_model_name(model.background_model).base if model.background_model
+                         else None) for model in models)
+
+
 _GLM_MODELS = (
     PresetModel("glm-5.3[1m]", 1_000_000, "glm-5.3-flash[1m]"),
     PresetModel("glm-5.3-flash[1m]", 1_000_000, "glm-5.3-flash[1m]"),
@@ -98,11 +107,15 @@ _GLM_MODELS = (
 _GLM_ENV = (("API_TIMEOUT_MS", "3000000"), ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"))
 _KIMI_MODELS = (
-    PresetModel("kimi-k3[1m]", 1_048_576, "kimi-k2.7-code"),
+    PresetModel("kimi-k3[1m]", 1_000_000, "kimi-k2.7-code"),
     PresetModel("kimi-k2.7-code", 262_144, "kimi-k2.7-code"),
     PresetModel("kimi-k2.6", 262_144, "kimi-k2.6"),
 )
 _KIMI_ENV = (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),)
+_DEEPSEEK_MODELS = (
+    PresetModel("deepseek-flash[1m]", 1_000_000, "deepseek-flash"),
+    PresetModel("deepseek-v4-pro[1m]", 1_000_000, "deepseek-flash"),
+)
 _KIMI_NOTE = ("kimi-k2.7-code always thinks; Moonshot's Claude Code guide uses it as the background model, and asks "
               "for thinking to be on")
 # OpenCode serves each family through one endpoint (https://opencode.ai/v2/docs/console/models/):
@@ -115,9 +128,9 @@ _OPENCODE_URL = "https://opencode.ai/inference/openai/v1"
 PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
         "glm-bigmodel", "GLM (BigModel, China)", "glm",
-        (PresetApi(_ANTHROPIC, "https://open.bigmodel.cn/api/anthropic"),
-         PresetApi(_CHAT, "https://open.bigmodel.cn/api/paas/v4"),
-         PresetApi(_RESPONSES, "https://open.bigmodel.cn/api/v1")),
+        (PresetApi(_ANTHROPIC, "https://open.bigmodel.cn/api/anthropic", _GLM_MODELS),
+         PresetApi(_CHAT, "https://open.bigmodel.cn/api/paas/v4", _without_context_suffix(_GLM_MODELS)),
+         PresetApi(_RESPONSES, "https://open.bigmodel.cn/api/v1", _without_context_suffix(_GLM_MODELS))),
         _GLM_MODELS, _GLM_ENV,
         ("https://docs.bigmodel.cn/cn/coding-plan/tool/claude", "https://docs.bigmodel.cn/cn/guide/start/quick-start",
          "https://docs.bigmodel.cn/cn/guide/start/model-overview"),
@@ -126,26 +139,26 @@ PRESETS: tuple[ProviderPreset, ...] = (
     ),
     ProviderPreset(
         "glm-zai", "GLM (Z.ai, international)", "glm-zai",
-        (PresetApi(_ANTHROPIC, "https://api.z.ai/api/anthropic"),
-         PresetApi(_CHAT, "https://api.z.ai/api/paas/v4"),
-         PresetApi(_RESPONSES, "https://api.z.ai/api/v1")),
+        (PresetApi(_ANTHROPIC, "https://api.z.ai/api/anthropic", _GLM_MODELS),
+         PresetApi(_CHAT, "https://api.z.ai/api/paas/v4", _without_context_suffix(_GLM_MODELS)),
+         PresetApi(_RESPONSES, "https://api.z.ai/api/v1", _without_context_suffix(_GLM_MODELS))),
         _GLM_MODELS, _GLM_ENV,
         ("https://docs.z.ai/devpack/tool/claude", "https://docs.z.ai/guides/overview/quick-start",
          "https://docs.z.ai/guides/llm/glm-5.3"),
     ),
     ProviderPreset(
         "deepseek", "DeepSeek", "deepseek",
-        (PresetApi(_ANTHROPIC, "https://api.deepseek.com/anthropic"),
-         PresetApi(_CHAT, "https://api.deepseek.com")),
-        (PresetModel("deepseek-flash[1m]", 1_000_000, "deepseek-flash"),
-         PresetModel("deepseek-v4-pro[1m]", 1_000_000, "deepseek-flash")),
+        (PresetApi(_ANTHROPIC, "https://api.deepseek.com/anthropic", _DEEPSEEK_MODELS),
+         PresetApi(_CHAT, "https://api.deepseek.com", _without_context_suffix(_DEEPSEEK_MODELS))),
+        _DEEPSEEK_MODELS,
         (("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "786432"),),
         ("https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code/",
          "https://api-docs.deepseek.com/guides/anthropic_api", "https://api-docs.deepseek.com/"),
     ),
     ProviderPreset(
         "kimi-moonshot-cn", "Kimi (Moonshot, China)", "kimi",
-        (PresetApi(_ANTHROPIC, "https://api.moonshot.cn/anthropic"), PresetApi(_OPENAI, "https://api.moonshot.cn/v1")),
+        (PresetApi(_ANTHROPIC, "https://api.moonshot.cn/anthropic", _KIMI_MODELS),
+         PresetApi(_OPENAI, "https://api.moonshot.cn/v1", _without_context_suffix(_KIMI_MODELS))),
         _KIMI_MODELS, _KIMI_ENV,
         ("https://platform.kimi.com/docs/guide/claude-code-kimi.md", "https://platform.kimi.com/docs/api/overview"),
         _KIMI_NOTE + "; Moonshot China bills in CNY, and Looper prices these models at the international USD list "
@@ -153,7 +166,8 @@ PRESETS: tuple[ProviderPreset, ...] = (
     ),
     ProviderPreset(
         "kimi-moonshot", "Kimi (Moonshot, international)", "kimi-intl",
-        (PresetApi(_ANTHROPIC, "https://api.moonshot.ai/anthropic"), PresetApi(_OPENAI, "https://api.moonshot.ai/v1")),
+        (PresetApi(_ANTHROPIC, "https://api.moonshot.ai/anthropic", _KIMI_MODELS),
+         PresetApi(_OPENAI, "https://api.moonshot.ai/v1", _without_context_suffix(_KIMI_MODELS))),
         _KIMI_MODELS, _KIMI_ENV,
         ("https://platform.kimi.ai/docs/guide/claude-code-kimi.md", "https://platform.kimi.ai/docs/api/overview.md"),
         _KIMI_NOTE,

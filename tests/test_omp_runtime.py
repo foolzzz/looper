@@ -59,6 +59,19 @@ def _launch(*, executable: str = "omp", library: AgentLibrary | None = None,
                   knowledge or AgentKnowledge())
 
 
+def test_a_suffix_free_deepseek_model_gets_its_million_token_catalog_window() -> None:
+    from looper.agents.runtimes.omp import models_yml
+
+    provider = _provider(protocols=frozenset({ApiProtocol.OPENAI_CHAT}),
+                         catalog=(CatalogModel("deepseek-flash", context_window=1_000_000),))
+    launch = _launch(provider=provider)
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, model="deepseek-flash")))
+    config = models_yml(launch)["providers"]["looper"]
+    assert config["api"] == "openai-completions"
+    assert config["models"][0]["id"] == "deepseek-flash"
+    assert config["models"][0]["contextWindow"] == 1_000_000
+
+
 # --- Events ---
 
 

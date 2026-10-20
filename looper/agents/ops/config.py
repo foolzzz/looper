@@ -226,7 +226,7 @@ async def _providers(call: Call) -> dict[str, Any]:
                             "env": [{"key": key, "value": value} for key, value in (arguments.get("env") or {}).items()]}
     answer = await answered(profile_registry.create_provider(data))
     provider = _provider_listed(answer["provider"])
-    return {"provider": provider, "note": KEY_NOTE.format(name=provider["name"])}
+    return {"provider": provider, "warnings": answer["warnings"], "note": KEY_NOTE.format(name=provider["name"])}
 
 
 # --- looper_catalog ---
