@@ -27,6 +27,72 @@ SECRET = "sk-test-secret-0123456789"
 ROLES = ("manager", "planner", "worker", "reviewer")
 
 
+def _documented_v3() -> dict[str, Any]:
+    """Execute the portable example operators copy from the architecture guide."""
+    import re
+
+    doc = (Path(__file__).resolve().parents[1] / "docs/architecture/agent-system.md").read_text()
+    section = doc.split("### Moving the configuration: export and import", 1)[1].split("\n### ", 1)[0]
+    examples = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", section, re.S)]
+    return next(example for example in examples if example.get("format") == "looper-config/v3")
+
+
+def test_documented_v3_example_previews_applies_and_reads_back(monkeypatch, tmp_path):
+    async def test():
+        data = _documented_v3()
+        path = tmp_path / "documented.json"
+        path.write_text(json.dumps(data))
+        async with _installation() as (pool, url):
+            before = await _rows(pool)
+            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--json")
+            assert code == 0, err
+            preview = _plan(out)
+            assert not preview["applied"]
+            assert await _rows(pool) == before
+            assert not any(section.get("skipped", 0) for section in preview["counts"].values())
+            for section in ("providers", "models", "profiles"):
+                assert preview["counts"][section]["added"] == 1
+            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--apply", "--json")
+            assert code == 0, err
+            assert _plan(out)["applied"]
+            _serve(monkeypatch, pool)
+            registry = await _ok("GET", "/api/registry")
+            profile = next(p for p in registry["profiles"] if p["name"] == data["profiles"][0]["name"])
+            model = next(m for m in registry["models"] if m["model_id"] == profile["model_id"])
+            assert (model["provider_name"], model["name"], model["protocol"]) == tuple(
+                data["profiles"][0]["model"][key] for key in ("provider", "name", "protocol"))
+            assert profile["model"]["protocol"] == model["protocol"]
+            assert "system_prompt_mode" not in profile
+            # An unknown price is NULL, never a zero-price override.
+            assert all(price == {"override": None, "effective": None, "source": "unknown"}
+                       for price in model["prices"].values())
+            exported = tmp_path / "exported.json"
+            code, _, err = await _looper(monkeypatch, url, "config", "export", str(exported))
+            assert code == 0, err
+            saved = json.loads(exported.read_text())
+            assert saved["format"] == "looper-config/v3"
+            assert saved["profiles"][0]["model"] == data["profiles"][0]["model"]
+            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--json")
+            assert code == 0, err
+            assert all(counts["added"] == counts["changed"] == counts["skipped"] == 0
+                       for counts in _plan(out)["counts"].values())
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
+def test_config_cli_help_exposes_portable_registry_and_preview(capsys):
+    from looper.cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exit_info:
+        parser.parse_args(["config", "--help"])
+    assert exit_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert all(word in help_text for word in ("providers", "models", "profiles", "looper-config/v3"))
+    preview = parser.parse_args(["config", "import", "portable.json", "--json"])
+    assert not preview.apply and preview.json
+
+
 @pytest.fixture(autouse=True)
 def _isolated_registry_logins(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import profile_registry

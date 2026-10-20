@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
         help="Export this installation's agent configuration to one file, or import one.",
         description=(
-            "Move an installation's agent configuration to another machine: settings layers and role prompts, "
+            "Move an installation's agent configuration as looper-config/v3: providers with per-protocol endpoints, "
+            "models and profiles, settings layers and role prompts, "
             "the catalog with its files and MCP servers, global installs, channels and, optionally, projects. "
             "Both commands use the database directly (the ops file's database.url); the server need not run. "
             "init-ops writes the ops file itself."

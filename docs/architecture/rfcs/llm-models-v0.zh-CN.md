@@ -1,6 +1,6 @@
 # RFC：LLM Provider、Model 与 Agent Profile 分层（v0）
 
-- **状态：** 设计稿，目标版本 v2.13.0；本文不表示实现、迁移或真实评测已完成。
+- **状态：** 实现中，目标版本 v2.13.0；新库模型层已在分支实现，旧库升级尚未接通，实际迁移演练待验证，未达到发布门禁。
 - **依据：** [多运行时架构](multi-runtime-agents-v0.zh-CN.md)、[系统提示词模式](system-prompt-mode-v0.zh-CN.md)、[开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md)第 1、5 节。
 - **代码基线：** v2.12.2（`95c399431`）。#251、#253 先在现有结构上作为补丁交付，再以补丁后的行为作为本次迁移基线。
 
@@ -380,4 +380,10 @@ eval harness 后续把 register-agent spec 明确分为 runtime、provider、mod
 
 ## 12. 本次交付状态
 
-本次交付仅为此 RFC：核对了当前 registry、预设、runtime、pricing、schema、配置交换、Manager 工具、Dashboard、eval 与现有 pinned fixtures。未实现新 schema/API/UI，未读取活动库或真实 key，未执行 live dry-run、DB 迁移、真实 CLI 运行或 dialogs，也不宣称已证明迁移等价。远端状态需实施前重新核对；本文的补丁衔接要求独立于未核实的合入状态。
+本分支已实现新库 schema、Provider/Endpoint/Model/Profile registry、HTTP 与 Manager 工具、运行时解析与计价、v3 导入导出、eval 注册输入及 Dashboard 的最小配置流程。第 2 节保留设计时的旧基线，当前字段与入口以[架构文档](../agent-system.md#runtimes-llm-providers-and-agent-profiles)为准；这不表示已合入、发布或完成真实评测。
+
+- **已验证：** 本切片在一次性 PostgreSQL 上运行指定的配置交换、Manager 配置工具、模型契约回归；文档 v3 示例经 CLI 预览、应用、HTTP 读回与再导出校验，详情记入[计划台账](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md#4-进度台账)。
+- **未通过发布门禁：** `ensure_schema` 尚未接入旧库转换，明确拒绝 version 2 或无版本的现有库；纯转换器与只读预检接口不能替代实际升级。需接通同事务转换与版本标记，并验证失败后 schema/rows 不变。
+- **未测 / 待验证：** 真实数据形状副本的完整迁移与恢复演练、获授权的只读 dry-run、带 forward-schema guard 的旧补丁版回退、旧/新版本真实 tiers 启动和计价对照、相关真实 CLI 与 Manager dialogs 的定向评测。本切片不运行 Dashboard 浏览器 smoke，也不将已有测试文件视为通过证据。
+
+HTTP breaking fields（provider 旧目录字段、Profile 的输入引用和结构化 model 输出）已列入架构 API 说明；实现 PR 与下次发布说明仍须按[发布流程](../../releases/README.md)逐项列出。迁移演练和发布状态必须继续保留待验证。

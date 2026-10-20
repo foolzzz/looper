@@ -4,7 +4,7 @@
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-19
+- **最近更新：** 2026-10-20
 
 ## 1. 工作方式
 
@@ -51,6 +51,7 @@
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录在 §5.0 第 3 项交付） | ✅ 已交付（looper #67） | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付（looper #70） | M9c |
+| LLM 模型层 | Provider → Endpoint → Model → Profile；配置 v3 | 分支实现中；新库契约已验证，旧库升级尚未接通，实际迁移演练待验证（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
@@ -679,6 +680,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-19 | 运维配置文件与子进程环境（本 PR）：部署设置改到 `<runtime root>/ops/server.toml`（默认 `~/.looper/ops/server.toml`；`looper serve`、`doctor`、`config export`、`config import`、`config init-ops`、`service install` 可用 `--config` 指向别处），由 `looper/ops_config.py` 在命令开始时读一次。键是 `[database] url`、`[server]` 的 `host`、`port`、`public_url`、`log_level`（debug、info、warning、error）、`[backup]` 的 `pg_dump` 与 `command`（argv 数组，填入 `{dbname}` 和 `{user}`）、`[operator_notes] root`（绝对路径）。文件不做插值、include，也不展开 `~`；未知键、类型不对或值不合法时命令停下，报错只点名键、不写出值。必须是普通文件（不能是符号链接），属主为当前用户、权限 0600，所在目录也属该用户且为 0700；Looper 原子写入。改文件后重启服务才生效。每一项的优先级：显式命令行旗标、文件、仅本版本仍读的旧变量（先是环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、`LOOPER_BACKUP_CMD`、`LOOPER_OPERATOR_NOTES_ROOT` 及其 `LOOPX_*` 同名，笔记根目录没有 `LOOPX_` 名，再用 checkout 的 `.env`）、最后是内置默认。用到旧变量时打弃用警告，只点名变量、不写出值，下一版删除。数据库 URL 不再有默认值：没有时 `looper serve`、doctor、config import 和 export 不启动，并提示跑 `looper config init-ops` 或改文件。runtime root 是 `--runtime-root`，否则是弃用并警告的 `LOOPER_RUNTIME_ROOT`（`LOOPX_RUNTIME_ROOT` 同样），否则 `~/.looper`；文件里不写它。`.env` 不再注入 Looper 的环境，只从中读上述旧设置，其余键（例如渠道 token 变量）忽略并在警告里点名；渠道密钥放在自己的 Settings 字段（存数据库）或服务环境（`looper service install --env NAME`）。已有安装迁一次：`looper config init-ops` 按当时生效的值写出 0600 的文件，已有文件拒绝覆盖；什么都没配时写入旧默认 `postgresql://localhost:5432/loopx` 并说明。然后从 shell 和 `.env` 去掉旧变量，用了服务的再跑一次 `looper service install`；在此之前 `looper serve` 仍按变量工作，只是有警告。`looper service install` 的单元运行 `looper serve --config <运维文件绝对路径> --runtime-root <根目录绝对路径>`，只有给 install 传了 `--port`，或以前的单元带了 `--port` 而文件没写端口时才加 `--port`；没有运维文件，或某项设置仍来自环境变量时拒绝。不再复制每一个 `LOOPER_*`、`LOOPX_*`、`ANTHROPIC_*`、`LARK_*`：复制 PATH、TZ、区域、代理和 CA 证书变量、各运行时的目录和登录（`child_env.RUNTIMES`）、`LOOPER_TELEGRAM_BOT_TOKEN`（本版本也复制 `LOOPX_TELEGRAM_BOT_TOKEN`），以及每个 `--env NAME`；报告点名不再复制的变量。`--env` 带运维变量时拒绝。重装替换旧单元，旧单元里的数据库 URL 随之消失；单元仍是 0600（里面可以有 API key）。服务启动的每个进程（agent 的运行时和它们起的 MCP 服务器、定时任务的门、探针、git、ps、lark-cli）从 `looper/child_env.py` 的允许名单起步（系统、区域、XDG、SSH agent、git 身份和配置、代理和证书、运行时自己的登录变量），再加上 Looper 为该子进程设置的（provider 绑定、agent 设置里的变量、MCP 令牌、门的运行变量）。数据库 URL（新旧名字）、`PGPASSWORD`、任何 `LOOPER_*` 或 `LOOPX_*` 以及其他变量都不传。数据库备份用自己的环境（这份再加上 libpq 的 `PG*` 和 Docker 的变量，pg_dump 的 `PGPASSWORD` 从 URL 取出）。agent 还要的变量从设置里的环境变量给（Settings 或项目层）。这只是不把秘密放进子进程环境，不是沙箱：agent 以服务的用户运行，有 shell 的仍能读该用户能读的文件，包括运维文件、操作者令牌、`.env` 和服务单元；隔开需要另一个系统用户或沙箱，这次没做。验证：针对性测试；在一次性的 runtime root 上由 `looper config init-ops` 起一个真实的 `looper serve`；替身 agent 的环境里没有数据库 URL。 |
 | 2026-10-19 | 知识库（looper #239，v2.12.0，设计见 [RFC](../architecture/rfcs/obsidian-knowledge-v0.zh-CN.md)）：系统设置 `knowledge_vault`（目录、可写目录、规则文件）加项目开关 `vault`（默认关），开着时任务的规划者、Worker 和 Reviewer 有 `looper_vault_search`、`looper_vault_read`、`looper_vault_write` 三个与运行时无关的 MCP 工具，读整个知识库、只写可写目录，每次写入是知识库仓库里只含这一篇笔记的一次提交，记在任务动态里；任务完成或失败时规划者按知识库的规则文件做一次 `[VAULT]` 收尾。写入从 `/` 起按目录 fd 逐层打开、不跟随符号链接，用线程锁串行，sha256 比对冲突，git 用字面路径、超时结束整个进程组、动态里不带 git 输出；没配置或项目关着时提示词逐字节不变（有测试），真实运行与评测结果见 PR。 |
 | 2026-10-19 | 定时任务共用 Planner 会话（[RFC](../architecture/rfcs/schedule-planner-session-v0.zh-CN.md)，本分支实现，待集成验证）：非并行运行认领同一条会话，每次仍建独立任务，写穿由 holder 校验保护，用户重置后进行中的运行保留自己的会话且不能写回；四种回退各记录原因，续接首轮增加用户消息说明，系统提示不变。认领或续接的运行另外把这一轮需求原文放进 PLAN 用户消息（标题 “This run's requirement (kept in the conversation for later runs):”，与 Task 节同一限度截断），否则续接会话看不到只写在 Task 节里的前置检查输出；非定时任务和并行运行的 PLAN 消息逐字节不变。API 返回不含会话 id 的状态与任务续接标志，项目定时任务行显示状态并提供确认重置，Manager 沿用 high 确认，配置导出不含会话、导入不恢复会话。纯逻辑与 Planner 运行时替身 14 项通过，并行写穿保护变异被测试检出并已恢复；数据库 14 项、前端测试与构建受执行环境限制尚未运行，holder/reset 的数据库变异、真实 Claude 记忆及定向评测待补（§5.4）。 |
+| 2026-10-20 | LLM 模型层（分支实现，未发布）：Provider/Endpoint/Model/Profile、新库 HTTP/Manager 与 Dashboard 配置入口、v3 交换和 eval 注册已实现；架构与 CLI 帮助同步实际字段，Telegram/Lark 共用 Manager 工具，无需新增频道命令。验证：一次性 PostgreSQL 上限时运行 [配置交换](../../tests/test_config_transfer_db.py)、[Manager 配置工具](../../tests/test_manager_config_tools_db.py)、[模型契约](../../tests/test_llm_models_db.py)，240 通过、0 失败、0 跳过（含新增 2 项，v3 文档示例经 CLI 预览无写入、应用、HTTP 读回、再导出及幂等校验）；旧库升级尚未接通，实际迁移、恢复、真实 tiers 对照与定向评测待验证（§5.4），不标记完整交付。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -757,6 +759,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **dashboard 的退出按钮**（looper #207）：服务端已有 `POST /logout`，界面里还没有入口。
 
 ### 5.4 验证缺口
+
+- **LLM 模型层（分支实现中，实际迁移演练待验证）**：新库模型/配置/Manager 回归不能证明旧库可升级；`ensure_schema` 仍拒绝旧结构，须先接入共用转换器并证明事务失败时旧库不变。其后在一次性副本完成完整数据库备份与恢复、count-only dry-run（profile 数量不变且全映射，unresolved/binding/pricing mismatch 均为 0）、新旧真实 tiers 启动/计价/会话引用对照；带 forward-schema guard 的旧结构补丁版回退路径仍须验证，不能在新 schema 上直接启动旧版。真实 CLI、Manager haiku/opus xhigh 定向 dialogs 及候选版本全量评测未在本切片运行；Dashboard smoke 有独立测试，但本切片未重跑。HTTP breaking fields（provider 的 `protocols/base_url/models` → `vendor_type/endpoints` 与独立 models，Profile 写入 `model_id`、读回结构化 `model`）必须进入实现 PR 和下次发布说明；门禁未齐不得写已发布或迁移完成，详见 [RFC §9](../architecture/rfcs/llm-models-v0.zh-CN.md#9-上线回滚与观测)、[RFC §12](../architecture/rfcs/llm-models-v0.zh-CN.md#12-本次交付状态)与[评测说明](../../evals/README.md)。
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 
