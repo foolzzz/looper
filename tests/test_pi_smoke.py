@@ -1,14 +1,19 @@
 """Safety boundaries of the isolated, installed-wheel Pi smoke harness."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import json
 import os
 import select
 import signal
 import subprocess
 import sys
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import pytest
 
@@ -16,6 +21,92 @@ SCRIPT = Path(__file__).resolve().parents[1] / "examples/pi/isolated-smoke.py"
 spec = importlib.util.spec_from_file_location("pi_smoke", SCRIPT)
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
+
+
+def test_fake_provider_mode_is_explicit_and_preserves_unverified_summary(monkeypatch):
+    monkeypatch.delenv("LOOPER_TEST_DATABASE_URL", raising=False)
+
+    def exercise(args, _root, _output, summary):
+        assert args.fake_provider is True
+        summary["unverified"].append("disposable database unavailable")
+
+    monkeypatch.setattr(smoke, "smoke", exercise)
+    assert smoke.main(["--fake-provider"]) == 2
+    assert json.loads((smoke.LAST_OUTPUT / "summary.json").read_text())["passed"] == []
+
+
+@contextmanager
+def _fresh_smoke_database(admin_url: str):
+    """An empty local ``looper_smoke_*`` database on the disposable server, dropped afterwards.
+
+    The harness accepts only that name, and it must contain no tables. CI's
+    ``LOOPER_TEST_DATABASE_URL`` is the shared ``postgres`` database, so it is
+    the admin connection here and is never passed to the smoke run.
+    """
+    import asyncpg
+
+    parts = urlsplit(admin_url)
+    if (parts.scheme not in ("postgres", "postgresql") or parts.hostname not in ("localhost", "127.0.0.1")
+            or unquote(parts.path.lstrip("/")) == "loopx"):
+        pytest.skip("no local disposable server: installed fake-provider sessions remain unverified")
+    name = "looper_smoke_" + uuid.uuid4().hex[:12]
+    smoke_url = urlunsplit(parts._replace(path="/" + name, query="", fragment=""))
+
+    async def create() -> None:
+        conn = await asyncpg.connect(admin_url)
+        try:
+            await conn.execute(f'CREATE DATABASE "{name}"')
+        finally:
+            await conn.close()
+
+    async def drop() -> None:
+        conn = await asyncpg.connect(admin_url)
+        try:
+            await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.run(create())
+    except (OSError, asyncpg.PostgresError):
+        pytest.skip("cannot create a looper_smoke_* database: installed fake-provider sessions remain unverified")
+    try:
+        yield smoke_url
+    finally:
+        asyncio.run(drop())
+
+
+@pytest.fixture(scope="module")
+def installed_session_evidence():
+    """One installed service on a fresh looper_smoke_* database, never an operator service."""
+    admin = os.environ.get("LOOPER_TEST_DATABASE_URL")
+    if not admin:
+        pytest.skip("no disposable DB: installed fake-provider sessions remain unverified")
+    with _fresh_smoke_database(admin) as smoke_url:
+        code = smoke.main(["--fake-provider", "--database-url", smoke_url, "--disposable-db"])
+        summary = json.loads((smoke.LAST_OUTPUT / "summary.json").read_text())
+        if code == 2:
+            pytest.skip("; ".join(summary["unverified"]))
+        assert code == 0, summary
+        return json.loads((smoke.LAST_OUTPUT / "sessions.json").read_text())
+
+
+@pytest.mark.parametrize("role", smoke.ROLES)
+def test_installed_fake_provider_session_closed_loop(installed_session_evidence, role):
+    from types import SimpleNamespace
+    from test_pi_platform_tools import _tool_messages
+
+    evidence = installed_session_evidence["roles"][role]
+    # Reuse the role driver's positive control: a real Pi request carries the
+    # platform's answer; an empty provider log cannot satisfy this assertion.
+    messages = _tool_messages(SimpleNamespace(requests=evidence["requests"]))
+    assert any(json.loads(message["content"])["status"] == "ok" for message in messages)
+    smoke.assert_role_evidence(role, evidence)
+
+
+@pytest.mark.parametrize("boundary", ["wrong-token", "parent-context", "cancel-tool"])
+def test_installed_fake_provider_negative_controls(installed_session_evidence, boundary):
+    assert installed_session_evidence["boundaries"][boundary] is True
 
 
 @pytest.mark.parametrize("unsafe", ["port", "root", "database", "symlink"])

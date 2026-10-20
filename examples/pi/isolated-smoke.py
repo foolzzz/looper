@@ -5,7 +5,8 @@ Run with ``uv run --extra test python examples/pi/isolated-smoke.py``.
 Optionally pass --database-url (or LOOPER_TEST_DATABASE_URL), --disposable-db,
 --runtime-root under the OS temporary directory, and --port (0 selects a free
 port). Only a fresh local database named looper_smoke_* is accepted. The caller
-owns database creation/deletion. No tasks, chats or model turns are scheduled.
+owns database creation/deletion. With --fake-provider, disposable chats/tasks
+exercise all four roles against a loopback-only fake Chat Completions provider.
 The development harness reuses the packaging tests' build/HTTP helpers; the
 server and negative startup checks run in the installed wheel's interpreter.
 Missing prerequisites are recorded as unverified and return 2; failures return
@@ -14,24 +15,374 @@ Missing prerequisites are recorded as unverified and return 2; failures return
 from __future__ import annotations
 
 import argparse
+import http.client
 import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 ROLES = ("manager", "planner", "worker", "reviewer")
+LAST_OUTPUT = None
+_OUTPUT_SEQ = 0
+PREFIX = "mcp__looper__"
+PROJECT_SENTINEL = "SMOKE_PROJECT_CONTEXT_8c40"
+PARENT_SENTINEL = "SMOKE_PARENT_CONTEXT_93f1"
+PERSONAL_SENTINEL = "SMOKE_PERSONAL_CONTEXT_64a2"
+STEER_SENTINEL = "SMOKE_STEER_701d"
+
+
+@contextmanager
+def fake_provider():
+    """The role-tool driver's local SSE protocol, with real platform results only.
+
+    Requests advertise the actual bridge schemas. The provider chooses a tool;
+    it never fabricates its result. A long inbox call leaves a window for the
+    Planner's forward; cancellation waits for a real local tool child sentinel.
+    """
+    state = {"requests": [], "errors": [], "worker": threading.Event(), "controls": 0,
+             "cancel": threading.Event(), "ready": {role: threading.Event() for role in ROLES}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            try:
+                assert self.path == "/v1/chat/completions"
+                assert self.headers.get("Authorization") == "Bearer local-key"
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                received = {"role": "control", "body": body}
+                state["requests"].append(received)
+                call_id = "call-" + str(len(state["requests"]))
+                if body.get("smoke_control"):
+                    state["controls"] += 1
+                    role, delta, reason = "control", {"content": "counted"}, "stop"
+                else:
+                    tools = {t["function"]["name"]: t["function"] for t in body["tools"]}
+                    role = ("manager" if PREFIX + "looper_projects" in tools else
+                            "planner" if PREFIX + "looper_task_profiles" in tools else
+                            "worker" if PREFIX + "looper_room_watch" in tools else "reviewer")
+                    received["role"] = role
+                    assert state["ready"][role].wait(10), "role's live scoped token was not observed"
+                    users = [m["content"] if isinstance(m["content"], str) else
+                             "".join(block.get("text", "") for block in m["content"])
+                             for m in body["messages"] if m["role"] == "user"]
+                    latest = users[-1]
+                    # Pi puts the task requirement in the developer prompt. A steer arrives later,
+                    # as its own user turn, and must not be required of the cancellation task.
+                    transcript = json.dumps(body["messages"])
+                    steered = role == "worker" and STEER_SENTINEL in latest
+                    cancelling = role == "worker" and "SMOKE_CANCEL" in transcript and not steered
+                    after_tool = body["messages"][-1]["role"] == "tool" or steered
+                    if not after_tool:
+                        name, arguments = (("looper_projects", {"action": "list"}) if role == "manager" else
+                                           ("looper_task_profiles", {}) if role == "planner" else
+                                           ("looper_room_roster", {}) if role == "reviewer" else
+                                           ("looper_room_inbox", {"wait_seconds": 10}))
+                        if cancelling:
+                            script = ("require('node:fs').writeFileSync('cancel-tool.json', JSON.stringify({pid:process.pid}));"
+                                      "setTimeout(() => {}, 120000)")
+                            name, arguments = "bash", {"command": "node -e " + shlex.quote(script)}
+                        tool = tools[name if cancelling else PREFIX + name]
+                        assert tool["parameters"]["type"] == "object"
+                        delta = {"tool_calls": [{"index": 0, "id": call_id,
+                                  "type": "function", "function": {"name": tool["name"],
+                                                                     "arguments": json.dumps(arguments)}}]}
+                        reason = "tool_calls"
+                        if role == "worker":
+                            state["cancel" if cancelling else "worker"].set()
+                    else:
+                        if role == "manager":
+                            reply = "SMOKE_MANAGER_DONE"
+                        elif role == "worker":
+                            if not cancelling:
+                                assert STEER_SENTINEL in transcript, "steer absent from next model request"
+                            reply = json.dumps({"status": "completed", "changed_files": {}, "deleted_files": [],
+                                                "summary": "cancel tool finished" if cancelling else "steering received"})
+                        elif role == "reviewer":
+                            reply = json.dumps({"passed": True, "findings": [], "summary": "checked"})
+                        else:
+                            if latest.startswith("[PLAN]"):
+                                result = {"steps": [{"id": "s1", "instruction": "Read platform state; " +
+                                                       ("SMOKE_CANCEL" if "SMOKE_CANCEL" in transcript else "SMOKE_WORK"),
+                                                       "acceptance_criteria": ["platform state read"],
+                                                       "depends_on": [], "review": True}]}
+                            elif latest.startswith("[CHAT]"):
+                                result = {"reply": "forwarded", "action": "forward", "step": "s1", "text": STEER_SENTINEL}
+                            elif latest.startswith("[DECISION]"):
+                                result = ({"decision": "review"} if "needs a passing review" in latest else
+                                          {"decision": "accept", "summary": "done", "final": {
+                                              "delivered": "platform read", "how_to_use": "smoke only",
+                                              "verification": "fake provider", "open_issues": "none"}})
+                            else:
+                                result = {"reply": "acknowledged", "action": "none"}
+                            reply = "```json\n" + json.dumps(result) + "\n```"
+                        delta, reason = {"content": reply}, "stop"
+                chunks = [{"id": "smoke-completion", "object": "chat.completion.chunk", "created": 0,
+                           "model": "selected", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+                          {"id": "smoke-completion", "object": "chat.completion.chunk", "created": 0,
+                           "model": "selected", "choices": [{"index": 0, "delta": {}, "finish_reason": reason}],
+                           "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}}]
+                data = ("".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as error:
+                state["errors"].append(str(error))
+                self.send_error(500)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state["url"] = f"http://127.0.0.1:{server.server_port}"
+    try:
+        # Same positive counter control as the installed-wheel cold-start helper.
+        client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        try:
+            client.request("POST", "/v1/chat/completions", json.dumps({"smoke_control": True}),
+                           {"Authorization": "Bearer local-key", "Content-Type": "application/json"})
+            response = client.getresponse()
+            assert response.status == 200 and b"counted" in response.read()
+            assert state["controls"] == 1
+            assert len(state["requests"]) == 1
+            state["requests"].clear()
+        finally:
+            client.close()
+        yield state
+    finally:
+        for ready in state["ready"].values():
+            ready.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def assert_role_evidence(role, evidence):
+    requests, records = evidence["requests"], evidence["records"]
+    assert requests and records, f"{role}: no positive provider/run control"
+    assert all(record["status"] == "completed" for record in records), role
+    assert sum(record["input_tokens"] for record in records) == 11 * len(requests), role
+    assert sum(record["output_tokens"] for record in records) == 3 * len(requests), role
+    for record in records:
+        assert record["role"] == role
+        assert record["agent_id"] == role or record["agent_id"].startswith(role + "-")
+        assert record["model"] == "selected"
+        assert record["metadata"]["profile"]["runtime"]["type"] == "pi"
+    advertised = {tool["function"]["name"] for tool in requests[0]["tools"]}
+    assert {PREFIX + tool["name"] for tool in evidence["catalog"]} == {name for name in advertised if name.startswith(PREFIX)}
+    assert evidence["scope_denied"] is True
+    name = {"manager": "looper_projects", "planner": "looper_task_profiles",
+            "worker": "looper_room_inbox", "reviewer": "looper_room_roster"}[role]
+    assert PREFIX + name in evidence["tool_names"], role
+    if role in ("manager", "planner"):
+        assert len(records) >= 2 and len({record["session_id"] for record in records}) == 1
+        assert records[0]["session_id"]
+        assert len([m for m in requests[-1]["messages"] if m["role"] == "user"]) >= 2
+    if role == "planner":
+        assert advertised - {name for name in advertised if name.startswith(PREFIX)} == {"read", "grep", "find", "ls"}
+        assert all(record["metadata"]["read_only"] == "tools" for record in records)
+    if role == "worker":
+        assert any(STEER_SENTINEL in json.dumps(body["messages"]) for body in requests[1:])
+    if role != "manager":
+        assert PROJECT_SENTINEL in json.dumps(requests[0]["messages"])
+        assert all(any(item["path"] == "AGENTS.md" and item["delivery"] == "injected"
+                       for item in record["metadata"]["project_instructions"]) for record in records)
+    assert all(PARENT_SENTINEL not in json.dumps(body) and PERSONAL_SENTINEL not in json.dumps(body) for body in requests)
+
+
+def session_smoke(base, token, root, work, output, provider, *, helper, installed):
+    """Drive the installed service, including resident factories and Worker RPC."""
+    evidence = {"roles": {}, "boundaries": {}, "provider_control": provider["controls"]}
+    grants = {}
+    seen = set()
+
+    def collect_grants():
+        for path in (root / ".local/mcp").glob("*.json"):
+            if path in seen:
+                continue
+            try:
+                scoped = json.loads(path.read_text())["mcpServers"]["looper"]["env"]["LOOPER_AGENT_TOKEN"]
+                catalog = request(base, "/api/agent/v1/tools", scoped)["tools"]
+            except (OSError, KeyError):
+                continue  # A completed run may already have revoked its token.
+            names = {tool["name"] for tool in catalog}
+            role = ("manager" if "looper_projects" in names else "planner" if "looper_task_profiles" in names else
+                    "worker" if "looper_room_watch" in names else "reviewer")
+            foreign, arguments = (("looper_vault_read", {"path": "note.md"}) if role == "manager" else
+                                   ("looper_projects", {"action": "list"}))
+            refused = request(base, "/api/agent/v1/ops/" + foreign, scoped, "POST", arguments)
+            assert refused["status"] == "error" and refused["error"]["code"] in ("invalid", "forbidden")
+            grants[role] = {"catalog": catalog, "scope_denied": True, "token": scoped}
+            seen.add(path)
+            provider["ready"][role].set()
+
+    def wait(check, description, timeout=90):
+        deadline = time.monotonic() + timeout
+        while True:
+            collect_grants()
+            assert not provider["errors"], provider["errors"]
+            value = check()
+            if value:
+                return value
+            if time.monotonic() >= deadline:
+                raise TimeoutError(description)
+            time.sleep(0.05)
+
+    def records(query=""):
+        rows = request(base, "/api/llm-records?limit=500" + query, token)["records"]
+        # The list endpoint filters by role but returns the persisted agent id.
+        return [{**row, "role": next(role for role in ROLES if row["agent_id"] == role or
+                                     row["agent_id"].startswith(role + "-"))} for row in rows]
+
+    def snapshot_role(role, selected):
+        tool_names = []
+        for record in selected:
+            events = request(base, f"/api/llm-records/{record['id']}/events?limit=5000", token)["events"]
+            for row in events:
+                event = row["event"]
+                if event.get("type") == "assistant":
+                    tool_names.extend(block["name"] for block in event["message"]["content"]
+                                      if block.get("type") == "tool_use")
+        grant = grants[role]
+        evidence["roles"][role] = {"requests": [r["body"] for r in provider["requests"] if r["role"] == role],
+                                  "records": selected, "catalog": grant["catalog"],
+                                  "scope_denied": grant["scope_denied"], "tool_names": tool_names}
+        assert_role_evidence(role, evidence["roles"][role])
+
+    def send(text, role="manager", task_id=None):
+        target = {"kind": role, **({"task_id": task_id} if task_id else {})}
+        return request(base, "/api/chat/send", token, "POST", {"text": text, "session_id": "smoke-" + role,
+                       "message_id": "smoke-" + str(time.monotonic_ns()), "target": target})
+
+    def task(marker):
+        task_id = request(base, "/api/tasks/create", token, "POST", {
+            "project_id": project_id, "requirement": marker})["task_id"]
+        request(base, "/api/tasks/start", token, "POST", {"task_id": task_id})
+        return task_id
+
+    try:
+        # This is the actual service's agent API; an operator token cannot impersonate an agent either.
+        before = len(provider["requests"])
+        for wrong in ("incorrect-local-token", token):
+            try:
+                request(base, "/api/agent/v1/tools", wrong)
+            except urllib.error.HTTPError as error:
+                assert error.code == 401
+            else:
+                raise AssertionError("wrong agent token accepted")
+        assert len(provider["requests"]) == before
+        evidence["boundaries"]["wrong-token"] = True
+        for turn in (1, 2):
+            send(f"SMOKE_MANAGER_TURN_{turn}: list projects")
+            wait(lambda: len([r for r in records("&agent_id=manager") if r["status"] == "completed"]) >= turn,
+                 "Manager turn did not complete")
+        wait(lambda: "SMOKE_MANAGER_DONE" in json.dumps(request(base, "/api/chat/messages?session_id=smoke-manager", token)),
+             "Manager reply was not persisted in chat")
+        snapshot_role("manager", records("&agent_id=manager"))
+        project_work = work / "project"
+        project_work.mkdir()
+        (project_work / "AGENTS.md").write_text(PROJECT_SENTINEL)
+        (work / "AGENTS.md").write_text(PARENT_SENTINEL)
+        project_id = request(base, "/api/projects", token, "POST", {
+            "name": "isolated-session-smoke", "work_dir": str(project_work)})["project_id"]
+        task_id = task("SMOKE_WORK")
+        wait(lambda: provider["worker"].is_set(), "Worker never reached local provider")
+        send(STEER_SENTINEL, "planner", task_id)
+        detail = wait(lambda: (value if (value := request(base, "/api/tasks/" + task_id, token))["status"]
+                              in ("completed", "failed", "cancelled", "stopped") else None), "task did not finish")
+        assert detail["status"] == "completed", detail["status"]
+        # Capture completed records before the cancellation task adds any more.
+        wait(lambda: all(r["status"] != "running" for r in records("&task_id=" + task_id)), "task left active runs")
+        completed = records("&task_id=" + task_id)
+        for role in ("planner", "worker", "reviewer"):
+            selected = [r for r in completed if r["role"] == role]
+            snapshot_role(role, selected)
+        evidence["boundaries"]["parent-context"] = True
+        cancelled = task("SMOKE_CANCEL")
+        wait(lambda: provider["cancel"].is_set(), "cancel tool was never requested")
+        # A tool-created child sentinel proves execution, beyond the model's tool_use.
+        tool_child = project_work / "cancel-tool.json"
+        def tool_started():
+            if not tool_child.is_file():
+                return False
+            for run in records("&task_id=" + cancelled):
+                if run["role"] == "worker" and run["status"] == "running":
+                    events = request(base, f"/api/llm-records/{run['id']}/events", token)["events"]
+                    if any(block.get("type") == "tool_use" and block.get("name") == "bash"
+                           for row in events for block in row["event"].get("message", {}).get("content", [])
+                           if isinstance(block, dict)):
+                        return True
+            return False
+        wait(tool_started, "cancellation did not reach a live tool")
+        process_files = list((root / ".local/agent-processes").glob("*.json"))
+        leaders = [int(path.stem) for path in process_files]
+        assert leaders, "no running process positive control before cancellation"
+        _, python, env = installed
+        snapshot = helper._run([str(python), "-I", "-c", '''
+import json, sys
+from types import SimpleNamespace
+from looper.agents import proc_tree
+table = proc_tree._snapshot()
+assert table, 'process listing unavailable: descendant cleanup cannot be verified'
+tree = {}
+for pid in sys.argv[1:]:
+    tree.update(proc_tree._tree(SimpleNamespace(pid=int(pid), returncode=None), table, {}))
+assert tree, 'no live tree before cancellation'
+print(json.dumps({'pids': list(tree), 'groups': list(set(tree.values()))}))
+''', *map(str, leaders)], cwd=work, env=env)
+        tree = json.loads(snapshot.stdout)
+        assert json.loads(tool_child.read_text())["pid"] in tree["pids"], "tool child missing from live tree"
+        evidence["cancel_tree"] = tree
+        cancelled_token = grants["worker"]["token"]
+        count_before = len([r for r in provider["requests"] if r["role"] == "worker"])
+        request(base, "/api/tasks/cancel", token, "POST", {"task_id": cancelled})
+        wait(lambda: request(base, "/api/tasks/" + cancelled, token)["status"] == "cancelled", "task not cancelled")
+        wait(lambda: all(r["status"] != "running" for r in records()), "cancel left running records")
+        def reaped():
+            for pid in tree["pids"]:
+                try:
+                    os.kill(pid, 0)
+                    return False
+                except ProcessLookupError:
+                    pass
+            for group in tree["groups"]:
+                try:
+                    os.killpg(group, 0)
+                    return False
+                except ProcessLookupError:
+                    pass
+            return not list((root / ".local/agent-processes").glob("*.json"))
+        wait(reaped, "cancel left processes", timeout=15)
+        try:
+            request(base, "/api/agent/v1/tools", cancelled_token)
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+        else:
+            raise AssertionError("cancel left a live run token")
+        assert len([r for r in provider["requests"] if r["role"] == "worker"]) == count_before
+        evidence["boundaries"]["cancel-tool"] = True
+    finally:
+        # Persist partial results on timeout/failure too; never infer a pass from missing evidence.
+        evidence["provider_requests"] = provider["requests"]
+        evidence["provider_errors"] = provider["errors"]
+        (output / "sessions.json").write_text(json.dumps(evidence, indent=2, default=str))
 
 
 @contextmanager
@@ -96,7 +447,7 @@ def request(base, path, token, method="GET", data=None):
         return json.load(response)
 
 
-def registry_smoke(helper, installed, root, port, dsn, output, provider_url):
+def registry_smoke(helper, installed, root, port, dsn, output, provider_url, *, provider_state=None):
     work, python, env = installed
     # Refuse an initialized DB before serve can resume anything or enable a channel.
     helper._run([str(python), "-I", "-c", '''
@@ -124,6 +475,12 @@ asyncio.run(check())
         if binary:
             (bin_dir / name).symlink_to(Path(binary).resolve())
     env = {**env, "PATH": str(bin_dir) + ":/usr/bin:/bin"}
+    if provider_state is not None:
+        # Poison only the disposable HOME, never the operator's configuration.
+        for name in (".pi/agent/AGENTS.md", ".claude/CLAUDE.md", ".codex/AGENTS.md", ".grok/AGENTS.md"):
+            path = Path(env["HOME"]) / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(PERSONAL_SENTINEL)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", port))
         port = sock.getsockname()[1]
@@ -153,7 +510,7 @@ asyncio.run(check())
         probe = request(base, "/api/runtimes/rt-pi/probe", token, "POST", {})
         assert not probe["runtime"]["probe_error"], "pi probe failed"
         provider = request(base, "/api/providers", token, "POST", {
-            "name": "isolated-smoke", "auth": "api_key", "protocols": ["openai-responses"],
+            "name": "isolated-smoke", "auth": "api_key", "protocols": ["openai-chat" if provider_state else "openai-responses"],
             "base_url": provider_url + "/v1", "api_key": "local-key", "models": [{"name": "selected"}],
         })["provider"]
         profile = request(base, "/api/agent-profiles", token, "POST", {
@@ -173,6 +530,8 @@ asyncio.run(check())
         assert set(saved["roles"]) == set(ROLES)
         assert {layer["role"] for layer in saved["used_by"]["layers"]} == set(ROLES)
         (output / "registry.json").write_text(json.dumps({"profile": saved, "probe": probe}, indent=2, default=str))
+        if provider_state is not None:
+            session_smoke(base, token, root, work, output, provider_state, helper=helper, installed=installed)
 
 
 def configuration_smoke(helper, installed, root, url):
@@ -229,6 +588,8 @@ print(json.dumps({'sys.executable': sys.executable, 'looper.__file__': looper.__
     summary["passed"].append("wheel installation and installed resource provenance")
     if not args.database_url:
         summary["unverified"].append("no disposable DB: installed serve and four-role registry readback")
+        if args.fake_provider:
+            summary["unverified"].append("fake-provider sessions, steering and cancellation require a disposable DB")
     if not shutil.which("pi"):
         summary["unverified"].append("pi not installed: safe probe and startup checks")
         return
@@ -264,23 +625,34 @@ print(probe.version)
         assert len(api.state["gets"]) == 2
         summary["passed"].append("wrong bridge token rejected in JSON/RPC; model requests = 0")
         if args.database_url:
-            registry_smoke(helper, installed, Path(args.runtime_root) if args.runtime_root else root / "runtime",
-                           args.port, args.database_url, output, url)
+            runtime_root = Path(args.runtime_root) if args.runtime_root else root / "runtime"
+            if args.fake_provider:
+                with fake_provider() as provider:
+                    registry_smoke(helper, installed, runtime_root, args.port, args.database_url, output,
+                                   provider["url"], provider_state=provider)
+                summary["passed"].append("installed four-role fake-provider sessions, scoped tools, usage, steering and cancellation")
+            else:
+                registry_smoke(helper, installed, runtime_root, args.port, args.database_url, output, url)
             assert not api.state["requests"]
             summary["passed"].append("installed serve, disabled channels and four-role registry readback; model requests = 0")
 
 
 def main(argv=None):
+    global LAST_OUTPUT, _OUTPUT_SEQ
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", default=os.environ.get("LOOPER_TEST_DATABASE_URL"))
     parser.add_argument("--disposable-db", action="store_true")
     parser.add_argument("--runtime-root")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--fake-provider", action="store_true", help="exercise installed sessions using only a local fake provider")
     args = parser.parse_args(argv)
     validate(parser, args)
-    output = ROOT / ".local" / ("pi-smoke-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()))
+    # Second resolution plus pid collides when one process calls main twice in the same second.
+    _OUTPUT_SEQ += 1
+    output = ROOT / ".local" / f"pi-smoke-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{_OUTPUT_SEQ}"
     output.mkdir(parents=True, mode=0o700)
-    summary = {"passed": [], "failed": [], "unverified": []}
+    LAST_OUTPUT = output
+    summary = {"mode": "fake-provider" if args.fake_provider else "startup", "passed": [], "failed": [], "unverified": []}
 
     def expired(*_args):
         raise TimeoutError("25 minute smoke deadline exceeded")
@@ -297,6 +669,8 @@ def main(argv=None):
     except PermissionError as error:
         (output / "environment.log").write_text(str(error))
         summary["unverified"].append("sandbox denied local listener/process access: HTTP model counter, wrong-token JSON/RPC startup and registry smoke")
+        if args.fake_provider:
+            summary["unverified"].append("installed fake-provider sessions did not complete")
     except KeyboardInterrupt:
         summary["failed"].append("interrupted; subprocess cleanup completed")
     except Exception as error:
