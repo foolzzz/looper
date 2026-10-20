@@ -63,14 +63,18 @@ export async function createBootstrap({ executable, text, mcp = [], readOnly = f
           await client.apply(ctx, resolved);
           if (own) {
             const added = [...ctx.tools.view().visible.keys()].filter(name => !before.has(name)).sort();
+            // Shared resource tools arrive with the first server. They are outside the
+            // bridge contract and must not widen the read-only guard.
+            const resourceTools = new Set(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource']);
+            const published = added.filter(name => !resourceTools.has(name));
             const expected = new Set(expectedTools.map(name => `mcp__looper__${name}`));
-            const has = name => added.includes(`mcp__looper__${name}`);
-            if (!added.length || added.some(name => !expected.has(name)) ||
+            const has = name => published.includes(`mcp__looper__${name}`);
+            if (!published.length || published.some(name => !expected.has(name)) ||
                 requiredTools.some(name => !has(name)) ||
                 toolGroups.some(group => group.any.some(has) && !group.all.every(has))) {
               throw new Error('Looper MCP tool set does not match the platform contract');
             }
-            for (const name of added) platformTools.add(name);
+            for (const name of published) platformTools.add(name);
           }
         } catch {
           if (own) throw new Error('Required Looper MCP bridge failed to become ready');

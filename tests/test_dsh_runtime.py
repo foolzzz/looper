@@ -26,6 +26,51 @@ PROVIDER = ProviderSpec("gateway", "Messages gateway", AuthKind.API_KEY,
                         base_url="https://gateway.example/anthropic/v1/", api_key="test-dsh-key")
 
 
+def test_dsh_local_messages_stand_in_counts_requests_and_streams_tool_calls():
+    import http.client
+    from tests.dsh_installed_stand_in import MessagesServer, tool
+
+    try:
+        peer = MessagesServer([[tool("mcp__looper__probe", {})], ["synthetic final"]])
+    except PermissionError:
+        pytest.skip("GAP: sandbox forbids binding a loopback Messages server; no positive HTTP control")
+    with peer as server:
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=3)
+        for _ in range(2):
+            connection.request("POST", "/v1/messages", json.dumps({"messages": [], "stream": True}))
+            response = connection.getresponse()
+            assert response.status == 200
+            records = [json.loads(line[6:]) for line in response.read().decode().splitlines()
+                       if line.startswith("data: ")]
+            assert records[0]["type"] == "message_start"
+            assert records[-1]["type"] == "message_stop"
+            assert records[1]["content_block"]["type"] == ("tool_use" if len(server.requests) == 1 else "text")
+        connection.close()
+        assert len(server.requests) == 2
+        assert all(row["path"] == "/v1/messages" for row in server.requests)
+
+
+def test_dsh_local_mcp_stand_in_counts_a_successful_tool_execution(tmp_path):
+    from tests.dsh_installed_stand_in import mcp_command, read_records
+
+    log = tmp_path / "mcp.jsonl"
+    command = mcp_command(log, ["looper_probe"])
+    requests = [
+        {"id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+        {"method": "notifications/initialized"},
+        {"id": 2, "method": "tools/list"},
+        {"id": 3, "method": "tools/call", "params": {"name": "looper_probe", "arguments": {}}},
+    ]
+    done = subprocess.run(command, input="".join(json.dumps({"jsonrpc": "2.0", **row}) + "\n"
+                                               for row in requests),
+                          capture_output=True, text=True, timeout=5, env={"PATH": os.defpath})
+    assert done.returncode == 0, done.stderr
+    replies = {row["id"]: row["result"] for line in done.stdout.splitlines() if (row := json.loads(line))}
+    assert replies[2]["tools"][0]["name"] == "looper_probe"
+    assert "platform called" in replies[3]["content"][0]["text"]
+    assert [row["method"] for row in read_records(log)].count("tools/call") == 1
+
+
 def test_registry_exposes_exact_dsh_models_and_replace_refusal():
     from looper.agents.profile_registry import type_view
     from looper.agents.runtimes.dsh import MODEL_MAP
