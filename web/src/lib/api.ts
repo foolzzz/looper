@@ -705,7 +705,7 @@ export interface ConfigImportPlan {
   /** Each section the file holds: how many of its entries are added, changed, unchanged and skipped. */
   counts: Record<string, Record<ConfigImportAction, number>>;
   /** Every entry but the unchanged ones: the fields that change, or why it is skipped. */
-  changes: { section: string; key: string; action: Exclude<ConfigImportAction, "unchanged">; fields?: string[]; reason?: string }[];
+  changes: { section: string; key: string; action: Exclude<ConfigImportAction, "unchanged">; fields?: string[]; reason?: string; code?: string }[];
   /** Secrets this machine still needs; after applying, `target` is the stored row whose form takes them. */
   need_secret: { section: string; key: string; names: string[]; target?: { kind: "provider" | "mcp" | "channel"; id: string } }[];
   notes: string[];

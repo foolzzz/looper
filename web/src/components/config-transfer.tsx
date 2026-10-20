@@ -23,6 +23,7 @@ const errorText = (err: unknown) => (err instanceof Error ? err.message : String
 const SECTION_LABELS: Record<string, string> = {
   runtimes: "Runtimes",
   providers: "Providers",
+  models: "Models",
   profiles: AGENT_PROFILE.plural,
   "settings.layers": "Settings layers",
   "settings.roles": "Role settings",
@@ -44,6 +45,8 @@ const TARGET_LINKS = { provider: "Edit provider", mcp: "Edit MCP server", channe
 
 const writes = (plan: ConfigImportPlan) =>
   Object.values(plan.counts).reduce((sum, counts) => sum + counts.added + counts.changed, 0);
+const skips = (plan: ConfigImportPlan) =>
+  Object.values(plan.counts).reduce((sum, counts) => sum + counts.skipped, 0);
 
 /** Each section's counts, then the entries that change or are skipped, and the added ones folded. */
 function PlanView({ plan }: { plan: ConfigImportPlan }) {
@@ -113,6 +116,7 @@ function PlanView({ plan }: { plan: ConfigImportPlan }) {
                 <span className="text-muted-foreground">{sectionLabel(c.section)} · </span>
                 <span className="font-mono">{c.key}</span>
                 <span className="text-muted-foreground">: {c.reason}</span>
+                {c.code && <span className="text-muted-foreground"> ({c.code})</span>}
               </li>
             ))}
           </ul>
@@ -330,9 +334,10 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
 
       {stage.step === "applied" && (
         <div className="space-y-3">
-          <p role="status" className="flex items-center gap-1.5 text-xs font-medium text-success">
-            <CheckCircle2 className="h-3.5 w-3.5" />
+          <p role="status" className={cn("flex items-center gap-1.5 text-xs font-medium", skips(stage.plan) > 0 ? "text-warning" : "text-success")}>
+            {skips(stage.plan) > 0 ? <AlertTriangle className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
             Applied {stage.file.name}: {writes(stage.plan)} {writes(stage.plan) === 1 ? "entry" : "entries"} written.
+            {skips(stage.plan) > 0 && ` ${skips(stage.plan)} skipped.`}
           </p>
           <PlanView plan={stage.plan} />
           <NeededSecrets plan={stage.plan} />
