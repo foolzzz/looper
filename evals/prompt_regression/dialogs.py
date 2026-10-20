@@ -78,7 +78,7 @@ from typing import Any
 from .compare import outcome
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
-    fresh_database, install_claude, register_agent, run_suite, running_server, select_agent, write_result,
+    fresh_database, install_claude, model_name, register_agent, run_suite, running_server, select_agent, write_result,
 )
 
 # v2: every row has rep, outcome (with error_class and error when it is an error) and models; the run has reps,
@@ -1271,12 +1271,43 @@ class SpendingCap(EvalError):
     """The dialog reached its case allowance."""
 
 
+def _check_manager_run(api: Api, since: int) -> None:
+    """Score only a completed turn; a failed resume followed by a completed retry is recoverable."""
+    from looper.agents.claude_cli import BUDGET_SUBTYPE
+
+    records = api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    new = [record for record in records if record["id"] > since
+           and not (record.get("metadata") or {}).get("autonomous")]
+    if not new:
+        raise EvalError("Manager replied without a new run record")
+    record = max(new, key=lambda row: row["id"])
+    result: dict[str, Any] = {}
+    after = 0
+    while True:
+        events = api.get(f"/api/llm-records/{record['id']}/events", after=after, limit=5000)["events"]
+        for row in events:
+            event = row["event"]
+            if event.get("type") == "result" and event.get("parent_tool_use_id") is None:
+                result = event
+        if len(events) < 5000:
+            break
+        after = events[-1]["seq"]
+    detail = record.get("error") or f"result subtype={result.get('subtype')!r}"
+    if result.get("subtype") == BUDGET_SUBTYPE:
+        raise SpendingCap(f"Manager run {record['id']} stopped at its spending cap: {detail}")
+    if (record["status"] != "completed" or record.get("error")
+            or result and (result.get("subtype") != "success" or result.get("is_error"))):
+        raise EvalError(f"Manager run {record['id']} {record['status']}: {detail}")
+
+
 def _ask(api: Api, session: str, text: str, *, timeout: float,
          check_budget: Callable[[], None] | None = None) -> str:
     """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one."""
     message_id = f"m-{uuid.uuid4().hex[:12]}"
     if check_budget is not None:
         check_budget()
+    records = api.get("/api/llm-records", agent_id="manager", limit=1)["records"]
+    since = max((record["id"] for record in records), default=0)
     api.post("/api/chat/send", {"text": text, "session_id": session, "message_id": message_id})
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1286,6 +1317,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             check_budget()
         for message in api.get("/api/chat/messages", session_id=session)["messages"]:
             if message.get("message_id") == f"{message_id}:reply":
+                _check_manager_run(api, since)
                 return str(message.get("content") or "")
         time.sleep(1.0)
     raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
@@ -1569,9 +1601,10 @@ def run(
             shutil.rmtree(root, ignore_errors=True)
         path = out_dir / f"{stamp}-dialogs-{mode}.json"
         result = write_result({
-            "schema": SCHEMA, "mode": mode, "model": chosen.get("model") if mode == "real" else None,
+            "schema": SCHEMA, "mode": mode, "model": model_name(chosen.get("model")) if mode == "real" else None,
             "agent": chosen.get("name"), "manager_agent": manager.get("name"),
-            "manager_model": manager.get("model") if mode == "real" else None, "started_at": stamp, "git": git,
+            "manager_model": model_name(manager.get("model")) if mode == "real" else None,
+            "started_at": stamp, "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "reps": reps,
             "stopped_by_cap": stopped, "aborted": aborted,
             "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6), "dialogs": results,

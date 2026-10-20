@@ -177,19 +177,18 @@ def test_manager_provider_registration_keeps_registry_warnings(monkeypatch: pyte
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from looper.agents import profile_registry
-    from looper.agents.ops import config
     from looper.agents.ops.config import _providers
 
-    provider = {"provider_id": "prov-test", "name": "test", "auth": "api_key", "protocols": ["openai-chat"],
-                "base_url": "https://example.invalid", "models": [{"name": "glm-5.3[1m]"}],
-                "profile_count": 0, "builtin": False, "api_key": None}
-    # This test covers forwarding the registry warning; provider heuristics are a separate contract.
-    monkeypatch.setattr(config, "_provider_warnings", lambda _view: [])
+    fields = {"name": "test", "vendor_type": "custom", "endpoints": [
+        {"protocol": "openai-chat", "base_url": "https://example.invalid"}]}
+    provider = {"provider_id": "prov-test", **fields, "auth": "api_key", "model_count": 0,
+                "profile_count": 0, "builtin": False, "api_key": None, "login": None}
+    # Forward registry warnings independently of how the registry derives them.
     warnings = ["glm-5.3[1m]: a Claude Code convention; other runtimes send it verbatim"]
-    monkeypatch.setattr(profile_registry, "create_provider", AsyncMock(return_value={
-        "provider": provider, "warnings": warnings}))
-    answer = asyncio.run(_providers(SimpleNamespace(arguments={
-        "action": "register", "name": "test", "protocols": ["openai-chat"], "models": ["glm-5.3[1m]"]})))
+    create = AsyncMock(return_value={"provider": provider, "warnings": warnings})
+    monkeypatch.setattr(profile_registry, "create_provider", create)
+    answer = asyncio.run(_providers(SimpleNamespace(arguments={"action": "register", **fields})))
+    create.assert_awaited_once_with(fields)
     assert answer["warnings"] == warnings
 
 

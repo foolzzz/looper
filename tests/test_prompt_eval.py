@@ -956,12 +956,86 @@ def test_a_gate_task_has_gates_on_whatever_user_gates_says(tmp_path: Path) -> No
     assert row["outcome"] == "pass" and row["gates_opened"] == 1, row["problems"]
 
 
+@pytest.mark.parametrize("typed", [False, True])
+@pytest.mark.parametrize("suite", ["tasks", "dialogs"])
+def test_run_metadata_keeps_model_names_with_typed_or_legacy_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: bool, suite: str,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    def profile(name: str) -> dict[str, Any]:
+        model = {"name": name, "protocol": "anthropic-messages", "model_id": f"model-{name}",
+                 "provider_id": "prov-test"} if typed else name
+        return {"name": f"claude-code/{name}", "model": model}
+
+    @contextmanager
+    def database(*_: Any) -> Any:
+        yield "unused", 0.0
+
+    @contextmanager
+    def server(**_: Any) -> Any:
+        yield SimpleNamespace(post=lambda *_: {"project_id": "project-test"})
+
+    module = runner if suite == "tasks" else dialogs
+    monkeypatch.setattr(module, "fresh_database", database)
+    monkeypatch.setattr(module, "running_server", server)
+    monkeypatch.setattr(module, "install_claude", lambda *_, **__: None)
+    monkeypatch.setattr(module, "_git", lambda: {})
+    monkeypatch.setattr(module, "select_agent", lambda *_, **__: profile("sonnet"))
+    if suite == "tasks":
+        monkeypatch.setattr(runner, "run_task", lambda _api, task, *_a, **_kw: {
+            "id": task.id, "outcome": "pass", "cost_usd": 0.0})
+        result, path = runner.run(mode="real", tasks=task_list.select(["single_step"]),
+                                  admin_url="unused", out_dir=tmp_path)
+        assert result["protocol"] == ("anthropic-messages" if typed else None)
+    else:
+        monkeypatch.setattr(dialogs, "_manager_profile", lambda *_: profile("opus"))
+        monkeypatch.setattr(dialogs, "run_dialog", lambda _api, case, **_: {
+            "id": case.id, "outcome": "pass", "turns": [], "cost_usd": 0.0})
+        monkeypatch.setattr(dialogs, "_usage", lambda _: (0.0, {}))
+        result, path = dialogs.run(mode="real", dialogs=dialogs.select(["status"]),
+                                   manager_model="opus", admin_url="unused", out_dir=tmp_path)
+        assert result["manager_model"] == "opus"
+    assert result["aborted"] is None
+    assert result["model"] == "sonnet"
+    assert json.loads(path.read_text())["model"] == "sonnet"
+    assert runner.compared_model(result) == ("opus" if suite == "dialogs" else "sonnet")
+
+
+@pytest.mark.parametrize("typed", [False, True])
+@pytest.mark.parametrize("dialogs", [False, True])
+def test_baseline_comparison_reads_model_names_from_existing_raw_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: bool, dialogs: bool,
+) -> None:
+    def model(name: str) -> Any:
+        return {"name": name, "protocol": "anthropic-messages", "model_id": f"model-{name}",
+                "provider_id": "prov-test"} if typed else name
+
+    run = {"mode": "real", "model": model("sonnet"), "tasks": []}
+    if dialogs:
+        run.update(manager_model=model("opus"), dialogs=[])
+    expected = "opus" if dialogs else "sonnet"
+    monkeypatch.setattr(runner, "BASELINES_DIR", tmp_path)
+    baseline = tmp_path / ("dialogs-real-opus.json" if dialogs else "real-sonnet.json")
+    baseline.write_text(json.dumps(run))
+    earlier = tmp_path / "20261016T100000Z-real.json"
+    earlier.write_text(json.dumps(run))
+    current = tmp_path / "20261016T110000Z-real.json"
+    assert runner.compared_model(run) == expected
+    for choice in (None, "previous"):
+        data, _ = runner.comparison_base(choice, out_dir=tmp_path, current=current, mode="real",
+                                         model=runner.compared_model(run), dialogs=dialogs)
+        assert data == run
+
+
 def test_the_base_is_the_committed_baseline_unless_another_is_named(tmp_path: Path,
                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     baselines, runs = tmp_path / "baselines", tmp_path / "runs"
     baselines.mkdir()
     runs.mkdir()
     monkeypatch.setattr(runner, "BASELINES_DIR", baselines)
+    # Keep these paths outside the report's repository, including with an in-tree --basetemp.
+    monkeypatch.setattr(runner, "REPO_ROOT", tmp_path / "repository")
 
     def write(path: Path, **data: Any) -> Path:
         path.write_text(json.dumps({"mode": "real", **data}), encoding="utf-8")
@@ -1097,6 +1171,100 @@ def test_case_allowances_fit_the_reservations_and_total_cap(jobs: int) -> None:
     assert stopped and results[-1].get("skipped")
 
 
+@pytest.mark.parametrize("mode", ["real", "fake"])
+@pytest.mark.parametrize("case,expected", [
+    ("completed", "pass"), ("recovered", "pass"), ("subagent_failure", "pass"),
+    ("completed_no_result", "pass"), ("completed_with_error", "harness"), ("interrupted", "harness"),
+    ("failed", "harness"), ("budget_words_only", "harness"), ("incomplete", "harness"),
+    ("missing", "harness"), ("failed_after_completed", "harness"),
+    ("autonomous_after_failed", "harness"), ("autonomous_after_completed", "pass"),
+    ("error_result_completed", "harness"), ("typed_budget", "spending_cap"),
+    ("paged_budget", "spending_cap"),
+])
+def test_dialog_checks_the_final_manager_run_before_scoring_a_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, case: str, expected: str,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    checked: list[str] = []
+    diagnostic = "Claude Code stopped at its per-run spend cap" if case == "budget_words_only" else "run failed"
+    status = "completed" if expected == "pass" or case in {
+        "error_result_completed", "completed_with_error"} else "failed"
+    if case in {"incomplete", "interrupted"}:
+        status = "running" if case == "incomplete" else "interrupted"
+    final_id = 3 if case in {"recovered", "failed_after_completed"} else 2
+    result = {"type": "result", "subtype": "success", "is_error": False}
+    if case in {"typed_budget", "paged_budget"}:
+        result.update(subtype="error_max_budget_usd", is_error=True)
+    elif case == "error_result_completed":
+        result.update(subtype="error_during_execution", is_error=True)
+
+    class Api:
+        def __init__(self) -> None:
+            self.sent: dict[str, Any] | None = None
+            self.event_offsets: list[int] = []
+
+        def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+            assert path == "/api/chat/send"
+            self.sent = data
+            return {}
+
+        def get(self, path: str, **query: Any) -> dict[str, Any]:
+            if path == "/api/tasks":
+                return {"tasks": []}
+            if path == "/api/chat/messages":
+                assert self.sent is not None
+                return {"messages": [{"message_id": self.sent["message_id"] + ":reply",
+                                      "content": "该配对不兼容，已保持所有配置不变。"}]}
+            if path == "/api/llm-records":
+                assert query["agent_id"] == "manager"
+                rows = [{"id": 1, "status": "failed", "error": "old turn failed"}]
+                if self.sent is not None and case != "missing":
+                    if final_id == 3:
+                        rows.append({"id": 2, "status": "failed" if case == "recovered" else "completed",
+                                     "error": "resume failed" if case == "recovered" else None})
+                    rows.append({"id": final_id, "status": status,
+                                 "error": diagnostic if status == "failed" or case == "completed_with_error" else None})
+                    if case.startswith("autonomous_after_"):
+                        rows.append({"id": final_id + 1, "status": "completed" if status == "failed" else "running",
+                                     "error": None, "metadata": {"autonomous": True}})
+                return {"records": list(reversed(rows))}
+            event_ids = {final_id, final_id + 1} if case.startswith("autonomous_after_") else {final_id}
+            assert path in {f"/api/llm-records/{record_id}/events" for record_id in event_ids}
+            after = int(query.get("after", 0))
+            limit = int(query.get("limit", 1000))
+            self.event_offsets.append(after)
+            events = []
+            if case == "paged_budget":
+                events = [{"seq": i, "event": {"type": "system"}} for i in range(1, 5001)]
+            if case != "completed_no_result":
+                events.append({"seq": len(events) + 1, "event": result})
+            if case == "subagent_failure":
+                events.append({"seq": len(events) + 1, "event": {
+                    "type": "result", "subtype": "error_during_execution",
+                    "is_error": True, "parent_tool_use_id": "subagent-tool"}})
+            return {"events": [event for event in events if event["seq"] > after][:limit]}
+
+    monkeypatch.setattr(dialogs, "_last_action", lambda *_: 0)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+    monkeypatch.setattr(dialogs, "_stop_leftovers", lambda *_: None)
+    say = dialogs.Say("确认配对是否有效。", lambda look: checked.append(look.reply))
+    scenario = tmp_path / "scenarios.json"
+    scenario.write_text("{}")
+    api = Api()
+    row = dialogs.run_dialog(api, dialogs.Dialog("refused_pair", (say,)), database_url="unused",
+                             project_id="project-test", scenarios=scenario, mode=mode, timeout=1)
+    if expected == "pass":
+        assert row["outcome"] == "pass" and len(checked) == 1, row
+    else:
+        assert (row["outcome"], row.get("error_class"), row["success"]) == ("error", expected, False), row
+        assert not checked
+        if status == "failed" and case != "missing":
+            assert diagnostic in row["error"]
+    if case == "paged_budget":
+        assert api.event_offsets == [0, 5000]
+
+
 @pytest.mark.parametrize("jobs", [1, 2])
 def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: int,
@@ -1124,6 +1292,11 @@ def test_dialogs_use_the_reserved_case_budget_only_in_parallel_mode(
         def get(self, path: str, **_: Any) -> dict[str, Any]:
             if path == "/api/tasks":
                 return {"tasks": []}
+            if path == "/api/llm-records":
+                return {"records": [{"id": i + 1, "status": "completed", "error": None}
+                                    for i in reversed(range(len(self.messages)))]}
+            if path.startswith("/api/llm-records/"):
+                return {"events": [{"seq": 1, "event": {"type": "result", "subtype": "success"}}]}
             assert path == "/api/chat/messages"
             return {"messages": self.messages}
 

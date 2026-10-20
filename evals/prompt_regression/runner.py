@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -902,8 +902,8 @@ def run(
         run_result = write_result({
             "schema": SCHEMA,
             "mode": mode,
-            "model": (chosen.get("model") or {}).get("name") if mode == "real" else None,
-            "protocol": (chosen.get("model") or {}).get("protocol"),
+            "model": model_name(chosen.get("model")) if mode == "real" else None,
+            "protocol": chosen["model"].get("protocol") if isinstance(chosen.get("model"), Mapping) else None,
             "cost_basis": chosen.get("cost"),
             "agent": chosen.get("name"),
             "provider_preset": provider.preset if provider is not None else None,
@@ -1119,9 +1119,17 @@ def baseline_path(*, mode: str, model: str | None, dialogs: bool = False) -> Pat
     return BASELINES_DIR / (f"dialogs-{name}" if dialogs else name)
 
 
+def model_name(value: Any) -> str | None:
+    """Keep report model names stable across legacy strings and typed registry references."""
+    if isinstance(value, Mapping):
+        value = value.get("name")
+    return value if isinstance(value, str) else None
+
+
 def compared_model(run: dict[str, Any]) -> str | None:
     """The model a run is compared by: the Manager's for dialogs (``manager_model``, else every role's)."""
-    return run.get("manager_model", run.get("model")) if "dialogs" in run else run.get("model")
+    value = run.get("manager_model", run.get("model")) if "dialogs" in run else run.get("model")
+    return model_name(value)
 
 
 def previous_run(out_dir: Path, current: Path, *, mode: str, model: str | None, dialogs: bool = False) -> Path | None:
