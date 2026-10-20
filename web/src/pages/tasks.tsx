@@ -254,7 +254,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const [scheduleNames, setScheduleNames] = useState<Record<string, string>>({});
-  const selectedTaskId = sub || null;
+  const [taskPath, taskQuery = ""] = (sub || "").split("?");
+  const selectedTaskId = taskPath ? decodeURIComponent(taskPath) : null;
+  const gateStep = new URLSearchParams(taskQuery).get("gate");
   // The list's filter, so leaving a task's detail returns to the list it was opened from.
   const listQuery = useRef("");
   useEffect(() => {
@@ -460,6 +462,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     return (
       <TaskDetailRoute
         taskId={selectedTaskId}
+        gateStep={gateStep}
         onBack={() => setSelectedTaskId(null)}
       />
     );

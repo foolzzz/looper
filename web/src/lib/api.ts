@@ -2049,9 +2049,17 @@ export interface ActivityEvent {
   created_at: string;
 }
 
+export class TaskDetailError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`task detail ${status}`);
+    this.status = status;
+  }
+}
+
 export async function fetchTaskDetail(taskId: string): Promise<TaskDetail> {
   const res = await fetch(`${API_BASE}/tasks/${taskId}`);
-  if (!res.ok) throw new Error(`task detail ${res.status}`);
+  if (!res.ok) throw new TaskDetailError(res.status);
   return res.json();
 }
 
@@ -2507,8 +2515,8 @@ export interface ProviderPreset {
   apis: {
     protocols: string[];
     base_url: string;
-    /** Models for a provider of this API. An OpenAI-format API omits Claude Code's `[1m]` mark. */
-    models: Pick<ProviderModel, "name" | "context_window" | "background_model">[];
+    /** When present, replaces the preset's model catalog for this API, including an empty catalog. */
+    models?: ProviderPreset["models"];
   }[];
   models: Pick<ProviderModel, "name" | "context_window" | "background_model">[];
   env: ProviderEnvEntry[];
@@ -2657,11 +2665,14 @@ export function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
   return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "re-detect runtime");
 }
 
-export function createProvider(fields: ProviderFields): Promise<{ provider: Provider }> {
+export function createProvider(fields: ProviderFields): Promise<{ provider: Provider; warnings: string[] }> {
   return registryCall("POST", "/providers", fields, "add provider");
 }
 
-export function updateProvider(providerId: string, fields: ProviderFields): Promise<{ provider: Provider }> {
+export function updateProvider(
+  providerId: string,
+  fields: ProviderFields,
+): Promise<{ provider: Provider; warnings: string[] }> {
   return registryCall("PUT", `/providers/${encodeURIComponent(providerId)}`, fields, "update provider");
 }
 

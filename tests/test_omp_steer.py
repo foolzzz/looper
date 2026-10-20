@@ -8,6 +8,7 @@ import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -17,13 +18,75 @@ from fake_claude import fake_claude
 from looper import child_env
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+from looper.agents.profile_registry import CatalogModel
 from looper.agents.runtimes import Capability, StreamChannel
 from looper.agents.runtimes import omp as omp_module, omp_steer
 from looper.agents.runtimes.omp_steer import OmpChannel
 from looper.agents.tiers import worker
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from tests.test_agent_planner_worker import _work_item
-from tests.test_omp_runtime import OMP, _blocks, _launch
+from tests.test_omp_runtime import API_ERROR, OMP, _FAILED_OMP, _blocks, _launch, _provider
+
+
+@pytest.mark.parametrize("source", ["setup", "prompt", "terminal"])
+def test_rpc_errors_redact_configured_key_before_emitting(source: str) -> None:
+    secret = "opaque-provider-secret"
+
+    async def run() -> None:
+        launch = _launch(provider=_provider(api_key=secret))
+        launch = replace(launch, settings=replace(launch.settings, profile=replace(
+            launch.profile, runtime=replace(launch.profile.runtime, capabilities=OMP.capabilities | {Capability.STEER}))))
+        stdout = asyncio.StreamReader()
+        process = SimpleNamespace(stdout=stdout, stdin=SimpleNamespace(write=lambda _: None, drain=AsyncMock()))
+        channel = OMP.run_channel(process, launch=launch, cwd="/work")
+        await channel.start("test")
+        raw = [{"type": "session", "id": "rpc-session"}]
+        if source == "setup":
+            raw.append({"type": "response", "id": "1", "success": False,
+                        "error": f"Rejected credential {secret}"})
+        else:
+            raw.append({"type": "message_end", "message": {
+                "role": "assistant", "stopReason": "error", "content": [],
+                "errorMessage": f"Rejected credential {secret}", "usage": {"input": 100, "output": 10}}})
+            raw.append({"type": "agent_end", "isTerminal": True})
+            if source == "prompt":
+                raw.append({"type": "prompt_result", "status": "error", "error": {
+                    "httpStatus": 401, "message": f"Rejected credential {secret}"}})
+        stdout.feed_data("".join(json.dumps(event) + "\n" for event in raw).encode())
+        stdout.feed_eof()
+        events = [event async for event in channel.events()]
+        assert secret not in json.dumps(events)
+        results = [event for event in events if event["type"] == "result"]
+        assert len(results) == 1
+        assert "Rejected credential [redacted]" in results[0]["errors"][0]
+
+    asyncio.run(run())
+
+
+def test_rpc_detailed_error_keeps_terminal_usage_and_session() -> None:
+    async def run() -> None:
+        stdout = asyncio.StreamReader()
+        channel = OmpChannel(SimpleNamespace(stdout=stdout), model="test-model", cwd="/work")
+        raw = [
+            {"type": "session", "id": "rpc-session"},
+            {"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "content": [],
+                                                "usage": {"input": 100, "output": 10}}},
+            {"type": "agent_end", "isTerminal": True},
+            {"type": "prompt_result", "status": "error", "error": {"httpStatus": 400, "message": "Bad model"}},
+        ]
+        stdout.feed_data("".join(json.dumps(event) + "\n" for event in raw).encode())
+        stdout.feed_eof()
+        events = [event async for event in channel.events()]
+        results = [event for event in events if event["type"] == "result"]
+        assert len(results) == 1
+        result = results[0]
+        assert result["is_error"]
+        assert "HTTP 400 Bad model" in result["errors"][0]
+        assert result["session_id"] == "rpc-session"
+        assert result["modelUsage"]["test-model"] == {
+            "inputTokens": 100, "outputTokens": 10, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}
+
+    asyncio.run(run())
 
 
 _RPC = """
@@ -101,6 +164,14 @@ while True:
         time.sleep(0.1)
     emit(response)
     if command == 'prompt':
+        if scenario in ('api_error', 'api_error_after_end'):
+            if scenario == 'api_error_after_end':
+                emit({'type': 'message_end', 'message': {'role': 'assistant', 'stopReason': 'error', 'content': [],
+                      'errorMessage': 'Rejected credential opaque-provider-secret', 'usage': {'input': 100, 'output': 10}}})
+                emit({'type': 'agent_end', 'isTerminal': True})
+            emit({'type': 'prompt_result', 'status': 'error', 'error': {
+                'httpStatus': 400, 'message': 'Unsupported model. Rejected credential opaque-provider-secret\\nAuthorization: Bearer private-rpc-secret'}})
+            continue
         if scenario == 'noise':
             print('not json SECRET-xyz', flush=True)
             print('[]', flush=True)
@@ -476,6 +547,82 @@ def test_worker_omp_input_over_the_bus(tmp_path: Path, monkeypatch: pytest.Monke
             assert argv[argv.index("--mode") + 1] == ("rpc" if steer else "json")
             assert ("-p" in argv) is (not steer)
             assert not await pool.send_input("w1", "late")
+        finally:
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("source", ["event", "log", "rpc", "rpc-after-end"])
+def test_worker_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                          agent_db: Any, source: str) -> None:
+    rpc = source.startswith("rpc")
+    if rpc:
+        executable = _fake(tmp_path, monkeypatch, "api_error_after_end" if source == "rpc-after-end" else "api_error")
+    else:
+        executable = fake_claude(tmp_path / "omp", f"ERROR = {API_ERROR!r}\nSOURCE = {source!r}\n" + _FAILED_OMP)
+    launch = _launch(executable=executable, provider=_provider(api_key="opaque-provider-secret", catalog=(
+        CatalogModel("gpt-5.5", input_usd_per_mtok=2, output_usd_per_mtok=10,
+                     cache_read_usd_per_mtok=0.2, cache_write_usd_per_mtok=2.5),)))
+    capabilities = OMP.capabilities | {Capability.STEER} if rpc else OMP.capabilities
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(
+        launch.profile, runtime=replace(launch.profile.runtime, capabilities=capabilities))))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        await pool.start(bus)
+        try:
+            await asyncio.sleep(0)
+            await bus.publish(_work_item(tmp_path))
+            queue = bus.get_queue("planner-t1")
+            while True:
+                result = await asyncio.wait_for(queue.get(), 8)
+                if result.message_type == MessageType.WORK_RESULT:
+                    break
+            reason = result.payload["error"]
+            assert result.payload["status"] == "failed"
+            assert "HTTP 400 " + ("Unsupported model." if rpc else API_ERROR) in reason
+            assert len(reason) <= 500
+            assert not any(secret in reason for secret in (
+                "opaque-provider-secret", "private-header-value", "private-field-value", "private-rpc-secret", "wrong run"))
+            assert "opaque-provider-secret" not in str(agent_db.append_events.call_args_list)
+            if source == "rpc-after-end":
+                fields = agent_db.finish_record.call_args.kwargs
+                assert fields["input_tokens"] == 100
+                assert fields["output_tokens"] == 10
+                assert fields["session_id"] == "rpc-session"
+                assert fields["cost_usd"] == pytest.approx(0.0003)
+        finally:
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_worker_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              agent_db: Any) -> None:
+    from looper.agents.runtimes import adapter
+
+    launch = _launch(executable=str(tmp_path / "missing-codex"))
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(
+        launch.profile, runtime=replace(launch.profile.runtime, type="codex"))))
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    monkeypatch.setattr(worker.proc_tree, "spawn", AsyncMock(side_effect=FileNotFoundError("executable was not found")))
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        await pool.start(bus)
+        try:
+            await asyncio.sleep(0)
+            await bus.publish(_work_item(tmp_path))
+            queue = bus.get_queue("planner-t1")
+            result = await asyncio.wait_for(queue.get(), 8)
+            assert result.message_type == MessageType.WORK_RESULT
+            assert result.payload["error"].startswith(f"Cannot start {adapter('codex').label}:")
         finally:
             await pool.stop()
             await bus.shutdown()

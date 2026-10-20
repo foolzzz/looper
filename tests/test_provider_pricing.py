@@ -26,6 +26,160 @@ MAIN = CatalogModel("m-main", input_usd_per_mtok=2.0, output_usd_per_mtok=10.0, 
                     cache_write_usd_per_mtok=2.5)
 
 
+@pytest.mark.parametrize("preset_id", ["glm-bigmodel", "glm-zai", "kimi-moonshot-cn", "kimi-moonshot", "deepseek"])
+def test_context_suffixes_belong_only_to_a_presets_anthropic_api(preset_id: str) -> None:
+    from looper.agents.provider_presets import api_models, presets_view
+
+    preset = next(p for p in presets_view() if p["preset_id"] == preset_id)
+    for api in preset["apis"]:
+        models = api_models(preset, api)
+        assert len(models) == len(preset["models"])
+        anthropic = "anthropic-messages" in api["protocols"]
+        for original, model in zip(preset["models"], models):
+            for field in ("name", "background_model"):
+                expected = original[field]
+                if expected and not anthropic:
+                    expected = expected.removesuffix("[1m]")
+                assert model[field] == expected
+            assert model["context_window"] == original["context_window"]
+            if original["name"].endswith("[1m]"):
+                assert model["context_window"] == 1_000_000
+
+
+@pytest.mark.parametrize(("name", "base", "suffix"), [
+    ("glm-5.3[1m]", "glm-5.3", "[1m]"),
+    (" sonnet[200k] ", "sonnet", "[200k]"),
+    ("deepseek-flash", "deepseek-flash", None),
+    ("claude-haiku-4-5-20251001[1m]", "claude-haiku-4-5-20251001", "[1m]"),
+    ("model[1m]-preview", "model[1m]-preview", None),
+])
+def test_model_names_parse_a_trailing_context_suffix(name: str, base: str, suffix: str | None) -> None:
+    from looper.agents.model_names import parse_model_name
+
+    parsed = parse_model_name(name)
+    assert parsed == (base, suffix)
+    assert parsed.base == base and parsed.context_suffix == suffix
+
+
+@pytest.mark.parametrize("protocol", list(ApiProtocol))
+def test_provider_context_suffix_warnings_name_main_and_background_models(protocol: ApiProtocol) -> None:
+    from dataclasses import replace
+    from looper.agents.profile_registry import provider_warnings
+
+    provider = replace(_provider(CatalogModel("glm-5.3[1m]", background_model="glm-5.3-flash[1m]")),
+                       protocols=frozenset({protocol}))
+    warnings = provider_warnings(provider)
+    if protocol is ApiProtocol.ANTHROPIC_MESSAGES:
+        assert warnings == []
+    else:
+        assert len(warnings) == 1
+        assert all(name in warnings[0] for name in provider.models + ("glm-5.3-flash[1m]",))
+        assert "Claude Code convention" in warnings[0] and "verbatim" in warnings[0]
+    assert provider_warnings(replace(provider, catalog=(CatalogModel("deepseek-flash"),))) == []
+    background_only = provider_warnings(replace(provider, catalog=(
+        CatalogModel("glm-5.3", background_model="glm-5.3-flash[1m]"),)))
+    assert len(background_only) == (0 if protocol is ApiProtocol.ANTHROPIC_MESSAGES else 1)
+    if background_only:
+        assert "glm-5.3-flash[1m]" in background_only[0]
+    assert provider_warnings(replace(provider, protocols=frozenset(ApiProtocol))) == []
+
+
+@pytest.mark.parametrize("protocol", ["openai-chat", "anthropic-messages"])
+def test_provider_api_saves_return_context_suffix_warnings(
+    monkeypatch: pytest.MonkeyPatch, protocol: str,
+) -> None:
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from looper.db import connection, profile_registry as db
+    from tests.test_profile_registry_db import _ok
+
+    # Exercise the HTTP/registry save path; only PostgreSQL persistence is replaced.
+    row = {"id": "prov-test", "builtin": False, "created_at": "", "updated_at": ""}
+
+    @asynccontextmanager
+    async def transaction():
+        yield AsyncMock()
+
+    async def insert(_conn, fields, _key):
+        row.update(fields)
+        return row["id"]
+
+    async def update(_conn, _id, fields, **_kwargs):
+        row.update(fields)
+
+    monkeypatch.setattr(connection, "transaction", transaction)
+    monkeypatch.setattr(db, "insert_provider", insert)
+    monkeypatch.setattr(db, "update_provider", update)
+    monkeypatch.setattr(db, "get_provider", AsyncMock(side_effect=lambda *_a, **_kw: dict(row)))
+    monkeypatch.setattr(db, "list_providers", AsyncMock(side_effect=lambda: [dict(row)]))
+    monkeypatch.setattr(db, "list_profiles", AsyncMock(return_value=[]))
+
+    async def save() -> None:
+        answer = await _ok("POST", "/api/providers", {"name": "test", "protocols": [protocol], "auth": "api_key",
+            "models": [{"name": "glm-5.3[1m]", "background_model": "glm-5.3-flash[1m]"}]})
+        expected = 0 if protocol == "anthropic-messages" else 1
+        assert len(answer["warnings"]) == expected
+        assert row["models"][0]["name"] == "glm-5.3[1m]"
+        answer = await _ok("PUT", "/api/providers/prov-test", {"name": "renamed"})
+        assert len(answer["warnings"]) == expected
+        if expected:
+            assert "glm-5.3-flash[1m]" in answer["warnings"][0]
+        answer = await _ok("PUT", "/api/providers/prov-test", {"models": [{"name": "glm-5.3"}]})
+        assert answer["warnings"] == [] and row["models"][0]["name"] == "glm-5.3"
+
+    asyncio.run(save())
+
+
+@pytest.mark.parametrize("runtime_type", ["claude-code", "omp", "codex"])
+@pytest.mark.parametrize(("model", "background"), [
+    ("glm-5.3[1m]", "glm-5.3-flash[1m]"), ("glm-5.3", "glm-5.3-flash[1m]"),
+    ("glm-5.3", None),
+])
+def test_profile_context_suffix_warnings_follow_its_runtime(
+    monkeypatch: pytest.MonkeyPatch, runtime_type: str, model: str, background: str | None,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from looper.agents.profile_registry import _profile_answer
+    from looper.db import profile_registry as db
+
+    # Even a provider that serves Anthropic messages can be used by another runtime.
+    row = {"id": "profile-test", "name": "test", "model": model, "builtin": False,
+           "runtime_id": "rt-test", "runtime_name": "test", "runtime_type": runtime_type,
+           "provider_id": "prov-test", "provider_name": "test", "provider_auth": "api_key",
+           "provider_protocols": ["anthropic-messages"], "provider_base_url": "https://example.invalid",
+           "provider_models": [{"name": model, "background_model": background}, {"name": "unrelated[1m]"}]}
+    monkeypatch.setattr(db, "get_profile", AsyncMock(return_value=row))
+    monkeypatch.setattr(db, "profile_usage", AsyncMock(return_value={}))
+    warnings = asyncio.run(_profile_answer(row["id"]))["warnings"]
+    if runtime_type == "claude-code" or not (model.endswith("[1m]") or background):
+        assert warnings == []
+    else:
+        assert len(warnings) == 1 and "Claude Code convention" in warnings[0] and "verbatim" in warnings[0]
+        assert "unrelated" not in warnings[0]
+        for name in (model, background):
+            if name and name.endswith("[1m]"):
+                assert name in warnings[0]
+
+
+def test_manager_provider_registration_keeps_registry_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from looper.agents import profile_registry
+    from looper.agents.ops.config import _providers
+
+    provider = {"provider_id": "prov-test", "name": "test", "auth": "api_key", "protocols": ["openai-chat"],
+                "base_url": "https://example.invalid", "models": [{"name": "glm-5.3[1m]"}],
+                "profile_count": 0, "builtin": False, "api_key": None}
+    warnings = ["glm-5.3[1m]: a Claude Code convention; other runtimes send it verbatim"]
+    monkeypatch.setattr(profile_registry, "create_provider", AsyncMock(return_value={
+        "provider": provider, "warnings": warnings}))
+    answer = asyncio.run(_providers(SimpleNamespace(arguments={
+        "action": "register", "name": "test", "protocols": ["openai-chat"], "models": ["glm-5.3[1m]"]})))
+    assert answer["warnings"] == warnings
+
+
 def test_a_runs_cost_is_each_kind_of_token_at_its_price() -> None:
     usage = Usage(input_tokens=1_000, output_tokens=2_000, cache_read_tokens=30_000, cache_creation_tokens=4_000)
     cost = price_cost(usage, _provider(MAIN), "m-main")
@@ -45,6 +199,19 @@ def test_deepseek_models_stay_priced_with_and_without_the_context_window_suffix(
         assert plain.complete and plain == marked
         assert (plain.input_usd_per_mtok, plain.output_usd_per_mtok, plain.cache_read_usd_per_mtok,
                 plain.cache_write_usd_per_mtok) == prices
+
+
+def test_a_model_name_without_a_catalog_price_falls_back_to_the_builtin_table() -> None:
+    """OpenCode prices some models as ranges, so the table stays the vendors' list prices and those names fall back."""
+    from looper.agents.runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES
+
+    provider = _provider()
+    for name in ("gpt-6.1-sol", "gpt-5.6-sol", "claude-opus-5-5", "claude-sonnet-5-5", "deepseek-v4-pro", "glm-5.3",
+                 "kimi-k3"):
+        assert name in BUILTIN_PRICES
+        assert model_price(provider, name) == BUILTIN_PRICES[name]
+        assert model_price(provider, name).complete
+    assert all("opencode.ai" not in source for source in PRICE_SOURCES)
 
 
 def test_a_catalog_price_wins_and_an_unknown_one_comes_from_the_builtin_table() -> None:

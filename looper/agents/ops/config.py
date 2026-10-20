@@ -243,8 +243,10 @@ def _provider_warnings(view: Mapping[str, Any]) -> list[str]:
 async def _providers(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     if action == "list":
-        return {"providers": [_provider_listed(p) for p in (await _registry())["providers"]],
-                "presets": provider_presets.presets_view()}
+        registry = await _registry()
+        # The same catalogs the dashboard serves. A caller that lists providers only still gets the presets.
+        presets = registry["provider_presets"] if "provider_presets" in registry else provider_presets.presets_view()
+        return {"providers": [_provider_listed(p) for p in registry["providers"]], "presets": presets}
     data: dict[str, Any] = {} if action == "update" else {
         "auth": "api_key", "base_url": None, "models": [], "env": []}
     if action == "update" and any(arguments.get(field) is not None for field in ("preset", "api")):
@@ -255,12 +257,14 @@ async def _providers(call: Call) -> dict[str, Any]:
             ids = ", ".join(p.id for p in provider_presets.PRESETS)
             raise OpError(ErrorCode.INVALID, f"unknown preset {arguments['preset']!r}; there are: {ids}")
         _required(arguments, "register", "api")
-        api = next((api for api in preset.view()["apis"] if arguments["api"] in api["protocols"]), None)
+        view = preset.view()
+        api = next((api for api in view["apis"] if arguments["api"] in api["protocols"]), None)
         if api is None:
             protocols = ", ".join(protocol.value for api in preset.apis for protocol in api.protocols)
             raise OpError(ErrorCode.INVALID, f"unknown API {arguments['api']!r} for preset {preset.id!r}; "
                                              f"choose a protocol: {protocols}")
-        data.update(name=preset.name, **api)
+        data.update(name=preset.name, protocols=api["protocols"], base_url=api["base_url"],
+                    models=provider_presets.api_models(view, api))
         data["env"] = [{"key": key, "value": value} for key, value in preset.env]
     data.update(_given(arguments, ("name", "protocols", "base_url"), clears=("base_url",)))
     if arguments.get("models") is not None:
@@ -276,7 +280,8 @@ async def _providers(call: Call) -> dict[str, Any]:
         _required(data, "register", "name", "protocols")
         answer = await answered(profile_registry.create_provider(data))
     provider = _provider_listed(answer["provider"])
-    result = {"provider": provider, "warnings": _provider_warnings(answer["provider"])}
+    result = {"provider": provider,
+              "warnings": [*answer.get("warnings", ()), *_provider_warnings(answer["provider"])]}
     if action == "register":
         result["note"] = KEY_NOTE.format(name=provider["name"])
     return result
@@ -476,8 +481,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_providers",
         description="LLM providers: list providers and presets; register; update by id or name. Never take or change "
-                    "API keys: the user sets them on the dashboard. Warns about unknown preset models and missing "
-                    "prices.",
+                    "API keys: the user sets them on the dashboard. Warns about unknown preset models, missing "
+                    "prices, and a context suffix another runtime would send verbatim.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {

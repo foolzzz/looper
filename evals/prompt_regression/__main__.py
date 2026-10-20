@@ -71,7 +71,7 @@ def _parser() -> argparse.ArgumentParser:
                      help="every role runs Claude Code with a provider registered from this preset's "
                           f"Anthropic-format API (such as glm-bigmodel), its API key from ${runner.API_KEY_ENV}")
     run.add_argument("--provider-base-url", help="with --provider-preset: this base URL instead of the preset's")
-    run.add_argument("--agent-model", help="with --provider-preset: the agent's model (default: the preset's first)")
+    run.add_argument("--agent-model", help="with --provider-preset: the agent's model (default: that API's first)")
     run.add_argument("--tasks", help="comma-separated task ids or task sets ("
                      + ", ".join(sorted(runner.TASK_SETS)) + "; default: all)")
     run.add_argument("--reps", type=_reps, default=1, help=_REPS_HELP)
