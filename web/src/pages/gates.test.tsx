@@ -52,6 +52,18 @@ describe("GatesPage", () => {
   const button = (text: string) => [...container.querySelectorAll("button")].find((b) => b.textContent?.startsWith(text))!;
   const click = async (el: Element) => { await act(async () => { el.dispatchEvent(new MouseEvent("click", { bubbles: true })); }); };
 
+  it("gives the header and every row the same fixed columns, so they line up", async () => {
+    vi.mocked(fetchGates).mockResolvedValue(list([
+      row("t1", gate("g1")), row("t2", gate("g2", { state: "passed", waiting_on: null, closed_at: "2026-10-20T10:10:00Z" }), "completed"),
+    ]));
+    await show();
+    const grids = [...container.querySelectorAll("[class*='lg:grid-cols-']")];
+    expect(grids).toHaveLength(3);
+    const columns = grids.map((g) => g.className.match(/lg:grid-cols-\[[^\]]+\]/)![0]);
+    expect(new Set(columns).size).toBe(1);
+    expect(columns[0]).not.toMatch(/auto|max-content|min-content/);
+  });
+
   it("lists the open gates with the counts", async () => {
     vi.mocked(fetchGates).mockResolvedValue(list([row("t1", gate("g1"))]));
     await show();

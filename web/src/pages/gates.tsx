@@ -21,7 +21,8 @@ const MAX_ROWS = 200;
 
 const linkClass =
   "rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-const COLUMNS = "lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.8fr)_9rem_6rem_9rem_8rem_auto]";
+// Every row is its own grid, so no track may size to its content: the header and the rows must line up.
+const COLUMNS = "lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.8fr)_9rem_6rem_9rem_8rem_14rem]";
 
 interface Filters {
   state: GateListState;
