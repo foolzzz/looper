@@ -138,8 +138,12 @@ def test_all_reference_layers_schedule_holder_sessions_and_old_costs_are_readabl
             assert all(r["model"] for r in rows)
         assert await conn.fetchval("SELECT count(*) FROM task_planner_profiles WHERE step_id IS NULL") == 24
         assert await conn.fetchval("SELECT count(*) FROM task_planner_profiles WHERE step_id IS NOT NULL") == 24
+        # The seed predates the Manager's selected profile: the schema adds that column, NULL for every old row.
+        await conn.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS selected_profile_id TEXT "
+                           "REFERENCES agent_profiles(id) ON DELETE RESTRICT")
         session = await agent_sessions.get_session("manager", pool=conn)
         assert session and session["session_id"] == "seed-session-manager"
+        assert session["selected_profile_id"] is None
         assert session["session_totals"]["cost_usd"] == 0.125
         schedule = await schedules.get_schedule("sched-seed-1", pool=conn)
         assert schedule and schedule["planner_session_provider"] == "prov-seed-merge-b"
