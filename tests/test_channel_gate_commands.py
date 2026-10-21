@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents import gate_commands, gate_routing
+from looper.agents import chat_commands, chat_settings, gate_commands, gate_routing
 from looper.agents.bus import MessageBus
 from looper.agents.channels.base import DeliveryReceipt
 from looper.agents.channels.chat_history import CHAT_RECORD, record_reply
@@ -257,6 +257,30 @@ class TestAnswer:
         world.send("/gatesx hello")
         world.send("gate 1 hello")
         assert world.model == ["/gatesx hello", "gate 1 hello"]
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestHelp:
+    """/help is answered by Looper on every channel, from the shared list, never by the model."""
+
+    @pytest.mark.parametrize("source", [LARK, TELEGRAM, channel_address("web", "channel-web")])
+    def test_each_channel_gets_the_shared_list(self, world: _World, source: Any) -> None:
+        [(text, _)] = world.send("/help", source=source)
+        assert world.model == []
+        for name, desc in chat_commands.available():
+            assert f"/{name} — {desc}" in text
+        assert "/stop" not in text  # off by default
+
+    def test_stop_is_listed_only_while_it_is_on(self, world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+        [(text, _)] = world.send("/help")
+        assert "/stop — " in text and world.model == []
+
+    def test_the_bots_suffix_is_accepted_and_other_text_reaches_the_model(self, world: _World) -> None:
+        world.send("/help@loop_bot", source=TELEGRAM)
+        assert world.model == []
+        world.send("/helpme")
+        assert world.model == ["/helpme"]
 
 
 @pytest.mark.usefixtures("agent_db")
