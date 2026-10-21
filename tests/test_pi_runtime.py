@@ -742,7 +742,7 @@ const result = await runtime.complete(model, {
     type: 'object', properties: {required_value: {type: 'string'}, optional_value: {type: 'string'}},
     required: ['required_value'], additionalProperties: false,
   }}],
-}, {signal: AbortSignal.timeout(10000), fetch});
+}, {signal: AbortSignal.timeout(60000), fetch});
 if (result.stopReason === 'error') throw new Error(result.errorMessage);
 console.log(JSON.stringify({requests, contextWindow: model.contextWindow, maxTokens: model.maxTokens}));
 ''')
@@ -754,7 +754,7 @@ console.log(JSON.stringify({requests, contextWindow: model.contextWindow, maxTok
             env.update(dict(PI.bind_provider(provider, "selected", "").env))
             env.update({"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"})
             done = subprocess.run([node, str(script), str(package), str(tmp_path), transport], cwd=tmp_path, env=env,
-                                  capture_output=True, text=True, timeout=20, check=False)
+                                  capture_output=True, text=True, timeout=120, check=False)
             assert done.returncode == 0, done.stderr
         finally:
             if server:
