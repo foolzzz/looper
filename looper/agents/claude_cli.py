@@ -737,6 +737,7 @@ class ResidentClaude:
         self._totals = Usage()  # the session's running totals at its last result
         self._user_turn: _UserTurn | None = None  # the user turn being run (what ``interrupt`` ends)
         self._user_stopped = False
+        self._ending: set[asyncio.Event] = set()  # the stops under way, each set once its process tree is gone
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
 
     @property
@@ -841,6 +842,9 @@ class ResidentClaude:
                 await proc_tree.end(process, label=self._label)
             self._user_turn = turn
             result_event = await turn.done
+            # A stop resolves the turn first; the turn is over only once its process tree is gone.
+            while self._ending:
+                await asyncio.gather(*(event.wait() for event in tuple(self._ending)))
         except BaseException:
             self._user_turn, self._user_stopped = None, False
             await self.stop(kill=True)
@@ -918,6 +922,8 @@ class ResidentClaude:
         self._process, self._output, self._command, self._signature = None, None, [], None
         if process is None:
             return
+        ended = asyncio.Event()
+        self._ending.add(ended)
         if output is not None:
             output.drop_turn()
         known: proc_tree.Tree | None = None
@@ -934,7 +940,11 @@ class ResidentClaude:
                     pass
         finally:
             # Also when the wait is cancelled: the process is forgotten already.
-            await proc_tree.end(process, label=self._label, known=known)
+            try:
+                await proc_tree.end(process, label=self._label, known=known)
+            finally:
+                self._ending.discard(ended)
+                ended.set()
             if output is not None:
                 await output.finish()
         logger.info("%s stopped Claude Code (pid=%s, exit code %s)", self._label, process.pid, process.returncode)

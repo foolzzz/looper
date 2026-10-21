@@ -229,3 +229,42 @@ def test_a_stop_that_lands_on_an_event_before_the_interrupt_kills_and_says_so(tm
             await session.stop(kill=True)
 
     asyncio.run(_run())
+
+
+def test_a_killed_turn_returns_only_after_its_process_tree_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.2)
+    claude = fake_claude(tmp_path / "claude", _DEAF)
+    real_end = claude_cli.proc_tree.end
+    ended: list[bool] = []
+
+    async def slow_end(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.5)
+        try:
+            return await real_end(*args, **kwargs)
+        finally:
+            ended.append(True)
+
+    monkeypatch.setattr(claude_cli.proc_tree, "end", slow_end)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            turn = asyncio.create_task(session.run_turn("work", on_event))
+            await _until_streaming(seen)
+            stopper = asyncio.create_task(session.interrupt())
+            result = await turn
+            assert result.stopped is StopMethod.KILL
+            assert ended == [True]
+            await stopper
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
