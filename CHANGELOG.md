@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.7] - 2026-10-20
+
+### Fixed
+
+- **Two load-dependent tests no longer fail on a busy machine.** `test_eval_deadline_kills_term_ignoring_child` now measures the kill latency from the deadline (the fake runner's recorded start plus the deadline) against `proc_tree.TERM_GRACE_SEC` plus 3 s, instead of 8 s from the launch of the script, so start-up time of bash, the interpreter and `uv` no longer counts; its subprocess timeout is 60 s and only guards a hang. `test_pi_responses_wire_preserves_optional_tool_parameters` now aborts after 60 s in node and times out after 120 s, so loading the installed pi on a loaded machine no longer expires first. All process-death and request assertions are unchanged. Tests only: no product code, API, prompt, tool or model-facing text changed. ([#288](https://github.com/foolzzz/looper/pull/288), follow-up of [#261](https://github.com/foolzzz/looper/issues/261))
+
+### Validation
+
+- Reported in #288: `pytest tests/test_pi_packaging.py -k term_ignoring` (12 passed) and `pytest tests/test_pi_runtime.py -k optional_tool_parameters` (4 passed). The PR description reports no full local suite or review. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.7.md).
+
 ## [2.13.6] - 2026-10-20
 
 ### Fixed
