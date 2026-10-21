@@ -54,6 +54,7 @@ _BOT_COMMANDS: list[tuple[str, str]] = [
     ("new", "开始新的 Manager 会话"),
     ("gates", "列出等你回答的关卡"),
     ("gate", "回答或结束一个关卡：/gate 编号 回答，/gate 编号 end"),
+    ("profile", "查看或切换 Manager 会话的 Agent Profile"),
     ("help", "显示帮助"),
 ]
 
@@ -138,6 +139,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         # The gate commands take arguments; the Manager parses and answers them in code, so the text goes as typed.
         self._app.add_handler(CommandHandler("gates", self._cmd_gates))
         self._app.add_handler(CommandHandler("gate", self._cmd_gate))
+        self._app.add_handler(CommandHandler("profile", self._cmd_profile))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -330,6 +332,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             "Looper Agent 已就绪。直接发消息给我，或使用:\n"
             "/status — 查看当前任务进度\n"
             "/new — 开始新的 Manager 会话\n"
+            "/profile — 查看或切换本会话的 Agent Profile\n"
             "/help — 帮助信息"
         )
 
@@ -368,6 +371,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             "/new — 开始新的 Manager 会话\n"
             "/gates — 列出等你回答的关卡\n"
             "/gate 编号 回答 — 回答关卡；/gate 编号 end — 结束\n"
+            "/profile — 查看或切换本会话的 Agent Profile\n"
             "/help — 显示此帮助"
         )
 
@@ -391,6 +395,14 @@ class TelegramChannelAdapter(ChannelAdapter):
         if not update.message or not update.message.text:
             return
         await self._forward(update, update.message.text)
+
+    async def _cmd_profile(self, update: Any, context: Any) -> None:
+        """/profile [choice] goes to the Manager as text, which it answers itself; ``CommandHandler`` has already
+        dropped any ``@<bot>`` suffix, so the text is rebuilt from the parsed arguments."""
+        if not self._admits(update):
+            return
+        args = getattr(context, "args", None) or []
+        await self._forward(update, "/profile" + (" " + " ".join(args) if args else ""))
 
     async def _on_message(self, update: Any, context: Any) -> None:
         if not self._admits(update):

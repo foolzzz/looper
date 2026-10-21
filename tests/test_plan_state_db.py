@@ -214,7 +214,8 @@ def test_the_state_files_are_imported_once(tmp_path: Path, monkeypatch: pytest.M
         assert (two["step_key"], two["depends_on"], two["review"], two["retries"], two["feedback"]) == (
             "s2", ["step-1"], True, 1, ["fix it"])
         # Sessions from files predate agents: Claude Code ran them (no runtime type recorded).
-        before_agents = {"runtime_type": None, "provider_id": None, "profile_id": None, "clean_start": False}
+        before_agents = {"runtime_type": None, "provider_id": None, "profile_id": None, "clean_start": False,
+                         "selected_profile_id": None}
         assert await agent_sessions.get_session("planner-task-new", pool=pool) == {
             "session_id": "sess-file", "session_totals": {"cost_usd": 0.42, "input_tokens": 10}, **before_agents}
         assert await agent_sessions.get_session("manager", pool=pool) == {
@@ -250,12 +251,14 @@ def test_a_manager_session_dropped_with_new_stays_clean_after_a_restart(
         await first._handle(_web("/new"))
         saved = await agent_sessions.get_session("manager", pool=pool)
         assert saved is not None and (saved["session_id"], saved["clean_start"]) == (None, True)
+        assert saved["selected_profile_id"] is None
         later = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)  # after a restart
         await later._load_session_state()
         assert (later._session_id, later._clean_start) == (None, True)
         (reset,) = await llm_records.list_records(agent_id="manager", pool=pool)
         assert (reset["session_id"], reset["status"], reset["cost_usd"]) == ("sess-old", "completed", 0.0)
         assert reset["metadata"]["session_reset"] == {"channel": "web", "sender": None, "chat": "session-a",
-                                                      "group": False, "previous_session_id": "sess-old"}
+                                                      "group": False, "previous_session_id": "sess-old",
+                                                      "selected_profile_id": None}  # /new clears the choice
 
     _run(test, monkeypatch)

@@ -52,8 +52,9 @@ with open('child.lock', 'w') as lock:
     time.sleep(60)
 '''
     fake_claude(bindir / "uv", f'''
-import os, signal, subprocess, sys
+import os, signal, subprocess, sys, time
 from pathlib import Path
+Path('runner.started').write_text(repr(time.time()))
 def terminate(*_):
     Path('parent.terminated').write_text('SIGTERM')
     sys.exit(0)
@@ -69,12 +70,19 @@ subprocess.Popen([sys.executable, '-c', {child!r}],
            "PI_EVAL_BASE_URL": "http://127.0.0.1:9/v1", "PI_EVAL_TOTAL_CAP_USD": "2.5",
            "PI_EVAL_CASE_BUDGET_USD": "0.4", "PI_EVAL_DEADLINE_SECONDS": "2",
            "LOOPER_EVAL_DATABASE_URL": "postgresql://127.0.0.1/disposable_eval"}
-    started = time.monotonic()
     try:
+        # The timeout only guards against a hang; the kill latency is asserted below.
         done = subprocess.run(["bash", str(scripts / f"eval-{kind}.sh")], cwd=tmp_path, env=env,
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=60)
+        finished = time.time()
         assert done.returncode == 124, done.stdout + done.stderr
-        assert time.monotonic() - started < 8
+        # Measure from the deadline, not from the launch: interpreter and `uv` start-up
+        # time varies with machine load, the SIGTERM grace and the kill do not. The
+        # runner starts at or after the script, so its start plus the deadline is
+        # never earlier than the real deadline and this never over-counts the kill.
+        from looper.agents import proc_tree
+        deadline_at = float((tmp_path / "runner.started").read_text()) + 2
+        assert finished - deadline_at < proc_tree.TERM_GRACE_SEC + 3, "kill took too long after the deadline"
         assert (tmp_path / "child.pid").is_file(), "child must be ready before the deadline"
         if parent_exits:
             assert (tmp_path / "parent.terminated").read_text() == "SIGTERM"

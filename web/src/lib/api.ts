@@ -403,17 +403,67 @@ export async function sendChat(
   sessionId?: string,
   messageId?: string,
   target: ChatTarget = { kind: "manager" },
+  options?: { newSessionProfileId?: string },
 ): Promise<ChatSendResponse> {
   const res = await fetch(`${API_BASE}/chat/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, session_id: sessionId, message_id: messageId, target }),
+    body: JSON.stringify({
+      text, session_id: sessionId, message_id: messageId, target,
+      ...(options?.newSessionProfileId ? { new_session_profile_id: options.newSessionProfileId } : {}),
+    }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `chat send ${res.status}`);
   }
   return res.json();
+}
+
+/** What choosing a profile does to the Manager's session. */
+export type ManagerSessionEffect = "current" | "resumes" | "new_session" | "starts";
+
+export interface ManagerProfileChoice {
+  number: number;
+  profile_id: string;
+  name: string;
+  runtime: string;
+  provider: string;
+  model: string;
+  effect: ManagerSessionEffect;
+  problem: string | null;
+}
+
+export interface ManagerSessionView {
+  session: { active: boolean; runtime: string | null; profile_id: string | null };
+  selected: { profile_id: string; name: string } | null;
+  effective: { profile: AgentProfile | null; source: SettingSource };
+  problem: string | null;
+  choices: ManagerProfileChoice[];
+}
+
+async function managerSessionResponse<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `${what} ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchManagerSession(): Promise<ManagerSessionView> {
+  return managerSessionResponse(await fetch(`${API_BASE}/manager/session`), "manager session");
+}
+
+/** Choose the Manager session's Agent Profile; null follows Settings. */
+export async function setManagerSessionProfile(
+  profileId: string | null,
+): Promise<ManagerSessionView & { effect: ManagerSessionEffect; text: string }> {
+  const res = await fetch(`${API_BASE}/manager/session/profile`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_id: profileId }),
+  });
+  return managerSessionResponse(res, "manager session profile");
 }
 
 /** Why a Lark or Telegram answer did not reach its chat: the channel no longer knew the chat (it restarted), or it
@@ -2557,6 +2607,8 @@ export interface ProfileUsedBy {
   schedule_count: number;
   /** The names of the projects whose list of profiles the Planner may choose holds it. */
   allowed_in: string[];
+  /** The Manager's current session runs on it. */
+  manager_session?: boolean;
 }
 
 export type SystemPromptMode = "append" | "replace";
@@ -2818,7 +2870,7 @@ export function deleteAgentProfile(profileId: string): Promise<{ deleted: string
 export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
 /** Where a value came from: a layer, the selected profile itself (its effort), a task's choice of profile, or its
  * Planner's choice of its Workers' or Reviewers' profile, for the rest of the task or for one step. */
-export type SettingSource = SettingLayer | "profile" | "task" | "planner_task" | "planner_step";
+export type SettingSource = SettingLayer | "session" | "profile" | "task" | "planner_task" | "planner_step";
 /** The roles a project's agents have: the Manager spans every project. */
 export type ProjectRole = Exclude<AgentRole, "manager">;
 
