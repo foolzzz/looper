@@ -412,6 +412,8 @@ subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_ne
 emit({'type': 'thread.started', 'thread_id': 'thread-1'})
 emit({'type': 'turn.started'})
 emit({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'output_tokens': 1}})
+# stdout ends before the exit is reported, as on a slow runner: the turn must not wait for the exit through the pipes
+os.close(1); time.sleep(0.5)
 '''
     monkeypatch.setattr(per_turn, "STDERR_DRAIN_SEC", 0.3)
     command = _resident_command(tmp_path / "runtime", fake_claude(tmp_path / "codex", body), "prompt")

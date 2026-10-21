@@ -43,7 +43,9 @@ def test_schema_applies_twice_with_column_and_constraint(monkeypatch: pytest.Mon
             "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() "
             "AND table_name = 'agent_sessions' AND column_name = 'selected_profile_id'") == 1
         assert await pool.fetchval(
-            "SELECT count(*) FROM pg_constraint WHERE conname = 'agent_sessions_selected_profile_manager'") == 1
+            # The shared CI database holds this constraint once per schema other tests applied: count this one's.
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'agent_sessions_selected_profile_manager' "
+            "AND conrelid = to_regclass(current_schema() || '.agent_sessions')") == 1
 
     _run(body, monkeypatch)
 
