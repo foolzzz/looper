@@ -18,8 +18,9 @@ import pytest
 
 from fake_claude import fake_claude
 from fake_grok_acp import FAKE_ACP
+from looper.agents import proc_tree
 from looper.agents.agent_settings import AgentType
-from looper.agents.claude_cli import CapStop
+from looper.agents.claude_cli import USER_STOP, CapStop
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import ResidentTransport, StopMethod, adapter
 from looper.agents.runtimes import grok_acp
@@ -810,8 +811,8 @@ def test_a_stop_while_the_session_is_readied_sends_no_prompt(tmp_path: Path, mon
 
 
 def test_a_stop_while_acp_falls_back_starts_no_per_turn_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stop that lands while the session falls back to per turn (``interrupt`` has no legacy turn to take it yet)
-    ends the turn stopped: the per-turn process is never started."""
+    """A cancel requested while the session falls back to per turn is passed on: the legacy turn sees it and ends
+    stopped; the per-turn process is never started."""
     from looper.agents.claude_cli import USER_STOP
     from looper.agents.runtimes.grok import ResidentGrok
 
@@ -820,11 +821,18 @@ def test_a_stop_while_acp_falls_back_starts_no_per_turn_process(tmp_path: Path, 
     fall_back = AcpGrok._fall_back
     methods: list[Any] = []
     legacy_turns: list[str] = []
+    spawned: list[str] = []
+    spawn = proc_tree.spawn
+
+    async def counting_spawn(*argv: str, **kwargs: Any) -> Any:
+        spawned.append(argv[0])
+        return await spawn(*argv, **kwargs)
 
     async def stopping_fall_back(self: AcpGrok, reason: str) -> None:
         methods.append(asyncio.create_task(self.interrupt()))
         await asyncio.sleep(0)  # the stop is asked before the fall back is done
         await fall_back(self, reason)
+        spawned.clear()  # (the ACP process is behind us)
 
     legacy_run_turn = ResidentGrok.run_turn
 
@@ -834,6 +842,7 @@ def test_a_stop_while_acp_falls_back_starts_no_per_turn_process(tmp_path: Path, 
 
     monkeypatch.setattr(AcpGrok, "_fall_back", stopping_fall_back)
     monkeypatch.setattr(ResidentGrok, "run_turn", spying_run_turn)
+    monkeypatch.setattr(proc_tree, "spawn", counting_spawn)
 
     async def _run() -> tuple[Any, Any]:
         session = AcpGrok(label="manager")
@@ -845,7 +854,7 @@ def test_a_stop_while_acp_falls_back_starts_no_per_turn_process(tmp_path: Path, 
         return stopped, method
 
     stopped, method = _go(_run())
-    assert legacy_turns == []
+    assert legacy_turns == ["work"] and spawned == []  # the legacy turn took the cancel and started no process
     assert method is StopMethod.KILL and stopped.stopped is StopMethod.KILL and stopped.result_event[USER_STOP]
 
 
@@ -879,3 +888,206 @@ def test_a_normal_result_queued_before_a_stop_does_not_end_the_turn_as_success(
     assert method is StopMethod.CANCEL and turn.stopped is StopMethod.CANCEL
     assert turn.result_event["is_error"] and turn.result_event["stop_reason"] == "cancelled"
     assert [e["type"] for e in seen if e["type"] in ("assistant", "result")] == ["result"]  # no answer, only the stop
+
+
+# --- The turn's cancel (``run_turn(cancel=)``) ---
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return pid in proc_tree._snapshot()
+
+
+def test_a_cancel_requested_before_run_turn_sends_no_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.runtimes.cancel import TurnCancel
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        cancel = TurnCancel()
+        cancel.request()
+        events = Events()
+        stopped = await session.run_turn("work", events, cancel=cancel)
+        (after,) = await _turns(session, "next")
+        await session.stop()
+        return stopped, events, after
+
+    stopped, events, after = _go(_run())
+    assert stopped.stopped is StopMethod.KILL and not stopped.prompt_sent and stopped.result_event[USER_STOP]
+    assert events.seen == [] and len(_acp_runs(root)) == 1
+    assert after.result_event["result"].endswith("| next | turn 1")  # the stopped prompt never reached Grok
+
+
+def test_a_cancel_while_initialize_hangs_ends_the_process_and_does_not_fall_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents.runtimes.cancel import TurnCancel
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        env = {**_launch().environment(), "FAKE_ACP_SILENT": "1"}
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
+        cancel = TurnCancel()
+        running = asyncio.create_task(session.run_turn("work", Events(), cancel=cancel))
+        while session._process is None:
+            await asyncio.sleep(0.02)
+        pid = session.pid
+        await asyncio.sleep(0.3)  # ``initialize`` is waiting
+        cancel.request()
+        stopped = await asyncio.wait_for(running, 20)
+        transport, stale, alive = session.transport, session.stale("s"), _pid_alive(pid)
+        await session.stop()
+        return stopped, transport, stale, alive
+
+    stopped, transport, stale, alive = _go(_run())
+    assert stopped.stopped is StopMethod.KILL and not stopped.prompt_sent and stopped.result_event[USER_STOP]
+    assert transport == "acp" and not stale and not alive
+
+
+def test_a_cancel_requested_while_falling_back_starts_no_per_turn_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents.runtimes.cancel import TurnCancel
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake_with_headless(tmp_path)
+    cancel = TurnCancel()
+    fall_back = AcpGrok._fall_back
+    spawned: list[str] = []
+    spawn = proc_tree.spawn
+
+    async def requesting_fall_back(self: AcpGrok, reason: str) -> None:
+        cancel.request()
+        await fall_back(self, reason)
+        spawned.clear()
+
+    async def counting_spawn(*argv: str, **kwargs: Any) -> Any:
+        spawned.append(argv[0])
+        return await spawn(*argv, **kwargs)
+
+    monkeypatch.setattr(AcpGrok, "_fall_back", requesting_fall_back)
+    monkeypatch.setattr(proc_tree, "spawn", counting_spawn)
+
+    async def _run() -> Any:
+        session = AcpGrok(label="manager")
+        env = {**_launch().environment(), "FAKE_ACP_DEAD": "1"}
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
+        stopped = await session.run_turn("work", Events(), cancel=cancel)
+        await session.stop()
+        return stopped
+
+    stopped = _go(_run())
+    assert spawned == [] and stopped.stopped is StopMethod.KILL and stopped.result_event[USER_STOP]
+
+
+def test_a_cancel_during_the_prompt_cancels_it_keeps_the_process_and_ends_the_tools_it_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents.runtimes.cancel import TurnCancel
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        cancel, events = TurnCancel(), Events()
+        running = asyncio.create_task(session.run_turn("SLEEPER", events, cancel=cancel))
+        sleeper_file = root / ".local" / "grok" / "sleeper.pid"
+        while not sleeper_file.exists() or not any(e["type"] == "assistant" for e in events.seen):
+            await asyncio.sleep(0.02)
+        sleeper = int(sleeper_file.read_text())
+        before, alive_before = session.pid, _pid_alive(sleeper)
+        cancel.request()
+        stopped = await asyncio.wait_for(running, 20)
+        kept = session.pid == before
+        gone = not _pid_alive(sleeper)
+        sid = session._session
+        (after,) = await _turns(session, "next")
+        await session.stop()
+        return stopped, alive_before, kept, gone, sid, after, events
+
+    stopped, alive_before, kept, gone, sid, after, events = _go(_run())
+    assert alive_before and gone  # a tool in a session of its own is ended from the tree's snapshot
+    assert stopped.stopped is StopMethod.CANCEL and stopped.prompt_sent and kept
+    assert stopped.result_event["stop_reason"] == "cancelled"
+    assert events.seen[-1]["type"] == "result"
+    assert after.result_event["session_id"] == sid and after.result_event["result"].endswith("| next | turn 2")
+    assert len(_acp_runs(tmp_path / "runtime")) == 1  # the same process served the next turn
+
+
+def test_a_cancel_grok_ignores_ends_the_process_within_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from looper.agents.runtimes.cancel import TurnCancel
+
+    _operator(tmp_path, monkeypatch)
+    monkeypatch.setattr(grok_acp, "CANCEL_GRACE_SEC", 0.5)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        waiting, cancel = asyncio.Event(), TurnCancel()
+
+        async def on_event(event: dict[str, Any]) -> None:
+            waiting.set()
+
+        running = asyncio.create_task(session.run_turn("DEAF", on_event, cancel=cancel))
+        await waiting.wait()
+        pid = session.pid
+        started = time.monotonic()
+        cancel.request()
+        stopped = await asyncio.wait_for(running, 20)
+        took = time.monotonic() - started
+        alive, stale = _pid_alive(pid), session.stale("s")
+        await session.stop()
+        return stopped, took, alive, stale
+
+    stopped, took, alive, stale = _go(_run())
+    assert stopped.stopped is StopMethod.KILL and stopped.result_event[USER_STOP] and stale and not alive
+    assert took < 5
+
+
+def test_no_session_update_text_reaches_on_event_after_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.agents.runtimes.cancel import TurnCancel
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        cancel, seen = TurnCancel(), []
+        asked = False
+
+        async def on_event(event: dict[str, Any]) -> None:
+            nonlocal asked
+            seen.append((asked, event))
+            if event["type"] == "system" and not asked:
+                asked = True
+                cancel.request()  # asked as the first event is handled; Grok's thought is already on its way
+
+        stopped = await asyncio.wait_for(session.run_turn("HANG", on_event, cancel=cancel), 20)
+        await session.stop()
+        return stopped, seen
+
+    stopped, seen = _go(_run())
+    after = [event for asked, event in seen if asked]  # what was handed over once the request was made
+    assert [e["type"] for e in after] == ["result"] and after[0]["stop_reason"] == "cancelled"
+    assert "thinking" not in json.dumps(after)
+    assert stopped.stopped is StopMethod.CANCEL

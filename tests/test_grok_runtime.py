@@ -636,6 +636,14 @@ emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'model': 'grok
 if 'HANG' in message:
     import time
     time.sleep(60)
+if 'STREAM' in message or 'SLEEPER' in message:  # half an answer (and a tool in a session of its own), then silence
+    import subprocess, time
+    if 'SLEEPER' in message:
+        sleeper = subprocess.Popen(['sleep', '60'], start_new_session=True)
+        open(os.path.join(os.path.dirname(os.path.dirname(home)), 'sleeper.pid'), 'w').write(str(sleeper.pid))
+    emit({'type': 'assistant', 'session_id': session, 'parent_tool_use_id': None, 'message': {
+        'role': 'assistant', 'model': 'grok-4.7', 'content': [{'type': 'text', 'text': 'half an answer'}], 'usage': usage}})
+    time.sleep(60)
 emit({'type': 'assistant', 'session_id': session, 'parent_tool_use_id': None, 'message': {
     'role': 'assistant', 'model': 'grok-4.7', 'content': [{'type': 'text', 'text': text}], 'usage': usage}})
 emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text, 'session_id': session,

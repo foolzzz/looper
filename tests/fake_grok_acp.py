@@ -5,6 +5,9 @@ processes and writes one line per start to ``<runtime_root>/.local/grok/acp-argv
 chosen by its text (the stand-in is told, not guessed):
 
 - ``TOOL``: one response that runs a shell command, then one that answers;
+- ``SLEEPER``: a tool call that starts a ``sleep`` in a session of its own (``setsid``), writes its pid to
+  ``sleeper.pid`` beside ``acp-argv.jsonl``, then waits for ``session/cancel`` as ``HANG`` does (a cancel it
+  ignores leaves the sleeper running, as a real tool Grok did not wait for would);
 - ``LOOP``: model responses in a row (a tool call each) until ``session/cancel``, which it logs to ``cancels.log``;
 - ``ORPHAN``: starts a long ``sleep`` that inherits stdout, then dies;
 - ``HANG``: thinks, then waits for ``session/cancel`` and ends with ``cancelled``; ``QUIET`` the same, writing
@@ -92,6 +95,19 @@ def prompt(request, text):
         subprocess.Popen(['sleep', '20'])
         print('SECRET-STDERR', file=sys.stderr, flush=True)
         os._exit(3)
+    if 'SLEEPER' in text:
+        import subprocess
+        sleeper = subprocess.Popen(['sleep', '60'], start_new_session=True)
+        open(os.path.join(root, 'sleeper.pid'), 'w').write(str(sleeper.pid))
+        completed(10, 0, 1)
+        update('tool_call', toolCallId='s1', title='run_terminal_command', rawInput={'command': 'sleep 60'})
+        update('tool_call_update', toolCallId='s1', status='in_progress', rawOutput={'type': 'Bash', 'output': []})
+        sys.stdout.flush()
+        for line in sys.stdin:
+            if json.loads(line).get('method') == 'session/cancel':
+                finish(request, 'cancelled', usage(1, 100, 0, 3, 50000000))
+                return
+        sys.exit(0)
     if 'LOOP' in text:
         for n in range(1, 40):
             completed(10, 0, 1)

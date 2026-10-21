@@ -556,15 +556,20 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
                 session._env = {**env, "FAKE_ACP_SILENT": "1"}
             else:
                 stall.touch()
-        seen, stop = Seen(hold_at="result" if window == "done" else None), Stop()
+        seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
         text = {"before_spawn": "work", "silent": "QUIET", "streaming": "HANG", "blocked": BIG, "tool": "LOOP",
                 "done": "work"}[window]
-        running = asyncio.create_task(session.run_turn(text, seen, stop=stop))
+        running = asyncio.create_task(session.run_turn(text, seen, stop=stop, cancel=cancel))
         try:
             if window == "done":
                 await asyncio.wait_for(seen.holding.wait(), BOUND)
                 pid = session.pid
-                method, turn = await _interrupt_held(session, seen, stop, running)
+                stop.asked = True
+                cancel.request()
+                await asyncio.sleep(0.2)
+                seen.release.set()
+                turn = await asyncio.wait_for(running, BOUND)
+                method = turn.stopped
             else:
                 if window == "before_spawn":
                     await _until(lambda: session._process is not None)
@@ -579,8 +584,9 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
                     await asyncio.sleep(0.3)
                 pid = session.pid
                 stop.asked = True
-                method = await asyncio.wait_for(session.interrupt(), BOUND)
+                cancel.request()
                 turn = await asyncio.wait_for(running, BOUND)
+                method = turn.stopped
         finally:
             seen.release.set()
             running.cancel()
@@ -609,3 +615,81 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
     assert _answered(after) and "| next |" in after.result_event["result"], after.result_event
     assert resumed == sid
     assert "thinking" not in json.dumps(nxt.events)
+
+
+# The same windows with ACP unavailable: the session runs per turn (``grok.ResidentGrok``), stopped by the same cancel.
+
+GROK_FALLBACK_WINDOWS = ["before_spawn", "silent", "streaming", "tool"]
+
+
+@pytest.mark.parametrize("window", GROK_FALLBACK_WINDOWS)
+def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_grok_acp import _command, _fake_with_headless
+    from test_grok_runtime import GROK, _launch, _operator
+
+    _operator(tmp_path, monkeypatch)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
+    root, grok = tmp_path / "runtime", _fake_with_headless(tmp_path)
+    sleeper_file = root / ".local" / "grok" / "sleeper.pid"
+    cancel = TurnCancel()
+    spawned: list[str] = []
+    if window == "before_spawn":  # asked while the session falls back, before the per-turn process exists
+        fall_back = grok_acp.AcpGrok._fall_back
+
+        async def requesting(self: Any, reason: str) -> None:
+            cancel.request()
+            await fall_back(self, reason)
+            spawned.clear()  # (the ACP process of the readying is behind us)
+
+        monkeypatch.setattr(grok_acp.AcpGrok, "_fall_back", requesting)
+    spawn = proc_tree.spawn
+
+    async def counting_spawn(*argv: str, **kwargs: Any) -> Any:
+        spawned.append(argv[0])
+        return await spawn(*argv, **kwargs)
+
+    monkeypatch.setattr(proc_tree, "spawn", counting_spawn)
+
+    async def run() -> tuple[Any, ...]:
+        session = grok_acp.AcpGrok(label="manager")
+        env = {**_launch().environment(), "FAKE_ACP_DEAD": "1"}
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
+        seen = Seen()
+        if window == "before_spawn":
+            turn = await asyncio.wait_for(session.run_turn("work", seen, cancel=cancel), BOUND)
+            started = list(spawned)
+            pids: list[int] = []
+        else:
+            first = await session.run_turn("hello", Seen())  # falls back
+            assert _answered(first), first.result_event
+            assert session.transport == "per-turn"
+            text = {"silent": "HANG", "streaming": "STREAM", "tool": "SLEEPER"}[window]
+            running = asyncio.create_task(session.run_turn(text, seen, cancel=cancel))
+            try:
+                if window == "tool":
+                    await _until(sleeper_file.exists)
+                await _until(lambda: bool(seen.events))
+                await asyncio.sleep(0.2)
+                pids = [int(sleeper_file.read_text())] if window == "tool" else []
+                cancel.request()
+                turn = await asyncio.wait_for(running, BOUND)
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+            started = []
+        seen.closed = True
+        alive = [pid for pid in pids if _alive(pid)]
+        nxt = Seen()
+        after = await asyncio.wait_for(session.run_turn("next", nxt), BOUND)
+        transport = session.transport
+        await session.stop()
+        return turn, seen, alive, transport, started, after, nxt
+
+    turn, seen, alive, transport, started, after, nxt = asyncio.run(asyncio.wait_for(run(), 60))
+    assert _stopped(turn) and turn.stopped is StopMethod.KILL, turn.result_event
+    assert turn.result_event.get("is_error") and not seen.late
+    assert alive == [] and transport == "per-turn"
+    assert _answered(after) and "| next |" in after.result_event["result"], after.result_event
+    assert "half an answer" not in json.dumps(nxt.events)
+    if window == "before_spawn":
+        assert started == [] and not any(e.get("type") == "assistant" for e in seen.events)
