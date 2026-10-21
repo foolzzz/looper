@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -16,6 +16,7 @@ import {
 import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
+import { fetchOverview } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
 import { cn } from "@/lib/utils";
 
@@ -57,6 +58,19 @@ export function Sidebar({
   open,
   onClose,
 }: SidebarProps) {
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    fetchOverview()
+      .then((overview) => {
+        if (live && overview.version) setVersion(overview.version);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
   return (
     <aside
       id={SIDEBAR_ID}
@@ -70,7 +84,13 @@ export function Sidebar({
     >
       <div className="flex h-14 shrink-0 items-center gap-2 px-4 border-b border-border">
         <Bot className="h-6 w-6 text-primary" />
-        <span className="flex-1 text-lg font-semibold tracking-tight">Looper</span>
+        <span className="text-lg font-semibold tracking-tight">Looper</span>
+        {version && (
+          <span title={version} className="whitespace-nowrap text-xs text-muted-foreground">
+            v{version}
+          </span>
+        )}
+        <span className="flex-1" />
         <button
           type="button"
           onClick={onClose}

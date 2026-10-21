@@ -11,8 +11,9 @@ import {
   resultCard,
   stepCard,
   stepSpan,
+  type TaskRuns,
 } from "@/lib/node-cards";
-import type { StepWorkspace, TaskDetail, TaskStep, TaskWait, UserGate } from "@/lib/api";
+import type { LlmRecord, StepWorkspace, TaskDetail, TaskStep, TaskWait, UserGate } from "@/lib/api";
 
 const look = (label: string): CardLook => ({ label, border: "b", borderStyle: "solid", background: "bg", color: "c" });
 const LOOKS: Record<string, CardLook> = { verified: look("Done"), failed: look("Failed"), pending: look("Not started") };
@@ -47,6 +48,18 @@ function cardOf(
   return stepCard(s, { taskId: "t1", active, look: LOOKS[s.status] ?? look(s.status), lookOf: (d) => LOOKS[d.status],
                        stepsById: new Map(steps.map((d) => [d.id, d])), skippedBecause, workspaces });
 }
+function run(id: number, extra: { step?: string; runtime?: string; model?: string | null; choice?: string; effort?: string | null; at?: string } = {}): LlmRecord {
+  return {
+    id, agent_id: `agent-${id}`, status: "completed", created_at: extra.at ?? `2026-10-17T08:00:0${id}Z`,
+    model: extra.model === undefined ? "gpt-5" : extra.model,
+    metadata: {
+      ...(extra.step ? { step_id: extra.step } : {}),
+      profile: { id: "p", name: "p", model: "m", runtime: { id: "codex", name: extra.runtime ?? "Codex", type: "codex" } },
+      ...(extra.choice ? { model_choice: { model: extra.choice, source: "profile", effort: extra.effort ?? null } } : {}),
+    },
+  } as unknown as LlmRecord;
+}
+const NO_RUNS: TaskRuns = { planner: [], worker: [], reviewer: [] };
 const titles = (sections: CardSection[]) => sections.map((section) => section.title);
 const section = (sections: CardSection[], title: string) => sections.find((s) => s.title === title);
 
@@ -57,6 +70,43 @@ function worktree(id: number, extra: Partial<StepWorkspace> = {}): StepWorkspace
     detail: "", links: [], path: "/w", removed_at: null, discardable: true, ...extra,
   };
 }
+
+describe("stepCard agent lines", () => {
+  const runs = (r: Partial<TaskRuns>) => ({ ...NO_RUNS, ...r });
+  const factsOf = (s: TaskStep, r: Partial<TaskRuns>) => {
+    const card = stepCard(s, { taskId: "t1", active: true, look: look("x"), lookOf: () => look("x"),
+                               stepsById: new Map([[s.id, s]]), runs: runs(r) });
+    return (section(card.sections, "Runs") as { facts: { label: string; value: string }[] }).facts;
+  };
+  const s1 = step("s1", { worker_id: "worker-a", reviewer_id: "reviewer-a" });
+
+  it("puts the Agent line under the Worker and under the Reviewer", () => {
+    const facts = factsOf(s1, {
+      worker: [run(1, { step: "s1", model: "gpt-5" })],
+      reviewer: [run(2, { step: "s1", runtime: "Claude Code", model: "opus" })],
+    });
+    expect(facts.map((f) => [f.label, f.value])).toEqual([
+      ["Worker", "worker-a"], ["Agent", "Codex · gpt-5"], ["Reviewer", "reviewer-a"], ["Agent", "Claude Code · opus"],
+    ]);
+  });
+
+  it("uses the latest run of this step, not another step's", () => {
+    const facts = factsOf(s1, {
+      worker: [run(1, { step: "s1", model: "old" }), run(3, { step: "s1", model: "new" }), run(4, { step: "s2", model: "other" })],
+    });
+    expect(facts.filter((f) => f.label === "Agent").map((f) => f.value)).toEqual(["Codex · new"]);
+  });
+
+  it("shows no line for a role that has not run", () => {
+    expect(factsOf(s1, { worker: [run(1, { step: "s2" })] }).some((f) => f.label === "Agent")).toBe(false);
+    expect(factsOf(s1, {}).some((f) => f.label === "Agent")).toBe(false);
+  });
+
+  it("shows the effort, and the chosen model when the run reported none", () => {
+    const facts = factsOf(s1, { worker: [run(1, { step: "s1", model: null, choice: "sonnet", effort: "high" })] });
+    expect(facts.find((f) => f.label === "Agent")?.value).toBe("Codex · sonnet · high");
+  });
+});
 
 describe("stepCard", () => {
   it("shows the step's latest worktree after its runs", () => {
@@ -260,6 +310,14 @@ describe("plannerCard and resultCard", () => {
       ] },
       { kind: "text", title: `Latest note · ${formatWhen("2026-10-17T08:01:00Z")}`, text: "Now: s2 runs", preview: undefined },
     ]);
+  });
+
+  it("adds the Planner's latest run as an Agent line", () => {
+    const card = plannerCard(task(), look("Planning"), { ...NO_RUNS, planner: [run(1, { model: "a" }), run(2, { model: "b", choice: "m", effort: "low" })] });
+    expect(card.sections[0]).toMatchObject({ facts: [
+      { label: "Planner", value: "planner-t1" }, { label: "Agent", value: "Codex · b · low" }, { label: "Plan" },
+    ] });
+    expect(JSON.stringify(plannerCard(task(), look("Planning"), NO_RUNS))).not.toContain("Agent");
   });
 
   it("gives the task's error, and how long it ran, once it ended", () => {

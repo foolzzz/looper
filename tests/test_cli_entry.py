@@ -433,10 +433,15 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
         assert "install lark-cli" in output
 
 
-def _stub_pg_dump(bin_dir: Path, version: str) -> None:
+def _stub_pg_dump(bin_dir: Path, version: str, *, pg_restore: bool = True) -> None:
+    """A pg_dump at ``version``; with ``pg_restore`` the dump can be verified by the one beside it."""
     stub = bin_dir / "pg_dump"
     stub.write_text(f"#!/bin/sh\necho 'pg_dump (PostgreSQL) {version}'\n")
     stub.chmod(0o755)
+    if pg_restore:
+        restore = bin_dir / "pg_restore"
+        restore.write_text("#!/bin/sh\n")
+        restore.chmod(0o755)
 
 
 def _pg_dump_line(output: str) -> tuple[str, str]:
@@ -446,14 +451,18 @@ def _pg_dump_line(output: str) -> tuple[str, str]:
     return lines[index], lines[index + 1]
 
 
-@pytest.mark.parametrize(("pg_dump", "status"), [(None, "warn"), ("16.4", "ok")], ids=["missing", "found"])
+@pytest.mark.parametrize(
+    ("pg_dump", "pg_restore", "status"),
+    [(None, False, "warn"), ("16.4", True, "ok"), ("16.4", False, "warn")],
+    ids=["missing", "found", "unverifiable"],
+)
 def test_doctor_reports_the_pg_dump_that_backs_up_before_a_schema_change(
-    tmp_path: Path, pg_dump: str | None, status: str,
+    tmp_path: Path, pg_dump: str | None, pg_restore: bool, status: str,
 ) -> None:
     env = _doctor_env(tmp_path, claude="logged_in", database_url=f"postgresql://127.0.0.1:{_closed_port()}/loopx")
     env["PATH"] = str(tmp_path / "bin")  # no system pg_dump
     if pg_dump:
-        _stub_pg_dump(tmp_path / "bin", pg_dump)
+        _stub_pg_dump(tmp_path / "bin", pg_dump, pg_restore=pg_restore)
 
     _, output, _ = _run_looper("doctor", cwd=tmp_path, env=env)
 
@@ -461,6 +470,11 @@ def test_doctor_reports_the_pg_dump_that_backs_up_before_a_schema_change(
     assert line.startswith(status), output
     if pg_dump:
         assert "pg_dump (PostgreSQL) 16.4" in line
+        if pg_restore:
+            assert f"backup verified by {tmp_path / 'bin' / 'pg_restore'} --list" in line, output
+        else:
+            assert "no way to verify the backup" in line, output
+            assert "verify_command" in output, output
     else:
         assert fix.lstrip().startswith("fix: install pg_dump"), output
 
@@ -491,7 +505,7 @@ def test_doctor_fails_without_a_usable_pg_dump_when_the_schema_is_about_to_chang
         env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
         env["PATH"] = str(tmp_path / "bin")
         if pg_dump:
-            _stub_pg_dump(tmp_path / "bin", pg_dump)
+            _stub_pg_dump(tmp_path / "bin", pg_dump)  # with a pg_restore beside it to verify the dump
         result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == code, output + stderr

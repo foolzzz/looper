@@ -2766,7 +2766,13 @@ Quiesce writes and scheduling and stop the old process before switching.
 `serve` takes and validates a **full database** custom-format `pg_dump` before
 schema changes; a schema-only dump or config export cannot restore history,
 secrets and references. Backup failure stops the upgrade; `--skip-backup` is
-not acceptable for this gate. The current branch initializes new databases as
+not acceptable for this gate. The dump is proved readable by, in order,
+`backup.verify_command` (dump on stdin), `docker exec -i <container>
+pg_restore --list` when `backup.command` is exactly `docker exec [options]
+<container> pg_dump ...`, or the local `pg_restore`; with none of these the
+backup fails before any DDL and the message names `backup.verify_command`. The
+check result, the startup self-check and `looper doctor` name the verifier.
+The current branch initializes new databases as
 version 3, but the legacy
 conversion is **not wired into `ensure_schema`**: version 2 and unversioned
 existing databases are refused before DDL with the database unchanged. Do not
@@ -3810,7 +3816,7 @@ the rename), because it holds the user's data.
 The product was LoopX up to v2.5.0. `looper.ops_config` reads the old
 deployment variables for one release, both prefixes (`LOOPER_DATABASE_URL`,
 `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
-`LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
+`LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
 root), from the environment and then from the checkout's `.env`, each use
 warned about by name; the next release removes them. `looper.env` still reads
 any other `LOOPER_*` variable's `LOOPX_*` name when the new one is unset, with
@@ -3831,8 +3837,9 @@ Deployment settings are the ops file, `<runtime root>/ops/server.toml`
 export`, `config import`, `config init-ops` and `service install` names
 another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
-`pg_dump` and `command` (an argv array; `{dbname}` and `{user}` are filled
-in), and `[operator_notes] root` (an absolute path). Nothing is expanded: no
+`pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
+in) and `verify_command` (an argv array that lists the dump read on stdin like
+`pg_restore --list`), and `[operator_notes] root` (an absolute path). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value
 stops the command; the message names the key and never shows the value. The
 file must be a regular file (not a symlink), owned by the user, mode 0600, in
@@ -3842,7 +3849,7 @@ and restart the server to apply a change.
 Each setting comes from the first of: an explicit flag, the file, then for
 this release only the old variable from the environment (`LOOPER_DATABASE_URL`,
 `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`, `LOOPER_BACKUP_CMD`,
-`LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
+`LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names except the notes
 root), then the same name in the checkout's `.env`, then the built-in
 default. Each use logs a deprecation warning that names the variable and never
 its value; the next release removes them. There is no default database URL:

@@ -141,6 +141,17 @@ PostgreSQL 跑在 Docker 里时，把 `[backup] command` 设成 argv 数组，�
 command = ["docker", "exec", "agentbox-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
 ```
 
+备份还要再列一遍来证明可读：由 `pg_dump` 旁边（否则 PATH 上）的 `pg_restore` 完成。`command` 是
+`docker exec [选项] <容器> pg_dump ...` 这一形式时，Looper 用 `docker exec -i <容器> pg_restore --list`
+（备份走标准输入）列出，本机不需要 `pg_restore`。其他命令且本机没有 `pg_restore` 时，必须设 `[backup] verify_command`，
+一个从标准输入读备份、像 `pg_restore --list` 一样列出内容的 argv：
+
+```toml
+verify_command = ["docker", "exec", "-i", "agentbox-postgres", "pg_restore", "--list"]
+```
+
+`looper doctor` 和启动日志会说明用的是哪个校验器。
+
 没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出；`looper serve --skip-backup`
 不备份直接迁移，并记一条警告。回退时先停掉 Looper，把数据库重建为空库，用
 `pg_restore --no-owner --dbname '<database.url>' <文件>`（Docker 里用
@@ -157,7 +168,7 @@ Looper 在 v2.5.0 及以前叫 LoopX。改名本身不需要手动操作：
   移过去（一次重命名，不复制也不删除任何文件），并在原处留一个指向它的链接，保留一个版本。两个目录都在时用
   `~/.looper` 并记一条警告。
 - **环境变量：**旧的部署变量再读一个版本（`LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
-  `LOOPER_BACKUP_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名），先看环境变量，再看 `.env`，
+  `LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名），先看环境变量，再看 `.env`，
   每次使用都按变量名警告。`looper config init-ops` 把它们写进运维文件。其余的 `LOOPX_*` 在对应 `LOOPER_*` 没设时，
   `looper.env` 仍会读，并警告，再保留一个版本。
 - **服务：**`com.looper.serve`。`looper service install` 会先停掉并删除旧的 `com.loopx.serve`。
@@ -251,11 +262,12 @@ API 只响应操作者：在这台机器的浏览器中打开控制台会自动�
 | `server.log_level` | 否 | `debug`、`info`、`warning` 或 `error`（默认 `info`） |
 | `backup.pg_dump` | 否 | 不用 PATH 上那个时，改用这个 `pg_dump`；主版本不能低于服务器 |
 | `backup.command` | 否 | 一个 argv 数组，它的标准输出就是备份；`{dbname}` 和 `{user}` 从数据库 URL 填入 |
+| `backup.verify_command` | 否 | 一个 argv 数组，从标准输入读备份，像 `pg_restore --list` 一样列出内容；`backup.command` 是 `docker exec ... <容器> pg_dump ...` 时自动推导，否则用本机 `pg_restore` |
 | `operator_notes.root` | 否 | 操作者的 Claude Code 存放项目笔记的目录，必须是绝对路径 |
 
 每一项按这个顺序取第一个：显式参数（`--host`、`--port`，以及把 `server.log_level` 设为 `debug` 的 `--verbose`）、
 文件、然后仅本版本仍读的旧变量（环境里的 `LOOPER_DATABASE_URL`、`LOOPER_PUBLIC_URL`、`LOOPER_PG_DUMP`、
-`LOOPER_BACKUP_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名）、再是 checkout 的 `.env` 里的同名、
+`LOOPER_BACKUP_CMD`、`LOOPER_BACKUP_VERIFY_CMD`、`LOOPER_OPERATOR_NOTES_ROOT`，以及除笔记根目录外的 `LOOPX_*` 同名）、再是 checkout 的 `.env` 里的同名、
 最后是内置默认值。数据库 URL 没有默认值。用到旧变量就记一条弃用警告，只写变量名、不写值；下一版删除它们。
 runtime root 是 `--runtime-root`，否则是 `LOOPER_RUNTIME_ROOT`（已弃用，会警告；`LOOPX_RUNTIME_ROOT` 同样），
 否则是 `~/.looper`。文件本身不写 runtime root。`.env` 不再放进 Looper 的环境：只从中读上述旧设置，

@@ -68,6 +68,7 @@ def _value(name: str, tag: str) -> str | list[str]:
         "public_url": f"https://example.com/{SECRET}-{tag}",
         "pg_dump": f"/bin/{SECRET}-{tag}/pg_dump",
         "backup_command": ["docker", "exec", f"{SECRET}-{tag} container", "pg_dump"],
+        "backup_verify_command": ["docker", "exec", "-i", f"{SECRET}-{tag} container", "pg_restore", "--list"],
         "operator_notes_root": f"/notes/{SECRET}-{tag}",
     }[name]
 
@@ -77,20 +78,31 @@ LEGACY_SETTINGS = [
     ("public_url", "server", "public_url", "PUBLIC_URL"),
     ("pg_dump", "backup", "pg_dump", "PG_DUMP"),
     ("backup_command", "backup", "command", "BACKUP_CMD"),
+    ("backup_verify_command", "backup", "verify_command", "BACKUP_VERIFY_CMD"),
     ("operator_notes_root", "operator_notes", "root", "OPERATOR_NOTES_ROOT"),
 ]
+COMMANDS = ("backup_command", "backup_verify_command")  # argv lists, written as one string in a variable
+NO_LEGACY_PREFIX = ("backup_verify_command", "operator_notes_root")  # never had a LOOPX_ name
+
+
+def _words(name: str, tag: str) -> str:
+    """What a variable holds for ``name``: a command as one string with a quoted word, else the value."""
+    value = _value(name, tag)
+    if name == "backup_verify_command":
+        return f'docker exec -i "{SECRET}-{tag} container" pg_restore --list'
+    return f'docker exec "{SECRET}-{tag} container" pg_dump' if isinstance(value, list) else value
 
 
 @pytest.mark.parametrize(("name", "section", "key", "suffix", "winner"), [
     (*setting, winner) for setting in LEGACY_SETTINGS
     for winner in ("file", "environment-new", "environment-old", "dotenv-new", "dotenv-old")
-    if setting[0] != "operator_notes_root" or not winner.endswith("old")
+    if setting[0] not in NO_LEGACY_PREFIX or not winner.endswith("old")
 ])
 def test_setting_precedence_and_sources(
     tmp_path: Path, dotenv: Path, name: str, section: str, key: str, suffix: str, winner: str,
 ) -> None:
     candidates = ["file", "environment-new", "environment-old", "dotenv-new", "dotenv-old"]
-    if name == "operator_notes_root":
+    if name in NO_LEGACY_PREFIX:
         candidates = [candidate for candidate in candidates if not candidate.endswith("old")]
     present = candidates[candidates.index(winner):]
     environ: dict[str, str] = {}
@@ -102,7 +114,7 @@ def test_setting_precedence_and_sources(
             continue
         prefix = "LOOPER_" if candidate.endswith("new") else "LOOPX_"
         variable = prefix + suffix
-        text = f'docker exec "{SECRET}-{candidate} container" pg_dump' if isinstance(value, list) else value
+        text = _words(name, candidate)
         if candidate.startswith("environment"):
             environ[variable] = text
         else:
@@ -131,7 +143,7 @@ def test_missing_and_blank_variables_are_unset(
 ) -> None:
     dotenv.write_text(f"LOOPER_{suffix}= \nLOOPX_{suffix}=\n")
     config = _load(tmp_path, dotenv, {f"LOOPER_{suffix}": " \t", f"LOOPX_{suffix}": ""})
-    assert getattr(config, name) == (() if name == "backup_command" else "")
+    assert getattr(config, name) == (() if name in COMMANDS else "")
     assert name not in config.sources
     assert not any("is deprecated" in warning for warning in config.warnings)
     if name == "database_url":
@@ -175,9 +187,7 @@ def test_server_flags_file_and_defaults(
 
 
 def test_legacy_warnings_name_each_used_variable_once(tmp_path: Path, dotenv: Path) -> None:
-    environ = {"LOOPER_" + suffix: (
-        f'docker exec "{SECRET} container" pg_dump' if name == "backup_command" else _value(name, "env")
-    ) for name, _, _, suffix in LEGACY_SETTINGS}
+    environ = {"LOOPER_" + suffix: _words(name, "env") for name, _, _, suffix in LEGACY_SETTINGS}
     config = _load(tmp_path, dotenv, environ)
     assert len(config.warnings) == len(environ)
     for name in environ:
@@ -324,9 +334,7 @@ def test_public_url_is_trimmed_and_trailing_slashes_removed(tmp_path: Path, dote
 def test_init_file_is_private_round_trips_and_explains_sources(
     tmp_path: Path, dotenv: Path, configured: bool,
 ) -> None:
-    environ = {"LOOPER_" + suffix: (
-        f'docker exec "{SECRET} container" pg_dump' if name == "backup_command" else _value(name, "env")
-    ) for name, _, _, suffix in LEGACY_SETTINGS} if configured else {}
+    environ = {"LOOPER_" + suffix: _words(name, "env") for name, _, _, suffix in LEGACY_SETTINGS} if configured else {}
     flags = Flags(runtime_root=tmp_path / "runtime")
     if configured:
         flags = replace(flags, host=f"{SECRET}-host", port=9002, log_level="debug")
@@ -339,7 +347,8 @@ def test_init_file_is_private_round_trips_and_explains_sources(
     assert table["server"] == ({"host": before.host, "port": before.port, "log_level": before.log_level,
                                 "public_url": before.public_url} if configured else {})
     if configured:
-        assert table["backup"] == {"pg_dump": before.pg_dump, "command": list(before.backup_command)}
+        assert table["backup"] == {"pg_dump": before.pg_dump, "command": list(before.backup_command),
+                                    "verify_command": list(before.backup_verify_command)}
         assert table["operator_notes"] == {"root": before.operator_notes_root}
     for name, source in before.sources.items():
         setting = next(setting for setting in ops.SETTINGS if setting.name == name)
@@ -378,10 +387,10 @@ def test_write_private_replaces_and_cleans_temporary_files(
 def test_render_escapes_strings_for_toml(tmp_path: Path) -> None:
     value = 'Sekr1t-pw "quoted" \\path\n雪'
     config = replace(ops.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops.FILE), database_url=DATABASE_URL,
-                     host=value, pg_dump=value, backup_command=(value,), operator_notes_root=value)
+                     host=value, pg_dump=value, backup_command=(value,), backup_verify_command=(value,), operator_notes_root=value)
     table = tomllib.loads(ops.render(config))
     assert table["server"]["host"] == table["backup"]["pg_dump"] == table["operator_notes"]["root"] == value
-    assert table["backup"]["command"] == [value]
+    assert table["backup"]["command"] == table["backup"]["verify_command"] == [value]
 
 
 def test_render_writes_characters_outside_the_bmp_that_load_reads_back(tmp_path: Path, dotenv: Path) -> None:
