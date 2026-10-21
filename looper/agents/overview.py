@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timezone
 from typing import Any
 
+from .. import __version__
 from ..db import llm_records as db_llm_records, tasks as db_tasks
 from ..db.tasks import TaskGroup
 from .agent_settings import AgentType
@@ -116,6 +117,7 @@ async def build_overview(
     } for project_id in shown]
 
     return {
+        "version": __version__,
         "tasks": group_counts(rows),
         "agents": {
             "manager": {"agent_id": manager.agent_id, "state": "busy" if manager.busy else "idle"} if manager else None,
