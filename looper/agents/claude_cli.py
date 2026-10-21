@@ -905,6 +905,8 @@ class ResidentClaude:
                 return StopMethod.CONTROL
         if self._process is process:
             self._user_stopped = True
+            if output is not None:
+                output._capped = True  # what Claude writes as it is killed is the stopped turn's: it belongs to no turn
             await self.stop(kill=True)
         return StopMethod.KILL
 
@@ -916,7 +918,8 @@ class ResidentClaude:
         and whatever it started are ended (``proc_tree.end``). The process is
         always reaped, and what it wrote meanwhile is still read: a turn of
         Claude's own that ends then is handled; one that does not is closed
-        without a result.
+        without a result. A turn waiting on the stop returns only after that
+        reading is over.
         """
         process, output = self._process, self._output
         self._process, self._output, self._command, self._signature = None, None, [], None
@@ -942,11 +945,12 @@ class ResidentClaude:
             # Also when the wait is cancelled: the process is forgotten already.
             try:
                 await proc_tree.end(process, label=self._label, known=known)
+                if output is not None:
+                    # Read to its end, or cut off: an event a stopped turn's owner still handles is over with it.
+                    await output.finish()
             finally:
                 self._ending.discard(ended)
                 ended.set()
-            if output is not None:
-                await output.finish()
         logger.info("%s stopped Claude Code (pid=%s, exit code %s)", self._label, process.pid, process.returncode)
 
 

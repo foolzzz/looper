@@ -354,6 +354,7 @@ class CurrentTurn:
     stop: StopRequest | None = None
     method: Any = None  # StopMethod: how interrupt() ended the turn; None until it returns
     client_message_id: str | None = None  # the web page's own id for the message, which its Stop button names
+    turn: Turn | None = None  # the turn its tool calls act in, which a stop marks stopped (``ManagerOps.stop_turn``)
 
 
 class TurnStopped(Exception):
@@ -617,7 +618,8 @@ class ManagerAgent:
         client_id = context.get("client_message_id") if isinstance(context, dict) else None
         self._current = CurrentTurn(message_id=envelope.message_id, channel=origin["channel"], chat=origin["chat"],
                                     started_at=datetime.now(timezone.utc),
-                                    client_message_id=client_id if isinstance(client_id, str) and client_id else None)
+                                    client_message_id=client_id if isinstance(client_id, str) and client_id else None,
+                                    turn=turn)
         try:
             try:
                 stopped_note, self._stopped_note = self._stopped_note, None
@@ -628,9 +630,7 @@ class ManagerAgent:
                 self._current, self._current_envelope = None, None
         except TurnStopped as stopped:
             if self.ops is not None:
-                block = self.ops.drop_asked_in(envelope.message_id)
-                if block in turn.blocks:
-                    turn.blocks.remove(block)
+                self.ops.stop_turn(turn)  # done at the stop already; again for a turn that ended stopped by itself
             first_line = " ".join(text.split())[:80]
             self._stopped_note = (f'[Looper] The user stopped your previous reply (to: "{first_line}") before it '
                                   "finished. Tool calls it had already made were not undone; check their effects "
@@ -668,6 +668,9 @@ class ManagerAgent:
         if current.stop is not None:
             return StopResult.ALREADY_STOPPING
         current.stop = StopRequest(via=via, at=datetime.now(timezone.utc))
+        if current.turn is not None and self.ops is not None:
+            # At once, before Claude is stopped: a call it still has under way asks the user nothing and runs nothing.
+            self.ops.stop_turn(current.turn)
         envelope = self._current_envelope
         if envelope is not None and self._bus is not None:
             await self._send_status(envelope, "Stopping…", phase=True)

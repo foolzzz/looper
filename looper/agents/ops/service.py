@@ -17,6 +17,10 @@ to ``call``.
   ``looper_confirm`` run it, with the arguments it was asked with, within
   ``CONFIRMATION_SECONDS``. After that turn it lapses. Confirmations live in
   memory: a restart drops them, and the user is asked again.
+- **A stopped turn.** When the user stops a turn (``stop_turn``) or it ends,
+  its calls still under way run no further: one waiting in ``escalate``
+  registers nothing, and a call that comes later, ``looper_confirm`` too, is
+  refused and told so. The confirmation the stopped turn asked is dropped.
 - **The trail.** Every call is a ``manager_actions`` row (``db.manager_actions``).
 - **When the tools do not work.** Before a turn answering the user, the
   Manager asks ``tools_problem``: it starts the MCP entry's command as the
@@ -46,7 +50,7 @@ from typing import Any
 
 from ... import child_env
 from ...db import manager_actions as db_actions
-from . import Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
+from . import Call, ErrorCode, OpError, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from .config import TOOLS as CONFIG_TOOLS
 from .schedules import TOOLS as SCHEDULE_TOOLS
@@ -200,6 +204,7 @@ class ManagerOps:
         try:
             arguments = check_arguments(tool.schema, raw)
             risk = tool.risk_of(arguments)
+            _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
@@ -209,6 +214,7 @@ class ManagerOps:
             impact = await tool.escalate(call) if tool.escalate is not None else None
             if impact is not None:
                 risk = Risk.HIGH
+                _check_answering(turn)  # stopped while escalate read: the user is asked nothing
                 pending = self._ask(tool, arguments, impact, turn)
                 await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
@@ -305,8 +311,20 @@ class ManagerOps:
                 f"confirmation_id {pending.id}); Looper showed them:\n{pending.block}\nIf the message below confirms "
                 f"it, call {CONFIRM_TOOL} with that confirmation_id. Otherwise do not: it lapses after this turn.")
 
+    def stop_turn(self, turn: Turn) -> None:
+        """The user stopped ``turn``: its calls still under way run no further, and the confirmation it asked, if
+        any, is dropped, with what its reply would have shown."""
+        turn.state = TurnState.STOPPED
+        for key, pending in list(self._pending.items()):
+            if pending.asked_in == turn.message_id and not turn.autonomous:
+                del self._pending[key]
+                if pending.block in turn.blocks:
+                    turn.blocks.remove(pending.block)
+
     def end_turn(self, turn: Turn) -> None:
         """``turn`` is over: an operation it could have confirmed and did not lapses."""
+        if turn.state is TurnState.ANSWERING:
+            turn.state = TurnState.ENDED
         if self._turn is turn:
             self._turn = None
         pending = self._pending.get(turn.chat_key)
@@ -316,14 +334,6 @@ class ManagerOps:
     def asks_in(self, message_id: str) -> bool:
         """Whether a confirmation asked in the turn of ``message_id`` waits."""
         return any(pending.asked_in == message_id for pending in self._pending.values())
-
-    def drop_asked_in(self, message_id: str) -> str | None:
-        """Drop the confirmation asked in the turn of ``message_id``; the block the user was shown, if any."""
-        for key, pending in self._pending.items():
-            if pending.asked_in == message_id:
-                del self._pending[key]
-                return pending.block
-        return None
 
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset)."""
@@ -372,6 +382,16 @@ class _Recorded(OpError):
 
     def __init__(self, error: OpError) -> None:
         super().__init__(error.code, str(error))
+
+
+def _check_answering(turn: Turn) -> None:
+    """Refuse a call of a turn the user stopped, or one that is over."""
+    if turn.state is TurnState.STOPPED:
+        raise OpError(ErrorCode.STOPPED, "the user stopped this turn: this call did not run and asks the user "
+                                         "nothing; stop here and make no more calls")
+    if turn.state is TurnState.ENDED:
+        raise OpError(ErrorCode.EXPIRED, "the turn this call came in is over: it did not run and asks the user "
+                                         "nothing")
 
 
 def tools_down_reply(problem: str) -> str:

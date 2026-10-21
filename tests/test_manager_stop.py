@@ -295,3 +295,135 @@ def test_the_turn_after_a_stop_is_told_once_and_new_clears_it(agent_db: Any) -> 
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+def _held_ops(manager: ManagerAgent) -> tuple[Any, asyncio.Event, list[str]]:
+    """A ``ManagerOps`` with ``looper_confirm`` over one high-risk stand-in tool whose ``escalate`` waits for the
+    returned event (a database read under way); the list collects the calls it ran."""
+    from looper.agents.ops import Risk, Tool
+    from looper.agents.ops.service import CONFIRM, ManagerOps, Platform
+
+    release, ran = asyncio.Event(), []
+
+    async def run(call: Any) -> dict[str, Any]:
+        ran.append(call.turn.message_id)
+        return {}
+
+    async def escalate(call: Any) -> str | None:
+        await release.wait()
+        return "删除 3？"
+
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok",
+                     tools=(Tool("t_write", "writes", schema, Risk.WRITE, run, escalate=escalate), CONFIRM))
+    ops._working_at = ops._clock()  # the MCP entry was probed
+    manager.ops = ops
+    return ops, release, ran
+
+
+def test_a_confirmation_asked_after_the_stop_is_refused_and_never_runs(agent_db: Any) -> None:
+    """A call still in ``escalate`` when the user stops the turn does not register its confirmation once it
+    returns: the next turn is not told about it, and ``looper_confirm`` cannot run what the user never saw."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            ops, release, ran = _held_ops(manager)
+            calls: list[asyncio.Task[Any]] = []
+
+            async def ask() -> None:
+                calls.append(asyncio.create_task(ops.call("t_write", {})))
+                await asyncio.sleep(0)  # the call took the turn and waits in escalate
+
+            session.on_turn = ask
+            envelope = _web("删掉它", 0)
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "需要你确认" not in reply["text"]
+
+            release.set()
+            answer = await calls[0]
+            assert answer["status"] == "error" and answer["error"]["code"] == "stopped"
+            assert "stopped" in answer["error"]["message"]
+            assert not ops.asks_in(envelope.message_id) and not ops._pending
+
+            # The next turn is told of no confirmation, and none can be confirmed in it.
+            nxt = Turn(channel="web", chat="session-a", message_id="next")
+            assert ops.begin_turn(nxt) == ""
+            ops.end_turn(nxt)
+            assert ran == []
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_calls_that_come_after_the_stop_are_refused_as_stopped(agent_db: Any) -> None:
+    """Once the user stopped the turn, a call it still makes (a write, a looper_confirm of the confirmation its
+    message answered) is refused and told the turn was stopped; nothing runs."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            ops, release, ran = _held_ops(manager)
+            release.set()
+
+            async def ask() -> None:
+                await ops.call("t_write", {})
+
+            session.on_turn = ask
+            await manager._handle(_web("删掉它", 0))
+            (pending,) = ops._pending.values()
+            _drain(queue)
+
+            answers: list[dict[str, Any]] = []
+
+            async def late() -> None:
+                await manager.stop_turn(confirm.message_id, via="web")
+                answers.append(await ops.call("looper_confirm", {"confirmation_id": pending.id}))
+                answers.append(await ops.call("t_write", {}))
+
+            session.hold, session.running, session._stopped = True, asyncio.Event(), asyncio.Event()
+            session.on_turn = late
+            confirm = _web("确认", 1)
+            handling = asyncio.create_task(manager._handle(confirm))
+            await _until(session.running.is_set)
+            await manager._interrupt_claude()
+            await handling
+            assert [a["error"]["code"] for a in answers] == ["stopped", "stopped"]
+            assert ran == [] and not ops._pending
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "需要你确认" not in reply["text"]
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_confirmation_asked_after_its_turn_ended_is_refused(agent_db: Any) -> None:
+    """A call still in ``escalate`` when its turn ended some other way (Claude failed) registers nothing either:
+    its reply was sent without it."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[asyncio.Task[Any]] = []
+
+            async def ask() -> None:
+                calls.append(asyncio.create_task(ops.call("t_write", {})))
+                await asyncio.sleep(0)
+                raise RuntimeError("Claude went away")
+
+            session = _Session(hold=False, on_turn=ask)
+            manager, bus, queue = _manager(Path(tmp), session)
+            ops, release, ran = _held_ops(manager)
+            envelope = _web("删掉它", 0)
+            await manager._handle(envelope)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "failed" and "需要你确认" not in reply["text"]
+            release.set()
+            answer = await calls[0]
+            assert answer["status"] == "error" and answer["error"]["code"] == "expired"
+            assert not ops._pending and ran == []
+            await bus.shutdown()
+
+    asyncio.run(run())

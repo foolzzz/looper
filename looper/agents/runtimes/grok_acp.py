@@ -672,6 +672,12 @@ class AcpGrok:
         while not self._inbox.empty():  # what the process wrote between turns
             self._inbox.get_nowait()
         turn = AcpTurn(model=self._launch.model, session_id=session)
+        if stop is not None and (early := stop()) is not None:
+            # Asked while the session was being readied, when ``interrupt`` had no prompt to cancel: a turn of text
+            # alone writes no event before its end that ``stop`` would be asked after, so the prompt is not sent.
+            await on_event(turn.init(cwd=self._cwd))
+            self._totals = self._totals.plus(early.usage)
+            return ResidentTurn(early.result_event, session_started=True, usage=early.usage)
         started = time.monotonic()
         self._requests += 1
         self._prompt_id = self._requests

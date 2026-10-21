@@ -40,6 +40,7 @@ class ErrorCode(str, Enum):
     FORBIDDEN = "forbidden"
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
     EXPIRED = "expired"  # a confirmation past its time or its turn
+    STOPPED = "stopped"  # the user stopped the turn the call came in
     UNAVAILABLE = "unavailable"  # Looper could not do it now (its database); the call may be tried again
     RATE_LIMITED = "rate_limited"  # over a limit of how often or how much (a room's); the message says when
 
@@ -50,6 +51,14 @@ class OpError(Exception):
     def __init__(self, code: ErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class TurnState(str, Enum):
+    """Where a Manager turn is: answering, stopped by the user, or over. Only an answering turn's calls run."""
+
+    ANSWERING = "answering"
+    STOPPED = "stopped"
+    ENDED = "ended"
 
 
 @dataclass
@@ -73,6 +82,9 @@ class Turn:
     task_ids: set[str | None] = field(default_factory=set)  # each call's named task; None for global calls or creates
     # Looper refused a call of this turn for its token: the tools did not work, whatever Claude says.
     refused: bool = False
+    # Set by the Manager when the user stops the turn and by ``end_turn``: a call of it still under way runs no
+    # further, and asks the user nothing.
+    state: TurnState = TurnState.ANSWERING
 
     @property
     def autonomous(self) -> bool:

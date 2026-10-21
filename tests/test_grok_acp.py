@@ -760,3 +760,47 @@ def test_a_stop_queued_while_a_cancel_waits_is_not_taken_for_its_response(
     got, answer, lost, stale = _go(_run())
     assert got is answer
     assert lost is None and stale  # the stop is no response: the grace period ran out and the process was ended
+
+
+def test_a_stop_while_the_session_is_readied_sends_no_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The user's stop that lands while the process starts and loads the session (``interrupt`` has no prompt to
+    cancel yet) ends the turn before its prompt is sent: Grok never runs it, and the session goes on."""
+    from looper.agents.claude_cli import USER_STOP, user_stop_result
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+    ensure = AcpGrok._ensure
+    readying, ready = asyncio.Event(), asyncio.Event()
+
+    async def slow_ensure(self: AcpGrok) -> None:
+        await ensure(self)
+        readying.set()
+        await ready.wait()
+
+    monkeypatch.setattr(AcpGrok, "_ensure", slow_ensure)
+    asked: list[bool] = []
+
+    def stop() -> CapStop | None:
+        return CapStop(user_stop_result(), Usage()) if asked else None
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        events = Events()
+        task = asyncio.create_task(session.run_turn("work", events, stop=stop))
+        await readying.wait()
+        asked.append(True)
+        method = await session.interrupt()  # no prompt in flight yet
+        ready.set()
+        stopped = await task
+        asked.clear()
+        (after,) = await _turns(session, "next")
+        stale = session.stale("s")
+        await session.stop()
+        return method, stopped, after, stale, events
+
+    method, stopped, after, stale, events = _go(_run())
+    assert method is None
+    assert stopped.result_event[USER_STOP] and not stale
+    assert not any(e["type"] in ("assistant", "result") for e in events.seen)
+    assert after.result_event["result"].endswith("| next | turn 1")  # the stopped prompt never reached Grok

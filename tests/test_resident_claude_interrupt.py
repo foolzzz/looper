@@ -87,6 +87,32 @@ for raw in sys.stdin:
         time.sleep(60)
 """
 
+# Deaf to the interrupt; ending (SIGTERM) it writes the stopped turn's answer and result before it exits.
+_ANSWERS_AS_IT_DIES = """\
+import json, signal, sys, time
+def out(event):
+    print(json.dumps(event), flush=True)
+def die(*_):
+    out({'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'too late'}]}})
+    out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'too late', 'total_cost_usd': 0.5,
+         'session_id': 's1', 'num_turns': 1})
+    sys.exit(0)
+signal.signal(signal.SIGTERM, die)
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if message['type'] == 'user':
+        out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
+        time.sleep(60)
+"""
+
+
+async def _until(check: Any) -> None:
+    for _ in range(500):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out")
+
 
 async def _until_streaming(seen: list[dict[str, Any]]) -> None:
     for _ in range(500):
@@ -264,6 +290,79 @@ def test_a_killed_turn_returns_only_after_its_process_tree_is_gone(
             assert result.stopped is StopMethod.KILL
             assert ended == [True]
             await stopper
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_what_a_killed_claude_writes_as_it_dies_is_no_turn_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stopped turn's output that is still read while Claude is killed belongs to no turn: it is neither a
+    turn Claude ran on its own (whose answer the Manager would send to the chat) nor spend of the session."""
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.2)
+    claude = fake_claude(tmp_path / "claude", _ANSWERS_AS_IT_DIES)
+    own: list[Any] = []
+
+    async def autonomous(tag: Any) -> Any:
+        own.append(tag)
+        raise AssertionError("a killed turn's output began a turn of Claude's own")
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None, autonomous=autonomous)
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            turn = asyncio.create_task(session.run_turn("work", on_event))
+            await _until_streaming(seen)
+            assert await session.interrupt() is StopMethod.KILL
+            result = await asyncio.wait_for(turn, 10)
+            assert result.stopped is StopMethod.KILL
+            await asyncio.sleep(0.3)  # the reader has had what Claude wrote as it died
+            assert own == []
+            assert session.totals.cost_usd in (None, 0)
+            assert not any(e.get("type") == "result" for e in seen)
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_a_killed_turn_returns_only_after_its_last_event_was_handled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event of the stopped turn its owner was still handling when Claude was killed is handled before the turn
+    returns: nothing of it reaches the owner after the turn (its record closed, the next turn begun)."""
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.2)
+    claude = fake_claude(tmp_path / "claude", _ANSWERS_AS_IT_DIES)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        handling: list[str] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            handling.append("in")
+            await asyncio.sleep(1.5)  # a slow write of the event (its record, the chat)
+            handling.append("out")
+
+        async def run_turn() -> Any:
+            result = await session.run_turn("work", on_event)
+            handling.append("returned")
+            return result
+
+        try:
+            turn = asyncio.create_task(run_turn())
+            await _until(lambda: handling == ["in"])
+            assert await session.interrupt() is StopMethod.KILL
+            result = await asyncio.wait_for(turn, 10)
+            assert result.stopped is StopMethod.KILL
+            assert handling == ["in", "out", "returned"]
         finally:
             await session.stop(kill=True)
 
