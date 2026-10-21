@@ -37,6 +37,9 @@ def _profile(profile_id: str = "agent-codex", runtime_type: str = "codex", provi
     (" /PROFILE ", ProfileCommand(Kind.LIST)),
     ("/profile 2", ProfileCommand(Kind.SELECT, "2")),
     ("/profile 0", ProfileCommand(Kind.FOLLOW_SETTINGS)),
+    ("/profile\t2", ProfileCommand(Kind.SELECT, "2")),
+    ("/profile\n2", ProfileCommand(Kind.SELECT, "2")),
+    ("/profile\n", ProfileCommand(Kind.LIST)),
     ("/profile claude-code/opus · xhigh", ProfileCommand(Kind.SELECT, "claude-code/opus · xhigh")),
     ("/profiles", None), ("/profile2", None), ("hello /profile", None), ("", None),
 ])

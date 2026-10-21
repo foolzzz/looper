@@ -710,7 +710,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     setNewPanel(null);
     fetchManagerSession().then(setNewPanel).catch(() => setNewPanel({
       session: { active: false, runtime: null, profile_id: null }, selected: null,
-      effective: { profile: null, source: "session" }, problem: null, choices: [],
+      effective: { profile: null, source: "session" }, problem: null, follow_settings: null, choices: [],
     }));
   };
 
@@ -724,7 +724,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     setServerTurn(null);
     setNotice("");
     setSending(true);
-    const isNewSession = text === NEW_SESSION_COMMAND;
+    const changesProfile = text === NEW_SESSION_COMMAND || /^\/profile(\s|$)/i.test(text);
     setPhase("");
     let finalSeen = false;
     let aborted = false;
@@ -785,7 +785,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
               if (current_()) {
                 setSending(false);
                 setPhase("");
-                if (isNewSession) setProfileRefresh((n) => n + 1);
+                if (changesProfile) setProfileRefresh((n) => n + 1);
               }
               if (sid !== sessionIdRef.current) break;
               const list = stagedRef.current;
