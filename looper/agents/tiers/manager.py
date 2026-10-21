@@ -73,6 +73,7 @@ from .. import session_switch
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
+from .turn_token import StopRequest, TurnStopped  # noqa: F401  (re-exported)
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from ..ops import Turn
 from ..ops.service import tools_down_reply
@@ -376,14 +377,6 @@ class StopResult(str, Enum):
     OTHER_MESSAGE = "other_message"
 
 
-@dataclass(frozen=True)
-class StopRequest:
-    """A user's request to stop the running turn: where it came from and when."""
-
-    via: str
-    at: datetime
-
-
 @dataclass
 class CurrentTurn:
     """The user turn the Manager is answering, and the stop asked for it, if any."""
@@ -397,14 +390,6 @@ class CurrentTurn:
     client_message_id: str | None = None  # the web page's own id for the message, which its Stop button names
     turn: Turn | None = None  # the turn its tool calls act in, which a stop marks stopped (``ManagerOps.stop_turn``)
     settled: bool = False  # its end is decided (recorded as an answer or a failure): a stop comes too late
-
-
-class TurnStopped(Exception):
-    """The user stopped the turn; ``partial`` is what Claude had written."""
-
-    def __init__(self, partial: str = "") -> None:
-        super().__init__("stopped by the user")
-        self.partial = partial
 
 
 class TurnFailed(RuntimeError):
