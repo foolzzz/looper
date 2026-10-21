@@ -22,9 +22,64 @@ How the agent system works today is described in
 
 - **The Manager's chat box keeps working while it replies: a queue, a history and a Stop.** Enter during a reply puts the message in a staging area above the box; after a reply that ends as `answered` the staged messages go as one message joined by a blank line, otherwise they return to the box, and they survive a reload. ↑ pulls them back, ↑/↓ walk this thread's last 100 messages, and Esc or the Stop button stops the reply (`POST /api/chat/stop`; `GET /api/chat/turn` tells a reloaded page whether one is running). `/stop` does the same from the web chat, Telegram (a new command) and Lark, and is answered outside the Manager's queue. A stopped turn is recorded `interrupted` with the text and usage so far, keeps the session, and the next turn is told the user stopped it; a confirmation it had asked for is dropped. Claude Code is interrupted with a control request (killed after 5 s), Grok with `session/cancel`, Codex, OMP, Pi and DSH by ending the turn's process tree (a stopped Codex turn records no usage). `answer.final` now carries the reply's `outcome`.
 
+## [2.13.5] - 2026-10-20
+
+### Changed
+
+- **OMP never backgrounds a command on its own.** The OMP settings overlay now turns off `bash.autoBackground` and `eval.autoBackground` beside `async`, for every role, so a long command finishes inside its turn instead of being backgrounded and the turn ending without its result. A very long command now holds its turn. The overlay change gives each OMP launch configuration a new content-derived home directory. ([#271](https://github.com/foolzzz/looper/pull/271))
+- **The Manager's "no reply" error names the runtime that ran.** It took "Claude Code" for every runtime; it now uses the launch's runtime label. Only the Manager text changed. No prompt, tool or model-facing text changed. ([#271](https://github.com/foolzzz/looper/pull/271))
+
+### Validation
+
+- Reported in #271: overlay and failure-text tests, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+## [2.13.4] - 2026-10-20
+
+### Changed
+
+- **Pipeline hover cards show each run's agent runtime and model.** The Worker, Reviewer and Planner lines gain an Agent fact (runtime, model, effort) from the latest run of that role, and of that step for Worker and Reviewer; it appears only when such a run exists. The task page now reads the task's Planner, Worker and Reviewer runs once through a shared hook, also used by the Agents tab, so it makes those `GET /api/llm-records` requests even when the Agents tab is closed. Dashboard-only; no API, prompt, tool or model-facing text changed. ([#274](https://github.com/foolzzz/looper/pull/274))
+
+### Validation
+
+- Reported in #274: vitest for the cards and node card component, tsc, headless-browser screenshots, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.4.md).
+
+## [2.13.3] - 2026-10-20
+
+### Changed
+
+- **The dashboard sidebar shows the running Looper version.** `GET /api/overview` gains a `version` field (the installed `looper.__version__`), and the sidebar shows it as a small muted label next to "Looper". A client talking to an older server shows no label. The overview response gains a field; no prompt, tool or model-facing text changed. ([#272](https://github.com/foolzzz/looper/pull/272))
+
+### Validation
+
+- Reported in #272: overview API test, sidebar vitest and tsc, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.3.md).
+
+## [2.13.2] - 2026-10-20
+
 ### Fixed
 
-- **The pre-upgrade backup is verified when `pg_dump` runs in Docker.** A `docker exec ... pg_dump` backup command no longer needs a local `pg_restore`: the dump is listed with `docker exec -i <container> pg_restore --list`, or with the new `[backup] verify_command` (deprecated env `LOOPER_BACKUP_VERIFY_CMD`) for any other setup. `looper doctor` and the startup check report the verifier; without one the backup still fails before any DDL, naming `backup.verify_command`.
+- **CI runs the legacy parity tests on a shallow-clone runner.** The `Agent system tests` job checks out the full history, and the Claude Code launch parity test no longer depends on the host's temporary-root ancestors (`/private/tmp` on macOS, `/tmp` on Linux). CI workflow and test-only change; no product or model-visible change. ([#270](https://github.com/foolzzz/looper/pull/270), follow-up of [#267](https://github.com/foolzzz/looper/issues/267))
+
+### Validation
+
+- Retained #270 report: targeted tests on a disposable PostgreSQL passed; no local full-suite run or review record is reported. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.2.md).
+
+## [2.13.1] - 2026-10-20
+
+### Fixed
+
+- **The pre-upgrade backup is verified when `pg_dump` runs in Docker.** A `docker exec <container> pg_dump ...` backup command no longer needs a local `pg_restore`: the dump is listed with `docker exec -i <container> pg_restore --list`, or with the new `backup.verify_command` in the ops file (deprecated env `LOOPER_BACKUP_VERIFY_CMD`) for other setups. `looper doctor` and the startup check report the verifier; without one the backup still fails before any DDL, naming `backup.verify_command`. This resolves the v2.13.0 Docker backup known issue. ([#266](https://github.com/foolzzz/looper/pull/266))
+
+### Validation
+
+- Retained #266 report: unit tests cover derivation, explicit and failing verifiers, and the unchanged failure path; final Codex and Grok reviews left no P0. The PR body reports CI green, but its final-head workflow shows Dashboard tests passed and Agent system tests failed; CI is not recorded as a verified pass for this draft.
+
+See the [bilingual release notes](docs/releases/v2.13.1.md) for activation, verification, rollback, authority boundaries and validation limits.
 
 ## [2.13.0] - 2026-10-20
 

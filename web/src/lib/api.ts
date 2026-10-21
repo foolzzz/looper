@@ -261,6 +261,8 @@ export interface ComponentHealth {
 }
 
 export interface Overview {
+  /** The installed Looper version; absent from a server that predates it. */
+  version?: string;
   tasks: Record<TaskGroup, number> & { total: number; other_statuses: Record<string, number> };
   agents: {
     /** null when the server has no Manager to ask. */

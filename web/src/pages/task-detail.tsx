@@ -44,7 +44,8 @@ import { WAIT_STATES, waitAnchor } from "@/lib/waits";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { TaskRoomTab } from "@/components/task-room";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
-import { type NodeCard, gateCard, waitCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
+import { useTaskRuns } from "@/lib/use-task-runs";
+import { type NodeCard, type TaskRuns, gateCard, waitCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
@@ -1688,7 +1689,7 @@ const NODE_TYPES = { gate: GateNode };
  * it on the Overview tab (`onOpenGate`). Done steps keep their place and edges when the plan changes; dropped ones
  * stay, dashed and muted, as history. Each node has a card of its details (`NodeCards`); the dropped steps are
  * hidden unless the viewer shows them, and the graph can go full screen (`PipelineToolbar`). */
-function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step: TaskStep) => void }) {
+function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskRuns | null; onOpenGate: (step: TaskStep) => void }) {
   const [hideSkipped, setHideSkipped] = useState(storedHideSkipped);
   const container = useRef<HTMLDivElement>(null);
   const [full, toggleFull] = useFullScreen(container);
@@ -1709,7 +1710,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       data: { label: <NodeLabel name="Planner" look={plannerLook} /> },
       style: nodeStyle(plannerLook), sourcePosition: Position.Bottom, targetPosition: Position.Top,
     });
-    cards.planner = plannerCard(task, plannerLook);
+    cards.planner = plannerCard(task, plannerLook, runs ?? undefined);
 
     if (all.length === 0) {
       const look = { ...STEP_LOOKS.pending, borderStyle: "dashed" as const, label: "Waiting for the plan" };
@@ -1782,7 +1783,8 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
       cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
-                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id), room });
+                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id), room,
+                                        runs: runs ?? undefined });
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.
@@ -1798,7 +1800,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
     }
     return { nodes: described(ns), edges: es, rows: depth + 3, cards, skipped };
-  }, [task, hideSkipped, onOpenGate]);
+  }, [task, runs, hideSkipped, onOpenGate]);
   const changeHideSkipped = (hide: boolean) => {
     setHideSkipped(hide);
     storeHideSkipped(hide);
@@ -1949,6 +1951,7 @@ export function TaskDetailRoute(props: TaskDetailPageProps) {
 
 function TaskDetailPage({ taskId, gateStep, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
+  const taskRuns = useTaskRuns(task);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
   /** Start over waits for its confirmation: it deletes the task's steps and plan. */
@@ -2151,10 +2154,10 @@ function TaskDetailPage({ taskId, gateStep, onBack }: TaskDetailPageProps) {
             onGateShown={gateShown}
           />
         )}
-        {task && tab === "pipeline" && <PipelineTab task={task} onOpenGate={openGate} />}
+        {task && tab === "pipeline" && <PipelineTab task={task} runs={taskRuns.runs} onOpenGate={openGate} />}
         {task && tab === "room" && <TaskRoomTab key={`${task.task_id}:${runs}`} task={task} />}
         {task && tab === "agents" && (
-          <TaskAgentsTab task={task} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
+          <TaskAgentsTab task={task} runs={taskRuns.runs} runsError={taskRuns.error} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
         )}
         {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}
