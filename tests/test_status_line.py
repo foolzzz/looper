@@ -119,6 +119,18 @@ def test_the_edit_cap_stops_progress_but_not_the_closing_edit() -> None:
     assert MAX_PROGRESS_EDITS + 1 <= 20  # Feishu's limit per message
 
 
+def test_a_stopped_reply_closes_the_line_without_an_error_mark() -> None:
+    chat = _Chat()
+
+    async def main() -> None:
+        lines = _lines(chat)
+        await lines.update("c1", "oc_1", _phase(1))
+        await lines.finish("c1", stopped=True)
+
+    asyncio.run(main())
+    assert chat.edits[-1] == "已停止" and "❌" not in chat.edits[-1]
+
+
 def test_an_edit_failure_is_logged_once_and_never_becomes_more_messages(caplog: pytest.LogCaptureFixture) -> None:
     chat = _Chat(fail_edit=True)
 

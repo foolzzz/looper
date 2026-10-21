@@ -694,7 +694,7 @@ async def _run_agent_system(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import links, operator_notes, scheduler_settings, waits
+    from . import chat_settings, links, operator_notes, scheduler_settings, waits
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
@@ -715,6 +715,7 @@ async def _run_agent_system(
     try:
         await scheduler_settings.load()
         await waits.load()
+        await chat_settings.load()
     except ValueError as exc:
         raise StartupCheckFailed(str(exc)) from None
 

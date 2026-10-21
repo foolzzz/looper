@@ -162,7 +162,8 @@ class LarkChannelAdapter(ChannelAdapter):
         else:
             receipt = await self._send_message(chat_id, text)
         if not envelope.payload.get("autonomous"):
-            await self._status.finish(corr_id, error=envelope.payload.get("error"))
+            await self._status.finish(corr_id, error=envelope.payload.get("error"),
+                                      stopped=envelope.payload.get("outcome") == "stopped")
         return receipt
 
     async def _answer(self, correlation_id: str, *, text: str | None = None,

@@ -2682,3 +2682,48 @@ def test_a_dialog_reply_must_not_show_raw_json(reply: str, raw: bool) -> None:
     from evals.prompt_regression.dialogs import _raw_json
 
     assert (_raw_json(reply) is not None) is raw
+
+
+class _StopApi:
+    """The Manager's run records, as ``_check_manager_run`` reads them."""
+
+    def __init__(self, status: str, via: str | None) -> None:
+        metadata = {"user_stop": {"via": via}} if via else {}
+        self.record = {"id": 5, "status": status, "error": None, "metadata": metadata}
+
+    def get(self, path: str, **_: Any) -> dict[str, Any]:
+        if path.endswith("/events"):
+            return {"events": [{"seq": 1, "event": {"type": "result", "subtype": "success", "is_error": False}}]}
+        return {"records": [self.record]}
+
+
+def test_a_stop_say_accepts_only_a_run_the_web_stop_interrupted() -> None:
+    from evals.prompt_regression import dialogs
+
+    dialogs._check_manager_run(_StopApi("interrupted", "web"), 0, stop=True)
+    for status, via in (("completed", None), ("interrupted", "telegram"), ("completed", "web")):
+        with pytest.raises(runner.EvalError, match="the turn was not stopped"):
+            dialogs._check_manager_run(_StopApi(status, via), 0, stop=True)
+    with pytest.raises(runner.EvalError, match="interrupted"):
+        dialogs._check_manager_run(_StopApi("interrupted", "web"), 0)
+
+
+def test_the_stop_dialog_checks_its_replies() -> None:
+    from evals.prompt_regression import dialogs
+
+    def look(reply: str) -> Any:
+        return dialogs.Look(None, None, reply, "disposable", 0, frozenset(), True)  # type: ignore[arg-type]
+
+    assert dialogs._was_stopped(look("一些内容\n\n（已停止）")) is None
+    assert dialogs._was_stopped(look("已停止，这次没有回复。")) is None
+    assert dialogs._was_stopped(look("已处理（looper_projects：ok）。")) is not None
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
+def test_the_fake_stop_dialog_passes(tmp_path: Path) -> None:
+    from evals.prompt_regression import dialogs
+
+    result, _ = dialogs.run(mode="fake", dialogs=dialogs.select(["stop_then_continue"]),
+                            admin_url=os.environ["LOOPER_TEST_DATABASE_URL"], out_dir=tmp_path, timeout=30)
+    assert result["aborted"] is None, result
+    assert [row["outcome"] for row in result["dialogs"]] == ["pass"], result["dialogs"]

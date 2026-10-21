@@ -341,6 +341,14 @@ async def _created_project(
             "background": background}
 
 
+@pytest.fixture(autouse=True)
+def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts with stopping a reply off, its default (``chat_settings``), whatever an earlier one set."""
+    from looper.agents import chat_settings
+
+    monkeypatch.setattr(chat_settings, "_stop_enabled", chat_settings.DEFAULT_STOP_ENABLED)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _no_operator_codex_login(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """No test reaches the operator's Codex login: the login file a Codex login run links to is ``auth.json`` in

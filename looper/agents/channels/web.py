@@ -209,6 +209,7 @@ class WebChannelAdapter(ChannelAdapter):
                 "channel_context": {
                     "session_id": session_id,
                     "goal_id": goal_id,
+                    "client_message_id": message_id,  # what the page's Stop button names (POST /api/chat/stop)
                 },
                 **({"supplement_id": supplement_id} if supplement_id is not None else {}),
                 **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id else {}),
@@ -275,6 +276,7 @@ class WebChannelAdapter(ChannelAdapter):
                     "payload": {
                         "text": envelope.payload.get("text", ""),
                         "response": {"message": envelope.payload.get("text", "")},
+                        "outcome": envelope.payload.get("outcome", "answered"),
                     },
                 }
             case MessageType.STATUS_UPDATE:
@@ -293,6 +295,7 @@ class WebChannelAdapter(ChannelAdapter):
                     "payload": {
                         "text": envelope.payload.get("text", ""),
                         "response": {"message": envelope.payload.get("text", "")},
+                        "outcome": envelope.payload.get("outcome", "answered"),
                     },
                 }
             case _:

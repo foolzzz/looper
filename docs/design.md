@@ -203,6 +203,13 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 左上角列出所有 agent（`GET /api/chat/targets`）：全局唯一的 Manager，以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
+- 输入框在管家回复期间照样能用：
+  - 回复期间按 Enter，消息进入输入框上方的暂存区（最多 20 条），不发出。回复正常结束（`answer.final` 的 `outcome` 为 `answered`）后，暂存的消息用空行连成一条消息发出一次；回复出错、被停止或在等用户确认时不发，暂存的消息回到输入框里。暂存区按聊天存在 `sessionStorage`，刷新页面不丢
+  - ↑（光标在第一行、没有选中文字）或暂存区的 Edit 按钮把暂存的消息拉回输入框，排在已输入文字之前
+  - 暂存区为空时，↑、↓ 翻看这个线程里用户自己发过的消息（最近 100 条，相邻重复合并）；Esc 或翻到底的 ↓ 回到原来输入的文字
+  - 停止管家当前的回复：回复期间按 Esc，或点输入框为空时代替发送的 Stop 按钮（`POST /api/chat/stop`），也可以直接发 `/stop`。刷新页面后用 `GET /api/chat/turn` 判断回复是否还在跑。规划者的聊天有暂存和历史，没有 Stop
+  - 触屏上没有方向键和 Esc，靠按钮：Queue、Stop、Edit，点击区域不小于 44 px；触屏上的历史翻看暂未提供
+- 任何渠道发来的消息只要正好是 `/stop`（去掉首尾空白，不分大小写），就停止管家正在回答这个聊天的那一轮：它不进管家的消息队列（不然要等被停的那一轮结束才轮到），由 Looper 自己回复，不交给 Claude。被停的一轮记为 `interrupted`，保留已输出的文字、已花费的用量和会话；下一轮开头有一句 `[Looper]` 说明用户停止了上一次回复，工具调用不会撤销；这一轮里等用户确认的操作作废
 - 选中 Manager 时，左侧按渠道（Dashboard chat、Lark、Telegram）列出它的对话（`GET /api/chat/sessions`，不含 Planner 线程），每条显示最后一条消息的开头和时间；选网页对话就接着在那个线程里聊，选 Lark 或 Telegram 的对话只读显示历史，没有输入框。窄屏时列表收进标题栏的按钮里。每个对话只取最新的 200 条消息（`GET /api/chat/messages`），更早的不翻页
 - 任何渠道发来的消息只要正好是 `/new`（去掉首尾空白，不分大小写），就由 Looper 自己处理、不交给 Claude：Manager 停掉常驻 Claude、丢掉保存的会话，下一条消息（不论来自哪个渠道）开新会话，不带续接简报；重置记成一次运行。Manager 聊天顶部的「New session」按钮打开一个面板：先选新会话用的 Agent Profile（默认「Follow Settings」，不能启动的 Profile 置灰并写明原因），再点「Start new session」，发出 `/new`，选了 Profile 时同时带 `new_session_profile_id`；`/new` 总会清掉会话原来的选择。
 - Manager 聊天顶部的「Agent:」控件显示这个会话现在用的 Agent Profile 和来源（「this session」或「Settings」），下拉框切换它（`GET /api/manager/session`、`PUT /api/manager/session/profile`，与对话里的 `/profile` 同一条路径，「Follow Settings」即 `/profile 0`）。运行时或 provider 变了、切换之后要开新会话（先让当前会话写交接）时，先用 `confirm()` 说明；同一运行时和 provider 的切换直接续接，不确认。生效的 Profile 不能启动时，控件下面显示原因（`problem`）；列表里不能服务 Manager 的 Profile 置灰并带原因
@@ -232,13 +239,13 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 ### Telegram
 
 - Bot 长轮询接入
-- 支持 `/start`、`/status`、`/new`、`/profile`、`/help` 命令；`/new`（不带参数）开始新的 Manager 会话；`/profile` 列出这个会话可选的 Agent Profile，`/profile <编号|名称|id>` 切换，`/profile 0` 改回跟随 Settings，由 Looper 自己回答
+- 支持 `/start`、`/status`、`/new`、`/stop`、`/profile`、`/help` 命令；`/new`（不带参数）开始新的 Manager 会话，`/stop`（不带参数）停止管家当前对这个聊天的回复；`/profile` 列出这个会话可选的 Agent Profile，`/profile <编号|名称|id>` 切换，`/profile 0` 改回跟随 Settings，由 Looper 自己回答
 - 消息自动分段（4000 字符限制）
 - Settings 配置项：
   - **Bot token**：BotFather 给的 token，存在与配置分开的 `channel_secrets` 表里，接口只返回是否已保存（`has_bot_token`），导出时不包含
   - `bot_token_env`：没有保存 token 时读取的环境变量名，默认 `LOOPER_TELEGRAM_BOT_TOKEN`
   - `allowed_user_ids`：发送者白名单，Telegram 的数字用户 ID（负数是群或频道，不是发送者）；以前存的逗号分隔字符串仍然能读。`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效
-- 名单外的发送者发 `/start`、`/status`、`/new`、`/profile`、`/help` 也得不到回复
+- 名单外的发送者发 `/start`、`/status`、`/new`、`/stop`、`/profile`、`/help` 也得不到回复
 
 ### Lark（lark-cli）
 

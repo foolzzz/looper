@@ -721,7 +721,7 @@ def test_manager_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pyt
                                                agent_db: Any) -> None:
     from unittest.mock import AsyncMock
     from looper.agents.message import MessageEnvelope, MessageType
-    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, TurnFailed
 
     launch = _launch(executable=str(tmp_path / "missing-omp"))
     manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
@@ -731,8 +731,12 @@ def test_manager_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pyt
 
     async def run() -> None:
         try:
-            reply = await asyncio.wait_for(manager._run_turn("hello", MessageEnvelope.create(
-                source="test", target="manager", message_type=MessageType.USER_MESSAGE, payload={})), 5)
+            # Raised, so the turn ends failed; what the user is told names the runtime.
+            with pytest.raises(TurnFailed) as failed:
+                await asyncio.wait_for(manager._run_turn("hello", MessageEnvelope.create(
+                    source="test", target="manager", message_type=MessageType.USER_MESSAGE, payload={})), 5)
+            reply = failed.value.reply
+            assert reply == "无法启动 OMP，请检查安装。"
             assert "OMP" in reply and "Claude Code" not in reply
             assert agent_db.finish_record.call_args.kwargs["error"].startswith("Cannot start OMP:")
         finally:

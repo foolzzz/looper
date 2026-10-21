@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Send,
+  Square,
   Loader2,
   Bot,
   User,
@@ -11,6 +11,7 @@ import {
   MessagesSquare,
   MessageCircleQuestionMark,
 } from "lucide-react";
+import { ChatComposer } from "@/components/chat-composer";
 import { NewSessionPanel } from "@/components/new-session-panel";
 import { ManagerSessionProfile } from "@/components/manager-session-profile";
 import { Markdown } from "@/components/markdown";
@@ -20,6 +21,9 @@ import {
   sendChat,
   saveChatMessage,
   fetchChatMessages,
+  fetchChatSettings,
+  fetchChatTurn,
+  stopChatReply,
   fetchChatSessions,
   fetchChatTargets,
   fetchManagerSession,
@@ -40,6 +44,7 @@ import {
   type UserGate,
   type ManagerSessionView,
 } from "@/lib/api";
+import { historyFrom, joinStaged, pullBack, turnAnswers } from "@/lib/composer";
 import { profileLabel } from "@/lib/use-registry";
 import { isGateWaiting } from "@/lib/gates";
 import { randomId } from "@/lib/ids";
@@ -52,6 +57,8 @@ interface ChatMessage {
   content: string;
   timestamp: number;
   streaming?: boolean;
+  /** How the turn ended when it was not an ordinary answer ("stopped" shows a label). */
+  outcome?: string;
 }
 
 const STORAGE_SESSION_KEY = "looper-chat-session-id";
@@ -59,6 +66,40 @@ const messagesKey = (sessionId: string) => `looper-chat-messages-${sessionId}`;
 // The keys from before the rename (LoopX), read when the new ones are missing so an open chat carries on.
 const LEGACY_SESSION_KEY = "loopx-chat-session-id";
 const legacyMessagesKey = (sessionId: string) => `loopx-chat-messages-${sessionId}`;
+
+const stagedKey = (sessionId: string) => `looper-chat-staged-${sessionId}`;
+// The server's running turn is asked again this often while the page waits for it to end.
+const TURN_POLL_MS = 3000;
+const STOP_DISABLED_NOTICE = "Stopping a reply is off (Settings → Chat).";
+const OTHER_MESSAGE_NOTICE = "The Manager is answering another message first; this one has not started.";
+
+function readStaged(sessionId: string): string[] {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(stagedKey(sessionId)) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStaged(sessionId: string, staged: string[]) {
+  try {
+    if (staged.length === 0) sessionStorage.removeItem(stagedKey(sessionId));
+    else sessionStorage.setItem(stagedKey(sessionId), JSON.stringify(staged));
+  } catch {
+    // Storage full or blocked: the queue still works for this page's life.
+  }
+}
+
+function fromDb(rows: DbChatMessage[]): ChatMessage[] {
+  return rows.map((m) => ({
+    id: m.message_id,
+    role: m.role as "user" | "assistant" | "system",
+    content: m.content,
+    timestamp: new Date(m.created_at).getTime(),
+    streaming: false,
+  }));
+}
 
 const MANAGER_TARGET: ChatTargetInfo = { kind: "manager", id: "manager", can_send: true };
 // Answered by Looper, not Claude: the Manager drops its session, so the next message, from any channel, starts clean.
@@ -261,7 +302,13 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const [sessionId, setSessionId] = useState(getOrCreateSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [notice, setNotice] = useState("");
+  const [staged, setStagedState] = useState<string[]>([]);
   const [sending, setSending] = useState(false);
+  // The id of the message this page's own reply stream answers.
+  const [ownId, setOwnId] = useState<string | null>(null);
+  // A turn running on the server that this page does not stream (a reload, or a stream that ended early).
+  const [serverTurn, setServerTurn] = useState<{ sid: string; ids: string[] } | null>(null);
   const [phase, setPhase] = useState("");
   const [roleConfigs, setRoleConfigs] = useState<RoleConfig[]>([]);
   const [targets, setTargets] = useState<ChatTargetInfo[]>([MANAGER_TARGET]);
@@ -272,15 +319,31 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const [taskOpen, setTaskOpen] = useState<Record<string, boolean>>({});
   const [plannerActivity, setPlannerActivity] = useState<ActivityEvent[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
   // Leaving the page (the session ended, for one) stops the reply stream.
   useEffect(() => () => cleanupRef.current?.(), []);
+
+  // Stopping a reply is a system setting (off by default); until it is read, there is no Stop.
+  const [stopEnabled, setStopEnabled] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetchChatSettings().then((s) => alive && setStopEnabled(s.stop_enabled), () => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
   const dbLoadedRef = useRef(false);
+  const stagedRef = useRef<string[]>([]);
+  const sendingRef = useRef(false);
+  sendingRef.current = sending;
+  const sendRef = useRef<(text: string, newSessionProfileId?: string) => Promise<void>>(async () => {});
+  const canSendRef = useRef(true);
+  const pollRef = useRef<{ sid: string; ids: string[]; stopped: boolean; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // The Manager's conversations on every channel, and the Lark or Telegram one open read-only (null: the web thread).
   const [conversations, setConversations] = useState<ChatSession[] | null>(null);
   const [conversationsError, setConversationsError] = useState("");
@@ -320,6 +383,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const groups = useMemo(() => groupByTask(targets), [targets]);
   // The selected agent as last listed: its status and whether it takes messages.
   const current = targets.find((t) => t.id === target.id) ?? target;
+  canSendRef.current = current.can_send;
   const taskGroup = groups.find((g) => g.planner.task_id === current.task_id);
   const isTaskOpen = (g: TaskGroup) =>
     taskOpen[g.planner.task_id ?? ""] ?? (g.planner.can_send || g.planner.task_id === current.task_id);
@@ -455,18 +519,6 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const viewingShown = viewingMessages ? `${viewingMessages.id}:${viewingMessages.rows.length}` : "";
   useEffect(scrollToBottom, [viewingShown, scrollToBottom]);
 
-  useEffect(() => {
-    if (!sending) inputRef.current?.focus();
-  }, [sending]);
-
-  // The message box grows with its lines, up to its max height, and shrinks back once sent.
-  useLayoutEffect(() => {
-    const box = inputRef.current;
-    if (!box) return;
-    box.style.height = "auto";
-    box.style.height = `${box.scrollHeight}px`;
-  }, [input]);
-
   // Load messages from DB on mount (or session change)
   useEffect(() => {
     dbLoadedRef.current = false;
@@ -477,14 +529,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     }
     fetchChatMessages(sessionId).then((dbMsgs) => {
       if (dbMsgs.length > 0) {
-        const loaded: ChatMessage[] = dbMsgs.map((m) => ({
-          id: m.message_id,
-          role: m.role as "user" | "assistant" | "system",
-          content: m.content,
-          timestamp: new Date(m.created_at).getTime(),
-          streaming: false,
-        }));
-        setMessages(loaded);
+        setMessages(fromDb(dbMsgs));
       } else {
         const local = loadMessages(sessionId);
         if (local.length > 0) setMessages(local);
@@ -505,7 +550,10 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     return watchChat(sessionId, (m) =>
       setMessages((prev) =>
         prev.some((p) => p.id === m.message_id)
-          ? prev
+          ? prev.map((p) =>
+              // The saved reply replaces the partial bubble this page streamed under the same id.
+              p.id === m.message_id && p.role === "assistant" ? { ...p, content: m.content, streaming: false } : p,
+            )
           : [
               ...prev,
               {
@@ -526,6 +574,117 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       saveMessages(sessionId, messages);
     }
   }, [messages, sessionId]);
+
+  // The queued messages of the open thread, mirrored to sessionStorage so a reload keeps them.
+  const setStaged = (next: string[]) => {
+    stagedRef.current = next;
+    setStagedState(next);
+    writeStaged(sessionIdRef.current, next);
+  };
+
+  // Queued messages that will not be sent go back to the draft, ahead of what is typed there.
+  const pullStagedToDraft = (extra: string[] = []) => {
+    const list = [...extra, ...stagedRef.current];
+    if (list.length === 0) return;
+    setStaged([]);
+    setInput((draft) => pullBack(list, draft));
+  };
+
+  const stopPoll = () => {
+    const poll = pollRef.current;
+    if (!poll) return;
+    poll.stopped = true;
+    clearTimeout(poll.timer);
+    pollRef.current = null;
+  };
+  useEffect(() => stopPoll, []);
+
+  // Waits for a turn this page does not stream to end, then re-reads the thread and returns the queue to the draft.
+  const followTurn = (sid: string, ids: string[]) => {
+    const running = pollRef.current;
+    if (running && running.sid === sid && ids.some((id) => running.ids.includes(id))) return;
+    stopPoll();
+    const poll: NonNullable<typeof pollRef.current> = { sid, ids, stopped: false };
+    pollRef.current = poll;
+    setServerTurn({ sid, ids });
+    const tick = async () => {
+      let turn: Awaited<ReturnType<typeof fetchChatTurn>> | undefined;
+      try {
+        turn = await fetchChatTurn(sid);
+      } catch {
+        turn = undefined;
+      }
+      if (poll.stopped) return;
+      if (turn === undefined || turnAnswers(turn, ids)) {
+        poll.timer = setTimeout(tick, TURN_POLL_MS);
+        return;
+      }
+      // Still replying while the history is re-read: a message sent now stops this poll, and its read is dropped.
+      const rows = await fetchChatMessages(sid).catch(() => []);
+      if (poll.stopped || sid !== sessionIdRef.current) return;
+      pollRef.current = null;
+      setServerTurn(null);
+      if (rows.length > 0) setMessages(fromDb(rows));
+      pullStagedToDraft();
+    };
+    poll.timer = setTimeout(tick, TURN_POLL_MS);
+  };
+
+  // On mount, a thread change and a return to the tab: is the Manager still answering this thread?
+  const syncTurn = async (sid: string) => {
+    if (sendingRef.current) return;
+    if (target.kind !== "manager") {
+      pullStagedToDraft();
+      return;
+    }
+    let turn: Awaited<ReturnType<typeof fetchChatTurn>>;
+    try {
+      turn = await fetchChatTurn(sid);
+    } catch {
+      return;
+    }
+    if (sid !== sessionIdRef.current || sendingRef.current) return;
+    if (turn) {
+      followTurn(sid, turn.client_message_id ? [turn.message_id, turn.client_message_id] : [turn.message_id]);
+    } else {
+      stopPoll();
+      setServerTurn(null);
+      pullStagedToDraft();
+    }
+  };
+  const syncTurnRef = useRef(syncTurn);
+  syncTurnRef.current = syncTurn;
+
+  useEffect(() => {
+    stagedRef.current = readStaged(sessionId);
+    setStagedState(stagedRef.current);
+    setNotice("");
+    stopPoll();
+    setServerTurn(null);
+    void syncTurnRef.current(sessionId);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void syncTurnRef.current(sessionId);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [sessionId, target.kind]);
+
+  const serverTurnHere = serverTurn && serverTurn.sid === sessionId ? serverTurn : null;
+  const replying = sending || serverTurnHere !== null;
+  const runningId = sending ? ownId : (serverTurnHere ? serverTurnHere.ids[serverTurnHere.ids.length - 1] : null);
+  const canStop = stopEnabled && target.kind === "manager" && runningId !== null;
+
+  const handleStop = async () => {
+    if (!runningId) return;
+    if (!stopEnabled) return setNotice(STOP_DISABLED_NOTICE); // a typed /stop: nothing is sent
+    try {
+      const { state } = await stopChatReply(runningId);
+      if (state === "disabled") setNotice(STOP_DISABLED_NOTICE);
+      else if (state === "other_message") setNotice(OTHER_MESSAGE_NOTICE);
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const handleNewChat = () => {
     if (wantConversation) onQuery?.(chatQuery(target.id));
@@ -555,14 +714,20 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     }));
   };
 
-  const handleSend = async (command?: string, newSessionProfileId?: string) => {
-    const text = command ?? input.trim();
-    if (!text || sending || !current.can_send) return;
+  const handleSend = async (text: string, newSessionProfileId?: string) => {
+    if (!text.trim() || !current.can_send) return;
 
-    if (command === undefined) setInput("");
+    const sid = sessionId;
+    const turn = ++turnRef.current;
+    const current_ = () => turn === turnRef.current;
+    stopPoll();
+    setServerTurn(null);
+    setNotice("");
     setSending(true);
-    const isNewSession = command === NEW_SESSION_COMMAND;
+    const isNewSession = text === NEW_SESSION_COMMAND;
     setPhase("");
+    let finalSeen = false;
+    let aborted = false;
 
     const userMsg: ChatMessage = {
       id: randomId(),
@@ -570,6 +735,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       content: text,
       timestamp: Date.now(),
     };
+    setOwnId(userMsg.id);
     setMessages((prev) => [...prev, userMsg]);
 
     // The server saves the answer to the chat under this id (`reply_message_id`), even when the page is left before
@@ -587,7 +753,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     try {
       const { events_url } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target), { newSessionProfileId });
 
-      cleanupRef.current = streamSSE(
+      const close = streamSSE(
         events_url,
         (event: SSEEvent) => {
           switch (event.kind) {
@@ -601,17 +767,34 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
               );
               break;
             case "answer.final": {
+              finalSeen = true;
               const finalText = (event.payload as any).text || "";
+              const outcome: string = (event.payload as any).outcome || "answered";
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
-                    ? { ...m, content: finalText || m.content || "Done.", streaming: false }
+                    ? {
+                        ...m,
+                        content: finalText || m.content || "Done.",
+                        streaming: false,
+                        outcome: outcome === "stopped" ? "stopped" : undefined,
+                      }
                     : m
                 )
               );
-              setSending(false);
-              setPhase("");
-              if (isNewSession) setProfileRefresh((n) => n + 1);
+              if (current_()) {
+                setSending(false);
+                setPhase("");
+                if (isNewSession) setProfileRefresh((n) => n + 1);
+              }
+              if (sid !== sessionIdRef.current) break;
+              const list = stagedRef.current;
+              if (list.length > 0) {
+                // Cleared first, so the batch can never go out twice.
+                setStaged([]);
+                if (outcome === "answered" && canSendRef.current) void sendRef.current(joinStaged(list));
+                else setInput((draft) => pullBack(list, draft));
+              }
               break;
             }
             case "agent.phase":
@@ -631,19 +814,31 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
                 }
                 return prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m));
               });
-              setSending(false);
-              setPhase("");
+              if (current_()) {
+                setSending(false);
+                setPhase("");
+              }
               break;
           }
         },
         () => {
-          setSending(false);
-          setPhase("");
+          if (current_()) {
+            setSending(false);
+            setPhase("");
+          }
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
           );
+          if (finalSeen || aborted || sid !== sessionIdRef.current) return;
+          // The stream ended with no final answer (its deadline, say): the turn may still run on the server.
+          if (target.kind === "manager") followTurn(sid, [userMsg.id]);
+          else pullStagedToDraft();
         }
       );
+      cleanupRef.current = () => {
+        aborted = true;
+        close();
+      };
     } catch (err) {
       // fetch() rejects with a TypeError when the server is unreachable; other
       // errors carry the server's reason, e.g. the task's Planner has stopped.
@@ -651,15 +846,23 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
         err instanceof TypeError || !(err instanceof Error)
           ? "Failed to connect. Is the server running?"
           : err.message;
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId ? { ...m, content: reason, streaming: false } : m
-        )
-      );
-      setSending(false);
+      if (current_()) setSending(false);
+      if (sid !== sessionIdRef.current) return;
+      if (text === NEW_SESSION_COMMAND) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, content: reason, streaming: false } : m)),
+        );
+      } else {
+        // Nothing is retried: the text returns to the draft with the reason.
+        setMessages((prev) => prev.filter((m) => m.id !== userMsg.id && m.id !== assistantId));
+        pullStagedToDraft([text]);
+        setNotice(reason);
+      }
       if (target.kind === "planner") refreshTargets();
     }
   };
+
+  sendRef.current = handleSend;
 
   const managerView = target.kind === "manager";
   const conversationList = (
@@ -974,6 +1177,12 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
               {msg.streaming && (
                 <Loader2 className="mt-1.5 h-3 w-3 animate-spin text-muted-foreground" />
               )}
+              {msg.outcome === "stopped" && (
+                <p className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground">
+                  <Square className="h-3 w-3 fill-current" aria-hidden="true" />
+                  Stopped
+                </p>
+              )}
             </div>
             {msg.role === "user" && (
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent">
@@ -1009,42 +1218,22 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
             )}
           </div>
         ) : (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSend();
+        <ChatComposer
+          key={sessionId}
+          draft={input}
+          onDraft={setInput}
+          staged={staged}
+          onStaged={setStaged}
+          history={historyFrom(messages)}
+          replying={replying}
+          canStop={canStop}
+          onSend={(text) => {
+            setInput("");
+            void handleSend(text);
           }}
-          className="flex items-end gap-2"
-        >
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              // Enter sends and Shift+Enter starts a new line; an input method's Enter only picks its candidate
-              // (Safari reports that keydown with keyCode 229 rather than isComposing).
-              if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing || e.keyCode === 229) return;
-              e.preventDefault();
-              e.currentTarget.form?.requestSubmit();
-            }}
-            placeholder="Type a message... (Shift+Enter for a new line)"
-            aria-label="Message"
-            className="max-h-40 min-h-10 flex-1 resize-none overflow-y-auto rounded-lg border border-input bg-background px-4 py-2.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
-            autoFocus
-          />
-          <button
-            type="submit"
-            disabled={sending || !input.trim()}
-            className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-          >
-            {sending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-          </button>
-        </form>
+          onStop={() => void handleStop()}
+          notice={notice || undefined}
+        />
         )}
       </div>
       </div>

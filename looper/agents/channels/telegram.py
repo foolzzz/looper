@@ -37,6 +37,7 @@ from ..message import (
 )
 from ..task_notice import NotifyTarget
 from .allowlist import SenderAllowlist
+from .. import chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -52,11 +53,17 @@ _CORRELATION_MAX = 1000
 _BOT_COMMANDS: list[tuple[str, str]] = [
     ("status", "查看当前任务进度"),
     ("new", "开始新的 Manager 会话"),
+    ("stop", "停止管家当前的回复"),
     ("gates", "列出等你回答的关卡"),
     ("gate", "回答或结束一个关卡：/gate 编号 回答，/gate 编号 end"),
     ("profile", "查看或切换 Manager 会话的 Agent Profile"),
     ("help", "显示帮助"),
 ]
+
+
+def bot_commands() -> list[tuple[str, str]]:
+    """The command menu: /stop only while stopping a reply is on (``chat_settings``)."""
+    return [(name, desc) for name, desc in _BOT_COMMANDS if name != "stop" or chat_settings.stop_enabled()]
 
 
 def _check_telegram_available() -> bool:
@@ -136,6 +143,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         # Only /new itself (also /new@<this bot>): "/new foo" stays an unknown command, as before.
         self._app.add_handler(CommandHandler("new", self._cmd_new, has_args=False))
+        self._app.add_handler(CommandHandler("stop", self._cmd_stop, has_args=False))
         # The gate commands take arguments; the Manager parses and answers them in code, so the text goes as typed.
         self._app.add_handler(CommandHandler("gates", self._cmd_gates))
         self._app.add_handler(CommandHandler("gate", self._cmd_gate))
@@ -151,7 +159,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             from telegram import BotCommand
 
             await self._app.bot.set_my_commands(
-                [BotCommand(name, desc) for name, desc in _BOT_COMMANDS]
+                [BotCommand(name, desc) for name, desc in bot_commands()]
             )
         except Exception:
             logger.warning("telegram set_my_commands failed", exc_info=True)
@@ -332,6 +340,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             "Looper Agent 已就绪。直接发消息给我，或使用:\n"
             "/status — 查看当前任务进度\n"
             "/new — 开始新的 Manager 会话\n"
+            "/stop — 停止管家当前的回复\n"
             "/profile — 查看或切换本会话的 Agent Profile\n"
             "/help — 帮助信息"
         )
@@ -369,6 +378,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             "直接发消息 — 提需求或问问题\n"
             "/status — 查看当前任务进度\n"
             "/new — 开始新的 Manager 会话\n"
+            "/stop — 停止管家当前的回复\n"
             "/gates — 列出等你回答的关卡\n"
             "/gate 编号 回答 — 回答关卡；/gate 编号 end — 结束\n"
             "/profile — 查看或切换本会话的 Agent Profile\n"
@@ -381,6 +391,11 @@ class TelegramChannelAdapter(ChannelAdapter):
             return
         await self._forward(update, "/new")
 
+    async def _cmd_stop(self, update: Any, context: Any) -> None:
+        """/stop goes to the Manager as the text ``/stop``, which it answers itself, outside its queue."""
+        if not self._admits(update):
+            return
+        await self._forward(update, "/stop")
     async def _cmd_gates(self, update: Any, context: Any) -> None:
         """/gates goes to the Manager as typed; it lists the gates and answers itself."""
         await self._forward_command(update)

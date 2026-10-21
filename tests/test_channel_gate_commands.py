@@ -99,7 +99,8 @@ class _World:
                     return None
 
                 manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
-                    has_planner=lambda task_id: True)), tools_problem=tools_problem)
+                    has_planner=lambda task_id: True)), tools_problem=tools_problem,
+                    asks_in=lambda message_id: False)
                 base = {"chat_id": "ou_me", "chat_type": "p2p", "sender_id": "ou_me", "message_id": "om_9"}
                 await manager._handle(MessageEnvelope.create(
                     source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,

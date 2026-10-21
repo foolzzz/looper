@@ -89,7 +89,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   chat as the turn runs, but is not part of the reply; a result without text
   (a turn that ended on a tool call) falls back to all the turn's top-level
   text. Messages
-  are handled one at a time, and each turn is one Runs record holding only
+  are handled one at a time (a `/stop` is not queued, see below), and each turn is one Runs record holding only
   that turn's cost and tokens
   ([What a run spent](#what-a-run-spent-and-how-large-its-context-grew)); the
   session's running totals are saved beside its id in the `agent_sessions`
@@ -146,6 +146,56 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   and the chat gets a confirmation. Tasks and their Planners are untouched.
   Any other text, `/new foo` and `/news` included, is handled as before: a
   message for Claude (in Telegram, an unknown command)
+- Stopping a reply is **behind the system setting `chat.stop_enabled`
+  (Settings → Chat, experimental, off by default)**, and everything about
+  `/stop`, `POST /api/chat/stop`, Esc and the Stop button below holds only
+  while it is on. Off, `POST /api/chat/stop` answers `409` with
+  `{"state": "disabled"}` and changes nothing (`GET /api/chat/turn` still
+  works); `/stop` is claimed from the bus as usual but answered by Looper with
+  `停止功能暂未开放`, interrupting nothing; the composer shows no Stop button and
+  Esc only restores a browsed draft; Telegram's command menu (set at startup)
+  leaves `/stop` out. The staging queue and the history do not depend on it
+- `/stop` (the same matching as `/new`: trimmed, any case, so `/stop now` and
+  `/stopx` are messages for Claude) stops the user turn the Manager is
+  answering for that chat. Unlike `/new` it does not wait in the Manager's
+  queue behind the turn it stops: the Manager takes it off the bus as soon as it
+  arrives (`subscribe_topic(USER_MESSAGE, ..., consumes=True)`, so the message
+  loop never sees it) and answers it itself, never through Claude: the
+  confirmation says the reply is being stopped, or that nothing is running
+  for this chat. It is not stored in the chat history. The web chat's Esc and
+  Stop button call `POST /api/chat/stop` instead, which reaches the same
+  `ManagerAgent.stop_turn`
+- A user turn can be stopped (`ManagerAgent.stop_turn(message_id, via=…)`
+  returns a `StopResult`: `stopping`, `already_stopping`, `not_running` when
+  no turn runs, `other_message` when the running turn answers another
+  message). The call does not wait for the turn: it records the request,
+  sends a "Stopping…" status and asks the runtime to interrupt
+  ([How an agent is stopped](#how-an-agent-is-stopped)); the turn then ends
+  by itself. A request that arrives before the turn's process has started
+  makes the turn end without starting it, with no spend. What a stopped turn
+  leaves:
+  - its Runs record ends `interrupted` ("stopped by the user") with the text
+    streamed so far as its output and the usage so far, and gets
+    `metadata.user_stop` (`via`: `web`, `telegram`, `lark`…; `method`:
+    `control`, `cancel` or `kill`, or null when no process had started;
+    `requested_at`; `usage_complete`);
+  - the saved session stays: the session totals move on, the session id is
+    kept, and the next turn resumes it (after a kill, with `--resume`). Tool
+    calls the turn had made are not undone, and the next turn's input starts
+    with a `[Looper]` note that the user stopped the previous reply (naming
+    its first 80 characters) and that those calls' effects must be checked
+    before they are relied on or repeated;
+  - the reply carries `outcome: stopped` (below), the text streamed so far
+    and `（已停止）`, or "已停止，这次没有回复。" when there was none, plus the
+    blocks of the tool calls that already ran; the Lark status line shows
+    "已停止", not an error;
+  - a confirmation that turn had asked for is dropped (it would otherwise end
+    with "reply to confirm"), and its block is removed from the reply.
+
+  A reply's `outcome` (`ReplyOutcome`) is `answered`, `failed` (an error was
+  attached), `stopped` or `confirm` (the turn ended on a confirmation
+  waiting for the user). Only the user's turn can be stopped, not a turn
+  Claude runs on its own, a `[HANDOFF]` turn or a `/new` reset
 - A turn its Claude runs on its own, after background work it started ends,
   is a Runs record of its own (input "(no user message: ...)", metadata
   `autonomous: true`). What Claude answered in it (its result's text, as for a
@@ -897,6 +947,21 @@ Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
   code 1, and a second SIGINT or SIGTERM during the shutdown exits at once the
   same way. The next start ends what such an exit leaves: the agents'
   processes (`proc_tree.sweep`) and their records (`end_unfinished_records`).
+
+A user's stop of a Manager turn (`ManagerAgent.stop_turn`) is the one stop
+that does not end the session: each runtime's `interrupt()` ends only the
+running turn, returns how (`StopMethod`: `control`, `cancel` or `kill`) and
+the turn comes back as stopped:
+
+| Runtime | `interrupt()` | Session after | Usage of the stopped turn |
+|---|---|---|---|
+| Claude Code (`ResidentClaude`) | writes a `control_request` `interrupt` to Claude's stdin and waits up to `INTERRUPT_GRACE_SEC` (5 s) for the turn's `result` (`control`); without one, or when stdin is closed, kills Claude (`kill`, the turn returns a synthetic `user_stop_result`) | `control`: the process stays; `kill`: the next turn starts it again with `--resume` | `control`: the result's; `kill`: what the events had reported |
+| Grok over ACP (`AcpGrok`) | `session/cancel`, waits for `stopReason: cancelled` up to `CANCEL_GRACE_SEC` (`cancel`); past it the process is ended (`kill`) | `cancel`: process and session stay | the response's `_meta.usage` |
+| Codex, OMP, Pi, DSH and Grok's per-turn fallback (`PerTurnSession`) | ends the turn's process tree through `proc_tree.end` (`kill`) | the session id is kept; the next turn resumes it | OMP, Pi and DSH report usage per message, so the usage so far is kept; Codex reports it only when a turn ends, so a stopped Codex turn records none (`usage_complete` false) |
+
+The per-turn runtimes are killed rather than asked: the Manager runs them
+as one process per turn, not over Codex's app-server or OMP/Pi's rpc, whose
+`turn/interrupt` and `abort` only Workers use.
 
 Before it sends any signal, `proc_tree.end` reads the agent's tree from one
 `ps -A -o pid=,ppid=,pgid=,stat=` snapshot: the agent, every process whose
@@ -3935,7 +4000,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Dashboard**: what is happening now, read from `GET /api/overview` every 5 s. A warning names each supervisor component that is not running: "is down" with when it restarts, or "keeps crashing" with its restarts in a row (and, when it is up between crashes, that it counts as stable after 5 minutes); else one muted "All components healthy" line. Task counts by group (In progress, Ready, Needs attention, Completed, and Cancelled or Other when they hold a task), each opening the Tasks page on that group (`#tasks?group=<group>`). "Agents running now": the Manager busy or idle, each running Planner with its project and task, and each Worker and Reviewer with its step (and the id of the role its task's Planner defined that it runs as) and how long it has run, or "waiting" for room under its task's limit, each linking to its agent history. "Running by project": for each project with a task in progress or ready, its running and ready tasks and its running Workers and Reviewers, with the waiting ones (a project has no limits), then how many projects are idle. "Schedules", when there is one: how many are enabled, the next 5 fires in their own zones, the failing schedules (failures in a row or an alert active, with the last run's status and the last success) and today's skipped runs by reason, each linking to its row on the project's Schedules tab. "Today's spend": the runs started since the server's local midnight, provider-priced (money) apart from the subscription equivalent (not billed), and the runs that ended without a cost.
-- **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`. Beside the Manager, a list shows its conversations on every channel (`GET /api/chat/sessions`), grouped as Dashboard chat, Lark and Telegram, each the most recently active first, with its last message's start, sender and time and its message count; it is re-read every 10 s and after each answer, and a failed read shows its error. Picking a dashboard chat opens it as the web chat thread; picking a Lark or Telegram conversation shows its newest messages read-only, with their times and no message box, re-read every 10 s, and says when only the newest 200 of more are shown; an answer its channel did not deliver says so under it, with the channel's reason. Below the md breakpoint the list opens from a button in the header.
+- **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`. Its message box stays usable while the Manager replies: Enter queues the message in a staging area above the box (up to 20; the Edit button or ↑ pulls them back into the box, ahead of what is typed), and once a reply ends as `answered` the queued messages go as one message joined by a blank line; after a failed, stopped or confirm reply they go back into the box instead, and they survive a reload (kept per chat in `sessionStorage`). ↑ and ↓ in the box walk the thread's earlier messages (the latest 100, adjacent duplicates collapsed). Esc, or the Stop button that replaces Send while the box is empty, calls `POST /api/chat/stop`; typing `/stop` and Enter does the same. After a reload the page asks `GET /api/chat/turn` whether a reply is still running. A planner's chat has the queue and the history but no Stop. Beside the Manager, a list shows its conversations on every channel (`GET /api/chat/sessions`), grouped as Dashboard chat, Lark and Telegram, each the most recently active first, with its last message's start, sender and time and its message count; it is re-read every 10 s and after each answer, and a failed read shows its error. Picking a dashboard chat opens it as the web chat thread; picking a Lark or Telegram conversation shows its newest messages read-only, with their times and no message box, re-read every 10 s, and says when only the newest 200 of more are shown; an answer its channel did not deliver says so under it, with the channel's reason. Below the md breakpoint the list opens from a button in the header.
 - **Tasks**: Task list, newest first, 50 at a time with Load more ("Showing N of M"; the newest page is re-read every 3 s and the older pages loaded stay below it), with project and status filters (`Ready` for ready tasks; the status chips filter on the server and count every task under the other filters), time display, each task's cost so far, a "Scheduled" badge linking to the schedule that created the task (with "continues the schedule's Planner session" on the detail page when `continues_schedule_session` is true), Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. On a stopped, failed or cancelled task, Start (here and on its detail page) goes on from its saved plan, and Start over, after an inline confirm, plans it anew (`POST /api/tasks/start` with `start_over`). `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, `#tasks?schedule=<id>` one schedule's tasks, shown as a chip too, and they combine. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|schedules|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then six tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers and Reviewers, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, spend cap and environment (a project sets no concurrency limit), where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Schedules**: a line saying a schedule runs a full task of the project on a time rule and starts disabled, New schedule, then one collapsible row per schedule. A closed row shows the name, the rule in words, the next run in the schedule's zone (or Disabled), the last run's status and the failures in a row, with the enable switch, Run now and Reset Planner session beside it (outside the row's button); reset asks for confirmation that the next run starts fresh and a run in flight keeps its own session without writing back. Its session status is "Planner session: none yet", or "Planner session: continuing since <time>, last used by run <task name>", with time in the schedule's zone and no session id, also for a parallel schedule. A closed row also shows "Failing" or "No success lately" while an alert is active. An open row edits every field (the gate command and timeout, the daily budget with today's spend, notify and the chat to send to, or Dashboard only, under "Before each run and after"), previews the rule's next 5 fire times as it is typed (an invalid rule says why and disables Save), saves with one Save, deletes after a confirmation, and lists the run history (the same one as a schedule's detail view): 20 runs at a time, newest first, with "Show older runs", the routine skips (nothing new, busy) hidden by a checkbox that is on at first and says how many firings there have been; each run with when it was due (the fire time on hover), how it fired (Scheduled, Catch-up with the missed count, Manual), the status, for a repeated skip ×N and until when (instead of how long it took), how long it took, the cost, the summary or error, a collapsed gate output, a note when the run carries the previous run's input, and its task by title with the task's status, linking to it. `#projects/<id>/schedules/<schedule id>` opens that row, and a task's Scheduled badge links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, offered only while the project has no tasks and no schedules.
@@ -3949,7 +4014,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 
 - **Activity SSE**: `GET /api/tasks/:id/activity/stream` — server-sent events from Worker subprocess
 - **Task polling**: 2-second interval with auto-stop on terminal status
-- **Chat SSE**: `GET /api/chat/events` — real-time chat responses
+- **Chat SSE**: `GET /api/chat/events` — real-time chat responses; the `answer.final` of a Manager reply carries its `outcome` (`answered`, `failed`, `stopped` or `confirm`; absent reads as `answered`), which the page uses to send queued messages only after `answered`
 
 ### Hash Routing
 
@@ -4125,6 +4190,8 @@ does not imply HTTP compatibility.
 | `/api/tasks/:id/activity` | GET | Activity events |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
 | `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` (the message is stored as a supplement of the task first), 409 when that task has no running Planner. `new_session_profile_id` goes only with `/new` to the Manager (else 400) and names the Agent Profile the new session runs on; it is checked as `/profile` checks it (400 for an unknown profile or one that cannot run the Manager), and a profile that cannot launch at `/new` leaves the session as it was |
+| `/api/chat/stop` | POST | Stop the Manager's running reply: body `{message_id}` (400 without it or on bad JSON, 503 without a Manager). 200 `{state: "stopping" \| "already_stopping", method}` (`method` is `control`, `cancel`, `kill`, or null while the interrupt is still under way); 409 `{state: "not_running" \| "other_message", error}` |
+| `/api/chat/turn` | GET | `?session_id=<web chat id>`: `{turn: null}` or `{turn: {message_id, channel, started_at, stopping}}` when the Manager's running user turn answers that chat; 400 without `session_id`, 503 without a Manager. The page reads it after a reload or when its stream broke |
 | `/api/manager/session` | GET | The Manager's session and its Agent Profile, never the session id: `session` (`active`, `runtime`, `profile_id`: what the saved session ran), `selected` (`{profile_id, name}` or null: the session's own choice), `effective` (`{profile, source}`: what the next turn runs and the layer it comes from, `session` or a settings layer), `problem` (why that profile cannot launch, else null) and `choices` (the numbered profiles `/profile` lists, each with its `problem` when it cannot serve the Manager). 503 while the Manager is not running |
 | `/api/manager/session/profile` | PUT | Choose the session's Agent Profile as `/profile` does: `{profile_id}`, null following Settings (a missing `profile_id` is 400, as is a non-string one, an unknown profile or one that cannot serve the Manager; nothing is stored then). Answers the session view with `effect` (`current`, `resumes`, `new_session` or `starts`) and the reply `text`; recorded as a Runs record (`metadata.session_profile`, `via` `api`). 503 while the Manager is not running |
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` (and `task_role` for one that ran as a role) |
@@ -4275,11 +4342,15 @@ restart.
   Telegram user IDs (a negative id is a group or channel, not a sender); a
   comma-separated string from before is still read.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
-  arguments) goes to the Manager as `/new`. `/profile [n|name|id|0]` goes to
-  it as the text `/profile` plus the arguments (`_cmd_profile`), which the
-  Manager answers itself ([Manager](#manager-looperagentstiersmanagerpy)).
-  `/start`, `/status`, `/new`, `/profile` and
-  `/help` from an unlisted sender get no answer either.
+  arguments) goes to the Manager as `/new`, and `/stop` as `/stop`, which the
+  Manager answers outside its queue and which stops the reply under way for
+  that chat. `/profile [n|name|id|0]` goes to it as the text `/profile` plus
+  the arguments (`_cmd_profile`), which the Manager answers itself
+  ([Manager](#manager-looperagentstiersmanagerpy)). `/start`, `/status`,
+  `/new`, `/stop`, `/profile` and `/help` from an unlisted sender get no
+  answer either. Lark has no command menu: a message that is
+  exactly `/stop` goes to the Manager as text like any other and is handled the
+  same way, and the status line of the stopped message ends as "已停止".
 - **Lark (bot token)** (`lark_bot.py`, `lark_bot_settings.py`): an independent
   `lark_bot` channel (`channel-lark_bot`), disabled by default, using the same
   adapter as `lark` through `LarkTransport`. Its configuration holds `app_id`,

@@ -206,6 +206,14 @@ class Probe:
     error: str | None = None
 
 
+class StopMethod(str, Enum):
+    """How a user's stop ended a running turn: a runtime's control request, its cancel, or killing the process."""
+
+    CONTROL = "control"
+    CANCEL = "cancel"
+    KILL = "kill"
+
+
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
@@ -230,6 +238,7 @@ class ResidentSession(Protocol):
     async def run_turn(self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *,
                        tag: Any = None, stop: Callable[[], CapStop | None] | None = None) -> ResidentTurn: ...
     async def stop(self, *, kill: bool = False) -> None: ...
+    async def interrupt(self) -> StopMethod | None: ...  # ends the running user turn; None: no turn running
 
 
 class RuntimeUnsupported(ValueError):

@@ -90,6 +90,21 @@ class TestWebChannelAdapter:
 
         asyncio.run(_run())
 
+    def test_the_message_carries_the_id_the_page_chose_for_the_stop_button(self) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                adapter = WebChannelAdapter()
+                await adapter.start(bus)
+                await adapter.handle_user_message(text="hi", session_id="chat-1", message_id="m1")
+                queue = bus.get_queue(MANAGER_ADDRESS.agent_id)
+                envelope = await asyncio.wait_for(queue.get(), 1)
+                assert envelope.payload["channel_context"]["client_message_id"] == "m1"
+                await adapter.stop()
+                await bus.shutdown()
+
+        asyncio.run(_run())
+
     @pytest.mark.parametrize("page_left", [False, True])
     def test_a_messages_answer_is_saved_to_its_chat_under_its_reply_id_even_after_the_page_left(
         self, monkeypatch: pytest.MonkeyPatch, page_left: bool,
@@ -207,6 +222,14 @@ class TestWebChannelAdapter:
         assert event["kind"] == kind
         if kind == "answer.final":
             assert event["payload"]["text"] == "hello user"
+            assert event["payload"]["outcome"] == payload.get("outcome", "answered")
+
+    def test_answer_final_carries_the_reply_outcome(self) -> None:
+        env = MessageEnvelope.create(
+            source=MANAGER_ADDRESS, target=channel_address("web"), message_type=MessageType.AGENT_REPLY,
+            payload={"text": "x", "outcome": "stopped"},
+        )
+        assert WebChannelAdapter._envelope_to_sse_event(env)["payload"]["outcome"] == "stopped"
 
 
 class TestTelegramAdapter:
@@ -552,6 +575,27 @@ class TestTelegramAllowlist:
         (message,) = self._run(tmp_path, "_cmd_new", update, "7")
         assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone"}
 
+    def test_stop_forwards_for_a_listed_sender_only(self, tmp_path: Path) -> None:
+        (message,) = self._run(tmp_path, "_cmd_stop", _tg_update(7, "/stop"), "7")
+        assert message.payload["text"] == "/stop"
+        update = _tg_update(8, "/stop")
+        assert self._run(tmp_path, "_cmd_stop", update, "7") == []
+        update.message.reply_text.assert_not_awaited()
+
+    def test_stop_is_a_registered_command(self) -> None:
+        from looper.agents.channels.telegram import _BOT_COMMANDS
+
+        assert "stop" in dict(_BOT_COMMANDS)
+
+    def test_the_menu_lists_stop_only_while_the_setting_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from looper.agents import chat_settings
+        from looper.agents.channels.telegram import _BOT_COMMANDS, bot_commands
+
+        assert "stop" not in dict(bot_commands())  # off by default
+        monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+        assert "stop" in dict(bot_commands())
+        assert [n for n, _ in bot_commands()] == [n for n, _ in _BOT_COMMANDS]
+
     def test_status_names_only_its_chat(self, tmp_path: Path) -> None:
         (message,) = self._run(tmp_path, "_cmd_status", _tg_update(7, "/status", replies_to=17), "7")
         assert message.payload["channel_context"] == {"chat_id": 99}
@@ -714,6 +758,14 @@ class TestLarkAllowlist:
                                                       "sender_name": "Ada Lovelace"}
         # Seen at once; its answer replies to it in the group.
         assert seen.reacted == ["om_7"] and seen.replies_to == {message.correlation_id: "om_7"}
+
+    def test_a_group_mention_of_stop_reaches_the_manager_as_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event = _lark_event(OPEN_ID, "@HelperBot /stop", chat_type="group", chat_id="oc_team",
+                            mentions=[BOT_MENTION], message_id="om_8")
+        (message,) = self._run(tmp_path, monkeypatch, event, OPEN_ID).messages
+        assert message.payload["text"] == "/stop"
 
     @pytest.mark.parametrize(("text", "seen"), [
         ("@HelperBot /gates", "/gates"),

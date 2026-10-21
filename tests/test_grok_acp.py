@@ -21,7 +21,7 @@ from fake_grok_acp import FAKE_ACP
 from looper.agents.agent_settings import AgentType
 from looper.agents.claude_cli import CapStop
 from looper.agents.run_usage import Usage
-from looper.agents.runtimes import ResidentTransport, adapter
+from looper.agents.runtimes import ResidentTransport, StopMethod, adapter
 from looper.agents.runtimes import grok_acp
 from looper.agents.runtimes.grok import GrokRuntime
 from looper.agents.runtimes.grok_acp import (
@@ -329,6 +329,71 @@ def test_a_turn_over_max_turns_is_cancelled_with_a_max_turns_result(
     # Grok got the cancel and answered it (it logs a cancel it received, then ends the prompt as cancelled).
     assert (root / ".local" / "grok" / "cancels.log").read_text() == "cancel\n"
     assert turn.result_event["stop_reason"] == "max_turns"
+
+
+def test_interrupt_cancels_the_prompt_and_the_next_turn_uses_the_same_session_and_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        idle = await session.interrupt()
+        waiting = asyncio.Event()
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+            if event["type"] == "system":
+                waiting.set()
+
+        task = asyncio.create_task(session.run_turn("HANG", on_event))
+        await waiting.wait()
+        before = session.pid
+        method = await session.interrupt()
+        stopped = await task
+        (after,) = await _turns(session, "next")
+        pids, stale = [before, session.pid], session.stale("s")
+        await session.stop()
+        return idle, method, stopped, after, pids, stale, seen
+
+    idle, method, stopped, after, pids, stale, seen = _go(_run())
+    assert idle is None and method is StopMethod.CANCEL and stopped.stopped is StopMethod.CANCEL
+    assert stopped.usage.output_tokens == 3  # the fake's usage for the cancelled prompt
+    assert seen[-1]["type"] == "result" and seen[-1]["stop_reason"] == "cancelled"
+    assert after.stopped is None and after.result_event["result"].endswith("| next | turn 2")
+    assert pids[0] == pids[1] and len(_acp_runs(root)) == 1 and not stale
+    assert after.result_event["session_id"] == stopped.result_event["session_id"]
+
+
+def test_interrupt_of_a_grok_that_ignores_the_cancel_ends_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    monkeypatch.setattr(grok_acp, "CANCEL_GRACE_SEC", 0.5)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        waiting = asyncio.Event()
+
+        async def on_event(event: dict[str, Any]) -> None:
+            waiting.set()
+
+        task = asyncio.create_task(session.run_turn("DEAF", on_event))
+        await waiting.wait()
+        method = await session.interrupt()
+        stopped = await task
+        stale = session.stale("s")
+        await session.stop()
+        return method, stopped, stale
+
+    method, stopped, stale = _go(_run())
+    assert method is StopMethod.KILL and stopped.stopped is StopMethod.KILL and stale
+    assert stopped.result_event is not None and stopped.result_event.get("looper_user_stop") is True
 
 
 def test_a_cancel_that_cannot_be_written_is_bounded_and_ends_the_process(
@@ -666,3 +731,151 @@ def test_grok_serves_its_resident_sessions_over_acp() -> None:
     assert GROK.resident_transport is ResidentTransport.ACP
     assert isinstance(GROK.resident_session("manager"), AcpGrok)
     assert adapter("codex").resident_transport is ResidentTransport.PER_TURN
+
+
+def test_a_stop_queued_while_a_cancel_waits_is_not_taken_for_its_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    monkeypatch.setattr(grok_acp, "CANCEL_GRACE_SEC", 0.5)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        await session._ensure()
+        session._prompt_id = 7
+        answer = {"id": 7, "result": {"stopReason": "cancelled"}}
+        session._inbox.put_nowait(grok_acp._USER_STOP)  # a stop that raced the cancel
+        session._inbox.put_nowait({"id": 3, "result": {}})  # a response to some other request
+        session._inbox.put_nowait(answer)
+        got = await session._cancel(session._session)
+        session._prompt_id = 8
+        session._inbox.put_nowait(grok_acp._USER_STOP)  # only the stop: no response comes
+        lost = await session._cancel(session._session)
+        stale = session.stale("s")
+        await session.stop()
+        return got, answer, lost, stale
+
+    got, answer, lost, stale = _go(_run())
+    assert got is answer
+    assert lost is None and stale  # the stop is no response: the grace period ran out and the process was ended
+
+
+def test_a_stop_while_the_session_is_readied_sends_no_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The user's stop that lands while the process starts and loads the session (``interrupt`` has no prompt to
+    cancel yet) ends that process and the turn before its prompt is sent: Grok never runs it, and the session goes
+    on."""
+    from looper.agents.claude_cli import USER_STOP, user_stop_result
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+    ensure = AcpGrok._ensure
+    readying, ready = asyncio.Event(), asyncio.Event()
+
+    async def slow_ensure(self: AcpGrok) -> None:
+        await ensure(self)
+        readying.set()
+        await ready.wait()
+
+    monkeypatch.setattr(AcpGrok, "_ensure", slow_ensure)
+    asked: list[bool] = []
+
+    def stop() -> CapStop | None:
+        return CapStop(user_stop_result(), Usage()) if asked else None
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        events = Events()
+        task = asyncio.create_task(session.run_turn("work", events, stop=stop))
+        await readying.wait()
+        asked.append(True)
+        stopping = asyncio.create_task(session.interrupt())  # no prompt in flight yet: the process is ended
+        await asyncio.sleep(0.1)
+        ready.set()
+        method = await stopping
+        stopped = await task
+        asked.clear()
+        (after,) = await _turns(session, "next")
+        stale = session.stale("s")
+        await session.stop()
+        return method, stopped, after, stale, events
+
+    method, stopped, after, stale, events = _go(_run())
+    assert method is StopMethod.KILL and stopped.stopped is StopMethod.KILL
+    assert stopped.result_event[USER_STOP] and not stale
+    assert not any(e["type"] in ("assistant", "result") for e in events.seen)
+    assert after.result_event["result"].endswith("| next | turn 1")  # the stopped prompt never reached Grok
+
+
+def test_a_stop_while_acp_falls_back_starts_no_per_turn_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop that lands while the session falls back to per turn (``interrupt`` has no legacy turn to take it yet)
+    ends the turn stopped: the per-turn process is never started."""
+    from looper.agents.claude_cli import USER_STOP
+    from looper.agents.runtimes.grok import ResidentGrok
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake_with_headless(tmp_path)
+    fall_back = AcpGrok._fall_back
+    methods: list[Any] = []
+    legacy_turns: list[str] = []
+
+    async def stopping_fall_back(self: AcpGrok, reason: str) -> None:
+        methods.append(asyncio.create_task(self.interrupt()))
+        await asyncio.sleep(0)  # the stop is asked before the fall back is done
+        await fall_back(self, reason)
+
+    legacy_run_turn = ResidentGrok.run_turn
+
+    async def spying_run_turn(self: ResidentGrok, text: str, *args: Any, **kwargs: Any) -> Any:
+        legacy_turns.append(text)
+        return await legacy_run_turn(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(AcpGrok, "_fall_back", stopping_fall_back)
+    monkeypatch.setattr(ResidentGrok, "run_turn", spying_run_turn)
+
+    async def _run() -> tuple[Any, Any]:
+        session = AcpGrok(label="manager")
+        env = {**_launch().environment(), "FAKE_ACP_DEAD": "1"}
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
+        stopped = await session.run_turn("work", Events())
+        method = await methods[0]
+        await session.stop()
+        return stopped, method
+
+    stopped, method = _go(_run())
+    assert legacy_turns == []
+    assert method is StopMethod.KILL and stopped.stopped is StopMethod.KILL and stopped.result_event[USER_STOP]
+
+
+def test_a_normal_result_queued_before_a_stop_does_not_end_the_turn_as_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        waiting = asyncio.Event()
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+            if event["type"] == "system":
+                waiting.set()
+
+        task = asyncio.create_task(session.run_turn("HANG", on_event))
+        await waiting.wait()
+        # Grok's answer is already queued when the stop is asked: the stop queues behind it.
+        session._inbox.put_nowait({"id": session._prompt_id, "result": {"stopReason": "end_turn"}})
+        method = await session.interrupt()
+        turn = await task
+        await session.stop()
+        return method, turn, seen
+
+    method, turn, seen = _go(_run())
+    assert method is StopMethod.CANCEL and turn.stopped is StopMethod.CANCEL
+    assert turn.result_event["is_error"] and turn.result_event["stop_reason"] == "cancelled"
+    assert [e["type"] for e in seen if e["type"] in ("assistant", "result")] == ["result"]  # no answer, only the stop

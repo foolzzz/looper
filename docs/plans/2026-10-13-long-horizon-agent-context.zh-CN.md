@@ -778,6 +778,10 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **定时任务的每日花费额度按各自时区清零**：每日额度（`daily_budget_usd`）现在在服务器时区的午夜清零，不看定时任务自己的 `timezone`；要按各定时任务的时区清零另做（2026-10-17 维护者决定暂不改）。
 - **dashboard 收到 401 时转到登录页**（looper #207）：会话过期或密码改过后，已打开的页面各处显示「status 401」，应提示重新加载（本机会自动登录，其他浏览器重新加载后看到 `/login`）。
 - **dashboard 的退出按钮**（looper #207）：服务端已有 `POST /logout`，界面里还没有入口。
+- **管家聊天输入框与停止回复的后续**（[chat-composer RFC](../architecture/rfcs/chat-composer-v0.zh-CN.md)）：
+  - 每轮一个进程的管家运行时（Codex、OMP、Pi）现在靠结束进程树来停一轮；改成优雅中止：Codex app-server 的 `turn/interrupt`、OMP/Pi rpc 的 `abort`（要先 `clear_queue`），这样 Codex 的已用量也能保留；
+  - 撤回一条还在排队、尚未开始的消息（RFC D7）；
+  - 触屏上翻看消息历史（现在只有键盘的 ↑、↓）。
 
 ### 5.4 验证缺口
 

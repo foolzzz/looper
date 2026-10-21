@@ -420,6 +420,66 @@ export async function sendChat(
   return res.json();
 }
 
+/** How a Manager reply ended (the `outcome` of `answer.final`). */
+export type ChatReplyOutcome = "answered" | "failed" | "stopped" | "confirm";
+
+/** The Manager's running turn for a chat. */
+export interface ChatTurn {
+  /** The envelope id. */
+  message_id: string;
+  /** The id the page gave its own message; null when the message did not come from this page. */
+  client_message_id: string | null;
+  channel: string;
+  started_at: string;
+  stopping: boolean;
+}
+
+/** Stop the Manager's reply to a message. A 409 (no turn running, or another message's turn) resolves with its
+ * `state`; other errors throw with the server's reason. */
+export async function stopChatReply(messageId: string): Promise<{ state: string; method: string | null }> {
+  const res = await fetch(`${API_BASE}/chat/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message_id: messageId }),
+  });
+  if (res.ok || res.status === 409) {
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) return { state: data.state, method: data.method ?? null };
+    return { state: data.state, method: null };
+  }
+  return failed(res, "stop reply");
+}
+
+/** The chat's system settings (Settings → Chat). */
+export interface ChatSettings {
+  /** Whether a reply can be stopped (Esc, the Stop button, /stop). Experimental; off by default. */
+  stop_enabled: boolean;
+}
+
+export async function fetchChatSettings(): Promise<ChatSettings> {
+  const res = await fetch(`${API_BASE}/chat-settings`);
+  if (!res.ok) await failed(res, "chat settings");
+  return res.json();
+}
+
+export async function updateChatSettings(body: { stop_enabled: boolean | null }): Promise<ChatSettings> {
+  const res = await fetch(`${API_BASE}/chat-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, "chat settings");
+  return res.json();
+}
+
+/** The Manager's running turn that answers this web chat, or null when none is running. */
+export async function fetchChatTurn(sessionId: string): Promise<ChatTurn | null> {
+  const res = await fetch(`${API_BASE}/chat/turn?session_id=${encodeURIComponent(sessionId)}`);
+  if (!res.ok) await failed(res, "chat turn");
+  const data = await res.json();
+  return data.turn ?? null;
+}
+
 /** What choosing a profile does to the Manager's session. */
 export type ManagerSessionEffect = "current" | "resumes" | "new_session" | "starts";
 

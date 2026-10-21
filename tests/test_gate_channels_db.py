@@ -528,6 +528,53 @@ def test_the_manager_relays_the_users_own_message_to_a_waiting_gate(monkeypatch:
     _run(test, monkeypatch)
 
 
+def test_a_gate_reply_runs_in_the_live_turn_and_never_in_one_stopped_or_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        from looper.agents.ops import TurnState
+        from looper.agents.ops.service import ManagerOps, Platform
+        from looper.db import user_gates
+
+        await _task_with_gate(pool, origin="channel-lark", chat=LARK_GROUP, kind="chat", mention=LARK_USER)
+        ops = ManagerOps(Platform(bus=_Bus(), task_router=SimpleNamespace(has_planner=lambda task_id: True)),
+                         url="http://127.0.0.1:9", token="tok")
+        turn = _tool_turn("PostgreSQL 16, please", group=True)
+
+        # The turn ran once and ended; begun again, it is live, and its call runs.
+        ops.begin_turn(turn)
+        ops.end_turn(turn)
+        ops.begin_turn(turn)
+        answer = await ops.call("looper_task_gate_reply", {"task_id": "task-a", "gate": "g1"})
+        assert answer["status"] == "ok" and answer["result"]["delivered"] == "queued", answer
+        assert turn.state is TurnState.ANSWERING
+
+        # A call still under way when the turn ends runs no further.
+        async def ending(call: Any) -> str:
+            ops.end_turn(turn)
+            return "it relays the message"
+
+        ops._tools["looper_task_gate_reply"] = replace(ops._tools["looper_task_gate_reply"], escalate=ending)
+        late = await ops.call("looper_task_gate_reply", {"task_id": "task-a", "gate": "g1", "excerpt": "PostgreSQL 16"})
+        assert late["status"] == "error" and late["error"]["code"] == "expired", late
+        assert not ops.asks_in(turn.message_id)
+        ops._tools["looper_task_gate_reply"] = replace(ops._tools["looper_task_gate_reply"], escalate=None)
+        # Begun again after the user stopped it, it stays stopped.
+        ops.begin_turn(turn)
+        ops.stop_turn(turn)
+        ops.end_turn(turn)
+        ops.begin_turn(turn)
+        stopped = await ops.call("looper_task_gate_reply", {"task_id": "task-a", "gate": "g1",
+                                                             "excerpt": "PostgreSQL 16"})
+        assert stopped["status"] == "error" and stopped["error"]["code"] == "stopped", stopped
+        ops.end_turn(turn)
+        assert [m["text"] for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"] == [
+            "PostgreSQL 16, please"]
+
+    _run(test, monkeypatch)
+
+
 def test_open_gates_filters_by_chat_before_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         from looper.db import user_gates

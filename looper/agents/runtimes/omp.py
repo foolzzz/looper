@@ -869,6 +869,9 @@ class OmpStream:
             events.append(self._usage(tokens))
         return events
 
+    def usage_so_far(self) -> Usage:
+        return self.usage
+
     def _usage(self, tokens: Usage, **extra: Any) -> dict[str, Any]:
         self.usage = self.usage.plus(tokens)
         return usage_event(self.model, tokens, **self._base(), **extra)
