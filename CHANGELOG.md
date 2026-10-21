@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.11] - 2026-10-21
+
+### Changed
+
+- **The Manager no longer waits inside a turn for a task it started.** Its tool contract gains a rule: after starting or changing a task, do not sleep or poll; end the reply, since Looper brings the task's gates and its end to the user. Guidance only; no code path changed. A new `start_no_wait` prompt-regression dialog checks it. ([#279](https://github.com/foolzzz/looper/pull/279))
+- Model-visible change: the Manager's tool contract gains that rule. No tool schema changed.
+
+### Validation
+
+- Reported in #279: real Manager dialogs 10/10 on sonnet and on OMP + DeepSeek, 8/8 on main for the shared dialogs; 71 passed in the Manager reply and dialog tests; the full local suite before the merge; Codex and Grok reviews left no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.11.md).
+
 ## [2.13.10] - 2026-10-21
 
 ### Fixed
