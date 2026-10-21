@@ -170,3 +170,46 @@ def test_dsh_session_is_not_stale_after_a_stopped_turn(tmp_path: Path, monkeypat
     turn, stale, session = asyncio.run(asyncio.wait_for(run(), 30))
     assert turn.stopped is StopMethod.KILL and turn.result_event[USER_STOP]
     assert not stale and session
+
+
+@pytest.mark.parametrize("runtime", ["omp", "codex"])
+def test_a_stopped_turn_returns_only_after_its_process_tree_cleanup(
+    tmp_path: Path, runtime: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, command, env, home = (_omp if runtime == "omp" else _codex)(tmp_path)
+    home.mkdir(parents=True, exist_ok=True)
+    real_end = proc_tree.end
+    ended: list[bool] = []
+
+    async def slow_end(process: Any, **kwargs: Any) -> Any:
+        process.kill()  # the turn's pipe closes while the tree's cleanup is still going
+        await asyncio.sleep(0.5)
+        try:
+            return await real_end(process, **kwargs)
+        finally:
+            ended.append(True)
+
+    async def run() -> Any:
+        await session.start(command, cwd=str(tmp_path), signature="s", env=env)
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        running = asyncio.create_task(session.run_turn("hello", on_event))
+        try:
+            await asyncio.wait_for(_until(lambda: (home / "pids").exists()), 8)
+            await asyncio.sleep(0.3)
+            monkeypatch.setattr(proc_tree, "end", slow_end)
+            stopper = asyncio.create_task(session.interrupt())
+            turn = await asyncio.wait_for(running, 5)
+            assert ended == [True]
+            await stopper
+            return turn
+        finally:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            monkeypatch.setattr(proc_tree, "end", real_end)
+            await session.stop()
+
+    turn = asyncio.run(asyncio.wait_for(run(), 30))
+    assert turn.stopped is StopMethod.KILL

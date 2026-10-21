@@ -90,6 +90,7 @@ class PerTurnSession(ABC):
         self._process: asyncio.subprocess.Process | None = None  # the turn running now, if any
         self._ended = False  # the last turn ended without a result: the owner starts over
         self._stopping = False  # the user's stop is ending the running turn
+        self._ending: asyncio.Future[None] | None = None  # the stop's cleanup of the turn's process tree
         self._totals = Usage()
         self._price: Price | None = None  # prices the totals at the provider's prices
 
@@ -212,7 +213,9 @@ class PerTurnSession(ABC):
                 self._process, self._ended, self._stopping = None, True, False
                 raise
             failure = exc
-        self._process = None
+        if self._ending is not None:  # the turn returns only once the stop has cleaned its process tree up
+            await asyncio.shield(self._ending)
+        self._process, self._ending = None, None
         if self._stopping:
             self._stopping = False
             stderr.cancel()
@@ -244,7 +247,8 @@ class PerTurnSession(ABC):
         if process is None or self._stopping:
             return None
         self._stopping = True
-        await proc_tree.end(process, label=self._label)
+        self._ending = asyncio.ensure_future(proc_tree.end(process, label=self._label))
+        await asyncio.shield(self._ending)
         return StopMethod.KILL
 
     async def stop(self, *, kill: bool = False) -> None:
