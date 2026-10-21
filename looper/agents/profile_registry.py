@@ -991,26 +991,31 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}
 
 
-def _cost_profile(row: Mapping[str, Any]) -> LegacyAgentProfile:
+def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = ()) -> LegacyAgentProfile:
     """Adapt the exact normalized model to the existing cost/warning calculation.
 
-    No provider catalog or preset participates: only this model's saved settings
-    and endpoint can affect the cost source and price overrides.
+    Like a launch (``agent_settings``), prices come from the models of the selected model's account and protocol
+    (``models``, any model rows; others are ignored), so a background model with its own price is priced.
     """
     profile = AgentProfile.from_row(row)
     model, account, endpoint = row["model"], row["provider"], row["endpoint"]
     provider = LegacyProviderSpec(
         account["id"], account["name"], AuthKind(account["auth"]),
         frozenset({ApiProtocol(model["protocol"])}), account.get("oauth_runtime_type"),
-        endpoint["base_url"], (CatalogModel.from_entry(model),), _env(account.get("env")))
+        endpoint["base_url"], (CatalogModel.from_entry(model), *(
+            CatalogModel.from_entry(other) for other in models if other["id"] != model["id"]
+            and other["provider_id"] == model["provider_id"] and other["protocol"] == model["protocol"])),
+        _env(account.get("env")))
     return LegacyAgentProfile(profile.id, profile.name, profile.runtime, provider, model["name"],
                               profile.effort, profile.agent_teams, profile.custom_prompt)
 
 
-def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) -> dict[str, Any]:
-    """An Agent Profile's saved model and derived account, roles, usage and cost warnings."""
+def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED,
+                 models: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    """An Agent Profile's saved model and derived account, roles, usage and cost warnings; ``models`` are the
+    model rows its prices may come from (see ``_cost_profile``)."""
     spec = AgentProfile.from_row(row)
-    cost_profile = _cost_profile(row)
+    cost_profile = _cost_profile(row, models)
     model, provider = row["model"], row["provider"]
     return {
         "profile_id": row["id"], "name": row["name"], "model_id": row["model_id"], "effort": row.get("effort"),
@@ -1063,12 +1068,13 @@ async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
     uses = await db.profile_usage()
     providers = await db.list_providers()
     logins = await _logins(providers)
+    models = await db.list_models()
     return {
         "runtime_types": [type_view(a) for a in runtimes.ADAPTERS.values()],
         "runtimes": [runtime_view(r, server_claude=server_claude) for r in await db.list_runtimes()],
         "providers": [provider_view(r, logins) for r in providers],
-        "profiles": [profile_view(r, uses.get(r["id"], NOT_USED)) for r in await db.list_profiles()],
-        "models": [model_view(r) for r in await db.list_models()],
+        "profiles": [profile_view(r, uses.get(r["id"], NOT_USED), models) for r in await db.list_profiles()],
+        "models": [model_view(r) for r in models],
         "vendor_types": vendor_types_view(),
         "prices": {"as_of": PRICES_AS_OF, "sources": list(PRICE_SOURCES),
                    "models": {name: price.view() for name, price in BUILTIN_PRICES.items()}},
@@ -1531,8 +1537,17 @@ async def _profile_answer(profile_id: str) -> dict[str, Any]:
 
     row = await _existing_profile(profile_id)
     uses = await db.profile_usage(profile_id)
-    return {"profile": profile_view(row, uses.get(profile_id, NOT_USED)),
-            "warnings": profile_warnings(_cost_profile(row))}
+    models = await db.list_models(provider_id=row["provider"]["id"])
+    return {"profile": profile_view(row, uses.get(profile_id, NOT_USED), models),
+            "warnings": profile_warnings(_cost_profile(row, models))}
+
+
+async def profile_views(rows: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """``profile_view`` of each profile row, keyed as given, priced like a launch."""
+    from ..db import profile_registry as db
+
+    models = await db.list_models() if rows else []
+    return {key: profile_view(row, models=models) for key, row in rows.items()}
 
 
 async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:

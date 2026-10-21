@@ -105,6 +105,12 @@ def test_accounts_register_list_and_http_readback(monkeypatch, tmp_path):
             endpoints=[{"protocol": "openai-chat", "base_url": "https://local.example.invalid"}],
             env=[{"key": "REGION", "value": "test"}], max_concurrency=2)
         assert (await db.get_provider(explicit["provider"]["provider_id"]))["max_concurrency"] == 2
+        assert explicit["provider"]["max_concurrency"] == 2
+        listed = await _ok(chat, "looper_providers", action="list")
+        assert {p["name"]: p["max_concurrency"] for p in listed["providers"]}["Local account"] == 2
+        updated = await _ok(chat, "looper_providers", action="update", provider=explicit["provider"]["provider_id"],
+                            max_concurrency=5)
+        assert updated["provider"]["max_concurrency"] == 5
     _run(test, monkeypatch)
 
 
