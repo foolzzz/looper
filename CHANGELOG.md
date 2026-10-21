@@ -18,9 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.1] - 2026-10-20
+
 ### Fixed
 
-- **The pre-upgrade backup is verified when `pg_dump` runs in Docker.** A `docker exec ... pg_dump` backup command no longer needs a local `pg_restore`: the dump is listed with `docker exec -i <container> pg_restore --list`, or with the new `[backup] verify_command` (deprecated env `LOOPER_BACKUP_VERIFY_CMD`) for any other setup. `looper doctor` and the startup check report the verifier; without one the backup still fails before any DDL, naming `backup.verify_command`.
+- **The pre-upgrade backup is verified when `pg_dump` runs in Docker.** A `docker exec <container> pg_dump ...` backup command no longer needs a local `pg_restore`: the dump is listed with `docker exec -i <container> pg_restore --list`, or with the new `backup.verify_command` in the ops file (deprecated env `LOOPER_BACKUP_VERIFY_CMD`) for other setups. `looper doctor` and the startup check report the verifier; without one the backup still fails before any DDL, naming `backup.verify_command`. This resolves the v2.13.0 Docker backup known issue. ([#266](https://github.com/foolzzz/looper/pull/266))
+
+### Validation
+
+- Retained #266 report: unit tests cover derivation, explicit and failing verifiers, and the unchanged failure path; final Codex and Grok reviews left no P0. The PR body reports CI green, but its final-head workflow shows Dashboard tests passed and Agent system tests failed; CI is not recorded as a verified pass for this draft.
+
+See the [bilingual release notes](docs/releases/v2.13.1.md) for activation, verification, rollback, authority boundaries and validation limits.
 
 ## [2.13.0] - 2026-10-20
 
