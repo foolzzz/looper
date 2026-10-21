@@ -414,6 +414,41 @@ export async function sendChat(
   return res.json();
 }
 
+/** How a Manager reply ended (the `outcome` of `answer.final`). */
+export type ChatReplyOutcome = "answered" | "failed" | "stopped" | "confirm";
+
+/** The Manager's running turn for a chat. */
+export interface ChatTurn {
+  message_id: string;
+  channel: string;
+  started_at: string;
+  stopping: boolean;
+}
+
+/** Stop the Manager's reply to a message. A 409 (no turn running, or another message's turn) resolves with its
+ * `state`; other errors throw with the server's reason. */
+export async function stopChatReply(messageId: string): Promise<{ state: string; method: string | null }> {
+  const res = await fetch(`${API_BASE}/chat/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message_id: messageId }),
+  });
+  if (res.ok || res.status === 409) {
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) return { state: data.state, method: data.method ?? null };
+    return { state: data.state, method: null };
+  }
+  return failed(res, "stop reply");
+}
+
+/** The Manager's running turn that answers this web chat, or null when none is running. */
+export async function fetchChatTurn(sessionId: string): Promise<ChatTurn | null> {
+  const res = await fetch(`${API_BASE}/chat/turn?session_id=${encodeURIComponent(sessionId)}`);
+  if (!res.ok) await failed(res, "chat turn");
+  const data = await res.json();
+  return data.turn ?? null;
+}
+
 /** Why a Lark or Telegram answer did not reach its chat: the channel no longer knew the chat (it restarted), or it
  * could not send the answer. */
 export type DeliveryFailure = "no_chat" | "send_failed";
