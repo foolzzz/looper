@@ -1,6 +1,6 @@
 # RFC：管家会话的 Agent Profile（v0）
 
-- **状态：** 设计稿，待维护者批准。第 3 节的决定按维护者给的三条需求写成；标「需要验证」的几处在实现或实跑时核实。
+- **状态：** 实现中（card 1–12）。第 3 节的决定按维护者给的三条需求写成；标「需要验证」的几处在实现或实跑时核实。
 - **相关：** [LLM 模型层](llm-models-v0.zh-CN.md)（Provider → Model → Profile）、[多运行时](multi-runtime-agents-v0.zh-CN.md) 的会话续接（P5）、[定时任务共用规划者会话](schedule-planner-session-v0.zh-CN.md)（同类的「会话状态放哪」）、[管家平台工具](manager-platform-tools-v0.zh-CN.md)。
 - **代码基线：** v2.13.0（`0fa4717ca`）。
 
