@@ -460,7 +460,8 @@ class TestNewSession:
         (reset,) = _resets(agent_db)
         assert (reset["agent_id"], reset["session_id"], reset["input_text"]) == ("manager", "sess-0", "/new")
         assert reset["metadata"]["session_reset"] == {"channel": "web", "sender": None, "chat": "session-a",
-                                                      "group": False, "previous_session_id": "sess-0"}
+                                                      "group": False, "previous_session_id": "sess-0",
+                                                      "selected_profile_id": None}
         (finish,) = agent_db.finish_record.await_args_list
         assert (finish.kwargs["status"], finish.kwargs["output_text"]) == ("completed", NEW_SESSION_REPLY)
 
@@ -532,4 +533,5 @@ class TestNewFromLarkAndTelegram:
         assert sent == [(chat, NEW_SESSION_REPLY)]
         (reset,) = _resets(agent_db)
         assert reset["metadata"]["session_reset"] == {"channel": channel, "sender": sender, "chat": str(chat),
-                                                      "group": False, "previous_session_id": "sess-0"}
+                                                      "group": False, "previous_session_id": "sess-0",
+                                                      "selected_profile_id": None}

@@ -103,6 +103,9 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--agent", help="every role runs this agent, by name, instead")
     talk.add_argument("--register-agent", type=Path, metavar="SPEC.json",
                       help="register this agent and run every role on it, as for run")
+    talk.add_argument("--switch-agent", type=Path, metavar="SPEC.json",
+                      help="session_profile_switch: register this agent as eval/switch (other roles keep "
+                           "--model/--agent)")
     talk.add_argument("--manager-model", help="the Manager alone runs Claude Code with this model (its role layer)")
     talk.add_argument("--manager-effort", help="with --manager-model: its effort, such as xhigh")
     talk.add_argument("--dialogs", help="comma-separated dialog ids (default: all)")
@@ -204,6 +207,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             manager_model=args.manager_model if real else None, manager_effort=args.manager_effort, reps=args.reps,
             jobs=args.jobs,
             case_budget_usd=args.case_budget_usd if real else None,
+            switch_agent=json.loads(args.switch_agent.read_text(encoding="utf-8")) if args.switch_agent else None,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)

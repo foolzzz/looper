@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -98,6 +99,7 @@ class _PlanStore:
         self.plans: dict[str, dict[str, Any]] = {}
         self.steps: dict[str, dict[str, dict[str, Any]]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.selected_profile_id: dict[str, str] = {}
         self.planner_session_labels: dict[str, str] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.journal: dict[str, list[dict[str, Any]]] = {}
@@ -294,7 +296,20 @@ class _PlanStore:
                            clean_start: bool = False, **_: object) -> None:
         self.sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals),
                                    "runtime_type": runtime_type, "profile_id": profile_id,
-                                   "clean_start": clean_start}
+                                   "clean_start": clean_start,
+                                   "selected_profile_id": self.selected_profile_id.get(agent_id)}
+
+    async def select_profile(self, agent_id: str, profile_id: str | None, **_: object) -> None:
+        if profile_id is None:
+            self.selected_profile_id.pop(agent_id, None)
+        else:
+            self.selected_profile_id[agent_id] = profile_id
+        if agent_id in self.sessions:
+            self.sessions[agent_id]["selected_profile_id"] = profile_id
+        else:
+            self.sessions[agent_id] = {"session_id": None, "session_totals": {}, "runtime_type": None,
+                                       "profile_id": None, "clean_start": False,
+                                       "selected_profile_id": profile_id}
 
     async def get_session(self, agent_id: str, **_: object) -> dict[str, Any] | None:
         saved = self.sessions.get(agent_id)
@@ -572,7 +587,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
-    from looper.db import agent_sessions, journal as db_journal, plans, step_workspaces, task_changes, tasks
+    from looper.db import agent_sessions, connection as db_connection, journal as db_journal, plans, step_workspaces, task_changes, tasks
     from looper.db import user_gates, waits as db_waits
 
     db.store = store = _PlanStore()
@@ -580,6 +595,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         (plans, "save_plan", "save", store.save), (plans, "load_plan", "load", store.load),
         (agent_sessions, "save_session", "save_session", store.save_session),
         (agent_sessions, "get_session", "get_session", store.get_session),
+        (agent_sessions, "select_profile", "select_profile", store.select_profile),
         (agent_sessions, "other_live_task_has_session", "other_live_task_has_session",
          store.other_live_task_has_session),
         (tasks, "set_planner_session_label", "set_planner_session_label", store.set_planner_session_label),
@@ -602,6 +618,12 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(side_effect=method)
         monkeypatch.setattr(module, function, mock)
         setattr(db, name, mock)
+    # A transaction on the in-memory store: its writes go straight to the store, the connection is a placeholder.
+    @contextlib.asynccontextmanager
+    async def _transaction() -> Any:
+        yield None
+
+    monkeypatch.setattr(db_connection, "transaction", _transaction)
     # The Planner imports this one by name rather than through its module.
     monkeypatch.setattr(planner_module, "update_task_phase", db.update_task_phase)
     # Agent tests never ask the loop which waits are ready; that read stays off the real database and on the

@@ -1153,11 +1153,11 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
             {"scope": "system", "role": None, "project_id": None, "project_name": None},
             {"scope": "role", "role": "worker", "project_id": None, "project_name": None},
             {"scope": "project", "role": None, "project_id": calc, "project_name": "calc"},
-        ], "task_count": 2, "schedule_count": 0, "allowed_in": []}
+        ], "task_count": 2, "schedule_count": 0, "allowed_in": [], "manager_session": False}
         assert profiles["si/sonnet"]["used_by"]["layers"] == [
             {"scope": "role_project", "role": "reviewer", "project_id": calc, "project_name": "calc"}]
         assert profiles["claude-code/haiku"]["used_by"] == {"layers": [], "task_count": 0, "schedule_count": 0,
-                                                            "allowed_in": []}
+                                                            "allowed_in": [], "manager_session": False}
         # What its runtime can run: the stand-in keeps no resident session.
         assert (profiles["claude-code/sonnet"]["roles"], profiles["si/sonnet"]["roles"]) == (
             ["manager", "planner", "worker", "reviewer"], ["worker", "reviewer"])

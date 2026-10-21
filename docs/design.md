@@ -204,7 +204,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
 - 选中 Manager 时，左侧按渠道（Dashboard chat、Lark、Telegram）列出它的对话（`GET /api/chat/sessions`，不含 Planner 线程），每条显示最后一条消息的开头和时间；选网页对话就接着在那个线程里聊，选 Lark 或 Telegram 的对话只读显示历史，没有输入框。窄屏时列表收进标题栏的按钮里。每个对话只取最新的 200 条消息（`GET /api/chat/messages`），更早的不翻页
-- 任何渠道发来的消息只要正好是 `/new`（去掉首尾空白，不分大小写），就由 Looper 自己处理、不交给 Claude：Manager 停掉常驻 Claude、丢掉保存的会话，下一条消息（不论来自哪个渠道）开新会话，不带续接简报；重置记成一次运行。Manager 聊天顶部的「New session」按钮发的就是 `/new`
+- 任何渠道发来的消息只要正好是 `/new`（去掉首尾空白，不分大小写），就由 Looper 自己处理、不交给 Claude：Manager 停掉常驻 Claude、丢掉保存的会话，下一条消息（不论来自哪个渠道）开新会话，不带续接简报；重置记成一次运行。Manager 聊天顶部的「New session」按钮打开一个面板：先选新会话用的 Agent Profile（默认「Follow Settings」，不能启动的 Profile 置灰并写明原因），再点「Start new session」，发出 `/new`，选了 Profile 时同时带 `new_session_profile_id`；`/new` 总会清掉会话原来的选择。
+- Manager 聊天顶部的「Agent:」控件显示这个会话现在用的 Agent Profile 和来源（「this session」或「Settings」），下拉框切换它（`GET /api/manager/session`、`PUT /api/manager/session/profile`，与对话里的 `/profile` 同一条路径，「Follow Settings」即 `/profile 0`）。运行时或 provider 变了、切换之后要开新会话（先让当前会话写交接）时，先用 `confirm()` 说明；同一运行时和 provider 的切换直接续接，不确认。生效的 Profile 不能启动时，控件下面显示原因（`problem`）；列表里不能服务 Manager 的 Profile 置灰并带原因
 - 花费与上下文的展示：
   - 任务列表的每一行都显示任务目前的花费。
   - 任务详情的 Overview 有一张「Cost」卡片，显示总额和运行次数。下面的「Cost by agent and model」列出 Planner、Workers、Reviewers 各自的运行次数、花费和占比，并注明还在跑的运行和没有报出花费的运行；下面（很宽的屏幕上在旁边）的「By model」表按模型列出运行次数、输入、输出、缓存读写 token（简写，如 1.23M）和花费，没有花费的模型显示「–」，各行加起来就是任务的花费。Manager 记录时带这个任务 id（消息关于这个任务）、或工具调用只指向这一个任务的 turn 单独成行（「Manager · 模型」），注明不算进任务的花费和任务的花费上限；涉及多个任务或没有任务的 turn 不归任何任务。
@@ -218,7 +219,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 页面结构：左侧栏顶部是 Dashboard、Chat、Tasks、Runs、Schedules，中间是项目列表，底部是可折叠的 **Settings** 分组（打开某个 Settings 页时自动展开，折叠状态按浏览器记住），每个子页一个地址 `#settings/<page>`：
   - **LLM Providers**（`providers`）：provider 列表和预设、API key（打码）、base URL、带价格和 background model 的模型目录、额外环境变量、并发上限；
   - **Agent Runtimes**（`runtimes`，只读）：每种运行时类型一张卡片（Claude Code CLI、Codex CLI、OMP CLI，以及标为 planned 的 Claude Code SDK、OpenAI Agents SDK、norma），写明类型（CLI/SDK）、是否检测到、路径、版本、能力、能跑哪些角色、安装提示和「Re-detect」；运行时内置、按服务的 PATH 自动检测，不能在界面上新增、修改或删除。以前手动注册、仍有 Agent Profile 在用的运行时显示为「custom (legacy)」；
-  - **Agent Profiles**（`profiles`）：Agent Profile 是 `agent_profiles` 表的一行（接口 `/api/agent-profiles`），即运行时 + provider + 模型 + effort（它的运行都用这个 effort）。列表写明每个 Profile 的组成、能跑的角色和被谁使用（系统层、角色层、项目层、项目里的角色层、任务覆盖）；表单依次选运行时、provider（分组：运行时自己的登录（OAuth），Claude Code 显示 `claude auth status` 的登录状态，Codex 的登录标为即将支持、不可选，OMP 没有；再是协议相符的 API key provider，和跳到 LLM Providers 的「+ New provider」）和模型（provider 有目录时从目录选，否则自由填写）；内置的 `claude-code/opus` 不能改删，被使用的 Profile 不能删除；
+  - **Agent Profiles**（`profiles`）：Agent Profile 是 `agent_profiles` 表的一行（接口 `/api/agent-profiles`），即运行时 + provider + 模型 + effort（它的运行都用这个 effort）。列表写明每个 Profile 的组成、能跑的角色和被谁使用（系统层、角色层、项目层、项目里的角色层、任务覆盖、Manager 的当前会话）；表单依次选运行时、provider（分组：运行时自己的登录（OAuth），Claude Code 显示 `claude auth status` 的登录状态，Codex 的登录标为即将支持、不可选，OMP 没有；再是协议相符的 API key provider，和跳到 LLM Providers 的「+ New provider」）和模型（provider 有目录时从目录选，否则自由填写）；内置的 `claude-code/opus` 不能改删，被使用的 Profile 不能删除；
   - **Roles**（`roles`，旧的 `#settings`、`#settings/defaults` 都跳到这里）：标题下一句话按服务端的角色写明有几个角色、各是什么，各角色用共享默认值，除非自己设了，项目还可以再覆盖。下面是一个可折叠列表：先是「Shared defaults」（系统层；界面上凡是说明取值来源的地方都叫 shared defaults），再按 Manager、Planner、Worker、Reviewer 各一行，默认全部收起，可以同时展开多行。收起的一行是摘要，窄屏截断：Shared defaults 写适用于几个角色、Agent Profile、单次花费上限和环境变量个数；角色写名称（显示名不同时附上）、一句职责、生效的 Agent Profile 及来源（shared 或 own），Planner、Worker、Reviewer 再加每个项目的并发上限，停用的标「Disabled」，有未保存修改的标「unsaved」。展开后 Shared defaults 是系统层的表单；角色分两组：「Overrides for this role」是该角色的层（Agent Profile（effort 随它而来）、harness、环境变量、单次花费上限和并发，每项显示当前取值和来源，按钮「Save overrides」），「Role prompt and limits」是角色自己的字段（显示名、max turns、超时、启用、Role prompt，以及一行说明：所有 agent 都开放全部工具、带 `--dangerously-skip-permissions`；按钮「Save prompt and limits」）。收起一行不丢它未保存的修改。`#settings/roles/<role>` 展开该角色并滚动到它，`#settings/roles/shared` 展开 Shared defaults。凡是选 Agent Profile 的地方（Roles、项目页的分层设置、新建任务的按角色覆盖）都用同一个下拉框；界面上 Profile 的名字统一由一个函数生成：Profile 有 effort 且名字不以「 · <effort>」结尾时补上它（迁移建的 Profile 本就叫 `claude-code/opus · xhigh`），摘要不再单列 effort，最后一项「+ New Agent Profile」就地打开同一张表单，保存后选中新建的 Profile；
   - **Skills & MCP**（`catalog`）是目录：条目数、已安装几个、总大小，一行说明条目只在安装的地方加载、升级前导入的条目没有安装；「Import from this machine」或「Re-import」和上次导入的时间、变化与未导入的内容；按名称筛选；插件和 skill 分组列出，各有来源、大小和装在哪里，没有全局安装的可以「Install globally」，有的显示四个角色的勾选框和卸载，项目写的 skill 只能在项目页安装；改动对下一次运行生效；
   - **Channels**（`channels`）和 **Import / Export**（`transfer`）：原来 Settings 长页上的渠道和「Move to another machine」，内容不变。
@@ -230,17 +231,18 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 ### Telegram
 
 - Bot 长轮询接入
-- 支持 `/start`、`/status`、`/new`、`/help` 命令；`/new`（不带参数）开始新的 Manager 会话
+- 支持 `/start`、`/status`、`/new`、`/profile`、`/help` 命令；`/new`（不带参数）开始新的 Manager 会话；`/profile` 列出这个会话可选的 Agent Profile，`/profile <编号|名称|id>` 切换，`/profile 0` 改回跟随 Settings，由 Looper 自己回答
 - 消息自动分段（4000 字符限制）
 - Settings 配置项：
   - **Bot token**：BotFather 给的 token，存在与配置分开的 `channel_secrets` 表里，接口只返回是否已保存（`has_bot_token`），导出时不包含
   - `bot_token_env`：没有保存 token 时读取的环境变量名，默认 `LOOPER_TELEGRAM_BOT_TOKEN`
   - `allowed_user_ids`：发送者白名单，Telegram 的数字用户 ID（负数是群或频道，不是发送者）；以前存的逗号分隔字符串仍然能读。`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效
-- 名单外的发送者发 `/start`、`/status`、`/new`、`/help` 也得不到回复
+- 名单外的发送者发 `/start`、`/status`、`/new`、`/profile`、`/help` 也得不到回复
 
 ### Lark（lark-cli）
 
 - 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它；处理私聊（`p2p`），群聊（`group`）里只处理 @ 机器人的消息（按事件 `mentions` 里有没有机器人自己的 open_id 判断），其余群消息完全忽略：不加表情、不存储、不交给 Manager；群里的状态消息和回答回复触发它的那条消息（`lark-cli im +messages-reply`），在群里发起的任务结束时通知发回该群并 @ 发起人
+- 文本命令原样交给 Manager：`/profile` 作为文本消息就能用（群聊里要 @ 机器人），同 Telegram，由 Looper 自己回答，不经 Claude
 - Settings 配置项 `profile`：lark-cli 的 profile，决定用哪个应用（也就是哪个机器人），为空时用 lark-cli 当前的 profile；每次调用都带 `--profile`。旧的 `app_id_env`、`app_secret_env` 启动时删除，没有 `profile` 的配置补上空的 `profile`，Settings 里才有这一项
 - Settings 配置项 `allowed_open_ids`：发送者白名单，飞书用户在这个应用下的 `open_id`（`ou_` 开头）；open_id 因应用而异，名单记下它是为哪个应用建的，换成别的应用的 profile 后不启动，直到重建名单
 - 启动前用 `lark-cli whoami` 和机器人信息核对能否以机器人身份收发，不行就不启动，Settings → Channels 显示原因；能就显示「Bot: 名字（app_id，profile）」

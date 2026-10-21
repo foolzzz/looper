@@ -151,7 +151,8 @@ def test_custom_case_checks_database_reference_actual_binding_and_cost(monkeypat
 
 def test_model_case_ids_are_unique_and_selectable_without_export_suite():
     expected = {"provider_key", "config_tools", "task_cost", "schedule_planner_profile", "model_custom",
-                "model_dual_protocol", "model_login_runtime", "model_missing_endpoint", "model_price_history"}
+                "model_dual_protocol", "model_login_runtime", "model_missing_endpoint", "model_price_history",
+                "session_profile_switch", "session_profile_ask"}
     selected = dialogs.select(sorted(expected))
     assert {case.id for case in selected} == expected
     assert len({case.id for case in dialogs.DIALOGS}) == len(dialogs.DIALOGS)
@@ -263,3 +264,119 @@ def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path):
         for turn in row["turns"]:
             assert dialogs.FAKE_KEY not in turn["reply"]
             assert dialogs.FAKE_KEY not in json.dumps(turn["errors"])
+
+
+# --- The session-profile dialogs ---
+
+
+def test_switch_profile_seed_registers_a_keyed_provider_and_one_profile_in_fake_mode():
+    api = SeedApi()
+    dialogs._make_switch_profile(api, "project-test")
+    providers = [body for path, body in api.posts if path == "/api/providers"]
+    assert len(providers) == 1 and providers[0]["name"] == "eval-switch"
+    assert providers[0]["api_key"] == dialogs.FAKE_KEY
+    assert providers[0]["endpoints"] == [{"protocol": "anthropic-messages",
+                                          "base_url": "https://switch.example.invalid"}]
+    assert [p["name"] for p in api.registry["profiles"]] == [dialogs.SWITCH]
+    assert api.registry["profiles"][0]["runtime_id"] == "rt-claude-code"
+
+
+def test_switch_profile_seed_registers_a_spec_as_eval_switch(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dialogs, "register_agent", lambda api, spec: calls.append(spec))
+    spec = {"runtime": {"type": "omp"}, "provider": {"name": "p"}, "agent": {"name": "other", "model": "m"}}
+    dialogs._make_switch_profile(SeedApi(), "project-test", fake=False, spec=spec)
+    assert calls == [{**spec, "agent": {"name": dialogs.SWITCH, "model": "m"}}]
+
+
+def test_switch_profile_seed_uses_the_login_provider_in_real_mode():
+    api = SeedApi()
+    dialogs._make_switch_profile(api, "project-test", fake=False)
+    assert [p for p, _ in api.posts if p == "/api/providers"] == []
+    assert api.registry["profiles"][0]["name"] == dialogs.SWITCH
+
+
+def run_record(record_id, text="hi", *, source="session", profile="agent-1", switch=None):
+    metadata = {"profile": {"id": profile, "source": source}}
+    if switch:
+        metadata["session_profile"] = switch
+    return {"id": record_id, "input_text": text, "metadata": metadata}
+
+
+class RunsApi:
+    def __init__(self, records, selected=None):
+        self.records, self.selected = records, selected
+
+    def get(self, path, **query):
+        if path == "/api/llm-records":
+            return {"records": list(reversed(self.records))}
+        if path == "/api/manager/session":
+            return {"selected": self.selected}
+        assert path == "/api/registry"
+        return {"profiles": [{"profile_id": "agent-1", "name": dialogs.SWITCH}]}
+
+
+def runs_look(records, *, selected=None, reply="ok", fake=False):
+    return dialogs.Look(RunsApi(records, selected), None, reply, "disposable", 0, frozenset(), fake)
+
+
+def test_switch_dialogs_are_selectable_with_unique_ids():
+    selected = dialogs.select(["session_profile_switch", "session_profile_ask"])
+    assert [d.id for d in selected] == ["session_profile_switch", "session_profile_ask"]
+    assert all(d.seed is dialogs._make_switch_profile for d in selected)
+    assert len({d.id for d in dialogs.DIALOGS}) == len(dialogs.DIALOGS)
+
+
+def test_switch_number_is_read_from_the_listing():
+    look = runs_look([], reply="0. 跟随设置\n1. eval/light · claude-code\n2. eval/switch · claude-code · x")
+    assert dialogs.select(["session_profile_switch"])[0].says[1].text_from(look) == "/profile 2"
+    assert dialogs._profile_listed(look) is None
+    assert dialogs._profile_listed(runs_look([run_record(1)], reply=look.reply)) is not None
+
+
+@pytest.mark.parametrize("source,ok", [("session", True), ("role", False)])
+def test_answer_must_run_on_the_session_profile(source, ok):
+    records = [run_record(1, "", source="x", switch={"to": "agent-1", "effect": "resumes"}),
+               run_record(2, "记住暗号", source=source)]
+    problem = dialogs._answered_on_the_switch_profile(runs_look(records))
+    assert (problem is None) == ok
+
+
+def test_answer_after_a_new_session_needs_handoff_on_the_old_profile_and_resume():
+    switch = run_record(1, "/profile 2", switch={"to": "agent-1", "effect": "new_session"})
+    handoff = run_record(2, "[HANDOFF] x", profile="agent-0", source="settings")
+    answer = run_record(3, "[RESUME] x")
+    check = dialogs._answered_on_the_switch_profile
+    assert check(runs_look([switch, handoff, answer])) is None
+    assert check(runs_look([switch, answer])) is not None
+    assert check(runs_look([switch, handoff, run_record(3, "plain")])) is not None
+    assert check(runs_look([switch, run_record(2, "[HANDOFF] x"), answer])) is not None
+
+
+def test_ask_check_fails_on_a_settings_write_or_a_selection(monkeypatch):
+    actions = []
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: deepcopy(actions))
+    reply = "我不能直接切换，请发送 /profile 选择。"
+    assert dialogs._switch_not_done_by_the_manager(runs_look([], reply=reply)) is None
+    actions.append(action("looper_settings", "set"))
+    assert dialogs._switch_not_done_by_the_manager(runs_look([], reply=reply)) is not None
+    actions.clear()
+    selected = {"profile_id": "agent-1", "name": dialogs.SWITCH}
+    assert dialogs._switch_not_done_by_the_manager(runs_look([], selected=selected, reply=reply)) is not None
+    assert dialogs._switch_not_done_by_the_manager(runs_look([], reply="好的。")) is not None
+    assert dialogs._switch_not_done_by_the_manager(runs_look([], reply="好的。", fake=True)) is None
+
+
+def test_omp_deepseek_example_registers():
+    from pathlib import Path
+    from evals.prompt_regression import runner
+
+    path = Path(__file__).parents[1] / "evals" / "agents" / "omp-deepseek.example.json"
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    os.environ["LOOPER_EVAL_API_KEY"] = "synthetic"
+    try:
+        profile = runner.register_agent(SeedApi(), spec)
+    finally:
+        del os.environ["LOOPER_EVAL_API_KEY"]
+    assert profile["name"] == "omp/deepseek/deepseek-flash"
+    assert profile["model"]["protocol"] == "openai-chat"
