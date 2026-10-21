@@ -137,6 +137,8 @@ class Say:
     # The stand-in Manager's calls: "<task>" is the dialog's task, "<task id>" the last task id an answer gave,
     # "<confirmation>" the confirmation id the note before the message names.
     fake: tuple[tuple[str, dict[str, Any]], ...] = ()
+    # The user stops the Manager's turn once it has made its first tool call (``POST /api/chat/stop``).
+    stop: bool = False
 
 
 @dataclass(frozen=True)
@@ -308,6 +310,33 @@ def _answered_by_reading(look: Look) -> str | None:
     if not reads:
         return "the Manager read nothing through its tools"
     return None if look.reply.strip() else "no reply"
+
+
+STOPPED_NOTE = "[Looper] The user stopped your previous reply"
+
+
+def _was_stopped(look: Look) -> str | None:
+    reply = look.reply.strip()
+    if reply.endswith("（已停止）") or reply == "已停止，这次没有回复。":
+        return None
+    return f"the reply does not say it was stopped: {reply[-80:]!r}"
+
+
+def _knows_it_was_stopped(look: Look) -> str | None:
+    """The turn after a stop was told of it; a real Manager must not claim the summary was finished."""
+    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    new = [r for r in records if r["id"] > look.since and not (r.get("metadata") or {}).get("autonomous")]
+    if not new:
+        return "no Manager run record for the turn"
+    record = max(new, key=lambda row: row["id"])
+    sent = (record.get("input_text") or record.get("input_summary") or "").lstrip()
+    if STOPPED_NOTE not in sent[:500]:
+        return "the turn's input does not start with the note that the user stopped the previous reply"
+    if look.fake:
+        return None
+    if "汇总" in look.reply and not re.search(r"没(有)?(来得及|完成|做完|汇总)|未(完成|汇总)|停", look.reply):
+        return "the reply claims the summary was finished"
+    return None
 
 
 # The configuration dialogs: a project made and deleted, and a key that must go nowhere.
@@ -1201,6 +1230,11 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_schedules", {"action": "run", "schedule": SCHEDULE, "project": OPS}),)),
         Say("确认。", _the_named_one_ran, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     ), seed=_make_two_projects_schedules),
+    Dialog("stop_then_continue", (
+        Say("列出所有项目，然后逐个查看每个项目最近的三个任务，最后汇总。", _was_stopped,
+            (("looper_projects", {"action": "list"}), ("__hold__", {})), stop=True),
+        Say("刚才停在哪了？", _knows_it_was_stopped),
+    ), tags=("stop",)),
     Dialog("config_export", (
         Say("把 Looper 的配置导出成一个文件，包括项目和它们的定时任务。", _exported,
             (("looper_config_export", {"include_projects": True}),)),
@@ -1271,8 +1305,9 @@ class SpendingCap(EvalError):
     """The dialog reached its case allowance."""
 
 
-def _check_manager_run(api: Api, since: int) -> None:
-    """Score only a completed turn; a failed resume followed by a completed retry is recoverable."""
+def _check_manager_run(api: Api, since: int, *, stop: bool = False) -> None:
+    """Score only a completed turn; a failed resume followed by a completed retry is recoverable. A turn the user
+    stopped (``stop``) must instead be an interrupted run the web chat's stop ended."""
     from looper.agents.claude_cli import BUDGET_SUBTYPE
 
     records = api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
@@ -1281,6 +1316,12 @@ def _check_manager_run(api: Api, since: int) -> None:
     if not new:
         raise EvalError("Manager replied without a new run record")
     record = max(new, key=lambda row: row["id"])
+    if stop:
+        via = ((record.get("metadata") or {}).get("user_stop") or {}).get("via")
+        if record["status"] != "interrupted" or via != "web":
+            raise EvalError(f"the turn was not stopped: Manager run {record['id']} is {record['status']}, "
+                            f"user_stop.via={via!r}")
+        return
     result: dict[str, Any] = {}
     after = 0
     while True:
@@ -1300,24 +1341,49 @@ def _check_manager_run(api: Api, since: int) -> None:
         raise EvalError(f"Manager run {record['id']} {record['status']}: {detail}")
 
 
+def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: int) -> bool:
+    """Whether the Manager's turn has made a tool call: a new row in its action trail, else a running run record
+    with a tool event."""
+    if database_url is not None and _trail(database_url, before):
+        return True
+    for record in api.get("/api/llm-records", agent_id="manager", limit=50)["records"]:
+        if record["id"] > since and record["status"] == "running":
+            events = api.get(f"/api/llm-records/{record['id']}/events", after=0, limit=5000)["events"]
+            if any(row["event"].get("type") == "assistant" and any(
+                    isinstance(b, dict) and b.get("type") == "tool_use"
+                    for b in (row["event"].get("message") or {}).get("content") or []) for row in events):
+                return True
+    return False
+
+
 def _ask(api: Api, session: str, text: str, *, timeout: float,
-         check_budget: Callable[[], None] | None = None) -> str:
-    """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one."""
+         check_budget: Callable[[], None] | None = None, stop: bool = False,
+         database_url: str | None = None) -> str:
+    """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one.
+    With ``stop``, the turn is stopped through the web chat once it has made its first tool call."""
     message_id = f"m-{uuid.uuid4().hex[:12]}"
     if check_budget is not None:
         check_budget()
     records = api.get("/api/llm-records", agent_id="manager", limit=1)["records"]
     since = max((record["id"] for record in records), default=0)
+    before = _last_action(database_url) if database_url is not None else 0
     api.post("/api/chat/send", {"text": text, "session_id": session, "message_id": message_id})
     deadline = time.monotonic() + timeout
+    stopped = not stop
     while time.monotonic() < deadline:
         if INTERRUPTED.is_set():
             raise EvalError("the run was interrupted")
         if check_budget is not None:
             check_budget()
+        if not stopped and _made_a_tool_call(api, since, database_url, before):
+            # The stop names the Manager's turn (its envelope's id), which the chat's turn endpoint tells.
+            turn = api.get("/api/chat/turn", session_id=session).get("turn")
+            if turn:
+                api.post("/api/chat/stop", {"message_id": turn["message_id"]})
+                stopped = True
         for message in api.get("/api/chat/messages", session_id=session)["messages"]:
             if message.get("message_id") == f"{message_id}:reply":
-                _check_manager_run(api, since)
+                _check_manager_run(api, since, stop=stop)
                 return str(message.get("content") or "")
         time.sleep(1.0)
     raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
@@ -1471,7 +1537,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url)
-            reply = _ask(api, session, text, timeout=timeout, **budget_args)
+            reply = _ask(api, session, text, timeout=timeout, stop=say.stop, database_url=database_url,
+                         **budget_args)
             problem = say.check(Look(api, task, reply, database_url, since, known,
                                      fake=mode == "fake", runtime_root=runtime_root,
                                      registry_before=registry_before))

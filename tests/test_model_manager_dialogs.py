@@ -156,6 +156,21 @@ def test_model_case_ids_are_unique_and_selectable_without_export_suite():
     assert {case.id for case in selected} == expected
     assert len({case.id for case in dialogs.DIALOGS}) == len(dialogs.DIALOGS)
     assert "config_export" not in expected
+    assert [case.id for case in dialogs.select(["stop_then_continue"])] == ["stop_then_continue"]
+    assert sum(case.id == "stop_then_continue" for case in dialogs.DIALOGS) == 1
+
+
+def test_the_stop_dialog_stops_its_first_say_only_and_its_fake_calls_are_valid():
+    from looper.agents.ops import check_arguments
+    from looper.agents.ops.config import TOOLS
+
+    (case,) = dialogs.select(["stop_then_continue"])
+    assert case.tags == ("stop",)
+    assert [say.stop for say in case.says] == [True, False]
+    schemas = {tool.name: tool.schema for tool in TOOLS}
+    tool, arguments = case.says[0].fake[0]
+    assert check_arguments(schemas[tool], deepcopy(arguments)) == arguments
+    assert case.says[0].fake[-1][0] == "__hold__"
 
 
 @pytest.mark.parametrize("mutation", [None, "wrong_protocol", "extra_write", "key_echo"])

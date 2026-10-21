@@ -49,7 +49,8 @@ agent system started it in:
   calls, ``<task id>`` is the last task id an answer gave and
   ``<confirmation>`` the confirmation id the note before the message names;
   a call of ``sleep`` (``{"seconds": n}``), no tool, makes the reply that much
-  later.
+  later; a call of ``__hold__``, no tool either, ends the calls and emits nothing until the Manager's control
+  request (the user's stop) comes on stdin, then answers it and ends the turn as an interrupted one.
 
 To show that the eval notices misbehaviour, a script may also make the
 Planner write files with the Write tool during [PLAN] (``planner_writes``),
@@ -387,6 +388,23 @@ def _main_checkout() -> str:
     return os.path.realpath(os.path.dirname(done.stdout.strip())) if done.returncode == 0 else ""
 
 
+def _hold(stdin: _Stdin, cost: float) -> None:
+    """Wait for a control request, answer it like Claude Code does an interrupt and end the turn without a reply."""
+    _emit({"type": "system", "subtype": "init", "session_id": "fake-manager", "model": "fake"})
+    while (line := stdin.readline()) is not None:
+        try:
+            request = json.loads(line)
+        except ValueError:
+            continue
+        if request.get("type") == "control_request":
+            _emit({"type": "control_response", "response": {"subtype": "success",
+                                                            "request_id": request.get("request_id")}})
+            _emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "",
+                   "session_id": "fake-manager", "total_cost_usd": round(cost, 6),
+                   "usage": {"input_tokens": 10, "output_tokens": 0}})
+            return
+
+
 def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
     rpc = _mcp(args)
     cost, last_task = 0.0, ""
@@ -399,11 +417,15 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
         named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
         with open(scenarios_path, encoding="utf-8") as handle:
             calls = (json.load(handle).get("manager") or {}).get(message.strip(), [])
-        answers = []
+        answers, held = [], False
         for name, arguments in calls:
             if name == "sleep":
                 time.sleep(float(arguments["seconds"]))
                 continue
+            if name == "__hold__":
+                _hold(stdin, cost)
+                held = True
+                break
             text = json.dumps(arguments).replace("<confirmation>", named.group(1) if named else "")
             result = rpc("tools/call", {"name": name, "arguments": json.loads(text.replace("<task id>", last_task))})
             answer = json.loads(result["result"]["content"][0]["text"])
@@ -411,6 +433,8 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
             last_task = created.get("task_id") or last_task
             answers.append((name, answer))
         cost += MANAGER_TURN_COST
+        if held:
+            continue
         done = "；".join(f"{name}：{answer.get('status')}" for name, answer in answers)
         _answer("fake-manager", f"已处理（{done}）。" if answers else "放在哪个项目、哪个目录？", cost)
 
