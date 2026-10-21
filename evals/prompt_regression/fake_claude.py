@@ -427,7 +427,12 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
                 held = True
                 break
             text = json.dumps(arguments).replace("<confirmation>", named.group(1) if named else "")
-            result = rpc("tools/call", {"name": name, "arguments": json.loads(text.replace("<task id>", last_task))})
+            sent = json.loads(text.replace("<task id>", last_task))
+            # As the real runtime does: the stream shows the call before it is made (a write must match it).
+            _emit({"type": "assistant", "session_id": "fake-manager", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"toolu_{len(answers)}_{name}", "name": f"mcp__looper__{name}",
+                 "input": sent}]}})
+            result = rpc("tools/call", {"name": name, "arguments": sent})
             answer = json.loads(result["result"]["content"][0]["text"])
             created = answer.get("result") if isinstance(answer.get("result"), dict) else {}
             last_task = created.get("task_id") or last_task

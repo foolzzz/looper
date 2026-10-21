@@ -1,6 +1,7 @@
 # RFC：控制台聊天输入框：暂存消息、历史和 Esc 停止回复（v0）
 
 - **状态：** 已实现（下一个版本，见 CHANGELOG 的 Unreleased）。第 3 节的决定按维护者给的四条需求写成；实现中已核实的「需要验证」处已写明结果，仍标「需要验证」的几处是还没在真实运行时上跑过的。
+- **被取代：** D3、D4、D7 和第 8 节的停止矩阵已由 [chat-stop-v2](chat-stop-v2.zh-CN.md) 取代；其余决定（D1、D2、D5、D6、D8、D9）仍有效。
 - **发布范围：** 暂存队列和历史随下一个版本发布；**停止回复（Esc、Stop 按钮、`POST /api/chat/stop`、Telegram 和飞书的 `/stop`）放在系统设置 `chat.stop_enabled` 后面，默认关闭**，设置页（Settings → Chat）标明是实验功能，等停止路径重新设计后再默认开放。关闭时：`POST /api/chat/stop` 答 409 `{"state": "disabled"}` 且什么都不改，`GET /api/chat/turn` 照常；输入框没有 Stop 按钮，Esc 只还原正在翻看的草稿，输入 `/stop` 也不发请求；Telegram 和飞书的 `/stop` 由 Looper 直接答「停止功能暂未开放」，不进模型、不中断任何东西；Telegram 的命令菜单不列 `/stop`（菜单在服务启动时设置，改设置后重启生效）。下文 D3、D8 和 D2 描述的是开关打开时的行为。队列和历史在两种状态下都一样。
 - **相关：** [引导运行中的 Worker](worker-steering-v0.zh-CN.md)（各运行时的中断原语，3.1、3.2 节已实测 Codex `turn/interrupt` 和 OMP `abort`）、[Grok 运行时](grok-runtime-v0.zh-CN.md)（`session/cancel`）、[操作者接口鉴权](operator-api-auth-v0.zh-CN.md)、管家会话的 Agent Profile RFC（另一分支，未合并：它改聊天头部和「New session」面板，本 RFC 不碰这两处）。
 - **代码基线：** v2.13.0（`3236c4242`）。
@@ -95,6 +96,8 @@
 
 ### D3 停止是一条有类型的路径：HTTP → 管家 → 运行时
 
+> 已被 [chat-stop-v2](chat-stop-v2.zh-CN.md) 取代（整轮一个停止令牌）；以下为 v0 的原文。
+
 管家的消息循环在等当前一轮，所以停止不能走总线队列（`/new` 就是这样要等一轮结束）。
 
 1. **接口：** `POST /api/chat/stop`，体 `{"message_id": "<这一轮回答的用户消息 id>"}`。`/api/` 下都是 `operator_auth.Access.OPERATOR`（`operator_auth.py:292-311`），不另加鉴权；管家和规划者的令牌进不来（写一条测试钉住）。
@@ -111,6 +114,8 @@
 8. **确认：** 被停的一轮里提出、等待用户确认的高风险操作作废（`ManagerOps.drop_asked_in(message_id)`：删掉 `asked_in` 是这条消息的 `_Pending`，并从 `turn.blocks` 去掉它的块）。用户按了停止，就不该留下一句「回复确认就执行」。
 
 ### D4 每个运行时怎么中断
+
+> 已被 [chat-stop-v2](chat-stop-v2.zh-CN.md) 取代（第 4 节：一个取消原语）；以下为 v0 的原文。
 
 `ResidentSession` 协议加 `async def interrupt(self) -> StopMethod | None`：没有一轮在跑时返回 None；否则开始中断并返回方法，正在跑的 `run_turn` 随后以 `stopped` 返回。
 
@@ -135,6 +140,8 @@
 `AGENT_REPLY` 的 payload 加 `outcome`：`ReplyOutcome` 枚举 `answered | failed | stopped | confirm`。`_send_reply` 的 `error=` 非空时默认 `failed`；这一轮结束时 `ops` 里有 `asked_in` 等于这条消息的待确认操作时为 `confirm`；停止为 `stopped`；其余 `answered`。`web.py:_envelope_to_sse_event` 把 `outcome` 放进 `answer.final` 的 payload（缺省按 `answered` 读，老页面不受影响）。前端只在 `answered` 时自动发暂存（D1）。
 
 ### D7 不停止尚未开始的消息
+
+> 已被 [chat-stop-v2](chat-stop-v2.zh-CN.md) 取代：排队中的消息可以停止；以下为 v0 的原文。
 
 本页的消息排在别的渠道的一轮后面时（服务端队列），Esc 得到 `OTHER_MESSAGE`；页面在输入框下方写「The Manager is answering another message first; this one has not started.」。要做「撤回排队中的消息」需要在 `_message_loop` 出队时检查撤回表，属于另一件事，记为非核心待办。
 
@@ -210,6 +217,8 @@
 - 按计划第 1 节：这是模型可见的改动，跑 dialogs 评测（第 8 节）。
 
 ## 8. 测试与验证
+
+> 其中的停止矩阵已被 [chat-stop-v2](chat-stop-v2.zh-CN.md) 第 8 节取代。
 
 **单元测试**（按卡片顺序）：
 

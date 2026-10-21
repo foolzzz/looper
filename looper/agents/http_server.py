@@ -762,7 +762,8 @@ class AgentHTTPServer:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
-            writer.write(_json_response(HTTP_200, await ops.call(m.group(1), arguments)))
+            writer.write(_json_response(HTTP_200, await ops.call(
+                m.group(1), arguments, binding=headers.get("x-looper-turn"), call_id=headers.get("x-looper-call"))))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()
@@ -908,6 +909,9 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        if self._manager_ops is not None:
+            # Whether tool calls are refused by their turn binding, and the mismatches seen (chat-stop-v2 §10).
+            status["turn_binding"] = self._manager_ops.binding_report()
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()
 
@@ -1023,10 +1027,13 @@ class AgentHTTPServer:
         else:
             result = await self._manager.stop_turn(message_id, via="web")
             if result.value in ("stopping", "already_stopping"):
-                current = self._manager.current_turn
+                current = self._manager.turn_for(message_id)
                 method = current.method if current is not None else None
+                found = current.stop.phase if current is not None and current.stop is not None else None
+                phase = found if found is not None else (current.phase if current is not None else None)
                 response = _json_response(HTTP_200, {
-                    "state": result.value, "method": getattr(method, "value", method)})
+                    "state": result.value, "phase": getattr(phase, "value", phase),
+                    "method": getattr(method, "value", method)})
             else:
                 errors = {"not_running": "No turn is running.",
                           "other_message": "The running turn answers a different message."}
@@ -1044,7 +1051,8 @@ class AgentHTTPServer:
             current = self._manager.current_turn_for("web", session_id)
             response = _json_response(HTTP_200, {"turn": None if current is None else {
                 "message_id": current.message_id, "client_message_id": current.client_message_id,
-                "channel": current.channel, "started_at": current.started_at.isoformat(), "stopping": current.stop is not None}})
+                "channel": current.channel, "started_at": current.received_at.isoformat(), "state": current.phase.value,
+                "method": getattr(current.method, "value", current.method), "stopping": current.stop is not None}})
         writer.write(response)
         await writer.drain()
 

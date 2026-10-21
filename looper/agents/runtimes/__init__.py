@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
     from ..run_usage import Price, Usage
+    from .cancel import TurnCancel
     from .instructions import InstructionFile
 
 
@@ -231,14 +232,18 @@ class ResidentSession(Protocol):
     def pid(self) -> int | None: ...
     @property
     def totals(self) -> Usage: ...
+    @property
+    def shares_bridge(self) -> bool: ...  # False unless the runtime's turns share one bridge process with the owner
     def stale(self, signature: Any) -> bool: ...
     async def start(self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
                     totals: Usage | None = None, autonomous: Callable[[Any], Awaitable[Any]] | None = None,
                     price: Price | None = None) -> None: ...
     async def run_turn(self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *,
-                       tag: Any = None, stop: Callable[[], CapStop | None] | None = None) -> ResidentTurn: ...
+                       tag: Any = None, stop: Callable[[], CapStop | None] | None = None,
+                       cancel: TurnCancel | None = None) -> ResidentTurn: ...
     async def stop(self, *, kill: bool = False) -> None: ...
-    async def interrupt(self) -> StopMethod | None: ...  # ends the running user turn; None: no turn running
+    # A wrapper over the running turn's ``cancel`` (request it, await the turn's end); None: no turn running
+    async def interrupt(self) -> StopMethod | None: ...
 
 
 class RuntimeUnsupported(ValueError):

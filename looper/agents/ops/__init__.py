@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     CONFLICT = "conflict"  # the target's state does not allow it (an ended task, a task not started)
     EXPIRED = "expired"  # a confirmation past its time or its turn
     STOPPED = "stopped"  # the user stopped the turn the call came in
+    NOT_THIS_TURN = "not_this_turn"  # a write call no tool_use of the running turn's stream matches
     UNAVAILABLE = "unavailable"  # Looper could not do it now (its database); the call may be tried again
     RATE_LIMITED = "rate_limited"  # over a limit of how often or how much (a room's); the message says when
 
@@ -85,6 +86,9 @@ class Turn:
     # Set by the Manager when the user stops the turn and by ``end_turn``: a call of it still under way runs no
     # further, and asks the user nothing.
     state: TurnState = TurnState.ANSWERING
+    # A resident runtime's turns share one bridge: a write call runs only when it matches a tool_use of this turn.
+    require_match: bool = False
+    runtime: str | None = None  # the runtime that answers it (its type), once the Manager knows it
 
     @property
     def autonomous(self) -> bool:

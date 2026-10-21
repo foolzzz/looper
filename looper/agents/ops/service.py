@@ -34,14 +34,17 @@ to ``call``.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import hmac
 import json
 import logging
+import os
 import secrets
 import subprocess
 import sys
 import time
 import uuid
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
@@ -49,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from ... import child_env
+from .. import chat_settings
 from ...db import manager_actions as db_actions
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
@@ -63,7 +67,11 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "looper"
 URL_ENV = "LOOPER_AGENT_URL"
 TOKEN_ENV = "LOOPER_AGENT_TOKEN"
+TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
+BINDINGS_KEPT = 64
 CONFIRMATION_SECONDS = 600
+# How long a write call waits for the tool_use of its turn's stream that it matches (the event may trail the call).
+MATCH_WAIT_SEC = 2.0
 # The most chats with a confirmation waiting at once; past it, the oldest one's is dropped.
 CONFIRMATION_CHATS = 50
 CONFIRM_TOOL = "looper_confirm"
@@ -120,15 +128,25 @@ MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOL
 class ManagerOps:
     def __init__(self, platform: Platform, *, url: str, token: str | None = None,
                  tools: Sequence[Tool] = MANAGER_TOOLS,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, turn_file: Path | None = None) -> None:
         self._platform = platform
         self._url = url.rstrip("/")
         self._token = token or secrets.token_urlsafe(32)
         self._tools = {tool.name: tool for tool in tools}
         self._clock = clock
         self._turn: Turn | None = None
+        self._turn_file = turn_file
+        self._epoch = 0
+        self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
         self._pending: dict[tuple[str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
+        # Per binding, the tool calls its turn's stream showed and no call has claimed yet: (call id, tool, args).
+        self._expected: dict[str, list[tuple[str | None, str, str]]] = {}
+        self._expected_event: dict[str, asyncio.Event] = {}
+        # The calls whose binding disagreed with how Looper placed them, per (reason, runtime, tool): what
+        # observe-only shows before the binding is enforced (``binding_report``).
+        self._mismatches: Counter[tuple[str, str, str]] = Counter()
+        self._observing: set[asyncio.Task[None]] = set()
 
     @property
     def platform(self) -> Platform:
@@ -188,8 +206,15 @@ class ManagerOps:
         last = (done.stderr.strip().splitlines() or [""])[-1]
         return f"looper mcp-server exited ({done.returncode}) without listing the tools{': ' + last if last else ''}"
 
-    async def call(self, name: str, raw: Any) -> dict[str, Any]:
-        """Run one tool call in the current turn; the protocol's answer."""
+    async def call(self, name: str, raw: Any, *, binding: str | None = None,
+                    call_id: str | None = None) -> dict[str, Any]:
+        """Run one tool call; the protocol's answer.
+
+        With stop enabled (``chat.stop_enabled``) the binding is enforced: the call runs in the turn its
+        ``binding`` names (no binding, or one unknown, is Claude's own turn: it only reads), and a resident
+        runtime's write call runs only when it matches a tool_use of that turn's stream. Off (the default), the
+        binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
+        and each disagreement is logged and counted (``binding_report``), never refused."""
         tool = self._tools.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
@@ -198,13 +223,25 @@ class ManagerOps:
                 return _error(ErrorCode.FORBIDDEN, f"{name} is a tool of a task's Planner, for its own task; the "
                                                    f"Manager's tools are: {', '.join(self._tools)}")
             return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._tools)}")
-        turn = self._turn or Turn(channel=None, chat=None)
+        enforced = chat_settings.stop_enabled()
+        bound = self._bindings.get(binding) if binding else None
+        self._observe_turn(name, binding, bound, enforced=enforced)
+        turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
             arguments = check_arguments(tool.schema, raw)
             risk = tool.risk_of(arguments)
             _check_answering(turn)
+            matched_turn = turn if enforced else bound
+            if (matched_turn is not None and matched_turn.require_match and binding
+                    and (risk is not Risk.READ or tool.name == CONFIRM_TOOL)):
+                if not enforced:
+                    self._observe_match(binding, tool.name, arguments, call_id, matched_turn)
+                elif not await self._matched(binding, tool.name, arguments, call_id):
+                    self._mismatch("not_this_turn", turn, tool.name, enforced=True)
+                    raise OpError(ErrorCode.NOT_THIS_TURN, "this call was not made in the running turn; it did not run")
+                _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
@@ -296,7 +333,109 @@ class ManagerOps:
 
     # --- The Manager's turns ---
 
-    def begin_turn(self, turn: Turn) -> str:
+    def register(self, turn: Turn, binding: str) -> None:
+        """Calls that carry ``binding`` belong to ``turn``; the last ``BINDINGS_KEPT`` stay, ended turns too."""
+        self._bindings[binding] = turn
+        self._bindings.move_to_end(binding)
+        while len(self._bindings) > BINDINGS_KEPT:
+            old, _ = self._bindings.popitem(last=False)
+            self._expected.pop(old, None)
+            self._expected_event.pop(old, None)
+
+    def expect(self, binding: str, tool: str, arguments: Mapping[str, Any], *, call_id: str | None = None) -> None:
+        """The turn of ``binding`` streamed a tool_use of ``tool``: one call with these arguments may match it."""
+        self._expected.setdefault(binding, []).append((call_id or None, tool, _canonical(arguments)))
+        event = self._expected_event.get(binding)
+        if event is not None:
+            event.set()
+
+    def _take(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None) -> bool:
+        entries = self._expected.get(binding, [])
+        canon = _canonical(arguments)
+        for i, (eid, etool, ecanon) in enumerate(entries):
+            if (eid == call_id) if call_id else (etool == tool and ecanon == canon):
+                del entries[i]
+                return True
+        return False
+
+    async def _matched(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None) -> bool:
+        """Whether a tool_use of the turn matches this call (consumed), waiting up to ``MATCH_WAIT_SEC`` for it."""
+        deadline = self._clock() + MATCH_WAIT_SEC
+        while True:
+            if self._take(binding, tool, arguments, call_id):
+                return True
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return False
+            event = self._expected_event.setdefault(binding, asyncio.Event())
+            event.clear()
+            if self._take(binding, tool, arguments, call_id):
+                return True
+            try:
+                await asyncio.wait_for(event.wait(), remaining)
+            except asyncio.TimeoutError:
+                return self._take(binding, tool, arguments, call_id)
+
+    # --- Observe-only binding (stop off) ---
+
+    def _observe_turn(self, tool: str, binding: str | None, bound: Turn | None, *, enforced: bool) -> None:
+        """Count a call whose binding names another turn than the one running when it came (which it runs in
+        while the binding only observes)."""
+        running = self._turn
+        if binding is None:
+            if running is not None:
+                self._mismatch("no_binding", running, tool, enforced=enforced)
+        elif bound is None:
+            self._mismatch("unknown_binding", running, tool, enforced=enforced)
+        elif bound is not running:
+            self._mismatch("other_turn", bound, tool, enforced=enforced)
+
+    def _observe_match(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None,
+                       turn: Turn) -> None:
+        """Look for the call's tool_use as enforcement would (waiting for it), beside the call: it runs meanwhile."""
+        async def look() -> None:
+            if not await self._matched(binding, tool, arguments, call_id):
+                self._mismatch("not_this_turn", turn, tool)
+
+        task = asyncio.get_running_loop().create_task(look())
+        self._observing.add(task)
+        task.add_done_callback(self._observing.discard)
+
+    def _mismatch(self, reason: str, turn: Turn | None, tool: str, *, enforced: bool = False) -> None:
+        runtime = (turn.runtime if turn is not None else None) or "unknown"
+        self._mismatches[(reason, runtime, tool)] += 1
+        logger.warning(
+            "turn binding mismatch (%s): reason=%s runtime=%s tool=%s message=%s total=%d",
+            "enforced" if enforced else "observe-only, the call runs", reason, runtime, tool,
+            turn.message_id if turn is not None else None, sum(self._mismatches.values()),
+            extra={"binding_mismatch": {"reason": reason, "runtime": runtime, "tool": tool,
+                                        "enforced": enforced}})
+
+    def binding_report(self) -> dict[str, Any]:
+        """Whether the binding is enforced, and the mismatches counted since the server started."""
+        return {"enforced": chat_settings.stop_enabled(), "mismatches": sum(self._mismatches.values()),
+                "by": [{"reason": reason, "runtime": runtime, "tool": tool, "count": count}
+                       for (reason, runtime, tool), count in sorted(self._mismatches.items())]}
+
+    def publish_binding(self, binding: str | None) -> None:
+        """Write the binding file the MCP bridge reads at each call (synchronously and atomically: it must be on
+        disk before the prompt reaches the runtime). ``None``: no turn runs."""
+        if self._turn_file is None:
+            return
+        self._epoch += 1
+        path = self._turn_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"epoch": self._epoch, "turn": binding}))
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def begin_turn(self, turn: Turn, binding: str | None = None) -> str:
         """``turn`` runs now; the note its message starts with when an operation in its chat waits for the user's
         word ('' otherwise). That operation may be confirmed in this turn only.
 
@@ -304,6 +443,8 @@ class ManagerOps:
         if turn.state is TurnState.ENDED:
             turn.state = TurnState.ANSWERING
         self._turn = turn
+        if binding:
+            self.register(turn, binding)
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
             return ""
@@ -320,7 +461,9 @@ class ManagerOps:
         any, is dropped, with what its reply would have shown."""
         turn.state = TurnState.STOPPED
         for key, pending in list(self._pending.items()):
-            if pending.asked_in == turn.message_id and not turn.autonomous:
+            # Asked in this turn, or waiting for this turn's word: a stopped turn confirms nothing.
+            if (pending.asked_in == turn.message_id or pending.answer_turn == turn.message_id) \
+                    and not turn.autonomous:
                 del self._pending[key]
                 if pending.block in turn.blocks:
                     turn.blocks.remove(pending.block)
@@ -346,7 +489,10 @@ class ManagerOps:
     # --- The Manager's MCP entry ---
 
     def server_config(self) -> dict[str, Any]:
-        return server_config(self._url, self._token)
+        config = server_config(self._url, self._token)
+        if self._turn_file is not None:
+            config["env"][TURN_FILE_ENV] = str(self._turn_file)
+        return config
 
     async def library_with_server(self, library: Any, runtime_root: Path) -> Any:
         """``library`` (``AgentLibrary``) with Looper's own MCP server added: always there for the Manager, and
@@ -401,6 +547,10 @@ def _check_answering(turn: Turn) -> None:
 def tools_down_reply(problem: str) -> str:
     """What the user gets when the Manager's tools do not work: nothing was done, whatever Claude says."""
     return f"平台工具不可用，没有执行任何操作：{problem}。请检查 looper serve 的日志，或先在控制台里操作。"
+
+
+def _canonical(arguments: Mapping[str, Any]) -> str:
+    return json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _error(code: ErrorCode, message: str) -> dict[str, Any]:

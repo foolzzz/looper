@@ -1,7 +1,7 @@
 """The chat's system settings (``system_settings``), edited in Settings → Chat.
 
 ``chat.stop_enabled``: whether a reply can be stopped (Esc and the Stop button in the dashboard,
-``POST /api/chat/stop``, ``/stop`` on Telegram and Lark). Experimental, and off until the stop path is redesigned.
+``POST /api/chat/stop``, ``/stop`` on Telegram and Lark). Experimental, and off by default until the criteria of chat-stop-v2 section 10 are met.
 
 Stop checks it on every request from synchronous code, so it is kept in memory: ``load`` reads it at startup and
 ``update`` refreshes it. Until loaded, it is off.

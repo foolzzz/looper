@@ -44,6 +44,8 @@ CAPABILITIES = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capabilit
                           Capability.READ_TOOLS, Capability.COMPACTION_EVENTS, Capability.MCP})
 PREFIX = "mcp__looper__"
 
+pytestmark = pytest.mark.usefixtures("current_turn")
+
 
 def _launch(role: str, library: AgentLibrary = AgentLibrary(), *, endpoint: str = "http://127.0.0.1:1/v1",
             consult: bool = False) -> Launch:

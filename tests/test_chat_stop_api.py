@@ -10,7 +10,8 @@ import pytest
 
 from looper.agents import chat_settings
 from looper.agents.runtimes import StopMethod
-from looper.agents.tiers.manager import CurrentTurn, StopRequest, StopResult
+from looper.agents.tiers.manager import StopRequest, StopResult
+from looper.agents.tiers.turn_token import TurnPhase, TurnToken
 
 
 @pytest.fixture(autouse=True)
@@ -31,16 +32,24 @@ class _Writer:
 
 
 class _Manager:
-    def __init__(self, result: StopResult = StopResult.STOPPING, turn: CurrentTurn | None = None) -> None:
+    """A stand-in whose ``stop_turn`` marks the token like the real one does."""
+
+    def __init__(self, result: StopResult = StopResult.STOPPING, turn: TurnToken | None = None) -> None:
         self.result = result
         self.current_turn = turn
         self.stops: list[tuple[str, str]] = []
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
         self.stops.append((message_id, via))
+        token = self.current_turn
+        if token is not None and self.result is StopResult.STOPPING and token.stop is None:
+            token.request_stop(via)
         return self.result
 
-    def current_turn_for(self, channel: str, chat: str) -> CurrentTurn | None:
+    def turn_for(self, message_id: str) -> TurnToken | None:
+        return self.current_turn
+
+    def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         turn = self.current_turn
         return turn if turn and turn.channel == channel and turn.chat == chat else None
 
@@ -60,9 +69,9 @@ def _call(manager: Any, method: str, path: str, body: bytes = b"",
     return asyncio.run(run())
 
 
-def _turn(**kw: Any) -> CurrentTurn:
-    return CurrentTurn(message_id="m1", channel="web", chat="s1",
-                       started_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), **kw)
+def _turn(**kw: Any) -> TurnToken:
+    return TurnToken(message_id="m1", client_message_id=kw.pop("client_message_id", None), channel="web", chat="s1",
+                     received_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), **kw)
 
 
 @pytest.mark.parametrize("body", [b"not json", b"{}", b'{"message_id": ""}', b"[]"])
@@ -80,14 +89,14 @@ def test_stop_stopping_passes_via_web_and_reports_method() -> None:
     manager = _Manager(StopResult.STOPPING, _turn())
     manager.current_turn.method = StopMethod.CONTROL
     status, body = _call(manager, "POST", "/api/chat/stop", b'{"message_id": "m1"}')
-    assert (status, body) == (200, {"state": "stopping", "method": "control"})
+    assert (status, body) == (200, {"state": "stopping", "phase": "received", "method": "control"})
     assert manager.stops == [("m1", "web")]
 
 
 def test_stop_method_unknown_yet_is_null() -> None:
     manager = _Manager(StopResult.ALREADY_STOPPING, _turn())
     status, body = _call(manager, "POST", "/api/chat/stop", b'{"message_id": "m1"}')
-    assert (status, body) == (200, {"state": "already_stopping", "method": None})
+    assert (status, body) == (200, {"state": "already_stopping", "phase": "received", "method": None})
 
 
 @pytest.mark.parametrize("result", [StopResult.NOT_RUNNING, StopResult.OTHER_MESSAGE])
@@ -106,7 +115,8 @@ def test_turn_reports_running_turn_only_for_its_session() -> None:
     status, body = _call(manager, "GET", "/api/chat/turn", query={"session_id": "s1"})
     assert status == 200
     assert body == {"turn": {"message_id": "m1", "client_message_id": None, "channel": "web",
-                             "started_at": "2026-01-02T03:04:05+00:00", "stopping": True}}
+                             "started_at": "2026-01-02T03:04:05+00:00", "state": "received", "method": None,
+                             "stopping": True}}
     assert _call(manager, "GET", "/api/chat/turn", query={"session_id": "other"}) == (200, {"turn": None})
     assert _call(_Manager(), "GET", "/api/chat/turn", query={"session_id": "s1"}) == (200, {"turn": None})
 
@@ -115,6 +125,20 @@ def test_turn_carries_the_envelope_id_and_the_pages_own_id() -> None:
     manager = _Manager(turn=_turn(client_message_id="c1"))
     _, body = _call(manager, "GET", "/api/chat/turn", query={"session_id": "s1"})
     assert body["turn"]["message_id"] == "m1" and body["turn"]["client_message_id"] == "c1"
+
+
+def test_stop_reports_the_phase_it_found_the_turn_in() -> None:
+    running = _turn()
+    running.phase = TurnPhase.RUNNING
+    _, body = _call(_Manager(StopResult.STOPPING, running), "POST", "/api/chat/stop", b'{"message_id": "m1"}')
+    assert body["phase"] == "running"
+    _, body = _call(_Manager(StopResult.STOPPING, _turn()), "POST", "/api/chat/stop", b'{"message_id": "m1"}')
+    assert body["phase"] == "received"
+
+
+def test_turn_reports_a_queued_token_as_received() -> None:
+    _, body = _call(_Manager(turn=_turn()), "GET", "/api/chat/turn", query={"session_id": "s1"})
+    assert body["turn"]["state"] == "received" and body["turn"]["stopping"] is False
 
 
 def test_stop_setting_is_off_by_default() -> None:

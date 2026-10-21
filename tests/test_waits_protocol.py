@@ -26,6 +26,8 @@ from looper.agents.waits import (
     check_from_row, describe, effective_every, open_times,
 )
 
+pytestmark = pytest.mark.usefixtures("current_turn")
+
 
 def reply(data: Any) -> str:
     return '```json\n' + json.dumps(data) + '\n```'

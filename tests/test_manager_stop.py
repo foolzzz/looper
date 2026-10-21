@@ -1,12 +1,13 @@
 """The Manager's typed stop for the running user turn (``ManagerAgent.stop_turn``).
 
-A stand-in session replaces the resident Claude: its turn streams a text delta, then waits until ``interrupt``
-ends it, the way a killed process does. The database is ``agent_db``'s in-memory one.
+A stand-in session replaces the resident Claude: its turn streams a text delta, then waits until its ``cancel``
+is requested, the way a killed process does. The database is ``agent_db``'s in-memory one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from looper.agents.runtimes import StopMethod
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, StopResult
 from tests.test_manager_new_session import _drain, _until, _web
 
+pytestmark = pytest.mark.usefixtures("current_turn")
+
 
 @pytest.fixture(autouse=True)
 def _stop_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,10 +34,11 @@ def _stop_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _Session:
-    """A resident session stand-in: a turn waits for ``interrupt`` unless ``hold`` is off."""
+    """A resident session stand-in: a turn waits for its ``cancel`` to be requested unless ``hold`` is off."""
 
     label = "manager"
     pid = None
+    shares_bridge = True
 
     def __init__(self, *, hold: bool = True, on_start: Any = None, on_turn: Any = None) -> None:
         self.hold, self.on_start, self.on_turn = hold, on_start, on_turn
@@ -42,6 +46,7 @@ class _Session:
         self.command: list[str] = []
         self.totals = Usage()
         self.turns: list[str] = []
+        self.cancels: list[Any] = []
         self.running = asyncio.Event()
         self._stopped = asyncio.Event()
 
@@ -53,8 +58,12 @@ class _Session:
         if self.on_start is not None:
             await self.on_start()
 
-    async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None) -> ResidentTurn:
+    async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None,
+                       cancel: Any = None) -> ResidentTurn:
         self.turns.append(text)
+        self.cancels.append(cancel)
+        if cancel is not None:
+            cancel.on_request(self._stopped.set)
         delta = {"type": "text_delta", "text": "半截回复"}
         await on_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
         await on_event({"type": "stream_event", "event": {"type": "content_block_delta", "delta": delta}})
@@ -67,13 +76,8 @@ class _Session:
             return ResidentTurn(result)
         self.running.set()
         await self._stopped.wait()
-        return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, usage=Usage(cost_usd=0.01))
-
-    async def interrupt(self) -> StopMethod | None:
-        if not self.running.is_set() or self._stopped.is_set():
-            return None
-        self._stopped.set()
-        return StopMethod.KILL
+        return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, usage=Usage(cost_usd=0.01),
+                            prompt_sent=True)
 
     async def stop(self, *, kill: bool = False) -> None:
         self.started = False
@@ -113,7 +117,7 @@ def test_stop_while_the_turn_runs(agent_db: Any) -> None:
             (_, notes), = [call.args for call in agent_db.add_metadata.await_args_list if "user_stop" in call.args[1]]
             assert notes["user_stop"]["via"] == "web" and notes["user_stop"]["method"] == "kill"
             assert manager._session_id == "sess-1"
-            assert manager._current is None
+            assert manager._running_token is None
             await bus.shutdown()
 
     asyncio.run(run())
@@ -128,7 +132,7 @@ def test_stop_of_another_message_or_when_idle(agent_db: Any) -> None:
             envelope = _web("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(envelope))
             await _until(session.running.is_set)
-            assert await manager.stop_turn("other", via="web") is StopResult.OTHER_MESSAGE
+            assert await manager.stop_turn("other", via="web") is StopResult.NOT_RUNNING
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
             await handling
             await bus.shutdown()
@@ -146,7 +150,7 @@ def test_the_web_page_stops_its_message_by_the_id_it_sent(agent_db: Any) -> None
             envelope.payload["channel_context"]["client_message_id"] = "m-page-1"
             handling = asyncio.create_task(manager._handle(envelope))
             await _until(session.running.is_set)
-            assert await manager.stop_turn("m-page-2", via="web") is StopResult.OTHER_MESSAGE
+            assert await manager.stop_turn("m-page-2", via="web") is StopResult.NOT_RUNNING
             assert await manager.stop_turn("m-page-1", via="web") is StopResult.STOPPING
             await handling
             await bus.shutdown()
@@ -198,7 +202,7 @@ def test_stop_while_the_turn_is_prepared_starts_no_model(agent_db: Any) -> None:
             assert session.turns == [] and not session.started
             (reply,) = _replies(queue)
             assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
-            assert manager._current is None
+            assert manager._running_token is None
             await bus.shutdown()
 
     asyncio.run(run())
@@ -321,9 +325,9 @@ def test_the_turn_after_a_stop_is_told_once_and_new_clears_it(agent_db: Any) -> 
             await _until(session.running.is_set)
             await manager.stop_turn(fourth.message_id, via="web")
             await handling
-            assert manager._stopped_note is not None
+            assert manager._stopped_notes
             await manager._handle(_web("/new", 4))
-            assert manager._stopped_note is None
+            assert not manager._stopped_notes
             session.hold = False
             await manager._handle(_web("第五个", 5))
             assert "[Looper] The user stopped" not in session.turns[-1]
@@ -472,7 +476,6 @@ def test_calls_that_come_after_the_stop_are_refused_as_stopped(agent_db: Any) ->
             confirm = _web("确认", 1)
             handling = asyncio.create_task(manager._handle(confirm))
             await _until(session.running.is_set)
-            await manager._interrupt_claude(manager.current_turn)
             await handling
             assert [a["error"]["code"] for a in answers] == ["stopped", "stopped"]
             assert ran == [] and not ops._pending
@@ -532,7 +535,7 @@ def test_a_stop_after_the_runtime_answered_ends_the_turn_stopped(agent_db: Any) 
             assert not ops.asks_in(envelope.message_id)
             (finish,) = agent_db.finish_record.await_args_list
             assert finish.kwargs["status"] == "interrupted"
-            assert manager._stopped_note is not None and manager._session_id == "sess-1"
+            assert manager._stopped_notes and manager._session_id == "sess-1"
             await bus.shutdown()
 
     asyncio.run(run())
@@ -574,27 +577,22 @@ def test_a_stop_once_the_turn_is_recorded_is_not_running_and_changes_nothing(age
 
 
 def test_a_stop_whose_status_is_slow_never_interrupts_the_next_turn(agent_db: Any) -> None:
-    """The stop's "Stopping…" status is slow to send while the stopped turn ends by itself (the ``stop=`` hook)
-    and the next one starts: the stopped turn's interrupt never reaches the next turn."""
+    """The stop's "Stopping…" status is slow to send while the stopped turn ends by itself (its cancel)
+    and the next one starts: the stopped turn's cancel never reaches the next turn."""
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             class _HookSession(_Session):
-                """The first turn ends at the ``stop=`` hook, as a runtime does at its next event."""
+                """The first turn ends at its cancel, as a runtime does."""
 
-                interrupts = 0
-
-                async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None) -> Any:
+                async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None,
+                                   cancel: Any = None) -> Any:
                     if self.turns:
-                        return await super().run_turn(text, on_event, tag=tag, stop=stop)
+                        return await super().run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
                     self.turns.append(text)
                     await on_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
-                    while (capped := stop()) is None:
+                    while not cancel.requested:
                         await asyncio.sleep(0.01)
-                    return ResidentTurn(capped.result_event, usage=capped.usage)
-
-                async def interrupt(self) -> StopMethod | None:
-                    self.interrupts += 1
-                    return await super().interrupt()
+                    return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, usage=Usage())
 
             session = _HookSession()
             manager, bus, queue = _manager(Path(tmp), session)
@@ -668,6 +666,387 @@ def test_a_failed_process_start_replies_failed(agent_db: Any) -> None:
             # As written, naming the runtime: not wrapped as the Manager's own error.
             assert reply["text"] == "无法启动 Claude Code，请检查安装。"
             assert reply["error"] == "Cannot start Claude Code: no such executable"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def _received(manager: ManagerAgent, bus: MessageBus) -> None:
+    """The Manager takes delivery of user messages from the bus, as ``start()`` has it do."""
+    manager._running = True
+    bus.subscribe_topic(MessageType.USER_MESSAGE.value, manager._receive, consumes=True)
+
+
+def test_a_message_queued_behind_a_running_turn_is_stoppable(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            _received(manager, bus)
+            first, second = _web("写一篇很长的文章", 0), _web("再来一篇", 1)
+            await bus.publish(first)
+            await bus.publish(second)
+            inbox = bus.get_queue("manager")
+            assert inbox.qsize() == 2
+            handling = asyncio.create_task(manager._handle(inbox.get_nowait()))
+            await _until(session.running.is_set)
+            assert await manager.stop_turn(second.message_id, via="web") is StopResult.STOPPING
+            assert await manager.stop_turn(second.message_id, via="web") is StopResult.ALREADY_STOPPING
+            assert not session._stopped.is_set()  # the running turn is not the one stopped
+            assert second.message_id in bus.journal._delivered
+            assert first.message_id not in bus.journal._delivered
+            await manager.stop_turn(first.message_id, via="web")
+            await handling
+            _drain(queue)
+            await manager._handle(inbox.get_nowait())  # dequeued: the model never runs
+            assert len(session.turns) == 1
+            (reply,) = _replies(queue)
+            assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
+            assert manager.turn_for(second.message_id) is None
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_right_after_publish_is_stopping_not_not_running(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            _received(manager, bus)
+            envelope = _web("你好")
+            await bus.publish(envelope)  # not dequeued yet
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            await manager._handle(bus.get_queue("manager").get_nowait())
+            assert session.turns == [] and not session.started
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_the_web_pages_id_finds_a_queued_token(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, bus, queue = _manager(Path(tmp), _Session())
+            _received(manager, bus)
+            envelope = _web("你好")
+            envelope.payload["channel_context"]["client_message_id"] = "m-page-1"
+            await bus.publish(envelope)
+            assert manager.turn_for("m-page-1") is manager.turn_for(envelope.message_id) is not None
+            assert await manager.stop_turn("m-page-1", via="web") is StopResult.STOPPING
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_new_stopped_before_it_acts_resets_nothing(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("/new")
+            acted: list[str] = []
+            results: list[StopResult] = []
+            persist = manager._persist_chat
+
+            async def stopping_persist(*args: Any, **kwargs: Any) -> Any:
+                results.append(await manager.stop_turn(envelope.message_id, via="web"))
+                return await persist(*args, **kwargs)
+
+            async def acting(env: MessageEnvelope) -> None:
+                acted.append(env.message_id)
+
+            manager._persist_chat = stopping_persist  # type: ignore[method-assign]
+            manager._start_new_session = acting  # type: ignore[method-assign]
+            await manager._handle(envelope)
+            assert results == [StopResult.STOPPING] and acted == []
+            (reply,) = _replies(queue)
+            assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_new_that_has_acted_is_not_running(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("/new")
+            results: list[StopResult] = []
+
+            async def acting(env: MessageEnvelope) -> None:
+                results.append(await manager.stop_turn(env.message_id, via="web"))
+
+            manager._start_new_session = acting  # type: ignore[method-assign]
+            await manager._handle(envelope)
+            assert results == [StopResult.NOT_RUNNING]
+            assert manager.turn_for(envelope.message_id) is None
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_hands_the_runtime_the_very_cancel_of_the_turn(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("写一篇很长的文章")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            token = manager.turn_for(envelope.message_id)
+            assert token is not None
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            await handling
+            (cancel,) = session.cancels
+            assert cancel is token.cancel and cancel.requested
+            assert _replies(queue)[0]["outcome"] == "stopped"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_between_the_runtimes_answer_and_the_end_is_stopped_and_after_it_is_not_running(
+        agent_db: Any, caplog: pytest.LogCaptureFixture) -> None:
+    """An answered turn that was asked to stop ends stopped (and logs the lost stop); once the end is settled a stop
+    changes nothing."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            first = _web("你好")
+
+            async def stop_it() -> None:
+                assert await manager.stop_turn(first.message_id, via="web") is StopResult.STOPPING
+
+            session.on_turn = stop_it
+            await manager._handle(first)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped"
+            assert "stop lost" in caplog.text
+            assert await manager.stop_turn(first.message_id, via="web") is StopResult.NOT_RUNNING
+            assert _replies(queue) == []
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_the_resume_retry_after_a_stop_starts_no_second_process(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = _web("你好")
+            holder: dict[str, ManagerAgent] = {}
+
+            class _Lost(_Session):
+                starts = 0
+
+                async def start(self, command: list[str], **kwargs: Any) -> None:
+                    self.starts += 1
+                    await super().start(command, **kwargs)
+
+                async def run_turn(self, text: str, on_event: Any, **kwargs: Any) -> ResidentTurn:
+                    self.turns.append(text)
+                    # The saved session is gone (no session started), and the stop comes with that answer.
+                    await holder["manager"].stop_turn(envelope.message_id, via="web")
+                    return ResidentTurn({"type": "result", "subtype": "success", "is_error": False, "result": ""},
+                                        session_started=False)
+
+            session = _Lost()
+            manager, bus, queue = _manager(Path(tmp), session)
+            holder["manager"] = manager
+            manager._session_loaded = True
+            manager._session_id, manager._session_runtime = "gone", "claude-code"
+            await manager._handle(envelope)
+            assert session.starts == 1 and len(session.turns) == 1
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def _user_stop(agent_db: Any) -> dict[str, Any]:
+    (_, notes), = [call.args for call in agent_db.add_metadata.await_args_list if "user_stop" in call.args[1]]
+    return notes["user_stop"]
+
+
+def test_a_stop_while_running_records_phase_and_method_and_leaves_a_stopped_note(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("写一篇很长的文章")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            stop = _user_stop(agent_db)
+            assert stop["phase"] == "running" and stop["method"] == "kill"
+            session.hold = False
+            await manager._handle(_web("再来", 1))
+            assert "[Looper] The user stopped" in session.turns[-1]
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_in_starting_is_withdrawn_with_no_method(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = _web("你好")
+            holder: dict[str, ManagerAgent] = {}
+
+            async def stop_now() -> None:
+                await holder["manager"].stop_turn(envelope.message_id, via="web")
+
+            session = _Session(hold=False, on_start=stop_now)
+            manager, bus, queue = _manager(Path(tmp), session)
+            holder["manager"] = manager
+            await manager._handle(envelope)
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["status"] == "interrupted"
+            stop = _user_stop(agent_db)
+            assert stop["method"] is None and stop["phase"] == "starting"
+            await manager._handle(_web("再来", 1))
+            assert "[Looper] The user withdrew a message before you saw it (it began: \"你好\")" in session.turns[-1]
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_prepared_writes_no_record_and_withdraws(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = _web("排队的消息")
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            persist = manager._persist_chat
+
+            async def stopping_persist(*args: Any, **kwargs: Any) -> Any:
+                await manager.stop_turn(envelope.message_id, via="web")
+                return await persist(*args, **kwargs)
+
+            manager._persist_chat = stopping_persist  # type: ignore[method-assign]
+            await manager._handle(envelope)
+            assert not agent_db.finish_record.await_args_list
+            manager._persist_chat = persist  # type: ignore[method-assign]
+            await manager._handle(_web("再来", 1))
+            assert session.turns[-1].count("[Looper] The user withdrew a message") == 1
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_two_stops_leave_both_notes_in_order_and_new_clears_them(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            first = _web("甲", 0)
+            handling = asyncio.create_task(manager._handle(first))
+            await _until(session.running.is_set)
+            await manager.stop_turn(first.message_id, via="web")
+            await handling
+            second = _web("乙", 1)
+            persist = manager._persist_chat
+
+            async def stopping_persist(*args: Any, **kwargs: Any) -> Any:
+                await manager.stop_turn(second.message_id, via="web")
+                return await persist(*args, **kwargs)
+
+            manager._persist_chat = stopping_persist  # type: ignore[method-assign]
+            await manager._handle(second)
+            manager._persist_chat = persist  # type: ignore[method-assign]
+            assert len(manager._stopped_notes) == 2
+            session.hold = False
+            await manager._handle(_web("丙", 2))
+            sent = session.turns[-1]
+            assert sent.index('(to: "甲")') < sent.index('(it began: "乙")')
+            session.hold = True
+            session.running.clear()
+            session._stopped.clear()
+            envelope = _web("丁", 3)
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            await manager._handle(_web("/new", 4))
+            assert manager._stopped_notes == []
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_with_no_usage_reported_is_incomplete(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            real = session.run_turn
+
+            async def no_usage(*args: Any, **kwargs: Any) -> ResidentTurn:
+                turn = await real(*args, **kwargs)
+                return dataclasses.replace(turn, usage=Usage())
+
+            session.run_turn = no_usage  # type: ignore[method-assign]
+            envelope = _web("写")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["cost_usd"] is None
+            assert _user_stop(agent_db)["usage_complete"] is False
+            assert manager._session_totals == Usage()
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+class _SlowStart(_Session):
+    """Its start spawns a real process after a while, and its stop kills it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.process: asyncio.subprocess.Process | None = None
+        self.starting = asyncio.Event()
+        self.spawned: list[asyncio.subprocess.Process] = []
+
+    async def start(self, command: list[str], **kwargs: Any) -> None:
+        self.starting.set()
+        await asyncio.sleep(0.3)  # the Manager is closed meanwhile
+        self.process = await asyncio.create_subprocess_exec("/bin/sleep", "60")
+        self.spawned.append(self.process)
+        self.started, self.command = True, command
+
+    async def stop(self, *, kill: bool = False) -> None:
+        process, self.process, self.started = self.process, None, False
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+def test_closing_the_manager_while_the_runtime_starts_leaves_no_process(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _SlowStart()
+            manager, bus, _ = _manager(Path(tmp), session)
+            manager._running = True
+            manager._task = asyncio.create_task(manager._handle(_web("你好")))
+            await _until(session.starting.is_set)
+            await manager.stop()
+            await asyncio.sleep(0.6)  # long enough for an abandoned start to have spawned its process
+            try:
+                assert all(p.returncode is not None for p in session.spawned), "a process outlived the close"
+                assert not session.started
+            finally:
+                for process in session.spawned:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
             await bus.shutdown()
 
     asyncio.run(run())

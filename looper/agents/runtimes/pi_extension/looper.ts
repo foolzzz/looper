@@ -11,11 +11,14 @@
  * input schema stay the server's; parameters are normalized the way pi's own
  * MCP adapter normalizes an input schema (`type` and `properties` filled in).
  * A call posts to `/api/agent/v1/ops/<name>`. Requests go straight to the bound
- * origin: no proxy and no redirect.
+ * origin: no proxy and no redirect. With `LOOPER_AGENT_TURN_FILE` (the Manager's
+ * binding file), each call reads the turn it belongs to from that file and
+ * sends it as `X-Looper-Turn`, with pi's own tool call id as `X-Looper-Call`.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Agent as HttpAgent, request as httpRequest, type ClientRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import { readFileSync } from "node:fs";
 
 // A direct agent. Node's global agent follows HTTP_PROXY when
 // NODE_USE_ENV_PROXY is set, which would send the bearer token to the proxy.
@@ -24,6 +27,7 @@ const directHttps = new HttpsAgent();
 
 const URL_ENV = "LOOPER_AGENT_URL";
 const TOKEN_ENV = "LOOPER_AGENT_TOKEN";
+const TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE";
 const REQUEST_TIMEOUT_MS = 120_000;
 const WAIT_MARGIN_MS = 20_000;
 const WAITING_TOOL = "looper_room_inbox";
@@ -31,6 +35,7 @@ const WAITING_TOOL = "looper_room_inbox";
 interface Binding {
   url: string;
   token: string;
+  turnFile: string | null;
 }
 
 interface ListedTool {
@@ -76,7 +81,19 @@ function readBinding(): Binding | null {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("LOOPER_AGENT_URL must be an http:// or https:// URL");
   }
-  return { url: url.replace(/\/+$/, ""), token };
+  const turnFile = (process.env[TURN_FILE_ENV] ?? "").trim();
+  return { url: url.replace(/\/+$/, ""), token, turnFile: turnFile === "" ? null : turnFile };
+}
+
+/** The turn the binding file names now; null when there is none or it cannot be read. */
+function readTurn(binding: Binding): string | null {
+  if (binding.turnFile === null) return null;
+  try {
+    const turn = JSON.parse(readFileSync(binding.turnFile, "utf8"))?.turn;
+    return typeof turn === "string" && turn !== "" && /^[\x21-\x7e]+$/.test(turn) ? turn : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Check schema positions recursively, without interpreting enum/default values as schemas. */
@@ -180,6 +197,7 @@ function requestOnce(
   body: Record<string, unknown> | null,
   timeoutMs: number,
   signal: AbortSignal | undefined,
+  extra: Record<string, string> = {},
 ): Promise<{ status: number; raw: Buffer }> {
   const target = new URL(binding.url + path);
   const transport = target.protocol === "https:" ? httpsRequest : httpRequest;
@@ -187,6 +205,7 @@ function requestOnce(
   const headers: Record<string, string> = {
     Authorization: `Bearer ${binding.token}`,
     Accept: "application/json",
+    ...extra,
   };
   if (payload !== null) {
     headers["Content-Type"] = "application/json";
@@ -266,8 +285,9 @@ async function readObject(
   body: Record<string, unknown> | null,
   timeoutMs: number,
   signal: AbortSignal | undefined,
+  extra: Record<string, string> = {},
 ): Promise<Record<string, unknown>> {
-  const { status, raw } = await requestOnce(binding, path, method, body, timeoutMs, signal);
+  const { status, raw } = await requestOnce(binding, path, method, body, timeoutMs, signal, extra);
   let payload: unknown = null;
   try {
     payload = JSON.parse(raw.toString("utf8"));
@@ -297,9 +317,14 @@ async function callTool(
   name: string,
   params: unknown,
   signal: AbortSignal | undefined,
+  callId: string,
 ): Promise<ToolResult> {
   const args = isPlainObject(params) ? params : {};
   const timeoutMs = timeoutFor(name, args);
+  const extra: Record<string, string> = {};
+  const turn = readTurn(binding);
+  if (turn !== null) extra["X-Looper-Turn"] = turn;
+  if (typeof callId === "string" && /^[\x21-\x7e]+$/.test(callId)) extra["X-Looper-Call"] = callId;
   try {
     const answer = await readObject(
       binding,
@@ -308,6 +333,7 @@ async function callTool(
       args,
       timeoutMs,
       signal,
+      extra,
     );
     // The bearer stays transport-only, even if an API answer echoes it.
     const text = JSON.stringify(answer).replaceAll(JSON.stringify(binding.token).slice(1, -1), "[redacted]");
@@ -344,7 +370,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         label: tool.label,
         description: tool.description,
         parameters: tool.parameters,
-        execute: (_toolCallId, params, signal) => callTool(binding, tool.original, params, signal),
+        execute: (toolCallId, params, signal) => callTool(binding, tool.original, params, signal, toolCallId),
       });
     }
   } catch (error) {

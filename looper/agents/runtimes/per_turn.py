@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from .. import proc_tree
 from ..run_usage import Usage
+from .cancel import TurnCancel
 
 if TYPE_CHECKING:
     from ..claude_cli import CapStop, ResidentTurn
@@ -43,18 +44,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+STDERR_DRAIN_SEC = 1.0  # how long a turn waits for stderr to close after its process exited
+# How long a turn waits for its tree to be ended: the grace, the reap and a second.
 # How much of a turn's stderr is kept for the log when it ends without a result.
 _STDERR_TAIL = 4_000
 
 
-async def stderr_tail(stream: asyncio.StreamReader | None) -> str:
-    """The last ``_STDERR_TAIL`` bytes ``stream`` gives before it ends."""
+async def stderr_tail(stream: asyncio.StreamReader | None, timeout: float | None = None) -> str:
+    """The last ``_STDERR_TAIL`` bytes ``stream`` gives before it ends, or before ``timeout`` seconds are up."""
     if stream is None:
         return ""
     kept = b""
-    while chunk := await stream.read(65_536):
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout is None else loop.time() + timeout
+    while True:
+        try:
+            chunk = await asyncio.wait_for(stream.read(65_536), None if deadline is None else max(0.0, deadline - loop.time()))
+        except asyncio.TimeoutError:
+            break
+        if not chunk:
+            break
         kept = (kept + chunk)[-_STDERR_TAIL:]
     return kept.decode("utf-8", errors="replace")
+
+
+def _end_bound() -> float:
+    """How long a turn waits for the cleanup of its process tree: the grace, the reap and a second."""
+    return proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 1
 
 
 def session_dir_name(label: str) -> str:
@@ -89,9 +105,11 @@ class PerTurnSession(ABC):
         self._session: str | None = None  # the session the next turn resumes
         self._process: asyncio.subprocess.Process | None = None  # the turn running now, if any
         self._ended = False  # the last turn ended without a result: the owner starts over
-        self._stopping = False  # the user's stop is ending the running turn
         self._active = False  # a turn is between run_turn's start and its end, its process spawned or not
-        self._ending: asyncio.Future[None] | None = None  # the stop's cleanup of the turn's process tree
+        self._cancel: TurnCancel | None = None  # the running turn's cancel (what ``interrupt`` requests)
+        self._done: asyncio.Future[None] | None = None  # set when the running turn has ended
+        self._tree: proc_tree.TurnTree | None = None  # the running turn's process tree, once spawned
+        self._end_task: asyncio.Future[None] | None = None  # the cleanup of that tree, once started
         self._totals = Usage()
         self._price: Price | None = None  # prices the totals at the provider's prices
 
@@ -106,6 +124,10 @@ class PerTurnSession(ABC):
     @property
     def command(self) -> list[str]:
         return self._command
+
+    @property
+    def shares_bridge(self) -> bool:
+        return False
 
     @property
     def pid(self) -> int | None:
@@ -159,7 +181,7 @@ class PerTurnSession(ABC):
 
     async def run_turn(
         self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
-        stop: Callable[[], CapStop | None] | None = None,
+        stop: Callable[[], CapStop | None] | None = None, cancel: TurnCancel | None = None,
     ) -> ResidentTurn:
         """Run ``text`` as one turn and hand each of its events to ``on_event``. A turn given up (an exception,
         cancellation included) kills its process before it propagates.
@@ -168,84 +190,137 @@ class PerTurnSession(ABC):
         cap (``ClaudeRunRecorder.cap_stop``); a turn over it ends there, with
         the cap's result, its process killed, the session's totals moved on by
         what it spent.
+
+        ``cancel`` is the one way to stop the turn: once it is requested, in any phase, the turn's process tree is
+        ended, no event reaches ``on_event`` (the output is read only for what the turn spent) and the turn
+        returns ``user_stop_result``. A request that came before the process exists starts none.
         """
         assert self.started
-        self._active = True
+        cancel = cancel or TurnCancel.never()
+        self._active, self._cancel = True, cancel
+        self._done = asyncio.get_running_loop().create_future()
+        unregister = cancel.on_request(self._on_stop)
         try:
-            return await self._run_turn(text, on_event, tag=tag, stop=stop)
+            return await self._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
         finally:
-            self._active = self._stopping = False
+            unregister()
+            self._active, self._cancel, self._tree, self._end_task = False, None, None, None
+            if not self._done.done():
+                self._done.set_result(None)
 
-    async def _run_turn(
-        self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
-        stop: Callable[[], CapStop | None] | None = None,
-    ) -> ResidentTurn:
+    def _on_stop(self) -> None:
+        """The turn's cancel was requested: end its tree once the process exists (otherwise ``_run_turn`` sees the
+        request when it has spawned)."""
+        if self._tree is not None and self._end_task is None:
+            self._end_task = asyncio.ensure_future(self._tree.end())
+
+    def _stopped_turn(self, *, session_started: bool, usage: Usage, complete: bool, sent: bool) -> ResidentTurn:
         from ..claude_cli import ResidentTurn, user_stop_result
         from . import StopMethod
 
+        return ResidentTurn(user_stop_result(), session_started=session_started, usage=usage,
+                            stopped=StopMethod.KILL, usage_complete=complete, prompt_sent=sent)
+
+    async def _end_tree(self, process: asyncio.subprocess.Process, tree: proc_tree.TurnTree) -> None:
+        """End the turn's tree, through the stop's own end when it is under way; bounded."""
+        if self._end_task is None:
+            self._end_task = asyncio.ensure_future(tree.end())
+        try:
+            await asyncio.wait_for(asyncio.shield(self._end_task), _end_bound())
+        except asyncio.TimeoutError:
+            logger.warning("%s: the turn's process tree was not ended within %.1f s", self._label, _end_bound())
+
+    async def _run_turn(
+        self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
+        stop: Callable[[], CapStop | None] | None = None, cancel: TurnCancel,
+    ) -> ResidentTurn:
+        from ..claude_cli import ResidentTurn
+
+        if cancel.requested:  # a stop that came before the turn began: nothing is started
+            return self._stopped_turn(session_started=False, usage=Usage(), complete=True, sent=False)
         argv = await asyncio.to_thread(self._turn_argv)
-        if self._stopping:  # a stop that came before the process existed: no process is started
-            return ResidentTurn(user_stop_result(), session_started=False, usage=Usage(),
-                                stopped=StopMethod.KILL, usage_complete=True)
+        if cancel.requested:
+            return self._stopped_turn(session_started=False, usage=Usage(), complete=True, sent=False)
         resuming = self._session
         process = await proc_tree.spawn(
             *argv, cwd=self._cwd, env=self._env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         self._process = process
-        if self._stopping:  # the stop came while the process was being spawned: end it with the turn
-            self._ending = asyncio.ensure_future(proc_tree.end(process, label=self._label))
+        self._tree = tree = proc_tree.track(process, label=self._label)
+        if cancel.requested:  # the stop came while the process was being spawned: end it with the turn
+            self._on_stop()
+        else:
+            tree.start_ticker()
         logger.info("%s started a %s turn (pid=%s, %s)", self._label, self.runtime_label, process.pid,
                     f"resuming {resuming}" if resuming else "new session")
         stderr = asyncio.create_task(stderr_tail(process.stderr))
         stream = self._stream()
+        if callable(getattr(stream, "cancel", None)):
+            cancel.on_request(stream.cancel)
         result: dict[str, Any] | None = None
         session_started = False
         capped: CapStop | None = None
         failure: Exception | None = None
+        sent = False
         try:
             assert process.stdin is not None and process.stdout is not None
             try:
-                process.stdin.write(text.encode("utf-8"))
-                await process.stdin.drain()
-                process.stdin.close()
+                if not cancel.requested:
+                    process.stdin.write(text.encode("utf-8"))
+                    await process.stdin.drain()
+                    process.stdin.close()
+                    sent = True
+                    cancel.sent()
             except (BrokenPipeError, ConnectionResetError):
                 logger.warning("%s: %s closed stdin before the message was sent", self._label, self.runtime_label)
             async for event in stream.events(process.stdout):
                 if event.get("type") == "system" and event.get("subtype") == "init":
                     session_started = True
                     self._session = stream.session_id or self._session
+                if cancel.requested:  # read on only for what the turn spent
+                    await tree.refresh()
+                    continue
                 await on_event(event)
+                await tree.refresh()
+                if cancel.requested:
+                    continue
                 if stop is not None and (capped := stop()) is not None:
-                    await proc_tree.end(process, label=self._label)
+                    await self._end_tree(process, tree)
                     break
                 if event.get("type") == "result":
                     result = event
             await process.wait()
         except BaseException as exc:
-            await proc_tree.end(process, label=self._label)
-            if not (self._stopping and isinstance(exc, Exception)):  # a stopped turn's closed pipe is not a failure
+            await self._end_tree(process, tree)
+            if not (cancel.requested and isinstance(exc, Exception)):  # a stopped turn's closed pipe is not a failure
                 stderr.cancel()
-                self._process, self._ended, self._stopping = None, True, False
+                self._process, self._ended = None, True
                 raise
             failure = exc
-        if self._ending is not None:  # the turn returns only once the stop has cleaned its process tree up
-            await asyncio.shield(self._ending)
-        self._process, self._ending = None, None
+        finally:
+            await tree.stop_ticker()
         # Read before the stop is looked at: a stop that lands while it is read still ends the turn.
-        errors = await stderr if not self._stopping and failure is None else ""
-        if self._stopping:
-            self._stopping = False
-            stderr.cancel()
+        errors = ""
+        if failure is None:
+            done, _ = await asyncio.wait({stderr}, timeout=STDERR_DRAIN_SEC)  # a grandchild may hold it open
+            if done and not stderr.cancelled():
+                errors = stderr.result()
+        stderr.cancel()
+        if self._end_task is not None:  # the turn returns only once the stop has cleaned its process tree up
+            await self._end_tree(process, tree)
+        self._process = None
+        if cancel.requested:
             usage = getattr(stream, "usage_so_far", Usage)()
             self._totals = self._totals.plus(usage)
-            return ResidentTurn(user_stop_result(), session_started=session_started, usage=usage,
-                                stopped=StopMethod.KILL, usage_complete=hasattr(stream, "usage_so_far"))
+            return self._stopped_turn(session_started=session_started, usage=usage,
+                                      complete=hasattr(stream, "usage_so_far"), sent=sent)
         if failure is not None:
             raise failure
         if capped is not None:
             self._totals = self._totals.plus(capped.usage)
-            return ResidentTurn(capped.result_event, session_started=session_started, usage=capped.usage)
+            return ResidentTurn(capped.result_event, session_started=session_started, usage=capped.usage,
+                                prompt_sent=sent)
         if result is None:
             self._ended = True
             logger.warning("%s: the %s turn ended without a result (exit code %s): %s", self._label,
@@ -253,21 +328,21 @@ class PerTurnSession(ABC):
         else:
             self._turn_ended(new_session=resuming is None and session_started)
         return ResidentTurn(result, None if result is not None else process.returncode,
-                            session_started=session_started, usage=self.turn_usage(result))
+                            session_started=session_started, usage=self.turn_usage(result), prompt_sent=sent)
 
     async def interrupt(self) -> StopMethod | None:
-        """End the running turn's process tree at once; the turn returns ``user_stop_result`` and the session is
-        kept for the next turn. None when no turn runs."""
+        """Request the running turn's cancel and wait (bounded) for the turn to end its process tree; the turn
+        returns ``user_stop_result`` and the session is kept for the next turn. None when no turn runs."""
         from . import StopMethod
 
-        process = self._process
-        if self._stopping or not self._active:
+        cancel, done = self._cancel, self._done
+        if not self._active or cancel is None or done is None:
             return None
-        self._stopping = True
-        if process is None:  # the turn is still preparing or spawning: run_turn sees the request
-            return StopMethod.KILL
-        self._ending = asyncio.ensure_future(proc_tree.end(process, label=self._label))
-        await asyncio.shield(self._ending)
+        cancel.request()
+        try:
+            await asyncio.wait_for(asyncio.shield(done), _end_bound() + STDERR_DRAIN_SEC)
+        except asyncio.TimeoutError:
+            logger.warning("%s: the stopped turn did not end in time", self._label)
         return StopMethod.KILL
 
     async def stop(self, *, kill: bool = False) -> None:
