@@ -1534,7 +1534,7 @@ class AgentHTTPServer:
             "work_dir": raw.get("work_dir", ""),
             "config": raw.get("config", {}),
             # The Agent Profile the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
-            "profile_overrides": {role: profile_registry.profile_view(profile) for role, profile in overrides.items()},
+            "profile_overrides": await profile_registry.profile_views(overrides),
             # Each task role's Agent Profile, and its Workers' and Reviewers' concurrency, with where each comes from;
             # the task's own choices are source "task" (projects.agents_view).
             "agents": agents,
