@@ -308,6 +308,10 @@ class RuntimeAdapter(ABC):
 
     # --- The launch ---
 
+    def api_model(self, model: str) -> str:
+        """The model name this runtime sends to the provider's API for ``model``; verbatim by default."""
+        return model
+
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
         """Additional configuration rules, without requiring or reading a provider key; none by default."""
         return None

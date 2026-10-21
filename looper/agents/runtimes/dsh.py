@@ -338,6 +338,9 @@ class DshRuntime(RuntimeAdapter):
                         return Probe(version, frozenset(), f"Unsupported DSH version; expected {SUPPORTED_VERSION}")
             return Probe(version, self.capabilities)
 
+    def api_model(self, model: str) -> str:
+        return MODEL_MAP.get(model, model)
+
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
         validate_provider(provider, model, effort)
 
@@ -511,7 +514,9 @@ class DshRuntime(RuntimeAdapter):
         mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
                          read_only=launch.read_only, consult=launch.consult)
         catalog = materialize(launch.library, launch.profile.runtime.executable or self.default_executable)
-        return {"runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit"},
+        # The configured model, kept verbatim: the patch carries only the normalized API model, and usage is priced
+        # by the configured one (``deepseek-v4-pro[1m]`` can cost differently from ``deepseek-v4-pro``).
+        return {"model": launch.model, "runtime_limits": {"max_turns": "unsupported: DSH has no native model-call limit"},
                 "usage_complete": _root_only_consult(launch), "cost_basis": "observed", "isolation": HOME_LAYOUT_ID,
                 "system_prompt_mode": "append", "web_search": _web_search(launch) and not _root_only_consult(launch),
                 "usage_limits": ("Tool-free consult: compaction disabled; execution guard denies auxiliary model tools"
@@ -530,6 +535,26 @@ class DshRuntime(RuntimeAdapter):
         # Native agent-instructions discovery is disabled by the managed overlay.
         return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
             cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+
+
+def _unpriced(model: str, usage: Any) -> None:
+    return None
+
+
+@dataclass
+class _ResidentStream(DshStream):
+    """A turn's stream whose result carries the root spend observed at the provider's prices, as a run's does
+    (``DshChannel.events``); None while no root step could be priced."""
+
+    spend: RunSpend | None = None
+
+    async def events(self, stdout: asyncio.StreamReader, *,
+                     process: asyncio.subprocess.Process | None = None) -> AsyncIterator[dict[str, Any]]:
+        async for event in super().events(stdout, process=process):
+            self.spend.add(event)
+            if event.get("type") == "result":
+                event["observed_cost_usd"] = self.spend.observed_cost_usd
+            yield event
 
 
 class ResidentDsh(PerTurnSession):
@@ -583,9 +608,14 @@ class ResidentDsh(PerTurnSession):
         return [*self._base[:-1], *(["--session-id", self._session] if self._session else []), "-"]
 
     def _stream(self) -> DshStream:
-        patch = json.loads(Path(self._base[self._base.index("--patch") + 1]).read_text(encoding="utf-8"))
+        source = Path(self._base[self._base.index("--patch") + 1])
+        patch = json.loads(source.read_text(encoding="utf-8"))
         model = next(item["config"]["model"] for item in patch if item.get("id") == "agent-default-model")
-        self._turn_stream = DshStream(model=model, process=self._process, require_session=True)
+        record = source.with_name("launch-record.json")
+        if record.is_file():
+            model = json.loads(record.read_text(encoding="utf-8")).get("model") or model
+        self._turn_stream = _ResidentStream(model=model, spend=RunSpend(self._price or _unpriced, model, None),
+                                            process=self._process, require_session=True)
         return self._turn_stream
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:

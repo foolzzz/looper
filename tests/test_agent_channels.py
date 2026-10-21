@@ -715,6 +715,25 @@ class TestLarkAllowlist:
         # Seen at once; its answer replies to it in the group.
         assert seen.reacted == ["om_7"] and seen.replies_to == {message.correlation_id: "om_7"}
 
+    @pytest.mark.parametrize(("text", "seen"), [
+        ("@HelperBot /gates", "/gates"),
+        ("@_user_1 /gate 1 用 Redis", "/gate 1 用 Redis"),
+        ("@HelperBot /gate 2 end", "/gate 2 end"),
+    ])
+    @pytest.mark.parametrize("chat_type", ["group", "p2p"])
+    def test_the_gate_commands_reach_the_handler_with_the_mention_stripped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str, seen: str, chat_type: str,
+    ) -> None:
+        if chat_type == "p2p":
+            text = text.split(" ", 1)[1]
+            seen = text
+        event = _lark_event(OPEN_ID, text, chat_type=chat_type, chat_id="oc_team", mentions=[BOT_MENTION],
+                            message_id="om_8")
+        (message,) = self._run(tmp_path, monkeypatch, event, OPEN_ID).messages
+        assert message.payload["text"] == seen
+        assert message.payload["channel_context"]["chat_id"] == "oc_team"
+        assert message.payload["channel_context"]["chat_type"] == chat_type
+
     @pytest.mark.parametrize(("refs", "seen"), [
         ({"reply_to": "om_card", "root_id": "om_card"}, {"reply_to": "om_card", "root_id": "om_card"}),
         # A reply further down a thread: the message it answers, and the thread's first.

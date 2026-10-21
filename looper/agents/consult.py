@@ -127,6 +127,15 @@ class _Failed(Exception):
         self.reason = reason
 
 
+def _unsuccessful(result: Mapping[str, Any]) -> str | None:
+    """Why a result must not be delivered as an answer, e.g. a runtime that kept a valid final from a failed exit."""
+    if result.get("is_error"):
+        return "its run ended in error: " + "; ".join(str(e) for e in result.get("errors") or []) [:300]
+    if result.get("subtype") not in (None, "success"):
+        return f"its run ended as {result.get('subtype')}, not success"
+    return None
+
+
 class ConsultService:
     """The consults of every task's room: ``ask`` is the room's, the WorkerPool runs them."""
 
@@ -374,6 +383,8 @@ class ConsultService:
                 raise _Failed(FallbackReason.CONTRACT, "its run ended without a result")
             if runtime.budget_error(result) is not None:
                 raise _Failed(FallbackReason.BUDGET, f"it reached its spend cap of {budget:g} USD (room_consult_budget_usd)")
+            if (failure := _unsuccessful(result)) is not None:
+                raise _Failed(FallbackReason.CONTRACT, failure)
             if cost is None and isinstance(result.get("total_cost_usd"), (int, float)):
                 cost = float(result["total_cost_usd"])
             if cost is None:

@@ -415,3 +415,40 @@ def test_dsh_room_cleanup_does_not_follow_a_linked_managed_parent(tmp_path: Path
     assert sweep_run_sessions(tmp_path, keep=[]) == []
     remove_run_sessions(tmp_path, "expired")
     assert (outside / "expired/history").read_bytes() == b"untouched"
+
+
+def test_a_failed_run_with_a_valid_final_is_not_delivered_as_an_answer(monkeypatch: pytest.MonkeyPatch,
+                                                                       tmp_path: Path) -> None:
+    from dataclasses import replace
+    from looper.agents import claude_cli
+    from looper.agents.consult import _unsuccessful
+    from looper.agents.system_prompt import SystemPrompt
+    from tests.test_dsh_runtime import _run_launch
+
+    class Recorder:
+        cap_stop = None
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        async def record(self, event):
+            pass
+
+        async def finish(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(claude_cli, "ClaudeRunRecorder", Recorder)
+    payload = (Path(__file__).parent / "fixtures/dsh_json/success.jsonl").read_bytes()
+    script = f"import sys; sys.stdin.read(); sys.stdout.buffer.write({payload!r}); sys.stdout.flush(); sys.exit(7)"
+    service = ConsultService(room=None, worker_pool=None, runtime_root=tmp_path)
+    launch = replace(_run_launch(tmp_path), consult=True)
+    result, _, _ = asyncio.run(service._execute(
+        "task", {"id": "step"}, "consult-test", [sys.executable, "-c", script], str(tmp_path),
+        "Answer the question", SystemPrompt(CONSULT_CONTRACT, {}), launch, 5))
+    assert result is not None and result["result"]  # the final survives the failed exit
+    assert _unsuccessful(result) is not None
+    assert _unsuccessful({"is_error": False, "subtype": "error_max_turns"}) is not None
+    assert _unsuccessful({"is_error": False, "subtype": "success"}) is None

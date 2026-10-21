@@ -18,6 +18,39 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.10] - 2026-10-21
+
+### Fixed
+
+- **A failed DSH consult run is no longer delivered as an answer.** A result with `is_error`, or a `subtype` other than `success`, falls back with a contract reason. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **Resident DSH is priced by the configured model**, not the normalized API model, so usage and budget stops use the right price; resident turn results gain `observed_cost_usd`, and the prompt-regression eval records `observed_cost_complete` instead of counting a missing value as 0. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **An unsupported effort is refused** when a profile is selected or launched (for example `dsh` with `medium` or `xhigh`), not only on config import. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **The `[1m]` suffix warning follows each runtime's real model mapping** (new adapter `api_model`): DSH and Claude Code no longer warn about a suffix they strip. ([#300](https://github.com/foolzzz/looper/pull/300))
+- No model-visible change: no prompt or tool schema changed.
+
+### Validation
+
+- Reported in #300: 495 passed, 2 skipped across the DSH runtime, DSH validation, provider pricing and room consult tests; 148 passed in the agent settings tests; the new effort test fails without the fix. No full-suite run or review is reported. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.10.md).
+
+## [2.13.9] - 2026-10-21
+
+### Added
+
+- **Answer and end user gates from a chat with `/gates` and `/gate`.** In a Lark or Telegram chat, `/gates` lists the user gates that wait for the user (a private chat: all of them; a group: that group's) as a numbered list, and `/gate N <answer>` and `/gate N end` add the answer to, or end, gate N. Looper answers these itself before the Manager's model; the numbers refer to the last list delivered to that chat (one hour, per sender), so a number never lands on another gate. A reply under a gate's card with exactly `end` (or `/end`) ends the gate. Telegram registers `/gates` and `/gate` in its menu and help. ([#277](https://github.com/foolzzz/looper/pull/277))
+
+### Changed
+
+- Code-written receipts now follow an answer that reaches a gate (including a reply under a gate's card, which was silent before): "delivered to <task> <step>", "asked the Planner to end it on what is settled", or, for a stopped task, that the answer is saved for when it continues. ([#277](https://github.com/foolzzz/looper/pull/277))
+- No model-visible change: the commands and their replies are not stored in the Manager's chat history or shown to its model.
+
+### Validation
+
+- Reported in #277: unit tests for the commands, scopes, numbering, end, receipts and the Telegram handlers; the full local suite before the merge; Codex and Grok reviews with no P0. Not tested on a real Lark or Telegram chat. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.9.md).
+
 ## [2.13.8] - 2026-10-21
 
 ### Added
