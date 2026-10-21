@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   ListTodo,
+  MessageCircleQuestion,
   Bot,
   CalendarClock,
   ChevronDown,
@@ -13,20 +14,23 @@ import {
   Plus,
   X,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { SignOut } from "@/components/sign-out";
 import { ProjectDialog } from "@/components/project-dialog";
 import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
+import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { cn } from "@/lib/utils";
 
 /** "history" is an agent's session history, reached from a task or a run; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page = "dashboard" | "chat" | "tasks" | "projects" | "runs" | "schedules" | "settings" | "history";
+export type Page = "dashboard" | "chat" | "tasks" | "gates" | "projects" | "runs" | "schedules" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { page: "chat", label: "Chat", icon: MessageSquare },
   { page: "tasks", label: "Tasks", icon: ListTodo },
+  { page: "gates", label: "User Gates", icon: MessageCircleQuestion },
   { page: "runs", label: "Runs", icon: History },
   { page: "schedules", label: "Schedules", icon: CalendarClock },
 ];
@@ -57,6 +61,7 @@ export function Sidebar({
   open,
   onClose,
 }: SidebarProps) {
+  const waitingGates = useWaitingGates();
   return (
     <aside
       id={SIDEBAR_ID}
@@ -96,6 +101,15 @@ export function Sidebar({
           >
             <Icon className="h-4 w-4" />
             {label}
+            {page === "gates" && waitingGates !== null && waitingGates > 0 && (
+              <Badge
+                variant="warning"
+                aria-label={`${waitingGates} ${waitingGates === 1 ? "gate" : "gates"} waiting for you`}
+                className="ml-auto tabular-nums"
+              >
+                {waitingGates > 99 ? "99+" : waitingGates}
+              </Badge>
+            )}
           </button>
         ))}
       </nav>

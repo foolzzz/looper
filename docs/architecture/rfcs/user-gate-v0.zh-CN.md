@@ -443,7 +443,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表（
 | G1 | 协议（关卡步骤、`[GATE]`、`gates`）、约定和用法（只在能开关卡的任务里）、对定时任务和关闭的项目的拒绝；数据模型；规划者的打开、送达、关闭、更新、取消、强制关闭、停止和重启、服务重启、等待时停掉进程；`waiting_user` 和 Needs you；结论补充说明；四类日志；接口；项目的两个设置（这一期 `user_gates` 为空即关闭）；提醒循环（这一期只记活动）；任务页的关卡面板、Pipeline 节点、Dashboard 和 Tasks 的分组；规划者评测（现有 16 个的对比、5 个新任务、替身模式）。✅ 已实现 | #161 合入 |
 | G2 | 渠道：适配器的 `post` 和回复引用，发卡片、更新、提醒、取消、结论，规划者的回复在线程里；路由；网页任务的通知目标；管家的「Open gates」、`looper_task_gate_reply` 和约定，以及管家评测；飞书群、Telegram 群各一条渠道事实的真实验证（征得维护者同意，用测试群）；`user_gates` 为空改为开启（默认行为的变化） | G1 |
 | 第二期（维护者的 D4） | 计划确认模式（按项目开关，默认关闭）；超时后按假设继续（项目设置，默认不超时）；关卡统计页（第 15 节的指标，按项目） | G2 |
-| 非核心 | 飞书交互卡片上的按钮（要消费 `card.action.trigger` 事件）、Telegram inline 按钮；侧栏的等待数；Dashboard 上的「Waiting for you」列表 | G2 |
+| 非核心 | 飞书交互卡片上的按钮（要消费 `card.action.trigger` 事件）、Telegram inline 按钮；Dashboard 上的「Waiting for you」列表 | G2 |
 
 ## 19. 已决问题（2026-10-17 答复）
 

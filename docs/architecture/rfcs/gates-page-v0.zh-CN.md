@@ -1,6 +1,6 @@
 # RFC：User Gates 页（v0）
 
-- **状态：** 待批准（D1–D8 是按维护者的需求定下的建议做法，理由写在各条里）。
+- **状态：** 已实现（D1–D8 是按维护者的需求定下的建议做法，理由写在各条里）。
 - **相关：** [用户关卡 RFC](user-gate-v0.zh-CN.md)（第 446 行把「侧栏的等待数」列为非核心待办，本 RFC 做掉它）；[agent-system.md 的 User gates](../agent-system.md#user-gates)；[docs/design.md 的界面设计](../../design.md#界面设计web)。
 - **最近更新：** 2026-10-20
 
