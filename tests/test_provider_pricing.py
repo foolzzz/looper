@@ -166,6 +166,7 @@ def test_profile_context_suffix_warnings_follow_its_runtime(
                provider=asdict(resolved.provider), endpoint=asdict(resolved.endpoint))
     monkeypatch.setattr(db, "get_profile", AsyncMock(return_value=row))
     monkeypatch.setattr(db, "profile_usage", AsyncMock(return_value={}))
+    monkeypatch.setattr(db, "list_models", AsyncMock(return_value=[]))
     warnings = asyncio.run(_profile_answer(row["id"]))["warnings"]
     if runtime_type == "claude-code" or not (model.endswith("[1m]") or background):
         assert warnings == []
@@ -211,7 +212,7 @@ def test_manager_provider_registration_keeps_registry_warnings(monkeypatch: pyte
     fields = {"name": "test", "vendor_type": "custom", "endpoints": [
         {"protocol": "openai-chat", "base_url": "https://example.invalid"}]}
     provider = {"provider_id": "prov-test", **fields, "auth": "api_key", "model_count": 0,
-                "profile_count": 0, "builtin": False, "api_key": None, "login": None}
+                "profile_count": 0, "builtin": False, "api_key": None, "login": None, "max_concurrency": None}
     # Forward registry warnings independently of how the registry derives them.
     warnings = ["glm-5.3[1m]: a Claude Code convention; other runtimes send it verbatim"]
     create = AsyncMock(return_value={"provider": provider, "warnings": warnings})

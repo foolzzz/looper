@@ -623,7 +623,7 @@ def test_resolved_claude_binding_matches_pinned_launches(case: str) -> None:
     import tempfile
     from unittest.mock import patch
 
-    from model_launch_parity import CLAUDE_CASES
+    from model_launch_parity import CLAUDE_CASES, above_root_normalized
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
     from looper.agents.profile_registry import (
         Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
@@ -668,7 +668,8 @@ def test_resolved_claude_binding_matches_pinned_launches(case: str) -> None:
                 command = runtime.resident_command("claude", cwd=cwd,
                            prompt_file=SystemPrompt(expected["prompt"]).write_file(tmp_path), launch=launch)
                 settings = command[command.index("--settings") + 1]
-                assert settings.replace(str(tmp_path), "<root>") == expected["config"]["settings"]
+                assert above_root_normalized(settings, str(tmp_path)) == \
+                    above_root_normalized(expected["config"]["settings"], str(tmp_path))
                 assert ("--system-prompt-file" in command) == (mode is SystemPromptMode.REPLACE)
                 assert "sk-test-capture" not in " ".join(command)
 

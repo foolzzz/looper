@@ -18,6 +18,64 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.6] - 2026-10-20
+
+### Fixed
+
+- **Profile cost warnings price the background model.** `profile_view` and the warnings after a profile write now price a profile from every model of the selected model's account and protocol, the same catalog a launch uses, so a background model with a full price of its own is no longer listed in `cost.unpriced` or warned about. A background model without a price still warns. The registry view, the profile answer and a task's profile overrides load that catalog once. ([#273](https://github.com/foolzzz/looper/pull/273), follow-up of [#264](https://github.com/foolzzz/looper/issues/264))
+- **Manager provider answers carry `max_concurrency`.** The `looper_providers` list, register and update answers now include the provider's `max_concurrency` field. No prompt, tool schema or tool description changed. ([#273](https://github.com/foolzzz/looper/pull/273))
+
+### Validation
+
+- Reported in #273: 131 tests in the two Manager tool files passed against a disposable PostgreSQL database (the new `max_concurrency` and background-price tests fail without the source change), and 444 passed across the pricing, provider binding, models, Manager tool and task agent tests. CI runs after the release.
+
+## [2.13.5] - 2026-10-20
+
+### Changed
+
+- **OMP never backgrounds a command on its own.** The OMP settings overlay now turns off `bash.autoBackground` and `eval.autoBackground` beside `async`, for every role, so a long command finishes inside its turn instead of being backgrounded and the turn ending without its result. A very long command now holds its turn. The overlay change gives each OMP launch configuration a new content-derived home directory. ([#271](https://github.com/foolzzz/looper/pull/271))
+- **The Manager's "no reply" error names the runtime that ran.** It took "Claude Code" for every runtime; it now uses the launch's runtime label. Only the Manager text changed. No prompt, tool or model-facing text changed. ([#271](https://github.com/foolzzz/looper/pull/271))
+
+### Validation
+
+- Reported in #271: overlay and failure-text tests, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+## [2.13.4] - 2026-10-20
+
+### Changed
+
+- **Pipeline hover cards show each run's agent runtime and model.** The Worker, Reviewer and Planner lines gain an Agent fact (runtime, model, effort) from the latest run of that role, and of that step for Worker and Reviewer; it appears only when such a run exists. The task page now reads the task's Planner, Worker and Reviewer runs once through a shared hook, also used by the Agents tab, so it makes those `GET /api/llm-records` requests even when the Agents tab is closed. Dashboard-only; no API, prompt, tool or model-facing text changed. ([#274](https://github.com/foolzzz/looper/pull/274))
+
+### Validation
+
+- Reported in #274: vitest for the cards and node card component, tsc, headless-browser screenshots, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.4.md).
+
+## [2.13.3] - 2026-10-20
+
+### Changed
+
+- **The dashboard sidebar shows the running Looper version.** `GET /api/overview` gains a `version` field (the installed `looper.__version__`), and the sidebar shows it as a small muted label next to "Looper". A client talking to an older server shows no label. The overview response gains a field; no prompt, tool or model-facing text changed. ([#272](https://github.com/foolzzz/looper/pull/272))
+
+### Validation
+
+- Reported in #272: overview API test, sidebar vitest and tsc, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.3.md).
+
+## [2.13.2] - 2026-10-20
+
+### Fixed
+
+- **CI runs the legacy parity tests on a shallow-clone runner.** The `Agent system tests` job checks out the full history, and the Claude Code launch parity test no longer depends on the host's temporary-root ancestors (`/private/tmp` on macOS, `/tmp` on Linux). CI workflow and test-only change; no product or model-visible change. ([#270](https://github.com/foolzzz/looper/pull/270), follow-up of [#267](https://github.com/foolzzz/looper/issues/267))
+
+### Validation
+
+- Retained #270 report: targeted tests on a disposable PostgreSQL passed; no local full-suite run or review record is reported. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.2.md).
+
 ## [2.13.1] - 2026-10-20
 
 ### Fixed

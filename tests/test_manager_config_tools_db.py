@@ -553,6 +553,24 @@ def test_model_update_refuses_with_dashboard_validation_and_rolls_back(monkeypat
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("background_priced", [True, False])
+def test_profile_price_warnings_use_the_catalog_a_launch_prices_with(monkeypatch, tmp_path, background_priced):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {"name": "priced", "vendor_type": "deepseek"}))["provider"]
+        prices = dict.fromkeys(registry.PRICE_FIELDS, 1.0)
+        if background_priced:
+            await _model("bg-priced", provider["provider_id"], **prices)
+        main = await _model("main-priced", provider["provider_id"], background_model="bg-priced", **prices)
+        created = await _ok("POST", "/api/agent-profiles", {"name": "priced", "runtime_id": "rt-claude-code",
+                                                           "model_id": main["model_id"]})
+        unpriced = [] if background_priced else ["bg-priced"]
+        assert created["profile"]["cost"]["unpriced"] == unpriced
+        assert sum("no full price" in w for w in created["warnings"]) == len(unpriced)
+        view = next(p for p in (await registry.registry_view())["profiles"] if p["name"] == "priced")
+        assert view["cost"]["unpriced"] == unpriced
+    _run(test, monkeypatch)
+
+
 @pytest.mark.parametrize("changes", [{"model": "sonnet"}, {"model": {"provider": "claude-subscription", "name": "sonnet"}},
     {"mode": "auto"}, {"system_prompt_mode": "append"}, {"effort": "unsupported"}, {"runtime": "omp", "agent_teams": True}])
 def test_invalid_profile_changes_preserve_saved_reference(monkeypatch, tmp_path, changes):

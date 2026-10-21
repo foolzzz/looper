@@ -474,8 +474,18 @@ class TestManagerResidentClaude:
         first, failed, third = chat["replies"]
         assert first == "turn 1: hello"
         assert "Manager" in failed and "3" in failed  # the exit code
+        assert "Claude Code 没有返回内容（退出码 3）" in failed
         assert third == "turn 1: third"
         assert [_flag(argv, "--resume") for argv, _ in chat["spawned"]] == [None, "sess-1"]
+
+    def test_a_turn_without_a_result_names_the_runtime_that_ran_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        # The failure text takes the launch's runtime label; a stand-in labelled OMP must not read "Claude Code".
+        monkeypatch.setattr(ClaudeCodeRuntime, "label", "OMP")
+        chat = _converse(monkeypatch, _resident(die_on=1), ["hello"])
+        failed, = chat["replies"]
+        assert "OMP 没有返回内容（退出码 3）" in failed and "Claude Code" not in failed
 
     def test_new_system_prompt_restarts_claude(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"],
