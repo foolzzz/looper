@@ -165,7 +165,9 @@ class Layer(str, Enum):
     ``PROFILE`` is the selected Agent Profile itself (its effort); ``TASK`` is a task's choice of profile, over every
     layer; ``PLANNER_TASK`` and ``PLANNER_STEP`` are its Planner's choice for its Workers or Reviewers, for the rest
     of the task or for one step, under the task's own; ``TASK_ROLE`` is the profile of the role a task's Planner
-    defined that a run runs as (``task_roles``), over the Planner's choices and under the task's own.
+    defined that a run runs as (``task_roles``), over the Planner's choices and under the task's own; ``SESSION`` is
+    the Agent Profile the user chose for the Manager's current session (``agent_sessions.selected_profile_id``), the
+    Manager's last layer.
     """
 
     BUILTIN = "builtin"
@@ -178,6 +180,7 @@ class Layer(str, Enum):
     PLANNER_STEP = "planner_step"
     TASK_ROLE = "task_role"
     TASK = "task"
+    SESSION = "session"
 
 
 class SettingsError(ValueError):
@@ -582,7 +585,9 @@ def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
         chain += [(Layer.PROJECT, None), (Layer.ROLE_PROJECT, role)]
     if role in PLANNER_CHOICE_ROLES:
         chain += [(Layer.PLANNER_TASK, role), (Layer.PLANNER_STEP, role), (Layer.TASK_ROLE, role)]
-    if role is not AgentType.MANAGER:
+    if role is AgentType.MANAGER:
+        chain.append((Layer.SESSION, role))
+    else:
         chain.append((Layer.TASK, role))
     return chain
 
@@ -727,9 +732,11 @@ async def load_agent_settings(
     set, when the layers cannot be read."""
     from ..db import agent_setting_layers
 
+    extra = {"manager_session": True} if AgentType(role) is AgentType.MANAGER else {}
     try:
         rows = await agent_setting_layers.list_layers(project_id, task_id=task_id, step_id=step_id,
-                                                      task_role=task_role)
+                                                      task_role=task_role,
+                                                      **extra)
     except Exception as exc:
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
         # The built-in defaults of this role, including its built-in system prompt mode.
