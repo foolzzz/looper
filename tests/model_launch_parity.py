@@ -1084,7 +1084,7 @@ async def capture_converted_tiers(
 
 def above_root_normalized(settings: str, root: str) -> str:
     """The Claude ``--settings`` text with ``root`` as ``<root>`` and every exclusion for a directory above it as
-    ``<above>/<name>``, each once. The directories above a temporary root depend on the host (``/private/tmp`` on
+    ``<above>/<name>`` (each once; entries under the root keep their count). The directories above a temporary root depend on the host (``/private/tmp`` on
     macOS, ``/tmp`` on Linux CI), so a pinned capture cannot name them."""
     parsed = json.loads(settings)
     excludes: list[str] = []
@@ -1093,8 +1093,9 @@ def above_root_normalized(settings: str, root: str) -> str:
             name = next(n for n in (".claude/rules/**", ".claude/CLAUDE.md", ".claude/AGENTS.md", "CLAUDE.md", "AGENTS.md")
                         if pattern.endswith("/" + n))
             pattern = f"<above>/{name}"
-        if pattern not in excludes:
-            excludes.append(pattern)
+            if pattern in excludes:
+                continue
+        excludes.append(pattern)
     parsed["claudeMdExcludes"] = excludes
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).replace(root, "<root>")
 
@@ -1117,6 +1118,31 @@ def _public_data(value: Any) -> Any:
         return [_public_data(item) for item in value]
     if isinstance(value, dict):
         return {key: _public_data(item) for key, item in value.items()}
+    return value
+
+
+def _above_root_everywhere(value: Any) -> Any:
+    """Apply ``above_root_normalized`` to every Claude ``--settings`` text (argv, config) and the parsed isolation
+    dict in a root-normalized record. Only the exclusions for directories above the root change."""
+    if isinstance(value, str):
+        if '"claudeMdExcludes"' in value:
+            try:
+                parsed = json.loads(value)
+                # Only text that is exactly its own compact serialization: any other byte (a stray newline) must
+                # still reach the comparison unchanged.
+                if isinstance(parsed, dict) and \
+                        json.dumps(parsed, ensure_ascii=False, separators=(",", ":")) == value:
+                    return above_root_normalized(value, "<root>")
+            except ValueError:
+                pass
+        return value
+    if isinstance(value, list):
+        return [_above_root_everywhere(item) for item in value]
+    if isinstance(value, dict):
+        result = {key: _above_root_everywhere(item) for key, item in value.items()}
+        if isinstance(result.get("claudeMdExcludes"), list):
+            result = json.loads(above_root_normalized(json.dumps(result), "<root>"))
+        return result
     return value
 
 
@@ -1229,7 +1255,7 @@ def assert_parity(expected: list[dict[str, Any]], actual: list[dict[str, Any]], 
         raise ValueError("provider_ids must map non-empty ids to declared canonical ids")
 
     def comparable(record: dict[str, Any], root: Path) -> dict[str, Any]:
-        result = normalize(record, root=root, time_paths=paths)
+        result = _above_root_everywhere(normalize(record, root=root, time_paths=paths))
         # An open legacy catalog has no row. Conversion materializes the
         # selected name with every setting unknown: only new model identity
         # metadata (§6.3). Generated files and the exact selected name remain
