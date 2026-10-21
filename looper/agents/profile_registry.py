@@ -982,11 +982,13 @@ def provider_warnings(provider: LegacyProviderSpec) -> list[str]:
 def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
     """Warnings about this profile's prices and the model names its runtime sends."""
     warnings = cost_warnings(profile)
-    if profile.runtime.type != runtimes.CLAUDE_CODE.type:
-        entry = profile.provider.catalog_model(profile.model)
-        warnings += _context_suffix_warnings([profile.model, *([entry.background_model]
-                                                              if entry and entry.background_model else [])])
-    return warnings
+    adapter = runtimes.ADAPTERS.get(profile.runtime.type)
+    entry = profile.provider.catalog_model(profile.model)
+    sent = {name: adapter.api_model(name) if adapter is not None else name
+            for name in [profile.model, *([entry.background_model] if entry and entry.background_model else [])]}
+    # Warn only about the names that reach the API still carrying a suffix, as the adapter maps them.
+    return warnings + _context_suffix_warnings(name for name, api in sent.items()
+                                               if parse_model_name(api).context_suffix is not None)
 
 
 # Where nothing selects a profile.

@@ -96,6 +96,8 @@ def _request(port: int, line: str, headers: dict[str, str] | None = None, body: 
         ("GET /api/nothing-here", "mixed_case_bearer", 404),
         ("POST /api/chat/stop", "agent", 401),
         ("GET /api/chat/turn", "agent", 401),
+        ("GET /api/gates", None, 401),
+        ("GET /api/gates", "agent", 401),
         ("PUT /api/tasks/task-1/roles/coder", None, 401),
         ("PUT /api/tasks/task-1/roles/coder", "agent", 401),
         ("OPTIONS /api/tasks/create", None, 401),

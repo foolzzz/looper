@@ -63,6 +63,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
+from .. import gate_commands
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
@@ -166,6 +167,9 @@ task's Planner waits for the user to answer).
   spend cap) means it did not run; say so and wait. When the next message starts with a
   [Looper] note naming the confirmation and the user confirms, call
   looper_confirm with its confirmation_id; otherwise do not.
+- After starting or changing a task, do not wait or poll inside the turn (no
+  sleep, no repeated status calls): end the reply. Looper brings the task's
+  questions (gates) and its end to the user.
 - The user switches the Agent Profile of this conversation with /profile
   and starts a new one with /new; Looper answers both itself. You cannot
   switch it: when asked to, tell the user to send /profile (it lists the
@@ -630,6 +634,15 @@ class ManagerAgent:
             await self._persist_chat(envelope, "user", text, envelope.message_id)
             await self._start_new_session(envelope)
             return
+        # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
+        answer = await self._gate_command(envelope, text)
+        if answer is not None:
+            await self._send_reply(envelope, answer, persist=False, snapshot=envelope.message_id)
+            channel = _message_origin(envelope)["channel"]
+            if not (is_lark(channel) or channel == "telegram"):
+                # Only Telegram and Lark report a delivery; the web chat shows what is published.
+                gate_commands.settle(envelope.message_id, True)
+            return
         if (command := parse_profile_command(text)) is not None:
             await self._persist_chat(envelope, "user", text, envelope.message_id)
             await self._handle_profile_command(envelope, command)
@@ -637,6 +650,8 @@ class ManagerAgent:
         # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
         gate = await self._route_to_gate(envelope)
         if gate.kind is RouteKind.DELIVERED:
+            if gate.reply:
+                await self._send_reply(envelope, gate.reply, persist=False)
             return
         if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
             await self._send_reply(envelope, gate.reply, persist=False)
@@ -1647,7 +1662,8 @@ class ManagerAgent:
             logger.warning("manager: could not persist a %s chat turn", channel, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
-                          persist: bool = True, outcome: ReplyOutcome | None = None) -> None:
+                          persist: bool = True, outcome: ReplyOutcome | None = None,
+                          snapshot: str | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; without ``persist`` it is not kept
         (one about a user gate, whose discussion keeps the message). ``outcome`` is how the turn ended; by default
@@ -1662,8 +1678,20 @@ class ManagerAgent:
             payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
-            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record},
+            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
+                      **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
         ))
+
+    async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
+        """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""
+        if self._bus is None or self.ops is None or not gate_commands.is_command(text):
+            return None
+        try:
+            return await gate_commands.handle(envelope, text, has_planner=self.ops.platform.task_router.has_planner,
+                                              bus=self._bus, source=MANAGER_ADDRESS)
+        except Exception as exc:
+            logger.exception("manager: the gate command %r failed", text[:40])
+            return f"关卡命令出错：{exc}"
 
     async def _route_to_gate(self, envelope: MessageEnvelope) -> Route:
         """Where a reply to a user gate's message goes (``gate_routing``); any other message is the Manager's."""

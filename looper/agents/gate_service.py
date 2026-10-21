@@ -204,6 +204,74 @@ async def gates_view(task_id: str) -> list[dict[str, Any]]:
     return [gate_view(row, chat) for row in rows]
 
 
+GATES_PAGE = 50
+GATES_PAGE_MAX = 200
+_GATE_LIST_STATES = ("open", "closed", "all")
+
+
+def _list_query(query: Mapping[str, str]) -> tuple[str, str | None, str | None, int, int]:
+    """The ``state``, ``waiting_on``, ``project_id``, ``limit`` and ``offset`` of a gates list request."""
+    state = query.get("state") or "open"
+    if state not in _GATE_LIST_STATES:
+        raise RequestError(HTTP_400, f"state must be one of {', '.join(_GATE_LIST_STATES)}")
+    waiting_on = query.get("waiting_on") or None
+    if waiting_on is not None:
+        if waiting_on not in ("user", "planner"):
+            raise RequestError(HTTP_400, "waiting_on must be user or planner")
+        if state != "open":
+            raise RequestError(HTTP_400, "waiting_on applies to state=open only")
+    raw = query.get("limit") or str(GATES_PAGE)
+    if not raw.isdigit() or not 1 <= int(raw) <= GATES_PAGE_MAX:
+        raise RequestError(HTTP_400, f"limit must be a whole number from 1 to {GATES_PAGE_MAX}")
+    offset = query.get("offset") or "0"
+    if not offset.isdigit():
+        raise RequestError(HTTP_400, "offset must be a whole number from 0")
+    return state, waiting_on, query.get("project_id") or None, int(raw), int(offset)
+
+
+def _listed_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A gate of the list: its task, the gate (``gate_view``) with the ``waiting_on`` the task page shows, how many
+    agenda items are open and the last message of the user's or the Planner's."""
+    task_id = str(row["task_id"])
+    group = db_tasks.task_group(row.get("task_status"))
+    gate = gate_view(row)
+    # As web/src/lib/gates.ts gateWaitsOn: the Planner answers only while its task runs; else it is the user's turn.
+    if gate["waiting_on"] == "planner" and group not in (db_tasks.TaskGroup.NEEDS_YOU, db_tasks.TaskGroup.IN_PROGRESS):
+        gate["waiting_on"] = "user"
+    last = row.get("last_message")
+    return {
+        "task": {"task_id": task_id,
+                 "name": db_tasks.task_name(title=row.get("title"), goal_id=row.get("goal_id"),
+                                            requirement=row.get("requirement"), task_id=task_id),
+                 "status": row.get("task_status"), "group": group.value, "project_id": row.get("project_id"),
+                 "project_name": row.get("project_name")},
+        "gate": gate,
+        "agenda_open": sum(1 for item in gate["agenda"] if isinstance(item, Mapping) and item.get("status") == "open"),
+        "last_message": None if not last else {key: last.get(key) for key in ("role", "author", "via", "created_at")},
+    }
+
+
+async def list_gates(query: Mapping[str, str]) -> dict[str, Any]:
+    """The user gates of all tasks (``GET /api/gates``): ``state`` ``open`` (default: waiting, in a task not completed
+    or cancelled), ``closed`` or ``all``; with ``state=open``, ``waiting_on`` ``user`` or ``planner``; ``project_id``;
+    ``limit`` and ``offset``. Newest opened first. ``counts`` apply ``project_id`` only."""
+    state, waiting_on, project_id, limit, offset = _list_query(query)
+    open_rows = [_listed_view(row) for row in await db_user_gates.list_gates(state="open", project_id=project_id)]
+    totals = await db_user_gates.count_gates(project_id=project_id)
+    counts = {"open": len(open_rows),
+              "waiting_user": sum(1 for r in open_rows if r["gate"]["waiting_on"] == "user"),
+              "waiting_planner": sum(1 for r in open_rows if r["gate"]["waiting_on"] == "planner"),
+              **totals}
+    if state == "open":
+        shown = [r for r in open_rows if waiting_on in (None, r["gate"]["waiting_on"])]
+        total, rows = len(shown), shown[offset:offset + limit]
+    else:
+        rows = [_listed_view(row) for row in await db_user_gates.list_gates(
+            state=state, project_id=project_id, limit=limit, offset=offset)]
+        total = totals[state]
+    return {"gates": rows, "total": total, "counts": counts, "limit": limit, "offset": offset}
+
+
 def _message_view(row: Mapping[str, Any]) -> dict[str, Any]:
     return {key: row.get(key) for key in ("id", "role", "kind", "text", "author", "via", "agenda_item", "option",
                                           "created_at")}
@@ -273,6 +341,25 @@ async def post_message(
             payload={"task_id": task_id, "gate": label}))
     return {"task_id": task_id, "gate": gate_view(gate, await task_gate_chat(task)), "message": _message_view(added),
             "delivered": "queued" if has_planner else "kept"}
+
+
+async def task_name(task_id: str) -> str:
+    """What the user's receipts call the task (``db.tasks.task_name``); its id when it cannot be read."""
+    try:
+        task = await db_tasks.get_task(task_id)
+    except Exception:
+        logger.warning("could not read the name of task %s", task_id, exc_info=True)
+        return task_id
+    return str(task["name"]) if task and task.get("name") else task_id
+
+
+def receipt(name: str, label: str, *, end: bool, kept: bool = False) -> str:
+    """What code tells the user after their answer (or end) went into a gate; ``kept``: the task is not running,
+    so nothing reached the Planner yet and the receipt must not say it did."""
+    if kept:
+        what = "结束的请求" if end else "回答"
+        return f"任务已停止，你对 {name} {label} 的{what}已保存，任务继续后交给规划者。"
+    return f"已请规划者按现在的结论结束 {name} 的 {label}" if end else f"已交给 {name} 的 {label}"
 
 
 def _hours(since: datetime | None) -> int:

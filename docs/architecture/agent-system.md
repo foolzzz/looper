@@ -3372,6 +3372,23 @@ refused with the reason and what to do instead.
   that the next `[CHAT]` turn gives the Planner, with a `late` note in the
   discussion. When that close would complete the task, the `[CHAT]` turn comes
   first, and its reply may add steps instead.
+- **Answering from a chat.** In a Lark or Telegram chat the user can answer
+  without the Manager's model (`looper/agents/gate_commands.py`; the Manager
+  takes these before the gate routing, and neither they nor the replies are
+  stored in its chat history or shown to its model). `/gates` lists the gates
+  that wait for the user: in a private chat all of them, across chats and
+  tasks (group tasks and dashboard tasks too); in a group that group's. The
+  list is numbered and the numbers are a snapshot of the last list sent in
+  that chat (for one sender, one hour): `/gate N <answer>` stores the answer
+  as the user's own message in gate N, and `/gate N end` ends the discussion,
+  both through `gate_service.post_message` (`via` `command:<channel>`), so a
+  number never lands on another gate than the one listed; a gate that no
+  longer waits answers "list again". Replying `end` under a gate's card ends
+  it too. Anyone on the channel's allowlist may answer or end (no owner
+  check). In Lark a group message needs the @-mention, which is stripped
+  before the text reaches the handler; Telegram registers `/gates` and `/gate`
+  (also `/gate@bot`) and lists them in the bot's menu (`setMyCommands`). The
+  receipts are code's text, in Chinese like the courier's.
 - **Changing a gate.** A `[DECISION]` or `[CHAT]` reply may carry `gates`:
   `{"id", "action": "update", "topic"?, "agenda"?, "findings"?, "note"}`
   (the note, for the user, is required for an open gate) or `{"id",
@@ -4155,6 +4172,7 @@ does not imply HTTP compatibility.
 | `/api/tasks/:id/gates/:step/messages` | GET | A user gate's discussion, oldest first: `{task_id, gate, messages}` (each `{id, role, kind, text, author, via, agenda_item, option, created_at}`); 404 for no such gate |
 | `/api/tasks/:id/gates/:step/messages` | POST | The user writes `{text, agenda_item?, option?}` in the gate (an option of an agenda item, with the item's id), only while it waits for the user: an open gate becomes `discussing`, and the task's Planner is woken. Answers `{task_id, gate, message, delivered}`: `queued` (its Planner takes it next) or `kept` (the task is not running; going on from its plan gives it). 400 for an empty text or one over 8,000 characters, or an option the item does not have; 404 for no such task or gate; 409 for a gate that does not wait for the user or a completed task |
 | `/api/tasks/:id/gates/:step/end` | POST | The user ends the gate's discussion (`{text?}`): the next `[GATE]` turn closes it with the current conclusions. As the POST above |
+| `/api/gates` | GET | The user gates of all tasks, newest opened first: `?state=open` (default: waiting, in a task not completed or cancelled) / `closed` / `all`, `waiting_on=user\|planner` (with `open` only), `project_id`, `limit` (1–200, 50), `offset`. `{gates, total, counts: {open, waiting_user, waiting_planner, closed, all}, limit, offset}` (`counts` apply `project_id` only); each gate is `{task: {task_id, name, status, group, project_id, project_name}, gate, agenda_open, last_message}`, `gate.waiting_on` as the task page shows it (`user` while the task does not run) |
 | `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`), `concurrency` (how many of its Workers or Reviewers run at once, 1–64) and `system_prompt_modes` (`append` or `replace` for its `planner`, `worker` or `reviewer`; 400 for another role or value), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
 | `/api/tasks/:id/roles/:key` | PUT | The user's edit of a role of the task: `{role_prompt, harness, profile_id, items?}`, the whole definition (the kind stays; `items` left out keeps the current ones), written as a new version by the user with a supplement that tells the Planner (a running one gets it at once); afterwards the Planner cannot change that role. Answers `{task_id, id, kind, version, via, changed}`. 400 for a definition a task role would be refused or one that changes nothing, 404 for an unknown task or role, 409 for a completed task or a role that changed meanwhile |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it gets its Planner at once, like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |

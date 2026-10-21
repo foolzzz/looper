@@ -830,9 +830,9 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
                 "cannot run")
     try:
         if isinstance(profile, ResolvedAgentProfile):
-            profile.resolved_model.check_runtime(profile.runtime)
+            profile.resolved_model.check_runtime(profile.runtime, profile.effort)
         else:
-            check_pairing(profile.runtime, profile.provider, profile.model)
+            check_pairing(profile.runtime, profile.provider, profile.model, profile.effort)
         check_roles(profile, [role.value])
     except RegistryError as exc:
         return f"Agent Profile {profile.name!r} cannot run: {exc}"
@@ -953,7 +953,7 @@ class Launch:
         if self.settings.profile_error:
             raise RuntimeUnsupported(self.settings.profile_error)
         if isinstance(self.profile, ResolvedAgentProfile):
-            self.profile.resolved_model.check_runtime(self.profile.runtime)
+            self.profile.resolved_model.check_runtime(self.profile.runtime, self.profile.effort)
 
     @property
     def binding_sha256(self) -> str:

@@ -474,6 +474,8 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: role_api.edit_task_role(
                 m.group(1), m.group(2), projects.json_object(body), task_router=self._task_router,
                 bus=self._supervisor.bus, source=self._web_adapter._address))
+        elif path == "/api/gates" and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: gate_service.list_gates(query))
         elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: gate_service.thread(m.group(1), m.group(2)))
         elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "POST":

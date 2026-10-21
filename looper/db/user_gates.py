@@ -24,7 +24,7 @@ from typing import Any
 import asyncpg
 
 from .connection import get_pool
-from .tasks import ACTIVE_STATUSES
+from .tasks import ACTIVE_STATUSES, STATUS_GROUPS, TaskGroup
 
 WAITING = ("open", "discussing")
 CLOSED = ("passed", "cancelled", "skipped")
@@ -83,6 +83,21 @@ JOIN task_steps s ON s.id = g.step_id
 WHERE g.step_id = $1 AND g.state IN {CLOSED!r}
 ORDER BY m.id
 """
+
+
+# A gate's row for the cross-task list: ``_GATES`` with its task, the task's project and the last message of the user's
+# or the Planner's in its discussion (a reminder of Looper's is not one).
+_LISTED_COLUMNS = """,
+       t.status AS task_status, t.title, t.goal_id, left(t.requirement, 200) AS requirement, t.project_id,
+       p.name AS project_name,
+       (SELECT row_to_json(x) FROM (SELECT m.role, m.author, m.via, m.created_at FROM task_user_gate_messages m
+                                    WHERE m.step_id = g.step_id AND m.role IN ('user','planner')
+                                    ORDER BY m.id DESC LIMIT 1) x) AS last_message
+"""
+_LISTED = (_GATES.replace("\nFROM task_user_gates g", _LISTED_COLUMNS + "FROM task_user_gates g", 1)
+           + "JOIN tasks t ON t.id = g.task_id\nLEFT JOIN projects p ON p.id = t.project_id\n")
+_LISTED_ORDER = " ORDER BY COALESCE(g.opened_at, g.created_at) DESC, g.step_id DESC"
+_ENDED_GROUPS = (TaskGroup.COMPLETED, TaskGroup.CANCELLED)
 
 
 def _json(value: Any) -> str | None:
@@ -379,9 +394,65 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
         args += [origins, chat[1], [kind.value for kind in TargetKind], dashboard, list(_BY_CHANNEL_ID)]
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
-                       ", p.name AS project_name, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
+                       ", p.name AS project_name, t.title AS task_title, t.goal_id AS task_goal_id, "
+                       "t.requirement AS task_requirement, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
                        "t.schedule_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
                        "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id")
         + " WHERE g.state = ANY($1::text[]) AND t.status = ANY($2::text[])" + where
         + " ORDER BY g.opened_at DESC NULLS LAST LIMIT $3", *args)
     return [_gate(row) for row in rows]
+
+
+# --- The gates of all tasks (GET /api/gates) ---
+
+def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
+    gate = _gate(row)
+    if isinstance(gate.get("last_message"), str):
+        gate["last_message"] = json.loads(gate["last_message"])
+        if isinstance(gate["last_message"].get("created_at"), str):
+            gate["last_message"]["created_at"] = datetime.fromisoformat(gate["last_message"]["created_at"])
+    return gate
+
+
+async def list_gates(*, state: str = "open", project_id: str | None = None, limit: int | None = None,
+                     offset: int = 0, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The gates of all tasks, newest opened first, each with its task (``task_status``, ``title``, ``goal_id``,
+    ``requirement``'s first 200 characters, ``project_id``, ``project_name``) and ``last_message`` (``role``,
+    ``author``, ``via``, ``created_at``; None without one): ``state`` ``open`` (waiting, in a task not completed or
+    cancelled), ``closed`` (passed, cancelled or skipped) or ``all``, in ``project_id`` when given. ``limit`` and
+    ``offset`` page them (no ``limit``: all)."""
+    pool = pool or get_pool()
+    where, args = _listed_filter(state, project_id)
+    sql = _LISTED
+    sql += f" WHERE {where}{_LISTED_ORDER}"
+    if limit is not None:
+        sql += f" LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}"
+        args = [*args, limit, offset]
+    return [_listed(row) for row in await pool.fetch(sql, *args)]
+
+
+def _listed_filter(state: str, project_id: str | None) -> tuple[str, list[Any]]:
+    args: list[Any] = []
+    clauses = ["TRUE"]
+    if project_id:
+        args.append(project_id)
+        clauses.append(f"t.project_id = ${len(args)}")
+    if state == "open":
+        args.append(list(WAITING))
+        clauses.append(f"g.state = ANY(${len(args)}::text[])")
+        args.append([status for status, group in STATUS_GROUPS.items() if group in _ENDED_GROUPS])
+        clauses.append(f"NOT (t.status = ANY(${len(args)}::text[]))")
+    elif state == "closed":
+        args.append(list(CLOSED))
+        clauses.append(f"g.state = ANY(${len(args)}::text[])")
+    return " AND ".join(clauses), args
+
+
+async def count_gates(*, project_id: str | None = None, pool: asyncpg.Pool | None = None) -> dict[str, int]:
+    """How many gates are closed (passed, cancelled or skipped) and how many there are, in ``project_id`` when given."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        "SELECT count(*) FILTER (WHERE g.state = ANY($2::text[])) AS closed, count(*) AS \"all\" "
+        "FROM task_user_gates g JOIN tasks t ON t.id = g.task_id WHERE ($1::text IS NULL OR t.project_id = $1)",
+        project_id or None, list(CLOSED))
+    return {"closed": int(row["closed"]), "all": int(row["all"])}

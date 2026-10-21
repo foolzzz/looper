@@ -22,6 +22,65 @@ How the agent system works today is described in
 
 - **The Manager's chat box keeps working while it replies: a queue, a history and a Stop.** Enter during a reply puts the message in a staging area above the box; after a reply that ends as `answered` the staged messages go as one message joined by a blank line, otherwise they return to the box, and they survive a reload. ↑ pulls them back, ↑/↓ walk this thread's last 100 messages, and Esc or the Stop button stops the reply (`POST /api/chat/stop`; `GET /api/chat/turn` tells a reloaded page whether one is running). `/stop` does the same from the web chat, Telegram (a new command) and Lark, and is answered outside the Manager's queue. A stopped turn is recorded `interrupted` with the text and usage so far, keeps the session, and the next turn is told the user stopped it; a confirmation it had asked for is dropped. Claude Code is interrupted with a control request (killed after 5 s), Grok with `session/cancel`, Codex, OMP, Pi and DSH by ending the turn's process tree (a stopped Codex turn records no usage). `answer.final` now carries the reply's `outcome`.
 
+## [2.13.12] - 2026-10-21
+
+### Added
+
+- **A User Gates page in the dashboard** (`#gates`, sidebar "User Gates"). It lists the gates of all tasks, open ones by default, with Closed and All, a "Waiting for you only" switch and a project filter; a gate waiting for you is answered in place. The sidebar entry shows how many gates wait for you. New read-only route `GET /api/gates` (`state`, `waiting_on`, `project_id`, `limit`, `offset`). ([#275](https://github.com/foolzzz/looper/pull/275))
+- No model-visible change: no prompt, tool schema or tool contract changed.
+
+### Validation
+
+- Reported in #275: each card's tests, headless-browser screenshots, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.12.md).
+
+## [2.13.11] - 2026-10-21
+
+### Changed
+
+- **The Manager no longer waits inside a turn for a task it started.** Its tool contract gains a rule: after starting or changing a task, do not sleep or poll; end the reply, since Looper brings the task's gates and its end to the user. Guidance only; no code path changed. A new `start_no_wait` prompt-regression dialog checks it. ([#279](https://github.com/foolzzz/looper/pull/279))
+- Model-visible change: the Manager's tool contract gains that rule. No tool schema changed.
+
+### Validation
+
+- Reported in #279: real Manager dialogs 10/10 on sonnet and on OMP + DeepSeek, 8/8 on main for the shared dialogs; 71 passed in the Manager reply and dialog tests; the full local suite before the merge; Codex and Grok reviews left no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.11.md).
+
+## [2.13.10] - 2026-10-21
+
+### Fixed
+
+- **A failed DSH consult run is no longer delivered as an answer.** A result with `is_error`, or a `subtype` other than `success`, falls back with a contract reason. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **Resident DSH is priced by the configured model**, not the normalized API model, so usage and budget stops use the right price; resident turn results gain `observed_cost_usd`, and the prompt-regression eval records `observed_cost_complete` instead of counting a missing value as 0. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **An unsupported effort is refused** when a profile is selected or launched (for example `dsh` with `medium` or `xhigh`), not only on config import. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **The `[1m]` suffix warning follows each runtime's real model mapping** (new adapter `api_model`): DSH and Claude Code no longer warn about a suffix they strip. ([#300](https://github.com/foolzzz/looper/pull/300))
+- No model-visible change: no prompt or tool schema changed.
+
+### Validation
+
+- Reported in #300: 495 passed, 2 skipped across the DSH runtime, DSH validation, provider pricing and room consult tests; 148 passed in the agent settings tests; the new effort test fails without the fix. No full-suite run or review is reported. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.10.md).
+
+## [2.13.9] - 2026-10-21
+
+### Added
+
+- **Answer and end user gates from a chat with `/gates` and `/gate`.** In a Lark or Telegram chat, `/gates` lists the user gates that wait for the user (a private chat: all of them; a group: that group's) as a numbered list, and `/gate N <answer>` and `/gate N end` add the answer to, or end, gate N. Looper answers these itself before the Manager's model; the numbers refer to the last list delivered to that chat (one hour, per sender), so a number never lands on another gate. A reply under a gate's card with exactly `end` (or `/end`) ends the gate. Telegram registers `/gates` and `/gate` in its menu and help. ([#277](https://github.com/foolzzz/looper/pull/277))
+
+### Changed
+
+- Code-written receipts now follow an answer that reaches a gate (including a reply under a gate's card, which was silent before): "delivered to <task> <step>", "asked the Planner to end it on what is settled", or, for a stopped task, that the answer is saved for when it continues. ([#277](https://github.com/foolzzz/looper/pull/277))
+- No model-visible change: the commands and their replies are not stored in the Manager's chat history or shown to its model.
+
+### Validation
+
+- Reported in #277: unit tests for the commands, scopes, numbering, end, receipts and the Telegram handlers; the full local suite before the merge; Codex and Grok reviews with no P0. Not tested on a real Lark or Telegram chat. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.9.md).
+
 ## [2.13.8] - 2026-10-21
 
 ### Added

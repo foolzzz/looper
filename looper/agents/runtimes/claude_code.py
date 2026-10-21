@@ -135,6 +135,11 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # A read-only run refuses what would change files and reports each refusal (claude_cli.read_only_args).
     read_only = ReadOnly.PERMISSIONS
 
+    def api_model(self, model: str) -> str:
+        from ..model_names import parse_model_name
+
+        return parse_model_name(model).base  # Claude Code reads the context suffix itself
+
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``: Claude Code prints its version and exits without calling a model."""
         try:
