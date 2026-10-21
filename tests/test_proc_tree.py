@@ -520,3 +520,158 @@ def test_a_reaped_agents_record_is_removed(tmp_path: Path, runtime_root: Path) -
         return recorded, record.exists()
 
     assert asyncio.run(_run()) == (True, False)
+
+
+# --- TurnTree: a turn's tree snapshotted at spawn, refreshed, ended from the snapshot ---
+
+_DETACHED_CHILD = (
+    "import os, subprocess, sys\n"
+    "g = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)\n"
+    "open('grandchild.pid', 'w').write(str(g.pid))\n"
+    "import time\nwhile not os.path.exists('release'):\n    time.sleep(0.01)\n"
+)
+
+
+async def _spawn_python(root: Path, code: str) -> asyncio.subprocess.Process:
+    return await asyncio.create_subprocess_exec(
+        sys.executable, "-c", code, cwd=root, stdin=asyncio.subprocess.PIPE, start_new_session=True)
+
+
+async def _wait_file(path: Path) -> str:
+    for _ in range(500):
+        if path.exists() and path.read_text().strip():
+            return path.read_text().strip()
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{path} was not written")
+
+
+def test_turn_tree_ends_a_detached_grandchild_whose_parent_is_gone(tmp_path: Path) -> None:
+    code = ("import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', " + repr(_DETACHED_CHILD) + "])\n"
+            "child.wait()\nsys.stdin.read()\n")
+
+    async def _run() -> tuple[int, bool, list[int]]:
+        process = await _spawn_python(tmp_path, code)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        grandchild = int(await _wait_file(tmp_path / "grandchild.pid"))
+        await tree.refresh(force=True)  # the middle child still runs
+        seen = grandchild in tree.seen
+        (tmp_path / "release").write_text("go")
+        await asyncio.sleep(0.3)  # the middle child has exited; the grandchild is re-parented
+        try:
+            await tree.end()
+        finally:
+            for pid in _running([grandchild], settle=0):
+                os.kill(pid, signal.SIGKILL)
+        return grandchild, seen, _running([grandchild])
+
+    grandchild, seen, left = asyncio.run(_run())
+    assert seen
+    assert left == []
+
+
+def test_turn_tree_leaves_a_reused_pid_alone(tmp_path: Path) -> None:
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, "import subprocess, time\n"
+                                      "subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)\nimport sys; sys.stdin.read()\n")
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        for _ in range(100):
+            await tree.refresh(force=True)
+            if len(tree.seen) > 1:
+                break
+            await asyncio.sleep(0.05)
+        (child,) = [pid for pid in tree.seen if pid != process.pid]
+        tree.seen[child] = "Thu Jan 1 00:00:00 1970"
+        try:
+            await tree.end()
+            return _running([child], settle=0)
+        finally:
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert len(asyncio.run(_run())) == 1
+
+
+def test_turn_tree_end_new_leaves_the_agent_and_earlier_children(tmp_path: Path) -> None:
+    code = ("import subprocess, sys\n"
+            "old = subprocess.Popen(['/bin/sleep', '60'])\nprint('go', flush=True)\n"
+            "sys.stdin.readline()\n"
+            "new = subprocess.Popen(['/bin/sleep', '60'])\nopen('new.pid', 'w').write(str(new.pid))\n"
+            "print(old.pid, flush=True)\nsys.stdin.read()\n")
+
+    async def _run() -> tuple[list[int], list[int]]:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, start_new_session=True)
+        assert process.stdin and process.stdout
+        await process.stdout.readline()
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree.baseline()
+        process.stdin.write(b"\n")
+        await process.stdin.drain()
+        old = int((await process.stdout.readline()).decode())
+        new = int(await _wait_file(tmp_path / "new.pid"))
+        try:
+            await tree.end_new()
+            return _running([new]), _running([process.pid, old], settle=0)
+        finally:
+            for pid in _running([process.pid, old, new], settle=0):
+                os.kill(pid, signal.SIGKILL)
+            await process.wait()
+
+    new_left, survivors = asyncio.run(_run())
+    assert new_left == []
+    assert len(survivors) == 2
+
+
+def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path) -> None:
+    code = ("import subprocess, sys\nsys.stdin.readline()\n"
+            "c = subprocess.Popen(['/bin/sleep', '60'])\nopen('c.pid', 'w').write(str(c.pid))\nsys.stdin.read()\n")
+
+    async def _run() -> bool:
+        process = await _spawn_python(tmp_path, code)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree.start_ticker(interval=0.05)
+        process.stdin.write(b"\n")  # type: ignore[union-attr]
+        child = int(await _wait_file(tmp_path / "c.pid"))
+        try:
+            for _ in range(100):
+                if child in tree.seen:
+                    return True
+                await asyncio.sleep(0.05)
+            return False
+        finally:
+            await tree.stop_ticker()
+            await tree.end()
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run())
+
+
+def test_turn_tree_end_returns_within_a_bound_when_the_agent_is_never_reaped() -> None:
+    sleeper = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+
+    class _Stuck:
+        pid = sleeper.pid
+        returncode = None
+
+        def send_signal(self, sig: int) -> None:
+            sleeper.send_signal(sig)
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return 0
+
+    async def _run() -> float:
+        tree = proc_tree.TurnTree.track(_Stuck(), label="turn")
+        began = time.monotonic()
+        await tree.end()
+        return time.monotonic() - began
+
+    try:
+        took = asyncio.run(_run())
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert took < proc_tree.REAP_SEC + proc_tree.TERM_GRACE_SEC + 1

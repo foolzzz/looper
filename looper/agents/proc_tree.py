@@ -45,6 +45,8 @@ from .. import child_env
 logger = logging.getLogger(__name__)
 
 TERM_GRACE_SEC = 3.0  # how long the tree has to exit after SIGTERM before what is left is killed
+REAP_SEC = 2.0  # how long the agent has to be reaped after SIGKILL before ``end`` gives up waiting
+_REFRESH_MIN_SEC = 0.1
 _POLL_SEC = 0.05
 _PS_TIMEOUT_SEC = 5.0
 RECORDS_DIR = Path(".local") / "agent-processes"  # under the runtime root: one ``<pid>.json`` per running agent
@@ -196,15 +198,28 @@ async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | 
     ``process`` is reaped. ``known`` is its tree as ``begin_end`` took it earlier. Processes that appear during the
     grace period get SIGTERM too, and a cancelled wait kills the rest at once."""
     await _end(process, label=label, known=known or {})
-    await process.wait()
+    await _reap(process, label)
 
 
-async def _end(process: _Agent, *, label: str, known: Tree) -> None:
-    """End the tree, recording it so the next start can finish an end cut short by the server's exit."""
+async def _reap(process: Any, label: str) -> None:
+    """Wait for the killed agent, for at most ``REAP_SEC``: a turn never hangs on a process that will not be reaped."""
+    try:
+        await asyncio.wait_for(process.wait(), REAP_SEC)
+    except asyncio.TimeoutError:
+        logger.warning("%s: pid %s was not reaped within %.1f s of SIGKILL", label, process.pid, REAP_SEC)
+
+
+async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset()) -> None:
+    """End the tree, recording it so the next start can finish an end cut short by the server's exit. Processes
+    in ``exclude`` are never signalled."""
     recorded = _recorded.get(process.pid)
     if recorded is not None:
         _ending.add(process.pid)
-    seen = _tree(process, _snapshot(), known)
+
+    def members(table: Table, known: Tree) -> Tree:
+        return {pid: pgid for pid, pgid in _tree(process, table, known).items() if pid not in exclude}
+
+    seen = members(_snapshot(), known)
     alive = dict(seen)
     try:
         if recorded is not None:
@@ -220,14 +235,14 @@ async def _end(process: _Agent, *, label: str, known: Tree) -> None:
         deadline = time.monotonic() + TERM_GRACE_SEC
         while alive and time.monotonic() < deadline:
             await asyncio.sleep(_POLL_SEC)
-            alive = _tree(process, await asyncio.to_thread(_snapshot), seen)
+            alive = members(await asyncio.to_thread(_snapshot), seen)
             if fresh := {pid: pgid for pid, pgid in alive.items() if pid not in seen}:
                 seen.update(fresh)
                 if recorded is not None:
                     await _record_tree(process.pid, seen)
                 _signal(process, fresh, signal.SIGTERM)
     except BaseException:
-        alive = _tree(process, _snapshot(), seen)
+        alive = members(_snapshot(), seen)
         raise
     finally:
         if alive:
@@ -396,3 +411,95 @@ async def sweep(runtime_root: Path) -> None:
             path.unlink(missing_ok=True)
 
     await asyncio.gather(*(end_record(path, agents) for path, agents in ends.items()))
+
+
+# --- One turn's tree, followed while the turn runs ---
+
+
+class TurnTree:
+    """The tree of one turn's agent process, snapshotted when the turn starts and refreshed while it runs, so a
+    stop can end every process the turn ever started, even those whose parent has exited since.
+
+    ``seen`` maps each pid of the tree to its start time (None until a refresh has read it); ``end`` leaves a
+    pid whose start time has changed alone, since the pid was reused."""
+
+    def __init__(self, process: Any, label: str) -> None:
+        self.process = process
+        self.label = label
+        self.seen: dict[int, str | None] = {}
+        self._groups: Tree = {}
+        self._baseline: set[int] = set()
+        self._refreshed = float("-inf")
+        self._lock = asyncio.Lock()
+        self._ticker: asyncio.Task[None] | None = None
+
+    @classmethod
+    def track(cls, process: Any, *, label: str) -> TurnTree:
+        tree = cls(process, label)
+        tree._merge(_tree(process, _snapshot(), {}))
+        return tree
+
+    def _merge(self, tree: Tree) -> list[int]:
+        fresh = [pid for pid in tree if pid not in self.seen]
+        self._groups.update(tree)
+        for pid in fresh:
+            self.seen[pid] = None
+        return fresh
+
+    async def refresh(self, *, force: bool = False) -> None:
+        """Merge the current tree into ``seen``; at most once per ``_REFRESH_MIN_SEC`` unless ``force``."""
+        async with self._lock:
+            if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
+                return
+            table = await asyncio.to_thread(_snapshot)
+            self._merge(_tree(self.process, table, self._groups))
+            unread = [pid for pid, started in self.seen.items() if started is None]
+            if unread:
+                starts = await asyncio.to_thread(_start_times, unread) or {}
+                for pid in unread:
+                    if pid in starts:
+                        self.seen[pid] = starts[pid]
+            self._refreshed = time.monotonic()
+
+    def start_ticker(self, interval: float = 0.5) -> None:
+        if self._ticker is None or self._ticker.done():
+            self._ticker = asyncio.get_running_loop().create_task(self._tick(interval))
+
+    async def _tick(self, interval: float) -> None:
+        while True:
+            try:
+                await self.refresh()
+            except Exception:
+                logger.warning("%s: cannot refresh the process tree", self.label, exc_info=True)
+            await asyncio.sleep(interval)
+
+    async def stop_ticker(self) -> None:
+        ticker, self._ticker = self._ticker, None
+        if ticker is not None:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    def baseline(self) -> None:
+        """Remember the current members; ``end_new`` leaves them running."""
+        self._merge(_tree(self.process, _snapshot(), self._groups))
+        self._baseline = set(self.seen)
+
+    async def _reused(self) -> frozenset[int]:
+        known = {pid: started for pid, started in self.seen.items() if started is not None}
+        current = await asyncio.to_thread(_start_times, known)
+        if current is None:
+            return frozenset()
+        return frozenset(pid for pid, started in known.items() if pid in current and current[pid] != started)
+
+    async def end(self) -> None:
+        """End every process of the tree seen so far and of the tree now, then reap the agent."""
+        await self.stop_ticker()
+        await self.refresh(force=True)
+        await _end(self.process, label=self.label, known=dict(self._groups), exclude=await self._reused())
+        await _reap(self.process, self.label)
+
+    async def end_new(self) -> None:
+        """End the members that are not in the baseline; the agent and the baseline members survive."""
+        await self.refresh(force=True)
+        exclude = self._baseline | {self.process.pid} | await self._reused()
+        await _end(self.process, label=self.label, known=dict(self._groups), exclude=frozenset(exclude))
