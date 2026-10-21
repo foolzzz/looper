@@ -7,7 +7,8 @@ chosen by its text (the stand-in is told, not guessed):
 - ``TOOL``: one response that runs a shell command, then one that answers;
 - ``LOOP``: model responses in a row (a tool call each) until ``session/cancel``, which it logs to ``cancels.log``;
 - ``ORPHAN``: starts a long ``sleep`` that inherits stdout, then dies;
-- ``HANG``: thinks, then waits for ``session/cancel`` and ends with ``cancelled``;
+- ``HANG``: thinks, then waits for ``session/cancel`` and ends with ``cancelled``; ``QUIET`` the same, writing
+  nothing first;
 - ``DEAF``: thinks, then ignores ``session/cancel`` (never answers the prompt);
 - ``CRASH``: streams a chunk, then dies;
 - ``BADRESP``: responses to the prompt with neither ``result`` nor ``error``, or both, then the answer;
@@ -17,7 +18,8 @@ chosen by its text (the stand-in is told, not guessed):
 - anything else: answers with the first line of Looper's prompt (from the rules file), the message and the turn.
 
 ``FAKE_ACP_DEAD`` makes the process exit at once (a Grok with no ``agent stdio``), ``FAKE_ACP_NO_LOAD`` leaves
-``loadSession`` out of ``initialize``, ``FAKE_ACP_SILENT`` never answers ``initialize``.
+``loadSession`` out of ``initialize``, ``FAKE_ACP_SILENT`` never answers ``initialize``. A ``stall`` file beside
+``acp-argv.jsonl`` makes it read nothing more once it has a session.
 """
 
 FAKE_ACP = """\
@@ -68,6 +70,10 @@ def usage(calls, inp, cached, out_tokens, ticks):
 def finish(request, reason, tokens):
     out({'id': request, 'result': {'stopReason': reason, '_meta': {'sessionId': state['session'], 'usage': tokens}}})
 
+def stall():
+    if os.path.exists(os.path.join(root, 'stall')):  # reads no more: a prompt written to it blocks
+        time.sleep(600)
+
 def prompt(request, text):
     state['turns'] += 1
     save()
@@ -98,8 +104,9 @@ def prompt(request, text):
                 open(os.path.join(root, 'cancels.log'), 'a').write('cancel\\n')
                 finish(request, 'cancelled', usage(1, 100, 0, 3, 50000000))
                 return
-    if 'HANG' in text:
-        chunk('thinking...', thought=True)
+    if 'HANG' in text or 'QUIET' in text:
+        if 'HANG' in text:
+            chunk('thinking...', thought=True)
         for line in sys.stdin:
             try:
                 message = json.loads(line)
@@ -159,6 +166,7 @@ for line in sys.stdin:
         state['session'] = '0199a000-0000-7000-8000-%012d' % (len(os.listdir(group)) + 1)
         save()
         out({'id': request, 'result': {'sessionId': state['session']}})
+        stall()
     elif method == 'session/load':
         session = message['params']['sessionId']
         path = os.path.join(group, session, 'summary.json')
@@ -170,6 +178,7 @@ for line in sys.stdin:
             continue
         state['session'], state['turns'] = session, json.load(open(path))['turns']
         out({'id': request, 'result': {}})
+        stall()
     elif method == 'session/prompt':
         prompt(request, message['params']['prompt'][0]['text'])
 """

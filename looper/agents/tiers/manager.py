@@ -392,6 +392,7 @@ class CurrentTurn:
     method: Any = None  # StopMethod: how interrupt() ended the turn; None until it returns
     client_message_id: str | None = None  # the web page's own id for the message, which its Stop button names
     turn: Turn | None = None  # the turn its tool calls act in, which a stop marks stopped (``ManagerOps.stop_turn``)
+    settled: bool = False  # its end is decided (recorded as an answer or a failure): a stop comes too late
 
 
 class TurnStopped(Exception):
@@ -704,7 +705,7 @@ class ManagerAgent:
         """Ask the running user turn of ``message_id`` to stop. Does not wait for the turn's lock: the turn ends by
         itself, replying with what it had written."""
         current = self._current
-        if current is None:
+        if current is None or current.settled:
             return StopResult.NOT_RUNNING
         if message_id not in (current.message_id, current.client_message_id):
             return StopResult.OTHER_MESSAGE
@@ -714,12 +715,13 @@ class ManagerAgent:
         if current.turn is not None and self.ops is not None:
             # At once, before Claude is stopped: a call it still has under way asks the user nothing and runs nothing.
             self.ops.stop_turn(current.turn)
+        # Before anything is awaited: the interrupt is for this turn, never for one that starts meanwhile.
+        task = asyncio.create_task(self._interrupt_claude(current))
+        self._stop_tasks.add(task)
+        task.add_done_callback(self._stop_tasks.discard)
         envelope = self._current_envelope
         if envelope is not None and self._bus is not None:
             await self._send_status(envelope, "Stopping…", phase=True)
-        task = asyncio.create_task(self._interrupt_claude())
-        self._stop_tasks.add(task)
-        task.add_done_callback(self._stop_tasks.discard)
         return StopResult.STOPPING
 
     @property
@@ -733,14 +735,18 @@ class ManagerAgent:
             return current
         return None
 
-    async def _interrupt_claude(self) -> None:
-        current = self._current
+    async def _interrupt_claude(self, current: CurrentTurn) -> None:
+        if self._current is not current:
+            return  # the turn ended (by the stop= hook) before its interrupt ran
         try:
-            method = await self._claude.interrupt()
-            if current is not None:
-                current.method = method
+            current.method = await self._claude.interrupt()
         except Exception:
             logger.warning("manager: could not interrupt the running turn", exc_info=True)
+
+    def _settle(self) -> None:
+        """The running turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on."""
+        if self._current is not None:
+            self._current.settled = True
 
     @property
     def _stop_requested(self) -> bool:
@@ -947,6 +953,9 @@ class ManagerAgent:
                     )
                 except OSError as exc:
                     logger.error("failed to start %s: %s", launch.runtime.label, exc)
+                    if self._stop_requested:  # asked while it was started: the turn ends stopped, as it would have
+                        await self._finish_stopped_early(recorder, ops_turn)
+                        raise TurnStopped() from None
                     await recorder.finish(output_text=None, result_event=None,
                                           error=f"Cannot start {launch.runtime.label}: {exc}")
                     return f"无法启动 {launch.runtime.label}，请检查安装。"
@@ -1028,6 +1037,7 @@ class ManagerAgent:
             except TurnStopped:
                 raise
             except BaseException as exc:
+                self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
                 # Never leave Claude running once the Manager gives up on it.
                 await self._claude.stop(kill=True)
                 await recorder.finish(
@@ -1037,7 +1047,11 @@ class ManagerAgent:
                 await self._link_turn_task(recorder, ops_turn)
                 raise
 
-            if turn.stopped is not None or (turn.result_event or {}).get(USER_STOP):
+            resume_lost = bool(resuming) and not turn.session_started and not retried
+            # A stop asked after the runtime had the result (it had no turn left to interrupt) ends the turn stopped
+            # all the same: the stop was taken, so the turn is not reported as an answer.
+            if turn.stopped is not None or (turn.result_event or {}).get(USER_STOP) or (
+                    self._stop_requested and not resume_lost):
                 partial = "".join(text_parts)
                 request = self._current.stop if self._current is not None else None
                 await recorder.finish(
@@ -1055,7 +1069,7 @@ class ManagerAgent:
                 await self._save_session_state()
                 raise TurnStopped(partial)
 
-            if resuming and not turn.session_started and not retried:
+            if resume_lost:
                 # Claude never started the saved session: it no longer exists. Every
                 # turn would resume it again and never answer, so drop it and run
                 # this message in a new session; the context each turn carries does
@@ -1074,6 +1088,9 @@ class ManagerAgent:
                     profile=launch.profile.id)
                 self._pending_handoff = None
                 return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True)
+
+            # Decided now, with nothing awaited since the stop was looked at: from here a stop is too late.
+            self._settle()
 
             result_event = turn.result_event
             # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.

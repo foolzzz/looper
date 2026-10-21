@@ -897,14 +897,16 @@ class ResidentClaude:
             return None
         turn.stopping = True
         try:
-            write_control(process.stdin, {"subtype": "interrupt"})
-            await process.stdin.drain()
+            async with asyncio.timeout(INTERRUPT_GRACE_SEC):  # the write, the drain and the wait share one grace
+                write_control(process.stdin, {"subtype": "interrupt"})
+                await process.stdin.drain()
+                await asyncio.wait({turn.done})
+            if not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
+                return StopMethod.CONTROL
         except (BrokenPipeError, ConnectionResetError):
             logger.warning("%s: Claude closed stdin before the interrupt was sent", self._label)
-        else:
-            done, _ = await asyncio.wait({turn.done}, timeout=INTERRUPT_GRACE_SEC)
-            if done and not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
-                return StopMethod.CONTROL
+        except TimeoutError:
+            logger.warning("%s: Claude did not end the interrupted turn in %ss", self._label, INTERRUPT_GRACE_SEC)
         if self._process is process:
             self._user_stopped = True
             if output is not None:

@@ -127,7 +127,7 @@
 
 ### D5 回复状态对页面可见：`GET /api/chat/turn`
 
-`GET /api/chat/turn?session_id=<web 聊天的 id>` → `{"turn": null}` 或 `{"turn": {"message_id", "channel", "started_at", "stopping": bool}}`：只在管家正在跑的用户轮属于这个聊天（`_message_origin` 的 `chat` 就是 web 的 `session_id`，`manager.py:256`）时返回。缺 `session_id` 400；服务没有管家 503。只用于刷新、第二个标签页和流断开后的判断（D1），本页自己发的消息仍以流为准。
+`GET /api/chat/turn?session_id=<web 聊天的 id>` → `{"turn": null}` 或 `{"turn": {"message_id", "client_message_id", "channel", "started_at", "stopping": bool}}`：`message_id` 是信封 id，`client_message_id` 是页面自己发的 id（可为 null），页面两个都认；只在管家正在跑的用户轮属于这个聊天（`_message_origin` 的 `chat` 就是 web 的 `session_id`，`manager.py:256`）时返回。缺 `session_id` 400；服务没有管家 503。只用于刷新、第二个标签页和流断开后的判断（D1），本页自己发的消息仍以流为准。
 
 ### D6 回复的结局是一个有类型的字段
 
@@ -221,6 +221,19 @@
 - `web/src/lib/composer.test.ts`：键位表每一行（含 IME、修饰键、多行光标）、合并、历史去重和上限。
 - `web/src/components/chat-composer.test.tsx`：暂存、拉回、删除、Stop 按钮、触屏按钮、IME 不触发。
 - `web/src/pages/chat-composer-flow.test.tsx`：`answered` 后合并发出一次；`failed`、`stopped`、`confirm` 放回输入框；刷新时 `sessionStorage` 和 `GET /api/chat/turn`；发送失败回到输入框。
+
+**停止矩阵**（`tests/test_stop_matrix.py`，真实子进程和管道）：每个管家运行时路径 × 停止落点，每格都检查同几件事：停止不丢（这一轮以停止结束，绝不当成回答）；有界时间内结束，这一轮起的进程树全部结束（Claude Code 的 `control`、Grok 的 `cancel` 按设计保留常驻进程，这一轮起的工具进程不留）；这一轮的事件不进下一轮；下一轮照常回答并续接同一会话。确认作废与运行时无关，在 `ManagerOps` 层（`tests/test_manager_stop.py`）。
+
+| 落点 | Claude Code 常驻 | 每轮一个进程（Codex/OMP/Pi/DSH） | Grok ACP |
+|---|---|---|---|
+| (a) 进程起来之前 | 进程在 `start` 里起，归管家：`test_stop_before_the_process_starts`、`test_a_stop_while_the_process_fails_to_start_ends_the_turn_stopped` | `test_per_turn_stop_in_every_window[before_spawn]`、`test_per_turn_interrupt.test_a_stop_before_the_process_exists_is_kept` | `[before_spawn]`（`initialize` 不答：结束进程，不退回每轮进程）、`test_grok_acp.test_a_stop_while_the_session_is_readied_sends_no_prompt` |
+| (b) 起了、还没有事件 | `test_resident_claude_stop_in_every_window[silent-*]` | `[silent]` | `[silent]` |
+| (c) 流式输出中 | `[streaming-*]` | `[streaming]` | `[streaming]` |
+| (d) 往进程写被堵住 | `[blocked-*]`（写、drain、等结果共用一个宽限） | `[blocked]` | `[blocked]`（提示写不进去：宽限后结束进程） |
+| (e) 工具调用进行中 | `[tool-*]` | `[tool]` | `[tool]` |
+| (f) 有了结果、收尾之前 | `[done-*]`；运行时已无可停时由管家兜底：`test_a_stop_after_the_runtime_answered_ends_the_turn_stopped` | `[done]`、`test_per_turn_stop_after_the_process_exited_before_the_turn_returned` | `[done]`、`test_grok_acp.test_a_normal_result_queued_before_a_stop_does_not_end_the_turn_as_success` |
+
+管家自己的窗口：这一轮的结局一经记录（回答或失败），停止返回 `not_running`（`test_a_stop_once_the_turn_is_recorded_is_not_running_and_changes_nothing`）；「Stopping…」状态发得慢时，这一轮的中断不会落到下一轮（`test_a_stop_whose_status_is_slow_never_interrupts_the_next_turn`）。
 
 **dialogs 评测**（`evals/prompt_regression/dialogs.py`）：新对话 `stop_then_continue`：发「数一下有几个项目，然后逐个看它们最近的任务」，第一个工具调用后调 `POST /api/chat/stop`；再发「刚才停在哪了？」。检查：第一轮记录 `interrupted`、`user_stop.via = web`；第二轮输入以 `[Looper] The user stopped` 开头；回复不声称刚才的工作做完了。fake 模式进 CI；real 模式跑 haiku 和 opus xhigh 两档各 2 次（需要验证：dialogs 驱动能否在一轮中途调接口，可能要加一个「事件后动作」钩子）。
 

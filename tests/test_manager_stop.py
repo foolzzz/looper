@@ -390,7 +390,7 @@ def test_calls_that_come_after_the_stop_are_refused_as_stopped(agent_db: Any) ->
             confirm = _web("确认", 1)
             handling = asyncio.create_task(manager._handle(confirm))
             await _until(session.running.is_set)
-            await manager._interrupt_claude()
+            await manager._interrupt_claude(manager.current_turn)
             await handling
             assert [a["error"]["code"] for a in answers] == ["stopped", "stopped"]
             assert ran == [] and not ops._pending
@@ -424,6 +424,146 @@ def test_a_confirmation_asked_after_its_turn_ended_is_refused(agent_db: Any) -> 
             answer = await calls[0]
             assert answer["status"] == "error" and answer["error"]["code"] == "expired"
             assert not ops._pending and ran == []
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_after_the_runtime_answered_ends_the_turn_stopped(agent_db: Any) -> None:
+    """The stop lands after the runtime has the turn's result, before the Manager handled it (the runtime has no
+    turn left to interrupt): the turn still ends stopped, never as an answer, and its confirmation is dropped."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            ops = _with_ops(manager)
+            envelope = _web("删掉它", 0)
+
+            async def ask_then_stop() -> None:
+                await ops.call("t_write", {})
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+
+            session.on_turn = ask_then_stop
+            await manager._handle(envelope)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "error" not in reply and "需要你确认" not in reply["text"]
+            assert not ops.asks_in(envelope.message_id)
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["status"] == "interrupted"
+            assert manager._stopped_note is not None and manager._session_id == "sess-1"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_once_the_turn_is_recorded_is_not_running_and_changes_nothing(agent_db: Any) -> None:
+    """Once the turn's end is recorded, a stop is too late: it is refused (``NOT_RUNNING``, as for a turn that has
+    ended), so the reply, its outcome and its confirmation are the turn's own."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            ops = _with_ops(manager)
+            envelope = _web("删掉它", 0)
+            results: list[StopResult] = []
+
+            async def ask() -> None:
+                await ops.call("t_write", {})
+
+            session.on_turn = ask
+            save = manager._save_session_state
+
+            async def late_stop() -> None:
+                if agent_db.finish_record.await_args_list and not results:
+                    results.append(await manager.stop_turn(envelope.message_id, via="web"))
+                await save()
+
+            manager._save_session_state = late_stop  # type: ignore[method-assign]
+            await manager._handle(envelope)
+            assert results == [StopResult.NOT_RUNNING]
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "confirm" and "需要你确认" in reply["text"]
+            assert ops.asks_in(envelope.message_id)
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["status"] != "interrupted"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_whose_status_is_slow_never_interrupts_the_next_turn(agent_db: Any) -> None:
+    """The stop's "Stopping…" status is slow to send while the stopped turn ends by itself (the ``stop=`` hook)
+    and the next one starts: the stopped turn's interrupt never reaches the next turn."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class _HookSession(_Session):
+                """The first turn ends at the ``stop=`` hook, as a runtime does at its next event."""
+
+                interrupts = 0
+
+                async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None) -> Any:
+                    if self.turns:
+                        return await super().run_turn(text, on_event, tag=tag, stop=stop)
+                    self.turns.append(text)
+                    await on_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
+                    while (capped := stop()) is None:
+                        await asyncio.sleep(0.01)
+                    return ResidentTurn(capped.result_event, usage=capped.usage)
+
+                async def interrupt(self) -> StopMethod | None:
+                    self.interrupts += 1
+                    return await super().interrupt()
+
+            session = _HookSession()
+            manager, bus, queue = _manager(Path(tmp), session)
+            status, slow = manager._send_status, asyncio.Event()
+
+            async def slow_status(envelope: Any, label: str, **kwargs: Any) -> None:
+                if label == "Stopping…":
+                    await slow.wait()
+                await status(envelope, label, **kwargs)
+
+            manager._send_status = slow_status  # type: ignore[method-assign]
+            first, second = _web("先来一个", 0), _web("再来一个", 1)
+            handling = asyncio.create_task(manager._handle(first))
+            await _until(lambda: bool(session.turns))
+            stopping = asyncio.create_task(manager.stop_turn(first.message_id, via="web"))
+            await handling
+            nxt = asyncio.create_task(manager._handle(second))
+            await _until(session.running.is_set)
+            slow.set()
+            assert await stopping is StopResult.STOPPING
+            await asyncio.sleep(0.1)
+            assert not nxt.done() and not session._stopped.is_set()  # the next turn runs on
+            assert await manager.stop_turn(second.message_id, via="web") is StopResult.STOPPING
+            await nxt
+            assert [r["outcome"] for r in _replies(queue)] == ["stopped", "stopped"]
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_the_process_fails_to_start_ends_the_turn_stopped(agent_db: Any) -> None:
+    """The stop lands while the runtime is started and the start fails: the turn ends stopped, not with the start's
+    error reply (which the page would take for an answer)."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = _web("你好")
+            holder: dict[str, ManagerAgent] = {}
+
+            async def stop_then_fail() -> None:
+                assert await holder["manager"].stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                raise OSError("no such executable")
+
+            session = _Session(on_start=stop_then_fail)
+            manager, bus, queue = _manager(Path(tmp), session)
+            holder["manager"] = manager
+            await manager._handle(envelope)
+            assert session.turns == []
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and reply["text"] == "已停止，这次没有回复。"
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["status"] == "interrupted"
             await bus.shutdown()
 
     asyncio.run(run())

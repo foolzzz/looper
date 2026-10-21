@@ -43,7 +43,7 @@ import {
   type UserGate,
   type ManagerSessionView,
 } from "@/lib/api";
-import { historyFrom, joinStaged, pullBack } from "@/lib/composer";
+import { historyFrom, joinStaged, pullBack, turnAnswers } from "@/lib/composer";
 import { profileLabel } from "@/lib/use-registry";
 import { isGateWaiting } from "@/lib/gates";
 import { randomId } from "@/lib/ids";
@@ -290,7 +290,7 @@ export function ChatPage() {
   // The id of the message this page's own reply stream answers.
   const [ownId, setOwnId] = useState<string | null>(null);
   // A turn running on the server that this page does not stream (a reload, or a stream that ended early).
-  const [serverTurn, setServerTurn] = useState<{ sid: string; message_id: string } | null>(null);
+  const [serverTurn, setServerTurn] = useState<{ sid: string; ids: string[] } | null>(null);
   const [phase, setPhase] = useState("");
   const [roleConfigs, setRoleConfigs] = useState<RoleConfig[]>([]);
   const [targets, setTargets] = useState<ChatTargetInfo[]>([MANAGER_TARGET]);
@@ -314,7 +314,7 @@ export function ChatPage() {
   sendingRef.current = sending;
   const sendRef = useRef<(text: string, newSessionProfileId?: string) => Promise<void>>(async () => {});
   const canSendRef = useRef(true);
-  const pollRef = useRef<{ sid: string; id: string; stopped: boolean; timer?: ReturnType<typeof setTimeout> } | null>(null);
+  const pollRef = useRef<{ sid: string; ids: string[]; stopped: boolean; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // The Manager's conversations on every channel, and the Lark or Telegram one open read-only (null: the web thread).
   const [conversations, setConversations] = useState<ChatSession[] | null>(null);
   const [conversationsError, setConversationsError] = useState("");
@@ -503,7 +503,10 @@ export function ChatPage() {
     return watchChat(sessionId, (m) =>
       setMessages((prev) =>
         prev.some((p) => p.id === m.message_id)
-          ? prev
+          ? prev.map((p) =>
+              // The saved reply replaces the partial bubble this page streamed under the same id.
+              p.id === m.message_id && p.role === "assistant" ? { ...p, content: m.content, streaming: false } : p,
+            )
           : [
               ...prev,
               {
@@ -550,12 +553,13 @@ export function ChatPage() {
   useEffect(() => stopPoll, []);
 
   // Waits for a turn this page does not stream to end, then re-reads the thread and returns the queue to the draft.
-  const followTurn = (sid: string, id: string) => {
-    if (pollRef.current && pollRef.current.sid === sid && pollRef.current.id === id) return;
+  const followTurn = (sid: string, ids: string[]) => {
+    const running = pollRef.current;
+    if (running && running.sid === sid && ids.some((id) => running.ids.includes(id))) return;
     stopPoll();
-    const poll: NonNullable<typeof pollRef.current> = { sid, id, stopped: false };
+    const poll: NonNullable<typeof pollRef.current> = { sid, ids, stopped: false };
     pollRef.current = poll;
-    setServerTurn({ sid, message_id: id });
+    setServerTurn({ sid, ids });
     const tick = async () => {
       let turn: Awaited<ReturnType<typeof fetchChatTurn>> | undefined;
       try {
@@ -564,7 +568,7 @@ export function ChatPage() {
         turn = undefined;
       }
       if (poll.stopped) return;
-      if (turn === undefined || turn?.message_id === id) {
+      if (turn === undefined || turnAnswers(turn, ids)) {
         poll.timer = setTimeout(tick, TURN_POLL_MS);
         return;
       }
@@ -593,7 +597,7 @@ export function ChatPage() {
     }
     if (sid !== sessionIdRef.current || sendingRef.current) return;
     if (turn) {
-      followTurn(sid, turn.message_id);
+      followTurn(sid, turn.client_message_id ? [turn.message_id, turn.client_message_id] : [turn.message_id]);
     } else {
       stopPoll();
       setServerTurn(null);
@@ -619,7 +623,7 @@ export function ChatPage() {
 
   const serverTurnHere = serverTurn && serverTurn.sid === sessionId ? serverTurn : null;
   const replying = sending || serverTurnHere !== null;
-  const runningId = sending ? ownId : (serverTurnHere?.message_id ?? null);
+  const runningId = sending ? ownId : (serverTurnHere ? serverTurnHere.ids[serverTurnHere.ids.length - 1] : null);
   const canStop = target.kind === "manager" && runningId !== null;
 
   const handleStop = async () => {
@@ -777,7 +781,7 @@ export function ChatPage() {
           );
           if (finalSeen || aborted || sid !== sessionIdRef.current) return;
           // The stream ended with no final answer (its deadline, say): the turn may still run on the server.
-          if (target.kind === "manager") followTurn(sid, userMsg.id);
+          if (target.kind === "manager") followTurn(sid, [userMsg.id]);
           else pullStagedToDraft();
         }
       );

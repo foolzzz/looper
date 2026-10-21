@@ -402,3 +402,38 @@ def test_a_killed_turn_returns_only_after_its_last_event_was_handled(
             await session.stop(kill=True)
 
     asyncio.run(_run())
+
+
+def test_an_interrupt_blocked_by_stdin_backpressure_still_kills_after_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
+    claude = fake_claude(tmp_path / "claude", _DEAF)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        pid = session.pid
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        try:
+            turn = asyncio.create_task(session.run_turn("work", on_event))
+            await _until(lambda: session._output is not None and session._output.turn is not None)
+            assert session._process is not None and session._process.stdin is not None
+
+            async def never_drains() -> None:
+                await asyncio.Event().wait()  # a full pipe: the write never completes
+
+            session._process.stdin.drain = never_drains  # type: ignore[method-assign]
+            assert await asyncio.wait_for(session.interrupt(), 5) is StopMethod.KILL
+            result = await asyncio.wait_for(turn, 5)
+            assert result.stopped is StopMethod.KILL
+            assert pid is not None
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())

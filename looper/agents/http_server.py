@@ -1020,8 +1020,8 @@ class AgentHTTPServer:
         else:
             current = self._manager.current_turn_for("web", session_id)
             response = _json_response(HTTP_200, {"turn": None if current is None else {
-                "message_id": current.message_id, "channel": current.channel,
-                "started_at": current.started_at.isoformat(), "stopping": current.stop is not None}})
+                "message_id": current.message_id, "client_message_id": current.client_message_id,
+                "channel": current.channel, "started_at": current.started_at.isoformat(), "stopping": current.stop is not None}})
         writer.write(response)
         await writer.drain()
 

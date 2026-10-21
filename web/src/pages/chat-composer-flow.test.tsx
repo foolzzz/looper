@@ -14,6 +14,7 @@ const api = vi.hoisted(() => ({
   stopChatReply: vi.fn(),
   fetchChatTargets: vi.fn(),
   fetchChatSessions: vi.fn(),
+  watchChat: vi.fn((_sid: string, _cb: (m: unknown) => void) => () => {}),
 }));
 vi.mock("@/lib/api", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/api")>();
@@ -25,7 +26,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     fetchTaskDetail: async () => ({ group: "running", gates: [] }),
     fetchLlmRecords: async () => [],
     saveChatMessage: async () => {},
-    watchChat: () => () => {},
+    watchChat: (sid: string, cb: (m: unknown) => void) => api.watchChat(sid, cb),
   };
 });
 
@@ -85,6 +86,7 @@ describe("chat composer flow", () => {
     api.stopChatReply.mockResolvedValue({ state: "stopping", method: "interrupt" });
     api.fetchChatTargets.mockResolvedValue([MANAGER, PLANNER]);
     api.fetchChatSessions.mockResolvedValue([]);
+    api.watchChat.mockImplementation(() => () => {});
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -195,5 +197,69 @@ describe("chat composer flow", () => {
     expect(api.sendChat).toHaveBeenCalledTimes(1);
     expect(container.querySelector('button[aria-label="Remove queued message"]')).not.toBeNull();
     expect(stopButton()).toBeNull();
+  });
+
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const envelopeTurn = { message_id: "env-1", client_message_id: "", channel: "web", started_at: "", stopping: false };
+
+  it("keeps following a turn named by the envelope id after the page's own stream ends without a final", async () => {
+    await mount();
+    await say("first");
+    const userId = api.sendChat.mock.calls[0][2];
+    await say("queued");
+    vi.useFakeTimers();
+    api.fetchChatTurn.mockResolvedValue({ ...envelopeTurn, client_message_id: userId });
+    act(() => done!());
+    await advance(3000);
+    expect(api.fetchChatTurn).toHaveBeenCalled();
+    expect(stopButton()).not.toBeNull();
+    expect(input().value).toBe("");
+    const reads = api.fetchChatMessages.mock.calls.length;
+    await advance(3000);
+    expect(api.fetchChatTurn.mock.calls.length).toBeGreaterThan(1);
+    expect(stopButton()).not.toBeNull();
+    expect(api.fetchChatMessages.mock.calls.length).toBe(reads);
+
+    api.fetchChatTurn.mockResolvedValue(null);
+    await advance(3000);
+    expect(stopButton()).toBeNull();
+    expect(input().value).toBe("queued");
+  });
+
+  it("keeps following on reload when a later poll names the turn by either id", async () => {
+    sessionStorage.setItem(`looper-chat-staged-${SID}`, JSON.stringify(["a"]));
+    api.fetchChatTurn.mockResolvedValue({ ...envelopeTurn, client_message_id: "c1" });
+    vi.useFakeTimers();
+    act(() => root.render(<ChatPage />));
+    await advance(0);
+    expect(stopButton()).not.toBeNull();
+    await advance(3000);
+    expect(stopButton()).not.toBeNull();
+    api.fetchChatTurn.mockResolvedValue({ ...envelopeTurn, message_id: "env-1", client_message_id: null });
+    await advance(3000);
+    expect(stopButton()).not.toBeNull();
+    expect(input().value).toBe("");
+    api.fetchChatTurn.mockResolvedValue(null);
+    await advance(3000);
+    expect(input().value).toBe("a");
+  });
+
+  it("replaces a partial reply with the saved one that arrives under the same id", async () => {
+    let saved!: (m: unknown) => void;
+    api.watchChat.mockImplementation((_sid: string, cb: (m: unknown) => void) => {
+      saved = cb;
+      return () => {};
+    });
+    await mount();
+    await say("first");
+    const userId = api.sendChat.mock.calls[0][2];
+    await fire("answer.delta", { text: "partial words" });
+    act(() => done!());
+    await flush();
+    expect(container.textContent).toContain("partial words");
+    act(() => saved({ message_id: `${userId}:reply`, role: "assistant", content: "the full saved reply", created_at: "2026-01-01T00:00:00Z" }));
+    await flush();
+    expect(container.textContent).toContain("the full saved reply");
+    expect(container.textContent).not.toContain("partial words");
   });
 });

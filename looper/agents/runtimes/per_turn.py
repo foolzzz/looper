@@ -232,6 +232,8 @@ class PerTurnSession(ABC):
         if self._ending is not None:  # the turn returns only once the stop has cleaned its process tree up
             await asyncio.shield(self._ending)
         self._process, self._ending = None, None
+        # Read before the stop is looked at: a stop that lands while it is read still ends the turn.
+        errors = await stderr if not self._stopping and failure is None else ""
         if self._stopping:
             self._stopping = False
             stderr.cancel()
@@ -241,7 +243,6 @@ class PerTurnSession(ABC):
                                 stopped=StopMethod.KILL, usage_complete=hasattr(stream, "usage_so_far"))
         if failure is not None:
             raise failure
-        errors = await stderr
         if capped is not None:
             self._totals = self._totals.plus(capped.usage)
             return ResidentTurn(capped.result_event, session_started=session_started, usage=capped.usage)

@@ -5,6 +5,7 @@ import {
   isStopCommand,
   joinStaged,
   pullBack,
+  turnAnswers,
   type ComposerKey,
   type ComposerState,
 } from "./composer";
@@ -162,5 +163,18 @@ describe("helpers", () => {
   it("isStopCommand", () => {
     expect(isStopCommand("/STOP ")).toBe(true);
     expect(isStopCommand("/stop now")).toBe(false);
+  });
+});
+
+describe("turnAnswers", () => {
+  const turn = { message_id: "env", client_message_id: "cli", channel: "web", started_at: "", stopping: false };
+  it("matches either id of the turn", () => {
+    expect(turnAnswers(turn, ["env"])).toBe(true);
+    expect(turnAnswers(turn, ["x", "cli"])).toBe(true);
+    expect(turnAnswers(turn, ["x"])).toBe(false);
+  });
+  it("does not match a missing client id or no turn", () => {
+    expect(turnAnswers({ ...turn, client_message_id: null }, ["null", ""])).toBe(false);
+    expect(turnAnswers(null, ["env"])).toBe(false);
   });
 });

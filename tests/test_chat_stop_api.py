@@ -98,7 +98,13 @@ def test_turn_reports_running_turn_only_for_its_session() -> None:
     manager = _Manager(turn=_turn(stop=StopRequest(via="web", at=datetime.now(timezone.utc))))
     status, body = _call(manager, "GET", "/api/chat/turn", query={"session_id": "s1"})
     assert status == 200
-    assert body == {"turn": {"message_id": "m1", "channel": "web", "started_at": "2026-01-02T03:04:05+00:00",
-                             "stopping": True}}
+    assert body == {"turn": {"message_id": "m1", "client_message_id": None, "channel": "web",
+                             "started_at": "2026-01-02T03:04:05+00:00", "stopping": True}}
     assert _call(manager, "GET", "/api/chat/turn", query={"session_id": "other"}) == (200, {"turn": None})
     assert _call(_Manager(), "GET", "/api/chat/turn", query={"session_id": "s1"}) == (200, {"turn": None})
+
+
+def test_turn_carries_the_envelope_id_and_the_pages_own_id() -> None:
+    manager = _Manager(turn=_turn(client_message_id="c1"))
+    _, body = _call(manager, "GET", "/api/chat/turn", query={"session_id": "s1"})
+    assert body["turn"]["message_id"] == "m1" and body["turn"]["client_message_id"] == "c1"

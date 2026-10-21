@@ -764,7 +764,8 @@ def test_a_stop_queued_while_a_cancel_waits_is_not_taken_for_its_response(
 
 def test_a_stop_while_the_session_is_readied_sends_no_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The user's stop that lands while the process starts and loads the session (``interrupt`` has no prompt to
-    cancel yet) ends the turn before its prompt is sent: Grok never runs it, and the session goes on."""
+    cancel yet) ends that process and the turn before its prompt is sent: Grok never runs it, and the session goes
+    on."""
     from looper.agents.claude_cli import USER_STOP, user_stop_result
 
     _operator(tmp_path, monkeypatch)
@@ -790,8 +791,10 @@ def test_a_stop_while_the_session_is_readied_sends_no_prompt(tmp_path: Path, mon
         task = asyncio.create_task(session.run_turn("work", events, stop=stop))
         await readying.wait()
         asked.append(True)
-        method = await session.interrupt()  # no prompt in flight yet
+        stopping = asyncio.create_task(session.interrupt())  # no prompt in flight yet: the process is ended
+        await asyncio.sleep(0.1)
         ready.set()
+        method = await stopping
         stopped = await task
         asked.clear()
         (after,) = await _turns(session, "next")
@@ -800,7 +803,39 @@ def test_a_stop_while_the_session_is_readied_sends_no_prompt(tmp_path: Path, mon
         return method, stopped, after, stale, events
 
     method, stopped, after, stale, events = _go(_run())
-    assert method is None
+    assert method is StopMethod.KILL and stopped.stopped is StopMethod.KILL
     assert stopped.result_event[USER_STOP] and not stale
     assert not any(e["type"] in ("assistant", "result") for e in events.seen)
     assert after.result_event["result"].endswith("| next | turn 1")  # the stopped prompt never reached Grok
+
+
+def test_a_normal_result_queued_before_a_stop_does_not_end_the_turn_as_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        waiting = asyncio.Event()
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+            if event["type"] == "system":
+                waiting.set()
+
+        task = asyncio.create_task(session.run_turn("HANG", on_event))
+        await waiting.wait()
+        # Grok's answer is already queued when the stop is asked: the stop queues behind it.
+        session._inbox.put_nowait({"id": session._prompt_id, "result": {"stopReason": "end_turn"}})
+        method = await session.interrupt()
+        turn = await task
+        await session.stop()
+        return method, turn, seen
+
+    method, turn, seen = _go(_run())
+    assert method is StopMethod.CANCEL and turn.stopped is StopMethod.CANCEL
+    assert turn.result_event["is_error"] and turn.result_event["stop_reason"] == "cancelled"
+    assert [e["type"] for e in seen if e["type"] in ("assistant", "result")] == ["result"]  # no answer, only the stop

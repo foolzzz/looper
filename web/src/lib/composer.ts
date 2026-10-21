@@ -1,3 +1,5 @@
+import type { ChatTurn } from "./api";
+
 export const STAGED_MAX = 20;
 export const HISTORY_MAX = 100;
 export const STAGED_SEPARATOR = "\n\n";
@@ -108,4 +110,10 @@ export function composerKeyAction(state: ComposerState, k: ComposerKey): Action 
     default:
       return NONE;
   }
+}
+
+/** Does the running turn answer one of these message ids? The page knows its own id, the server's envelope has another. */
+export function turnAnswers(turn: ChatTurn | null, ids: readonly string[]): boolean {
+  if (!turn) return false;
+  return ids.includes(turn.message_id) || (turn.client_message_id !== null && ids.includes(turn.client_message_id));
 }

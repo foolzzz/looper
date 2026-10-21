@@ -425,7 +425,10 @@ export type ChatReplyOutcome = "answered" | "failed" | "stopped" | "confirm";
 
 /** The Manager's running turn for a chat. */
 export interface ChatTurn {
+  /** The envelope id. */
   message_id: string;
+  /** The id the page gave its own message; null when the message did not come from this page. */
+  client_message_id: string | null;
   channel: string;
   started_at: string;
   stopping: boolean;
