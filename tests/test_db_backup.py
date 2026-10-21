@@ -90,19 +90,19 @@ def _install(bin_dir: Path, *, version: str | None = "99.1", mode: str = "dump",
 
 
 def _env(**extra: str) -> dict[str, str]:
-    dropped = {"LOOPER_PG_DUMP", "LOOPER_BACKUP_CMD", "LOOPER_RUNTIME_ROOT"}
+    dropped = {"LOOPER_PG_DUMP", "LOOPER_BACKUP_CMD", "LOOPER_BACKUP_VERIFY_CMD", "LOOPER_RUNTIME_ROOT"}
     env = {key: value for key, value in os.environ.items() if key not in dropped and counterpart(key) not in dropped}
     return {**env, **extra}
 
 
-def _serve(tmp_path: Path, database_url: str, *flags: str) -> tuple[int | None, str]:
+def _serve(tmp_path: Path, database_url: str, *flags: str, **extra_env: str) -> tuple[int | None, str]:
     """Start ``looper serve`` with PATH = tmp_path/bin: its exit code, or None when it came up (then stopped); its log."""
     port = free_port()
     for name in ("runtime", "work", "home"):
         (tmp_path / name).mkdir(exist_ok=True)
     log_path = tmp_path / "serve.log"
     env = _env(LOOPER_DATABASE_URL=database_url, PATH=str(tmp_path / "bin"), HOME=str(tmp_path / "home"),
-               PYTHONPATH=str(REPO_ROOT))
+               PYTHONPATH=str(REPO_ROOT), **extra_env)
     with log_path.open("w") as log:
         process = subprocess.Popen(
             [sys.executable, "-m", "looper.cli", "serve", "--port", str(port),
@@ -371,3 +371,185 @@ def test_a_backup_command_is_shown_by_its_program_only(tmp_path: Path) -> None:
 
     assert dumper.detail == "LOOPER_BACKUP_CMD: docker … (version not checked)"
     assert "Sekr1t-pw" not in self_check.format_checks([check]) and "PGPASSWORD" not in check.detail
+
+
+# --- Docker: the dump is made, and listed, inside the container -----------------------
+
+_DOCKER = r'''#!@PYTHON@
+import json, sys
+args = sys.argv[1:]
+record = {"argv": args}
+if "pg_dump" in args:
+    sys.stdout.buffer.write(b"PGDMP docker")
+elif "pg_restore" in args:
+    record["stdin"] = sys.stdin.buffer.read().decode("latin-1")
+    mode = @MODE@
+    if mode == "ok":
+        print("1; 1259 100 TABLE public t test")
+        print("2; 0 100 TABLE DATA public t test")
+    elif mode == "fail":
+        print("pg_restore: error: input file is too short", file=sys.stderr)
+        sys.exit(1)
+else:
+    sys.exit(2)
+with open(@CALLS@, "a") as log:
+    log.write(json.dumps(record) + "\n")
+'''
+
+DOCKER_DUMP = ["docker", "exec", "pgc", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
+DOCKER_VERIFY = ("docker", "exec", "-i", "pgc", "pg_restore", "--list")
+
+
+def _install_docker(bin_dir: Path, *, listing: str = "ok") -> Path:
+    """A stand-in ``docker`` (never the real one): ``exec ... pg_dump`` writes an archive header, ``exec ... pg_restore``
+    lists what it reads on stdin (``listing``: ok, fail or empty). The file it logs each call to."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    calls = bin_dir.parent / "docker-calls.jsonl"
+    script = (_DOCKER.replace("@PYTHON@", sys.executable).replace("@MODE@", repr(listing))
+              .replace("@CALLS@", repr(str(calls))))
+    (bin_dir / "docker").write_text(script)
+    (bin_dir / "docker").chmod(0o755)
+    return calls
+
+
+def _docker_calls(calls: Path) -> list[dict]:
+    return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+
+
+def _ops(tmp_path: Path, **environ: str) -> ops_config.OpsConfig:
+    return ops_config.load(ops_config.Flags(runtime_root=tmp_path), environ=environ, dotenv=tmp_path / ".env",
+                           require_database=False)
+
+
+def _ops_file(tmp_path: Path, backup: dict) -> ops_config.OpsConfig:
+    path = tmp_path / "runtime" / "ops" / "server.toml"
+    path.parent.mkdir(parents=True, mode=0o700)
+    body = "\n".join(f"{key} = {json.dumps(value)}" for key, value in backup.items())
+    path.write_text(f'[database]\nurl = "postgresql://u@127.0.0.1:1/loopx"\n[backup]\n{body}\n')
+    path.chmod(0o600)
+    return ops_config.load(ops_config.Flags(runtime_root=tmp_path / "runtime"), environ={}, dotenv=tmp_path / ".env")
+
+
+@pytest.mark.parametrize("command", [
+    DOCKER_DUMP,
+    ["docker", "exec", "-e", "PGPASSWORD=pw", "-u", "postgres", "pgc", "pg_dump", "--format=custom"],
+    ["/usr/local/bin/docker", "exec", "--env", "A=b", "--env=C=d", "-eE=f", "--user=postgres", "-w", "/tmp", "pgc",
+     "pg_dump"],
+    ["docker", "exec", "-it", "-i", "--privileged", "pgc", "/usr/bin/pg_dump"],
+], ids=["plain", "short-options", "long-options", "flags"])
+def test_the_verifier_is_derived_from_a_docker_exec_pg_dump_in_the_ops_file(tmp_path, command):
+    ops = _ops_file(tmp_path, {"command": command})
+
+    dumper = db_backup.find_dumper(16, ops)
+
+    assert dumper.verify == (command[0], "exec", "-i", "pgc", "pg_restore", "--list")
+    assert dumper.verifier == "docker exec -i pgc pg_restore --list"
+
+
+def test_the_verifier_is_derived_from_the_deprecated_environment_string(tmp_path):
+    ops = _ops(tmp_path, LOOPER_BACKUP_CMD="docker exec -e PGPASSWORD=Sekr1t-pw --env A=b pgc pg_dump --format=custom "
+                                           "-U {user} {dbname}")
+
+    dumper = db_backup.find_dumper(16, ops)
+
+    assert dumper.verify == DOCKER_VERIFY
+    assert "Sekr1t-pw" not in dumper.detail + dumper.verifier
+
+
+@pytest.mark.parametrize("command", [
+    ["pg_dump", "--format=custom", "{dbname}"],
+    ["docker", "run", "--rm", "pgc", "pg_dump"],
+    ["docker", "exec", "pgc", "psql", "-c", "select 1"],
+    ["docker", "exec", "--no-such-option", "pgc", "pg_dump"],
+    ["docker", "-H", "tcp://h", "exec", "pgc", "pg_dump"],
+    ["docker", "exec", "pgc"],
+    ["docker", "exec", "-e"],
+    ["sudo", "docker", "exec", "pgc", "pg_dump"],
+], ids=["local", "run", "other-program", "unknown-option", "global-option", "no-program", "dangling", "sudo"])
+def test_only_the_exact_docker_exec_form_is_derived(tmp_path, command):
+    assert db_backup.find_dumper(16, _ops_file(tmp_path, {"command": command})).verify == ()
+
+
+def test_a_docker_backup_is_dumped_and_listed_inside_the_container(tmp_path, monkeypatch):
+    calls = _install_docker(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    dumper = db_backup.find_dumper(16, _ops_file(tmp_path, {"command": DOCKER_DUMP}))
+
+    path, checked = db_backup.back_up(dumper, "postgresql://alice@127.0.0.1:1/loopx", tmp_path / "backups")
+
+    assert checked == "listed with docker exec -i pgc pg_restore --list"
+    dump, listing = _docker_calls(calls)
+    assert dump["argv"] == ["exec", "pgc", "pg_dump", "--format=custom", "-U", "alice", "loopx"]
+    assert listing == {"argv": ["exec", "-i", "pgc", "pg_restore", "--list"], "stdin": "PGDMP docker"}
+    assert path.read_bytes() == b"PGDMP docker"
+
+
+def test_an_explicit_verify_command_wins_over_the_derived_one(tmp_path, monkeypatch):
+    calls = _install_docker(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    verify = ["docker", "exec", "-i", "other", "pg_restore", "--list"]
+    ops = _ops_file(tmp_path, {"command": DOCKER_DUMP, "verify_command": verify})
+    dumper = db_backup.find_dumper(16, ops)
+
+    _, checked = db_backup.back_up(dumper, "postgresql://alice@127.0.0.1:1/loopx", tmp_path / "backups")
+
+    assert dumper.verify == tuple(verify)
+    assert checked == "listed with docker … (backup.verify_command)"
+    assert _docker_calls(calls)[-1]["argv"] == verify[1:]
+    assert _docker_calls(calls)[-1]["stdin"] == "PGDMP docker"
+
+
+def test_an_explicit_verify_command_serves_a_local_pg_dump_without_pg_restore(tmp_path, monkeypatch):
+    _install(tmp_path / "bin", mode="offline", restore_ok=None)
+    calls = _install_docker(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    ops = _ops(tmp_path, LOOPER_BACKUP_VERIFY_CMD="docker exec -i pgc pg_restore --list")
+
+    dumper = db_backup.find_dumper(16, ops)
+    _, checked = db_backup.back_up(dumper, "postgresql://u@127.0.0.1:1/loopx", tmp_path / "backups")
+
+    assert checked.startswith("listed with docker … (LOOPER_BACKUP_VERIFY_CMD")
+    assert _docker_calls(calls)[-1]["argv"] == ["exec", "-i", "pgc", "pg_restore", "--list"]
+    assert any("LOOPER_BACKUP_VERIFY_CMD in the environment is deprecated" in warning for warning in ops.warnings)
+
+
+@pytest.mark.parametrize(("listing", "reason"), [
+    ("fail", "cannot read the dump: pg_restore: error: input file is too short"),
+    ("empty", "not a full database backup"),
+], ids=["exits-non-zero", "lists-nothing"])
+def test_a_verifier_that_fails_or_lists_nothing_fails_the_backup(tmp_path, monkeypatch, listing, reason):
+    _install_docker(tmp_path / "bin", listing=listing)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    dumper = db_backup.find_dumper(16, _ops_file(tmp_path, {"command": DOCKER_DUMP}))
+
+    with pytest.raises(db_backup.BackupFailed, match=reason):
+        db_backup.back_up(dumper, "postgresql://alice@127.0.0.1:1/loopx", tmp_path / "backups")
+
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+def test_without_any_verifier_the_backup_fails_naming_verify_command(tmp_path, monkeypatch):
+    _install(tmp_path / "bin", mode="offline", restore_ok=None)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    dumper = db_backup.find_dumper(16, _ops(tmp_path, LOOPER_BACKUP_CMD=f"{tmp_path / 'bin' / 'pg_dump'} {{dbname}}"))
+
+    with pytest.raises(db_backup.BackupFailed, match="backup.verify_command") as failure:
+        db_backup.back_up(dumper, "postgresql://u@127.0.0.1:1/loopx", tmp_path / "backups")
+
+    assert '["docker", "exec", "-i", "<container>", "pg_restore", "--list"]' in str(failure.value)
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+def test_the_self_check_reports_the_verifier_and_fails_without_one(tmp_path, monkeypatch):
+    from looper.agents import self_check
+
+    _install(tmp_path / "bin", mode="offline", restore_ok=None)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+
+    check, dumper = self_check.check_pg_dump(160004, True, _ops_file(tmp_path, {"command": DOCKER_DUMP}))
+    assert dumper is not None and check.status == self_check.OK
+    assert check.detail.endswith("backup verified by docker exec -i pgc pg_restore --list")
+
+    check, dumper = self_check.check_pg_dump(160004, True, _ops(tmp_path, LOOPER_PG_DUMP=str(tmp_path / "bin" / "pg_dump")))
+    assert dumper is None and check.status == self_check.FAIL
+    assert "backup.verify_command" in check.detail
