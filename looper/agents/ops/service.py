@@ -34,6 +34,7 @@ to ``call``.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import hmac
 import json
 import logging
@@ -68,6 +69,8 @@ TOKEN_ENV = "LOOPER_AGENT_TOKEN"
 TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
 BINDINGS_KEPT = 64
 CONFIRMATION_SECONDS = 600
+# How long a write call waits for the tool_use of its turn's stream that it matches (the event may trail the call).
+MATCH_WAIT_SEC = 2.0
 # The most chats with a confirmation waiting at once; past it, the oldest one's is dropped.
 CONFIRMATION_CHATS = 50
 CONFIRM_TOOL = "looper_confirm"
@@ -136,6 +139,9 @@ class ManagerOps:
         self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
         self._pending: dict[tuple[str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
+        # Per binding, the tool calls its turn's stream showed and no call has claimed yet: (call id, tool, args).
+        self._expected: dict[str, list[tuple[str | None, str, str]]] = {}
+        self._expected_event: dict[str, asyncio.Event] = {}
 
     @property
     def platform(self) -> Platform:
@@ -215,6 +221,10 @@ class ManagerOps:
             arguments = check_arguments(tool.schema, raw)
             risk = tool.risk_of(arguments)
             _check_answering(turn)
+            if turn.require_match and binding and (risk is not Risk.READ or tool.name == CONFIRM_TOOL):
+                if not await self._matched(binding, tool.name, arguments, call_id):
+                    raise OpError(ErrorCode.NOT_THIS_TURN, "this call was not made in the running turn; it did not run")
+                _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
@@ -311,7 +321,43 @@ class ManagerOps:
         self._bindings[binding] = turn
         self._bindings.move_to_end(binding)
         while len(self._bindings) > BINDINGS_KEPT:
-            self._bindings.popitem(last=False)
+            old, _ = self._bindings.popitem(last=False)
+            self._expected.pop(old, None)
+            self._expected_event.pop(old, None)
+
+    def expect(self, binding: str, tool: str, arguments: Mapping[str, Any], *, call_id: str | None = None) -> None:
+        """The turn of ``binding`` streamed a tool_use of ``tool``: one call with these arguments may match it."""
+        self._expected.setdefault(binding, []).append((call_id or None, tool, _canonical(arguments)))
+        event = self._expected_event.get(binding)
+        if event is not None:
+            event.set()
+
+    def _take(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None) -> bool:
+        entries = self._expected.get(binding, [])
+        canon = _canonical(arguments)
+        for i, (eid, etool, ecanon) in enumerate(entries):
+            if (eid == call_id) if call_id else (etool == tool and ecanon == canon):
+                del entries[i]
+                return True
+        return False
+
+    async def _matched(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None) -> bool:
+        """Whether a tool_use of the turn matches this call (consumed), waiting up to ``MATCH_WAIT_SEC`` for it."""
+        deadline = self._clock() + MATCH_WAIT_SEC
+        while True:
+            if self._take(binding, tool, arguments, call_id):
+                return True
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return False
+            event = self._expected_event.setdefault(binding, asyncio.Event())
+            event.clear()
+            if self._take(binding, tool, arguments, call_id):
+                return True
+            try:
+                await asyncio.wait_for(event.wait(), remaining)
+            except asyncio.TimeoutError:
+                return self._take(binding, tool, arguments, call_id)
 
     def publish_binding(self, binding: str | None) -> None:
         """Write the binding file the MCP bridge reads at each call (synchronously and atomically: it must be on
@@ -443,6 +489,10 @@ def _check_answering(turn: Turn) -> None:
 def tools_down_reply(problem: str) -> str:
     """What the user gets when the Manager's tools do not work: nothing was done, whatever Claude says."""
     return f"平台工具不可用，没有执行任何操作：{problem}。请检查 looper serve 的日志，或先在控制台里操作。"
+
+
+def _canonical(arguments: Mapping[str, Any]) -> str:
+    return json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _error(code: ErrorCode, message: str) -> dict[str, Any]:

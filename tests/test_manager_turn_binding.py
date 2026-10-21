@@ -113,3 +113,134 @@ def test_a_call_that_comes_after_the_stop_is_refused_and_the_next_turns_runs(age
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+class _ResidentSession(_PerTurnSession):
+    """A resident runtime (one bridge shared by the turns): its turn streams tool_use events, then calls."""
+
+    shares_bridge = True
+
+    def __init__(self, ops: ManagerOps, turn_file: Path, script: Any) -> None:
+        super().__init__(ops, turn_file)
+        self.script = script
+
+    async def run_turn(self, text: str, on_event: Any, *, tag: Any = None, stop: Any = None,
+                       cancel: Any = None) -> ResidentTurn:
+        binding = json.loads(self.turn_file.read_text())["turn"]
+        await on_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
+        await self.script(self, binding, on_event)
+        return ResidentTurn({"type": "result", "subtype": "success", "is_error": False, "result": "好的",
+                             "session_id": "sess-1"})
+
+
+def _tool_use(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": call_id, "name": name, "input": arguments}]}}
+
+
+def _resident(script: Any, *, per_turn: bool = False) -> tuple[list[Any], list[dict[str, Any]], list[str]]:
+    """Run one turn of a runtime driven by ``script``; returns (script's answers, writes run, reads run)."""
+    answers: list[Any] = []
+    writes: list[dict[str, Any]] = []
+    reads: list[str] = []
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            turn_file = root / ".local" / "manager-turn.json"
+
+            async def write(call: Call) -> dict[str, Any]:
+                writes.append(dict(call.arguments))
+                return {"ok": True}
+
+            async def read(call: Call) -> dict[str, Any]:
+                reads.append("read")
+                return {"ok": True}
+
+            schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+            ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok",
+                             tools=(Tool("t_write", "writes", schema, Risk.WRITE, write),
+                                    Tool("t_read", "reads", schema, Risk.READ, read)), turn_file=turn_file)
+            ops._working_at = ops._clock()
+            session = _ResidentSession(ops, turn_file, script)
+            session.shares_bridge = not per_turn
+            session.answers = answers  # type: ignore[attr-defined]
+            manager, bus, _ = _manager(root, session)  # type: ignore[arg-type]
+            manager.ops = ops
+            await manager._handle(_web("改一下"))
+            await bus.shutdown()
+
+    asyncio.run(run())
+    return answers, writes, reads
+
+
+def test_resident_write_matching_the_streamed_tool_use_runs(agent_db: Any) -> None:
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        await on_event(_tool_use("tu1", "mcp__looper__t_write", {"n": 1}))
+        await on_event(_tool_use("tu2", "t_write", {"n": 2}))
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding, call_id="tu1"))
+        session.answers.append(await session.ops.call("t_write", {"n": 2}, binding=binding))
+
+    answers, writes, _ = _resident(script)
+    assert [a["status"] for a in answers] == ["ok", "ok"] and writes == [{"n": 1}, {"n": 2}]
+
+
+def test_resident_write_without_a_matching_tool_use_is_refused_after_the_wait(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.ops import service
+
+    monkeypatch.setattr(service, "MATCH_WAIT_SEC", 0.2)
+
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding))
+        session.answers.append(loop.time() - started)
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding))  # same call, other turn
+        await on_event(_tool_use("tu1", "mcp__looper__t_write", {"n": 9}))  # a different call's tool_use
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding))
+
+    answers, writes, _ = _resident(script)
+    assert answers[0]["error"]["code"] == "not_this_turn" and 0.15 <= answers[1] < 1.5
+    assert answers[2]["error"]["code"] == "not_this_turn" and answers[3]["error"]["code"] == "not_this_turn"
+    assert writes == []
+
+
+def test_resident_read_runs_without_a_match_and_per_turn_never_waits(agent_db: Any) -> None:
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        session.answers.append(await session.ops.call("t_read", {}, binding=binding))
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding))
+
+    answers, writes, reads = _resident(script)
+    assert answers[0]["status"] == "ok" and answers[1]["error"]["code"] == "not_this_turn" and reads == ["read"]
+
+    answers, writes, _ = _resident(script, per_turn=True)
+    assert answers[1]["status"] == "ok" and writes == [{"n": 1}]
+
+
+def test_resident_tool_use_trailing_the_call_still_matches(agent_db: Any) -> None:
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        later = asyncio.create_task(_later(on_event))
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding, call_id="tu1"))
+        await later
+
+    async def _later(on_event: Any) -> None:
+        await asyncio.sleep(0.2)
+        await on_event(_tool_use("tu1", "mcp__looper__t_write", {"n": 1}))
+
+    answers, writes, _ = _resident(script)
+    assert answers[0]["status"] == "ok" and writes == [{"n": 1}]
+
+
+def test_resident_expectation_is_consumed_once(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.ops import service
+
+    monkeypatch.setattr(service, "MATCH_WAIT_SEC", 0.1)
+
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        await on_event(_tool_use("tu1", "mcp__looper__t_write", {"n": 1}))
+        for _ in range(2):
+            session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding, call_id="tu1"))
+
+    answers, writes, _ = _resident(script)
+    assert answers[0]["status"] == "ok" and answers[1]["error"]["code"] == "not_this_turn" and writes == [{"n": 1}]

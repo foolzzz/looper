@@ -839,7 +839,8 @@ class ManagerAgent:
             origin = _message_origin(envelope)
             # The calls Claude makes while answering belong to this message and its chat.
             turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
-                        envelope=envelope, sender=origin["sender"], group=origin["group"])
+                        envelope=envelope, sender=origin["sender"], group=origin["group"],
+                        require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn
             # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
@@ -1215,6 +1216,11 @@ class ManagerAgent:
                                     await self._send_status(context_envelope, chunk, delta=True)
                         elif block_type == "tool_use":
                             tool_name = block.get("name", "tool")
+                            if self.ops is not None:
+                                bare = str(tool_name).removeprefix("mcp__looper__")
+                                raw_input = block.get("input")
+                                self.ops.expect(token.binding, bare, raw_input if isinstance(raw_input, dict) else {},
+                                                call_id=block.get("id"))
                             await self._send_status(
                                 context_envelope,
                                 f"正在使用工具: {tool_name}",

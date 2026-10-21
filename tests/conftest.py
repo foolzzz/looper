@@ -784,6 +784,9 @@ def current_turn(monkeypatch: pytest.MonkeyPatch) -> None:
         return begin(self, turn, binding)
 
     async def bound_call(self, name, raw, *, binding=None, call_id=None):  # type: ignore[no-untyped-def]
+        if binding is None and bound.get(id(self)) and isinstance(raw, dict):
+            # As the bridge would: the running turn's stream showed this call (matters to a resident runtime's turn).
+            self.expect(bound[id(self)], name, raw)
         return await call(self, name, raw, binding=binding or bound.get(id(self)), call_id=call_id)
 
     monkeypatch.setattr(ManagerOps, "begin_turn", begin_turn)
