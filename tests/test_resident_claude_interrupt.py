@@ -105,6 +105,13 @@ for raw in sys.stdin:
         time.sleep(60)
 """
 
+# Never writes a thing, and deaf to the interrupt.
+_SILENT = """\
+import sys, time
+for raw in sys.stdin:
+    time.sleep(60)
+"""
+
 
 async def _until(check: Any) -> None:
     for _ in range(500):
@@ -176,6 +183,34 @@ def test_a_deaf_claude_is_killed_after_the_grace(tmp_path: Path, monkeypatch: py
             await _until_streaming(seen)
             assert await session.interrupt() is StopMethod.KILL
             result = await turn
+            assert result.stopped is StopMethod.KILL
+            assert session.started is False
+            assert pid is not None
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_a_stop_before_claudes_first_event_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
+    claude = fake_claude(tmp_path / "claude", _SILENT)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        pid = session.pid
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        try:
+            turn = asyncio.create_task(session.run_turn("work", on_event))
+            await _until(lambda: session._output is not None and session._output.turn is not None)
+            assert await asyncio.wait_for(session.interrupt(), 5) is StopMethod.KILL
+            result = await asyncio.wait_for(turn, 5)
             assert result.stopped is StopMethod.KILL
             assert session.started is False
             assert pid is not None

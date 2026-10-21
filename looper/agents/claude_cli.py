@@ -886,12 +886,14 @@ class ResidentClaude:
     async def interrupt(self) -> StopMethod | None:
         """End the running user turn: ask Claude to interrupt it and wait up to ``INTERRUPT_GRACE_SEC`` for the
         turn's result (``CONTROL``); else, or when the request cannot be written, kill Claude (``KILL``; the turn
-        returns ``user_stop_result``). None when no user turn runs."""
+        returns ``user_stop_result``). None when no user turn runs. A turn Claude has not yet begun (no output so
+        far) is stopped the same way: the request is sent at once and, unanswered within the grace, the process
+        tree is killed, so a silent Claude cannot hang the turn."""
         from .runtimes import StopMethod
 
         output, process = self._output, self._process
         turn = output.turn if output is not None else None
-        if turn is None or not turn.started or turn.stopping or process is None or process.stdin is None:
+        if turn is None or turn.stopping or process is None or process.stdin is None:
             return None
         turn.stopping = True
         try:
