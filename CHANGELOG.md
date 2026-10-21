@@ -18,6 +18,37 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-10-20
+
+### Highlights
+
+- **Typed LLM registry: provider → endpoint → model → profile.** Accounts have typed vendors and per-protocol endpoints; independent saved models carry an exact name, one protocol, context/reasoning/background settings and prices. Agent Profiles reference a runtime and model. All six existing runtimes consume resolved bindings; no new runtime is introduced. Manager `looper_models` adds model CRUD. ([#258](https://github.com/foolzzz/looper/pull/258))
+
+### Behavior changes
+
+- **Automatic v2 registry upgrade requires a verified full backup.** Startup creates a custom-format `pg_dump` and verifies table definitions and data with `pg_restore --list` before any DDL. Missing/unverifiable backups stop startup with the database unchanged; registry upgrades reject `--skip-backup`. Conversion, schema changes and version 3 commit in one locked transaction; unresolved references or launch/pricing mismatches roll everything back. Profile IDs, selections, runtime options, protocol choices and omitted-endpoint semantics are preserved, models used by legacy open catalogs are materialized, and equivalent accounts merge only after compatibility checks with Session/scheduled Planner references remapped.
+- **Breaking HTTP and config contracts.** Provider `protocols/base_url/embedded models` become `vendor_type/endpoints` and independent `/api/models`; Profile writes require `model_id`, reads expose a structured model, and `/api/registry` includes models/vendor types. Export writes `looper-config/v3` with composite model references; v2/v1 imports remain supported, including user models under built-in providers. Invalid/ambiguous entries get skip diagnostics and apply recomputes its plan. Legacy profile `system_prompt_mode` is ignored with a note; v3 rejects it.
+- **Saved-model selection and write guards are explicit.** Empty catalogs no longer allow arbitrary model names. Model provider/name/protocol and provider vendor identities are immutable; referenced resources cannot be deleted and incompatible updates are refused. Vendor suggestions apply only at creation; endpoint validation rejects malformed URLs, embedded credentials and fragments. OMP/pi bind the selected model's exact protocol; pi efforts include `off/minimal`, dsh exposes `low/high/max`.
+- **Dashboard and Manager share the model layer.** Settings manage accounts/endpoints/models and compatible profiles with runtime-specific efforts; profile identities, price sources, compatibility, import diagnostics and shared refreshes reach selectors and summaries. Inline profile creation does not select it automatically. `looper_providers` retains account/endpoint registration and update, `looper_agent_profiles` accepts model IDs or full references, and `looper_models` deletes unused models only with confirmation. Credentials remain dashboard-only; environment-entry arrays are masked in Manager audits.
+- **Pricing and resident sessions use resolved settings.** Exact case-sensitive prices precede normalized matches and built-in fallback within the selected provider/protocol; Claude subscription alias semantics remain. Null falls back, zero means free and unknown stays unknown. Run prices are frozen and shared by usage/spend checks with identity/provenance recorded; historical costs stay unchanged. Model, price and runtime-option changes refresh resident processes on subsequent turns.
+
+### Model-visible changes
+
+- Manager instructions describe accounts, exact model references and profile recipes, direct credential entry to the dashboard and include models in the existing user-requested write policy. Tool schemas/results expose models and compatibility. Custom prompts and role/task append-or-replace semantics remain in their existing layers; Prompt Preview reports mode provenance without loading another selected profile's credentials. Dashboard chat, Telegram and Lark share these tools without channel-specific commands; CLI startup migrates and existing config commands use v3. Evals register provider → model → profile, retain legacy-spec conversion and add model dialogs. ([#258](https://github.com/foolzzz/looper/pull/258))
+
+### Upgrade and known issue
+
+- Quiesce writes/scheduling, stop v2.12.5, retain an independent full database backup plus configuration/runtime data, and rehearse restore before upgrading. Startup then makes and verifies its own full backup. Rollback means stopping v2.13.0, retaining its database, restoring the pre-upgrade backup into a separate database and installing the v2.12.5 release wheel against that restored database. Validate profiles, historical costs and old-version launches before resuming. Never point an unpatched older binary at schema v3; there is no down migration or v3-to-v2 export, and later writes require a recovery decision.
+- **Docker backup limitation:** If `backup.command` or `LOOPER_BACKUP_CMD` runs `pg_dump` through `docker exec` and no local `pg_restore` exists, the upgrade refuses to start without changing the database. Install a local `pg_restore` of any version not older than the PostgreSQL server, available to the service user, or wait for the patch release.
+
+### Validation
+
+- Retained #258 reports: unit/database tests and CI passed; read-only reviews left no P0 after six fixes covering built-in-provider user-model export, valid v2 OAuth multi-protocol declarations, exact-price case handling, provider updates, environment-array audit masking and Claude alias lookup order.
+- Fresh-database migration rehearsal used a real configuration export with 4 providers, 9 profiles and 107 catalog items, detecting pi/dsh: 10/10 profiles retained, 0 launch differences, 104 unchanged price values and a backup verified with `pg_restore --list`. The migrated server ran a real Sonnet Planner/Claude Code Worker task and a Manager `looper_models` turn.
+- Existing Manager dialogs: 52/52 on both branch and main with Sonnet and Opus xhigh; final-fix Sonnet model-dialog follow-up: 8/8. Initial new-model dialogs remain partial at 18/20 (one model-path miss, one per-turn budget stop). Real post-migration Codex/OMP/Grok/pi/dsh launches and non-empty custom prompts in a real configuration were not tested; unit tests cover custom prompts. Runtime/database checks and a complete final-head prompt suite were not rerun for this draft.
+
+See the [bilingual release notes](docs/releases/v2.13.0.md) for activation, backup, rollback, authority boundaries and validation limits.
+
 ## [2.12.5] - 2026-10-20
 
 ### Highlights
