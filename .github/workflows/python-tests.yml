@@ -35,6 +35,9 @@ jobs:
       LOOPER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Parity tests check out pinned old revisions.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
