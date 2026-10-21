@@ -68,6 +68,8 @@ const NONE: Action = { type: "none" };
 export function composerKeyAction(state: ComposerState, k: ComposerKey): Action {
   if (k.isComposing || k.keyCode === 229) return NONE;
   if (k.ctrlKey || k.altKey || k.metaKey) return NONE;
+  // Shift+arrow extends the native selection; never treat it as history navigation.
+  if (k.shiftKey && (k.key === "ArrowUp" || k.key === "ArrowDown")) return NONE;
   const { draft, staged, history, browsing } = state;
   const hasDraft = draft.trim() !== "";
 

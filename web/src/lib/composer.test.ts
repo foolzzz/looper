@@ -63,6 +63,15 @@ describe("Enter", () => {
   });
 });
 
+describe("Shift+arrow", () => {
+  it("keeps native selection behaviour instead of navigating history", () => {
+    const s = st({ draft: "abc", caretStart: 0, caretEnd: 0, history: ["h"], staged: ["a"] });
+    expect(composerKeyAction(s, key("ArrowUp", { shiftKey: true }))).toEqual({ type: "none" });
+    const b = st({ draft: "h", history: ["h", "i"], browsing: { index: 0, saved: "s" } });
+    expect(composerKeyAction(b, key("ArrowDown", { shiftKey: true }))).toEqual({ type: "none" });
+  });
+});
+
 describe("ArrowUp", () => {
   it("non-collapsed selection acts natively", () => {
     expect(composerKeyAction(st({ draft: "abc", caretStart: 0, caretEnd: 2, history: ["h"] }), key("ArrowUp"))).toEqual({ type: "none" });
