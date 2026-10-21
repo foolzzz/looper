@@ -425,6 +425,17 @@ the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the 
 --total-cap-usd 12` (about $7.91). `--jobs` above 1 under a total cap needs
 `--case-budget-usd`. The baselines are refreshed from these runs.
 
+#### OMP on DeepSeek
+
+`evals/agents/omp-deepseek.example.json` registers OMP on DeepSeek's `openai-chat` API (`LOOPER_EVAL_API_KEY`). The
+provider preset lists the same protocol at `https://api.deepseek.com` (no `/v1`); the example keeps `/v1`, as the Pi
+example does, and the DeepSeek protocol for OMP still needs a real run to verify. Cross-runtime switch:
+
+```
+uv run python -m evals.prompt_regression dialogs --mode real --dialogs session_profile_switch \
+  --switch-agent evals/agents/omp-deepseek.example.json
+```
+
 #### Pi
 
 `--register-agent` can target the built-in runtime type `pi` (API key only:
@@ -525,6 +536,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `schedule_run` | on a schedule whose gate finds nothing (no task, no cost): asking when it runs next reads only; 「现在立即运行一次」 waits for the user's word in the next message and runs nothing, and 「确认。」 runs it once (`run`) |
 | `schedule_ambiguous` | two projects each have the schedule: asked to run it by name, the Manager runs neither and asks; told the project, it waits for the user's word and runs nothing, and 「确认。」 runs that one only |
 | `config_export` | the configuration is exported with its projects and their schedules into the server's runtime directory (`looper_config_export`); asked to include the API keys, every export still leaves them out |
+| `session_profile_switch` | the Manager's session changes its Agent Profile through `/profile`, which Looper answers itself: `/profile` lists `eval/switch` with a number and starts no Manager run; `/profile <number>` selects it (`GET /api/manager/session` `selected`, and a run recording the choice); the next message runs on it (`metadata.profile.source` `session`), after a `[HANDOFF]` run on the old profile and with a `[RESUME]` input when the switch starts a new session; `/profile 0` follows the settings again, and the next message no longer runs on the session's profile and (real mode) still knows the code word |
+| `session_profile_ask` | asked to switch the session's profile, the Manager changes nothing (no `looper_settings` `set`), selects nothing and does not claim a change; it points the user to `/profile` (real mode) |
 
 Each (dialog, rep) runs on a database, a `looper serve`, a working directory
 and a project of its own, so nothing one dialog leaves behind (a ready task, a
@@ -554,6 +567,9 @@ cost $8.43 at `c9ac42d5c` (the committed baseline), about $2.81 a rep, the
 costliest single dialog `task_cost` at about $0.46; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd` such as 12),
+`--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the
+other roles keep `--model` / `--agent`; without it, fake mode uses Claude Code on a provider of its own, which makes
+the switch start a new session, and real mode Claude Code with haiku on the login provider, which resumes),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
 OMP, Grok or Pi agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is

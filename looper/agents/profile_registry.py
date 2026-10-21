@@ -758,11 +758,13 @@ async def check_selection(profile_id: str, roles: Iterable[str]) -> AgentProfile
 
 async def _selected_roles(profile_id: str, conn: Any = None) -> list[str]:
     """Every role ``profile_id`` is selected for, by a layer or a task."""
-    from ..db import agent_setting_layers
+    from ..db import agent_sessions, agent_setting_layers
 
     roles: set[str] = set()
     for scope, role in await agent_setting_layers.selected_roles(profile_id, pool=conn):
         roles.update(_SCOPE_ROLES.get(scope, (role,)))
+    if await agent_sessions.selects_profile("manager", profile_id, pool=conn):
+        roles.add("manager")
     return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
 
 
@@ -990,7 +992,8 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 
 
 # Where nothing selects a profile.
-NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}
+NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
+                                "manager_session": False}
 
 
 def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = ()) -> LegacyAgentProfile:
@@ -1044,6 +1047,8 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
     if count := used_by.get("schedule_count"):
         parts.append(f"{count} {'schedule' if count == 1 else 'schedules'}")
     parts += [f"the profiles the Planners of project {name!r} may choose" for name in used_by.get("allowed_in") or ()]
+    if used_by.get("manager_session"):
+        parts.append("the Manager's current session")
     return ", ".join(parts)
 
 
@@ -1607,8 +1612,10 @@ async def deletable_profile(profile_id: str) -> dict[str, Any]:
     _not_builtin(row, "profile")
     used_by = (await db.profile_usage(profile_id)).get(profile_id)
     if used_by:
+        how = ("; switch the Manager's session with /profile or start a new one with /new"
+               if used_by.get("manager_session") else "")
         raise RegistryConflict(f"Agent Profile {row['name']!r} is selected by {usage_text(used_by)}: select "
-                               "another profile there first")
+                               f"another profile there first{how}")
     return row
 
 
