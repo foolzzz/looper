@@ -197,6 +197,7 @@ def test_profile_suffix_warning_follows_the_adapters_actual_model_mapping(
                provider=asdict(resolved.provider), endpoint=asdict(resolved.endpoint))
     monkeypatch.setattr(db, "get_profile", AsyncMock(return_value=row))
     monkeypatch.setattr(db, "profile_usage", AsyncMock(return_value={}))
+    monkeypatch.setattr(db, "list_models", AsyncMock(return_value=[]))
     warnings = asyncio.run(_profile_answer(row["id"]))["warnings"]
     assert len(warnings) == expected
     if expected:
