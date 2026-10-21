@@ -102,28 +102,30 @@ function useGateThread(taskId: string, step: string, { enabled, follow, signatur
   const [error, setError] = useState("");
   // Only the newest request's answer is kept.
   const latest = useRef(0);
-  const load = useCallback(() => {
+  const load = useCallback((signal?: AbortSignal) => {
     const request = ++latest.current;
-    return fetchGateThread(taskId, step).then(
+    return fetchGateThread(taskId, step, signal).then(
       (thread) => {
         if (request !== latest.current) return;
         setMessages(thread.messages);
         setError("");
       },
       (err) => {
-        if (request === latest.current) setError(errorText(err));
+        if (request === latest.current && !signal?.aborted) setError(errorText(err));
       },
     );
   }, [taskId, step]);
+  // One reader: following polls (its first read is immediate), else the thread is read once per change.
   useEffect(() => {
-    if (enabled) load();
-  }, [load, enabled, signature]);
-  useEffect(() => {
-    if (!enabled || !follow) return;
-    return startPolling(async () => {
-      await load();
+    if (!enabled) return;
+    if (!follow) {
+      load();
+      return;
+    }
+    return startPolling(async (signal) => {
+      await load(signal);
     }, THREAD_POLL_MS);
-  }, [load, enabled, follow]);
+  }, [load, enabled, follow, signature]);
   const add = (message: GateMessage) =>
     setMessages((current) => (current && !current.some((m) => m.id === message.id) ? [...current, message] : current));
   return { messages, error, reload: load, add };
