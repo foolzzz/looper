@@ -62,6 +62,8 @@ _AGENT_DB_READS = (
     ("activity", "list_activity", []),
     ("system_settings", "get_settings", {}),
     ("agent_setting_layers", "list_layers", []),
+    # No stored built-in binding: the settings fall to the code's own built-in profile.
+    ("profile_registry", "get_profile", None),
     ("library", "list_installed", []),
     ("library", "get_item_files", []),
     ("project_documents", "list_documents", []),

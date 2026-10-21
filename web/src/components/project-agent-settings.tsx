@@ -17,6 +17,7 @@ import {
   type LayerValues,
   type ProjectAgentSettings,
   type ProjectRole,
+  type Registry,
   type SettingSource,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
@@ -24,7 +25,7 @@ import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { formatUsd } from "@/lib/usage";
 import { errorText, useAction } from "@/lib/use-action";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
-import { profileName } from "@/lib/use-registry";
+import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 
 const ROLES: ProjectRole[] = ["planner", "worker", "reviewer"];
 
@@ -43,23 +44,28 @@ const SOURCES: Partial<Record<SettingSource, string>> = {
 };
 
 /** The Agent Profile in effect (with its effort) and where it comes from: a role's line. */
-const profileText = (effective: EffectiveSettings) =>
-  `${profileName(effective.profile.value)} (${SOURCES[effective.profile.source] ?? effective.profile.source})`;
+function profileText(effective: EffectiveSettings, registry: Registry | null) {
+  const profile = registry?.profiles.find((p) => p.profile_id === effective.profile.value.profile_id);
+  return `${profile ? profileLabel(profile) : profileName(effective.profile.value)} (${SOURCES[effective.profile.source] ?? effective.profile.source})`;
+}
 
 /** The project row's line: the Agent Profile the roles that do not set one here run with, when they agree. */
-function projectSummary(settings: ProjectAgentSettings) {
+function projectSummary(settings: ProjectAgentSettings, registry: Registry | null) {
   const shown = new Set(
     ROLES.filter((role) => settings.roles[role].values.profile_id == null).map((role) =>
-      profileText(settings.roles[role].effective),
+      profileText(settings.roles[role].effective, registry),
     ),
   );
   return shown.size === 1 ? [...shown][0] : shown.size === 0 ? "Agent Profile set per role" : "Agent Profile varies by role";
 }
 
 /** The Planner list's line: what is on it, or that it is empty. */
-function choicesSummary(profiles: AllowedProfile[]) {
+function choicesSummary(profiles: AllowedProfile[], registry: Registry | null) {
   if (!profiles.length) return "any profile (no restriction)";
-  return profiles.map(profileName).join(", ");
+  return profiles.map((allowed) => {
+    const profile = registry?.profiles.find((p) => p.profile_id === allowed.profile_id);
+    return profile ? profileLabel(profile) : profileName(allowed);
+  }).join(", ");
 }
 
 /** A price per million tokens, or that it is unknown. */
@@ -84,6 +90,7 @@ function PlannerChoices({
   const id = useId();
   const [adding, setAdding] = useState("");
   const action = useAction();
+  const { registry } = useRegistry();
 
   if (!profiles) {
     return loadError ? (
@@ -126,7 +133,7 @@ function PlannerChoices({
               <li key={profile.profile_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
                 {/* Remove goes below the text when the row is too narrow for both. */}
                 <div className="min-w-0 flex-1 basis-60 space-y-0.5">
-                  <p className="break-words text-sm font-medium">{profileName(profile)}</p>
+                  <p className="break-words text-sm font-medium">{choicesSummary([profile], registry)}</p>
                   <p className="break-words text-xs text-muted-foreground">
                     model <span className="font-mono text-foreground/80">{profile.model}</span> · can run{" "}
                     <span className="text-foreground">{profile.roles.map(roleLabel).join(", ")}</span> ·{" "}
@@ -192,6 +199,7 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
   const [allowed, setAllowed] = useState<AllowedProfile[] | null>(null);
   const [allowedError, setAllowedError] = useState("");
   const row = useCollapsibleRows(linked, settings !== null);
+  const { registry } = useRegistry();
 
   useEffect(() => {
     let alive = true;
@@ -238,7 +246,7 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
             id={`project-profiles-${PROJECT_ROW}`}
             {...row(PROJECT_ROW)}
             name="All roles in this project"
-            summary={projectSummary(settings)}
+            summary={projectSummary(settings, registry)}
             marks={overridden(settings.project.values)}
           >
             {(dirty) => (
@@ -272,7 +280,7 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
               id={`project-profiles-${role}`}
               {...row(role)}
               name={roleLabel(role)}
-              summary={profileText(settings.roles[role].effective)}
+              summary={profileText(settings.roles[role].effective, registry)}
               marks={overridden(settings.roles[role].values)}
             >
               {(dirty) => (
@@ -307,7 +315,7 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
             id={`project-profiles-${CHOICES_ROW}`}
             {...row(CHOICES_ROW)}
             name="Profiles the Planner may choose"
-            summary={allowed ? choicesSummary(allowed) : allowedError ? "could not load" : ""}
+            summary={allowed ? choicesSummary(allowed, registry) : allowedError ? "could not load" : ""}
           >
             {() => (
               <PlannerChoices projectId={projectId} profiles={allowed} loadError={allowedError} onSaved={setAllowed} />

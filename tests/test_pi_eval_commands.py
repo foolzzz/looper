@@ -5,6 +5,7 @@ must fail before that ``uv`` runs. The script is not a new eval engine.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -55,13 +56,18 @@ if os.environ.get("PI_EVAL_FAKE_UV_EXIT"):
 
 @pytest.fixture(autouse=True)
 def clean_local_state():
-    if STATE.exists():
-        shutil.rmtree(STATE)
-    FIXTURE_JSON.unlink(missing_ok=True)
-    yield
-    if STATE.exists():
-        shutil.rmtree(STATE)
-    FIXTURE_JSON.unlink(missing_ok=True)
+    # The scripts write under the repository's .local and evals/runs, which every pytest-xdist worker shares: one
+    # test at a time, across processes, owns that state.
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    with (STATE.parent / "pi-eval-commands.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if STATE.exists():
+            shutil.rmtree(STATE)
+        FIXTURE_JSON.unlink(missing_ok=True)
+        yield
+        if STATE.exists():
+            shutil.rmtree(STATE)
+        FIXTURE_JSON.unlink(missing_ok=True)
 
 
 def _environment(tmp_path: Path, **updates: str | None) -> dict[str, str]:

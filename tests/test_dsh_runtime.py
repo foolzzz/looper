@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 
 from looper.agents import runtimes
-from looper.agents.profile_registry import CatalogModel, ProviderSpec, RegistryError, RuntimeSpec, check_pairing
+from looper.agents.profile_registry import (
+    CatalogModel, LegacyProviderSpec as ProviderSpec, RegistryError, RuntimeSpec, check_pairing,
+)
+from tests.runtime_model_helpers import resolved_profile
 from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported
 from tests.test_dsh_installed import installation as installed_dsh
 
@@ -147,11 +150,10 @@ def _register_prompt_runtime(monkeypatch):
 
 def _prompt_launch(monkeypatch, custom=""):
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
-    from looper.agents.profile_registry import BUILTIN_PROFILE
 
     runtime = _register_prompt_runtime(monkeypatch)
-    profile = replace(BUILTIN_PROFILE, custom_prompt=custom, model="deepseek-flash", provider=PROVIDER,
-                      runtime=replace(BUILTIN_PROFILE.runtime, type=runtime.type))
+    profile = resolved_profile("dsh-prompt", "DSH prompt", RuntimeSpec("dsh", "DSH", runtime.type),
+                               PROVIDER, "deepseek-flash", custom_prompt=custom)
     return Launch(AgentSettings(profile=profile), role=AgentType.WORKER)
 
 
@@ -983,14 +985,13 @@ def _run_launch(tmp_path, *, budget=None, role="worker"):
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
     from looper.agents.library import AgentLibrary
     from looper.agents.ops.service import server_config
-    from looper.agents.profile_registry import AgentProfile
 
     runtime = runtimes.adapter("dsh")
     source = tmp_path / "mcp.json"
     source.write_text(json.dumps({"mcpServers": {
         "looper": server_config("http://127.0.0.1:19999", "test-run-token"),
     }}))
-    profile = AgentProfile("dsh-test", "DSH test", RuntimeSpec("dsh-test", "DSH", "dsh", "", runtime.capabilities),
+    profile = resolved_profile("dsh-test", "DSH test", RuntimeSpec("dsh-test", "DSH", "dsh", "", runtime.capabilities),
                            PROVIDER, "deepseek-flash", "high")
     return Launch(AgentSettings(profile=profile, max_budget_usd=budget),
                   AgentLibrary(mcp_config=str(source), role=role), role=AgentType(role))
@@ -2720,12 +2721,16 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
             assert len(detected) == 1 and detected[0]["version"] == "0.2.1-rc.2"
             api.post("/api/runtimes/rt-dsh/probe", {})
             provider = api.post("/api/providers", {
-                "name": "disposable-messages", "protocols": ["anthropic-messages"], "auth": "api_key",
-                "base_url": "https://deepseek.example.invalid/anthropic", "api_key": "synthetic-dsh-key",
+                "name": "disposable-messages", "vendor_type": "custom",
+                "endpoints": [{"protocol": "anthropic-messages",
+                               "base_url": "https://deepseek.example.invalid/anthropic"}],
+                "api_key": "synthetic-dsh-key",
             })["provider"]["provider_id"]
+            model = api.post("/api/models", {
+                "provider_id": provider, "name": "deepseek-flash", "protocol": "anthropic-messages",
+            })["model"]["model_id"]
             profile = api.post("/api/agent-profiles", {
-                "name": "disposable-dsh", "runtime_id": "rt-dsh", "provider_id": provider,
-                "model": "deepseek-flash", "effort": "high",
+                "name": "disposable-dsh", "runtime_id": "rt-dsh", "model_id": model, "effort": "high",
             })["profile"]["profile_id"]
             for role in ("manager", "planner", "worker", "reviewer"):
                 api.put(f"/api/agent-settings/roles/{role}", {"profile_id": profile})

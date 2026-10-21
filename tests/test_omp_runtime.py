@@ -22,14 +22,16 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import (
+    Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+)
 from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
 from looper.agents.run_usage import Usage, request_context, run_usage
 from looper.agents.runtimes import (
-    ROLE_CAPABILITIES, ApiProtocol, AuthKind, Capability, ReadOnly, RuntimeUnsupported, adapter,
+    ROLE_CAPABILITIES, ApiProtocol, AuthKind, Capability, ReadOnly, RuntimeUnsupported, VendorType, adapter,
 )
 from looper.agents.runtimes.omp import (
     KEY_ENV, MCP_PLUGIN, OVERLAY, RESTORED_VARS, SHELL_PREFIX_VAR, OmpRuntime, ResidentOmp, edited_paths, write_prompt,
@@ -41,19 +43,26 @@ OMP: OmpRuntime = adapter("omp")  # type: ignore[assignment]
 KEY = "sk-test-omp-0123456789"
 
 
-def _provider(**fields: Any) -> ProviderSpec:
-    values: dict[str, Any] = {"id": "prov-cpa", "name": "cpa", "auth": AuthKind.API_KEY,
-                              "protocols": frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT}),
-                              "base_url": "http://127.0.0.1:8317/v1", "api_key": KEY}
-    return ProviderSpec(**{**values, **fields})
+def _resolved_model(*, protocol: ApiProtocol = ApiProtocol.OPENAI_RESPONSES, name: str = "gpt-5.5",
+                    vendor: VendorType = VendorType.CUSTOM, base_url: str = "http://127.0.0.1:8317/v1",
+                    api_key: str | None = KEY, env: tuple[tuple[str, str], ...] = (),
+                    **settings: Any) -> ResolvedModel:
+    login = vendor.auth_kind is AuthKind.OAUTH
+    provider = ProviderSpec("prov-cpa", "cpa", vendor, vendor.auth_kind, vendor.oauth_runtime_type,
+                            env=env, api_key=None if login else api_key)
+    model = ModelSpec("model-main", provider.id, name, protocol, **settings)
+    endpoint = Endpoint(provider.id, protocol, "" if login else base_url,
+                        use_runtime_default=not login and not base_url)
+    return ResolvedModel(model, provider, endpoint)
 
 
 def _launch(*, executable: str = "omp", library: AgentLibrary | None = None,
-            knowledge: AgentKnowledge | None = None, provider: ProviderSpec | None = None, effort: str = "low",
+            knowledge: AgentKnowledge | None = None, resolved: ResolvedModel | None = None, effort: str = "low",
             env: tuple[tuple[str, str], ...] = (), budget: float | None = None) -> Launch:
-    profile = AgentProfile("agent-omp", "omp/gpt-5.5",
-                           RuntimeSpec("rt-omp", "omp", "omp", executable, OMP.capabilities),
-                           provider or _provider(), "gpt-5.5", effort or None)
+    resolved = resolved or _resolved_model()
+    profile = ResolvedAgentProfile("agent-omp", "omp/gpt-5.5",
+                                   RuntimeSpec("rt-omp", "omp", "omp", executable, OMP.capabilities),
+                                   resolved.model.id, effort or None, resolved_model=resolved)
     return Launch(AgentSettings(profile=profile, env=env, max_budget_usd=budget),
                   library or AgentLibrary(),
                   knowledge or AgentKnowledge())
@@ -62,11 +71,8 @@ def _launch(*, executable: str = "omp", library: AgentLibrary | None = None,
 def test_a_suffix_free_deepseek_model_gets_its_million_token_catalog_window() -> None:
     from looper.agents.runtimes.omp import models_yml
 
-    provider = _provider(protocols=frozenset({ApiProtocol.OPENAI_CHAT}),
-                         catalog=(CatalogModel("deepseek-flash", context_window=1_000_000),))
-    launch = _launch(provider=provider)
-    launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, model="deepseek-flash")))
-    config = models_yml(launch)["providers"]["looper"]
+    resolved = _resolved_model(protocol=ApiProtocol.OPENAI_CHAT, name="deepseek-flash", context_window=1_000_000)
+    config = models_yml(_launch(resolved=resolved))["providers"]["looper"]
     assert config["api"] == "openai-completions"
     assert config["models"][0]["id"] == "deepseek-flash"
     assert config["models"][0]["contextWindow"] == 1_000_000
@@ -257,8 +263,8 @@ def test_a_run_gets_a_home_of_its_own_with_only_the_generated_files(
     root = tmp_path / "runtime"
     work = tmp_path / "work"
     (work / ".git").mkdir(parents=True)
-    provider = _provider(catalog=(CatalogModel("gpt-5.5", context_window=272_000),))
-    launch = _launch(provider=provider, env=(("FOO", "bar"),))
+    resolved = _resolved_model(context_window=272_000)
+    launch = _launch(resolved=resolved, env=(("FOO", "bar"),))
     command = OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(root), launch=launch)
 
     assert command[:3] == ["env", command[1], "omp"] and command[-1] == "--no-session"
@@ -317,14 +323,14 @@ def test_outside_a_repository_the_sources_that_climb_are_off(tmp_path: Path) -> 
     assert settings["disabledProviders"] == ["native", "claude", "agents", "agents-md", "claude-md"]
 
 
-@pytest.mark.parametrize(("protocols", "api", "base_url"), [
-    ({ApiProtocol.OPENAI_CHAT}, "openai-completions", "https://api.openai.com/v1"),
-    ({ApiProtocol.ANTHROPIC_MESSAGES}, "anthropic-messages", "https://api.anthropic.com"),
+@pytest.mark.parametrize(("protocol", "api", "base_url"), [
+    (ApiProtocol.OPENAI_CHAT, "openai-completions", "https://api.openai.com/v1"),
+    (ApiProtocol.ANTHROPIC_MESSAGES, "anthropic-messages", "https://api.anthropic.com"),
 ])
-def test_the_provider_api_follows_its_protocols(protocols: set[ApiProtocol], api: str, base_url: str,
-                                                tmp_path: Path) -> None:
+def test_the_provider_api_follows_its_protocols(protocol: ApiProtocol, api: str, base_url: str,
+                                               tmp_path: Path) -> None:
     command = OMP.run_command("omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path),
-                              launch=_launch(provider=_provider(protocols=frozenset(protocols), base_url=""),
+                              launch=_launch(resolved=_resolved_model(protocol=protocol, base_url=""),
                                              effort=""))
     home = Path(command[1].removeprefix("HOME="))
     provider = json.loads((home / ".omp" / "agent" / "models.yml").read_text())["providers"]["looper"]
@@ -335,12 +341,16 @@ def test_the_provider_api_follows_its_protocols(protocols: set[ApiProtocol], api
 
 
 @pytest.mark.parametrize(("provider", "error"), [
-    (_provider(api_key=None), "has no API key"),
-    (_provider(auth=AuthKind.OAUTH, oauth_runtime_type="omp"), "API key provider only"),
+    (_resolved_model(api_key=None), "has no API key"),
+    (_resolved_model(vendor=VendorType.GROK_LOGIN), "only use its own runtime"),
 ])
-def test_a_provider_omp_cannot_use_fails_the_launch(provider: ProviderSpec, error: str, tmp_path: Path) -> None:
-    with pytest.raises(RuntimeUnsupported, match=error):
-        OMP.run_command("omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=_launch(provider=provider))
+def test_a_provider_omp_cannot_use_fails_the_launch(provider: ResolvedModel, error: str, tmp_path: Path) -> None:
+    with pytest.raises(RegistryError if provider.provider.auth is AuthKind.OAUTH else RuntimeUnsupported, match=error):
+        OMP.run_command("omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=_launch(resolved=provider))
+    assert not (tmp_path / ".local" / "omp").exists()
+    if provider.provider.auth is AuthKind.OAUTH:
+        with pytest.raises(RuntimeUnsupported, match="API key provider only"):
+            OMP.bind_provider(provider.binding_provider(), provider.model.name, "")
 
 
 def test_plugins_load_natively_and_their_own_mcp_servers_and_hooks_do_not(
@@ -618,7 +628,7 @@ def test_planner_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.
     from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError, TaskPlan
 
     executable = fake_claude(tmp_path / "omp", f"ERROR = {API_ERROR!r}\nSOURCE = {source!r}\n" + _FAILED_OMP)
-    launch = _launch(executable=executable, provider=_provider(api_key="opaque-provider-secret"))
+    launch = _launch(executable=executable, resolved=_resolved_model(api_key="opaque-provider-secret"))
     planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
     planner._plan = TaskPlan("p1", "g1", "test failure", str(tmp_path))
     monkeypatch.setattr(planner, "_load_agent_settings", AsyncMock(return_value=launch.settings))
@@ -652,7 +662,7 @@ def test_manager_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.
     if with_text:
         prefix += "CONTENT = [{'type': 'text', 'text': 'partial answer'}]\n"
     executable = fake_claude(tmp_path / "omp", prefix + _FAILED_OMP)
-    launch = _launch(executable=executable, provider=_provider(api_key="opaque-provider-secret"))
+    launch = _launch(executable=executable, resolved=_resolved_model(api_key="opaque-provider-secret"))
     manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
     manager._session_loaded, manager._clean_start = True, True
     monkeypatch.setattr(manager, "_load_db_config", AsyncMock())
@@ -689,7 +699,9 @@ def test_planner_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pyt
     launch = _launch(executable=str(tmp_path / "missing"))
     profile = replace(launch.profile, runtime=replace(launch.profile.runtime, type=runtime))
     if runtime == "grok":
-        profile = replace(profile, provider=_provider(auth=AuthKind.OAUTH, oauth_runtime_type="grok"))
+        profile = replace(profile, resolved_model=_resolved_model(vendor=VendorType.GROK_LOGIN))
+    elif runtime == "claude-code":
+        profile = replace(profile, resolved_model=_resolved_model(protocol=ApiProtocol.ANTHROPIC_MESSAGES))
     planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
     planner._plan = TaskPlan("p1", "g1", "test startup", str(tmp_path))
     monkeypatch.setattr(planner, "_load_agent_settings", AsyncMock(return_value=replace(launch.settings, profile=profile)))
@@ -732,7 +744,7 @@ def test_manager_cannot_start_names_the_runtime(tmp_path: Path, monkeypatch: pyt
 def test_error_redaction_precedes_clipping() -> None:
     from looper.agents.runtimes.omp import OmpStream
 
-    launch = _launch(provider=_provider(api_key="opaque-provider-secret"))
+    launch = _launch(resolved=_resolved_model(api_key="opaque-provider-secret"))
     stream = OmpStream()
     stream.translate({"type": "message_end", "message": {"role": "assistant", "stopReason": "error",
                      "errorMessage": "x" * 480 + "opaque-provider-secret" + "y" * 100}})
@@ -767,7 +779,7 @@ def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_between_requests(tm
 
     root = tmp_path / "runtime"
     omp = fake_claude(tmp_path / "omp", _FAKE_OMP)
-    provider = _provider()
+    provider = _resolved_model().binding_provider()
     second = tmp_path / "second-request"
     # gpt-5.5 at the built-in prices: each request's 60 uncached and 40 cached input tokens and 5 output tokens.
     request_cost = (60 * 5.00 + 40 * 0.50 + 5 * 30.00) / 1_000_000
@@ -927,3 +939,98 @@ def test_a_consult_resumes_a_copy_of_the_runs_session_with_only_the_reading_tool
     assert _flag(command, "--tools") == ["read,glob,grep"]
     assert command[-4:] == ["--session-dir", str(fork), "--resume", "s-1"] and (fork / "session.jsonl").is_file()
     assert "--tools" not in OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path), launch=_launch())
+
+
+@pytest.mark.parametrize("invalid", ["protocols", "empty-protocols", "catalog", "missing-model", "model"])
+def test_binding_requires_one_exact_resolved_model(invalid: str) -> None:
+    resolved = _resolved_model()
+    provider = resolved.binding_provider()
+    if invalid == "protocols":
+        provider = replace(provider, protocols=frozenset(ApiProtocol))
+    elif invalid == "empty-protocols":
+        provider = replace(provider, protocols=frozenset())
+    elif invalid == "catalog":
+        provider = replace(provider, catalog=(*provider.catalog, *provider.catalog))
+    elif invalid == "missing-model":
+        provider = replace(provider, catalog=())
+    with pytest.raises(RuntimeUnsupported, match="protocol|model"):
+        OMP.bind_provider(provider, "other-model" if invalid == "model" else resolved.model.name, "")
+
+
+@pytest.mark.parametrize(("protocol", "api"), [
+    (ApiProtocol.OPENAI_RESPONSES, "openai-responses"),
+    (ApiProtocol.OPENAI_CHAT, "openai-completions"),
+    (ApiProtocol.ANTHROPIC_MESSAGES, "anthropic-messages"),
+])
+@pytest.mark.parametrize("efforts", [None, (), ("low", "high")])
+def test_exact_model_settings_and_all_roles_follow_the_resolved_model(
+    protocol: ApiProtocol, api: str, efforts: tuple[str, ...] | None,
+) -> None:
+    from looper.agents.runtimes.omp import models_yml, overlay
+
+    name = "exact-model[1m]"
+    resolved = _resolved_model(protocol=protocol, name=name, context_window=272_000, efforts=efforts,
+                               background_model="side-model[1m]")
+    launch = _launch(resolved=resolved, effort="xhigh")
+    provider = models_yml(launch)["providers"]["looper"]
+    model, = provider["models"]
+    assert provider["api"] == api and provider["baseUrl"] == resolved.endpoint.base_url
+    assert model["id"] == model["name"] == name
+    assert model["contextWindow"] == 272_000
+    assert model["reasoning"] is (efforts != ())
+    assert model.get("compat") == ({"supportsStrictMode": True} if protocol is ApiProtocol.OPENAI_RESPONSES else None)
+    assert OMP.bind_provider(resolved.binding_provider(), name, "xhigh").args == (
+        "--model", f"looper/{name}", "--thinking", "xhigh")
+    settings = overlay(launch, outside_repository=False)
+    assert settings["enabledModels"] == [f"looper/{name}"]
+    assert settings["modelRoles"] == {role: f"looper/{name}" for role in ("default", "smol", "slow", "plan", "vision")}
+    assert settings["retry"] == {"modelFallback": False}
+
+
+@pytest.mark.parametrize("case", ["responses-default", "chat-proxy", "messages-open", "priority-all",
+                                   "priority-chat", "responses-open"])
+def test_resolved_omp_config_matches_pinned_launches(case: str) -> None:
+    from looper.agents.runtimes.omp import models_yml, overlay
+
+    pinned = json.loads((FIXTURES.parent / "model_launch_parity_v2_omp.json").read_text())["captures"][case]
+    for expected in pinned:
+        config = expected["config"]
+        models = json.loads(config["models_yml"])
+        bound = models["providers"]["looper"]
+        protocol = {"openai-responses": ApiProtocol.OPENAI_RESPONSES,
+                    "openai-completions": ApiProtocol.OPENAI_CHAT,
+                    "anthropic-messages": ApiProtocol.ANTHROPIC_MESSAGES}[config["api"]]
+        metadata = dict(config["catalog"][0]) if config["catalog"] else {"name": config["model"]}
+        resolved = _resolved_model(protocol=protocol, base_url=bound["baseUrl"], api_key="sk-test-capture", **metadata)
+        launch = _launch(resolved=resolved, effort=config["effort"], budget=expected["cap"])
+        assert models_yml(launch) == models
+        assert overlay(launch, outside_repository=True) == json.loads(config["overlay"])
+        launch = replace(launch, role=AgentType.PLANNER if expected["permissions"]["read_only"] else AgentType.WORKER)
+        argv = expected["argv"]
+        start, end = argv.index("-p"), argv.index("--config")
+        assert OMP.launch_args(launch) == argv[start:end]
+        assert launch.environment()[KEY_ENV] == expected["env"][KEY_ENV]
+        assert launch.cost_source.value == expected["price"]["source"]
+
+
+@pytest.mark.parametrize("replacing", [False, True], ids=["append", "replace"])
+@pytest.mark.parametrize("steer", [False, True], ids=["json", "rpc"])
+def test_resolved_omp_launch_preserves_prompt_and_transport_modes(
+    replacing: bool, steer: bool, tmp_path: Path,
+) -> None:
+    from looper.agents.runtimes import SystemPromptMode
+
+    launch = _launch(resolved=_resolved_model(protocol=ApiProtocol.OPENAI_CHAT, name="exact[1m]"))
+    launch = replace(launch, role=AgentType.WORKER, settings=replace(launch.settings, system_prompt_mode=(
+        SystemPromptMode.REPLACE if replacing else SystemPromptMode.APPEND)))
+    command = (OMP.steer_command if steer else OMP.run_command)(
+        "omp", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)
+    assert _flag(command, "--model") == ["looper/exact[1m]"]
+    assert _flag(command, "--mode") == ["rpc" if steer else "json"]
+    assert ("--no-ui" in command) is steer and ("-p" in command) is not steer
+    flag = "--system-prompt" if replacing else "--append-system-prompt"
+    prompt, = _flag(command, flag)
+    assert Path(prompt).read_text().endswith("LOOPER PROMPT: the contract comes last.")
+    assert ("--system-prompt" in command) is replacing
+    assert ("--append-system-prompt" in command) is not replacing
+    assert command[-1] == "--no-session"

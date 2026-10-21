@@ -1,4 +1,4 @@
-"""The Manager's T2 tools (Manager tools RFC, section 7): projects, Agent Profiles, LLM providers, the capability
+"""The Manager's T2 tools (Manager tools RFC, section 7): projects, Agent Profiles, LLM accounts and models, the capability
 catalog and spending; its settings tool is ``ops.settings``. And T3's configuration export (section 7.1): the
 file ``looper config export`` writes, never with secrets, into the runtime directory.
 
@@ -13,20 +13,20 @@ enters it on the dashboard.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Iterable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import urlsplit
 
 from ...db import llm_records as db_llm_records, projects as db_projects
-from .. import catalog, profile_registry, projects, provider_presets
+from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..projects import RequestError, project_name
-from ..runtimes.pricing import base_model, model_price
+from ..runtimes import ApiProtocol, AuthKind, VendorType
 from ..tiers.journal import clip
-from . import Call, ErrorCode, OpError, Risk, Tool
+from . import Call, ErrorCode, OpError, Risk, Tool, check_arguments
 from .tasks import _TASK_ID, _request_error, _task, _task_argument
 
 T = TypeVar("T")
@@ -139,7 +139,8 @@ async def _deleting_project(call: Call) -> str | None:
 def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     used = profile_registry.usage_text(view["used_by"])
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
-            "provider": view["provider_name"], "model": view["model"], "effort": view["effort"],
+            "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
+            "effort": view["effort"],
             "agent_teams": view["agent_teams"],
             "custom_prompt": view.get("custom_prompt", ""),
             "roles": view["roles"], "builtin": view["builtin"],
@@ -147,10 +148,8 @@ def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _provider_listed(view: Mapping[str, Any]) -> dict[str, Any]:
-    listed = {"provider_id": view["provider_id"], "name": view["name"], "auth": view["auth"],
-              "protocols": view["protocols"], "base_url": view["base_url"] or None,
-              "models": [m["name"] for m in view["models"]], "profiles": view["profile_count"],
-              "builtin": view["builtin"]}
+    listed = {key: view[key] for key in ("provider_id", "name", "vendor_type", "auth", "endpoints",
+                                       "model_count", "profile_count", "builtin", "login")}
     if view["auth"] == "api_key":
         listed["api_key"] = "set" if view["api_key"] else "missing: the user enters it on the dashboard"
     return listed
@@ -164,16 +163,14 @@ def _profile(registry: Mapping[str, Any], wanted: Any) -> dict[str, Any]:
     return by_id_or_name(registry["profiles"], wanted, id_key="profile_id", what="Agent Profile")
 
 
-def _profile_parts(registry: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """The runtime and provider a call names (each by id or name; a runtime also by its type), as the registry's
-    ids."""
+async def _profile_parts(registry: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve a runtime and an exact model reference to their registry ids."""
     parts = {}
     if arguments.get("runtime") is not None:
         parts["runtime_id"] = by_id_or_name(registry["runtimes"], arguments["runtime"], id_key="runtime_id",
                                             what="runtime", keys=("name", "type"))["runtime_id"]
-    if arguments.get("provider") is not None:
-        parts["provider_id"] = by_id_or_name(registry["providers"], arguments["provider"], id_key="provider_id",
-                                             what="provider")["provider_id"]
+    if arguments.get("model") is not None:
+        parts["model_id"] = (await _model_reference(arguments["model"]))["model_id"]
     return parts
 
 
@@ -188,18 +185,19 @@ async def _profiles(call: Call) -> dict[str, Any]:
         return {"profiles": [_profile_listed(p) for p in registry["profiles"]],
                 "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"], "roles": r["roles"]}
                              for r in registry["runtimes"]],
-                "providers": [{"provider_id": p["provider_id"], "name": p["name"],
-                               "models": [m["name"] for m in p["models"]] or p["suggested_models"]}
-                              for p in registry["providers"]]}
-    fields = {**_given(arguments, ("name", "model", "effort", "agent_teams", "custom_prompt"),
-                      clears=("effort",)),
-              **_profile_parts(registry, arguments)}
+                "runtime_types": registry["runtime_types"],
+                "models": [{key: m[key] for key in ("model_id", "provider_id", "provider_name", "name", "protocol")}
+                           for m in registry["models"]]}
     if action == "create":
-        _required(arguments, action, "name", "runtime", "provider", "model")
-        return _profile_answer(await answered(profile_registry.create_profile(fields)))
-    _required(arguments, action, "profile")
-    profile = _profile(registry, arguments["profile"])
-    if action == "update":
+        _required(arguments, action, "name", "runtime", "model")
+    else:
+        _required(arguments, action, "profile")
+        profile = _profile(registry, arguments["profile"])
+    if action in ("create", "update"):
+        fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt"), clears=("effort",)),
+                  **await _profile_parts(registry, arguments)}
+        if action == "create":
+            return _profile_answer(await answered(profile_registry.create_profile(fields)))
         return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields)))
     await answered(profile_registry.delete_profile(profile["profile_id"]))
     return {"deleted": profile["name"]}
@@ -213,82 +211,113 @@ async def _deleting_profile(call: Call) -> str | None:
     profile = _profile(await _registry(), call.arguments["profile"])
     row = await answered(profile_registry.deletable_profile(profile["profile_id"]))
     effort = f" · effort {row['effort']}" if row.get("effort") else ""
-    return (f"要删除 Agent Profile「{row['name']}」（{row['runtime_name']} · {row['provider_name']} · {row['model']}"
+    return (f"要删除 Agent Profile「{row['name']}」（{row['runtime_name']} · {row['provider']['name']} · "
+            f"{row['model']['name']} · {row['model']['protocol']}"
             f"{effort}）吗？没有设置层、任务、定时任务或项目的可选列表在用它；删除后不能恢复。")
-
-
-def _provider_warnings(view: Mapping[str, Any]) -> list[str]:
-    provider = profile_registry.provider_spec({**view, "id": view["provider_id"],
-                                               "oauth_runtime_type": view.get("oauth_runtime_type")})
-    # Warning lookup must not impose stricter URL validation after the dashboard's code has saved it.
-    try:
-        host = urlsplit(provider.base_url or "").hostname
-    except ValueError:
-        host = None
-    preset = next((p for p in provider_presets.PRESETS
-                   if host and any(urlsplit(api.base_url).hostname == host for api in p.apis)), None)
-    known = {base_model(model.name) for model in preset.models} if preset else set()
-    warnings = []
-    for model in provider.catalog:
-        if not model_price(provider, model.name).complete:
-            warnings.append(f"model {model.name!r} has no full price with provider {provider.name!r} (input, output, "
-                            "cache read and cache write): its runs record tokens only and spend caps do not apply "
-                            "to them; add its prices to the provider's model catalog")
-        if preset and base_model(model.name) not in known:
-            warnings.append(f"model {model.name!r} is unknown for preset {preset.label!r}; known models: "
-                            f"{', '.join(sorted(known))}. Check the vendor's model name before using it.")
-    return warnings
 
 
 async def _providers(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     if action == "list":
-        registry = await _registry()
-        # The same catalogs the dashboard serves. A caller that lists providers only still gets the presets.
-        presets = registry["provider_presets"] if "provider_presets" in registry else provider_presets.presets_view()
-        return {"providers": [_provider_listed(p) for p in registry["providers"]], "presets": presets}
-    data: dict[str, Any] = {} if action == "update" else {
-        "auth": "api_key", "base_url": None, "models": [], "env": []}
-    if action == "update" and any(arguments.get(field) is not None for field in ("preset", "api")):
-        raise OpError(ErrorCode.INVALID, "preset and api are for register; update protocols, base_url, models or env")
-    if arguments.get("preset") is not None:
-        preset = next((p for p in provider_presets.PRESETS if p.id == arguments["preset"]), None)
-        if preset is None:
-            ids = ", ".join(p.id for p in provider_presets.PRESETS)
-            raise OpError(ErrorCode.INVALID, f"unknown preset {arguments['preset']!r}; there are: {ids}")
-        _required(arguments, "register", "api")
-        view = preset.view()
-        api = next((api for api in view["apis"] if arguments["api"] in api["protocols"]), None)
-        if api is None:
-            protocols = ", ".join(protocol.value for api in preset.apis for protocol in api.protocols)
-            raise OpError(ErrorCode.INVALID, f"unknown API {arguments['api']!r} for preset {preset.id!r}; "
-                                             f"choose a protocol: {protocols}")
-        data.update(name=preset.name, protocols=api["protocols"], base_url=api["base_url"],
-                    models=provider_presets.api_models(view, api))
-        data["env"] = [{"key": key, "value": value} for key, value in preset.env]
-    data.update(_given(arguments, ("name", "protocols", "base_url"), clears=("base_url",)))
-    if arguments.get("models") is not None:
-        data["models"] = [{"name": model} for model in arguments["models"]]
-    if arguments.get("env") is not None:
-        data["env"] = [{"key": key, "value": value} for key, value in arguments["env"].items()]
+        accounts = await answered(profile_registry.list_providers())
+        return {"providers": [_provider_listed(p) for p in accounts["providers"]],
+                "vendors": profile_registry.vendor_types_view()}
+    if "endpoints" in arguments:
+        if not isinstance(arguments["endpoints"], list):
+            raise OpError(ErrorCode.INVALID, "endpoints must be a list")
+        for endpoint in arguments["endpoints"]:
+            check_arguments(_PROVIDER_ENDPOINT, endpoint)
     if action == "update":
         _required(arguments, action, "provider")
-        current = by_id_or_name((await _registry())["providers"], arguments["provider"],
-                                id_key="provider_id", what="provider")
-        if "models" in data:
-            # The registry replaces the catalog; names retained by the tool keep their metadata.
-            existing = {model["name"]: model for model in current["models"]}
-            data["models"] = [existing.get(model["name"].strip(), model) for model in data["models"]]
-        answer = await answered(profile_registry.update_provider(current["provider_id"], data))
+        provider_id = await _model_provider(arguments["provider"])
+        answer = await answered(profile_registry.update_provider(
+            provider_id, {key: value for key, value in arguments.items() if key not in {"action", "provider"}}))
     else:
-        _required(data, "register", "name", "protocols")
-        answer = await answered(profile_registry.create_provider(data))
+        _required(arguments, action, "name", "vendor_type")
+        try:
+            vendor = VendorType(arguments["vendor_type"])
+        except ValueError:
+            raise OpError(ErrorCode.INVALID, "unknown vendor_type") from None
+        if vendor.auth_kind is AuthKind.OAUTH:
+            raise OpError(ErrorCode.INVALID, "select the builtin login account from looper_providers.list; "
+                                             "register cannot copy login accounts")
+        answer = await answered(profile_registry.create_provider(
+            {key: value for key, value in arguments.items() if key != "action"}))
     provider = _provider_listed(answer["provider"])
-    result = {"provider": provider,
-              "warnings": [*answer.get("warnings", ()), *_provider_warnings(answer["provider"])]}
+    result = {"provider": provider, "warnings": answer.get("warnings", [])}
     if action == "register":
         result["note"] = KEY_NOTE.format(name=provider["name"])
     return result
+
+
+# --- looper_models ---
+
+
+async def _model_provider(wanted: Any) -> str:
+    accounts = (await answered(profile_registry.list_providers()))["providers"]
+    return by_id_or_name(accounts, wanted, id_key="provider_id", what="provider")["provider_id"]
+
+
+async def _model_reference(wanted: Any) -> dict[str, Any]:
+    # check_arguments handles only a subset of JSON Schema; enforce the oneOf here too.
+    if isinstance(wanted, str):
+        if not re.fullmatch(r"model-[a-zA-Z0-9-]+", wanted):
+            raise OpError(ErrorCode.INVALID, "model must be an id or full {provider, name, protocol} reference; "
+                                             "use looper_models.list to choose an exact model")
+        return (await answered(profile_registry.get_model(wanted)))["model"]
+    reference = check_arguments(_MODEL_REFERENCE["oneOf"][1], wanted)
+    provider_id = await _model_provider(reference["provider"])
+    rows = (await answered(profile_registry.list_models(provider_id=provider_id)))["models"]
+    match = next((row for row in rows if row["name"] == reference["name"]
+                  and row["protocol"] == reference["protocol"]), None)
+    if match is None:
+        raise OpError(ErrorCode.NOT_FOUND, "no model with this provider, exact name and protocol; "
+                                           "use looper_models.list")
+    return match
+
+
+async def _models(call: Call) -> dict[str, Any]:
+    arguments, action = call.arguments, call.arguments["action"]
+    if action == "list":
+        filters = {}
+        if arguments.get("provider") is not None:
+            filters["provider_id"] = await _model_provider(arguments["provider"])
+        if arguments.get("runtime") is not None:
+            from ...db import profile_registry as db_registry
+
+            rows = [{**row, "runtime_id": row["id"]} for row in await db_registry.list_runtimes()]
+            filters["runtime_id"] = by_id_or_name(rows, arguments["runtime"], id_key="runtime_id",
+                                                   what="runtime", keys=("name", "type"))["runtime_id"]
+        return await answered(profile_registry.list_models(**filters))
+    fields = {key: arguments[key] for key in _MODEL_SETTINGS if key in arguments}
+    if action == "create":
+        _required(arguments, action, "provider", "name", "protocol")
+        fields.update(provider_id=await _model_provider(arguments["provider"]), name=arguments["name"],
+                      protocol=arguments["protocol"])
+        return await answered(profile_registry.create_model(fields))
+    _required(arguments, action, "model")
+    model = await _model_reference(arguments["model"])
+    if action == "update":
+        if any(key in arguments for key in ("provider", "name", "protocol", "runtime")):
+            raise OpError(ErrorCode.INVALID, "update only changes model settings; identity is immutable")
+        return await answered(profile_registry.update_model(model["model_id"], fields))
+    return await answered(profile_registry.delete_model(model["model_id"]))
+
+
+async def _deleting_model(call: Call) -> str | None:
+    if call.arguments["action"] != "delete":
+        return None
+    _required(call.arguments, "delete", "model")
+    model = await _model_reference(call.arguments["model"])
+    if model["builtin"]:
+        raise OpError(ErrorCode.INVALID, "a builtin model cannot be deleted")
+    if model["profile_count"]:
+        raise OpError(ErrorCode.CONFLICT,
+                      "this model still has Agent Profile references: remove or repoint them first")
+    # Freeze the exact target for confirmation, even if its provider is later renamed.
+    call.arguments["model"] = model["model_id"]
+    return (f"要删除模型「{model['provider_name']} · {model['name']} · {model['protocol']}」"
+            f"（{model['model_id']}）吗？没有 Agent Profile 引用它；账户、endpoint 和其他模型不受影响。删除后不能恢复。")
 
 
 # --- looper_catalog ---
@@ -443,6 +472,25 @@ async def _config_export(call: Call) -> dict[str, Any]:
 _PROJECT = {"type": "string", "minLength": 1, "description": "The project's name."}
 _ROLES = {"type": "array", "description": "Of manager (global only), planner, worker, reviewer; default all."}
 
+_PROTOCOL = {"type": "string", "enum": [p.value for p in ApiProtocol]}
+_PROVIDER_ENDPOINT = {
+    "type": "object", "required": ["protocol", "base_url"], "additionalProperties": False,
+    "properties": {"protocol": _PROTOCOL, "base_url": {"type": "string"}},
+}
+_MODEL_REFERENCE = {"oneOf": [
+    {"type": "string", "minLength": 1, "pattern": "^model-[a-zA-Z0-9-]+$", "description": "Model id from list."},
+    {"type": "object", "required": ["provider", "name", "protocol"], "additionalProperties": False,
+     "properties": {"provider": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+                    "protocol": _PROTOCOL}},
+]}
+_MODEL_SETTINGS = {
+    "context_window": {"type": ["integer", "null"]},
+    **{field: {"type": ["number", "null"]} for field in profile_registry.PRICE_FIELDS},
+    "efforts": {"type": ["array", "null"], "items": {"type": "string"}},
+    "background_model": {"type": ["string", "null"]},
+}
+
+
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_projects",
@@ -463,8 +511,8 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_agent_profiles",
-        description="Agent Profiles (runtime, provider, model, effort): list (with runtimes and providers); create; "
-                    "update; delete one nothing uses (the user confirms first). A role's profile: looper_settings.",
+        description="Agent Profiles: runtime, LLM model and runtime options. List; create; update; delete one "
+                    "nothing uses with confirmation. Select a role's profile with looper_settings.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
@@ -472,9 +520,11 @@ TOOLS: tuple[Tool, ...] = (
                 "profile": {"type": "string", "minLength": 1, "description": "Its id or name (update, delete)."},
                 "name": {"type": "string", "minLength": 1, "description": "create: its name; update: its new name."},
                 "runtime": {"type": "string", "description": "A runtime's id, name or type."},
-                "provider": {"type": "string", "description": "A provider's id or name."},
-                "model": {"type": "string"},
-                "effort": {"type": "string", "description": "low, medium, high, xhigh, max; null: the runtime's."},
+                "model": _MODEL_REFERENCE,
+                "effort": {"type": ["string", "null"],
+                           "description": "Choose from the runtime type's effort_levels returned by list; "
+                                          "when null, shared levels are low, medium, high, xhigh, max. "
+                                          "A null effort uses the runtime's default."},
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
                 "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
                                   "prompt, before the harness; empty adds nothing."},
@@ -484,26 +534,44 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_providers",
-        description="LLM providers: list providers and presets; register; update by id or name. Never take or change "
-                    "API keys: the user sets them on the dashboard. Warns about unknown preset models, missing "
-                    "prices, and a context suffix another runtime would send verbatim.",
+        description="LLM accounts: list vendors and accounts; register an API-key account without its key; "
+                    "update an account's name, endpoints, env or max_concurrency. "
+                    "Never take or pass a key; the user enters it on the dashboard.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
                 "action": {"type": "string", "enum": ["list", "register", "update"]},
-                "provider": {"type": "string", "minLength": 1, "description": "Its id or name (update)."},
-                "preset": {"type": "string", "description": "Register: preset id from list; api selects its API, "
-                           "and explicit fields override its defaults."},
-                "api": {"type": "string", "description": "A protocol of the preset's chosen API (required with preset)."},
+                "provider": {"type": "string", "minLength": 1, "description": "Account id or name (update)."},
                 "name": {"type": "string", "minLength": 1},
-                "protocols": {"type": "array", "description": "Of anthropic-messages, openai-responses, openai-chat."},
-                "base_url": {"type": ["string", "null"], "description": "http(s) URL; null clears it; omitted on "
-                             "update keeps it."},
-                "models": {"type": "array", "description": "Model names it serves."},
-                "env": {"type": "object", "description": "Extra environment for its runs: {NAME: value}."},
+                "vendor_type": {"type": "string", "enum": [v.value for v in VendorType]},
+                # Structured arrays are checked by the shared HTTP registry, beyond check_arguments' subset.
+                "endpoints": {"oneOf": [{"type": "array", "items": _PROVIDER_ENDPOINT}]},
+                "env": {"oneOf": [{"type": "array", "items": {
+                    "type": "object", "required": ["key", "value"], "additionalProperties": False,
+                    "properties": {"key": {"type": "string"}, "value": {"type": "string"}}}}]},
+                "max_concurrency": {"type": ["integer", "null"]},
             },
         },
         risk=Risk.WRITE, run=_providers, read_actions=frozenset({"list"}),
+    ),
+    Tool(
+        name="looper_models",
+        description="LLM models: list (optionally compatible with a runtime); create; update settings; delete an "
+                    "unused model with confirmation. A model is one provider, exact name and protocol; use its "
+                    "id or full reference.",
+        schema={
+            "type": "object", "required": ["action"], "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "create", "update", "delete"]},
+                "provider": {"type": "string", "minLength": 1, "description": "Account id or name (list, create)."},
+                "runtime": {"type": "string", "minLength": 1, "description": "Runtime id, name or type (list)."},
+                "name": {"type": "string", "minLength": 1, "description": "Exact model name (create)."},
+                "protocol": _PROTOCOL,
+                "model": _MODEL_REFERENCE,
+                **_MODEL_SETTINGS,
+            },
+        },
+        risk=Risk.WRITE, run=_models, escalate=_deleting_model, read_actions=frozenset({"list"}),
     ),
     Tool(
         name="looper_catalog",

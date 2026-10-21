@@ -12,15 +12,16 @@ from typing import Any
 import pytest
 
 from looper.agents.agent_settings import AgentSettings, Launch
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
-from looper.agents.runtimes import ApiProtocol, AuthKind, adapter, grok_login
+from looper.agents.profile_registry import (
+    Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+)
+from looper.agents.runtimes import ApiProtocol, AuthKind, VendorType, adapter, grok_login
 from looper.agents.runtimes.grok_login import LoginState, LoginStatus
 from looper.agents.self_check import FAIL, OK, SKIP, check_grok_login
 from looper.agents.system_prompt import SystemPrompt
 
 GROK = adapter("grok")
-LOGIN = ProviderSpec("prov-grok-login", "grok-login", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}),
-                     "grok")
+LOGIN = ProviderSpec("prov-grok-login", "grok-login", VendorType.GROK_LOGIN, AuthKind.OAUTH, "grok")
 
 
 @pytest.fixture
@@ -56,8 +57,10 @@ def _operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _run(tmp_path: Path, prompt: str = "PROMPT") -> tuple[Launch, list[str]]:
-    profile = AgentProfile("agent-grok-login", "grok/login", RuntimeSpec("rt-grok", "grok", "grok", "",
-                                                                       GROK.capabilities), LOGIN, "grok-4.7")
+    model = ModelSpec("model-grok-login", LOGIN.id, "grok-4.7", ApiProtocol.OPENAI_RESPONSES)
+    profile = ResolvedAgentProfile("agent-grok-login", "grok/login",
+        RuntimeSpec("rt-grok", "grok", "grok", "", GROK.capabilities), model.id,
+        resolved_model=ResolvedModel(model, LOGIN, Endpoint(LOGIN.id, model.protocol, "")))
     launch = Launch(AgentSettings(profile=profile))
     command = GROK.run_command("grok", cwd=tmp_path, prompt_file=SystemPrompt(prompt).write_file(tmp_path / "rt"),
                                launch=launch)

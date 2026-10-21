@@ -88,9 +88,8 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
 
     async def test(pool: Any) -> None:
         project = await _project(pool)
-        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                           "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', 'prov-claude-subscription', "
-                           "'sonnet')")
+        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                           "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'))")
         chat = _Chat(tmp_path)
         (answer,) = await chat.say("确认", ("looper_task_create", {
             "requirement": "build a calculator", "title": "计算器", "project": "CALC",

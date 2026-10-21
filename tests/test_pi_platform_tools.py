@@ -31,7 +31,8 @@ from looper.agents.ops.planner import PlannerOps, TOOLS as PLANNER_TOOLS
 from looper.agents.ops.room import RoomOps, tools_for
 from looper.agents.ops.service import MANAGER_TOOLS, ManagerOps, Platform, library_with_server, server_config
 from looper.agents.ops.vault import TOOLS as VAULT_TOOLS
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec, servable_roles
+from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec, servable_roles
+from tests.runtime_model_helpers import resolved_profile
 from looper.agents.room import MemberKind, RoomService, Seat
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, RuntimeUnsupported
 from looper.agents.runtimes.pi import PROBE_HELP_TOKENS, PiRuntime
@@ -48,7 +49,7 @@ def _launch(role: str, library: AgentLibrary = AgentLibrary(), *, endpoint: str 
             consult: bool = False) -> Launch:
     provider = ProviderSpec("prov-pi-test", "test", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_CHAT}),
                             base_url=endpoint, api_key="sk-disposable-provider")
-    profile = AgentProfile("agent-pi-test", "test", RuntimeSpec("rt-pi", "pi", "pi", capabilities=CAPABILITIES),
+    profile = resolved_profile("agent-pi-test", "test", RuntimeSpec("rt-pi", "pi", "pi", capabilities=CAPABILITIES),
                            provider, "selected", "")
     return Launch(AgentSettings(profile=profile), library=library, role=AgentType(role), consult=consult)
 

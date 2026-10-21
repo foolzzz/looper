@@ -539,11 +539,11 @@ async def choosable_profiles(project_id: str | None) -> tuple[list[dict[str, Any
 def allowed_profile_view(row: dict[str, Any]) -> dict[str, Any]:
     """A profile on a project's list (``profile_registry.PROFILE_JSON``) as the list shows it: what it runs, which of
     the Worker and Reviewer it can run, and its input and output price per million tokens (None where unknown)."""
-    from .profile_registry import AgentProfile, servable_roles
+    from .profile_registry import ResolvedAgentProfile, servable_roles
     from .runtimes.pricing import model_price
 
-    profile = AgentProfile.from_row(row)
-    price = model_price(profile.provider, profile.model)
+    profile = ResolvedAgentProfile.from_row(row)
+    price = model_price(profile.resolved_model, profile.model)
     return {"profile_id": profile.id, "name": profile.name, "runtime": profile.runtime.type, "model": profile.model,
             "effort": profile.effort or None,
             "roles": [role for role in servable_roles(profile.runtime.capabilities) if role in _CHOOSABLE],

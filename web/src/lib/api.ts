@@ -708,7 +708,7 @@ export interface ConfigImportPlan {
   /** Each section the file holds: how many of its entries are added, changed, unchanged and skipped. */
   counts: Record<string, Record<ConfigImportAction, number>>;
   /** Every entry but the unchanged ones: the fields that change, or why it is skipped. */
-  changes: { section: string; key: string; action: Exclude<ConfigImportAction, "unchanged">; fields?: string[]; reason?: string }[];
+  changes: { section: string; key: string; action: Exclude<ConfigImportAction, "unchanged">; fields?: string[]; reason?: string; code?: string }[];
   /** Secrets this machine still needs; after applying, `target` is the stored row whose form takes them. */
   need_secret: { section: string; key: string; names: string[]; target?: { kind: "provider" | "mcp" | "channel"; id: string } }[];
   notes: string[];
@@ -2487,6 +2487,8 @@ export interface RuntimeType {
   auth_kinds: ProviderAuth[];
   /** Exact accepted model ids, or null when the provider's catalog is unrestricted by the runtime. */
   supported_models: string[] | null;
+  /** Accepted effort levels, or null when the runtime uses the registry-wide choices. */
+  effort_levels?: string[] | null;
   can_replace_system_prompt: boolean;
   replace_system_prompt_refusal: string | null;
 }
@@ -2518,20 +2520,8 @@ export interface Runtime {
 /** "oauth": the runtime's own login; "api_key": a key stored in Looper. */
 export type ProviderAuth = "oauth" | "api_key";
 
-/** One model a provider serves; every field but the name may be null (unknown). Prices are USD per million tokens. */
-export interface ProviderModel {
-  name: string;
-  context_window: number | null;
-  input_usd_per_mtok: number | null;
-  output_usd_per_mtok: number | null;
-  cache_read_usd_per_mtok: number | null;
-  cache_write_usd_per_mtok: number | null;
-  efforts: string[] | null;
-  /** The model the runtime's side requests use with this one (titles, summaries, quick subagents); null: itself. */
-  background_model: string | null;
-}
-
-export type PriceField = Exclude<keyof ProviderModel, "name" | "context_window" | "efforts" | "background_model">;
+/** Prices are USD per million tokens. */
+export type PriceField = "input_usd_per_mtok" | "output_usd_per_mtok" | "cache_read_usd_per_mtok" | "cache_write_usd_per_mtok";
 
 /** An environment variable a provider adds to the runs that use it. */
 export interface ProviderEnvEntry {
@@ -2545,48 +2535,6 @@ export interface ProviderEnvEntry {
 export interface ProviderLogin {
   state: "chatgpt" | "logged_in" | "other_method" | "not_logged_in" | "unknown" | "unavailable";
   detail: string;
-}
-
-/** A registered LLM provider. The key itself is never sent: `api_key` is the mask when one is stored. */
-export interface Provider {
-  provider_id: string;
-  name: string;
-  protocols: string[];
-  auth: ProviderAuth;
-  /** The runtime type whose login an OAuth provider is; null for an API-key provider. */
-  oauth_runtime_type: string | null;
-  /** "" = the protocol's own endpoint. */
-  base_url: string;
-  /** Empty: any model. */
-  models: ProviderModel[];
-  /** The models its runtime's own login offers, to suggest (an OAuth provider; any model is taken). */
-  suggested_models: string[];
-  /** The login's state, for an OAuth provider whose runtime reports one (Codex, Grok); null otherwise. */
-  login: ProviderLogin | null;
-  /** Its own environment variables for the runs that use it. */
-  env: ProviderEnvEntry[];
-  /** null = no limit. */
-  max_concurrency: number | null;
-  api_key: string | null;
-  builtin: boolean;
-  profile_count: number;
-}
-
-/** A known vendor's provider, filled in except for the key: its APIs (each one provider), models and env. */
-export interface ProviderPreset {
-  preset_id: string;
-  label: string;
-  name: string;
-  apis: {
-    protocols: string[];
-    base_url: string;
-    /** When present, replaces the preset's model catalog for this API, including an empty catalog. */
-    models?: ProviderPreset["models"];
-  }[];
-  models: Pick<ProviderModel, "name" | "context_window" | "background_model">[];
-  env: ProviderEnvEntry[];
-  docs: string[];
-  note: string;
 }
 
 /** How a profile's runs are priced: by its runtime, or by Looper at the provider's prices; which models lack a
@@ -2604,37 +2552,17 @@ export interface ProfileCostBasis {
 export interface ProfileUsedBy {
   layers: { scope: SettingLayer; role: AgentRole | null; project_id: string | null; project_name: string | null }[];
   task_count: number;
+  schedule_count: number;
   /** The names of the projects whose list of profiles the Planner may choose holds it. */
   allowed_in: string[];
 }
 
 export type SystemPromptMode = "append" | "replace";
 
-/** An Agent Profile: a runtime, a provider and a model, with an optional effort, which its runs use. */
-export interface AgentProfile {
-  profile_id: string;
-  name: string;
-  model: string;
-  /** null = the runtime's default. */
-  effort: string | null;
-  /** Claude Code's agent teams in its runs (Claude Code runtimes only). */
-  agent_teams: boolean;
-  custom_prompt: string;
-  runtime_id: string;
-  runtime_name: string;
-  runtime_type: string;
-  provider_id: string;
-  provider_name: string;
-  builtin: boolean;
-  /** The roles its runtime can run. */
-  roles: AgentRole[];
-  used_by: ProfileUsedBy;
-  cost: ProfileCostBasis;
-}
-
 export interface RegistryLimits {
   name_max_chars: number;
   models_max: number;
+  model_fields: string[];
   price_fields: PriceField[];
   protocols: string[];
   auth_kinds: ProviderAuth[];
@@ -2647,40 +2575,131 @@ export interface RegistryLimits {
   provider_env_owned: string[];
 }
 
+export type ApiProtocol = "anthropic-messages" | "openai-chat" | "openai-responses";
+export type VendorKind = "glm-bigmodel" | "glm-zai" | "deepseek" | "kimi-moonshot-cn" | "kimi-moonshot"
+  | "cpa" | "opencode" | "sub2api" | "claude-subscription" | "codex-login" | "grok-login" | "custom";
+
+export interface ProviderEndpoint {
+  provider_id?: string;
+  protocol: ApiProtocol;
+  base_url: string;
+  /** Only migrated endpoints may retain the runtime's default URL. */
+  use_runtime_default: boolean;
+}
+
+/** An account owns endpoints and credentials; callable models and prices live separately. */
+export interface Provider {
+  provider_id: string;
+  name: string;
+  vendor_type: VendorKind;
+  auth: ProviderAuth;
+  oauth_runtime_type: string | null;
+  endpoints: ProviderEndpoint[];
+  suggested_models: string[];
+  login: ProviderLogin | null;
+  env: ProviderEnvEntry[];
+  max_concurrency: number | null;
+  api_key: string | null;
+  builtin: boolean;
+  endpoint_count: number;
+  model_count: number;
+  profile_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Model {
+  model_id: string;
+  provider_id: string;
+  provider_name: string;
+  name: string;
+  protocol: ApiProtocol;
+  context_window: number | null;
+  input_usd_per_mtok: number | null;
+  output_usd_per_mtok: number | null;
+  cache_read_usd_per_mtok: number | null;
+  cache_write_usd_per_mtok: number | null;
+  efforts: string[] | null;
+  background_model: string | null;
+  catalog_order: number;
+  builtin: boolean;
+  profile_count: number;
+  endpoint: ProviderEndpoint;
+  prices: Record<PriceField, { override: number | null; effective: number | null; source: "override" | "builtin" | "unknown" }>;
+  warnings: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** Creation defaults only; selecting a vendor never registers its suggested models. */
+export interface VendorType {
+  vendor_type: VendorKind;
+  auth: ProviderAuth;
+  oauth_runtime_type: string | null;
+  endpoints: ProviderEndpoint[];
+  suggested_models: (Partial<Pick<Model, "context_window" | "background_model" | "efforts" | PriceField>>
+    & Pick<Model, "name" | "protocol">)[];
+  env: ProviderEnvEntry[];
+  requires_url_confirmation: boolean;
+}
+
+export interface AgentProfile {
+  profile_id: string;
+  name: string;
+  model_id: string;
+  model: Pick<Model, "model_id" | "name" | "protocol" | "provider_id">;
+  effort: string | null;
+  agent_teams: boolean;
+  custom_prompt: string;
+  runtime_id: string;
+  runtime_name: string;
+  runtime_type: string;
+  provider: Pick<Provider, "provider_id" | "name" | "vendor_type" | "auth">;
+  builtin: boolean;
+  roles: AgentRole[];
+  used_by: ProfileUsedBy;
+  cost: ProfileCostBasis;
+  warnings: string[];
+}
+
 export interface Registry {
   runtime_types: RuntimeType[];
   runtimes: Runtime[];
   providers: Provider[];
+  models: Model[];
   profiles: AgentProfile[];
-  provider_presets: ProviderPreset[];
-  /** The built-in price table: a catalog price left unknown comes from it. */
+  vendor_types: VendorType[];
   prices: { as_of: string; sources: string[]; models: Record<string, Record<PriceField, number | null>> };
   limits: RegistryLimits;
 }
 
-/** The provider fields a create or update sends; `api_key` the mask keeps the stored key, null removes it. */
 export interface ProviderFields {
   name?: string;
-  protocols?: string[];
-  auth?: ProviderAuth;
-  oauth_runtime_type?: string | null;
-  base_url?: string;
-  /** A number field may go as typed, so the server's 400 explains it. */
-  models?: Record<string, unknown>[];
+  vendor_type?: VendorKind;
+  endpoints?: ProviderEndpoint[];
   env?: ProviderEnvEntry[];
   max_concurrency?: number | string | null;
+  /** Omitted or masked keeps the key; null removes it. */
   api_key?: string | null;
 }
 
 export interface ProfileFields {
   name?: string;
   runtime_id?: string;
-  provider_id?: string;
-  model?: string;
+  model_id?: string;
   effort?: string | null;
   agent_teams?: boolean;
   custom_prompt?: string;
 }
+
+/** Mutable model settings. Empty numeric inputs clear overrides; invalid text is validated by the server. */
+export type ModelFields = Partial<Record<PriceField | "context_window", number | string | null>> & {
+  efforts?: string[] | null;
+  background_model?: string | null;
+};
+
+/** A model's account, exact name and protocol are immutable after creation. */
+export type CreateModelFields = ModelFields & Pick<Model, "provider_id" | "name" | "protocol">;
 
 export interface PromptBlock {
   name: string;
@@ -2745,6 +2764,18 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
 }
 
+export function createModel(fields: CreateModelFields): Promise<{ model: Model; warnings: string[] }> {
+  return registryCall("POST", "/models", fields, "add model");
+}
+
+export function updateModel(modelId: string, fields: ModelFields): Promise<{ model: Model; warnings: string[] }> {
+  return registryCall("PUT", `/models/${encodeURIComponent(modelId)}`, fields, "update model");
+}
+
+export function deleteModel(modelId: string): Promise<{ deleted: string }> {
+  return registryCall("DELETE", `/models/${encodeURIComponent(modelId)}`, undefined, "delete model");
+}
+
 /** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it
  * forked. */
 export function clearLoginProblem(providerId: string): Promise<{ provider: Provider }> {
@@ -2752,7 +2783,7 @@ export function clearLoginProblem(providerId: string): Promise<{ provider: Provi
     "use the login again");
 }
 
-/** Register an Agent Profile; refused (400) when its runtime, provider and model could not run together. */
+/** Register an Agent Profile; refused (400) when its runtime cannot use the selected model and its derived account. */
 export function createAgentProfile(fields: ProfileFields): Promise<{ profile: AgentProfile; warnings: string[] }> {
   return registryCall("POST", "/agent-profiles", fields, "add Agent Profile");
 }

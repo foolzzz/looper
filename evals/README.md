@@ -233,16 +233,46 @@ read from `LOOPER_EVAL_API_KEY`; `--agent-model` picks the model, default that
 API's first, and `--provider-base-url` replaces the preset's endpoint, for
 example with a logging proxy; the per-run cap is then Looper's own at the
 provider's prices, and each task reports its `cost_basis`), `--register-agent
-SPEC.json` (register an Agent Profile in the eval's database first and run
-every role on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
-"provider": {"name", "protocols", "auth", "base_url"?, "api_key_env"?},
-"agent": {"name", "model", "effort"?}}`, its `agent` being the profile;
-runtimes are built in, so the profile runs on the runtime of that name or the
-built-in one of that type, such as `codex`, `omp`, `grok` or `pi` when on PATH, and
-the provider's key is read from the variable `api_key_env` names, never from
-the file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in
-Codex login instead, the operator's own ChatGPT login on this machine, and
-`"provider": {"provider_id": "prov-grok-login"}` Grok's own login), `--tasks
+SPEC.json` (register provider → model → profile in the eval's disposable
+database, then run every role on it). The explicit spec is:
+
+```json
+{
+  "runtime": {"type": "claude-code"},
+  "provider": {
+    "name": "Eval account", "vendor_type": "custom",
+    "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://api.example.invalid"}],
+    "api_key_env": "LOOPER_EVAL_API_KEY"
+  },
+  "model": {"name": "example-model", "protocol": "anthropic-messages"},
+  "agent": {"name": "Eval profile", "effort": "high", "agent_teams": false, "custom_prompt": ""}
+}
+```
+
+Replace the example endpoint and model with the intended callable entry.
+Runtimes are built in: `runtime.name` selects one by name, else `runtime.type`
+selects the detected built-in runtime (`codex`, `omp`, `grok`, `pi`, `dsh` when on PATH).
+`provider.api_key_env` names an environment variable; literal `api_key` in the
+spec is rejected. Never put a credential in the JSON file. A saved provider
+can instead be selected with `{"provider_id": "prov-codex-login"}` (or
+`prov-grok-login`, for that runtime's own login). The `model` layer accepts an
+explicit `{name, protocol, settings...}`, a saved model-id string,
+`{"model_id": "..."}`, or an exact saved `{provider_id, name, protocol}`
+reference belonging to that account. The `agent` layer holds only its name
+and runtime options; profile system-prompt mode is not an option. Role/task
+mode selection continues to apply.
+
+Older specs with provider `protocols`/`base_url`/`models` and `agent.model`
+still use the shared legacy converter. Ambiguous or unresolvable bindings fail
+rather than selecting a different model. API writes use `model_id`, and the
+profile view's `model` is structured. Registration coverage is in
+[the registration contract tests](../tests/test_model_eval_registration.py);
+the [delivery ledger](../docs/plans/2026-10-13-long-horizon-agent-context.zh-CN.md#54-验证缺口)
+keeps synthetic tests, real-mode dialogs and actual migration rehearsal separate.
+Unknown prices retain tokens with unknown cost; they cannot prove a spend cap.
+Registration success alone is not a real-model evaluation.
+
+Other options: `--tasks
 single_step,chat_correction` (task ids, or a named set: `planner`, the tasks
 whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `parallel_parts`, `interface_first`, `supplement_replan`,
@@ -400,8 +430,10 @@ the earlier baseline cost about $27.73); and all 22 dialogs on haiku and on the 
 `--register-agent` can target the built-in runtime type `pi` (API key only:
 `openai-responses`, or `openai-chat`, which pi calls `openai-completions`).
 Example specs are `evals/agents/pi-cpa.example.json` and
-`evals/agents/pi-deepseek.example.json`. The registered `base_url` is passed
-through. The entry scripts are `examples/pi/eval-responses.sh`,
+`evals/agents/pi-deepseek.example.json`. These legacy specs use the shared
+converter above; new specs should declare provider endpoints and a separate
+model with an explicit protocol. The selected model fixes the endpoint, whose
+`base_url` is passed through. The entry scripts are `examples/pi/eval-responses.sh`,
 `examples/pi/eval-deepseek.sh` and `examples/pi/eval-prompt-comparison.sh`.
 They follow the tiers above. The comparison script scopes 13 distinct cases
 across 4 tiers, 48 case/reps, and exits before `uv` when `ANTHROPIC_API_KEY`

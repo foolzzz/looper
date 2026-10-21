@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 from tests.test_catalog_db import DSN, _fresh_schema
-from tests.test_layer_effort import _old
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -27,9 +26,9 @@ OPUS = "agent-claude-code-opus"
 _BEFORE = """
 ALTER TABLE agent_setting_layers ADD COLUMN effort TEXT;
 DELETE FROM schema_migrations WHERE name = 'layer_effort_on_profiles';
-INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, agent_teams) VALUES
-    ('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', 'prov-claude-subscription', 'sonnet', true),
-    ('agent-haiku', 'claude-code/haiku', 'rt-claude-code', 'prov-claude-subscription', 'haiku', true);
+INSERT INTO agent_profiles (id, name, runtime_id, model_id, agent_teams) VALUES
+    ('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'), true),
+    ('agent-haiku', 'claude-code/haiku', 'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'haiku'), true);
 INSERT INTO projects (id, name) VALUES ('proj-x', 'calc');
 INSERT INTO tasks (id, requirement, project_id) VALUES ('task-x', 'Add add().', 'proj-x');
 INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES ('task-x', 'worker', 'agent-haiku');
@@ -39,6 +38,23 @@ INSERT INTO agent_setting_layers (scope, role, project_id, profile_id, effort) V
     ('project', NULL, 'proj-x', 'agent-sonnet', NULL),
     ('role_project', 'reviewer', 'proj-x', NULL, 'low');
 """
+
+
+def _old(layers: dict[Any, Any], role: Any, project: str | None) -> tuple[Any, ...]:
+    """What ``role`` (None: the system layer alone) ran in ``project`` under the old rule: the last profile and the
+    last effort its layers set, else the profile's own; by the model it runs."""
+    from looper.agents.agent_settings import AgentType, Layer
+    from looper.agents.profile_registry import builtin_resolved_profile
+
+    chain = [(Layer.SYSTEM, None, None)] if role is None else [(Layer.SYSTEM, None, None), (Layer.ROLE, role, None)]
+    if project and role not in (None, AgentType.MANAGER):
+        chain += [(Layer.PROJECT, None, project), (Layer.ROLE_PROJECT, role, project)]
+    profile, effort = builtin_resolved_profile(), None
+    for key in chain:
+        before = layers.get(key)
+        if before is not None:
+            profile, effort = before.profile or profile, before.effort or effort
+    return profile.runtime.id, profile.model_id, profile.agent_teams, effort or profile.effort
 
 
 def test_the_upgrade_moves_each_effort_onto_profiles_and_every_run_keeps_its_profile_and_effort(
@@ -85,7 +101,7 @@ def test_the_upgrade_moves_each_effort_onto_profiles_and_every_run_keeps_its_pro
                 settings = resolve(role, index_layers(await agent_setting_layers.list_layers(project, pool=pool),
                                                       project), project)
                 profile = settings.profile
-                assert (profile.runtime.id, profile.provider.id, profile.model, profile.agent_teams,
+                assert (profile.runtime.id, profile.model_id, profile.agent_teams,
                         settings.effort or None) == _old(before, role, project), (role, project)
             # One line per profile added and per layer and task changed.
             lines = [r.getMessage() for r in caplog.records if r.name == "looper.agents.layer_effort"]

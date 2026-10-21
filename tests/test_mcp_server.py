@@ -652,7 +652,9 @@ def test_dsh_mandatory_mcp_failure_stops_required_runner_with_zero_model_request
 
 @pytest.mark.parametrize("mode", ["optional", "sse"])
 def test_dsh_optional_catalog_failure_keeps_diagnostic_and_runs_model(tmp_path, monkeypatch, dsh_mcp_state, mode):
-    done, report = _dsh_mcp_run(tmp_path, monkeypatch, dsh_mcp_state, mode=mode)
+    # A read-only run (a Planner's) leaves an external server out; a Worker's connects to it.
+    _dsh_role_tools(dsh_mcp_state, "worker")
+    done, report = _dsh_mcp_run(tmp_path, monkeypatch, dsh_mcp_state, mode=mode, role="worker")
     assert done.returncode == 0, (done.stderr, report)
     assert dsh_mcp_state.model_requests == 1
     assert report["diagnostics"] == [{"serverName": "unavailable", "status": "failed"}]

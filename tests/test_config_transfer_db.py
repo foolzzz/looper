@@ -27,6 +27,79 @@ SECRET = "sk-test-secret-0123456789"
 ROLES = ("manager", "planner", "worker", "reviewer")
 
 
+def _documented_v3() -> dict[str, Any]:
+    """Execute the portable example operators copy from the architecture guide."""
+    import re
+
+    doc = (Path(__file__).resolve().parents[1] / "docs/architecture/agent-system.md").read_text()
+    section = doc.split("### Moving the configuration: export and import", 1)[1].split("\n### ", 1)[0]
+    examples = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", section, re.S)]
+    return next(example for example in examples if example.get("format") == "looper-config/v3")
+
+
+def test_documented_v3_example_previews_applies_and_reads_back(monkeypatch, tmp_path):
+    async def test():
+        data = _documented_v3()
+        path = tmp_path / "documented.json"
+        path.write_text(json.dumps(data))
+        async with _installation() as (pool, url):
+            before = await _rows(pool)
+            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--json")
+            assert code == 0, err
+            preview = _plan(out)
+            assert not preview["applied"]
+            assert await _rows(pool) == before
+            assert not any(section.get("skipped", 0) for section in preview["counts"].values())
+            for section in ("providers", "models", "profiles"):
+                assert preview["counts"][section]["added"] == 1
+            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--apply", "--json")
+            assert code == 0, err
+            assert _plan(out)["applied"]
+            _serve(monkeypatch, pool)
+            registry = await _ok("GET", "/api/registry")
+            profile = next(p for p in registry["profiles"] if p["name"] == data["profiles"][0]["name"])
+            model = next(m for m in registry["models"] if m["model_id"] == profile["model_id"])
+            assert (model["provider_name"], model["name"], model["protocol"]) == tuple(
+                data["profiles"][0]["model"][key] for key in ("provider", "name", "protocol"))
+            assert profile["model"]["protocol"] == model["protocol"]
+            assert "system_prompt_mode" not in profile
+            # An unknown price is NULL, never a zero-price override.
+            assert all(price == {"override": None, "effective": None, "source": "unknown"}
+                       for price in model["prices"].values())
+            exported = tmp_path / "exported.json"
+            code, _, err = await _looper(monkeypatch, url, "config", "export", str(exported))
+            assert code == 0, err
+            saved = json.loads(exported.read_text())
+            assert saved["format"] == "looper-config/v3"
+            assert saved["profiles"][0]["model"] == data["profiles"][0]["model"]
+            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--json")
+            assert code == 0, err
+            assert all(counts["added"] == counts["changed"] == counts["skipped"] == 0
+                       for counts in _plan(out)["counts"].values())
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
+def test_config_cli_help_exposes_portable_registry_and_preview(capsys):
+    from looper.cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exit_info:
+        parser.parse_args(["config", "--help"])
+    assert exit_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert all(word in help_text for word in ("providers", "models", "profiles", "looper-config/v3"))
+    preview = parser.parse_args(["config", "import", "portable.json", "--json"])
+    assert not preview.apply and preview.json
+
+
+@pytest.fixture(autouse=True)
+def _isolated_registry_logins(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import profile_registry
+
+    monkeypatch.setattr(profile_registry, "_login_modules", lambda: {})
+
+
 @contextlib.asynccontextmanager
 async def _installation(*, schema: bool = True) -> AsyncIterator[tuple[Any, str]]:
     """A new schema (with Looper's tables unless ``schema`` is False): its pool and a URL that reaches it."""
@@ -103,16 +176,23 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
                        "VALUES ($1, 'claude-beta', 'claude-code', 'claude-beta', $2)", beta,
                        ["resident_session", "resume", "run"])
-    await _ok("POST", "/api/providers", {"name": "anthropic-key", "protocols": ["anthropic-messages"],
-                                         "auth": "api_key", "api_key": SECRET, "base_url": "https://api.example.test",
-                                         "models": [{"name": "claude-sonnet-4-5", "input_usd_per_mtok": 3,
-                                                     "output_usd_per_mtok": 15}]})
+    await _ok("POST", "/api/providers", {"name": "anthropic-key", "vendor_type": "custom",
+                                         "api_key": SECRET, "endpoints": [
+                                             {"protocol": "anthropic-messages", "base_url": "https://api.example.test"}]})
+    provider = await pool.fetchval("SELECT id FROM llm_providers WHERE name = 'anthropic-key'")
+    await _ok("POST", "/api/models", {"provider_id": provider, "name": "claude-sonnet-4-5",
+                                     "protocol": "anthropic-messages", "input_usd_per_mtok": 3,
+                                     "output_usd_per_mtok": 15})
+    # Login suggestions are seeded models; profiles select their existing ids.
+    login_models = {row["name"]: row["id"] for row in await pool.fetch(
+        "SELECT id, name FROM llm_models WHERE provider_id = $1 AND protocol = $2",
+        "prov-claude-subscription", "anthropic-messages")}
+    sonnet_model, haiku_model = login_models["sonnet"], login_models["haiku"]
     sonnet = (await _ok("POST", "/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                                "provider_id": "prov-claude-subscription",
-                                                        "model": "sonnet", "effort": "high", "agent_teams": True}))["profile"][
+                                                "model_id": sonnet_model, "effort": "high", "agent_teams": True}))["profile"][
         "profile_id"]
     beta_haiku = (await _ok("POST", "/api/agent-profiles", {"name": "beta-haiku", "runtime_id": beta,
-                                                    "provider_id": "prov-claude-subscription", "model": "haiku",
+                                                    "model_id": haiku_model,
                                                             "effort": "low"}))["profile"]["profile_id"]
     await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "profile_id": sonnet,
                                                     "env": [{"key": "LOOPER_MODE", "value": "a"}]})
@@ -243,7 +323,11 @@ async def _state(pool: Any) -> dict[str, Any]:
                             for role in TASK_LIMIT_ROLES},
             "runtimes": [{k: r[k] for k in ("name", "type", "executable", "capabilities")}
                          for r in await db.read_runtimes(conn)],
-            "providers": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_providers(conn)],
+            "providers": [{**{k: v for k, v in r.items() if k not in ("id", "endpoints")},
+                           "endpoints": [{k: v for k, v in e.items() if k != "provider_id"}
+                                         for e in r["endpoints"]]} for r in await db.read_providers(conn)],
+            "models": [{k: v for k, v in r.items() if k not in ("id", "provider_id", "created_at", "updated_at")}
+                       for r in await db.read_models(conn)],
             "profiles": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_profiles(conn)],
             "roles": [role_entry(r) for r in await db.read_roles(conn)],
             "channels": {c["channel_type"]: (c["display_name"], c["enabled"], c["config"])
@@ -273,7 +357,8 @@ async def _rows(pool: Any) -> dict[str, list[Any]]:
     """Every row of the tables an import writes, to tell that nothing changed."""
     tables = ("agent_setting_layers", "role_configs", "channel_configs", "library_items", "library_files",
               "library_mcp_servers", "library_installs", "projects", "project_documents", "agent_runtimes",
-              "llm_providers", "llm_provider_secrets", "agent_profiles", "project_role_templates", "schedules",
+              "llm_providers", "llm_provider_endpoints", "llm_models", "llm_provider_secrets", "agent_profiles",
+              "project_role_templates", "schedules",
               "schedule_profile_overrides", "schedule_task_limits")
     async with pool.acquire() as conn:
         if not await conn.fetchval("SELECT to_regclass('library_installs') IS NOT NULL"):
@@ -675,7 +760,10 @@ def test_a_profile_without_agent_teams_imports_with_its_runtimes_default_and_ano
         async with _installation() as (target, target_url):
             _serve(monkeypatch, target)
             await _ok("POST", "/api/agent-profiles", {"name": "cc/off", "runtime_id": "rt-claude-code",
-                                                      "provider_id": "prov-claude-subscription", "model": "sonnet",
+                                                      "model_id": await target.fetchval(
+                                                          "SELECT id FROM llm_models WHERE provider_id = $1 "
+                                                          "AND name = $2 AND protocol = $3",
+                                                          "prov-claude-subscription", "sonnet", "anthropic-messages"),
                                                       "agent_teams": False})
             await target.execute("INSERT INTO agent_runtimes (id, name, type, capabilities, builtin) "
                                  "VALUES ('rt-codex', 'codex', 'codex', $1, true)", ["resident_session", "resume", "run"])
@@ -701,6 +789,7 @@ def test_a_profile_without_agent_teams_imports_with_its_runtimes_default_and_ano
             assert changes[("profiles", "codex/gpt")]["action"] == "added"
             assert changes[("profiles", "codex/teams")]["action"] == "skipped"
             assert "agent teams are a Claude Code feature" in changes[("profiles", "codex/teams")]["reason"]
+            assert changes[("profiles", "codex/teams")]["code"] == "invalid_legacy_value"
             rows = await target.fetch("SELECT name, agent_teams FROM agent_profiles WHERE NOT builtin")
             assert {r["name"]: r["agent_teams"] for r in rows} == {"cc/off": True, "codex/gpt": False}
 
@@ -822,7 +911,7 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             assert (await _looper(monkeypatch, target_url, "config", "export", str(again),
                                  "--include-projects"))[0] == 0
             new = _without_time(again)
-            assert new["format"] == "looper-config/v2" and "agents" not in new
+            assert new["format"] == "looper-config/v3" and "agents" not in new
 
             # The layers' effort is on the profiles they select now.
             moved = {("system", None, "claude-code/glm/glm-5.3[1m]"): "claude-code/glm/glm-5.3[1m] · high",
@@ -843,10 +932,24 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             for base, effort in (("claude-code/glm/glm-5.3[1m]", "high"), ("claude-code/sonnet", "high"),
                                  ("beta/haiku", "high"), ("claude-code/sonnet", "low")):
                 profiles.append({**_by_name(profiles, base), "name": f"{base} · {effort}", "effort": effort})
-            expected.update(format="looper-config/v2", looper_version=new["looper_version"], runtimes=[],
-                            profiles=sorted(profiles, key=lambda p: p["name"].encode()))
+            expected.update(format="looper-config/v3", looper_version=new["looper_version"], runtimes=[],
+                            profiles=sorted([{**{k: v for k, v in p.items() if k != "provider"},
+                                              "model": {"provider": p["provider"], "name": p["model"],
+                                                        "protocol": "anthropic-messages"}} for p in profiles],
+                                            key=lambda p: p["name"].encode()))
             # The file left the provider's key out, so none is stored here to export.
-            expected["providers"] = [{**_by_name(old["providers"], "glm"), "api_key": None}]
+            legacy_provider = _by_name(old["providers"], "glm")
+            expected["providers"] = [{**{k: v for k, v in legacy_provider.items()
+                                          if k not in ("models", "protocols", "base_url", "api_key")},
+                                      "vendor_type": "glm-bigmodel", "api_key": None,
+                                      "endpoints": {"anthropic-messages": {"base_url": legacy_provider["base_url"]}}}]
+            from looper.agents.profile_registry import MODEL_FIELDS
+
+            defaults = dict.fromkeys(MODEL_FIELDS)
+            # Built-in login models stay on the target and are omitted from exports.
+            expected["models"] = [
+                {**defaults, **model, "provider": "glm", "protocol": "anthropic-messages", "catalog_order": order}
+                for order, model in enumerate(legacy_provider["models"])]
             expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [
                 {k: v for k, v in role.items() if k != "max_concurrency"} for role in old["settings"]["roles"]]}
             # A file from before step workspaces, per-project retries, Planner roles, wait commands, user gates and the agent room

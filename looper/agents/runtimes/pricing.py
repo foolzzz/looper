@@ -2,8 +2,9 @@
 
 A model has four prices, in US dollars per million tokens: uncached input,
 output, prompt read from the cache and prompt written to it. A provider's model
-catalog (``ProviderSpec.catalog``) sets them; each one it leaves unknown comes
-from the built-in table below, which ships with this version. A model that has
+catalog sets them within one account and protocol; each unknown field comes
+from the built-in table below, which ships with this version. Every run freezes
+its main model and protocol catalog, including auxiliary models, in one price snapshot. A model that has
 no price for a kind of token its run used is unpriced: the run records its
 tokens only, and no spend cap can apply to it.
 
@@ -17,8 +18,9 @@ whose models use these USD list prices unless a provider's catalog says
 otherwise.
 
 A model is looked up by the name its runtime reports (Claude Code's
-``modelUsage`` keys), without a context-window suffix (``glm-5.3[1m]``) or a
-date suffix (``claude-haiku-4-5-20251001``). With Claude Code's own login a
+``modelUsage`` keys): first the exact name, then without context-window and
+date suffixes (``claude-haiku-4-5-20251001[1m]``). Normalized collisions follow
+the saved catalog order. With Claude Code's own login a
 profile names a Claude Code alias (``opus``, ``sonnet[1m]``), which is looked
 up as the model it runs (``CLAUDE_CODE_ALIASES``); with any other provider an
 alias stays unpriced, since the provider's environment may map it to a model
@@ -35,8 +37,9 @@ made and paid.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from ..model_names import parse_model_name
@@ -44,7 +47,7 @@ from ..run_usage import Price, Usage
 from . import AuthKind, CostSource, RunCost
 
 if TYPE_CHECKING:
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec, ModelSpec, ProviderSpec, ResolvedModel
 
 PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
 
@@ -150,29 +153,71 @@ def base_model(name: str) -> str:
     return _DATE.sub("", parse_model_name(name).base).lower()
 
 
-def model_price(provider: ProviderSpec, model: str) -> ModelPrice:
-    """``model``'s prices with ``provider``: each from the provider's catalog when it gives one, else from the
-    built-in table."""
-    base = base_model(model)
-    if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type == _CLAUDE_CODE:
-        base = CLAUDE_CODE_ALIASES.get(base, base)
-    builtin = BUILTIN_PRICES.get(base, ModelPrice())
-    entry = provider.catalog_model(model) or next((m for m in provider.catalog if base_model(m.name) == base), None)
-    if entry is None:
-        return builtin
-    return ModelPrice(**{name: getattr(entry, name) if getattr(entry, name) is not None else getattr(builtin, name)
-                         for name in PRICE_FIELDS})
+@dataclass(frozen=True)
+class PriceSnapshot:
+    """One run's immutable price scope; exact names precede normalized catalog names."""
+
+    exact: Mapping[str, ModelPrice]
+    normalized: Mapping[str, ModelPrice]
+    builtin: Mapping[str, ModelPrice]
+    aliases: Mapping[str, str]
+
+    def model_price(self, model: str) -> ModelPrice:
+        exact = self.exact.get(model)
+        if exact is not None:
+            return exact
+        base = base_model(model)
+        base = self.aliases.get(base, base)
+        normalized = self.normalized.get(base)
+        if normalized is not None:
+            return normalized
+        return self.builtin.get(base, ModelPrice())
+
+    def __call__(self, model: str, usage: Usage) -> float | None:
+        return self.model_price(model).cost(usage)
 
 
-def price_cost(usage: Usage, provider: ProviderSpec, model: str) -> RunCost:
-    """``usage`` priced at ``provider``'s prices for ``model``: its tokens always, its ``cost_usd`` None when a
-    price it needs is unknown."""
-    return RunCost(replace(usage, cost_usd=model_price(provider, model).cost(usage)), CostSource.PROVIDER_PRICE)
+def pricer(provider: LegacyProviderSpec | ProviderSpec | ResolvedModel, *,
+           catalog: Iterable[ModelSpec] = ()) -> PriceSnapshot:
+    """Freeze raw overrides and built-ins now; normalized bindings admit only their account and protocol."""
+    from ..profile_registry import LegacyProviderSpec, ResolvedModel
+
+    if isinstance(provider, ResolvedModel):
+        selected = provider.model
+        entries = sorted([selected, *[model for model in catalog
+                          if model.provider_id == selected.provider_id and model.protocol is selected.protocol
+                          and model.id != selected.id]],
+                         key=lambda model: (model.catalog_order, model.name, model.id))
+        account = provider.provider
+    else:
+        entries = provider.catalog if isinstance(provider, LegacyProviderSpec) else ()
+        account = provider
+    aliases = dict(CLAUDE_CODE_ALIASES) if (account.auth is AuthKind.OAUTH
+                                           and account.oauth_runtime_type == _CLAUDE_CODE) else {}
+    builtin = dict(BUILTIN_PRICES)
+    exact: dict[str, ModelPrice] = {}
+    normalized: dict[str, ModelPrice] = {}
+    for entry in entries:
+        base = base_model(entry.name)
+        fallback = builtin.get(aliases.get(base, base), ModelPrice())
+        price = ModelPrice(**{name: getattr(entry, name) if getattr(entry, name) is not None
+                             else getattr(fallback, name) for name in PRICE_FIELDS})
+        exact.setdefault(entry.name, price)
+        normalized.setdefault(base, price)
+    return PriceSnapshot(*(MappingProxyType(values) for values in (exact, normalized, builtin, aliases)))
 
 
-def pricer(provider: ProviderSpec) -> Price:
-    """What prices a model's tokens at ``provider``'s prices (for ``run_usage`` to price a per-model report)."""
-    return lambda model, usage: model_price(provider, model).cost(usage)
+def model_price(provider: LegacyProviderSpec | ProviderSpec | ResolvedModel, model: str, *,
+                catalog: Iterable[ModelSpec] = ()) -> ModelPrice:
+    """Resolve each price field from this protocol's model override, then the built-in table."""
+    return pricer(provider, catalog=catalog).model_price(model)
+
+
+def price_cost(usage: Usage, provider: LegacyProviderSpec | ProviderSpec | ResolvedModel, model: str, *,
+               catalog: Iterable[ModelSpec] = ()) -> RunCost:
+    """Tokens always; cost NULL when any used token kind has no price in this scope."""
+    return RunCost(replace(usage, cost_usd=pricer(provider, catalog=catalog)(model, usage)),
+                   CostSource.PROVIDER_PRICE)
 
 
 def cap_exceeded(cost_so_far: float | None, cap: float | None) -> bool:
@@ -218,8 +263,9 @@ class RunSpend:
     unpriced; the caller must stop further calls when a budget is configured.
     """
 
-    def __init__(self, provider: ProviderSpec, model: str, cap: float | None) -> None:
-        self._provider = provider
+    def __init__(self, provider: LegacyProviderSpec | ProviderSpec | ResolvedModel | Price,
+                 model: str, cap: float | None) -> None:
+        self._price = provider if callable(provider) else pricer(provider)
         self._model = model
         self.cap = cap
         self.usage = Usage()
@@ -235,7 +281,7 @@ class RunSpend:
             return False
         model, usage = found
         was = self.exceeded
-        cost = model_price(self._provider, model or self._model).cost(usage)
+        cost = self._price(model or self._model, usage)
         root_complete = event.get("root_usage_complete") is not False
         self._observed_basis = self._observed_basis or event.get("cost_basis") == "observed"
         if not root_complete:

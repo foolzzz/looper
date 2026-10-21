@@ -24,9 +24,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
+from uuid import uuid4
 
 from .model_names import parse_model_name
-from .runtimes import ApiProtocol
+from .runtimes import ApiProtocol, VendorType
+from .profile_registry import Endpoint, ModelSpec
 
 _ANTHROPIC = (ApiProtocol.ANTHROPIC_MESSAGES,)
 _CHAT = (ApiProtocol.OPENAI_CHAT,)
@@ -221,3 +223,41 @@ PRESETS: tuple[ProviderPreset, ...] = (
 
 def presets_view() -> list[dict[str, Any]]:
     return [preset.view() for preset in PRESETS]
+
+
+@dataclass(frozen=True)
+class VendorDefaults:
+    """Creation suggestions, copied once; never overrides a saved account."""
+
+    vendor_type: VendorType
+    endpoints: tuple[Endpoint, ...] = ()
+    models: tuple[ModelSpec, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+    requires_url_confirmation: bool = False
+
+
+def vendor_defaults(vendor_type: VendorType, *, provider_id: str | None = None) -> VendorDefaults:
+    """Build draft endpoints and models from each API's effective catalog.
+
+    IDs are new opaque UUIDs, ready for a new account; callers creating models
+    for an existing account pass its provider_id. Self-hosted examples still
+    require the user's URL confirmation before persistence.
+    """
+    vendor = VendorType(vendor_type)
+    provider_id = provider_id or f"prov-{uuid4()}"
+    if vendor.login_protocol is not None:
+        return VendorDefaults(vendor, (Endpoint(provider_id, vendor.login_protocol, ""),))
+    preset = next((preset for preset in PRESETS if preset.id == vendor.value), None)
+    if preset is None:
+        return VendorDefaults(vendor)
+    endpoints: list[Endpoint] = []
+    models: list[ModelSpec] = []
+    for api in preset.apis:
+        for protocol in api.protocols:
+            endpoints.append(Endpoint(provider_id, protocol, api.base_url))
+            for entry in preset.models_for(api):
+                models.append(ModelSpec(f"model-{uuid4()}", provider_id, entry.name, protocol,
+                                        context_window=entry.context_window, background_model=entry.background_model,
+                                        catalog_order=len(models)))
+    return VendorDefaults(vendor, tuple(endpoints), tuple(models), preset.env,
+                          vendor in {VendorType.CPA, VendorType.SUB2API, VendorType.OPENCODE})

@@ -13,7 +13,8 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents.agent_settings import AgentSettings, Launch
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
+from tests.runtime_model_helpers import resolved_profile
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.agents.runtimes.per_turn import PerTurnSession
@@ -86,7 +87,7 @@ def _launch() -> Launch:
     provider = ProviderSpec('test-provider', 'test', auth=AuthKind.API_KEY,
                             protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}),
                             base_url='https://pi.example.invalid/v1', api_key='test-key')
-    profile = AgentProfile('test-pi', 'pi/test', RuntimeSpec('rt-pi', 'pi', 'pi'), provider, 'selected', 'high')
+    profile = resolved_profile('test-pi', 'pi/test', RuntimeSpec('rt-pi', 'pi', 'pi'), provider, 'selected', 'high')
     return Launch(AgentSettings(profile=profile))
 
 

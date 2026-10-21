@@ -26,13 +26,55 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents.agent_settings import AgentSettings, Launch
-from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec, servable_roles
+from looper.agents.profile_registry import (
+    CatalogModel, LegacyProviderSpec as ProviderSpec, RegistryError, RuntimeSpec, servable_roles,
+)
+from tests.runtime_model_helpers import resolved_profile
 from looper.agents.runtimes import (
     ADAPTERS, ApiProtocol, AuthKind, Capability, Probe, RuntimeAdapter, RuntimeUnsupported, adapter,
 )
 from looper.agents.runtimes.pi import PROBE_HELP_TOKENS, PiRuntime
 
 PI = PiRuntime()
+
+
+@pytest.mark.parametrize("normalized_registry", [False, True])
+@pytest.mark.parametrize("model,cost,exceeded", [
+    ("MODEL", 1, False),
+    ("model", 20, True),
+    ("model[1m]", 1, False),
+    ("model-20261001", 1, False),
+    ("gpt-6.1-sol", 2, False),
+    ("unknown", None, False),
+])
+def test_price_snapshot_keeps_case_sensitive_exact_models_and_budget(
+    normalized_registry: bool, model: str, cost: float | None, exceeded: bool,
+) -> None:
+    from looper.agents.profile_registry import ModelSpec
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import RunSpend, pricer, usage_event
+
+    provider = ProviderSpec(
+        "account", "account", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_CHAT}),
+        base_url="https://models.example/v1",
+        catalog=(CatalogModel("MODEL", input_usd_per_mtok=1),
+                 CatalogModel("model", input_usd_per_mtok=20)),
+    )
+    if normalized_registry:
+        profile = resolved_profile("profile", "profile", RuntimeSpec("runtime", "pi", "pi"), provider, "model")
+        catalog = tuple(ModelSpec(
+            f"catalog-{index}", provider.id, entry.name, ApiProtocol.OPENAI_CHAT,
+            input_usd_per_mtok=entry.input_usd_per_mtok, catalog_order=index,
+        ) for index, entry in enumerate(provider.catalog))
+        snapshot = pricer(profile.resolved_model, catalog=catalog)
+    else:
+        snapshot = pricer(provider)
+    usage = Usage(input_tokens=1_000_000)
+    assert snapshot(model, usage) == cost
+    spend = RunSpend(snapshot, model, cap=10)
+    assert spend.add(usage_event(model, usage)) is exceeded
+    assert spend.usage.cost_usd == cost
+    assert spend.exceeded is exceeded
 
 
 def test_the_module_imports_and_pi_runtime_can_be_constructed() -> None:
@@ -232,7 +274,7 @@ def _provider(**fields: Any) -> ProviderSpec:
 
 
 def _launch(provider: ProviderSpec, model: str = "selected", effort: str = "high") -> Launch:
-    profile = AgentProfile("agent-pi", "pi/test", RuntimeSpec("rt-pi", "pi", "pi"), provider, model, effort)
+    profile = resolved_profile("agent-pi", "pi/test", RuntimeSpec("rt-pi", "pi", "pi"), provider, model, effort)
     return Launch(AgentSettings(profile=profile))
 
 
@@ -339,7 +381,12 @@ def test_invalid_mcp_configuration_fails_closed(tmp_path: Path, contents: str) -
 @pytest.mark.parametrize("source", ["provider", "role"])
 @pytest.mark.parametrize("name", ["LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", "LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN"])
 def test_explicit_env_cannot_replace_the_bridge(tmp_path: Path, source: str, name: str) -> None:
-    launch = _launch(_provider(env=((name, "malicious"),)) if source == "provider" else _provider())
+    if source == "provider":
+        with pytest.raises(RegistryError, match=name):
+            _launch(_provider(env=((name, "malicious"),)))
+        assert not (tmp_path / ".local/pi").exists()
+        return
+    launch = _launch(_provider())
     if source == "role":
         launch = replace(launch, settings=replace(launch.settings, env=((name, "malicious"),)))
     launch = _with_mcp(tmp_path, {"mcpServers": {"looper": {
@@ -516,10 +563,10 @@ def test_private_permissions_do_not_depend_on_the_server_umask(tmp_path: Path, u
                                   "PI_SHELL_PREFIX", "PI_OFFLINE", "PI_FUTURE_PATH", "LOOPER_AGENT_TOKEN",
                                   "LOOPER_PROVIDER_API_KEY"])
 def test_explicit_environment_cannot_override_isolation(source: str, name: str) -> None:
-    launch = _launch(_provider(env=((name, "override"),)) if source == "provider" else _provider())
-    if source == "role":
-        launch = replace(launch, settings=replace(launch.settings, env=((name, "override"),)))
-    with pytest.raises(RuntimeUnsupported, match=name):
+    with pytest.raises((RuntimeUnsupported, RegistryError), match=name):
+        launch = _launch(_provider(env=((name, "override"),)) if source == "provider" else _provider())
+        if source == "role":
+            launch = replace(launch, settings=replace(launch.settings, env=((name, "override"),)))
         launch.environment()
 
 
@@ -565,9 +612,11 @@ def test_invalid_providers_are_refused_before_binding_or_rendering(fields: dict[
     from looper.agents.runtimes.pi import models_json
 
     provider = _provider(**fields)
-    for call in (lambda: PI.bind_provider(provider, "selected", "high"), lambda: models_json(_launch(provider))):
-        with pytest.raises(RuntimeUnsupported, match=error):
-            call()
+    with pytest.raises(RuntimeUnsupported, match=error):
+        PI.bind_provider(provider, "selected", "high")
+    # Typed account/model validation rejects malformed metadata before a renderer can receive it.
+    with pytest.raises((RuntimeUnsupported, RegistryError)):
+        models_json(_launch(provider))
 
 
 @pytest.mark.parametrize("effort", ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"])
@@ -608,13 +657,12 @@ def test_models_json_contains_only_the_selected_model_with_catalog_metadata(
 
 
 def test_a_model_outside_a_nonempty_catalog_is_refused() -> None:
-    from looper.agents.runtimes.pi import models_json
-
     provider = _provider(catalog=(CatalogModel("known"),))
     with pytest.raises(RuntimeUnsupported, match="model"):
         PI.bind_provider(provider, "unknown", "high")
-    with pytest.raises(RuntimeUnsupported, match="model"):
-        models_json(_launch(provider, model="unknown"))
+    launch = _launch(provider, model="known")
+    with pytest.raises(RegistryError, match="profile and resolved model references must match"):
+        replace(launch.profile, model_id="unknown-model")
 
 
 @pytest.mark.parametrize("transport", ["http", "fetch"])

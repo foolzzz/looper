@@ -333,20 +333,22 @@ import json, sys
 from pathlib import Path
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.library import AgentLibrary
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
-from looper.agents.runtimes import ApiProtocol, AuthKind, Capability
+from looper.agents.profile_registry import (Endpoint, ModelSpec, ProviderSpec,
+    ResolvedAgentProfile, ResolvedModel, RuntimeSpec)
+from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, VendorType
 from looper.agents.runtimes.pi import PiRuntime
 root, url, executable, mode, bound = sys.argv[1:]
 root = Path(root)
 prompt = root / '.local/prompts/system.md'
 prompt.parent.mkdir(parents=True)
 prompt.write_text('Packaging probe')
-provider = ProviderSpec(id='local', name='local', auth=AuthKind.API_KEY,
-    protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}), base_url=url + '/v1', api_key='local-key')
+provider = ProviderSpec('local', 'local', VendorType.CUSTOM, AuthKind.API_KEY, api_key='local-key')
+model = ModelSpec('selected-model', provider.id, 'selected', ApiProtocol.OPENAI_RESPONSES)
+resolved = ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, url + '/v1'))
 # RPC is the steered launch. steer_command refuses a runtime whose probe did not record steer.
 capabilities = frozenset({Capability.STEER}) if mode == 'rpc' else frozenset()
-profile = AgentProfile('pi-test', 'pi-test', RuntimeSpec('rt-pi', 'pi', 'pi', executable, capabilities),
-                       provider, 'selected', '')
+profile = ResolvedAgentProfile('pi-test', 'pi-test', RuntimeSpec('rt-pi', 'pi', 'pi', executable, capabilities),
+                               model.id, resolved_model=resolved)
 config = root / 'mcp.json'
 config.write_text(json.dumps({'mcpServers': {'looper': {'env': {
     'LOOPER_AGENT_URL': url, 'LOOPER_AGENT_TOKEN': 'scoped-test-token'}}}}))

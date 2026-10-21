@@ -50,20 +50,31 @@ async def read_runtimes(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 async def read_providers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every provider with its API key (``api_key``, None without one)."""
     rows = await conn.fetch(
-        "SELECT p.id, p.name, p.protocols, p.auth, p.oauth_runtime_type, p.base_url, p.models, p.env, "
-        "p.max_concurrency, p.builtin, s.api_key "
+        "SELECT p.id, p.name, p.vendor_type, p.auth, p.oauth_runtime_type, p.env, "
+        "p.max_concurrency, p.builtin, s.api_key, "
+        "COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.protocol) FROM llm_provider_endpoints e "
+        "WHERE e.provider_id = p.id), '[]'::jsonb) AS endpoints "
         "FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id ORDER BY p.name COLLATE \"C\""
     )
-    return [{**dict(row), "models": _json(row["models"]), "env": _json(row["env"])} for row in rows]
+    return [{**dict(row), "endpoints": _json(row["endpoints"]), "env": _json(row["env"])} for row in rows]
+
+
+async def read_models(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Every model with its provider's natural key, in stable catalog order."""
+    rows = await conn.fetch(
+        "SELECT m.*, p.name AS provider FROM llm_models m JOIN llm_providers p ON p.id = m.provider_id "
+        "ORDER BY p.name COLLATE \"C\", m.catalog_order, m.name COLLATE \"C\", m.protocol"
+    )
+    return [dict(row) for row in rows]
 
 
 async def read_profiles(conn: asyncpg.Connection) -> list[dict[str, Any]]:
-    """Every Agent Profile, its runtime and provider by name."""
+    """Every Agent Profile, its runtime by name and its model's complete natural key."""
     rows = await conn.fetch(
-        "SELECT a.id, a.name, r.name AS runtime, p.name AS provider, a.model, a.effort, a.agent_teams, "
+        "SELECT a.id, a.name, r.name AS runtime, p.name AS provider, m.name AS model, m.protocol, a.effort, a.agent_teams, "
         "a.custom_prompt, a.builtin "
         "FROM agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
-        "JOIN llm_providers p ON p.id = a.provider_id "
+        "JOIN llm_models m ON m.id = a.model_id JOIN llm_providers p ON p.id = m.provider_id "
         "ORDER BY a.name COLLATE \"C\""
     )
     return [dict(row) for row in rows]
@@ -240,7 +251,7 @@ async def write_provider(conn: asyncpg.Connection, provider_id: str | None, valu
     """Add a provider (``provider_id`` None) or replace one's fields; ``api_key`` (None: none) replaces its key."""
     from .profile_registry import insert_provider, update_provider
 
-    fields = {k: values[k] for k in ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "env",
+    fields = {k: values[k] for k in ("name", "vendor_type", "auth", "oauth_runtime_type", "endpoints", "env",
                                      "max_concurrency")}
     if provider_id is None:
         return await insert_provider(conn, fields, api_key)
@@ -250,22 +261,24 @@ async def write_provider(conn: asyncpg.Connection, provider_id: str | None, valu
 
 async def write_profile(conn: asyncpg.Connection, profile_id: str | None, values: Mapping[str, Any]) -> str:
     """Add an Agent Profile (``profile_id`` None) or replace its settings; returns its id."""
+    from .profile_registry import insert_profile, update_profile
+
     if profile_id is None:
-        profile_id = f"agent-{uuid.uuid4().hex[:12]}"
-        await conn.execute(
-            "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort, agent_teams, custom_prompt) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-            profile_id, values["name"], values["runtime_id"], values["provider_id"], values["model"],
-            values["effort"], values["agent_teams"], values.get("custom_prompt", ""),
-        )
-    else:
-        await conn.execute(
-            "UPDATE agent_profiles SET runtime_id = $2, provider_id = $3, model = $4, effort = $5, agent_teams = $6, "
-            "custom_prompt = $7, updated_at = now() WHERE id = $1",
-            profile_id, values["runtime_id"], values["provider_id"], values["model"], values["effort"],
-            values["agent_teams"], values.get("custom_prompt", ""),
-        )
+        return await insert_profile(values, pool=conn)
+    await update_profile(profile_id, values, pool=conn)
     return profile_id
+
+
+async def write_model(conn: asyncpg.Connection, model_id: str | None, values: Mapping[str, Any]) -> str:
+    """Upsert a model by the identity already matched by the importer."""
+    from .profile_registry import insert_model, update_model
+
+    if model_id is None:
+        return await insert_model(conn, values)
+    settings = {k: v for k, v in values.items() if k not in ("provider_id", "name", "protocol")}
+    await update_model(conn, model_id, settings)
+    await conn.execute("UPDATE llm_models SET catalog_order = $2 WHERE id = $1", model_id, values["catalog_order"])
+    return model_id
 
 
 async def write_role(conn: asyncpg.Connection, role: str, values: Mapping[str, Any], *, exists: bool) -> None:

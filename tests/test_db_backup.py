@@ -27,7 +27,6 @@ import pytest
 from evals.prompt_regression.runner import fresh_database, free_port
 from looper import ops_config
 from looper.agents import db_backup, operator_auth
-from looper.agents.self_check import mask_dsn
 from looper.env import counterpart
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,7 +62,11 @@ sys.stdout.buffer.write(b"PGDMP" + json.dumps({"permission_mode": asyncio.run(dr
 
 _PG_RESTORE = r'''#!/bin/sh
 echo "$@" >> @CALLS@
-[ "@OK@" = yes ] && exit 0
+if [ "@OK@" = yes ]; then
+    echo '1; 1259 100 TABLE public role_configs test'
+    echo '2; 0 100 TABLE DATA public role_configs test'
+    exit 0
+fi
 echo "pg_restore: error: input file does not appear to be a valid archive" >&2
 exit 1
 '''
@@ -199,7 +202,8 @@ def test_a_schema_change_is_backed_up_before_it_is_applied(tmp_path: Path) -> No
     assert state == MIGRATED
     listed = (tmp_path / "restore-calls").read_text().split()  # before it took its final name
     assert listed[0] == "--list" and listed[1].startswith(str(backup))
-    assert f"pg_restore --no-owner --dbname '{mask_dsn(url)}' '{backup}'" in log
+    assert f"pg_restore --no-owner --dbname '<isolated-database-url>' '{backup}'" in log
+    assert "preserving the migrated database and new writes" in log
 
 
 @needs_database
@@ -278,8 +282,31 @@ def test_a_failed_backup_stops_serve_before_any_ddl(tmp_path: Path, mode: str, r
     assert _backups(tmp_path) == []  # nor a partial file
 
 
+@pytest.mark.parametrize("command", [False, True], ids=["pg-dump", "backup-command"])
+@pytest.mark.parametrize("restore_ok", [None, False], ids=["missing-verifier", "unreadable-archive"])
+def test_header_alone_cannot_authorize_a_schema_change(tmp_path, monkeypatch, command, restore_ok):
+    _install(tmp_path / "bin", mode="offline", restore_ok=restore_ok)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    dumper = db_backup.Dumper((str(tmp_path / "bin" / "pg_dump"),), command, "test")
+    with pytest.raises(db_backup.BackupFailed):
+        db_backup.back_up(dumper, "postgresql://u@127.0.0.1:1/loopx", tmp_path / "backups")
+    assert list((tmp_path / "backups").iterdir()) == []
+
+
+@pytest.mark.parametrize("toc", ["", "1; 1259 100 TABLE public t test", "2; 0 100 TABLE DATA public t test"],
+                         ids=["empty-archive", "schema-only", "data-only"])
+def test_a_full_backup_requires_both_table_definitions_and_data(tmp_path, toc):
+    dump = tmp_path / "backup.dump"
+    dump.write_bytes(b"PGDMP")
+    restore = tmp_path / "pg_restore"
+    restore.write_text(f"#!{sys.executable}\nprint({toc!r})\n")
+    restore.chmod(0o755)
+    with pytest.raises(db_backup.BackupFailed, match="full database backup"):
+        db_backup._verify(dump, str(restore), password=None)
+
+
 def test_the_newest_five_backups_of_the_database_are_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(tmp_path / "bin", mode="offline", restore_ok=None)
+    _install(tmp_path / "bin", mode="offline")
     backups = tmp_path / "backups"
     backups.mkdir()
     old = [backups / f"looper-loopx-2026100{day}T120000.000000Z.dump" for day in range(1, 7)]
@@ -298,7 +325,7 @@ def test_the_newest_five_backups_of_the_database_are_kept(tmp_path: Path, monkey
 def test_the_password_reaches_pg_dump_only_through_its_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _install(tmp_path / "bin", mode="offline", restore_ok=None)
+    calls = _install(tmp_path / "bin", mode="offline")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
 
     db_backup.back_up(db_backup.find_dumper(16), "postgresql://u:p%40ss@127.0.0.1:1/loopx", tmp_path / "backups")
@@ -312,7 +339,7 @@ def test_a_backup_command_runs_as_given_with_the_database_filled_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``backup.command`` wins over any pg_dump: its version is not asked, its stdout is the backup."""
-    calls = _install(tmp_path / "bin", version="9.6.24", mode="offline", restore_ok=False)
+    calls = _install(tmp_path / "bin", version="9.6.24", mode="offline")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     ops = ops_config.load(
         ops_config.Flags(runtime_root=tmp_path),
@@ -325,7 +352,7 @@ def test_a_backup_command_runs_as_given_with_the_database_filled_in(
 
     assert [json.loads(line)["argv"] for line in calls.read_text().splitlines()] == [
         ["--format=custom", "-U", "alice", "loopx"]]
-    assert path.read_bytes() == b"PGDMP offline" and "header" in checked
+    assert path.read_bytes() == b"PGDMP offline" and "listed" in checked
 
 
 def test_a_backup_command_is_shown_by_its_program_only(tmp_path: Path) -> None:

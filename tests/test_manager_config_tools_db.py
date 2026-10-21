@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from looper.agents.ops import Turn
-from looper.agents.provider_presets import PRESETS
+from looper.agents import profile_registry as registry
+from looper.agents.runtimes import VendorType
 from tests.test_ops_tasks_db import _Chat, _error, _project, _task
 from tests.test_task_agents_db import _call, _concurrency_chat
 from tests.test_usage_api_db import DSN, _run, _run_record
@@ -39,8 +40,27 @@ async def _trail(pool: Any) -> list[tuple[str, str, str]]:
 
 
 async def _sonnet(pool: Any) -> None:
-    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                       "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', 'prov-claude-subscription', 'sonnet')")
+    model = next(m for m in (await registry.list_models(provider_id="prov-claude-subscription"))["models"]
+                 if m["name"] == "sonnet")
+    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                       "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', $1)", model["model_id"])
+
+
+@pytest.fixture(autouse=True)
+def isolated_logins(monkeypatch):
+    # Listing configuration never reads the operator's CLI homes.
+    monkeypatch.setattr(registry, "_login_modules", lambda: {})
+
+
+async def _model(name="test-model", provider="prov-claude-subscription", protocol="anthropic-messages", **settings):
+    return (await _ok("POST", "/api/models", {"provider_id": provider, "name": name,
+                                               "protocol": protocol, **settings}))["model"]
+
+
+async def _tool(chat, tool, **arguments):
+    (answer,) = await chat.say("配置", (tool, arguments))
+    assert answer["status"] == "ok", answer
+    return answer["result"]
 
 
 # --- looper_projects ---
@@ -132,33 +152,102 @@ def test_a_project_with_tasks_is_not_offered_for_deletion(monkeypatch: pytest.Mo
 
 def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
+        model = next(m for m in (await _ok("GET", "/api/models"))["models"]
+                     if m["provider_id"] == "prov-claude-subscription" and m["name"] == "sonnet")
         chat = _Chat(tmp_path)
-        (created,) = await chat.say("加一个 sonnet 的 profile", ("looper_agent_profiles", {
-            "action": "create", "name": "fast", "runtime": "claude-code", "provider": "CLAUDE-SUBSCRIPTION",
-            "model": "sonnet", "effort": "low"}))
-        assert created["status"] == "ok", created
-        profile = created["result"]["profile"]
-        assert (profile["runtime"], profile["provider"], profile["model"], profile["effort"]) == (
-            "claude-code", "claude-subscription", "sonnet", "low")
-        (changed,) = await chat.say("fast 的 effort 去掉", ("looper_agent_profiles", {
-            "action": "update", "profile": "fast", "effort": None}))
-        assert changed["result"]["profile"]["effort"] is None
-        (registered,) = [p for p in (await _ok("GET", "/api/registry"))["profiles"] if p["name"] == "fast"]
-        assert (registered["profile_id"], registered["model"], registered["effort"]) == (
-            profile["profile_id"], "sonnet", None)
-        (listed,) = await chat.say("有哪些 profile", ("looper_agent_profiles", {"action": "list"}))
-        assert [p["name"] for p in listed["result"]["profiles"]] == ["claude-code/opus", "fast"]
-        assert listed["result"]["runtimes"] == [{"runtime_id": "rt-claude-code", "name": "claude-code",
-                                                 "type": "claude-code", "roles": ["manager", "planner", "worker",
-                                                                                  "reviewer"]}]
-        # A profile's id works where its name does; an unknown one is named with the ones there are.
-        (unknown,) = await chat.say("改 slow", ("looper_agent_profiles", {"action": "update", "profile": "slow",
-                                                                          "model": "opus"}))
+        created = await _tool(chat, "looper_agent_profiles", action="create", name="fast", runtime="claude-code",
+                              model=model["model_id"], effort="low", agent_teams=False, custom_prompt="Be concise.")
+        profile = created["profile"]
+        assert (profile["runtime"], profile["model_id"], profile["model"], profile["effort"]) == (
+            "claude-code", model["model_id"], {"model_id": model["model_id"], "name": "sonnet",
+            "protocol": "anthropic-messages", "provider_id": "prov-claude-subscription"}, "low")
+        assert profile["provider"] == {"provider_id": "prov-claude-subscription", "name": "claude-subscription",
+                                        "vendor_type": "claude-subscription", "auth": "oauth"}
+        assert profile["agent_teams"] is False and profile["custom_prompt"] == "Be concise."
+        assert profile["used_by"] is None
+        opus = next(m for m in (await _ok("GET", "/api/models"))["models"] if m["name"] == "opus")
+        changed = await _tool(chat, "looper_agent_profiles", action="update", profile="fast", effort=None,
+                              model={"provider": "CLAUDE-SUBSCRIPTION", "name": "opus", "protocol": opus["protocol"]})
+        assert changed["profile"]["effort"] is None
+        assert changed["profile"]["model_id"] == opus["model_id"]
+        assert changed["profile"]["custom_prompt"] == "Be concise." and changed["profile"]["agent_teams"] is False
+        registered = next(p for p in (await _ok("GET", "/api/registry"))["profiles"] if p["name"] == "fast")
+        assert (registered["profile_id"], registered["model_id"], registered["effort"]) == (
+            profile["profile_id"], opus["model_id"], None)
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile["profile_id"]})
+        listed = await _tool(chat, "looper_agent_profiles", action="list")
+        assert [p["name"] for p in listed["profiles"]] == ["claude-code/opus", "fast"]
+        assert listed["profiles"][1]["used_by"] == "the worker role"
+        assert listed["profiles"][1]["model_id"] == opus["model_id"]
+        assert listed["runtimes"] == [{"runtime_id": "rt-claude-code", "name": "claude-code",
+                                       "type": "claude-code", "roles": ["manager", "planner", "worker", "reviewer"]}]
+        assert {m["model_id"] for m in listed["models"]} == {
+            m["model_id"] for m in (await _ok("GET", "/api/models"))["models"]}
+        assert all("prices" not in m for m in listed["models"])
+        (unknown,) = await chat.say("改 slow", ("looper_agent_profiles", {
+            "action": "update", "profile": "slow", "effort": "high"}))
         assert _error(unknown) == "not_found" and "claude-code/opus, fast" in unknown["error"]["message"]
         (taken,) = await chat.say("再加一个", ("looper_agent_profiles", {
-            "action": "create", "name": "fast", "runtime": "rt-claude-code", "provider": "prov-claude-subscription",
-            "model": "opus"}))
+            "action": "create", "name": "fast", "runtime": "rt-claude-code", "model": opus["model_id"]}))
         assert _error(taken) == "conflict" and "already exists" in taken["error"]["message"]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("runtime,protocol,model_name,effort", [
+    ("pi", "openai-responses", "gpt-6.1-sol", "minimal"),
+    ("pi", "openai-chat", "deepseek-flash", "off"),
+    ("dsh", "anthropic-messages", "deepseek-flash", "low"),
+    ("dsh", "anthropic-messages", "deepseek-flash[1m]", "high"),
+    ("dsh", "anthropic-messages", "deepseek-v4-pro", "max"),
+    ("dsh", "anthropic-messages", "deepseek-v4-pro[1m]", "max"),
+])
+def test_pi_and_dsh_manager_models_profiles_and_config_import_share_pairing_rules(
+    monkeypatch, tmp_path, runtime, protocol, model_name, effort,
+):
+    from looper.agents import config_transfer as transfer
+    from tests.test_profile_registry_db import _runtime
+
+    async def test(pool):
+        runtime_id = await _runtime(runtime)
+        chat = _Chat(tmp_path)
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "gateway", "vendor_type": "custom", "endpoints": [
+                {"protocol": p, "base_url": "https://gateway.example.invalid"}
+                for p in ("anthropic-messages", "openai-chat", "openai-responses")]}))["provider"]
+        model = (await _tool(chat, "looper_models", action="create", provider=provider["provider_id"],
+                             name=model_name, protocol=protocol, input_usd_per_mtok=2.5))["model"]
+        incompatible_protocol = "anthropic-messages" if runtime == "pi" else "openai-chat"
+        wrong_protocol = await _model(model_name, provider["provider_id"], incompatible_protocol)
+        unsupported = await _model("unsupported-model", provider["provider_id"], protocol)
+        listed = await _tool(chat, "looper_models", action="list", runtime=runtime)
+        ids = {m["model_id"] for m in listed["models"]}
+        assert model["model_id"] in ids and wrong_protocol["model_id"] not in ids
+        assert (unsupported["model_id"] in ids) == (runtime == "pi")
+        created = await _tool(chat, "looper_agent_profiles", action="create", name="native", runtime=runtime,
+                              model=model["model_id"], effort=effort, custom_prompt="Keep this instruction.")
+        assert created["profile"]["runtime"] == runtime and created["profile"]["effort"] == effort
+        listed_profiles = await _tool(chat, "looper_agent_profiles", action="list")
+        kind = next(t for t in listed_profiles["runtime_types"] if t["type"] == runtime)
+        assert effort in kind["effort_levels"] and protocol in kind["protocols"]
+        assert kind["supported_models"] is None if runtime == "pi" else model_name in kind["supported_models"]
+        (refused,) = await chat.say("创建不兼容配方", ("looper_agent_profiles", {
+            "action": "create", "name": "bad", "runtime": runtime,
+            "model": wrong_protocol["model_id"]}))
+        assert _error(refused) == "invalid" and "exact protocol" in refused["error"]["message"]
+
+        data = {"format": transfer.FORMAT, "profiles": [{
+            "name": "imported", "runtime": runtime, "model": {
+                "provider": "gateway", "name": model_name, "protocol": protocol},
+            "effort": effort, "agent_teams": False, "custom_prompt": "Keep this instruction."}]}
+        async with pool.acquire() as conn:
+            plan = await transfer.run_import(conn, data, apply=True)
+        change = next(c for c in plan.changes if c.section == "profiles")
+        assert change.action == transfer.Action.ADDED
+        imported = next(p for p in (await _ok("GET", "/api/registry"))["profiles"] if p["name"] == "imported")
+        assert (imported["runtime_id"], imported["model_id"], imported["effort"], imported["agent_teams"],
+                imported["custom_prompt"]) == (runtime_id, model["model_id"], effort, False, "Keep this instruction.")
+        assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"]["input_usd_per_mtok"] == 2.5
 
     _run(test, monkeypatch)
 
@@ -177,7 +266,7 @@ def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": None})
         (asked,) = await chat.say("删掉 sonnet", ("looper_agent_profiles", {"action": "delete",
                                                                           "profile": "agent-sonnet"}))
-        assert "要删除 Agent Profile「claude-code/sonnet」（claude-code · claude-subscription · sonnet）吗？" in \
+        assert "要删除 Agent Profile「claude-code/sonnet」（claude-code · claude-subscription · sonnet · anthropic-messages）吗？" in \
             chat.turns[1].blocks[0]
         assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE id = 'agent-sonnet'") == 1
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
@@ -187,232 +276,317 @@ def test_deleting_an_agent_profile_asks_first_and_one_in_use_is_refused(
     _run(test, monkeypatch)
 
 
-def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter_it(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    async def test(pool: Any) -> None:
+def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter_it(monkeypatch, tmp_path):
+    async def test(pool):
         chat = _Chat(tmp_path)
-        (answer,) = await chat.say("登记 DeepSeek", ("looper_providers", {
-            "action": "register", "name": "deepseek", "protocols": ["anthropic-messages"],
-            "base_url": "https://api.deepseek.com/anthropic", "models": ["deepseek-flash"],
-            "env": {"API_TIMEOUT_MS": "3000000"}}))
-        assert answer["status"] == "ok", answer
-        provider = answer["result"]["provider"]
-        assert (provider["auth"], provider["models"], provider["api_key"]) == (
-            "api_key", ["deepseek-flash"], "missing: the user enters it on the dashboard")
-        assert "Settings → LLM Providers → deepseek → API key" in answer["result"]["note"]
-        (stored,) = [p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "deepseek"]
-        assert (stored["api_key"], stored["base_url"], stored["env"]) == (
-            None, "https://api.deepseek.com/anthropic", [{"key": "API_TIMEOUT_MS", "value": "3000000"}])
-        (listed,) = await chat.say("有哪些 provider", ("looper_providers", {"action": "list"}))
-        assert [p["name"] for p in listed["result"]["providers"]] == ["claude-subscription", "codex-login",
-                                                                       "grok-login", "deepseek"]
-        # A credential in its environment is refused as the dashboard refuses it.
+        answer = await _tool(chat, "looper_providers", action="register", name="deepseek", vendor_type="deepseek",
+                             env=[{"key": "API_TIMEOUT_MS", "value": "3000000"}])
+        provider = answer["provider"]
+        assert (provider["auth"], provider["model_count"], provider["api_key"]) == (
+            "api_key", 0, "missing: the user enters it on the dashboard")
+        assert "Settings → LLM Providers → deepseek → API key" in answer["note"]
+        model = await _tool(chat, "looper_models", action="create", provider=provider["provider_id"],
+                            name="deepseek-flash", protocol="anthropic-messages")
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "deepseek")
+        assert stored["api_key"] is None and stored["model_count"] == 1
+        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]}["anthropic-messages"] == \
+            "https://api.deepseek.com/anthropic"
+        assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "3000000"}]
+        assert model["model"]["provider_id"] == stored["provider_id"]
+        listed = await _tool(chat, "looper_providers", action="list")
+        assert [p["name"] for p in listed["providers"]] == ["claude-subscription", "codex-login", "grok-login", "deepseek"]
         (refused,) = await chat.say("再登记一个", ("looper_providers", {
-            "action": "register", "name": "other", "protocols": ["anthropic-messages"],
-            "env": {"OTHER_API_TOKEN": "x"}}))
+            "action": "register", "name": "other", "vendor_type": "deepseek",
+            "env": [{"key": "OTHER_API_TOKEN", "value": "x"}]}))
         assert _error(refused) == "invalid" and "looks like a credential" in refused["error"]["message"]
-
     _run(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("preset", "api"), [(preset, api) for preset in PRESETS for api in preset.apis])
-def test_registering_a_provider_from_a_preset_is_read_back_with_its_api_defaults(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, preset: Any, api: Any,
-) -> None:
-    async def test(pool: Any) -> None:
-        (answer,) = await _Chat(tmp_path).say("用预设登记 provider", ("looper_providers", {
-            "action": "register", "preset": preset.id, "api": api.protocols[-1].value}))
-        assert answer["status"] == "ok", answer
-        (stored,) = [p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == preset.name]
-        assert stored["protocols"] == [protocol.value for protocol in api.protocols]
-        assert stored["base_url"] == api.base_url
-        assert [{key: model[key] for key in ("name", "context_window", "background_model")}
-                for model in stored["models"]] == [
-                    {"name": model.name, "context_window": model.context_window,
-                     "background_model": model.background_model} for model in preset.models_for(api)]
-        assert stored["env"] == [{"key": key, "value": value} for key, value in preset.env]
+@pytest.mark.parametrize("vendor", [v for v in VendorType if v.auth_kind.value == "api_key"])
+def test_registering_a_vendor_and_its_suggested_models_reads_back_defaults(monkeypatch, tmp_path, vendor):
+    from looper.agents.provider_presets import vendor_defaults
+
+    async def test(pool):
+        defaults = vendor_defaults(vendor, provider_id="draft")
+        fields = {"name": vendor.value, "vendor_type": vendor.value}
+        if defaults.requires_url_confirmation or not defaults.endpoints:
+            fields["endpoints"] = ([{"protocol": e.protocol.value, "base_url": "https://example.com/v1"}
+                                    for e in defaults.endpoints] or
+                                   [{"protocol": "openai-chat", "base_url": "https://example.com/v1"}])
+        chat = _Chat(tmp_path)
+        provider = (await _tool(chat, "looper_providers", action="register", **fields))["provider"]
+        assert provider["model_count"] == 0
+        for model in defaults.models:
+            await _tool(chat, "looper_models", action="create", provider=provider["provider_id"], name=model.name,
+                        protocol=model.protocol.value, context_window=model.context_window,
+                        background_model=model.background_model)
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == vendor.value)
+        expected = fields.get("endpoints", [{"protocol": e.protocol.value, "base_url": e.base_url}
+                                            for e in defaults.endpoints])
+        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {e["protocol"]: e["base_url"] for e in expected}
+        models = (await _ok("GET", "/api/models"))["models"]
+        assert {(m["name"], m["protocol"], m["context_window"], m["background_model"]) for m in models
+                if m["provider_id"] == provider["provider_id"]} == {
+            (m.name, m.protocol.value, m.context_window, m.background_model) for m in defaults.models}
+        assert stored["env"] == [{"key": k, "value": v} for k, v in defaults.env]
         assert stored["api_key"] is None
-
     _run(test, monkeypatch)
 
 
-def test_provider_preset_explicit_overrides_win(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(pool: Any) -> None:
-        (answer,) = await _Chat(tmp_path).say("覆盖预设字段", ("looper_providers", {
-            "action": "register", "preset": "glm-bigmodel", "api": "anthropic-messages",
-            "name": "custom", "protocols": ["openai-chat"], "base_url": "https://example.com/v1",
-            "models": ["custom-model"], "env": {"API_TIMEOUT_MS": "1234"}}))
-        assert answer["status"] == "ok", answer
-        (stored,) = [p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "custom"]
-        assert stored["protocols"] == ["openai-chat"]
-        assert stored["base_url"] == "https://example.com/v1"
-        assert [model["name"] for model in stored["models"]] == ["custom-model"]
+def test_provider_explicit_overrides_win(monkeypatch, tmp_path):
+    async def test(pool):
+        chat = _Chat(tmp_path)
+        provider = (await _tool(chat, "looper_providers", action="register", name="custom", vendor_type="glm-bigmodel",
+            endpoints=[{"protocol": "openai-chat", "base_url": "https://example.com/v1"}],
+            env=[{"key": "API_TIMEOUT_MS", "value": "1234"}]))["provider"]
+        model = (await _tool(chat, "looper_models", action="create", provider="custom", name="custom-model",
+                             protocol="openai-chat"))["model"]
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "custom")
+        assert stored["endpoints"] == [{"provider_id": provider["provider_id"], "protocol": "openai-chat",
+                                        "base_url": "https://example.com/v1", "use_runtime_default": False}]
         assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "1234"}]
-
+        assert model["name"] == "custom-model" and model["provider_id"] == provider["provider_id"]
     _run(test, monkeypatch)
 
 
 @pytest.mark.parametrize(("arguments", "message"), [
-    ({"preset": "unknown", "api": "openai-chat"}, "unknown preset 'unknown'"),
-    ({"preset": "deepseek"}, "api is required"),
-    ({"preset": "deepseek", "api": "unknown"}, "unknown API"),
+    ({"vendor_type": "unknown", "name": "x"}, "vendor_type must be one of"),
+    ({"name": "deepseek"}, "vendor_type is required"),
+    ({"vendor_type": "codex-login", "name": "copy"}, "builtin login account"),
+    ({"preset": "deepseek"}, "unknown argument 'preset'"),
 ])
-def test_invalid_provider_presets_are_refused_without_registering(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: dict[str, Any], message: str,
-) -> None:
-    async def test(pool: Any) -> None:
+def test_invalid_provider_registration_is_refused_without_registering(monkeypatch, tmp_path, arguments, message):
+    async def test(pool):
         before = await pool.fetchval("SELECT count(*) FROM llm_providers")
-        (answer,) = await _Chat(tmp_path).say("登记 provider", ("looper_providers", {
-            "action": "register", **arguments}))
+        (answer,) = await _Chat(tmp_path).say("登记", ("looper_providers", {"action": "register", **arguments}))
         assert _error(answer) == "invalid" and message in answer["error"]["message"], answer
-        if arguments["preset"] == "unknown":
-            assert all(preset.id in answer["error"]["message"] for preset in PRESETS)
         assert await pool.fetchval("SELECT count(*) FROM llm_providers") == before
-
     _run(test, monkeypatch)
 
 
-def test_provider_list_includes_available_presets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def test(pool: Any) -> None:
-        (answer,) = await _Chat(tmp_path).say("列出 providers 和预设", ("looper_providers", {"action": "list"}))
-        assert answer["status"] == "ok", answer
-        assert answer["result"]["presets"] == (await _ok("GET", "/api/registry"))["provider_presets"]
-        deepseek = next(preset for preset in answer["result"]["presets"] if preset["preset_id"] == "deepseek")
-        assert deepseek["name"] == "deepseek"
-        assert deepseek["apis"][1]["protocols"] == ["openai-responses", "openai-chat"]
-        assert deepseek["apis"][1]["base_url"] == "https://api.deepseek.com"
-        assert [model["name"] for model in deepseek["apis"][1]["models"]] == ["deepseek-flash", "deepseek-v4-pro"]
-
+def test_provider_list_includes_vendor_suggestions(monkeypatch, tmp_path):
+    async def test(pool):
+        answer = await _tool(_Chat(tmp_path), "looper_providers", action="list")
+        assert answer["vendors"] == (await _ok("GET", "/api/registry"))["vendor_types"]
+        deepseek = next(v for v in answer["vendors"] if v["vendor_type"] == "deepseek")
+        assert {e["protocol"] for e in deepseek["endpoints"]} == {"anthropic-messages", "openai-chat", "openai-responses"}
+        assert {m["name"] for m in deepseek["suggested_models"]} == {"deepseek-flash[1m]", "deepseek-v4-pro[1m]",
+                                                                    "deepseek-flash", "deepseek-v4-pro"}
+        assert any(e["base_url"] == "https://api.deepseek.com" for e in deepseek["endpoints"])
     _run(test, monkeypatch)
 
 
-def test_provider_update_changes_the_dashboard_and_preserves_its_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    async def test(pool: Any) -> None:
-        provider = (await _ok("POST", "/api/providers", {
-            "name": "deepseek", "auth": "api_key", "protocols": ["anthropic-messages"],
-            "base_url": "https://api.deepseek.com/anthropic", "models": [{"name": "deepseek-flash"}],
-            "api_key": SECRET, "env": [{"key": "API_TIMEOUT_MS", "value": "3000000"}]}))["provider"]
+@pytest.mark.parametrize("reference", ["id", "name"])
+def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypatch, tmp_path, reference):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+            "api_key": SECRET, "env": [{"key": "API_TIMEOUT_MS", "value": "3000000"}],
+            "max_concurrency": 2}))["provider"]
+        model = await _model("deepseek-flash", provider["provider_id"])
+        endpoints = [{"protocol": e["protocol"], "base_url": "https://example.invalid/" + e["protocol"]}
+                     for e in provider["endpoints"]]
         chat = _Chat(tmp_path)
-        (answer,) = await chat.say("更新 provider", ("looper_providers", {
-            "action": "update", "provider": "DEEPSEEK", "protocols": ["openai-chat", "openai-responses"],
-            "base_url": "https://api.deepseek.com", "models": ["deepseek-v4-pro"], "env": {}}))
-        assert answer["status"] == "ok", answer
-        assert answer["result"]["provider"]["models"] == ["deepseek-v4-pro"]
-        assert answer["result"]["warnings"] == []
+        answer = await _tool(chat, "looper_providers", action="update",
+                             provider=provider["provider_id"] if reference == "id" else "DEEPSEEK",
+                             name="renamed", endpoints=endpoints, env=[], max_concurrency=None)
+        assert answer["provider"]["name"] == "renamed"
+        assert answer["provider"]["api_key"] == "set" and answer["warnings"] == []
         stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
                       if p["provider_id"] == provider["provider_id"])
-        assert stored["protocols"] == ["openai-responses", "openai-chat"]
-        assert stored["base_url"] == "https://api.deepseek.com"
-        assert [m["name"] for m in stored["models"]] == ["deepseek-v4-pro"]
-        assert stored["env"] == []
+        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {
+            e["protocol"]: e["base_url"] for e in endpoints}
+        assert stored["env"] == [] and stored["max_concurrency"] is None
+        assert stored["vendor_type"] == "deepseek"
+        assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"] == {
+            **model, "provider_name": "renamed", "endpoint": {
+                **model["endpoint"], "base_url": "https://example.invalid/anthropic-messages"}}
+        await _tool(chat, "looper_providers", action="update", provider=provider["provider_id"],
+                    env=[{"key": "API_TIMEOUT_MS", "value": "1234"}])
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+                      if p["provider_id"] == provider["provider_id"])
+        assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "1234"}]
+        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {
+            e["protocol"]: e["base_url"] for e in endpoints}
         assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
                                    provider["provider_id"]) == SECRET
-        assert await _trail(pool) == [("looper_providers", "write", "ok")]
-        # Updating by id preserves omitted fields and permits clearing the URL.
-        (answer,) = await chat.say("清空 URL", ("looper_providers", {
-            "action": "update", "provider": provider["provider_id"], "base_url": None}))
-        assert answer["status"] == "ok", answer
-        assert answer["result"]["provider"]["base_url"] is None
-        assert answer["result"]["provider"]["models"] == ["deepseek-v4-pro"]
-
-    _run(test, monkeypatch)
-
-
-@pytest.mark.parametrize("models", [None, ["priced-b", "priced-a", "new-model"], ["priced-a"], [], [" priced-a "]])
-def test_provider_model_list_update_preserves_retained_metadata(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, models: list[str] | None,
-) -> None:
-    async def test(pool: Any) -> None:
-        provider = (await _ok("POST", "/api/providers", {
-            "name": "custom", "auth": "api_key", "protocols": ["anthropic-messages"],
-            "models": [
-                {"name": "priced-a", "context_window": 200_000, "background_model": "background-a",
-                 "efforts": ["low", "high"], "input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0,
-                 "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 0.5},
-                {"name": "priced-b", "context_window": 1_000_000, "background_model": "background-b",
-                 "efforts": ["medium"], "input_usd_per_mtok": 3.0, "output_usd_per_mtok": 4.0,
-                 "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 1.5},
-            ]}))["provider"]
-        before = {m["name"]: m for m in provider["models"]}
-        arguments = {"action": "update", "provider": provider["provider_id"], "name": "renamed"}
-        if models is not None:
-            arguments["models"] = models
-        (answer,) = await _Chat(tmp_path).say("更新 provider 模型列表", ("looper_providers", arguments))
-        assert answer["status"] == "ok", answer
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
-                      if p["provider_id"] == provider["provider_id"])
-        expected_names = list(before) if models is None else [m.strip() for m in models]
-        assert answer["result"]["provider"]["models"] == expected_names
-        assert [m["name"] for m in stored["models"]] == expected_names
-        for model in stored["models"]:
-            if model["name"] in before:
-                assert model == before[model["name"]]
-            else:
-                assert model == {**dict.fromkeys(before["priced-a"]), "name": "new-model"}
-        assert any("no full price" in w for w in answer["result"]["warnings"]) == ("new-model" in expected_names)
-
-    _run(test, monkeypatch)
-
-
-@pytest.mark.parametrize("action", ["register", "update"])
-@pytest.mark.parametrize("model", ["deepseek-typo", "gpt-6.1-sol"])
-def test_provider_writes_warn_about_unknown_models_and_missing_prices(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str, model: str,
-) -> None:
-    async def test(pool: Any) -> None:
-        arguments: dict[str, Any] = {"action": action, "models": [model]}
-        if action == "register":
-            arguments.update(preset="deepseek", api="anthropic-messages")
-        else:
-            await _ok("POST", "/api/providers", {
-                "name": "custom-name", "auth": "api_key", "protocols": ["anthropic-messages"],
-                "base_url": "https://api.deepseek.com/anthropic", "models": [{"name": "deepseek-flash"}]})
-            arguments["provider"] = "custom-name"
-        (answer,) = await _Chat(tmp_path).say("设置模型", ("looper_providers", arguments))
-        assert answer["status"] == "ok", answer
-        warnings = answer["result"]["warnings"]
-        assert any(model in w and "no full price" in w for w in warnings) == (model == "deepseek-typo")
-        assert any(all(name in w for name in (model, "deepseek-flash", "deepseek-v4-pro"))
-                   and "known models" in w for w in warnings)
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
-                      if p["provider_id"] == answer["result"]["provider"]["provider_id"])
-        assert [m["name"] for m in stored["models"]] == [model]
-
+        assert SECRET not in json.dumps(answer)
+        assert await _trail(pool) == [("looper_providers", "write", "ok")] * 2
     _run(test, monkeypatch)
 
 
 @pytest.mark.parametrize("fields", [
-    {}, {"protocols": []}, {"base_url": "ftp://example.com"}, {"env": {"OTHER_API_TOKEN": "x"}},
-    {"protocols": ["openai-chat"]}, {"models": ["deepseek-v4-pro"]},
+    {"vendor_type": "cpa"},
+    {"endpoints": [{"protocol": "openai-chat", "base_url": "file:///tmp/provider"}]},
+    {"endpoints": [{"protocol": "openai-chat", "base_url": "https://example.invalid"}] * 2},
+    {"env": [{"key": "OTHER_API_TOKEN", "value": "x"}]},
+    {"max_concurrency": 0},
+    {},
 ])
-def test_provider_update_refuses_with_the_dashboard_validation_and_rolls_back(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fields: dict[str, Any],
-) -> None:
-    async def test(pool: Any) -> None:
-        provider = (await _ok("POST", "/api/providers", {
-            "name": "deepseek", "auth": "api_key", "protocols": ["anthropic-messages"],
-            "models": [{"name": "deepseek-flash"}]}))["provider"]
-        await _ok("POST", "/api/agent-profiles", {
-            "name": "fast", "runtime_id": "rt-claude-code", "provider_id": provider["provider_id"],
-            "model": "deepseek-flash"})
-        before = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "deepseek")
-        data = {**fields}
-        if "env" in data:
-            data["env"] = [{"key": k, "value": v} for k, v in data["env"].items()]
-        if "models" in data:
-            data["models"] = [{"name": m} for m in data["models"]]
-        status, dashboard = await _call("PUT", f"/api/providers/{provider['provider_id']}", data)
-        assert status == 400, dashboard
-        (answer,) = await _Chat(tmp_path).say("更新 provider", ("looper_providers", {
-            "action": "update", "provider": "deepseek", **fields}))
+def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, tmp_path, fields):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+            "api_key": SECRET}))["provider"]
+        await _model("deepseek-flash", provider["provider_id"])
+        before = await _ok("GET", "/api/registry")
+        status, expected = await _call("PUT", f"/api/providers/{provider['provider_id']}", fields)
+        assert status == 400, expected
+        (answer,) = await _Chat(tmp_path).say("修改账户", ("looper_providers", {
+            "action": "update", "provider": provider["provider_id"], **fields}))
         assert _error(answer) == "invalid", answer
-        assert answer["error"]["message"] == dashboard["error"]
-        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"] if p["name"] == "deepseek")
-        assert stored == before
+        assert answer["error"]["message"] == expected["error"]
+        assert await _ok("GET", "/api/registry") == before
+        assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
+                                   provider["provider_id"]) == SECRET
+    _run(test, monkeypatch)
 
+
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize("name", ["API_KEY", "OTHER_API_TOKEN", "CLIENT_SECRET", "PASSWORD", "CREDENTIAL"])
+def test_rejected_provider_env_credentials_are_masked_in_audit(monkeypatch, tmp_path, action, name):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "deepseek", "vendor_type": "deepseek"}))["provider"]
+        before = await _ok("GET", "/api/registry")
+        fields = {"name": "new-account", "vendor_type": "deepseek"} if action == "register" else {
+            "provider": provider["provider_id"]}
+        env = [{"key": "API_TIMEOUT_MS", "value": "1234"}, {"key": name, "value": SECRET}]
+        (answer,) = await _Chat(tmp_path).say("配置账户", ("looper_providers", {
+            "action": action, **fields, "env": env}))
+        assert _error(answer) == "invalid", answer
+        assert await _ok("GET", "/api/registry") == before
+        (row,) = await pool.fetch("SELECT arguments, result, status, error_code FROM manager_actions")
+        assert (row["status"], row["error_code"]) == ("error", "invalid")
+        assert SECRET not in row["arguments"] + row["result"]
+        saved_env = json.loads(row["arguments"])["env"]
+        assert saved_env[0]["value"] == "1234"
+        assert saved_env[1]["value"] == "***"
+        assert env[1]["value"] == SECRET  # Auditing must not mutate the original request.
+
+    _run(test, monkeypatch)
+
+
+def test_model_update_changes_dashboard_and_preserves_provider_key(monkeypatch, tmp_path):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+            "api_key": SECRET, "env": [{"key": "API_TIMEOUT_MS", "value": "3000000"}]}))["provider"]
+        model = await _model("deepseek-flash", provider["provider_id"])
+        chat = _Chat(tmp_path)
+        answer = await _tool(chat, "looper_models", action="update", model=model["model_id"], context_window=1234,
+                             background_model="deepseek-v4-pro")
+        assert answer["model"]["context_window"] == 1234 and answer["model"]["background_model"] == "deepseek-v4-pro"
+        assert answer["warnings"] == []
+        stored = (await _ok("GET", f"/api/models/{model['model_id']}"))["model"]
+        assert stored == answer["model"]
+        assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
+                                   provider["provider_id"]) == SECRET
+        assert SECRET not in json.dumps(answer)
+        endpoints = [{"protocol": "anthropic-messages", "base_url": "https://api.deepseek.com/anthropic"},
+                     {"protocol": "openai-chat", "base_url": "https://api.deepseek.com"},
+                     {"protocol": "openai-responses", "base_url": "https://api.deepseek.com"}]
+        updated = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {
+            "endpoints": endpoints, "env": []}))["provider"]
+        assert {e["protocol"]: e["base_url"] for e in updated["endpoints"]} == {
+            e["protocol"]: e["base_url"] for e in endpoints}
+        assert updated["env"] == []
+        assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
+                                   provider["provider_id"]) == SECRET
+        assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"] == stored
+        cleared = await _tool(chat, "looper_models", action="update", model=model["model_id"], context_window=None)
+        assert cleared["model"]["context_window"] is None and cleared["model"]["background_model"] == "deepseek-v4-pro"
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("changes", [{"context_window": 1}, {"background_model": None}, {"efforts": []},
+                                      {"input_usd_per_mtok": 0}, {"output_usd_per_mtok": None}])
+def test_model_update_preserves_other_catalog_metadata(monkeypatch, tmp_path, changes):
+    async def test(pool):
+        model = await _model("priced-a", context_window=200_000, background_model="background-a",
+            efforts=["low", "high"], input_usd_per_mtok=1.0, output_usd_per_mtok=2.0,
+            cache_read_usd_per_mtok=0.1, cache_write_usd_per_mtok=0.5)
+        other = await _model("priced-b", context_window=1_000_000, background_model="background-b",
+            efforts=["medium"], input_usd_per_mtok=3.0, output_usd_per_mtok=4.0,
+            cache_read_usd_per_mtok=0.0, cache_write_usd_per_mtok=1.5)
+        answer = await _tool(_Chat(tmp_path), "looper_models", action="update", model=model["model_id"], **changes)
+        stored = (await _ok("GET", f"/api/models/{model['model_id']}"))["model"]
+        assert stored == answer["model"]
+        for field in registry.MODEL_FIELDS:
+            assert stored[field] == changes.get(field, model[field])
+        assert (await _ok("GET", f"/api/models/{other['model_id']}"))["model"] == other
+        assert any("no full price" in w for w in answer["warnings"]) == (changes.get("output_usd_per_mtok", 2) is None)
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("name", ["deepseek-typo", "gpt-6.1-sol"])
+def test_model_writes_report_prices_and_keep_exact_unknown_names(monkeypatch, tmp_path, action, name):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek"}))["provider"]
+        model = await _model(name, provider["provider_id"]) if action == "update" else None
+        fields = {"model": model["model_id"], "context_window": 200_000} if model else {
+            "provider": "deepseek", "name": name, "protocol": "anthropic-messages"}
+        answer = await _tool(_Chat(tmp_path), "looper_models", action=action, **fields)
+        assert any("no full price" in w and "spend caps" in w for w in answer["warnings"]) == (name == "deepseek-typo")
+        stored = (await _ok("GET", f"/api/models/{answer['model']['model_id']}"))["model"]
+        assert stored["name"] == name and stored["provider_id"] == provider["provider_id"]
+        assert stored["warnings"] == answer["warnings"]
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("fields", [{}, {"context_window": 0}, {"input_usd_per_mtok": -1},
+    {"efforts": ["bad value"]}, {"protocol": "openai-chat"}, {"name": "renamed"}])
+def test_model_update_refuses_with_dashboard_validation_and_rolls_back(monkeypatch, tmp_path, fields):
+    async def test(pool):
+        model = await _model("editable-sonnet")
+        await _ok("POST", "/api/agent-profiles", {"name": "fast", "runtime_id": "rt-claude-code",
+                                                "model_id": model["model_id"]})
+        # The baseline for the rollback check is the model as the profile now uses it (profile_count 1).
+        model = (await _ok("GET", f"/api/models/{model['model_id']}"))["model"]
+        status, dashboard = await _call("PUT", f"/api/models/{model['model_id']}", fields)
+        assert status == 400, dashboard
+        (answer,) = await _Chat(tmp_path).say("更新", ("looper_models", {
+            "action": "update", "model": model["model_id"], **fields}))
+        assert _error(answer) == "invalid", answer
+        # Identity fields are rejected at the tool boundary before HTTP's registry schema.
+        if not (set(fields) & {"protocol", "name"}):
+            assert answer["error"]["message"] == dashboard["error"]
+        assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"] == model
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("changes", [{"model": "sonnet"}, {"model": {"provider": "claude-subscription", "name": "sonnet"}},
+    {"mode": "auto"}, {"system_prompt_mode": "append"}, {"effort": "unsupported"}, {"runtime": "omp", "agent_teams": True}])
+def test_invalid_profile_changes_preserve_saved_reference(monkeypatch, tmp_path, changes):
+    async def test(pool):
+        await _sonnet(pool)
+        await pool.execute("INSERT INTO agent_runtimes (id, name, type, capabilities) VALUES ('rt-omp', 'omp', 'omp', '{}')")
+        fields = dict(changes)
+        if fields.get("agent_teams"):
+            account = (await _ok("POST", "/api/providers", {"name": "api", "vendor_type": "custom",
+                "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://example.com"}]}))["provider"]
+            fields["model"] = (await _model("api-model", account["provider_id"]))["model_id"]
+        before = await pool.fetchrow("SELECT * FROM agent_profiles WHERE id = 'agent-sonnet'")
+        (answer,) = await _Chat(tmp_path).say("更新配方", ("looper_agent_profiles", {
+            "action": "update", "profile": "agent-sonnet", **fields}))
+        assert _error(answer) == "invalid", answer
+        if fields.get("agent_teams"):
+            assert "agent teams are a Claude Code feature" in answer["error"]["message"]
+        if "effort" in fields:
+            assert "effort" in answer["error"]["message"]
+        assert await pool.fetchrow("SELECT * FROM agent_profiles WHERE id = 'agent-sonnet'") == before
+    _run(test, monkeypatch)
+
+
+def test_profile_login_cannot_be_used_by_another_runtime(monkeypatch, tmp_path):
+    async def test(pool):
+        model = await _model("login-model", "prov-grok-login", "openai-responses")
+        await pool.execute("INSERT INTO agent_runtimes (id, name, type, capabilities) VALUES ('rt-codex', 'codex', 'codex', '{}')")
+        (answer,) = await _Chat(tmp_path).say("创建配方", ("looper_agent_profiles", {
+            "action": "create", "name": "wrong-login", "runtime": "codex", "model": model["model_id"]}))
+        assert _error(answer) == "invalid" and "own runtime" in answer["error"]["message"]
+        assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE name = 'wrong-login'") == 0
+        valid = await _tool(_Chat(tmp_path), "looper_agent_profiles", action="create", name="valid", runtime="claude-code",
+                            model=(await _model())["model_id"])
+        assert valid["profile"]["model_id"] and valid["profile"]["provider"]["auth"] == "oauth"
     _run(test, monkeypatch)
 
 
@@ -424,7 +598,7 @@ def test_no_tool_takes_a_key_and_none_is_kept_or_answered(
     async def test(pool: Any) -> None:
         chat = _Chat(tmp_path)
         (answer,) = await chat.say(f"登记 deepseek，key 是 {SECRET}", ("looper_providers", {
-            "action": action, "name": "deepseek", "protocols": ["anthropic-messages"], name: SECRET}))
+            "action": action, "name": "deepseek", "vendor_type": "deepseek", name: SECRET}))
         assert _error(answer) == "forbidden"
         assert "Settings → LLM Providers" in answer["error"]["message"] and SECRET not in json.dumps(answer)
         assert await pool.fetchval("SELECT count(*) FROM llm_providers WHERE name = 'deepseek'") == 0

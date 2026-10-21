@@ -40,6 +40,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -214,7 +215,7 @@ class ManagerOps:
                         "expires_in_seconds": CONFIRMATION_SECONDS,
                         "shown_to_user": "Looper adds what this does and the request to confirm it after your reply. "
                                          "It has not run: do not say it did."}
-            result = await tool.run(call)
+            result = _plain(await tool.run(call))
         except _Recorded as exc:
             return _error(exc.code, str(exc))
         except OpError as exc:
@@ -228,7 +229,7 @@ class ManagerOps:
             return _error(ErrorCode.UNAVAILABLE, f"Looper could not do it now ({type(exc).__name__}: {exc}); tell "
                                                  "the user, and try again later")
         await self._record(turn, tool, arguments, risk, "ok", result=None if risk is Risk.READ else result)
-        return {"status": "ok", "result": _plain(result)}
+        return {"status": "ok", "result": result}
 
     async def _confirm(self, confirmation_id: str, turn: Turn) -> dict[str, Any]:
         if turn.autonomous:
@@ -245,7 +246,7 @@ class ManagerOps:
         del self._pending[turn.chat_key]
         tool = pending.tool
         try:
-            result = await tool.run(Call(pending.arguments, turn, self._platform))
+            result = _plain(await tool.run(Call(pending.arguments, turn, self._platform)))
         except Exception as exc:
             if isinstance(exc, OpError):
                 error = exc
@@ -257,7 +258,7 @@ class ManagerOps:
                                result={"message": str(error)}, confirmation_id=pending.id)
             raise _Recorded(error) from None
         await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
-        return {"status": "ok", "result": _plain(result)}
+        return {"status": "ok", "result": result}
 
     def _ask(self, tool: Tool, arguments: dict[str, Any], impact: str, turn: Turn) -> _Pending:
         """Register ``tool``'s call for the user to confirm, replacing the chat's earlier one, and show it."""
@@ -372,7 +373,8 @@ def _error(code: ErrorCode, message: str) -> dict[str, Any]:
 
 def _plain(value: Any) -> Any:
     """``value`` as JSON has it (dates as ISO text)."""
-    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    return json.loads(json.dumps(value, ensure_ascii=False,
+                                default=lambda obj: obj.isoformat() if isinstance(obj, date) else str(obj)))
 
 
 def _created_task(result: Any) -> str | None:

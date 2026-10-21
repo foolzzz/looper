@@ -3,6 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SchedulerSection } from "@/components/scheduler-settings";
+import { ScheduleDetail } from "@/components/schedule-detail";
+import type { ScheduleInfo } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -91,6 +93,33 @@ describe("Settings → Scheduler", () => {
     const inputs = container.querySelectorAll("input");
     expect((inputs[0] as HTMLInputElement).value).toBe("90");
     expect((inputs[1] as HTMLInputElement).value).toBe("45");
+  });
+
+  it.each([true, false])("shows a schedule's registered model summary or project inheritance (override: %s)", async (override) => {
+    const schedule: ScheduleInfo = {
+      schedule_id: "schedule", project_id: "project", project_name: "Project", name: "Scheduled task",
+      cron: "0 9 * * *", timezone: "UTC", description: "Every morning", requirement: "Check changes", work_dir: "",
+      overlap: "skip", max_parallel_runs: 1, catch_up: "skip", run_timeout_seconds: null,
+      run_timeout_effective_seconds: null, run_budget_usd: null, profile_overrides: override ? { worker: "p" } : {},
+      task_limits: { worker: null, reviewer: null }, enabled: false, next_fire_at: null, last_fired_at: null,
+      last_success_at: null, consecutive_failures: 0, created_via: "dashboard", created_at: "", updated_at: "",
+      last_run: null, gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "never",
+      notify_target: null, spent_today_usd: 0, alerts: { failures_since: null, stale_since: null },
+      planner_session: { active: false, runtime: null, profile: null, last_task_id: null, last_task_title: null, updated_at: null },
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return Response.json(url.endsWith("/registry") ? { profiles: [{
+        profile_id: "p", name: "Schedule profile", effort: "high", runtime_name: "Runtime",
+        provider: { provider_id: "v", name: "Schedule account", auth: "api_key", vendor_type: "custom" },
+        model: { model_id: "m", provider_id: "v", name: "Exact model", protocol: "openai-responses" },
+      }] } : url.includes("/runs?") ? { runs: [], next_before: null, routine_skips: { skipped_gate: 0, skipped_overlap: 0 } }
+        : { schedule });
+    }));
+    await act(async () => root.render(<ScheduleDetail scheduleId="schedule" onDeleted={() => {}} />));
+    expect(container.textContent).toContain(override
+      ? "Schedule profile · high — Runtime · Schedule account / Exact model / openai-responses"
+      : "As the project sets them");
   });
 
   it("shows wait defaults and sources, saves seconds, resets to default and shows a refusal", async () => {

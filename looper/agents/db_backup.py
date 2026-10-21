@@ -4,7 +4,8 @@
 migrations that drop columns and tables. When the schema is about to change
 (``schema_change_pending``), serve first writes a custom-format dump into
 ``<runtime root>/backups/`` and keeps the newest ``KEEP`` of that database's;
-without a way to make one it does not start (``--skip-backup`` overrides).
+without a way to make one it does not start. Registry upgrades cannot use
+the general ``--skip-backup`` override.
 
 The dump is made by, in order of precedence (the ops file's ``[backup]``,
 ``looper.ops_config``; ``LOOPER_BACKUP_CMD`` and ``LOOPER_PG_DUMP`` for one
@@ -13,8 +14,8 @@ release):
 - ``backup.command``: a command run as given whose stdout is the dump, for a
   ``pg_dump`` that cannot reach the database URL as written, such as the one
   inside a PostgreSQL container; ``{dbname}`` and ``{user}`` are filled in
-  from the database URL. Its version is not checked, and the dump is checked
-  by its header only;
+  from the database URL. Its version is not checked; a local ``pg_restore``
+  must still list the archive before migration;
 - the ``pg_dump`` that ``backup.pg_dump`` names, else ``pg_dump`` on PATH. Its
   major version must be at least the server's; the dump is then listed with
   the ``pg_restore`` beside it (else the one on PATH) to prove it is readable.
@@ -71,7 +72,7 @@ class Dumper:
     def pg_restore(self) -> str | None:
         """The pg_restore that lists this pg_dump's backups: the one beside it, else on PATH."""
         if self.command:
-            return None
+            return shutil.which("pg_restore")
         sibling = Path(self.argv[0]).with_name("pg_restore")
         if sibling.is_file() and os.access(sibling, os.X_OK):
             return str(sibling)
@@ -193,7 +194,7 @@ def _verify(path: Path, pg_restore: str | None, *, password: str | None) -> str:
     if head != _MAGIC:
         raise BackupFailed("the dump is not a custom-format archive (does the command pass --format=custom?)")
     if pg_restore is None:
-        return "header checked; no pg_restore to list it"
+        raise BackupFailed("pg_restore is required to verify the custom-format archive")
     try:
         listed = subprocess.run([pg_restore, "--list", str(path)], capture_output=True, stdin=subprocess.DEVNULL,
                                 env=child_env.backup(), timeout=_LIST_TIMEOUT_SECONDS)
@@ -202,4 +203,9 @@ def _verify(path: Path, pg_restore: str | None, *, password: str | None) -> str:
     if listed.returncode != 0:
         reason = _tail(listed.stderr.decode("utf-8", "replace"), password=password)
         raise BackupFailed(f"`{pg_restore} --list` cannot read the dump: {reason or 'no message'}")
+    # A readable schema-only or data-only archive cannot recover the old
+    # database on its own. The startup gate requires both in one archive.
+    kinds = set(re.findall(rb"(?m)^\d+;\s+\d+\s+\d+\s+(TABLE DATA|TABLE)\s", listed.stdout))
+    if kinds != {b"TABLE", b"TABLE DATA"}:
+        raise BackupFailed("the archive is not a full database backup (table definitions and data are required)")
     return f"listed with {pg_restore}"

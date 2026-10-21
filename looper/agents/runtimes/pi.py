@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
     from ..library import AgentLibrary
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec as ProviderSpec
 
 _PROBE_TIMEOUT_SEC = 10.0
 _VERSION_MAX = 200
@@ -130,6 +130,7 @@ class PiRuntime(RuntimeAdapter):
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES, ApiProtocol.OPENAI_CHAT})
     # API keys only. pi's own /login and OAuth are not providers Looper binds.
     auth_kinds = frozenset({AuthKind.API_KEY})
+    effort_levels = THINKING_LEVELS
     isolation_id = HOME_LAYOUT_ID
     can_replace_system_prompt = True
     read_only = ReadOnly.TOOLS
@@ -193,13 +194,16 @@ class PiRuntime(RuntimeAdapter):
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return list(_ISOLATION_FLAGS)
 
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+        if effort and effort not in self.effort_levels:
+            raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(self.effort_levels)}, or empty")
+
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
         """Pin the private provider and selected model; the API key goes only in the child environment."""
         _check_provider(provider, model)
         _check_explicit_env(provider.env)
         assert provider.api_key is not None  # checked above; ProviderBinding.env contains strings only
-        if effort and effort not in THINKING_LEVELS:
-            raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(THINKING_LEVELS)}, or empty")
+        self.check_pairing(provider, model, effort)
         return ProviderBinding(
             args=("--provider", PROVIDER_ID, "--model", model, *(("--thinking", effort) if effort else ())),
             env=(*provider.env, (KEY_ENV, provider.api_key)),
@@ -729,18 +733,18 @@ def _check_provider(provider: ProviderSpec, model: str) -> str:
 def models_json(launch: Launch) -> dict[str, Any]:
     """The private models.json, containing only the chosen model and an interpolated key reference.
 
-    Missing context/output limits stay with pi's defaults; catalog prices are handled by Looper.
+    Missing context/output limits stay with pi's defaults; model prices are handled by Looper.
     """
     provider = launch.profile.provider
     api = _check_provider(provider, launch.model)
-    entry = provider.catalog_model(launch.model)
+    entry = launch.settings.resolved_model.model
     model: dict[str, Any] = {
         "id": launch.model, "name": launch.model,
-        "reasoning": not (entry is not None and entry.efforts is not None and not entry.efforts),
+        "reasoning": entry.efforts != (),
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
     }
-    if entry is not None and entry.context_window:
+    if entry.context_window:
         model["contextWindow"] = entry.context_window
     if api == "openai-responses":
         # pi 1.3's openai-responses getCompat/convertResponsesTools (also checked in request serialization):

@@ -33,9 +33,9 @@ function registry(pi: Runtime | null): Registry {
       roles: [...ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null,
     }],
     runtimes: pi ? [pi] : [],
-    providers: [], profiles: [], provider_presets: [], prices: { as_of: "", sources: [], models: {} },
+    providers: [], models: [], profiles: [], vendor_types: [], prices: { as_of: "", sources: [], models: {} },
     limits: {
-      name_max_chars: 100, models_max: 10, price_fields: [], protocols: ["openai-chat", "openai-responses"],
+      name_max_chars: 100, models_max: 10, model_fields: [], price_fields: [], protocols: ["openai-chat", "openai-responses"],
       auth_kinds: ["api_key"], effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },
       secret_mask: "", provider_env_owned: [],
     },

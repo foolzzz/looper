@@ -22,7 +22,8 @@ import pytest
 
 from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.library import AgentLibrary
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
+from tests.runtime_model_helpers import resolved_profile
 from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.agents.runtimes import dsh
 from tests.dsh_installed_stand_in import FetchMessages, MessagesServer, NETWORK_GUARD, mcp_command, read_records, tool
@@ -79,7 +80,7 @@ def _launch(tmp_path, installation, server, *, role="worker", gate=None, mode="r
         "env": {"LOOPER_AGENT_URL": server.url, "LOOPER_AGENT_TOKEN": "synthetic-platform-token"}}}}))
     provider = ProviderSpec("offline", "Local synthetic Messages", AuthKind.API_KEY,
                             frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), base_url=server.url, api_key=KEY)
-    profile = AgentProfile("offline", "Offline", RuntimeSpec("offline", "DSH", "dsh", executable,
+    profile = resolved_profile("offline", "Offline", RuntimeSpec("offline", "DSH", "dsh", executable,
                            runtime.capabilities), provider, "deepseek-flash", "high")
     launch = Launch(AgentSettings(profile=profile), AgentLibrary(mcp_config=str(source), role=role),
                     role=AgentType(role))

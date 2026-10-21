@@ -26,9 +26,11 @@ from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import (
+    Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+)
 from looper.agents.run_usage import Usage, request_context, run_usage
-from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, adapter, grok_login
+from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType, adapter, grok_login
 from looper.agents.runtimes import CostSource, ReadOnly
 from looper.agents.runtimes.grok import (
     COMPAT_VARS, DIRECTORY_VARS, RESTORED_VARS, RULES_FILE, GrokRuntime, GrokStream, ResidentGrok, write_home,
@@ -37,15 +39,23 @@ from looper.agents.runtimes.instructions import Delivery
 from looper.agents.system_prompt import SystemPrompt
 
 GROK: GrokRuntime = adapter("grok")  # type: ignore[assignment]
-LOGIN = ProviderSpec("prov-grok-login", "grok-login", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}),
-                     "grok")
+def _resolved_model(vendor: VendorType = VendorType.GROK_LOGIN, *, name: str = "grok-4.7", **settings: Any) -> ResolvedModel:
+    login = vendor.auth_kind is AuthKind.OAUTH
+    provider = ProviderSpec("prov-login", vendor.value, vendor, vendor.auth_kind, vendor.oauth_runtime_type,
+                            api_key=None if login else "sk-test")
+    model = ModelSpec("model-grok", provider.id, name, ApiProtocol.OPENAI_RESPONSES, **settings)
+    return ResolvedModel(model, provider, Endpoint(provider.id, model.protocol,
+                                                  "" if login else "https://example.test/v1"))
 
 
-def _launch(*, executable: str = "grok", library: AgentLibrary | None = None, provider: ProviderSpec = LOGIN,
+LOGIN = _resolved_model()
+
+
+def _launch(*, executable: str = "grok", library: AgentLibrary | None = None, resolved: ResolvedModel = LOGIN,
             effort: str = "low", env: tuple[tuple[str, str], ...] = ()) -> Launch:
-    profile = AgentProfile("agent-grok", "grok/grok-4.7",
-                           RuntimeSpec("rt-grok", "grok", "grok", executable, GROK.capabilities),
-                           provider, "grok-4.7", effort or None)
+    profile = ResolvedAgentProfile("agent-grok", "grok/grok-4.7",
+                                   RuntimeSpec("rt-grok", "grok", "grok", executable, GROK.capabilities),
+                                   resolved.model.id, effort or None, resolved_model=resolved)
     return Launch(AgentSettings(profile=profile, env=env), library or AgentLibrary(), AgentKnowledge())
 
 
@@ -415,12 +425,14 @@ def test_every_compat_variable_is_off_and_owned_by_the_runtime() -> None:
 
 
 @pytest.mark.parametrize("provider", [
-    ProviderSpec("prov-codex-login", "codex-login", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}), "codex"),
-    ProviderSpec("prov-cpa", "cpa", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_RESPONSES}), api_key="sk-test"),
+    _resolved_model(VendorType.CODEX_LOGIN),
+    _resolved_model(VendorType.CUSTOM),
 ], ids=["codex-login", "api-key"])
-def test_any_provider_but_its_own_login_fails_the_launch(provider: ProviderSpec, tmp_path: Path) -> None:
+def test_any_provider_but_its_own_login_fails_the_launch(provider: ResolvedModel, tmp_path: Path) -> None:
     with pytest.raises(RuntimeUnsupported, match="its own login only"):
-        GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=_launch(provider=provider))
+        GROK.bind_provider(provider.binding_provider(), provider.model.name, "")
+    with pytest.raises(RegistryError, match="auth kind|own runtime"):
+        GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=_launch(resolved=provider))
 
 
 def test_without_an_effort_grok_picks_its_own(tmp_path: Path) -> None:
@@ -431,7 +443,7 @@ def test_without_an_effort_grok_picks_its_own(tmp_path: Path) -> None:
 @pytest.mark.parametrize("effort", ["max", "minimal", "unsupported"])
 def test_an_unsupported_effort_is_rejected_when_binding_the_configuration(effort: str) -> None:
     with pytest.raises(RuntimeUnsupported, match=f"Grok.*{effort!r}.*low, medium, high, xhigh"):
-        GROK.bind_provider(LOGIN, "grok-4.7", effort)
+        GROK.bind_provider(LOGIN.binding_provider(), "grok-4.7", effort)
 
 
 def _library(root: Path) -> AgentLibrary:
@@ -567,7 +579,7 @@ def test_its_capabilities_cover_every_role() -> None:
     assert GROK.protocols == {ApiProtocol.OPENAI_RESPONSES} and GROK.auth_kinds == {AuthKind.OAUTH}
     assert GROK.login_models[0] == "grok-4.7"
     # Its own figure is the run's cost, which it reports only when a run ends: no per-run cap stops a run.
-    assert GROK.cost_source(LOGIN) is CostSource.RUNTIME and not GROK.runtime_cost_capped
+    assert GROK.cost_source(LOGIN.binding_provider()) is CostSource.RUNTIME and not GROK.runtime_cost_capped
     assert GROK.budget_error({"type": "result", "subtype": "error_max_budget_usd"}) is None
 
 
@@ -727,3 +739,120 @@ def test_a_resident_session_needs_its_executable(tmp_path: Path) -> None:
 
     with pytest.raises(OSError, match="was not found"):
         asyncio.run(_run())
+
+
+@pytest.mark.parametrize("invalid", ["protocols", "chat", "catalog", "missing-model", "model"])
+def test_binding_requires_the_exact_responses_login_model(invalid: str) -> None:
+    provider = LOGIN.binding_provider()
+    if invalid == "protocols":
+        provider = dataclasses.replace(provider, protocols=frozenset(ApiProtocol))
+    elif invalid == "chat":
+        provider = dataclasses.replace(provider, protocols=frozenset({ApiProtocol.OPENAI_CHAT}))
+    elif invalid == "catalog":
+        provider = dataclasses.replace(provider, catalog=(*provider.catalog, *provider.catalog))
+    elif invalid == "missing-model":
+        provider = dataclasses.replace(provider, catalog=())
+    with pytest.raises(RuntimeUnsupported, match="protocol|model"):
+        GROK.bind_provider(provider, "other-model" if invalid == "model" else LOGIN.model.name, "")
+
+
+def test_resolved_grok_metadata_does_not_enable_a_soft_cap_or_background_model(tmp_path: Path) -> None:
+    resolved = _resolved_model(name="grok-4.7[1m]", context_window=128_000, efforts=(), background_model="side-model",
+                               input_usd_per_mtok=100, output_usd_per_mtok=100)
+    launch = _launch(resolved=resolved, effort="xhigh")
+    launch = dataclasses.replace(launch, settings=dataclasses.replace(launch.settings, max_budget_usd=0.001))
+    assert launch.cost_source is CostSource.RUNTIME and launch.price is None
+    assert not GROK.runtime_cost_capped
+    command = GROK.run_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)
+    assert _flag(command, "-m") == ["grok-4.7[1m]"] and _flag(command, "--effort") == ["xhigh"]
+    assert not any("budget" in arg or "side-model" in arg for arg in command)
+    assert "side-model" not in (_home(command) / "config.toml").read_text()
+
+
+@pytest.mark.parametrize("case", ["acp-known", "acp-unknown", "fallback-known", "fallback-unknown"])
+def test_resolved_grok_config_matches_pinned_launches(case: str, tmp_path: Path) -> None:
+    from unittest.mock import patch
+    from model_launch_parity import GROK_CASES, grok_environment
+    from looper.agents.runtimes import SystemPromptMode
+    from looper.agents.runtimes.grok import config_toml
+
+    pinned = json.loads((FIXTURES.parent / "model_launch_parity_v2_grok.json").read_text())["captures"][case]
+    parent = grok_environment(tmp_path, explicit_home=GROK_CASES[case][4])
+    with patch.dict(os.environ, parent, clear=True):
+        for expected in pinned:
+            metadata = {k: v for k, v in expected["config"]["catalog"][0].items() if k != "name"}
+            resolved = _resolved_model(**metadata)
+            resolved = dataclasses.replace(resolved, provider=dataclasses.replace(
+                resolved.provider, env=(("CAPTURE_SETTING", "provider"),)))
+            launch = _launch(resolved=resolved, effort=expected["config"]["effort"],
+                              env=(("CAPTURE_SETTING", "settings"),))
+            mode = SystemPromptMode(GROK_CASES[case][3])
+            launch = dataclasses.replace(launch, role=AgentType.PLANNER if expected["permissions"]["read_only"]
+                                         else AgentType.WORKER, settings=dataclasses.replace(
+                launch.settings, max_budget_usd=expected["cap"], system_prompt_mode=mode))
+            config = config_toml(launch, shell_home=tmp_path / "runtime/.local/grok/shell-home")
+            assert config.replace(str(tmp_path), "<root>") == expected["config"]["toml"]
+            binding = GROK.bind_provider(resolved.binding_provider(), launch.model, launch.effort)
+            assert sorted(binding.unset) == expected["unset"]
+            argv = expected["argv"]
+            start = argv.index("-m")
+            assert argv[start:start + len(binding.args)] == list(binding.args)
+            env = launch.environment()
+            env.update({name: value.replace("<root>", str(tmp_path))
+                        for name, value in expected["env"].items() if name in ("HOME", "GROK_HOME")})
+            assert {k: v.replace(str(tmp_path), "<root>") for k, v in env.items()
+                    if parent.get(k) != v} == expected["env"]
+            assert launch.cost_source.value == expected["price"]["source"]
+            assert launch.price is None and not GROK.runtime_cost_capped
+
+
+@pytest.mark.parametrize("fallback", [False, True], ids=["acp", "per-turn-fallback"])
+def test_resolved_grok_launch_keeps_transport_and_session_on_model_id_change(
+    fallback: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fake_grok_acp import FAKE_ACP
+
+    _operator(tmp_path, monkeypatch)
+    acp = "import os\nos.environ['FAKE_ACP_DEAD'] = '1'\n" + FAKE_ACP if fallback else FAKE_ACP
+    body = f"import sys\nsrc = {acp!r} if 'agent' in sys.argv[1:] else {_FAKE_GROK!r}\nexec(compile(src, 'fake', 'exec'))\n"
+    executable = fake_claude(tmp_path / "grok", body)
+    resolved = _resolved_model(efforts=(), context_window=128_000)
+    launch = _launch(executable=executable, resolved=resolved, effort="xhigh")
+    root = tmp_path / "runtime"
+
+    async def run() -> None:
+        session = GROK.resident_session("resolved-session")
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            command = GROK.resident_command(executable, cwd=tmp_path, prompt_file=_prompt_file(root, "prompt A"),
+                                            launch=launch)
+            await session.start(command, cwd=str(tmp_path), signature=launch.binding_sha256, env=launch.environment())
+            one = await session.run_turn("hello", on_event)
+            two = await session.run_turn("again", on_event)
+            expected_transport = "per-turn" if fallback else "acp"
+            assert session.transport == expected_transport
+            session_id = one.result_event["session_id"]
+            totals = session.totals
+            await session.stop()
+            moved = dataclasses.replace(resolved, model=dataclasses.replace(resolved.model, id="new-model-id"))
+            next_launch = _launch(executable=executable, resolved=moved, effort="xhigh")
+            assert next_launch.binding_sha256 == launch.binding_sha256
+            command = GROK.resident_command(executable, cwd=tmp_path, prompt_file=_prompt_file(root, "prompt B"),
+                                            launch=next_launch) + GROK.resume_args(session_id)
+            await session.start(command, cwd=str(tmp_path), signature=next_launch.binding_sha256,
+                                env=next_launch.environment(), totals=totals)
+            three = await session.run_turn("third", on_event)
+            assert session.transport == expected_transport
+            assert [turn.result_event["result"] for turn in (one, two, three)] == [
+                "prompt A | hello | turn 1", "prompt A | again | turn 2", "prompt B | third | turn 3"]
+            assert {turn.result_event["session_id"] for turn in (one, two, three)} == {session_id}
+            assert all(turn.session_started for turn in (one, two, three))
+            assert session.totals == totals.plus(three.usage)
+        finally:
+            await session.stop()
+
+    asyncio.run(asyncio.wait_for(run(), 20))

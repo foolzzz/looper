@@ -1,6 +1,7 @@
 -- Looper Agent System Schema
--- Idempotent: safe to run on every startup.
+-- Executed by connection.ensure_schema in a single locked transaction.
 
+-- registry-phase: expand
 -- One-time data migrations; schema.sql itself runs on every startup.
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name        TEXT PRIMARY KEY,
@@ -68,6 +69,150 @@ BEGIN
     END IF;
 END $$;
 
+
+-- Registry expansion keeps the v2 columns until historical SQL and Python
+-- migrations finish. ensure_schema compares and applies the conversion before
+-- contract, under the same schema lock and transaction.
+CREATE TABLE IF NOT EXISTS agent_runtimes (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    type          TEXT NOT NULL,
+    executable    TEXT NOT NULL DEFAULT '',
+    version       TEXT,
+    capabilities  TEXT[] NOT NULL DEFAULT '{}'
+        CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
+                                     'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
+                                     'read_tools', 'steer']),
+    probed_at     TIMESTAMPTZ,
+    probe_error   TEXT,
+    builtin       BOOLEAN NOT NULL DEFAULT false,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS llm_providers (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL UNIQUE,
+    protocols           TEXT[] NOT NULL CHECK (cardinality(protocols) > 0
+        AND protocols <@ ARRAY['anthropic-messages', 'openai-responses', 'openai-chat']),
+    auth                TEXT NOT NULL CHECK (auth IN ('oauth', 'api_key')),
+    oauth_runtime_type  TEXT,
+    base_url            TEXT NOT NULL DEFAULT '',
+    -- The model catalog: [{"name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
+    -- "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts", "background_model"}], each but the name
+    -- null when unknown; [] = any model the provider takes. A null price falls back to the built-in price table.
+    models              JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(models) = 'array'),
+    -- At most this many runs at once on the provider; NULL = no limit.
+    max_concurrency     INTEGER CHECK (max_concurrency > 0),
+    builtin             BOOLEAN NOT NULL DEFAULT false,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((auth = 'oauth') = (oauth_runtime_type IS NOT NULL))
+);
+-- The provider's own environment variables for the runs that use it, [{"key", "value"}]: not secrets (its key is
+-- in llm_provider_secrets), and none a runtime's provider binding sets itself.
+ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS env JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(env) = 'array');
+CREATE TABLE IF NOT EXISTS llm_provider_secrets (
+    provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
+    api_key      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    runtime_id   TEXT NOT NULL REFERENCES agent_runtimes(id),
+    provider_id  TEXT NOT NULL REFERENCES llm_providers(id),
+    model        TEXT NOT NULL CHECK (model <> ''),
+    -- The effort of the profile's runs (no layer sets one). NULL: the runtime's own default.
+    effort       TEXT CHECK (effort IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')),
+    builtin      BOOLEAN NOT NULL DEFAULT false,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Claude Code's agent teams for the profile's runs, only on a Claude Code runtime. On by default there: the
+-- registry sets a new profile's (profile_registry.default_agent_teams) and a migration below turned them on once
+-- for the profiles before; the column's default is for the other runtimes, which have none.
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
+-- Existing profiles add no custom text and append the Looper prompt by default.
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS custom_prompt TEXT NOT NULL DEFAULT '';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'profile_runtime_effort_levels') THEN
+        ALTER TABLE agent_profiles DROP CONSTRAINT IF EXISTS agent_profiles_effort_check;
+        ALTER TABLE agent_profiles ADD CONSTRAINT agent_profiles_effort_check
+            CHECK (effort IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'));
+        INSERT INTO schema_migrations (name) VALUES ('profile_runtime_effort_levels');
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS registry_schema_version (
+    id       BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    version  INTEGER NOT NULL CHECK (version > 0)
+);
+ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS vendor_type TEXT
+    CHECK (vendor_type IN ('glm-bigmodel', 'glm-zai', 'deepseek', 'kimi-moonshot-cn', 'kimi-moonshot',
+                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'custom'))
+    CHECK (
+        (vendor_type = 'claude-subscription' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'claude-code')
+        OR (vendor_type = 'codex-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'codex')
+        OR (vendor_type = 'grok-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'grok')
+        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login')
+            AND auth = 'api_key' AND oauth_runtime_type IS NULL)
+    );
+CREATE TABLE IF NOT EXISTS llm_provider_endpoints (
+    provider_id          TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
+    protocol             TEXT NOT NULL CHECK (protocol IN ('anthropic-messages', 'openai-responses', 'openai-chat')),
+    base_url             TEXT NOT NULL CHECK (length(base_url) <= 2000 AND base_url !~ '[[:space:][:cntrl:]]'
+                             AND (base_url = '' OR base_url ~ '^https?://[^/?#@]+([/?#]|$)')),
+    use_runtime_default  BOOLEAN NOT NULL DEFAULT false CHECK (NOT use_runtime_default OR base_url = ''),
+    PRIMARY KEY (provider_id, protocol)
+);
+
+-- CHECK constraints cannot contain subqueries. Keep the array validation in a
+-- single immutable predicate, including NULL elements and duplicate efforts.
+CREATE OR REPLACE FUNCTION llm_model_efforts_valid(value TEXT[]) RETURNS BOOLEAN
+LANGUAGE SQL IMMUTABLE STRICT AS $$
+    SELECT coalesce(array_ndims(value), 1) = 1 AND cardinality(value) <= 10
+        AND NOT EXISTS (SELECT 1 FROM unnest(value) e WHERE e IS NULL OR e !~ '^[a-z][a-z0-9_-]{0,31}$')
+        AND (SELECT count(DISTINCT e) FROM unnest(value) e) = cardinality(value)
+$$;
+CREATE TABLE IF NOT EXISTS llm_models (
+    id                        TEXT PRIMARY KEY CHECK (id LIKE 'model-%' AND length(id) > 6),
+    provider_id               TEXT NOT NULL,
+    protocol                  TEXT NOT NULL CHECK (protocol IN ('anthropic-messages', 'openai-responses', 'openai-chat')),
+    name                      TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 200
+                                  AND name ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$'),
+    context_window            INTEGER CHECK (context_window BETWEEN 1 AND 100000000),
+    input_usd_per_mtok        DOUBLE PRECISION CHECK (input_usd_per_mtok BETWEEN 0 AND 10000),
+    output_usd_per_mtok       DOUBLE PRECISION CHECK (output_usd_per_mtok BETWEEN 0 AND 10000),
+    cache_read_usd_per_mtok   DOUBLE PRECISION CHECK (cache_read_usd_per_mtok BETWEEN 0 AND 10000),
+    cache_write_usd_per_mtok  DOUBLE PRECISION CHECK (cache_write_usd_per_mtok BETWEEN 0 AND 10000),
+    efforts                   TEXT[] CHECK (llm_model_efforts_valid(efforts)),
+    background_model          TEXT CHECK (length(background_model) BETWEEN 1 AND 200
+                                  AND background_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$'),
+    catalog_order             INTEGER NOT NULL DEFAULT 0 CHECK (catalog_order >= 0),
+    builtin                   BOOLEAN NOT NULL DEFAULT false,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (provider_id, protocol) REFERENCES llm_provider_endpoints(provider_id, protocol) ON DELETE RESTRICT,
+    UNIQUE (provider_id, name, protocol)
+);
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS model_id TEXT REFERENCES llm_models(id) ON DELETE RESTRICT;
+
+-- Append-only migration history, intentionally without live-object FKs: normal
+-- deletion of a model/provider must not erase or be blocked by its old mapping.
+CREATE TABLE IF NOT EXISTS llm_model_migration_map (
+    legacy_provider_id  TEXT NOT NULL,
+    legacy_model        TEXT NOT NULL,
+    protocol            TEXT NOT NULL CHECK (protocol IN ('anthropic-messages', 'openai-responses', 'openai-chat')),
+    provider_id         TEXT NOT NULL,
+    model_id            TEXT NOT NULL,
+    PRIMARY KEY (legacy_provider_id, legacy_model, protocol)
+);
+
+-- registry-phase: legacy
 CREATE TABLE IF NOT EXISTS tasks (
     id                TEXT PRIMARY KEY,
     requirement       TEXT NOT NULL,
@@ -360,80 +505,6 @@ BEGIN
     END IF;
 END $$;
 
--- Agent Profiles (RFC decision 10): a profile is a runtime, an LLM provider and
--- a model. A runtime is a runtime type, which code provides (an adapter,
--- looper/agents/runtimes), found on this machine: built in, one per type on
--- the server's PATH, with the executable it runs ('' = the type's default, for
--- Claude Code the server's configured one) and what its last probe found
--- (version, capabilities). A runtime registered by hand before (builtin
--- false) stays read-only while a profile uses it. A provider is where an agent's
--- requests go: the protocols it serves, its models and their prices, and how
--- it authenticates: a runtime type's own login (oauth, bound to that type) or
--- an API key, kept in llm_provider_secrets and never shown by the API. Code
--- owns the types, the protocols, the capabilities and the validation
--- (looper/agents/profile_registry.py). The built-in rows (builtin) are
--- read-only; a runtime, provider or profile still referred to cannot be deleted.
-CREATE TABLE IF NOT EXISTS agent_runtimes (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL UNIQUE,
-    type          TEXT NOT NULL,
-    executable    TEXT NOT NULL DEFAULT '',
-    version       TEXT,
-    capabilities  TEXT[] NOT NULL DEFAULT '{}'
-        CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
-                                     'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report',
-                                     'read_tools', 'steer']),
-    probed_at     TIMESTAMPTZ,
-    probe_error   TEXT,
-    builtin       BOOLEAN NOT NULL DEFAULT false,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS llm_providers (
-    id                  TEXT PRIMARY KEY,
-    name                TEXT NOT NULL UNIQUE,
-    protocols           TEXT[] NOT NULL CHECK (cardinality(protocols) > 0
-        AND protocols <@ ARRAY['anthropic-messages', 'openai-responses', 'openai-chat']),
-    auth                TEXT NOT NULL CHECK (auth IN ('oauth', 'api_key')),
-    oauth_runtime_type  TEXT,
-    base_url            TEXT NOT NULL DEFAULT '',
-    -- The model catalog: [{"name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
-    -- "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts", "background_model"}], each but the name
-    -- null when unknown; [] = any model the provider takes. A null price falls back to the built-in price table.
-    models              JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(models) = 'array'),
-    -- At most this many runs at once on the provider; NULL = no limit.
-    max_concurrency     INTEGER CHECK (max_concurrency > 0),
-    builtin             BOOLEAN NOT NULL DEFAULT false,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK ((auth = 'oauth') = (oauth_runtime_type IS NOT NULL))
-);
--- The provider's own environment variables for the runs that use it, [{"key", "value"}]: not secrets (its key is
--- in llm_provider_secrets), and none a runtime's provider binding sets itself.
-ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS env JSONB NOT NULL DEFAULT '[]'::jsonb
-    CHECK (jsonb_typeof(env) = 'array');
-CREATE TABLE IF NOT EXISTS llm_provider_secrets (
-    provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
-    api_key      TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS agent_profiles (
-    id           TEXT PRIMARY KEY,
-    name         TEXT NOT NULL UNIQUE,
-    runtime_id   TEXT NOT NULL REFERENCES agent_runtimes(id),
-    provider_id  TEXT NOT NULL REFERENCES llm_providers(id),
-    model        TEXT NOT NULL CHECK (model <> ''),
-    -- The effort of the profile's runs (no layer sets one). NULL: the runtime's own default.
-    effort       TEXT CHECK (effort IN ('low', 'medium', 'high', 'xhigh', 'max')),
-    builtin      BOOLEAN NOT NULL DEFAULT false,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
--- Claude Code's agent teams for the profile's runs, only on a Claude Code runtime. On by default there: the
--- registry sets a new profile's (profile_registry.default_agent_teams) and a migration below turned them on once
--- for the profiles before; the column's default is for the other runtimes, which have none.
-ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
--- Existing profiles add no custom text and append the Looper prompt by default.
-ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS custom_prompt TEXT NOT NULL DEFAULT '';
 -- A task's profile overrides: its own choice of Agent Profile for some of its
 -- roles (the Planner, Workers or Reviewers), the only agent setting a task has.
 -- Each wins over every layer, for that task only; a profile a task chose cannot
@@ -444,28 +515,6 @@ CREATE TABLE IF NOT EXISTS task_profile_overrides (
     profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),
     PRIMARY KEY (task_id, role)
 );
--- The built-ins, on every start: the Claude Code runtime (the server's claude),
--- its own login as a provider, Codex's and Grok's own logins as providers
--- (looper/agents/runtimes/codex_login.py, grok_login.py), and the profile every role runs when nothing
--- selects another (looper/agents/profile_registry.py BUILTIN_*). A missing one comes back.
-INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
-VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
-        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
-              'resident_session', 'resume', 'run'], true)
-ON CONFLICT DO NOTHING;
-INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
-VALUES ('prov-claude-subscription', 'claude-subscription', ARRAY['anthropic-messages'], 'oauth', 'claude-code', true)
-ON CONFLICT DO NOTHING;
-INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
-VALUES ('prov-codex-login', 'codex-login', ARRAY['openai-responses'], 'oauth', 'codex', true)
-ON CONFLICT DO NOTHING;
-INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
-VALUES ('prov-grok-login', 'grok-login', ARRAY['openai-responses'], 'oauth', 'grok', true)
-ON CONFLICT DO NOTHING;
-INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, builtin, agent_teams)
-VALUES ('agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', 'prov-claude-subscription', 'opus', true, true)
-ON CONFLICT DO NOTHING;
-
 -- Settings the whole system shares, one value per key. Code owns each key's
 -- type and validation; a key without a row has its built-in default. (The
 -- agent settings live in agent_setting_layers.)
@@ -1911,3 +1960,71 @@ CREATE TABLE IF NOT EXISTS channel_rejected_senders (
 -- A table from before kept the start of each refused message: dropped, with what it held.
 ALTER TABLE channel_rejected_senders DROP COLUMN IF EXISTS snippet;
 ALTER TABLE channel_rejected_senders ADD COLUMN IF NOT EXISTS chat_id TEXT;
+
+-- registry-phase: convert
+
+-- Python conversion and launch/pricing comparison have completed. Refuse to
+-- contract any unmapped row, including when a future migration adds one.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM llm_providers WHERE vendor_type IS NULL)
+        OR EXISTS (SELECT 1 FROM agent_profiles WHERE model_id IS NULL) THEN
+        RAISE EXCEPTION 'registry conversion left unmapped rows';
+    END IF;
+END $$;
+
+-- registry-phase: contract
+
+-- Historical migrations above (including layer_effort in Python) must finish
+-- before these columns disappear. Role/task prompt-mode storage is unchanged.
+ALTER TABLE llm_providers ALTER COLUMN vendor_type SET NOT NULL;
+ALTER TABLE agent_profiles ALTER COLUMN model_id SET NOT NULL;
+ALTER TABLE agent_profiles DROP COLUMN IF EXISTS provider_id;
+ALTER TABLE agent_profiles DROP COLUMN IF EXISTS model;
+ALTER TABLE llm_providers DROP COLUMN IF EXISTS protocols;
+ALTER TABLE llm_providers DROP COLUMN IF EXISTS base_url;
+ALTER TABLE llm_providers DROP COLUMN IF EXISTS models;
+
+-- registry-phase: builtin
+
+-- Target-layout builtins run only after contract, including on second startup.
+-- Login endpoints use the CLI's own connection; no token or URL is copied.
+INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
+VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
+        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
+              'resident_session', 'resume', 'run'], true)
+ON CONFLICT DO NOTHING;
+INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
+VALUES ('prov-claude-subscription', 'claude-subscription', 'claude-subscription', 'oauth', 'claude-code', true),
+       ('prov-codex-login', 'codex-login', 'codex-login', 'oauth', 'codex', true),
+       ('prov-grok-login', 'grok-login', 'grok-login', 'oauth', 'grok', true)
+ON CONFLICT DO NOTHING;
+INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
+VALUES ('prov-claude-subscription', 'anthropic-messages', ''),
+       ('prov-codex-login', 'openai-responses', ''),
+       ('prov-grok-login', 'openai-responses', '')
+ON CONFLICT (provider_id, protocol) DO NOTHING;
+
+-- Fixed UUIDv5 ids for the pinned login suggestions, matched by the complete
+-- natural key on readback; restarting never resets metadata or allocates ids.
+INSERT INTO llm_models (id, provider_id, name, protocol, catalog_order, builtin)
+VALUES
+    ('model-84f4b69e-12a7-5fd7-b665-a9b7d01568eb', 'prov-claude-subscription', 'opus', 'anthropic-messages', 0, true),
+    ('model-c0d66d22-9bfd-5fbe-b6d5-5626efd7d46e', 'prov-claude-subscription', 'sonnet', 'anthropic-messages', 1, true),
+    ('model-47a35ff0-e373-50bc-8633-e0d5f1bfbf53', 'prov-claude-subscription', 'haiku', 'anthropic-messages', 2, true),
+    ('model-7268a107-dade-549c-a62f-d65c2c459488', 'prov-codex-login', 'gpt-6.1-sol', 'openai-responses', 0, true),
+    ('model-c56d0439-b240-5650-aa9d-f1d561e5b577', 'prov-codex-login', 'gpt-6-sol', 'openai-responses', 1, true),
+    ('model-1a5dc62a-a91f-5fe2-bac1-4db37f68854f', 'prov-codex-login', 'gpt-6-astra', 'openai-responses', 2, true),
+    ('model-bc53b78f-8626-5cc6-8114-cc29b2b13c23', 'prov-codex-login', 'gpt-6-luna', 'openai-responses', 3, true),
+    ('model-7bfb6763-93d9-5740-869d-435691e83fcb', 'prov-codex-login', 'gpt-5.6-sol', 'openai-responses', 4, true),
+    ('model-95fdbced-a8cd-5775-80c7-5abeeb1b8be9', 'prov-codex-login', 'gpt-5.6-terra', 'openai-responses', 5, true),
+    ('model-2f901fbc-ea04-5450-ac57-96c8ba5f46ca', 'prov-codex-login', 'gpt-5.6-luna', 'openai-responses', 6, true),
+    ('model-a34a618b-2cfd-5151-966b-6edcfb4e5992', 'prov-grok-login', 'grok-4.7', 'openai-responses', 0, true),
+    ('model-96ad8acd-53da-59e2-859f-829db99b8422', 'prov-grok-login', 'grok-4.7-build-fast', 'openai-responses', 1, true),
+    ('model-600929a8-fd29-521b-ad52-ee5cc69914d8', 'prov-grok-login', 'grok-4.6', 'openai-responses', 2, true),
+    ('model-e1d7d77c-276f-5e28-8a9b-2ecf480f0f91', 'prov-grok-login', 'grok-4.5', 'openai-responses', 3, true)
+ON CONFLICT (provider_id, name, protocol) DO NOTHING;
+INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams)
+SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true
+FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus' AND protocol = 'anthropic-messages'
+ON CONFLICT DO NOTHING;

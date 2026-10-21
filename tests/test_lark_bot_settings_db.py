@@ -295,7 +295,8 @@ def test_import_skips_extra_config_key_with_reason(monkeypatch: pytest.MonkeyPat
                 conn, include_projects=False, include_secrets=False)]))
             entry = next(row for row in data["channels"] if row["channel_type"] == "lark_bot")
             entry["config"] = {**CONFIG, "extra": SECRET}
-            plan = await import_config(conn, data, apply=True)
+            async with conn.transaction():
+                plan = await import_config(conn, data, apply=True)
         [change] = [c for c in plan.changes if c.section == "channels" and c.key == "lark_bot"]
         assert change.action == Action.SKIPPED and "extra" in change.reason
         assert SECRET not in change.reason
@@ -378,7 +379,8 @@ def test_config_export_import_round_trip(monkeypatch: pytest.MonkeyPatch, platfo
             assert any(c.section == "channels" and c.key == "lark_bot" and c.action == Action.UNCHANGED
                        for c in again.changes)
             entry["config"]["app_id"] = " cli_other "
-            normalized = await import_config(conn, data, apply=True)
+            async with conn.transaction():
+                normalized = await import_config(conn, data, apply=True)
             assert not any(c.key == "lark_bot" and c.action == Action.SKIPPED for c in normalized.changes)
             assert json.loads(await conn.fetchval("SELECT config FROM channel_configs "
                                                   "WHERE channel_id = 'channel-lark_bot'"))["app_id"] == "cli_other"

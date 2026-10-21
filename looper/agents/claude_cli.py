@@ -1023,7 +1023,7 @@ class ClaudeRunRecorder:
         if launch is not None and launch.price is not None:
             from .runtimes.pricing import RunSpend
 
-            self._spend = RunSpend(launch.profile.provider, launch.model, launch.max_budget_usd)
+            self._spend = RunSpend(launch.price, launch.model, launch.max_budget_usd)
 
     @property
     def record_id(self) -> int | None:

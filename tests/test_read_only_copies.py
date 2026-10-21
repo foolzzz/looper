@@ -320,10 +320,11 @@ def test_a_private_home_is_kept_while_a_running_process_names_it(
 
 def test_a_pi_home_stays_after_env_has_execed_the_agent(tmp_path: Path, content: _Content) -> None:
     from looper.agents.agent_settings import AgentSettings, Launch
-    from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+    from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
+    from tests.runtime_model_helpers import resolved_profile
     from looper.agents.runtimes import ApiProtocol, AuthKind
 
-    launch = Launch(AgentSettings(profile=AgentProfile(
+    launch = Launch(AgentSettings(profile=resolved_profile(
         "pi-test", "pi-test", RuntimeSpec("pi", "pi", "pi"),
         ProviderSpec("test", "test", auth=AuthKind.API_KEY, api_key="test-key",
                      protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}), base_url="https://pi.example.invalid/v1"),

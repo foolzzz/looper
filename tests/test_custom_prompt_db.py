@@ -9,7 +9,7 @@ import pytest
 
 from looper.agents.agent_settings import HARNESS_MAX_CHARS
 from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _ok, _run
+from tests.test_profile_registry_db import _call, _model_id, _ok, _run
 from tests.test_system_prompt_mode_db import _profile
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -21,7 +21,7 @@ def test_custom_prompt_registry_keeps_omitted_updates_and_strips_text(monkeypatc
         profile = await _profile("custom", custom_prompt=" \nCUSTOM\n ")
         assert profile["custom_prompt"] == "CUSTOM"
         profile_id = profile["profile_id"]
-        updated = await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"model": "opus"})
+        updated = await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"model_id": await _model_id("prov-claude-subscription", "opus")})
         assert updated["profile"]["custom_prompt"] == "CUSTOM"
         registry = await _ok("GET", "/api/registry")
         assert next(p for p in registry["profiles"] if p["profile_id"] == profile_id)["custom_prompt"] == "CUSTOM"
@@ -38,7 +38,7 @@ def test_custom_prompt_bad_values_return_400(monkeypatch: pytest.MonkeyPatch, va
         profile = await _profile("valid")
         for method, path, fields in [
             ("POST", "/api/agent-profiles", {"name": "bad", "runtime_id": "rt-claude-code",
-                                           "provider_id": "prov-claude-subscription", "model": "sonnet"}),
+                                           "model_id": await _model_id("prov-claude-subscription", "sonnet")}),
             ("PUT", f"/api/agent-profiles/{profile['profile_id']}", {}),
         ]:
             status, payload = await _call(method, path, {**fields, "custom_prompt": value})
@@ -61,16 +61,19 @@ def test_custom_prompt_config_round_trip_legacy_and_derived(monkeypatch: pytest.
             exported = next(row for row in document["profiles"] if row["name"] == "custom")
             assert exported["custom_prompt"] == "CUSTOM"
             await conn.execute("DELETE FROM agent_profiles WHERE id = $1", profile["profile_id"])
-            plan = await import_config(conn, {"profiles": [exported]}, apply=True)
+            async with conn.transaction():
+                plan = await import_config(conn, {"profiles": [exported]}, apply=True)
             assert next(c for c in plan.changes if c.key == "custom").action is Action.ADDED
             assert await conn.fetchval("SELECT custom_prompt FROM agent_profiles WHERE name = 'custom'") == "CUSTOM"
-            await import_config(conn, {"settings": {"layers": [
-                {"scope": "system", "profile": "custom", "effort": "high"}]}}, apply=True)
+            async with conn.transaction():
+                await import_config(conn, {"settings": {"layers": [
+                    {"scope": "system", "profile": "custom", "effort": "high"}]}}, apply=True)
             row = await conn.fetchrow("SELECT a.name, a.effort, a.custom_prompt FROM agent_profiles a "
                                       "JOIN agent_setting_layers l ON l.profile_id = a.id WHERE l.scope = 'system'")
             assert dict(row) == {"name": "custom · high", "effort": "high", "custom_prompt": "CUSTOM"}
             legacy = {k: v for k, v in exported.items() if k != "custom_prompt"}
-            await import_config(conn, {"profiles": [legacy]}, apply=True)
+            async with conn.transaction():
+                await import_config(conn, {"profiles": [legacy]}, apply=True)
             assert await conn.fetchval("SELECT custom_prompt FROM agent_profiles WHERE name = 'custom'") == ""
 
     _run(run, monkeypatch)
@@ -98,7 +101,8 @@ def test_manager_profile_tool_saves_lists_and_updates_custom_prompt(monkeypatch:
         tool = next(tool for tool in TOOLS if tool.name == "looper_agent_profiles")
         turn = Turn("web", "chat", "message")
         created = await tool.run(Call({"action": "create", "name": "tool-profile", "runtime": "claude-code",
-                                      "provider": "claude-subscription", "model": "sonnet",
+                                      "model": {"provider": "claude-subscription", "name": "sonnet",
+                                                "protocol": "anthropic-messages"},
                                       "custom_prompt": " CUSTOM "}, turn, None))
         assert created["profile"]["custom_prompt"] == "CUSTOM"
         listed = await tool.run(Call({"action": "list"}, turn, None))

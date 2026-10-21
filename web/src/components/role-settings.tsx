@@ -17,10 +17,11 @@ import {
   type AgentSettings,
   type EffectiveSettings,
   type RoleConfig,
+  type Registry,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
-import { profileName } from "@/lib/use-registry";
+import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -213,11 +214,16 @@ function listed(names: string[]) {
 }
 
 /** The Shared defaults row's line: what every role runs with unless it sets its own. */
-function sharedSummary(effective: EffectiveSettings, roles: number) {
+function effectiveProfileText(effective: EffectiveSettings, registry: Registry | null) {
+  const profile = registry?.profiles.find((p) => p.profile_id === effective.profile.value.profile_id);
+  return profile ? profileLabel(profile) : profileName(effective.profile.value);
+}
+
+function sharedSummary(effective: EffectiveSettings, roles: number, registry: Registry | null) {
   const budget = effective.run_budget_usd.value;
   return [
     `Applies to all ${count(roles, "role")}`,
-    profileName(effective.profile.value),
+    effectiveProfileText(effective, registry),
     budget == null ? "no spend cap" : `${formatUsd(budget)} cap per run`,
     effective.env.length ? count(effective.env.length, "environment variable") : "no environment variables",
   ].join(" · ");
@@ -225,11 +231,11 @@ function sharedSummary(effective: EffectiveSettings, roles: number) {
 
 /** A role's line: its job, then its Agent Profile (with its effort) and where that comes from, and for the Worker and
  * the Reviewer the default limit in each task. */
-function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined) {
+function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined, registry: Registry | null) {
   const parts = [ROLE_JOBS[role]];
   if (effective) {
     const own = effective.profile.source === "role";
-    parts.push(`${profileName(effective.profile.value)} (${own ? "own" : "shared"})`);
+    parts.push(`${effectiveProfileText(effective, registry)} (${own ? "own" : "shared"})`);
     const limit = effective.max_concurrency?.value;
     if (limit != null && (role === "worker" || role === "reviewer")) parts.push(`up to ${limit} per task`);
   }
@@ -250,6 +256,7 @@ export function RolesSection({ sub }: { sub: string }) {
   const [toast, setToast] = useState<{ role: string; text: string } | null>(null);
   // A link to a row (from Runs or an Agent Profile's "used by") opens it, also while the page is showing.
   const row = useCollapsibleRows(sub.split("/")[0], !loading);
+  const { registry } = useRegistry();
 
   useEffect(() => {
     const roles = fetchRoleConfigs().then((list) => setConfigs([...list].sort((a, b) => rank(a.role) - rank(b.role))));
@@ -316,7 +323,7 @@ export function RolesSection({ sub }: { sub: string }) {
             id={`roles-${SHARED}`}
             {...row(SHARED)}
             name="Shared defaults"
-            summary={sharedSummary(settings.system.effective, configs.length)}
+            summary={sharedSummary(settings.system.effective, configs.length, registry)}
           >
             {(marks) => (
               <LayerSettingsForm
@@ -362,7 +369,7 @@ export function RolesSection({ sub }: { sub: string }) {
               {...row(config.role)}
               name={name}
               detail={config.display_name && config.display_name !== name ? config.display_name : undefined}
-              summary={role ? roleSummary(role, settings?.roles[role].effective) : ""}
+              summary={role ? roleSummary(role, settings?.roles[role].effective, registry) : ""}
               marks={!config.enabled && <Badge variant="outline" className="shrink-0">Disabled</Badge>}
             >
               {(marks) => (

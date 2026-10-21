@@ -184,6 +184,7 @@ def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_set
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.agents.agent_settings import BUILTIN_SETTINGS, load_agent_settings
+    from looper.agents.profile_registry import builtin_resolved_profile
 
     async def _test(pool: Any) -> None:
         assert await _layers(pool) == []
@@ -194,7 +195,8 @@ def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_set
             from looper.agents.agent_settings import BUILTIN_SYSTEM_PROMPT_MODE, AgentType
 
             assert await load_agent_settings(role, "proj-x") == replace(
-                BUILTIN_SETTINGS, system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[AgentType(role)])
+                BUILTIN_SETTINGS, profile=builtin_resolved_profile(),
+                system_prompt_mode=BUILTIN_SYSTEM_PROMPT_MODE[AgentType(role)])
 
     _run(_test, monkeypatch)
 
@@ -213,9 +215,11 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         pid = calc["id"]
         await agent_settings.update_system({"profile_id": "agent-claude-code-opus", "env": [
             {"key": "TZ", "value": "UTC"}, {"key": "LANG", "value": "C"}]})
+        opus = next(m for m in (await profile_registry.list_models(provider_id="prov-claude-subscription"))["models"]
+                    if m["name"] == "opus")
         opus_max = (await profile_registry.create_profile({
-            "name": "opus max", "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
-            "model": "opus", "effort": "max"}))["profile"]["profile_id"]
+            "name": "opus max", "runtime_id": "rt-claude-code", "model_id": opus["model_id"],
+            "effort": "max"}))["profile"]["profile_id"]
         await agent_settings.update_role("reviewer", {"profile_id": opus_max})
         await agent_settings.update_project(pid, {"run_budget_usd": 0.5, "env": [{"key": "TZ", "value": None}]})
         view = await agent_settings.update_project(pid, {"harness_prompt": "W."}, role="worker")

@@ -25,6 +25,7 @@ import contextlib
 import logging
 import os
 import signal
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -555,36 +556,56 @@ async def _back_up_before_schema_change(pool: Any, ops: OpsConfig, runtime_root:
     ``ensure_schema`` is about to change it.
 
     Raises ``StartupCheckFailed``, before any DDL, when there is no usable
-    ``pg_dump`` or the dump fails; ``skip_backup`` goes ahead without one.
+    ``pg_dump`` or the dump fails. Registry upgrades cannot skip the backup.
     """
-    from ..db.connection import schema_change_pending
+    from ..db.connection import REGISTRY_SCHEMA_VERSION, check_registry_schema_version, schema_change_pending
     from . import db_backup
 
     async with pool.acquire() as conn:
         if not await schema_change_pending(conn):
             return
+        version = await check_registry_schema_version(conn, supported_version=REGISTRY_SCHEMA_VERSION)
+        registry_upgrade = version != REGISTRY_SCHEMA_VERSION and await conn.fetchval(
+            "SELECT to_regclass('llm_providers') IS NOT NULL")
         server_version_num = int(await conn.fetchval("SELECT current_setting('server_version_num')"))
     dsn = ops.database_url
     shown = self_check.mask_dsn(dsn)
     if skip_backup:
+        if registry_upgrade:
+            raise StartupCheckFailed("registry schema upgrade requires a verified full database backup; "
+                                     "--skip-backup is not allowed; the schema was not changed")
         logger.warning("BACKUP SKIPPED (--skip-backup): the database schema of %s changes now without a backup; "
                        "the columns and tables its migrations drop cannot be restored", shown)
         return
     check, dumper = await asyncio.to_thread(self_check.check_pg_dump, server_version_num, True, ops)
     if dumper is None:
         raise StartupCheckFailed(self_check.format_checks([check]))
-    logger.info("the database schema is about to change; backing up %s with %s", shown, dumper.detail)
+    started = time.monotonic()
+    if registry_upgrade:
+        logger.info("registry migration version=%s target_version=%s phase=backup rollback=not_needed",
+                    version or 2, REGISTRY_SCHEMA_VERSION)
+    else:
+        logger.info("the database schema is about to change; backing up %s with %s", shown, dumper.detail)
     try:
         path, checked = await asyncio.to_thread(
             db_backup.back_up, dumper, dsn, runtime_root / db_backup.BACKUP_DIRNAME)
     except db_backup.BackupFailed as exc:
+        if registry_upgrade:
+            logger.error("registry migration version=%s phase=backup_failed elapsed_seconds=%.3f rollback=not_needed",
+                         version or 2, time.monotonic() - started)
+            raise StartupCheckFailed("registry schema backup verification failed; the schema was not changed") from None
         raise StartupCheckFailed(self_check.format_checks([self_check.Check(
             "pg_dump", "pg_dump backup", self_check.FAIL, f"{exc}; the schema was not changed",
             "fix the problem above and start again, or migrate once without a backup: looper serve --skip-backup",
         )])) from None
-    logger.info("backed up the database to %s (%d bytes, %s); to restore it, stop Looper, recreate the database "
-                "empty, then run: pg_restore --no-owner --dbname '%s' '%s'",
-                path, path.stat().st_size, checked, shown, path)
+    if registry_upgrade:
+        logger.info("registry migration version=%s phase=backup_verified elapsed_seconds=%.3f bytes=%d rollback=not_needed",
+                    version or 2, time.monotonic() - started, path.stat().st_size)
+    else:
+        logger.info("backed up the database to %s (%d bytes, %s); restore only into a new isolated database, "
+                    "preserving the migrated database and new writes: "
+                    "pg_restore --no-owner --dbname '<isolated-database-url>' '%s'",
+                    path, path.stat().st_size, checked, path)
 
 
 @dataclass(frozen=True)

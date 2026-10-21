@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -17,7 +18,9 @@ from looper import child_env
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
+from tests.runtime_model_helpers import resolved_profile
+from tests.test_agent_settings import _row
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability
 from looper.agents.runtimes.codex import CodexRuntime, CodexStream
 from looper.agents.runtimes.codex_steer import CodexChannel, exec_events, exec_item
@@ -185,7 +188,7 @@ def _launch(executable: str, *, steer: bool = True) -> Launch:
     provider = ProviderSpec("provider", "fake", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_RESPONSES}),
                             api_key="fake-key")
     capabilities = CODEX.capabilities | {Capability.STEER} if steer else CODEX.capabilities
-    profile = AgentProfile("profile", "codex/test", RuntimeSpec("runtime", "codex", "codex", executable,
+    profile = resolved_profile("profile", "codex/test", RuntimeSpec("runtime", "codex", "codex", executable,
                                                                 frozenset(capabilities)), provider, "gpt-5.5", "low")
     return Launch(AgentSettings(profile=profile))
 
@@ -537,17 +540,13 @@ def test_worker_bus_input_uses_detected_steering_capability(agent_db: Any, app_s
     monkeypatch.setenv("FAKE_CODEX_MODE", "worker_steer_error" if reject else "worker")
     monkeypatch.setenv("FAKE_CODEX_FINISH_GATE", str(finish_gate))
     launch = _launch(executable, steer=steer)
-    profile = {
-        "id": "profile", "name": "codex/test", "model": launch.model, "effort": launch.effort,
-        "runtime_id": "runtime", "runtime_name": "codex", "runtime_type": "codex",
-        "runtime_executable": executable, "runtime_capabilities": [c.value for c in launch.profile.runtime.capabilities],
-        "provider_id": "provider", "provider_name": "fake", "provider_auth": "api_key",
-        "provider_protocols": ["openai-responses"], "provider_api_key": "fake-key", "provider_base_url": "",
-        "provider_models": [],
-    }
+    profile = _row(launch.profile)
     from looper.db import profile_registry
 
     monkeypatch.setattr(profile_registry, "get_api_key", AsyncMock(return_value="fake-key"))
+    model = launch.profile.resolved_model.model
+    monkeypatch.setattr(profile_registry, "list_models", AsyncMock(return_value=[
+        {**asdict(model), "protocol": model.protocol.value}]))
     agent_db.list_layers.return_value = [{"scope": "system", "profile": profile}]
 
     payload = {"task_id": "s1", "instruction": "add the parser", "context": {"work_dir": str(tmp_path)}}

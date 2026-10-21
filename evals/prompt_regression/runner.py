@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1001,8 +1001,8 @@ def run(
             chosen_profile_id = None
             if any(task.planner_may_choose for task in tasks):
                 chosen_profile_id = api.post("/api/agent-profiles", {
-                    "name": CHOSEN_PROFILE, **{key: chosen[key] for key in ("runtime_id", "provider_id", "model",
-                                                                             "effort")}})["profile"]["profile_id"]
+                    "name": CHOSEN_PROFILE,
+                    **{key: chosen[key] for key in ("runtime_id", "model_id", "effort")}})["profile"]["profile_id"]
             _, stopped = run_suite(
                 tasks,
                 lambda task, rep, cap_left: run_task(api, task, work_dirs[task.id, rep], timeout=timeout, poll=poll,
@@ -1030,7 +1030,9 @@ def run(
         run_result = write_result({
             "schema": SCHEMA,
             "mode": mode,
-            "model": chosen.get("model") if mode == "real" else None,
+            "model": model_name(chosen.get("model")) if mode == "real" else None,
+            "protocol": chosen["model"].get("protocol") if isinstance(chosen.get("model"), Mapping) else None,
+            "cost_basis": chosen.get("cost"),
             "agent": chosen.get("name"),
             "provider_preset": provider.preset if provider is not None else None,
             "started_at": stamp,
@@ -1049,31 +1051,114 @@ def run(
     return run_result, path
 
 
+def _register_eval_provider(api: Api, provider: dict[str, Any]) -> dict[str, Any]:
+    """Keep a failed provider write from echoing its credential into an eval report."""
+    try:
+        return api.post("/api/providers", provider)["provider"]
+    except EvalError:
+        if provider.get("api_key"):
+            # Api.request clips HTTP errors: even a partial key must stay private.
+            raise EvalError("provider registration failed; credential-bearing response omitted") from None
+        raise
+
+
+def _eval_model(api: Api, registry: dict[str, Any], provider_id: str, wanted: Any) -> dict[str, Any]:
+    """Resolve an id/composite reference, or register an explicit model declaration."""
+    reference = isinstance(wanted, str) or "model_id" in wanted
+    if reference:
+        identity = wanted if isinstance(wanted, str) else wanted["model_id"]
+        model = next((m for m in registry["models"] if m["model_id"] == identity), None)
+    else:
+        if wanted.get("provider_id", provider_id) != provider_id:
+            raise EvalError("the model reference belongs to a different provider")
+        if not wanted.get("name") or not wanted.get("protocol"):
+            raise EvalError("an eval model needs an explicit name and protocol")
+        model = next((m for m in registry["models"] if m["provider_id"] == provider_id
+                      and m["name"] == wanted["name"] and m["protocol"] == wanted["protocol"]), None)
+        if model is None and "provider_id" not in wanted:
+            return api.post("/api/models", {**wanted, "provider_id": provider_id})["model"]
+    if model is None:
+        raise EvalError("no saved model matches the eval model reference")
+    if model["provider_id"] != provider_id:
+        raise EvalError("the model reference belongs to a different provider")
+    return model
+
+
+def _legacy_eval_spec(spec: dict[str, Any], runtime: dict[str, Any],
+                      provider: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    """Normalize old eval input through the same converter as schema/file migration."""
+    from looper.agents import registry_migration
+    from looper.agents.profile_registry import MODEL_FIELDS, RuntimeSpec
+
+    row = {**provider, "id": provider.get("provider_id", "eval-provider")}
+    if "endpoints" in row:
+        urls = {e["base_url"] for e in row["endpoints"]}
+        if len(urls) != 1:
+            raise EvalError("legacy provider reference has ambiguous endpoint URLs; use an explicit model")
+        row.update(protocols=[e["protocol"] for e in row["endpoints"]], base_url=urls.pop())
+    profile = {**spec["agent"], "id": "eval-profile", "runtime_id": runtime["runtime_id"],
+               "provider_id": row["id"]}
+    try:
+        converted = registry_migration.convert(
+            [RuntimeSpec(runtime["runtime_id"], runtime["name"], runtime["type"])], [row], [profile])
+    except registry_migration.MigrationBlocked as exc:
+        raise EvalError(f"legacy eval registration blocked: {exc.code}") from None
+    account = converted.providers[row["id"]]
+    endpoints = [{"protocol": endpoint.protocol.value,
+                  "base_url": converted.default_urls.get((account.id, endpoint.protocol), endpoint.base_url)}
+                 for endpoint in converted.endpoints.values()]
+    draft = {"name": account.name, "vendor_type": account.vendor_type.value, "endpoints": endpoints,
+             "env": [{"key": k, "value": v} for k, v in account.env],
+             "max_concurrency": account.max_concurrency}
+    models = [{"protocol": m.protocol.value, **{key: getattr(m, key) for key in MODEL_FIELDS}}
+              for m in converted.models.values()]
+    selected = converted.models[converted.profiles["eval-profile"].model_id]
+    return draft, models, {"name": selected.name, "protocol": selected.protocol.value}
+
+
 def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
-    """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name?, type},
-    "provider": {name, protocols, auth, base_url?, models?, api_key_env?} or {provider_id}, "agent": {name,
-    model, effort?}}``. Runtimes are built in: the agent runs on the runtime of that name, else the built-in one
-    of that type (``codex``, ``omp`` or ``grok`` when on the server's PATH); a ``provider_id`` names a provider
-    the server has, such as the built-in ``prov-codex-login`` (Codex's own login) or ``prov-grok-login`` (Grok's);
-    the provider's API key is read from the environment variable ``api_key_env`` names, so no key is in the file
-    or in the run's result."""
+    """Register runtime/provider/model/agent layers in provider → model → profile order.
+
+    ``model`` is {name, protocol, settings...}, a model_id string/object, or a
+    {provider_id, name, protocol} saved reference. ``agent`` holds only name and
+    runtime options. Older specs with agent.model use the shared legacy converter.
+    Credentials come exclusively from provider.api_key_env and never alter spec.
+    """
     registry = api.get("/api/registry")
     wanted = spec["runtime"]
     runtime = next((r for r in registry["runtimes"] if r["name"] == wanted.get("name")), None) or next(
         (r for r in registry["runtimes"] if r["builtin"] and r["type"] == wanted.get("type")), None)
     if runtime is None:
         raise EvalError(f"no {wanted.get('type')!r} runtime in the eval's server: put its CLI on PATH")
-    if (provider_id := spec["provider"].get("provider_id")) is None:
-        provider = {k: v for k, v in spec["provider"].items() if k != "api_key_env"}
-        if (variable := spec["provider"].get("api_key_env")) is not None:
+    source = spec["provider"]
+    if "api_key" in source:
+        raise EvalError("eval specs must use api_key_env instead of api_key")
+    provider_id = source.get("provider_id")
+    existing = next((p for p in registry["providers"] if p["provider_id"] == provider_id), None)
+    if provider_id is not None and existing is None:
+        raise EvalError(f"no provider {provider_id!r} in the eval's server")
+    provider = {k: v for k, v in source.items() if k != "api_key_env"}
+    models = []
+    model = spec.get("model")
+    agent = dict(spec["agent"])
+    if model is None:
+        provider, models, model = _legacy_eval_spec(spec, runtime, existing or provider)
+        agent.pop("model", None)
+    elif "model" in agent or "provider_id" in agent or "model_id" in agent:
+        raise EvalError("put the model reference in the model layer, not the agent layer")
+    if provider_id is None:
+        if (variable := source.get("api_key_env")) is not None:
             if not os.environ.get(variable):
                 raise EvalError(f"the provider's API key is read from ${variable}, which is not set")
             provider["api_key"] = os.environ[variable]
-        provider_id = api.post("/api/providers", provider)["provider"]["provider_id"]
-    elif not any(p["provider_id"] == provider_id for p in registry["providers"]):
-        raise EvalError(f"no provider {provider_id!r} in the eval's server")
-    return api.post("/api/agent-profiles", {**spec["agent"], "runtime_id": runtime["runtime_id"],
-                                            "provider_id": provider_id})["profile"]
+        provider_id = _register_eval_provider(api, provider)["provider_id"]
+    for entry in models:
+        saved = _eval_model(api, registry, provider_id, entry)
+        if saved not in registry["models"]:
+            registry["models"].append(saved)
+    saved = _eval_model(api, registry, provider_id, model)
+    return api.post("/api/agent-profiles", {**agent, "runtime_id": runtime["runtime_id"],
+                                            "model_id": saved["model_id"]})["profile"]
 
 
 # The API key of a provider an eval registers (``--provider-preset``): read from the environment, never a file.
@@ -1101,14 +1186,29 @@ def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
     if api_entry is None:
         raise EvalError(f"preset {choice.preset!r} has no Anthropic-format API for Claude Code")
     models = api_models(preset, api_entry)
-    provider = api.post("/api/providers", {
-        "name": preset["name"], "protocols": ["anthropic-messages"], "auth": "api_key", "api_key": choice.api_key,
-        "base_url": choice.base_url or api_entry["base_url"], "models": models, "env": preset["env"],
-    })["provider"]
-    model = choice.model or models[0]["name"]
-    answer = api.post("/api/agent-profiles", {"name": f"claude-code/{preset['name']}/{model}",
-                                              "runtime_id": "rt-claude-code", "provider_id": provider["provider_id"],
-                                              "model": model})
+    if not models:
+        raise EvalError(f"preset {choice.preset!r} has no Messages models for Claude Code")
+    name = choice.model or models[0]["name"]
+    if not any(m["name"] == name for m in models):
+        raise EvalError("the requested model is outside the preset's Messages catalog")
+    endpoints = [{"protocol": protocol,
+                  "base_url": choice.base_url if choice.base_url and protocol == "anthropic-messages"
+                  else entry["base_url"]} for entry in preset["apis"] for protocol in entry["protocols"]]
+    provider = _register_eval_provider(api, {
+        "name": preset["name"], "vendor_type": choice.preset, "api_key": choice.api_key,
+        "endpoints": endpoints, "env": preset["env"],
+    })
+    selected = None
+    for entry in preset["apis"]:
+        for protocol in entry["protocols"]:
+            for model in api_models(preset, entry):
+                saved = api.post("/api/models", {**model, "provider_id": provider["provider_id"],
+                                                 "protocol": protocol})["model"]
+                if protocol == "anthropic-messages" and model["name"] == name:
+                    selected = saved
+    assert selected is not None
+    answer = api.post("/api/agent-profiles", {"name": f"claude-code/{preset['name']}/{name}",
+                                              "runtime_id": "rt-claude-code", "model_id": selected["model_id"]})
     for warning in answer.get("warnings") or []:
         print(f"warning: {warning}", file=sys.stderr)
     return answer["profile"]
@@ -1131,9 +1231,9 @@ def select_agent(api: Api, *, agent: str | None, model: str | None, provider: Pr
         return chosen
     elif model:
         name = f"claude-code/{model}"
-        chosen = agents.get(name) or api.post("/api/agent-profiles", {
-            "name": name, "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
-            "model": model})["profile"]
+        chosen = agents.get(name) or register_agent(api, {
+            "runtime": {"type": "claude-code"}, "provider": {"provider_id": "prov-claude-subscription"},
+            "model": {"name": model, "protocol": "anthropic-messages"}, "agent": {"name": name}})
     else:
         return next(a for a in registry["profiles"] if a["builtin"])
     api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"]})
@@ -1147,9 +1247,17 @@ def baseline_path(*, mode: str, model: str | None, dialogs: bool = False) -> Pat
     return BASELINES_DIR / (f"dialogs-{name}" if dialogs else name)
 
 
+def model_name(value: Any) -> str | None:
+    """Keep report model names stable across legacy strings and typed registry references."""
+    if isinstance(value, Mapping):
+        value = value.get("name")
+    return value if isinstance(value, str) else None
+
+
 def compared_model(run: dict[str, Any]) -> str | None:
     """The model a run is compared by: the Manager's for dialogs (``manager_model``, else every role's)."""
-    return run.get("manager_model", run.get("model")) if "dialogs" in run else run.get("model")
+    value = run.get("manager_model", run.get("model")) if "dialogs" in run else run.get("model")
+    return model_name(value)
 
 
 def previous_run(out_dir: Path, current: Path, *, mode: str, model: str | None, dialogs: bool = False) -> Path | None:

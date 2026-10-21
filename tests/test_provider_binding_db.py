@@ -18,28 +18,53 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from tests.test_profile_registry_db import _call, _launch, _ok, _run
+from tests.test_profile_registry_db import _call, _launch, _ok, _run as _run_db
 from tests.test_catalog_db import DSN
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+def _run(*args: Any, **kwargs: Any) -> None:
+    if not DSN:
+        pytest.skip("LOOPER_TEST_DATABASE_URL is not set")
+    _run_db(*args, **kwargs)
+
 
 KEY = "sk-test-binding-0123456789"
 THIRD_PARTY = "https://llm.example.invalid/api/anthropic"
 
 
 async def _provider(name: str = "glm", *, base_url: str = THIRD_PARTY, api_key: str | None = KEY,
-                    models: list[dict[str, Any]] | None = None, env: list[dict[str, str]] | None = None) -> str:
-    body: dict[str, Any] = {"name": name, "protocols": ["anthropic-messages"], "auth": "api_key",
-                            "base_url": base_url, "models": models or [], "env": env or []}
+                    models: list[dict[str, Any]] | None = None, env: list[dict[str, str]] | None = None,
+                    protocol: str = "anthropic-messages") -> str:
+    body: dict[str, Any] = {"name": name, "vendor_type": "custom",
+                            "endpoints": [{"protocol": protocol,
+                                           "base_url": base_url or "https://api.anthropic.com"}], "env": env or []}
     if api_key is not None:
         body["api_key"] = api_key
-    return (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
+    provider_id = (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
+    if not base_url:
+        # Only migrated accounts can retain an omitted runtime-default endpoint.
+        from looper.db.connection import get_pool
+
+        await get_pool().execute("UPDATE llm_provider_endpoints SET base_url = '', use_runtime_default = true "
+                                 "WHERE provider_id = $1 AND protocol = $2", provider_id, protocol)
+    for model in models or []:
+        await _ok("POST", "/api/models", {"provider_id": provider_id, "protocol": protocol, **model})
+    return provider_id
 
 
-async def _profile(provider_id: str, model: str, name: str | None = None) -> dict[str, Any]:
+async def _model(provider_id: str, name: str, protocol: str = "anthropic-messages") -> dict[str, Any]:
+    models = (await _ok("GET", f"/api/models?provider_id={provider_id}"))["models"]
+    found = next((m for m in models if m["provider_id"] == provider_id
+                  and m["name"] == name and m["protocol"] == protocol), None)
+    return found or (await _ok("POST", "/api/models", {
+        "provider_id": provider_id, "name": name, "protocol": protocol}))["model"]
+
+
+async def _profile(provider_id: str, model: str, name: str | None = None, *,
+                   protocol: str = "anthropic-messages", runtime_id: str = "rt-claude-code") -> dict[str, Any]:
+    resolved = await _model(provider_id, model, protocol)
     return await _ok("POST", "/api/agent-profiles", {"name": name or f"cc-{provider_id}-{model}",
-                                                     "runtime_id": "rt-claude-code", "provider_id": provider_id,
-                                                     "model": model})
+                                                     "runtime_id": runtime_id, "model_id": resolved["model_id"]})
 
 
 @pytest.mark.parametrize("models", [
@@ -50,16 +75,18 @@ def test_provider_saves_warn_about_context_suffixes_without_anthropic_messages(
     monkeypatch: pytest.MonkeyPatch, models: list[dict[str, Any]],
 ) -> None:
     async def _test(_pool: Any) -> None:
-        answer = await _ok("POST", "/api/providers", {"name": "suffix-test", "auth": "api_key",
-            "protocols": ["openai-chat"], "base_url": "https://example.invalid/v1", "models": models})
-        provider_id = answer["provider"]["provider_id"]
+        provider_id = await _provider("suffix-test", protocol="openai-chat",
+                                       base_url="https://example.invalid/v1", models=models)
+        answer = await _ok("PUT", f"/api/providers/{provider_id}", {"name": "suffix-test"})
         assert len(answer["warnings"]) == 1
         assert "Claude Code convention" in answer["warnings"][0] and "verbatim" in answer["warnings"][0]
         saved = (await _ok("PUT", f"/api/providers/{provider_id}", {"name": "renamed"}))
         assert saved["warnings"] == answer["warnings"]
-        assert saved["provider"]["models"][0]["name"] == models[0]["name"]
-        assert saved["provider"]["models"][0]["background_model"] == models[0]["background_model"]
-        anthropic = await _ok("PUT", f"/api/providers/{provider_id}", {"protocols": ["anthropic-messages"]})
+        saved_model = await _model(provider_id, models[0]["name"], "openai-chat")
+        assert saved_model["name"] == models[0]["name"]
+        assert saved_model["background_model"] == models[0]["background_model"]
+        anthropic = await _ok("PUT", f"/api/providers/{provider_id}", {"endpoints": [
+            *saved["provider"]["endpoints"], {"protocol": "anthropic-messages", "base_url": THIRD_PARTY}]})
         assert anthropic["warnings"] == []
         assert (await _profile(provider_id, models[0]["name"]))["warnings"] == []
 
@@ -95,12 +122,11 @@ def test_pi_bridge_reads_the_materialized_scoped_library_after_loading_settings(
         # Exercise binding independently of Pi's capability rollout gate.
         await pool.execute("UPDATE agent_runtimes SET capabilities = $1 WHERE id = $2",
                            ["run", "resident_session", "resume", "mcp", "read_tools"], runtime_id)
-        provider = (await _ok("POST", "/api/providers", {
-            "name": "pi-key", "protocols": ["openai-responses"], "auth": "api_key", "api_key": KEY,
-            "base_url": "https://provider.example.invalid/v1", "models": [{"name": "selected"}],
-        }))["provider"]["provider_id"]
+        provider = await _provider("pi-key", protocol="openai-responses",
+                                   base_url="https://provider.example.invalid/v1", models=[{"name": "selected"}])
+        model = await _model(provider, "selected", "openai-responses")
         profile = (await _ok("POST", "/api/agent-profiles", {
-            "name": "pi-test", "runtime_id": runtime_id, "provider_id": provider, "model": "selected",
+            "name": "pi-test", "runtime_id": runtime_id, "model_id": model["model_id"],
         }))["profile"]["profile_id"]
         await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile})
         settings = await load_agent_settings(role)
@@ -188,12 +214,12 @@ def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        preset = next(p for p in (await _ok("GET", "/api/registry"))["provider_presets"]
-                      if p["preset_id"] == "glm-bigmodel")
-        api = next(a for a in preset["apis"] if a["protocols"] == ["anthropic-messages"])
-        provider = (await _ok("POST", "/api/providers", {
-            "name": preset["name"], "protocols": api["protocols"], "base_url": api["base_url"], "auth": "api_key",
-            "api_key": KEY, "models": preset["models"], "env": preset["env"]}))["provider"]["provider_id"]
+        preset = next(p for p in (await _ok("GET", "/api/registry"))["vendor_types"]
+                      if p["vendor_type"] == "glm-bigmodel")
+        api = next(a for a in preset["endpoints"] if a["protocol"] == "anthropic-messages")
+        provider = await _provider(base_url=api["base_url"], env=preset["env"],
+            models=[{k: v for k, v in m.items() if k != "protocol"}
+                    for m in preset["suggested_models"] if m["protocol"] == "anthropic-messages"])
         profile = (await _profile(provider, "glm-5.3[1m]"))["profile"]["profile_id"]
         await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile})
 
@@ -214,30 +240,29 @@ _DEEPSEEK_RESPONSES = "https://api-docs.deepseek.com/guides/responses_api/"
 
 
 def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents.provider_presets import api_models
-
     async def _test(_pool: Any) -> None:
         registry = await _ok("GET", "/api/registry")
-        assert {p["preset_id"] for p in registry["provider_presets"]} >= {"glm-bigmodel", "glm-zai", "deepseek",
+        assert {p["vendor_type"] for p in registry["vendor_types"]} >= {"glm-bigmodel", "glm-zai", "deepseek",
                                                                           "kimi-moonshot-cn", "kimi-moonshot", "cpa"}
-        for preset in registry["provider_presets"]:
-            for n, api in enumerate(preset["apis"]):
+        for preset in registry["vendor_types"]:
+            if preset["auth"] != "api_key":
+                continue
+            for n, api in enumerate(preset["endpoints"]):
                 # ``[1m]`` is Claude Code's mark. An OpenAI-format API lists the name without it.
                 # An API with no catalog of its own uses the preset's models.
-                anthropic = "anthropic-messages" in api["protocols"]
-                models = api_models(preset, api)
+                anthropic = api["protocol"] == "anthropic-messages"
+                models = [{k: v for k, v in m.items() if k != "protocol"}
+                          for m in preset["suggested_models"] if m["protocol"] == api["protocol"]]
                 if not anthropic:
                     assert all("[" not in model["name"] and "[" not in (model["background_model"] or "")
-                               for model in models), preset["preset_id"]
-                provider = (await _ok("POST", "/api/providers", {
-                    "name": f"{preset['preset_id']}-{n}", "protocols": api["protocols"], "base_url": api["base_url"],
-                    "auth": "api_key", "api_key": KEY, "models": models,
-                    "env": preset["env"] if anthropic else []}))["provider"]
+                               for model in models), preset["vendor_type"]
+                provider = await _provider(f"{preset['vendor_type']}-{n}", protocol=api["protocol"],
+                    base_url=api["base_url"], models=models, env=preset["env"] if anthropic else [])
                 if not anthropic:
                     continue
                 for model in models:
-                    answer = await _profile(provider["provider_id"], model["name"])
-                    assert answer["warnings"] == [], (preset["preset_id"], model["name"])
+                    answer = await _profile(provider, model["name"])
+                    assert answer["warnings"] == [], (preset["vendor_type"], model["name"])
                     assert answer["profile"]["cost"] == {"source": "provider_price", "equivalent": False, "unpriced": []}
 
     _run(_test, monkeypatch)
@@ -254,29 +279,42 @@ def test_the_deepseek_preset_serves_responses_and_chat_at_one_url_and_prices_eac
     monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        preset = next(p for p in (await _ok("GET", "/api/registry"))["provider_presets"]
-                      if p["preset_id"] == "deepseek")
-        assert [(api["base_url"], api["protocols"], [model["name"] for model in api["models"]])
-                for api in preset["apis"]] == [
-            ("https://api.deepseek.com/anthropic", ["anthropic-messages"],
+        preset = next(p for p in (await _ok("GET", "/api/registry"))["vendor_types"]
+                      if p["vendor_type"] == "deepseek")
+        # Endpoints are keyed by protocol; their presentation order is not a preference order.
+        assert sorted((api["base_url"], api["protocol"], [model["name"] for model in preset["suggested_models"]
+                                                  if model["protocol"] == api["protocol"]])
+                      for api in preset["endpoints"]) == sorted([
+            ("https://api.deepseek.com/anthropic", "anthropic-messages",
              ["deepseek-flash[1m]", "deepseek-v4-pro[1m]"]),
-            ("https://api.deepseek.com", ["openai-responses", "openai-chat"],
+            ("https://api.deepseek.com", "openai-responses",
              ["deepseek-flash", "deepseek-v4-pro"]),
-        ]
-        assert _DEEPSEEK_RESPONSES in preset["docs"]
+            ("https://api.deepseek.com", "openai-chat",
+             ["deepseek-flash", "deepseek-v4-pro"]),
+        ])
+        from looper.agents.provider_presets import PRESETS
+
+        assert _DEEPSEEK_RESPONSES in next(p for p in PRESETS if p.id == "deepseek").docs
         codex = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]["runtime_id"]
-        for api in preset["apis"]:
-            anthropic = "anthropic-messages" in api["protocols"]
-            provider = (await _ok("POST", "/api/providers", {
-                "name": "deepseek-anthropic" if anthropic else "deepseek-openai",
-                "protocols": api["protocols"], "base_url": api["base_url"], "auth": "api_key", "api_key": KEY,
-                "models": api["models"], "env": preset["env"] if anthropic else []}))["provider"]
-            assert [model["name"] for model in provider["models"]] == [model["name"] for model in api["models"]]
+        for api in preset["endpoints"]:
+            protocol = api["protocol"]
+            anthropic = protocol == "anthropic-messages"
+            models = [{k: v for k, v in m.items() if k != "protocol"}
+                      for m in preset["suggested_models"] if m["protocol"] == protocol]
+            provider = await _provider(f"deepseek-{protocol}", protocol=protocol, base_url=api["base_url"],
+                                       models=models, env=preset["env"] if anthropic else [])
+            saved = (await _ok("GET", f"/api/models?provider_id={provider}"))["models"]
+            assert [model["name"] for model in saved] == [model["name"] for model in models]
             runtime = "rt-claude-code" if anthropic else codex
-            for model in api["models"]:
-                answer = await _ok("POST", "/api/agent-profiles", {
-                    "name": f"{provider['name']}/{model['name']}", "runtime_id": runtime,
-                    "provider_id": provider["provider_id"], "model": model["name"]})
+            for model in models:
+                if protocol == "openai-chat":
+                    resolved = await _model(provider, model["name"], protocol)
+                    status, payload = await _call("POST", "/api/agent-profiles", {
+                        "name": f"{provider}/{model['name']}", "runtime_id": runtime,
+                        "model_id": resolved["model_id"]})
+                    assert status == 400 and "exact protocol" in payload["error"]
+                    continue
+                answer = await _profile(provider, model["name"], protocol=protocol, runtime_id=runtime)
                 assert answer["warnings"] == [], model["name"]
                 assert answer["profile"]["cost"] == {
                     "source": "provider_price", "equivalent": False, "unpriced": []}
@@ -294,7 +332,9 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
         # Priced in the catalog: no warning.
         priced = [{"name": "mystery-1", "input_usd_per_mtok": 1, "output_usd_per_mtok": 2,
                    "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1}]
-        await _ok("PUT", f"/api/providers/{provider}", {"models": priced})
+        model_id = answer["profile"]["model_id"]
+        await _ok("PUT", f"/api/models/{model_id}", {
+            **{k: v for k, v in priced[0].items() if k != "name"}, "background_model": None})
         again = await _ok("PUT", f"/api/agent-profiles/{answer['profile']['profile_id']}", {"name": "mystery"})
         assert again["warnings"] == []
         # Claude Code's own figures: the subscription's is an equivalent, an Anthropic key's real spend.
@@ -317,8 +357,8 @@ def test_a_providers_own_env_cannot_set_what_the_binding_owns_or_hold_a_secret(
     monkeypatch: pytest.MonkeyPatch, env: list[dict[str, str]], error: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        status, payload = await _call("POST", "/api/providers", {"name": "p", "protocols": ["anthropic-messages"],
-                                                                 "auth": "api_key", "env": env})
+        status, payload = await _call("POST", "/api/providers", {"name": "p", "vendor_type": "custom",
+            "endpoints": [{"protocol": "anthropic-messages", "base_url": THIRD_PARTY}], "env": env})
         assert status == 400 and error in payload["error"], payload
 
     _run(_test, monkeypatch)
@@ -538,6 +578,100 @@ def test_a_planner_resumes_its_session_only_with_the_same_runtime_type_and_provi
     _run(_test, monkeypatch)
 
 
+# These adapter tests need no database: the resolved loader snapshot is their input.
+@pytest.mark.parametrize("runtime_type,protocol", [
+    ("claude-code", "openai-responses"), ("codex", "anthropic-messages"),
+])
+def test_binding_rejects_an_incompatible_exact_model_protocol(runtime_type: str, protocol: str) -> None:
+    from looper.agents.profile_registry import Endpoint, ModelSpec, ProviderSpec, ResolvedModel
+    from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, VendorType, adapter
+
+    provider = ProviderSpec("provider", "test", VendorType.CUSTOM, AuthKind.API_KEY, api_key=KEY)
+    model = ModelSpec("model", provider.id, "exact-name[1m]", ApiProtocol(protocol))
+    resolved = ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, THIRD_PARTY))
+    with pytest.raises(RuntimeUnsupported, match="protocol|speaks"):
+        adapter(runtime_type).bind_provider(resolved.binding_provider(), model.name, "")
+
+
+@pytest.mark.parametrize("runtime_type", ["claude-code", "codex"])
+@pytest.mark.parametrize("invalid", ["protocols", "model", "catalog", "missing-model"])
+def test_binding_never_selects_from_an_account_catalog_or_protocol_set(runtime_type: str, invalid: str) -> None:
+    from dataclasses import replace
+    from looper.agents.profile_registry import Endpoint, ModelSpec, ProviderSpec, ResolvedModel
+    from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, VendorType, adapter
+
+    protocol = ApiProtocol.ANTHROPIC_MESSAGES if runtime_type == "claude-code" else ApiProtocol.OPENAI_RESPONSES
+    provider = ProviderSpec("provider", "test", VendorType.CUSTOM, AuthKind.API_KEY, api_key=KEY)
+    model = ModelSpec("model", provider.id, "exact-name[1m]", protocol)
+    bound = ResolvedModel(model, provider, Endpoint(provider.id, protocol, THIRD_PARTY)).binding_provider()
+    if invalid == "protocols":
+        bound = replace(bound, protocols=frozenset(ApiProtocol))
+    elif invalid == "catalog":
+        bound = replace(bound, catalog=(*bound.catalog, *bound.catalog))
+    elif invalid == "missing-model":
+        bound = replace(bound, catalog=())
+    with pytest.raises(RuntimeUnsupported, match="protocol|model"):
+        adapter(runtime_type).bind_provider(bound, "other-name" if invalid == "model" else model.name, "")
+
+
+@pytest.mark.parametrize("case", [
+    "oauth-default", "official-key-append", "empty-url-key-replace",
+    "proxy-key-background-append", "proxy-key-task-replace",
+])
+def test_resolved_claude_binding_matches_pinned_launches(case: str) -> None:
+    import os
+    import tempfile
+    from unittest.mock import patch
+
+    from model_launch_parity import CLAUDE_CASES
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.profile_registry import (
+        Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+    )
+    from looper.agents.runtimes import ApiProtocol, AuthKind, SystemPromptMode, VendorType, adapter
+    from looper.agents.system_prompt import SystemPrompt
+
+    with tempfile.TemporaryDirectory(prefix="looper-claude-binding-", dir="/tmp") as directory:
+        tmp_path = Path(directory).resolve()
+        baseline = json.loads((Path(__file__).parent / "fixtures/model_launch_parity_v2_claude.json").read_text())
+        auth, url, _, teams, _, _ = CLAUDE_CASES[case]
+        runtime = adapter("claude-code")
+        records = baseline["captures"][case]
+        parent = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"),
+                  "CLAUDE_CONFIG_DIR": str(tmp_path / "login"), "ANTHROPIC_API_KEY": "sk-test-inherited-key",
+                  "ANTHROPIC_AUTH_TOKEN": "sk-test-inherited-token", "ANTHROPIC_BASE_URL": "https://inherited.example.test/",
+                  "ANTHROPIC_DEFAULT_HAIKU_MODEL": "inherited-side", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}
+        with patch.dict(os.environ, parent, clear=True):
+            for role, expected in zip(AgentType, records, strict=True):
+                protocol = ApiProtocol(expected["config"]["protocol"])
+                vendor = VendorType.CLAUDE_SUBSCRIPTION if auth == "oauth" else VendorType.CUSTOM
+                provider = ProviderSpec("provider", "capture", vendor, AuthKind(auth),
+                                        vendor.oauth_runtime_type, env=(("API_TIMEOUT_MS", "3000000"),),
+                                        api_key=None if auth == "oauth" else "sk-test-capture")
+                model = ModelSpec("model", provider.id, protocol=protocol, **expected["config"]["catalog"][0])
+                resolved = ResolvedModel(model, provider, Endpoint(provider.id, protocol, url,
+                                         use_runtime_default=not url and auth == "api_key"))
+                profile = ResolvedAgentProfile("profile", "capture", RuntimeSpec("runtime", "claude", "claude-code"),
+                                               model.id, expected["config"]["effort"], teams, resolved_model=resolved)
+                mode = SystemPromptMode.REPLACE if "--system-prompt-file" in expected["argv"] else SystemPromptMode.APPEND
+                launch = Launch(AgentSettings(profile=profile, max_budget_usd=expected["cap"], system_prompt_mode=mode),
+                                role=role)
+                env = launch.environment()
+                binding = runtime.bind_provider(profile.provider, launch.model, launch.effort)
+                assert {k: v for k, v in env.items() if parent.get(k) != v} == expected["env"]
+                assert sorted((parent.keys() - env.keys()) | set(binding.unset)) == expected["unset"]
+                argv = expected["argv"]
+                start = next(i for i, arg in enumerate(argv) if arg in ("--dangerously-skip-permissions", "--permission-mode"))
+                assert launch.args() == argv[start:]
+                assert launch.cost_source.value == expected["price"]["source"]
+                cwd = tmp_path / "work" if role is AgentType.MANAGER else tmp_path / "work/project"
+                command = runtime.resident_command("claude", cwd=cwd,
+                           prompt_file=SystemPrompt(expected["prompt"]).write_file(tmp_path), launch=launch)
+                settings = command[command.index("--settings") + 1]
+                assert settings.replace(str(tmp_path), "<root>") == expected["config"]["settings"]
+                assert ("--system-prompt-file" in command) == (mode is SystemPromptMode.REPLACE)
+                assert "sk-test-capture" not in " ".join(command)
+
 # --- DSH subprocess failures and budget states, read back from PostgreSQL and the API ---
 
 
@@ -553,11 +687,17 @@ async def _dsh_worker_profile(executable: str, *, key: str | None = KEY, budget:
     from tests.test_profile_registry_db import _runtime
 
     runtime_id = await _runtime("dsh", executable=executable)
-    provider_id = await _provider("dsh-gateway", api_key=key, models=[{"name": "deepseek-flash"}])
-    profile_id = (await _ok("POST", "/api/agent-profiles", {
-        "name": "dsh-worker", "runtime_id": runtime_id, "provider_id": provider_id,
-        "model": "deepseek-flash",
-    }))["profile"]["profile_id"]
+    provider_id = await _provider("dsh-gateway", api_key=key)
+    model = await _model(provider_id, "deepseek-flash", "anthropic-messages")
+    profile = (await _ok("POST", "/api/agent-profiles", {
+        "name": "dsh-worker", "runtime_id": runtime_id, "model_id": model["model_id"],
+    }))["profile"]
+    assert profile["model"] == {
+        "model_id": model["model_id"], "name": "deepseek-flash",
+        "protocol": "anthropic-messages", "provider_id": provider_id,
+    }
+    assert profile["provider"]["provider_id"] == provider_id
+    profile_id = profile["profile_id"]
     await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile_id, "run_budget_usd": budget})
     return profile_id, provider_id
 

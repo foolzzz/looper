@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .agent_settings import TASK_ROLES, AgentType, Layer, SettingsError, effort_level
-from .profile_registry import BUILTIN_PROFILE, AgentProfile, RegistryError, check_roles
+from .profile_registry import BUILTIN_PROFILE, AgentProfile, LegacyAgentProfile, RegistryError, check_roles
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,22 @@ class Conversion:
     derived: list[Derived] = field(default_factory=list)
 
 
+def _model_identity(profile: AgentProfile) -> tuple[str, ...]:
+    """The model ``profile`` runs: its provider and model name when it carries them (a resolved profile, or a v2
+    one before the model migration), else its model id."""
+    if hasattr(profile, "provider"):
+        return (profile.provider.id, profile.model)
+    return (profile.model_id,)
+
+
+def _model_fields(profile: AgentProfile) -> dict[str, str]:
+    """``profile``'s model as the fields of the profile inserted beside it: its model id, or (a v2 profile, before
+    the model migration) its provider and model name."""
+    if isinstance(profile, LegacyAgentProfile):
+        return {"provider_id": profile.provider.id, "model": profile.model}
+    return {"model_id": profile.model_id}
+
+
 class _Targets:
     """The profile that runs like ``base`` with ``effort``: ``base`` when that is its own effort, else an existing
     one with the same runtime, provider, model, agent teams and that effort (the built-in one first, then by name),
@@ -95,10 +111,9 @@ class _Targets:
     def __call__(self, base: AgentProfile, effort: str | None) -> Choice:
         if (effort or None) == (base.effort or None):
             return base
-        key = (base.runtime.id, base.provider.id, base.model, base.agent_teams,
-               base.custom_prompt, effort)
+        key = (base.runtime.id, _model_identity(base), base.agent_teams, base.custom_prompt, effort)
         for profile in self.profiles:
-            if (profile.runtime.id, profile.provider.id, profile.model, profile.agent_teams,
+            if (profile.runtime.id, _model_identity(profile), profile.agent_teams,
                     profile.custom_prompt, profile.effort) == key:
                 return profile
         if key not in self.derived:
@@ -228,11 +243,16 @@ def _stored(raw: Any, parse: Any, what: str, place: str) -> Any:
         return None
 
 
-async def migrate(conn: Any) -> None:
+async def migrate(conn: Any, *, legacy_registry: bool = False) -> None:
     """Once (``schema_migrations`` ``MIGRATION``), in the schema's transaction: move each layer's effort onto the
     profiles its roles run (``convert``), log each profile added and each layer and task changed, then drop the
     column and the layers left with nothing set."""
     from ..db.profile_registry import PROFILE_JOIN, PROFILE_JSON, _json, insert_profile
+
+    if legacy_registry:
+        from ..db.registry_migration import LEGACY_PROFILE_JOIN, LEGACY_PROFILE_JSON, insert_legacy_profile
+
+        PROFILE_JOIN, PROFILE_JSON, insert_profile = LEGACY_PROFILE_JOIN, LEGACY_PROFILE_JSON, insert_legacy_profile
 
     if await conn.fetchval("SELECT 1 FROM schema_migrations WHERE name = $1", MIGRATION):
         return
@@ -269,9 +289,9 @@ async def _apply(conn: Any, layers: Mapping[Key, Before], conversion: Conversion
     for derived in conversion.derived:
         base = derived.base
         ids[derived.name] = await insert_profile(
-            {"name": derived.name, "runtime_id": base.runtime.id, "provider_id": base.provider.id,
-             "model": base.model, "effort": derived.effort, "agent_teams": base.agent_teams,
-             "custom_prompt": base.custom_prompt}, pool=conn)
+            {"name": derived.name, "runtime_id": base.runtime.id, **_model_fields(base),
+             "effort": derived.effort, "agent_teams": base.agent_teams, "custom_prompt": base.custom_prompt},
+            pool=conn)
         logger.info("the effort is the Agent Profile's now: added Agent Profile %r (%s with effort %s)",
                     derived.name, base.name, derived.effort)
 

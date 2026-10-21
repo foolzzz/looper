@@ -22,13 +22,15 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import (
+    Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+)
 from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 from looper.agents.mcp import write_config
 from looper.agents.run_usage import Usage, run_usage
-from looper.agents.runtimes import ApiProtocol, AuthKind, ReadOnly, RuntimeUnsupported, adapter
+from looper.agents.runtimes import ApiProtocol, AuthKind, ReadOnly, RuntimeUnsupported, VendorType, adapter
 from looper.agents.runtimes.codex import KEY_ENV, CodexRuntime, ResidentCodex, config_toml
 from looper.agents.system_prompt import SystemPrompt
 
@@ -37,19 +39,23 @@ CODEX: CodexRuntime = adapter("codex")  # type: ignore[assignment]
 KEY = "sk-test-codex-0123456789"
 
 
-def _provider(**fields: Any) -> ProviderSpec:
-    values: dict[str, Any] = {"id": "prov-cpa", "name": "cpa", "auth": AuthKind.API_KEY,
-                              "protocols": frozenset({ApiProtocol.OPENAI_RESPONSES}),
-                              "base_url": "http://127.0.0.1:8317/v1", "api_key": KEY}
-    return ProviderSpec(**{**values, **fields})
+def _provider(*, base_url: str = "http://127.0.0.1:8317/v1", api_key: str | None = KEY,
+              protocol: ApiProtocol = ApiProtocol.OPENAI_RESPONSES,
+              vendor: VendorType = VendorType.CUSTOM, name: str = "gpt-5.5") -> ResolvedModel:
+    provider = ProviderSpec("prov-cpa", "cpa", vendor, vendor.auth_kind, vendor.oauth_runtime_type,
+                            api_key=api_key)
+    model = ModelSpec("model-codex", provider.id, name, protocol)
+    return ResolvedModel(model, provider, Endpoint(provider.id, protocol, base_url,
+                         use_runtime_default=not base_url and provider.auth is AuthKind.API_KEY))
 
 
 def _launch(*, executable: str = "codex", library: AgentLibrary | None = None,
-            knowledge: AgentKnowledge | None = None, provider: ProviderSpec | None = None, effort: str = "low",
+            knowledge: AgentKnowledge | None = None, provider: ResolvedModel | None = None, effort: str = "low",
             env: tuple[tuple[str, str], ...] = ()) -> Launch:
-    profile = AgentProfile("agent-codex", "codex/gpt-5.5",
-                           RuntimeSpec("rt-codex", "codex", "codex", executable, CODEX.capabilities),
-                           provider or _provider(), "gpt-5.5", effort or None)
+    resolved = provider or _provider()
+    profile = ResolvedAgentProfile("agent-codex", "codex/gpt-5.5",
+                                   RuntimeSpec("rt-codex", "codex", "codex", executable, CODEX.capabilities),
+                                   resolved.model.id, effort or None, resolved_model=resolved)
     return Launch(AgentSettings(profile=profile, env=env), library or AgentLibrary(),
                   knowledge or AgentKnowledge())
 
@@ -309,10 +315,11 @@ def test_writing_a_new_run_home_removes_the_idle_ones(tmp_path: Path) -> None:
     assert sorted(p.name for p in fresh.parent.iterdir()) == sorted([busy.name, fresh.name])
 
 
-def _login_provider() -> ProviderSpec:
+def _login_provider() -> ResolvedModel:
     """Codex's own login, as the built-in provider ``codex-login`` is."""
-    return ProviderSpec("prov-codex-login", "codex-login", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}),
-                        "codex")
+    provider = ProviderSpec("prov-codex-login", "codex-login", VendorType.CODEX_LOGIN, AuthKind.OAUTH, "codex")
+    model = ModelSpec("model-login", provider.id, "gpt-5.5", ApiProtocol.OPENAI_RESPONSES)
+    return ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, ""))
 
 
 def _operator_login(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, codex_home_set: bool) -> Path:
@@ -372,7 +379,7 @@ def test_a_session_home_links_the_login_only_while_its_agent_runs_with_it(
     codex = fake_claude(tmp_path / "codex", _FAKE_CODEX)
     session_home = root / ".local" / "codex" / "sessions" / "manager"
 
-    async def _turn(provider: ProviderSpec) -> Any:
+    async def _turn(provider: ResolvedModel) -> Any:
         launch = _launch(executable=codex, provider=provider)
         session = CODEX.resident_session("manager")
         command = CODEX.resident_command(codex, cwd=root, prompt_file=_prompt_file(root), launch=launch)
@@ -413,11 +420,14 @@ def test_without_a_base_url_the_provider_is_openais_own_endpoint(tmp_path: Path)
 
 @pytest.mark.parametrize(("provider", "error"), [
     (_provider(api_key=None), "has no API key"),
-    (_provider(protocols=frozenset({ApiProtocol.ANTHROPIC_MESSAGES})), "openai-responses"),
-    (_provider(auth=AuthKind.OAUTH, oauth_runtime_type="claude-code", api_key=None), "not of Codex"),
+    (_provider(protocol=ApiProtocol.ANTHROPIC_MESSAGES), "openai-responses"),
+    (_provider(vendor=VendorType.CLAUDE_SUBSCRIPTION, protocol=ApiProtocol.ANTHROPIC_MESSAGES,
+               base_url="", api_key=None), "not of Codex"),
 ])
-def test_a_provider_codex_cannot_use_fails_the_launch(provider: ProviderSpec, error: str, tmp_path: Path) -> None:
+def test_a_provider_codex_cannot_use_fails_the_launch(provider: ResolvedModel, error: str, tmp_path: Path) -> None:
     with pytest.raises(RuntimeUnsupported, match=error):
+        CODEX.bind_provider(provider.binding_provider(), provider.model.name, "low")
+    with pytest.raises((RegistryError, RuntimeUnsupported)):
         CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=_launch(provider=provider))
 
 
@@ -611,7 +621,7 @@ def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_once_it_ends(tmp_pa
 
     root = tmp_path / "runtime"
     codex = fake_claude(tmp_path / "codex", _FAKE_CODEX)
-    provider = _provider()
+    provider = _provider().binding_provider()
     # gpt-5.5 at the built-in prices: each turn's 60 uncached, 40 cached input and 10 output tokens.
     turn_cost = (60 * 5.00 + 40 * 0.50 + 10 * 30.00) / 1_000_000
 
@@ -721,3 +731,61 @@ def test_a_login_consult_links_the_operators_login_and_copies_no_auth_file(
     # The consult's home links the operator's login like any login run's; nothing of the run's auth.json reaches it.
     assert link.is_symlink() and os.readlink(link) == str(login)
     assert sorted(p.name for p in fork.iterdir()) == ["AGENTS.md", "auth.json", "config.toml", "sessions"]
+
+
+@pytest.mark.parametrize("case", ["key-default", "key-proxy", "login-home", "login-codex-home"])
+def test_resolved_codex_binding_matches_pinned_launches(case: str) -> None:
+    from unittest.mock import patch
+
+    from model_launch_parity import CODEX_CASES, codex_capture_root, codex_environment
+    from looper.agents.runtimes import SystemPromptMode
+
+    with codex_capture_root() as tmp_path:
+        baseline = json.loads((FIXTURES.parent / "model_launch_parity_v2_codex.json").read_text())
+        auth, url, _, mode, explicit_home = CODEX_CASES[case]
+        parent = codex_environment(tmp_path, explicit_home=explicit_home)
+        records = baseline["captures"][case]
+        roles = (AgentType.MANAGER, AgentType.MANAGER, AgentType.PLANNER, AgentType.PLANNER,
+                 AgentType.WORKER, AgentType.REVIEWER)
+        with patch.dict(os.environ, parent, clear=True):
+            for role, expected in zip(roles, records, strict=True):
+                protocol = ApiProtocol(expected["config"]["protocol"])
+                vendor = VendorType.CODEX_LOGIN if auth == "oauth" else VendorType.CUSTOM
+                provider = ProviderSpec("provider", "capture", vendor, AuthKind(auth), vendor.oauth_runtime_type,
+                                        env=(("CAPTURE_SETTING", "provider"),),
+                                        api_key=None if auth == "oauth" else "sk-test-capture")
+                model = ModelSpec("model", provider.id, protocol=protocol, **expected["config"]["catalog"][0])
+                resolved = ResolvedModel(model, provider, Endpoint(provider.id, protocol, url,
+                                         use_runtime_default=not url and auth == "api_key"))
+                profile = ResolvedAgentProfile("profile", "capture", RuntimeSpec("runtime", "codex", "codex"),
+                                               model.id, expected["config"]["effort"] or None, resolved_model=resolved)
+                launch = Launch(AgentSettings(profile=profile, max_budget_usd=expected["cap"],
+                                env=(("CAPTURE_SETTING", "settings"),), system_prompt_mode=SystemPromptMode(mode)), role=role)
+                # The capture holds the rendered runtime notes; give the adapter its original Looper text.
+                prompt = expected["prompt"].partition("\n\n---\n\n")[2].replace("<root>", str(tmp_path))
+                session_dir = None
+                if role in (AgentType.MANAGER, AgentType.PLANNER):
+                    owner = "manager" if role is AgentType.MANAGER else "planner-task-0000000000a1"
+                    session_dir = tmp_path / "runtime/.local/codex/sessions" / owner
+                command = CODEX.run_command("codex", cwd=tmp_path,
+                           prompt_file=_prompt_file(tmp_path / "runtime", prompt), launch=launch,
+                           session_dir=session_dir)
+                home = Path(command[1].removeprefix("CODEX_HOME="))
+                actual_config = (home / "config.toml").read_text()
+                assert actual_config.replace(str(tmp_path), "<root>") == expected["config"]["toml"]
+                assert (home / "AGENTS.md").read_text().replace(str(tmp_path), "<root>") == expected["config"]["agents_md"]
+                env = {**launch.environment(), "CODEX_HOME": str(home)}
+                changed = {k: v.replace(str(tmp_path), "<root>") for k, v in env.items() if parent.get(k) != v}
+                assert changed == expected["env"]
+                binding = CODEX.bind_provider(profile.provider, launch.model, launch.effort)
+                assert sorted((parent.keys() - env.keys()) | set(binding.unset)) == expected["unset"]
+                argv = expected["argv"]
+                end = next((argv.index(flag) for flag in ("resume", "--ephemeral") if flag in argv), len(argv) - 1)
+                assert launch.args() == argv[argv.index("--json"):end]
+                assert launch.cost_source.value == expected["price"]["source"]
+                if auth == "oauth":
+                    assert (home / "auth.json").is_symlink()
+                    assert os.readlink(home / "auth.json").replace(str(tmp_path), "<root>") == expected["login_target"]
+                else:
+                    assert not (home / "auth.json").exists()
+                assert "sk-test-capture" not in actual_config + " ".join(command)

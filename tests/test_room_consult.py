@@ -130,10 +130,11 @@ def test_dsh_consult_verifies_the_process_exit(monkeypatch: pytest.MonkeyPatch, 
 
 def _pi_launch(**kwargs: Any) -> Any:
     from looper.agents.agent_settings import AgentSettings, Launch
-    from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec
+    from looper.agents.profile_registry import CatalogModel, LegacyProviderSpec as ProviderSpec, RuntimeSpec
+    from tests.runtime_model_helpers import resolved_profile
     from looper.agents.runtimes import ApiProtocol, AuthKind, Capability
 
-    profile = AgentProfile("pi-test", "pi-test", RuntimeSpec("pi", "pi", "pi", capabilities=frozenset({
+    profile = resolved_profile("pi-test", "pi-test", RuntimeSpec("pi", "pi", "pi", capabilities=frozenset({
         Capability.READ_TOOLS})), ProviderSpec(
             "test", "test", auth=AuthKind.API_KEY, api_key="test-key",
             protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}), base_url="https://pi.example.invalid/v1",

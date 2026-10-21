@@ -19,7 +19,7 @@ import type {
   TaskLimitRole,
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
-import { profileName } from "@/lib/use-registry";
+import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn } from "@/lib/utils";
 
@@ -193,6 +193,7 @@ export function LayerSettingsForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const { registry } = useRegistry();
   const isSystem = layer === "system";
   const [only] = roles;
   const concurrencyRole: TaskLimitRole | null =
@@ -230,8 +231,10 @@ export function LayerSettingsForm({
   };
 
   const harness = effective?.harness_prompt;
-  const profileText = (value: EffectiveProfile) =>
-    `${profileName(value)} (${value.runtime} · ${value.provider} · ${value.model})`;
+  const profileText = (value: EffectiveProfile) => {
+    const profile = registry?.profiles.find((p) => p.profile_id === value.profile_id);
+    return profile ? profileLabel(profile) : `${profileName(value)} (${value.runtime} · ${value.provider} · ${value.model})`;
+  };
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
   const concurrencyText = (value: number) => String(value);
 

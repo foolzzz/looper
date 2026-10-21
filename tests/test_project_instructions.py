@@ -21,7 +21,8 @@ import pytest
 
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.claude_cli import ClaudeRunRecorder
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
+from tests.runtime_model_helpers import resolved_profile
 from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind, adapter
 from looper.agents.runtimes.instructions import INJECTED_MAX_BYTES, record
 from looper.agents.system_prompt import SystemPrompt
@@ -32,7 +33,7 @@ LOOPER_PROMPT = "LOOPER PROMPT: the contract comes last."
 def _launch(runtime: str, provider: ProviderSpec | None = None) -> Launch:
     provider = provider or ProviderSpec("prov-cpa", "cpa", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_RESPONSES}),
                                         base_url="http://127.0.0.1:8317/v1", api_key="sk-test-0123456789")
-    profile = AgentProfile(f"agent-{runtime}", f"{runtime}/gpt-5.5",
+    profile = resolved_profile(f"agent-{runtime}", f"{runtime}/gpt-5.5",
                            RuntimeSpec(f"rt-{runtime}", runtime, runtime, runtime, adapter(runtime).capabilities),
                            provider, "gpt-5.5", "low")
     return Launch(AgentSettings(profile=profile))

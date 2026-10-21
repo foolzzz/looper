@@ -25,6 +25,7 @@ from looper.agents.runtimes.pi import PiRuntime
 from looper.agents.runtimes.pi_steer import PiChannel
 from looper.agents.tiers import worker
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+from tests.runtime_model_helpers import builtin_launch
 from tests.test_agent_planner_worker import _LISTENING_CLAUDE, _fake_claude, _work_item
 from tests.test_pi_runtime import _launch as _pi_launch, _provider as _pi_provider
 
@@ -86,7 +87,7 @@ def test_stream_channel_yields_the_runtimes_events() -> None:
 
 @pytest.mark.parametrize("steer", [False, True])
 def test_launch_steers_uses_the_registered_runtimes_capabilities(steer: bool) -> None:
-    launch = Launch()
+    launch = builtin_launch()
     assert launch.steers is False
     assert Capability.STEER not in CLAUDE_CODE.capabilities
     capabilities = launch.profile.runtime.capabilities
@@ -100,7 +101,7 @@ def test_launch_steers_uses_the_registered_runtimes_capabilities(steer: bool) ->
 
 def test_a_runtime_without_steering_rejects_a_steered_command(tmp_path: Path) -> None:
     with pytest.raises(RuntimeUnsupported, match="a Claude Code run cannot be steered"):
-        CLAUDE_CODE.steer_command("claude", cwd=tmp_path, prompt_file=tmp_path / "prompt", launch=Launch())
+        CLAUDE_CODE.steer_command("claude", cwd=tmp_path, prompt_file=tmp_path / "prompt", launch=builtin_launch())
 
 
 @pytest.mark.parametrize("error", [BrokenPipeError, ConnectionResetError, RuntimeError])
@@ -159,7 +160,7 @@ def test_worker_uses_its_run_channel_over_the_bus(
 
     runtime = Runtime()
     monkeypatch.setitem(ADAPTERS, "claude-code", runtime)
-    launch = Launch()
+    launch = builtin_launch()
     registered = replace(launch.profile.runtime, executable=executable,
                          capabilities=runtime.capabilities if steer else CLAUDE_CODE.capabilities)
     settings = AgentSettings(profile=replace(launch.profile, runtime=registered))

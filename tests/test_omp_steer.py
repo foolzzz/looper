@@ -18,14 +18,13 @@ from fake_claude import fake_claude
 from looper import child_env
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
-from looper.agents.profile_registry import CatalogModel
 from looper.agents.runtimes import Capability, StreamChannel
 from looper.agents.runtimes import omp as omp_module, omp_steer
 from looper.agents.runtimes.omp_steer import OmpChannel
 from looper.agents.tiers import worker
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from tests.test_agent_planner_worker import _work_item
-from tests.test_omp_runtime import API_ERROR, OMP, _FAILED_OMP, _blocks, _launch, _provider
+from tests.test_omp_runtime import API_ERROR, OMP, _FAILED_OMP, _blocks, _launch, _resolved_model
 
 
 @pytest.mark.parametrize("source", ["setup", "prompt", "terminal"])
@@ -33,7 +32,7 @@ def test_rpc_errors_redact_configured_key_before_emitting(source: str) -> None:
     secret = "opaque-provider-secret"
 
     async def run() -> None:
-        launch = _launch(provider=_provider(api_key=secret))
+        launch = _launch(resolved=_resolved_model(api_key=secret))
         launch = replace(launch, settings=replace(launch.settings, profile=replace(
             launch.profile, runtime=replace(launch.profile.runtime, capabilities=OMP.capabilities | {Capability.STEER}))))
         stdout = asyncio.StreamReader()
@@ -562,9 +561,9 @@ def test_worker_reports_the_provider_error(tmp_path: Path, monkeypatch: pytest.M
         executable = _fake(tmp_path, monkeypatch, "api_error_after_end" if source == "rpc-after-end" else "api_error")
     else:
         executable = fake_claude(tmp_path / "omp", f"ERROR = {API_ERROR!r}\nSOURCE = {source!r}\n" + _FAILED_OMP)
-    launch = _launch(executable=executable, provider=_provider(api_key="opaque-provider-secret", catalog=(
-        CatalogModel("gpt-5.5", input_usd_per_mtok=2, output_usd_per_mtok=10,
-                     cache_read_usd_per_mtok=0.2, cache_write_usd_per_mtok=2.5),)))
+    launch = _launch(executable=executable, resolved=_resolved_model(api_key="opaque-provider-secret",
+        input_usd_per_mtok=2, output_usd_per_mtok=10,
+        cache_read_usd_per_mtok=0.2, cache_write_usd_per_mtok=2.5))
     capabilities = OMP.capabilities | {Capability.STEER} if rpc else OMP.capabilities
     launch = replace(launch, settings=replace(launch.settings, profile=replace(
         launch.profile, runtime=replace(launch.profile.runtime, capabilities=capabilities))))

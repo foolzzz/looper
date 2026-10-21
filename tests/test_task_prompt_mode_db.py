@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _launch, _ok, _run, _runtime
+from tests.test_profile_registry_db import _call, _launch, _model_id, _ok, _run, _runtime
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -65,7 +65,8 @@ def test_task_mode_shows_the_runtime_type_so_the_ui_hides_it_off_claude_code(
     async def run(_pool: Any) -> None:
         await _runtime("codex")
         profile = (await _ok("POST", "/api/agent-profiles", {
-            "name": "cdx", "runtime_id": "rt-codex", "provider_id": "prov-codex-login", "model": "gpt-5"}))["profile"]
+            "name": "cdx", "runtime_id": "rt-codex",
+            "model_id": await _model_id("prov-codex-login", "gpt-5", "openai-responses")}))["profile"]
         task = await _task(tmp_path)
         body = await _ok("PUT", f"/api/tasks/{task}/agents", {"profiles": {"worker": profile["profile_id"]},
                                                               "system_prompt_modes": {"worker": "replace"}})

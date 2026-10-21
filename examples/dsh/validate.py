@@ -484,7 +484,7 @@ try {
 
 
 def _session_accounting(records: list[dict[str, Any]], runtime: Path) -> dict[str, Any]:
-    from looper.agents.profile_registry import AuthKind, ProviderSpec
+    from looper.agents.profile_registry import AuthKind, ProviderSpec, VendorType
     from looper.agents.run_usage import Usage
     from looper.agents.runtimes.dsh import DshRuntime
     from looper.agents.runtimes.pricing import price_cost
@@ -498,7 +498,7 @@ def _session_accounting(records: list[dict[str, Any]], runtime: Path) -> dict[st
                               "summary_observed_cost_usd": None}
     # Same eval spec and shared price table as the runtime. No parallel provider
     # registry or second price catalog. These figures remain observations.
-    provider = ProviderSpec("validation", "validation", AuthKind.API_KEY, frozenset())
+    provider = ProviderSpec("validation", "validation", VendorType.CUSTOM, AuthKind.API_KEY)
     token_fields = ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
 
     def usage(value):

@@ -52,8 +52,8 @@ async def _steps(pool: Any, task_id: str, **statuses: str) -> None:
 
 
 async def _haiku(pool: Any) -> None:
-    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                       "('agent-haiku', 'claude-code/haiku', 'rt-claude-code', 'prov-claude-subscription', 'haiku')")
+    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                       "('agent-haiku', 'claude-code/haiku', 'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'haiku'))")
 
 
 async def _allow(project: dict[str, Any], *profiles: str) -> dict[str, Any]:
@@ -187,8 +187,8 @@ def test_the_projects_list_is_set_whole_by_id_or_name_and_read_back(monkeypatch:
         await _haiku(pool)
         await pool.execute("INSERT INTO agent_runtimes (id, name, type, capabilities) VALUES "
                            "('rt-resident', 'resident', 'claude-code', ARRAY['resident_session', 'resume'])")
-        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                           "('agent-resident', 'resident/opus', 'rt-resident', 'prov-claude-subscription', 'opus')")
+        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                           "('agent-resident', 'resident/opus', 'rt-resident', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus'))")
         path = f"/api/projects/{project['id']}/allowed-profiles"
         empty = (await _call("GET", path))[1]
         assert empty["profiles"] == [] and empty["restricted"] is False

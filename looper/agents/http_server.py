@@ -388,6 +388,7 @@ class AgentHTTPServer:
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
+    _RE_MODEL = re.compile(r"^/api/models/(model-[a-zA-Z0-9-]+)$")
     _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
     _RE_PROFILE_PROMPT_PREVIEW = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)/prompt-preview$")
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
@@ -575,6 +576,8 @@ class AgentHTTPServer:
         elif (m := self._RE_RUNTIME_PROBE.match(path)) and method == "POST":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.probe_runtime(
                 m.group(1), server_claude=self._claude_bin))
+        elif path == "/api/providers" and method == "GET":
+            await self._handle_registry(writer, HTTP_200, profile_registry.list_providers)
         elif path == "/api/providers" and method == "POST":
             await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_provider(
                 projects.json_object(body)))
@@ -585,6 +588,19 @@ class AgentHTTPServer:
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
         elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
+        elif path == "/api/models" and method == "GET":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.list_models(
+                provider_id=query.get("provider_id") or None, runtime_id=query.get("runtime_id") or None))
+        elif path == "/api/models" and method == "POST":
+            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_model(
+                projects.json_object(body)))
+        elif (m := self._RE_MODEL.match(path)) and method == "GET":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.get_model(m.group(1)))
+        elif (m := self._RE_MODEL.match(path)) and method == "PUT":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_model(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_MODEL.match(path)) and method == "DELETE":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_model(m.group(1)))
         elif (m := self._RE_PROFILE_PROMPT_PREVIEW.match(path)) and method == "GET":
             await self._handle_registry(writer, HTTP_200, lambda: prompt_preview.preview(
                 m.group(1), query.get("role", ""), query.get("project_id") or None))
@@ -628,7 +644,8 @@ class AgentHTTPServer:
         elif path == "/api/config/export" and method == "GET":
             await self._handle_config_export(query, writer)
         elif (m := self._RE_CONFIG_IMPORT_APPLY.match(path)) and method == "POST":
-            await self._handle_config_import(writer, HTTP_200, lambda imports: self._apply_import(imports, m.group(1)))
+            await self._handle_config_import(writer, HTTP_200,
+                                             lambda imports: self._apply_import(imports, m.group(1), body))
         elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
             await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
         elif path == "/api/catalog" and method == "GET":
@@ -1737,8 +1754,10 @@ class AgentHTTPServer:
             await self._recheck_concurrency()
         return result
 
-    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str) -> Any:
+    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str, body: bytes = b"") -> Any:
         """Apply an import; its layers may raise a concurrency limit."""
+        if body:
+            raise config_transfer.ConfigFileError("apply takes no request body; the server recomputes the import plan")
         result = await imports.apply(import_id)
         await self._recheck_concurrency()
         return result

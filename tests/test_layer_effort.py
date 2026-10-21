@@ -10,13 +10,17 @@ the code under test.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from looper.agents.agent_settings import AgentType, Layer, LayerValues, resolve
 from looper.agents.layer_effort import Before, Derived, convert
-from looper.agents.profile_registry import BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile
+from looper.agents.profile_registry import (
+    BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, ResolvedAgentProfile, builtin_resolved_profile,
+)
+from tests.runtime_model_helpers import resolved_profile
 
 S = (Layer.SYSTEM, None, None)
 ROLES = tuple(AgentType)
@@ -25,7 +29,8 @@ P = "proj-a"
 
 
 def _profile(name: str, model: str, effort: str | None = None, *, agent_teams: bool = True) -> AgentProfile:
-    return AgentProfile(f"agent-{name}", name, BUILTIN_RUNTIME, BUILTIN_PROVIDER, model, effort, agent_teams)
+    return resolved_profile(f"agent-{name}", name, BUILTIN_RUNTIME, BUILTIN_PROVIDER, model, effort,
+                            agent_teams=agent_teams)
 
 
 SONNET, HAIKU = _profile("claude-code/sonnet", "sonnet"), _profile("claude-code/haiku", "haiku")
@@ -64,8 +69,9 @@ def _converted(layers: dict[Any, Before]) -> tuple[dict[Any, AgentProfile | None
     """The layers after ``convert`` (what each selects), the names of the changed ones' profiles, and the names of
     the profiles it adds."""
     conversion = convert(layers, CATALOG)
-    added = {d.name: AgentProfile(f"agent-{d.name}", d.name, d.base.runtime, d.base.provider, d.base.model, d.effort,
-                                  d.base.agent_teams) for d in conversion.derived}
+    added = {d.name: replace(d.base if isinstance(d.base, ResolvedAgentProfile) else builtin_resolved_profile(),
+                             id=f"agent-{d.name}", name=d.name, effort=d.effort,
+                             agent_teams=d.base.agent_teams) for d in conversion.derived}
 
     def real(choice: Any) -> AgentProfile | None:
         return added[choice.name] if isinstance(choice, Derived) else choice

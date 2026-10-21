@@ -510,12 +510,17 @@ asyncio.run(check())
         probe = request(base, "/api/runtimes/rt-pi/probe", token, "POST", {})
         assert not probe["runtime"]["probe_error"], "pi probe failed"
         provider = request(base, "/api/providers", token, "POST", {
-            "name": "isolated-smoke", "auth": "api_key", "protocols": ["openai-chat" if provider_state else "openai-responses"],
-            "base_url": provider_url + "/v1", "api_key": "local-key", "models": [{"name": "selected"}],
+            "name": "isolated-smoke", "vendor_type": "custom",
+            "endpoints": [{"protocol": "openai-chat" if provider_state else "openai-responses",
+                           "base_url": provider_url + "/v1"}], "api_key": "local-key",
         })["provider"]
+        model = request(base, "/api/models", token, "POST", {
+            "provider_id": provider["provider_id"], "name": "selected",
+            "protocol": "openai-chat" if provider_state else "openai-responses",
+        })["model"]
         profile = request(base, "/api/agent-profiles", token, "POST", {
-            "name": "isolated-smoke", "runtime_id": "rt-pi", "provider_id": provider["provider_id"],
-            "model": "selected", "agent_teams": False,
+            "name": "isolated-smoke", "runtime_id": "rt-pi", "model_id": model["model_id"],
+            "agent_teams": False,
         })["profile"]
         profile_id = profile["profile_id"]
         for role in ROLES:
@@ -541,22 +546,25 @@ import sys
 from pathlib import Path
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.library import AgentLibrary
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
-from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported
+from looper.agents.profile_registry import (Endpoint, ModelSpec, ProviderSpec, RegistryError,
+    ResolvedAgentProfile, ResolvedModel, RuntimeSpec)
+from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, VendorType
 from looper.agents.runtimes.pi import PiRuntime
 root, url, executable = sys.argv[1:]
 prompt = Path(root) / '.local/prompts/system.md'
 prompt.parent.mkdir(parents=True)
 prompt.write_text('Startup validation only')
-for protocol, key, expected in [(ApiProtocol.OPENAI_RESPONSES, '', 'no API key'),
+for protocol, key, expected in [(ApiProtocol.OPENAI_RESPONSES, None, 'no API key'),
                                 (ApiProtocol.ANTHROPIC_MESSAGES, 'local-key', 'protocol')]:
-    provider = ProviderSpec(id='local', name='local', auth=AuthKind.API_KEY,
-        protocols=frozenset({protocol}), base_url=url + '/v1', api_key=key)
-    profile = AgentProfile('pi-test', 'pi-test', RuntimeSpec('rt-pi', 'pi', 'pi', executable), provider, 'selected', '')
+    provider = ProviderSpec('local', 'local', VendorType.CUSTOM, AuthKind.API_KEY, api_key=key)
+    model = ModelSpec('selected-model', provider.id, 'selected', protocol)
+    resolved = ResolvedModel(model, provider, Endpoint(provider.id, protocol, url + '/v1'))
+    profile = ResolvedAgentProfile('pi-test', 'pi-test', RuntimeSpec('rt-pi', 'pi', 'pi', executable),
+                                   model.id, resolved_model=resolved)
     launch = Launch(AgentSettings(profile=profile), AgentLibrary())
     try:
         PiRuntime().run_command(executable, cwd=Path(root), prompt_file=prompt, launch=launch)
-    except RuntimeUnsupported as error:
+    except (RuntimeUnsupported, RegistryError) as error:
         assert expected in str(error), str(error)
     else:
         raise AssertionError('invalid provider reached process launch')

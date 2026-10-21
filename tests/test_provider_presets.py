@@ -7,7 +7,7 @@ models keep the preset default (``None``).
 
 from __future__ import annotations
 
-from looper.agents.profile_registry import _provider_fields
+from looper.agents.profile_registry import ModelSpec, _provider_fields
 from looper.agents.provider_presets import api_models, presets_view
 
 # The preset defaults; each API's effective catalog is checked separately below.
@@ -184,14 +184,17 @@ def test_a_provider_created_from_each_new_preset_api_keeps_its_protocol_and_mode
             anthropic = "anthropic-messages" in api["protocols"]
             models = api_models(preset, api)
             fields, key = _provider_fields({
-                "name": f"{preset['name']}-{index}", "protocols": api["protocols"], "auth": "api_key",
-                "base_url": api["base_url"], "models": models,
+                "name": f"{preset['name']}-{index}", "vendor_type": preset_id,
+                "endpoints": [{"protocol": protocol, "base_url": api["base_url"]} for protocol in api["protocols"]],
                 "env": preset["env"] if anthropic else [], "api_key": "sk-test-preset-key",
             }, None)
+            # The models are rows of their own, one per protocol of this API.
+            saved = [ModelSpec.from_entry({**model, "id": "draft", "provider_id": "draft", "protocol": protocol})
+                     for protocol in api["protocols"] for model in models]
             assert fields["auth"] == "api_key"
-            assert fields["protocols"] == api["protocols"]
-            assert fields["base_url"] == api["base_url"]
-            assert [model["name"] for model in fields["models"]] == [model["name"] for model in models]
+            assert [endpoint["protocol"] for endpoint in fields["endpoints"]] == api["protocols"]
+            assert all(endpoint["base_url"] == api["base_url"] for endpoint in fields["endpoints"])
+            assert [model.name for model in saved] == [model["name"] for model in models] * len(api["protocols"])
             assert key == "sk-test-preset-key"
             if preset_id != "opencode":
                 continue
@@ -199,4 +202,4 @@ def test_a_provider_created_from_each_new_preset_api_keeps_its_protocol_and_mode
             other = {name for protocols, _url, family in _OPENCODE_FAMILIES
                      if protocols != tuple(api["protocols"]) for name, _window, _background in family}
             assert own.isdisjoint(other)
-            assert fields["protocols"] == list(api["protocols"])
+            assert [endpoint["protocol"] for endpoint in fields["endpoints"]] == list(api["protocols"])

@@ -47,7 +47,7 @@ DROPPED = {"agent_configs": {"role", "max_concurrency"}, "agent_setting_layers":
 # profiles, all on Claude Code runtimes), and built-in rows.
 ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None, "boundaries": None,
                                                       "system_prompt_mode": None},
-         "agents": {"agent_teams": True, "custom_prompt": ""}}
+         "agents": {"agent_teams": True, "custom_prompt": "", "protocol": "anthropic-messages"}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login", "prov-grok-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 # Columns a later migration of main adds to those tables, empty (NULL or '') on the rows from before.
@@ -108,6 +108,14 @@ async def _schema() -> AsyncIterator[Any]:
 
 
 async def _rows(pool: Any, table: str, key: str) -> list[dict[str, Any]]:
+    if table == "agent_profiles":
+        # Compare the old identity with the target model's complete natural key;
+        # the migration deliberately replaces the profile's two legacy columns.
+        return [json.loads(r["row"]) for r in await pool.fetch(
+            "SELECT (to_jsonb(p) - 'model_id') || jsonb_build_object('provider_id', m.provider_id, "
+            "'model', m.name, 'protocol', m.protocol) AS row "
+            "FROM agent_profiles p JOIN llm_models m ON m.id = p.model_id "
+            f"ORDER BY {'1' if key == '1' else 'p.' + key}")]
     return [json.loads(r["row"]) for r in await pool.fetch(f"SELECT to_jsonb(t) AS row FROM {table} t ORDER BY {key}")]
 
 
@@ -158,11 +166,30 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
             assert all(row["role"] == row["agent_id"] for row in before["agent_configs"])
             after_unchanged = {table: [row for row in await _rows(pool, table, "1")
                                        if row.get("id") not in ADDED_ROWS.get(table, ())] for table in UNCHANGED}
+            # The provider's metadata stays put while its endpoints and ordered
+            # catalog move to their own tables, without losing their settings.
+            old_providers = unchanged.pop("llm_providers")
+            new_providers = after_unchanged.pop("llm_providers")
+            assert [{k: v for k, v in row.items() if k != "vendor_type"} for row in new_providers] == [
+                {k: v for k, v in row.items() if k not in {"protocols", "base_url", "models"}}
+                for row in old_providers]
+            for provider in old_providers:
+                endpoints = await pool.fetch("SELECT protocol, base_url FROM llm_provider_endpoints "
+                                             "WHERE provider_id = $1 ORDER BY protocol", provider["id"])
+                assert [tuple(row) for row in endpoints] == [
+                    (protocol, provider["base_url"]) for protocol in sorted(provider["protocols"])]
+                for order, model in enumerate(provider["models"]):
+                    for protocol in provider["protocols"]:
+                        row = await pool.fetchrow("SELECT * FROM llm_models WHERE provider_id = $1 "
+                                                  "AND name = $2 AND protocol = $3", provider["id"],
+                                                  model["name"], protocol)
+                        assert row is not None and row["catalog_order"] == order
+                        assert {key: row[key] for key in model} == model
             for table, columns in NEW_COLUMNS.items():
                 assert all(row.pop(column) in (None, "", False) for row in after_unchanged[table] for column in columns)
             assert after_unchanged == unchanged
             assert {row["id"] for row in await _rows(pool, "llm_providers", "1")} - {
-                row["id"] for row in unchanged["llm_providers"]} == ADDED_ROWS["llm_providers"]
+                row["id"] for row in old_providers} == ADDED_ROWS["llm_providers"]
             for old in ("agent_configs", "agents", "task_agent_overrides"):
                 assert await pool.fetchval("SELECT to_regclass($1)", old) is None
             assert await pool.fetchval(
@@ -170,9 +197,11 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
 
             # Applying the schema again changes nothing.
             migrated = {new: await _rows(pool, new, "1") for _, new, _, _ in RENAMED}
+            identities = await pool.fetch("SELECT id, model_id FROM agent_profiles ORDER BY id")
             shape = await _structure(pool)
             await connection.ensure_schema(pool)
             assert {new: await _rows(pool, new, "1") for _, new, _, _ in RENAMED} == migrated
+            assert await pool.fetch("SELECT id, model_id FROM agent_profiles ORDER BY id") == identities
             assert await _structure(pool) == shape
 
             monkeypatch.setattr(connection, "_pool", pool)
@@ -192,8 +221,9 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
     captured["manager"]["stdin"] = captured["manager"]["stdin"].replace(f"(agent {glm_high})",
                                                                         "(agent agent-glm000000001)")
     assert sorted(captured) == sorted(MAIN)
-    # The fixture predates the Planner's read-only run (its role prompt is the scenario's own, not the recommended one).
-    expected = agent_launch_parity.read_only_planner(MAIN, recommended=False)
+    # The pinned launch predates the Planner's read-only run and Manager's model registry contract.
+    expected = agent_launch_parity.model_registry_contract(
+        agent_launch_parity.read_only_planner(MAIN, recommended=False))
     for case in parity.CASES:
         assert captured[case] == expected[case], case
 

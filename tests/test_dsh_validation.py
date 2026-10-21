@@ -496,10 +496,23 @@ def test_execute_rejects_incomplete_or_invalid_success_rows(command, problem, tm
 def test_agent_spec_provider_passes_registry_validation():
     from looper.agents import profile_registry
 
+    from evals.prompt_regression import runner
+
     spec = json.loads(launcher.SPEC.read_text())
-    provider = {key: value for key, value in spec["provider"].items() if key != "api_key_env"}
+    source = {key: value for key, value in spec["provider"].items() if key != "api_key_env"}
+    runtime = {"runtime_id": "rt-dsh", "name": "DSH", "type": "dsh"}
+    provider, models, selected = runner._legacy_eval_spec(spec, runtime, source)
     fields, _ = profile_registry._provider_fields(provider, None)
-    assert spec["agent"]["model"] in {model["name"] for model in fields["models"]}
+    assert fields["endpoints"] == [{"protocol": "anthropic-messages",
+        "base_url": "https://api.deepseek.com/anthropic", "use_runtime_default": False}]
+    assert selected == {"name": spec["agent"]["model"], "protocol": "anthropic-messages"}
+    assert {model["name"] for model in models} == {selected["name"]}
+    account = profile_registry.provider_spec({**fields, "id": "account"})
+    model = profile_registry.ModelSpec("selected", account.id, **models[0])
+    endpoint = profile_registry.Endpoint(account.id, model.protocol, fields["endpoints"][0]["base_url"])
+    resolved = profile_registry.ResolvedModel(model, account, endpoint)
+    resolved.check_runtime(profile_registry.RuntimeSpec("rt-dsh", "DSH", "dsh"), spec["agent"]["effort"])
+    assert "api_key" not in provider and "api_key_env" not in provider
 
 
 def test_summary_distinguishes_all_outcomes_and_missing_rows():
@@ -657,13 +670,20 @@ def _serve_smoke_stand_in(mode):
                 result = {"configs": [{"enabled": mode == "channels"}]}
             elif path == "/api/registry":
                 result = {"runtimes": [{"name": "DSH", "type": "dsh", "builtin": True, "runtime_id": "rt-dsh"}],
-                          "providers": []}
+                          "providers": [], "models": []}
             elif path == "/api/providers":
                 assert body["api_key"] == "<memory-only>"
+                assert body["endpoints"] == [{"protocol": "anthropic-messages",
+                                              "base_url": "https://api.deepseek.com/anthropic"}]
                 result = {"provider": {"provider_id": "provider"}}
+            elif path == "/api/models":
+                assert body["provider_id"] == "provider"
+                assert (body["name"], body["protocol"]) == ("deepseek-flash", "anthropic-messages")
+                result = {"model": {**body, "model_id": "model"}}
             elif path == "/api/agent-profiles":
                 assert body["runtime_id"] == "rt-dsh"
-                profiles.update(body, profile_id="profile")
+                assert body["model_id"] == "model"
+                profiles.update(body, profile_id="profile", provider_id="provider")
                 result = {"profile": profiles}
                 if mode == "profile":
                     status = 500

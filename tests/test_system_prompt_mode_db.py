@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _ok, _run, _runtime
+from tests.test_profile_registry_db import _call, _model_id, _ok, _run, _runtime
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -19,8 +19,8 @@ BUILTIN = {"manager": "replace", "planner": "replace", "worker": "append", "revi
 
 async def _profile(name: str, **fields: Any) -> dict[str, Any]:
     return (await _ok("POST", "/api/agent-profiles", {
-        "name": name, "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
-        "model": "sonnet", **fields}))["profile"]
+        "name": name, "runtime_id": "rt-claude-code",
+        "model_id": await _model_id("prov-claude-subscription", "sonnet"), **fields}))["profile"]
 
 
 async def _modes() -> dict[str, str]:
@@ -64,8 +64,8 @@ def test_mode_is_set_only_on_a_role_layer_and_a_profile_has_none(monkeypatch: py
             status, body = await _call(method, path, {"system_prompt_mode": "replace"})
             assert status == 400 and "set per role" in body["error"], path
         status, body = await _call("POST", "/api/agent-profiles", {
-            "name": "p", "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
-            "model": "sonnet", "system_prompt_mode": "replace"})
+            "name": "p", "runtime_id": "rt-claude-code",
+            "model_id": await _model_id("prov-claude-subscription", "sonnet"), "system_prompt_mode": "replace"})
         assert status == 400 and "unknown field 'system_prompt_mode'" in body["error"]
         profile = await _profile("q")
         assert "system_prompt_mode" not in profile
@@ -82,8 +82,10 @@ async def _old_shape(pool: Any) -> None:
 
 async def _profile_row(pool: Any, profile_id: str, mode: str, runtime: str = "claude-code") -> None:
     provider = {"claude-code": "prov-claude-subscription", "codex": "prov-codex-login"}[runtime]
-    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, system_prompt_mode) "
-                       "VALUES ($1, $1, $2, $3, 'sonnet', $4)", profile_id, f"rt-{runtime}", provider, mode)
+    model = await _model_id(provider, "sonnet" if runtime == "claude-code" else "gpt-6.1-sol",
+                            "anthropic-messages" if runtime == "claude-code" else "openai-responses")
+    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id, system_prompt_mode) "
+                       "VALUES ($1, $1, $2, $3, $4)", profile_id, f"rt-{runtime}", model, mode)
 
 
 async def _layer_modes(pool: Any) -> dict[str, str | None]:
@@ -194,12 +196,14 @@ def test_config_transfer_carries_role_modes_and_ignores_a_profiles_old_mode(
                       if e["scope"] == "role"}
             assert layers == {"worker": "replace", "planner": "append"}
             await conn.execute("DELETE FROM agent_setting_layers")
-            plan = await import_config(conn, document, apply=True)
+            async with conn.transaction():
+                plan = await import_config(conn, document, apply=True)
             assert not any(c.action is Action.SKIPPED for c in plan.changes if c.section == "settings.layers")
             assert await _layer_modes(pool) == {"worker": "replace", "planner": "append"}
             entry = {"name": "old", "runtime": "claude-code", "provider": "claude-subscription", "model": "sonnet",
                      "effort": None, "agent_teams": True, "system_prompt_mode": "replace", "custom_prompt": ""}
-            plan = await import_config(conn, {"profiles": [entry]}, apply=True)
+            async with conn.transaction():
+                plan = await import_config(conn, {"format": "looper-config/v2", "profiles": [entry]}, apply=True)
             change = next(c for c in plan.changes if c.key == "old")
             assert change.action is Action.ADDED and "system_prompt_mode" not in await _profile_columns(conn)
             assert any("old: its system_prompt_mode is ignored" in note for note in plan.notes)
@@ -208,7 +212,8 @@ def test_config_transfer_carries_role_modes_and_ignores_a_profiles_old_mode(
             assert "system_prompt_mode" not in exported
             # A system layer cannot carry one.
             bad = {"settings": {"layers": [{"scope": "system", "system_prompt_mode": "replace"}]}}
-            plan = await import_config(conn, bad, apply=True)
+            async with conn.transaction():
+                plan = await import_config(conn, bad, apply=True)
             assert any(c.action is Action.SKIPPED for c in plan.changes)
 
     _run(run, monkeypatch)

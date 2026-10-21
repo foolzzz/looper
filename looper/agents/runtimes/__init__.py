@@ -70,7 +70,7 @@ from ..system_prompt_mode import SystemPromptMode as SystemPromptMode
 from .channel import RunChannel as RunChannel, StreamChannel as StreamChannel
 
 if TYPE_CHECKING:
-    from ..profile_registry import ProviderSpec
+    from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
     from ..run_usage import Price, Usage
@@ -90,6 +90,42 @@ class AuthKind(str, Enum):
 
     OAUTH = "oauth"
     API_KEY = "api_key"
+
+
+class VendorType(str, Enum):
+    """An account's vendor, independent of its display name and endpoint URLs."""
+
+    GLM_BIGMODEL = "glm-bigmodel"
+    GLM_ZAI = "glm-zai"
+    DEEPSEEK = "deepseek"
+    KIMI_MOONSHOT_CN = "kimi-moonshot-cn"
+    KIMI_MOONSHOT = "kimi-moonshot"
+    CPA = "cpa"
+    OPENCODE = "opencode"
+    SUB2API = "sub2api"
+    CLAUDE_SUBSCRIPTION = "claude-subscription"
+    CODEX_LOGIN = "codex-login"
+    GROK_LOGIN = "grok-login"
+    CUSTOM = "custom"
+
+    @property
+    def oauth_runtime_type(self) -> str | None:
+        return _LOGIN_VENDORS.get(self, (None, None))[0]
+
+    @property
+    def login_protocol(self) -> ApiProtocol | None:
+        return _LOGIN_VENDORS.get(self, (None, None))[1]
+
+    @property
+    def auth_kind(self) -> AuthKind:
+        return AuthKind.OAUTH if self.oauth_runtime_type else AuthKind.API_KEY
+
+
+_LOGIN_VENDORS = {
+    VendorType.CLAUDE_SUBSCRIPTION: ("claude-code", ApiProtocol.ANTHROPIC_MESSAGES),
+    VendorType.CODEX_LOGIN: ("codex", ApiProtocol.OPENAI_RESPONSES),
+    VendorType.GROK_LOGIN: ("grok", ApiProtocol.OPENAI_RESPONSES),
+}
 
 
 class Capability(str, Enum):
@@ -238,6 +274,8 @@ class RuntimeAdapter(ABC):
     auth_kinds: ClassVar[frozenset[AuthKind]]
     # Exact model ids when this runtime restricts them; None leaves the provider's catalog authoritative.
     supported_models: ClassVar[frozenset[str] | None] = None
+    # None uses the registry's shared effort levels; a tuple is this adapter's exact choices.
+    effort_levels: ClassVar[tuple[str, ...] | None] = None
     isolation_id: ClassVar[str]  # names its isolation flags in each run's record
     # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
     # cannot set them.
@@ -285,8 +323,11 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
-        """What points a run at ``provider``, ``model`` and ``effort`` beside the runtime's own flags; raises
-        ``RuntimeUnsupported`` when it cannot."""
+        """Bind the loader's exact endpoint and singleton model catalog, with its launch-only key.
+
+        ``ResolvedModel`` checks runtime compatibility before producing this input; adapters never select
+        another endpoint or model from the account. Raises ``RuntimeUnsupported`` when it cannot bind.
+        """
 
     @abstractmethod
     def launch_args(self, launch: Launch) -> list[str]:
