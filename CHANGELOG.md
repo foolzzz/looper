@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.14] - 2026-10-21
+
+### Changed
+
+- **The task page stays responsive on long and running tasks.** The Sessions and Conversation tabs read the latest 1000 messages and load older ones when the scroll nears the top, keeping the reading place; the view follows new events only while it is at the bottom, and the live stream starts after the latest loaded event. The page and the Room poll without overlap, wait while the browser tab is hidden and abort a request in flight when they stop. The task's runs are read in one compact request instead of three. ([#324](https://github.com/foolzzz/looper/pull/324))
+- `GET /api/tasks/<id>/activity` and `GET /api/tasks/<id>/conversation` return the latest 1000 rows by default (`limit` 1 to 1000), oldest first, with `has_more`, `oldest_seq` and `latest_seq`; `before=<seq>` returns the rows just before that seq. `since` or `after` keeps the forward read (at most 500 rows). A non-integer `since`, `after`, `before` or `limit` answers 400. ([#324](https://github.com/foolzzz/looper/pull/324))
+- New `GET /api/tasks/<id>/runs` returns a task's Planner, Worker and Reviewer runs as compact rows (no prompts, metadata body or events). ([#324](https://github.com/foolzzz/looper/pull/324))
+- The Agents tab no longer says that only the latest 500 runs are listed, as all runs are read.
+- No model-visible change: no prompt, tool schema or tool contract changed.
+
+### Fixed
+
+- The Sessions tab showed the oldest 500 events of a task and replayed its whole history on every refresh. ([#324](https://github.com/foolzzz/looper/pull/324))
+
+### Validation
+
+- Reported in #324: database tests for the windows, cursors and run rows, Vitest tests for the upward load, anchoring, stream start, runs request and polling, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
 ## [2.13.13] - 2026-10-21
 
 ### Changed
