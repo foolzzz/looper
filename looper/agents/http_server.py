@@ -428,6 +428,10 @@ class AgentHTTPServer:
             await self._handle_chat_messages(query, writer)
         elif path == "/api/chat/messages" and method == "POST":
             await self._handle_chat_save_message(body, writer)
+        elif path == "/api/chat/stop" and method == "POST":
+            await self._handle_chat_stop(body, writer)
+        elif path == "/api/chat/turn" and method == "GET":
+            await self._handle_chat_turn(query, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/create" and method == "POST":
@@ -974,6 +978,46 @@ class AgentHTTPServer:
             "tasks": _serialize(result), "next_before": tasks[-1]["id"] if len(page) > limit else None,
             "counts": counts,
         }))
+        await writer.drain()
+
+    async def _handle_chat_stop(self, body: bytes, writer: asyncio.StreamWriter) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            data = None
+        message_id = data.get("message_id") if isinstance(data, dict) else None
+        if data is None:
+            response = _json_response(HTTP_400, {"error": "invalid JSON body"})
+        elif not isinstance(message_id, str) or not message_id.strip():
+            response = _json_response(HTTP_400, {"error": "message_id is required"})
+        elif self._manager is None:
+            response = _json_response(HTTP_503, {"error": "the Manager is not running"})
+        else:
+            result = await self._manager.stop_turn(message_id, via="web")
+            if result.value in ("stopping", "already_stopping"):
+                current = self._manager.current_turn
+                method = current.method if current is not None and current.message_id == message_id else None
+                response = _json_response(HTTP_200, {
+                    "state": result.value, "method": getattr(method, "value", method)})
+            else:
+                errors = {"not_running": "No turn is running.",
+                          "other_message": "The running turn answers a different message."}
+                response = _json_response(HTTP_409, {"state": result.value, "error": errors[result.value]})
+        writer.write(response)
+        await writer.drain()
+
+    async def _handle_chat_turn(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
+        session_id = query.get("session_id", "")
+        if not session_id:
+            response = _json_response(HTTP_400, {"error": "session_id is required"})
+        elif self._manager is None:
+            response = _json_response(HTTP_503, {"error": "the Manager is not running"})
+        else:
+            current = self._manager.current_turn_for("web", session_id)
+            response = _json_response(HTTP_200, {"turn": None if current is None else {
+                "message_id": current.message_id, "channel": current.channel,
+                "started_at": current.started_at.isoformat(), "stopping": current.stop is not None}})
+        writer.write(response)
         await writer.drain()
 
     async def _handle_chat_send(

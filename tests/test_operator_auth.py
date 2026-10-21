@@ -94,6 +94,8 @@ def _request(port: int, line: str, headers: dict[str, str] | None = None, body: 
         ("GET /api/nothing-here", "agent", 401),
         ("GET /api/nothing-here", "agent_and_cookie", 404),
         ("GET /api/nothing-here", "mixed_case_bearer", 404),
+        ("POST /api/chat/stop", "agent", 401),
+        ("GET /api/chat/turn", "agent", 401),
         ("PUT /api/tasks/task-1/roles/coder", None, 401),
         ("PUT /api/tasks/task-1/roles/coder", "agent", 401),
         ("OPTIONS /api/tasks/create", None, 401),
@@ -1056,6 +1058,11 @@ def test_nonlocal_navigation_requires_password(tmp_path: Path, transport: str, h
             assert status == 200 and "<form" in body and "set-cookie" not in response
             _policies(response)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("path", ["/api/chat/stop", "/api/chat/turn"])
+def test_chat_stop_paths_are_operator(path: str) -> None:
+    assert operator_auth.access(path) is operator_auth.Access.OPERATOR
 
 
 @pytest.mark.parametrize("path", ["/login/", "/logout/", "/login/extra", "/api/login"])

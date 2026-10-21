@@ -341,6 +341,7 @@ class CurrentTurn:
     chat: str
     started_at: datetime
     stop: StopRequest | None = None
+    method: Any = None  # StopMethod: how interrupt() ended the turn; None until it returns
 
 
 class TurnStopped(Exception):
@@ -632,9 +633,23 @@ class ManagerAgent:
         task.add_done_callback(self._stop_tasks.discard)
         return StopResult.STOPPING
 
+    @property
+    def current_turn(self) -> CurrentTurn | None:
+        return self._current
+
+    def current_turn_for(self, channel: str, chat: str) -> CurrentTurn | None:
+        """The running user turn if it answers ``chat`` on ``channel``."""
+        current = self._current
+        if current is not None and current.channel == channel and current.chat == chat:
+            return current
+        return None
+
     async def _interrupt_claude(self) -> None:
+        current = self._current
         try:
-            await self._claude.interrupt()
+            method = await self._claude.interrupt()
+            if current is not None:
+                current.method = method
         except Exception:
             logger.warning("manager: could not interrupt the running turn", exc_info=True)
 
