@@ -20,9 +20,11 @@ MASK = "***"
 
 
 def masked(value: Any) -> Any:
-    """``value`` with every value under a secret-looking key replaced by ``MASK``, at any depth."""
+    """Mask secret-looking fields and credential values in ``{key, value}`` entries, at any depth."""
     if isinstance(value, Mapping):
-        return {k: MASK if SECRET_KEY.search(str(k)) and v is not None else masked(v) for k, v in value.items()}
+        credential_entry = SECRET_KEY.search(str(value.get("key", "")))
+        return {k: MASK if v is not None and (SECRET_KEY.search(str(k)) or k == "value" and credential_entry)
+                else masked(v) for k, v in value.items()}
     if isinstance(value, list):
         return [masked(item) for item in value]
     return value

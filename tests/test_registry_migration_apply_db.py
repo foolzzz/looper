@@ -111,6 +111,35 @@ def test_apply_maps_once_and_preserves_sessions_modes_and_history(monkeypatch):
     asyncio.run(asyncio.wait_for(run(), 45))
 
 
+def test_apply_accepts_claude_oauth_alias_custom_prices_and_preserves_them():
+    from looper.agents.runtimes.pricing import ModelPrice
+
+    async def run():
+        async with _database() as conn:
+            await _legacy(conn)
+            custom = ModelPrice(101, 102, 103, 104).view()
+            await conn.execute("UPDATE llm_providers SET models = $1 WHERE id = 'prov-claude-subscription'",
+                               json.dumps([{"name": "opus", **custom}]))
+            await conn.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) "
+                               "VALUES ('agent-custom-opus', 'custom-opus', 'rt-claude-code', "
+                               "'prov-claude-subscription', 'opus')")
+            expected = plan(await registry_migration._read_snapshot(conn))
+            assert expected.report["profiles_mapped"] > 0
+            assert expected.report["pricing_mismatches"] == 0
+            assert expected.applicable
+            await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
+            saved = await conn.fetchrow("SELECT m.input_usd_per_mtok, m.output_usd_per_mtok, "
+                                       "m.cache_read_usd_per_mtok, m.cache_write_usd_per_mtok "
+                                       "FROM llm_models m JOIN agent_profiles p ON p.model_id = m.id "
+                                       "WHERE p.id = 'agent-custom-opus'")
+            assert dict(saved) == custom
+            await connection.ensure_schema(conn)
+            assert await conn.fetchval("SELECT version FROM registry_schema_version") == 3
+
+    asyncio.run(asyncio.wait_for(run(), 45))
+
+
 @pytest.mark.parametrize('failure', ['unknown_pair', 'binding_mismatches', 'pricing_mismatches', 'builtin'])
 def test_blocked_or_late_failure_rolls_back_every_schema_and_data_change(failure, monkeypatch, tmp_path):
     async def run():

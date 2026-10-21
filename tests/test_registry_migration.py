@@ -129,6 +129,30 @@ def test_migration_price_comparison_uses_pinned_v2_exact_semantics(monkeypatch):
     assert result.report["pricing_mismatches"] >= 1
 
 
+@pytest.mark.parametrize("alias", ["opus", "sonnet", "haiku"])
+@pytest.mark.parametrize("canonical_override", [False, True])
+def test_migration_preserves_claude_oauth_exact_then_mapped_normalized_prices(alias, canonical_override):
+    from looper.agents.registry_migration import plan, snapshot
+    from looper.agents.runtimes.pricing import BUILTIN_PRICES, CLAUDE_CODE_ALIASES, ModelPrice, pricer
+
+    canonical = CLAUDE_CODE_ALIASES[alias]
+    custom = ModelPrice(101, 102, 103, 104)
+    mapped = ModelPrice(201, 202, 203, 204) if canonical_override else BUILTIN_PRICES[canonical]
+    catalog = [{"name": alias, **custom.view()}]
+    if canonical_override:
+        catalog.append({"name": canonical, **mapped.view()})
+    account = provider(auth="oauth", oauth_runtime_type="claude-code", base_url="",
+                       protocols=[P.ANTHROPIC_MESSAGES], models=catalog)
+    old = snapshot(RUNTIMES, [account], [profile("claude-code", model=alias, effort=None)])
+    price = pricer(old.pricing["agent-test"])
+    assert price.model_price(alias) == custom
+    for name in (alias.upper(), f"{alias}[1m]", f"{alias}-20261020", f"{canonical}-20261020[1m]"):
+        assert price.model_price(name) == mapped
+    result = plan(old)
+    assert result.applicable
+    assert result.report["pricing_mismatches"] == 0
+
+
 @pytest.mark.parametrize("changes", [{"runtime_id": "missing"}, {"provider_id": "missing"},
                                          {"effort": "invalid"}, {"model": "outside"}])
 def test_bad_profile_is_counted_and_never_silently_dropped(changes):

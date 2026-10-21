@@ -440,6 +440,31 @@ def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, t
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("action", ["register", "update"])
+@pytest.mark.parametrize("name", ["API_KEY", "OTHER_API_TOKEN", "CLIENT_SECRET", "PASSWORD", "CREDENTIAL"])
+def test_rejected_provider_env_credentials_are_masked_in_audit(monkeypatch, tmp_path, action, name):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "deepseek", "vendor_type": "deepseek"}))["provider"]
+        before = await _ok("GET", "/api/registry")
+        fields = {"name": "new-account", "vendor_type": "deepseek"} if action == "register" else {
+            "provider": provider["provider_id"]}
+        env = [{"key": "API_TIMEOUT_MS", "value": "1234"}, {"key": name, "value": SECRET}]
+        (answer,) = await _Chat(tmp_path).say("配置账户", ("looper_providers", {
+            "action": action, **fields, "env": env}))
+        assert _error(answer) == "invalid", answer
+        assert await _ok("GET", "/api/registry") == before
+        (row,) = await pool.fetch("SELECT arguments, result, status, error_code FROM manager_actions")
+        assert (row["status"], row["error_code"]) == ("error", "invalid")
+        assert SECRET not in row["arguments"] + row["result"]
+        saved_env = json.loads(row["arguments"])["env"]
+        assert saved_env[0]["value"] == "1234"
+        assert saved_env[1]["value"] == "***"
+        assert env[1]["value"] == SECRET  # Auditing must not mutate the original request.
+
+    _run(test, monkeypatch)
+
+
 def test_model_update_changes_dashboard_and_preserves_provider_key(monkeypatch, tmp_path):
     async def test(pool):
         provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",

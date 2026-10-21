@@ -167,10 +167,11 @@ class PriceSnapshot:
         if exact is not None:
             return exact
         base = base_model(model)
+        base = self.aliases.get(base, base)
         normalized = self.normalized.get(base)
         if normalized is not None:
             return normalized
-        return self.builtin.get(self.aliases.get(base, base), ModelPrice())
+        return self.builtin.get(base, ModelPrice())
 
     def __call__(self, model: str, usage: Usage) -> float | None:
         return self.model_price(model).cost(usage)
