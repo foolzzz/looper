@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.6] - 2026-10-20
+
+### Fixed
+
+- **Profile cost warnings price the background model.** `profile_view` and the warnings after a profile write now price a profile from every model of the selected model's account and protocol, the same catalog a launch uses, so a background model with a full price of its own is no longer listed in `cost.unpriced` or warned about. A background model without a price still warns. The registry view, the profile answer and a task's profile overrides load that catalog once. ([#273](https://github.com/foolzzz/looper/pull/273), follow-up of [#264](https://github.com/foolzzz/looper/issues/264))
+- **Manager provider answers carry `max_concurrency`.** The `looper_providers` list, register and update answers now include the provider's `max_concurrency` field. No prompt, tool schema or tool description changed. ([#273](https://github.com/foolzzz/looper/pull/273))
+
+### Validation
+
+- Reported in #273: 131 tests in the two Manager tool files passed against a disposable PostgreSQL database (the new `max_concurrency` and background-price tests fail without the source change), and 444 passed across the pricing, provider binding, models, Manager tool and task agent tests. CI runs after the release.
+
 ## [2.13.5] - 2026-10-20
 
 ### Changed
