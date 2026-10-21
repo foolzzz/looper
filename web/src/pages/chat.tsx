@@ -24,6 +24,7 @@ import {
   fetchChatSettings,
   fetchChatTurn,
   stopChatReply,
+  fetchChatSession,
   fetchChatSessions,
   fetchChatTargets,
   fetchManagerSession,
@@ -446,10 +447,41 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   }, [target.kind, sending, refreshConversations]);
 
   // A Lark or Telegram conversation is read-only here: its newest messages, re-read on the same cadence.
-  const viewing =
+  // The conversation the address names is read by its id as well, as the list holds only the newest: a link to an
+  // older one opens, and one open stays open when the list moves on.
+  const [opened, setOpened] = useState<{ id: string; session: ChatSession | null; error: string } | null>(null);
+  useEffect(() => {
+    if (target.kind !== "manager" || !wantConversation) return;
+    let alive = true;
+    const load = () =>
+      fetchChatSession(wantConversation).then(
+        (session) => alive && setOpened({ id: wantConversation, session, error: "" }),
+        (err) =>
+          alive &&
+          setOpened((prev) => ({
+            id: wantConversation,
+            session: prev?.id === wantConversation ? prev.session : null,
+            error: err instanceof Error ? err.message : String(err),
+          })),
+      );
+    load();
+    const timer = setInterval(load, TARGETS_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [target.kind, wantConversation]);
+  const openedHere = opened?.id === wantConversation ? opened : null;
+  const knownConversation =
     target.kind === "manager" && wantConversation
-      ? conversations?.find((c) => c.session_id === wantConversation && c.channel !== "web") ?? null
+      ? conversations?.find((c) => c.session_id === wantConversation) ?? openedHere?.session ?? null
       : null;
+  const viewing = knownConversation && knownConversation.channel !== "web" ? knownConversation : null;
+  // Named by the address but not read yet: loading, or the read failed (and it is tried again).
+  const conversationUnread =
+    target.kind === "manager" && !!wantConversation && wantConversation !== sessionId && !knownConversation &&
+    (!openedHere || !!openedHere.error);
+  const conversationError = conversationUnread ? openedHere?.error ?? "" : "";
   const viewingId = viewing?.session_id;
   useEffect(() => {
     if (!viewingId) return;
@@ -466,23 +498,34 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     };
   }, [viewingId]);
 
-  const openConversation = (session: ChatSession) => {
-    setListOpen(false);
-    if (session.channel !== "web") {
-      onQuery?.(chatQuery(target.id, session.session_id));
-      return;
-    }
-    // A dashboard chat thread opens as the web chat, as if the page had been opened on it.
-    if (wantConversation) onQuery?.(chatQuery(target.id));
-    if (session.session_id === sessionId) return;
+  // The web thread to continue; the address names it too, so it is kept by a link, a refresh, Back and Forward.
+  const switchWebSession = (id: string) => {
     cleanupRef.current?.();
     cleanupRef.current = null;
-    localStorage.setItem(STORAGE_SESSION_KEY, session.session_id);
-    setSessionId(session.session_id);
+    localStorage.setItem(STORAGE_SESSION_KEY, id);
+    setSessionId(id);
     setMessages([]);
     setSending(false);
     setPhase("");
   };
+  // The conversation in the address that is already applied (or chosen here), so the address is applied once.
+  const appliedConversation = useRef("");
+  const openConversation = (session: ChatSession) => {
+    setListOpen(false);
+    if (session.channel === "web") appliedConversation.current = session.session_id;
+    onQuery?.(chatQuery(target.id, session.session_id));
+    if (session.channel === "web" && session.session_id !== sessionId) switchWebSession(session.session_id);
+  };
+  // A web thread the address names (a link, Back, a refresh) once it is known not to be a channel conversation; an id
+  // with no messages yet is a new web thread.
+  useEffect(() => {
+    if (!wantConversation) appliedConversation.current = "";
+    if (target.kind !== "manager" || !wantConversation || appliedConversation.current === wantConversation) return;
+    if (conversationUnread) return;
+    appliedConversation.current = wantConversation;
+    if (!viewing && wantConversation !== sessionId) switchWebSession(wantConversation);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target.kind, wantConversation, conversationUnread, viewing]);
 
   const selectTarget = (next: ChatTargetInfo) => {
     setAgentDropdown(false);
@@ -687,15 +730,10 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   };
 
   const handleNewChat = () => {
-    if (wantConversation) onQuery?.(chatQuery(target.id));
-    cleanupRef.current?.();
-    cleanupRef.current = null;
     const newId = `session-${randomId().slice(0, 8)}`;
-    localStorage.setItem(STORAGE_SESSION_KEY, newId);
-    setSessionId(newId);
-    setMessages([]);
-    setSending(false);
-    setPhase("");
+    appliedConversation.current = newId;
+    onQuery?.(chatQuery(target.id, newId));
+    switchWebSession(newId);
     setInput("");
   };
 
@@ -1141,7 +1179,19 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
           </div>
         )}
 
-        {messages.length === 0 && target.kind === "manager" && !viewing && (
+        {conversationUnread &&
+          (conversationError ? (
+            <p role="alert" className="py-10 text-center text-sm text-destructive">
+              Could not load the conversation: {conversationError}
+            </p>
+          ) : (
+            <p role="status" className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              Loading the conversation…
+            </p>
+          ))}
+
+        {messages.length === 0 && target.kind === "manager" && !viewing && !conversationUnread && (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <Bot className="mx-auto h-12 w-12 text-muted-foreground/50" />
@@ -1150,7 +1200,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
           </div>
         )}
 
-        {!viewing && messages.map((msg) => (
+        {!viewing && !conversationUnread && messages.map((msg) => (
           <div
             key={msg.id}
             className={cn("flex gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
@@ -1198,7 +1248,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
           <p className="text-xs text-muted-foreground">
             This conversation is in {channelLabel(viewing.channel)}, where the Manager answers it; here it is read-only.
           </p>
-        ) : !current.can_send ? (
+        ) : conversationUnread ? null : !current.can_send ? (
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
             <span className="flex-1">
               {current.kind === "planner"
