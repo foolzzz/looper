@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.5] - 2026-10-20
+
+### Changed
+
+- **OMP never backgrounds a command on its own.** The OMP settings overlay now turns off `bash.autoBackground` and `eval.autoBackground` beside `async`, for every role, so a long command finishes inside its turn instead of being backgrounded and the turn ending without its result. A very long command now holds its turn. The overlay change gives each OMP launch configuration a new content-derived home directory. ([#271](https://github.com/foolzzz/looper/pull/271))
+- **The Manager's "no reply" error names the runtime that ran.** It took "Claude Code" for every runtime; it now uses the launch's runtime label. Only the Manager text changed. No prompt, tool or model-facing text changed. ([#271](https://github.com/foolzzz/looper/pull/271))
+
+### Validation
+
+- Reported in #271: overlay and failure-text tests, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
 ## [2.13.4] - 2026-10-20
 
 ### Changed
