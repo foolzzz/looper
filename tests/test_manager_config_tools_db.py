@@ -376,6 +376,70 @@ def test_provider_list_includes_vendor_suggestions(monkeypatch, tmp_path):
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("reference", ["id", "name"])
+def test_provider_update_changes_dashboard_and_preserves_models_and_key(monkeypatch, tmp_path, reference):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+            "api_key": SECRET, "env": [{"key": "API_TIMEOUT_MS", "value": "3000000"}],
+            "max_concurrency": 2}))["provider"]
+        model = await _model("deepseek-flash", provider["provider_id"])
+        endpoints = [{"protocol": e["protocol"], "base_url": "https://example.invalid/" + e["protocol"]}
+                     for e in provider["endpoints"]]
+        chat = _Chat(tmp_path)
+        answer = await _tool(chat, "looper_providers", action="update",
+                             provider=provider["provider_id"] if reference == "id" else "DEEPSEEK",
+                             name="renamed", endpoints=endpoints, env=[], max_concurrency=None)
+        assert answer["provider"]["name"] == "renamed"
+        assert answer["provider"]["api_key"] == "set" and answer["warnings"] == []
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+                      if p["provider_id"] == provider["provider_id"])
+        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {
+            e["protocol"]: e["base_url"] for e in endpoints}
+        assert stored["env"] == [] and stored["max_concurrency"] is None
+        assert stored["vendor_type"] == "deepseek"
+        assert (await _ok("GET", f"/api/models/{model['model_id']}"))["model"] == {
+            **model, "provider_name": "renamed", "endpoint": {
+                **model["endpoint"], "base_url": "https://example.invalid/anthropic-messages"}}
+        await _tool(chat, "looper_providers", action="update", provider=provider["provider_id"],
+                    env=[{"key": "API_TIMEOUT_MS", "value": "1234"}])
+        stored = next(p for p in (await _ok("GET", "/api/registry"))["providers"]
+                      if p["provider_id"] == provider["provider_id"])
+        assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "1234"}]
+        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {
+            e["protocol"]: e["base_url"] for e in endpoints}
+        assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
+                                   provider["provider_id"]) == SECRET
+        assert SECRET not in json.dumps(answer)
+        assert await _trail(pool) == [("looper_providers", "write", "ok")] * 2
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("fields", [
+    {"vendor_type": "cpa"},
+    {"endpoints": [{"protocol": "openai-chat", "base_url": "file:///tmp/provider"}]},
+    {"endpoints": [{"protocol": "openai-chat", "base_url": "https://example.invalid"}] * 2},
+    {"env": [{"key": "OTHER_API_TOKEN", "value": "x"}]},
+    {"max_concurrency": 0},
+    {},
+])
+def test_provider_update_uses_dashboard_validation_and_rolls_back(monkeypatch, tmp_path, fields):
+    async def test(pool):
+        provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",
+            "api_key": SECRET}))["provider"]
+        await _model("deepseek-flash", provider["provider_id"])
+        before = await _ok("GET", "/api/registry")
+        status, expected = await _call("PUT", f"/api/providers/{provider['provider_id']}", fields)
+        assert status == 400, expected
+        (answer,) = await _Chat(tmp_path).say("修改账户", ("looper_providers", {
+            "action": "update", "provider": provider["provider_id"], **fields}))
+        assert _error(answer) == "invalid", answer
+        assert answer["error"]["message"] == expected["error"]
+        assert await _ok("GET", "/api/registry") == before
+        assert await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1",
+                                   provider["provider_id"]) == SECRET
+    _run(test, monkeypatch)
+
+
 def test_model_update_changes_dashboard_and_preserves_provider_key(monkeypatch, tmp_path):
     async def test(pool):
         provider = (await _ok("POST", "/api/providers", {"name": "deepseek", "vendor_type": "deepseek",

@@ -163,7 +163,7 @@ class PriceSnapshot:
     aliases: Mapping[str, str]
 
     def model_price(self, model: str) -> ModelPrice:
-        exact = self.exact.get(model.strip().lower())
+        exact = self.exact.get(model)
         if exact is not None:
             return exact
         base = base_model(model)
@@ -201,7 +201,7 @@ def pricer(provider: LegacyProviderSpec | ProviderSpec | ResolvedModel, *,
         fallback = builtin.get(aliases.get(base, base), ModelPrice())
         price = ModelPrice(**{name: getattr(entry, name) if getattr(entry, name) is not None
                              else getattr(fallback, name) for name in PRICE_FIELDS})
-        exact.setdefault(entry.name.strip().lower(), price)
+        exact.setdefault(entry.name, price)
         normalized.setdefault(base, price)
     return PriceSnapshot(*(MappingProxyType(values) for values in (exact, normalized, builtin, aliases)))
 

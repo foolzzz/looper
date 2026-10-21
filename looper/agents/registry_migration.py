@@ -28,11 +28,21 @@ from .provider_presets import PRESETS
 from .runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType
 from .runtimes.dsh import DEFAULT_BASE_URL as DSH_DEFAULT_BASE_URL
 from .runtimes.pi import API_NAMES as PI_API_NAMES
-from .runtimes.pricing import base_model, model_price
+from .runtimes.pricing import BUILTIN_PRICES, CLAUDE_CODE_ALIASES, PRICE_FIELDS, ModelPrice, base_model, model_price
 
 
 # Persisted identity contract: never change this namespace or the key encoding.
 MODEL_NAMESPACE = UUID("d2819ed8-b51d-5e72-aeb9-a1f31c1e12ac")
+
+# The fixed suggestions seeded by schema.sql, not every model on a login account.
+_BUILTIN_MODELS = {
+    "prov-claude-subscription": (ApiProtocol.ANTHROPIC_MESSAGES, ("opus", "sonnet", "haiku")),
+    "prov-codex-login": (ApiProtocol.OPENAI_RESPONSES,
+                         ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna", "gpt-5.6-sol",
+                          "gpt-5.6-terra", "gpt-5.6-luna")),
+    "prov-grok-login": (ApiProtocol.OPENAI_RESPONSES,
+                        ("grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5")),
+}
 
 
 class MigrationBlocked(RegistryError):
@@ -290,8 +300,8 @@ def plan(old: LegacySnapshot) -> ConversionPlan:
                 same_binding = False
             report["binding_mismatches"] += int(not same_binding)
             previous = old.pricing.get(identity)
-            same_price = (previous is not None and _same_prices(previous.catalog, target.catalog)
-                          and model_price(previous, rows[identity]["model"]) == model_price(target, model.name)
+            same_price = (previous is not None and _same_prices(previous.catalog, target.catalog, provider=previous)
+                          and _legacy_model_price(previous, rows[identity]["model"]) == model_price(target, model.name)
                           and ADAPTERS[profile.runtime.type].cost_source(previous)
                           == ADAPTERS[profile.runtime.type].cost_source(target))
             report["pricing_mismatches"] += int(not same_price)
@@ -387,7 +397,7 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
     protocols_by_provider = {}
     try:
         for identity, row in provider_rows.items():
-            protocols = protocols_by_provider[identity] = _protocols(row)
+            protocols = _protocols(row)
             account = ProviderSpec.from_entry({
                 "id": identity, "name": row["name"], "vendor_type": _vendor(row, protocols),
                 "auth": row["auth"], "oauth_runtime_type": row.get("oauth_runtime_type"),
@@ -395,6 +405,14 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
                 "api_key": _saved_key(row.get("api_key")), "builtin": row.get("builtin", False),
             })
             result.providers[identity] = account
+            if account.auth is AuthKind.OAUTH:
+                # v2 allowed extra declarations, but the login runtime selected
+                # only its own wire protocol. They are not callable endpoints.
+                protocol = account.vendor_type.login_protocol
+                if protocol not in protocols:
+                    raise MigrationBlocked("incompatible_protocol")
+                protocols = (protocol,)
+            protocols_by_provider[identity] = protocols
             catalogs[identity] = _models(row.get("models", []))
             for protocol in protocols:
                 key = (identity, protocol)
@@ -441,9 +459,11 @@ def convert(runtimes: Iterable[RuntimeSpec], providers: Iterable[Mapping[str, An
         def add(account_id: str, entry: Mapping[str, Any], protocol: ApiProtocol, order: int) -> None:
             key = (account_id, entry["name"], protocol)
             identity = _model_id(*key)
+            fixed_protocol, fixed_names = _BUILTIN_MODELS.get(account_id, (None, ()))
             model = ModelSpec(identity, account_id, entry["name"], protocol,
                               **{k: entry.get(k) for k in MODEL_FIELDS if k != "name"}, catalog_order=order,
-                              builtin=result.providers[account_id].builtin)
+                              builtin=(result.providers[account_id].builtin and protocol is fixed_protocol
+                                       and entry["name"] in fixed_names))
             result.models[identity] = model
             natural_keys[key] = identity
 
@@ -511,7 +531,24 @@ def _catalog_models(models: Iterable[ModelSpec]) -> tuple[CatalogModel, ...]:
                  for model in sorted(models, key=lambda m: (m.catalog_order, m.name)))
 
 
-def _same_prices(before: tuple[CatalogModel, ...], after: tuple[CatalogModel, ...]) -> bool:
+def _legacy_model_price(provider: LegacyProviderSpec, model: str) -> ModelPrice:
+    """Pinned v2 resolver: exact case-sensitive name, then first normalized entry.
+
+    Keep this independent of the target index so preflight detects pricing
+    regressions instead of comparing two executions of the same new resolver.
+    """
+    base = base_model(model)
+    if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type == "claude-code":
+        base = CLAUDE_CODE_ALIASES.get(base, base)
+    fallback = BUILTIN_PRICES.get(base, ModelPrice())
+    entry = provider.catalog_model(model) or next(
+        (entry for entry in provider.catalog if base_model(entry.name) == base), None)
+    return ModelPrice(**{name: getattr(entry, name) if entry and getattr(entry, name) is not None
+                         else getattr(fallback, name) for name in PRICE_FIELDS})
+
+
+def _same_prices(before: tuple[CatalogModel, ...], after: tuple[CatalogModel, ...], *,
+                 provider: LegacyProviderSpec | None = None) -> bool:
     # model_price is piecewise: exact names, then the FIRST normalized match,
     # then builtin prices. One non-exact representative per base covers every
     # remaining date/context/case variant, including runtime-reported helpers.
@@ -522,9 +559,10 @@ def _same_prices(before: tuple[CatalogModel, ...], after: tuple[CatalogModel, ..
         while (probe := f"{base}-{index:08d}") in names:
             index += 1
         probes.add(probe)
-    old = LegacyProviderSpec("", "", AuthKind.API_KEY, frozenset(), catalog=before)
+    old = (replace(provider, catalog=before) if provider is not None
+           else LegacyProviderSpec("", "", AuthKind.API_KEY, frozenset(), catalog=before))
     new = replace(old, catalog=after)
-    return all(model_price(old, name) == model_price(new, name) for name in probes)
+    return all(_legacy_model_price(old, name) == model_price(new, name) for name in probes)
 
 
 def _merge_accounts(result: Conversion, rows: Mapping[str, Mapping[str, Any]],

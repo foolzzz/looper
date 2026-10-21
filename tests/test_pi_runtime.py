@@ -38,6 +38,45 @@ from looper.agents.runtimes.pi import PROBE_HELP_TOKENS, PiRuntime
 PI = PiRuntime()
 
 
+@pytest.mark.parametrize("normalized_registry", [False, True])
+@pytest.mark.parametrize("model,cost,exceeded", [
+    ("MODEL", 1, False),
+    ("model", 20, True),
+    ("model[1m]", 1, False),
+    ("model-20261001", 1, False),
+    ("gpt-6.1-sol", 2, False),
+    ("unknown", None, False),
+])
+def test_price_snapshot_keeps_case_sensitive_exact_models_and_budget(
+    normalized_registry: bool, model: str, cost: float | None, exceeded: bool,
+) -> None:
+    from looper.agents.profile_registry import ModelSpec
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import RunSpend, pricer, usage_event
+
+    provider = ProviderSpec(
+        "account", "account", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_CHAT}),
+        base_url="https://models.example/v1",
+        catalog=(CatalogModel("MODEL", input_usd_per_mtok=1),
+                 CatalogModel("model", input_usd_per_mtok=20)),
+    )
+    if normalized_registry:
+        profile = resolved_profile("profile", "profile", RuntimeSpec("runtime", "pi", "pi"), provider, "model")
+        catalog = tuple(ModelSpec(
+            f"catalog-{index}", provider.id, entry.name, ApiProtocol.OPENAI_CHAT,
+            input_usd_per_mtok=entry.input_usd_per_mtok, catalog_order=index,
+        ) for index, entry in enumerate(provider.catalog))
+        snapshot = pricer(profile.resolved_model, catalog=catalog)
+    else:
+        snapshot = pricer(provider)
+    usage = Usage(input_tokens=1_000_000)
+    assert snapshot(model, usage) == cost
+    spend = RunSpend(snapshot, model, cap=10)
+    assert spend.add(usage_event(model, usage)) is exceeded
+    assert spend.usage.cost_usd == cost
+    assert spend.exceeded is exceeded
+
+
 def test_the_module_imports_and_pi_runtime_can_be_constructed() -> None:
     assert isinstance(PI, RuntimeAdapter)
     assert (PI.type, PI.label, PI.default_executable) == ("pi", "pi", "pi")

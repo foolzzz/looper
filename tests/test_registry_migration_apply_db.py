@@ -192,6 +192,79 @@ def test_apply_preserves_detected_pi_and_dsh_without_profiles():
     asyncio.run(asyncio.wait_for(run(), 45))
 
 
+@pytest.mark.parametrize("finite_catalog", [False, True])
+def test_migrated_user_model_on_builtin_account_survives_export_and_fresh_import(finite_catalog):
+    from looper.agents import config_transfer
+
+    async def run():
+        async with _database() as old, _database() as fresh:
+            await _legacy(old)
+            if finite_catalog:
+                await old.execute("UPDATE llm_providers SET models = $1 WHERE id = 'prov-claude-subscription'",
+                                  json.dumps([{"name": "opus"}, {"name": "future-model"}]))
+            await old.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) "
+                              "VALUES ('agent-user-model', 'user-model-profile', 'rt-claude-code', "
+                              "'prov-claude-subscription', 'future-model')")
+            await connection.ensure_schema(old)
+            saved = await old.fetchrow("SELECT m.id, m.builtin FROM llm_models m JOIN agent_profiles p "
+                                      "ON p.model_id = m.id WHERE p.id = 'agent-user-model'")
+            assert saved and saved['builtin'] is False
+            assert await old.fetchval("SELECT builtin FROM llm_models WHERE provider_id = "
+                                      "'prov-claude-subscription' AND name = 'opus'") is True
+            payload = json.loads(''.join([part async for part in config_transfer.export_chunks(
+                old, include_projects=False, include_secrets=False)]))
+            assert any(model['name'] == 'future-model' for model in payload['models'])
+            await connection.ensure_schema(fresh)
+            async with fresh.transaction():
+                result = await config_transfer.import_config(fresh, payload, apply=True)
+            change = next(change for change in result.changes
+                          if change.section == 'profiles' and change.key == 'user-model-profile')
+            assert change.action is config_transfer.Action.ADDED
+            imported = await fresh.fetchrow("SELECT p.name, m.name, m.provider_id, m.protocol FROM agent_profiles p "
+                                           "JOIN llm_models m ON m.id = p.model_id WHERE p.name = 'user-model-profile'")
+            assert tuple(imported) == ('user-model-profile', 'future-model', 'prov-claude-subscription',
+                                       'anthropic-messages')
+
+    asyncio.run(asyncio.wait_for(run(), 45))
+
+
+@pytest.mark.parametrize("runtime,account_id,protocol", [
+    ('claude-code', 'prov-claude-subscription', 'anthropic-messages'),
+    ('codex', 'prov-codex-login', 'openai-responses'),
+    ('grok', 'prov-grok-login', 'openai-responses'),
+])
+def test_apply_normalizes_legacy_oauth_protocols_without_changing_profile_or_session(runtime, account_id, protocol):
+    async def run():
+        async with _database() as conn:
+            await _legacy(conn)
+            await conn.execute("INSERT INTO agent_runtimes (id, name, type) VALUES ($1, $2, $2) "
+                               "ON CONFLICT DO NOTHING", f'rt-{runtime}', runtime)
+            await conn.execute("INSERT INTO llm_providers (id, name, auth, oauth_runtime_type, protocols, builtin) "
+                               "VALUES ($1, $2, 'oauth', $3, ARRAY['anthropic-messages', 'openai-chat', "
+                               "'openai-responses'], true) ON CONFLICT (id) DO UPDATE SET protocols = EXCLUDED.protocols",
+                               account_id, account_id.removeprefix('prov-'), runtime)
+            await conn.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) "
+                               "VALUES ('agent-login', 'login-profile', $1, $2, 'future-model')",
+                               f'rt-{runtime}', account_id)
+            await conn.execute("INSERT INTO agent_sessions (agent_id, session_id, runtime_type, provider_id, profile_id) "
+                               "VALUES ('login-agent', 'login-session', $1, $2, 'agent-login')", runtime, account_id)
+            session = await conn.fetchrow("SELECT * FROM agent_sessions WHERE agent_id = 'login-agent'")
+            expected = plan(await registry_migration._read_snapshot(conn))
+            assert expected.applicable and expected.report['binding_mismatches'] == 0
+            await connection.ensure_schema(conn)
+            assert await conn.fetchrow("SELECT * FROM agent_sessions WHERE agent_id = 'login-agent'") == session
+            saved = await conn.fetchrow("SELECT p.id, p.runtime_id, m.provider_id, m.name, m.protocol "
+                                       "FROM agent_profiles p JOIN llm_models m ON m.id = p.model_id "
+                                       "WHERE p.id = 'agent-login'")
+            assert tuple(saved) == ('agent-login', f'rt-{runtime}', account_id, 'future-model', protocol)
+            assert [tuple(row) for row in await conn.fetch(
+                "SELECT protocol, base_url FROM llm_provider_endpoints WHERE provider_id = $1", account_id
+            )] == [(protocol, '')]
+            assert await conn.fetchval('SELECT version FROM registry_schema_version') == 3
+
+    asyncio.run(asyncio.wait_for(run(), 45))
+
+
 @pytest.mark.parametrize("runtime,protocol,model,effort,vendor,url", [
     ("pi", "openai-responses", "Exact.Model[1m]", "xhigh", "cpa", "https://cpa.example.invalid/v1/"),
     ("pi", "openai-chat", "Exact.Model[1m]", "low", "cpa", "https://cpa.example.invalid/v1/"),

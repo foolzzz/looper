@@ -222,24 +222,32 @@ async def _providers(call: Call) -> dict[str, Any]:
         accounts = await answered(profile_registry.list_providers())
         return {"providers": [_provider_listed(p) for p in accounts["providers"]],
                 "vendors": profile_registry.vendor_types_view()}
-    _required(arguments, action, "name", "vendor_type")
-    try:
-        vendor = VendorType(arguments["vendor_type"])
-    except ValueError:
-        raise OpError(ErrorCode.INVALID, "unknown vendor_type") from None
-    if vendor.auth_kind is AuthKind.OAUTH:
-        raise OpError(ErrorCode.INVALID, "select the builtin login account from looper_providers.list; "
-                                         "register cannot copy login accounts")
     if "endpoints" in arguments:
         if not isinstance(arguments["endpoints"], list):
             raise OpError(ErrorCode.INVALID, "endpoints must be a list")
         for endpoint in arguments["endpoints"]:
             check_arguments(_PROVIDER_ENDPOINT, endpoint)
-    answer = await answered(profile_registry.create_provider(
-        {key: value for key, value in arguments.items() if key != "action"}))
+    if action == "update":
+        _required(arguments, action, "provider")
+        provider_id = await _model_provider(arguments["provider"])
+        answer = await answered(profile_registry.update_provider(
+            provider_id, {key: value for key, value in arguments.items() if key not in {"action", "provider"}}))
+    else:
+        _required(arguments, action, "name", "vendor_type")
+        try:
+            vendor = VendorType(arguments["vendor_type"])
+        except ValueError:
+            raise OpError(ErrorCode.INVALID, "unknown vendor_type") from None
+        if vendor.auth_kind is AuthKind.OAUTH:
+            raise OpError(ErrorCode.INVALID, "select the builtin login account from looper_providers.list; "
+                                             "register cannot copy login accounts")
+        answer = await answered(profile_registry.create_provider(
+            {key: value for key, value in arguments.items() if key != "action"}))
     provider = _provider_listed(answer["provider"])
-    return {"provider": provider, "warnings": answer.get("warnings", []),
-            "note": KEY_NOTE.format(name=provider["name"])}
+    result = {"provider": provider, "warnings": answer.get("warnings", [])}
+    if action == "register":
+        result["note"] = KEY_NOTE.format(name=provider["name"])
+    return result
 
 
 # --- looper_models ---
@@ -526,12 +534,14 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_providers",
-        description="LLM accounts: list vendors and accounts; register an API-key account without its key. "
+        description="LLM accounts: list vendors and accounts; register an API-key account without its key; "
+                    "update an account's name, endpoints, env or max_concurrency. "
                     "Never take or pass a key; the user enters it on the dashboard.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["list", "register"]},
+                "action": {"type": "string", "enum": ["list", "register", "update"]},
+                "provider": {"type": "string", "minLength": 1, "description": "Account id or name (update)."},
                 "name": {"type": "string", "minLength": 1},
                 "vendor_type": {"type": "string", "enum": [v.value for v in VendorType]},
                 # Structured arrays are checked by the shared HTTP registry, beyond check_arguments' subset.

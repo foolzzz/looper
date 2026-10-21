@@ -76,6 +76,59 @@ def test_count_only_plan_has_a_nonempty_positive_control_and_no_identity_values(
     assert old.bindings and old.pricing  # A saved old baseline, not two reads of the target.
 
 
+@pytest.mark.parametrize("runtime,account_id,fixed,protocol", [
+    ("claude-code", "prov-claude-subscription", "opus", P.ANTHROPIC_MESSAGES),
+    ("codex", "prov-codex-login", "gpt-6.1-sol", P.OPENAI_RESPONSES),
+    ("grok", "prov-grok-login", "grok-4.7", P.OPENAI_RESPONSES),
+])
+def test_builtin_accounts_only_mark_fixed_model_suggestions_builtin(runtime, account_id, fixed, protocol):
+    account = provider(id=account_id, auth="oauth", oauth_runtime_type=runtime,
+                       builtin=True, protocols=[protocol], base_url="")
+    rows = [profile(runtime, id=name, provider_id=account_id, model=name, effort=None)
+            for name in (fixed, "user-model")]
+    converted = convert(RUNTIMES, [account], rows)
+    assert converted.models[converted.profiles[fixed].model_id].builtin
+    assert not converted.models[converted.profiles["user-model"].model_id].builtin
+
+
+@pytest.mark.parametrize("runtime,protocol", [
+    ("claude-code", P.ANTHROPIC_MESSAGES), ("codex", P.OPENAI_RESPONSES), ("grok", P.OPENAI_RESPONSES),
+])
+def test_oauth_multi_protocol_declarations_keep_login_binding_and_profile_id(runtime, protocol):
+    from looper.agents.registry_migration import plan, snapshot
+
+    account = provider(auth="oauth", oauth_runtime_type=runtime, base_url="")
+    row = profile(runtime, effort=None)
+    old = snapshot(RUNTIMES, [account], [row])
+    assert row["id"] in old.bindings
+    result = plan(old)
+    assert result.applicable
+    assert result.report["binding_mismatches"] == 0
+    assert set(result.conversion.profiles) == {row["id"]}
+    assert set(result.conversion.endpoints) == {(account["id"], protocol)}
+    model = result.conversion.models[result.conversion.profiles[row["id"]].model_id]
+    assert (model.provider_id, model.name, model.protocol) == (account["id"], row["model"], protocol)
+
+
+def test_migration_price_comparison_uses_pinned_v2_exact_semantics(monkeypatch):
+    from looper.agents import registry_migration as migration
+    from looper.agents.runtimes.pricing import ModelPrice
+
+    account = provider(models=[{"name": "MODEL", "input_usd_per_mtok": 1},
+                               {"name": "model", "input_usd_per_mtok": 20}])
+    rows = [profile(id=name, model=name) for name in ("MODEL", "model")]
+    old = migration.snapshot(RUNTIMES, [account], rows)
+    assert len(old.bindings) == 2
+    valid = migration.plan(old)
+    assert valid.applicable
+    assert valid.report["pricing_mismatches"] == 0
+    # Reproduce the broken v3 index independently of the production resolver.
+    monkeypatch.setattr(migration, "model_price", lambda account, name: ModelPrice(input_usd_per_mtok=1))
+    result = migration.plan(old)
+    assert not result.applicable
+    assert result.report["pricing_mismatches"] >= 1
+
+
 @pytest.mark.parametrize("changes", [{"runtime_id": "missing"}, {"provider_id": "missing"},
                                          {"effort": "invalid"}, {"model": "outside"}])
 def test_bad_profile_is_counted_and_never_silently_dropped(changes):
