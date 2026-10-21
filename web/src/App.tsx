@@ -8,13 +8,14 @@ import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
 import { RunsPage } from "@/pages/runs";
+import { GatesPage } from "@/pages/gates";
 import { SchedulesPage } from "@/pages/schedules";
 import { SettingsPage } from "@/pages/settings";
 import { AgentHistoryPage } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
 import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "projects", "runs", "schedules", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "gates", "projects", "runs", "schedules", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -173,6 +174,11 @@ function App() {
                 query={route.query}
                 onNavigate={(sub, query) => navigateSub("schedules", sub, query)}
               />
+            </div>
+          )}
+          {route.page === "gates" && (
+            <div className="h-full overflow-y-auto p-6">
+              <GatesPage query={route.query} onQuery={(q) => navigateSub("gates", "", q)} />
             </div>
           )}
           {route.page === "history" && (

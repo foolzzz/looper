@@ -11,11 +11,11 @@ import { errorText, useAction } from "@/lib/use-action";
 
 const LIMIT = 10;
 const linkClass = "rounded-sm text-primary hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-type Waiting = { task: TaskDetail; gate: UserGate };
 type Reply = { taskId: string; stepId: string; text: string };
 const gateKey = (taskId: string, stepId: string) => `${taskId}/${stepId}`;
 
-function GateReply({ task, gate, reply, onChanged }: Waiting & {
+export function GateReply({ task, gate, reply, onChanged }: {
+  task: Pick<TaskDetail, "task_id" | "name" | "group">; gate: UserGate;
   reply?: Reply; onChanged: (gate: UserGate, text: string) => void;
 }) {
   const [text, setText] = useState("");
