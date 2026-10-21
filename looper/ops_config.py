@@ -14,6 +14,7 @@
     [backup]                                    # how the database is backed up before a schema change
     pg_dump = "/usr/lib/postgresql/17/bin/pg_dump"
     command = ["docker", "exec", "pg", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
+    verify_command = ["docker", "exec", "-i", "pg", "pg_restore", "--list"]   # reads the dump on stdin
 
     [operator_notes]
     root = "/home/me/.claude/projects"          # where the operator's Claude Code keeps its project notes
@@ -108,6 +109,7 @@ class OpsConfig:
     log_level: str = "info"
     pg_dump: str = ""
     backup_command: tuple[str, ...] = ()
+    backup_verify_command: tuple[str, ...] = ()
     operator_notes_root: str = ""
     sources: Mapping[str, Source] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
@@ -166,7 +168,7 @@ def _command(value: Any, where: str) -> tuple[str, ...]:
 
 
 def _split(value: str, where: str) -> list[str]:
-    """``LOOPER_BACKUP_CMD``: one string, split into words as a shell would."""
+    """``LOOPER_BACKUP_CMD`` and ``LOOPER_BACKUP_VERIFY_CMD``: one string, split into words as a shell would."""
     try:
         return shlex.split(value)
     except ValueError as exc:
@@ -212,6 +214,8 @@ SETTINGS = (
     _Setting("log_level", "server", "log_level", _log_level, flag="log_level"),
     _Setting("pg_dump", "backup", "pg_dump", _text, variable="LOOPER_PG_DUMP"),
     _Setting("backup_command", "backup", "command", _command, variable="LOOPER_BACKUP_CMD", from_variable=_split),
+    _Setting("backup_verify_command", "backup", "verify_command", _command, variable="LOOPER_BACKUP_VERIFY_CMD",
+             legacy_prefix=False, from_variable=_split),
     _Setting("operator_notes_root", "operator_notes", "root", _absolute_path, variable="LOOPER_OPERATOR_NOTES_ROOT",
              legacy_prefix=False, from_variable=lambda value, where: os.path.expanduser(value.strip())),
 )
@@ -437,6 +441,9 @@ def render(config: OpsConfig) -> str:
         (f"command = [{', '.join(_toml_string(word) for word in config.backup_command)}]" if config.backup_command
          else '# command = ["docker", "exec", "<container>", "pg_dump", "--format=custom", "-U", "{user}", '
               '"{dbname}"]'),
+        (f"verify_command = [{', '.join(_toml_string(word) for word in config.backup_verify_command)}]"
+         if config.backup_verify_command
+         else '# verify_command = ["docker", "exec", "-i", "<container>", "pg_restore", "--list"]'),
         "",
         "[operator_notes]",
         f"root = {_toml_string(config.operator_notes_root)}" if config.operator_notes_root

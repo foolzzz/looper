@@ -331,6 +331,8 @@ def pg_dump_fix(server_major: int | None) -> str:
         "or name a pg_dump in the ops file's [backup] (pg_dump = \"/path/to/pg_dump\"); with PostgreSQL in Docker, "
         "dump inside its container:\n"
         '  command = ["docker", "exec", "<container>", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]\n'
+        "(the dump is then listed with `docker exec -i <container> pg_restore --list`; for another command set "
+        "verify_command, which reads the dump on stdin)\n"
         "or migrate once without a backup: looper serve --skip-backup"
     )
 
@@ -355,8 +357,14 @@ def check_pg_dump(server_version_num: int | None, pending: bool | None,
                      f"{exc}; after an upgrade that changes the database schema, `looper serve` backs the database "
                      "up first and will not start without it",
                      pg_dump_fix(server_major)), None
+    verifier = dumper.verifier
+    if verifier is None:
+        problem = f"{dumper.detail}: {db_backup.NO_VERIFIER}"
+        return Check("pg_dump", "pg_dump", FAIL if pending else WARN, problem,
+                     pg_dump_fix(server_major)), None
     unchecked = "" if server_major or dumper.command else "; not compared with the server, which is unreachable"
-    return Check("pg_dump", "pg_dump", OK, dumper.detail + unchecked), dumper
+    return Check("pg_dump", "pg_dump", OK,
+                 f"{dumper.detail}{unchecked}; backup verified by {verifier}"), dumper
 
 
 @dataclass(frozen=True)

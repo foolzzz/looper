@@ -28,7 +28,7 @@ from looper import ops_config
 from looper.agents import db_backup
 from looper.agents.serve import _back_up_before_schema_change
 from looper.db import connection, registry_migration
-from tests.test_db_backup import _backups, _install, _serve
+from tests.test_db_backup import _backups, _install, _install_docker, _docker_calls, _serve
 from tests.test_llm_registry_rehearsal_db import _dsn, _history, _snapshot_databases
 from tests.test_registry_migration_report_db import state
 from tests.test_profile_rename_migration_db import _structure as _raw_structure
@@ -226,6 +226,25 @@ def test_registry_backup_failure_refuses_ready_before_any_ddl(tmp_path, failure)
             assert await state(target) == before
             assert _backups(tmp_path) == []
     asyncio.run(asyncio.wait_for(run(), 100))
+
+
+def test_registry_upgrade_with_a_docker_backup_passes_the_gate_without_local_pg_restore(tmp_path):
+    """The documented Docker setup has no local pg_restore: the dump is listed inside the container, with a stand-in
+    ``docker`` on PATH (the real one is never called)."""
+    calls = _install_docker(tmp_path / "bin")
+
+    async def run():
+        async with _snapshot_databases() as (_, target, target_dsn):
+            await target.execute(_VERSION_TWO)
+            code, log = await asyncio.to_thread(
+                _serve, tmp_path, target_dsn,
+                LOOPER_BACKUP_CMD="docker exec -e A=b pgc pg_dump --format=custom -U {user} {dbname}")
+            assert code is None, log
+            assert "phase=backup_verified" in log and "pg_restore is required" not in log
+            assert await target.fetchval("SELECT version FROM registry_schema_version") == 3
+    asyncio.run(asyncio.wait_for(run(), 150))
+    assert [call["argv"][:5] for call in _docker_calls(calls)][-1] == ["exec", "-i", "pgc", "pg_restore", "--list"]
+    assert len(_backups(tmp_path)) == 1
 
 
 def test_failure_after_conversion_rolls_back_every_ddl_row_and_marker(monkeypatch):

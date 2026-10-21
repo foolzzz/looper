@@ -303,7 +303,7 @@ Telegram 与 Lark 通过同一 Manager 工具配置账户、模型和 profiles�
 
 dry-run 输出固定计数字段：`providers_before/after`、`endpoints_after`、`models_after`、`profiles_before/after/mapped`、`models_from_open_catalog`、`providers_merged`、`providers_kept_separate_by_reason`、`legacy_default_endpoints`、`unresolved_profiles`、`binding_mismatches`、`pricing_mismatches`、`session_references_remapped`。各值为数量或原因枚举→数量；不带 provider/model 名称、URL、id、key、env 或内容哈希。profile 数量不变且全部 mapped、unresolved/mismatch 都为 0 才能放行。线上 dry-run 只做静态解析与等价比较，pinned tiers capture 在副本执行。
 
-沿用 `looper/agents/db_backup.py`、`serve.py` 的既有机制：`schema_change_pending` 检测到变化时，先完成并校验 custom-format `pg_dump`，再 `ensure_schema`；schema 指纹与转换事务一起提交。这里是 **schema 变更前的完整数据库备份**，schema-only dump 无法恢复账户与引用。备份含秘密，留在原有受保护备份目录，报告不贴路径/内容。备份失败停止升级，本次发布门禁不使用 `--skip-backup`。导入新文件也不能绕过已有 schema 检查与备份要求。
+沿用 `looper/agents/db_backup.py`、`serve.py` 的既有机制：`schema_change_pending` 检测到变化时，先完成并校验 custom-format `pg_dump`，再 `ensure_schema`；schema 指纹与转换事务一起提交。这里是 **schema 变更前的完整数据库备份**，schema-only dump 无法恢复账户与引用。备份含秘密，留在原有受保护备份目录，报告不贴路径/内容。备份失败停止升级，本次发布门禁不使用 `--skip-backup`。备份的可读性由校验器证明，顺序为：`backup.verify_command`（备份走标准输入，像 `pg_restore --list` 一样列出内容；弃用环境变量 `LOOPER_BACKUP_VERIFY_CMD`）；`backup.command` 恰为 `docker exec [选项] <容器> pg_dump ...` 时推导出的 `docker exec -i <容器> pg_restore --list`；本机 `pg_restore`。三者皆无则在任何 DDL 之前失败，报错点名 `backup.verify_command`；`looper doctor` 与启动自检会报告所用校验器。导入新文件也不能绕过已有 schema 检查与备份要求。
 
 ### 9.2 回滚
 
