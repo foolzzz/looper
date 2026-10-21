@@ -90,6 +90,7 @@ class PerTurnSession(ABC):
         self._process: asyncio.subprocess.Process | None = None  # the turn running now, if any
         self._ended = False  # the last turn ended without a result: the owner starts over
         self._stopping = False  # the user's stop is ending the running turn
+        self._active = False  # a turn is between run_turn's start and its end, its process spawned or not
         self._ending: asyncio.Future[None] | None = None  # the stop's cleanup of the turn's process tree
         self._totals = Usage()
         self._price: Price | None = None  # prices the totals at the provider's prices
@@ -168,17 +169,32 @@ class PerTurnSession(ABC):
         the cap's result, its process killed, the session's totals moved on by
         what it spent.
         """
+        assert self.started
+        self._active = True
+        try:
+            return await self._run_turn(text, on_event, tag=tag, stop=stop)
+        finally:
+            self._active = self._stopping = False
+
+    async def _run_turn(
+        self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
+        stop: Callable[[], CapStop | None] | None = None,
+    ) -> ResidentTurn:
         from ..claude_cli import ResidentTurn, user_stop_result
         from . import StopMethod
 
-        assert self.started
         argv = await asyncio.to_thread(self._turn_argv)
+        if self._stopping:  # a stop that came before the process existed: no process is started
+            return ResidentTurn(user_stop_result(), session_started=False, usage=Usage(),
+                                stopped=StopMethod.KILL, usage_complete=True)
         resuming = self._session
         process = await proc_tree.spawn(
             *argv, cwd=self._cwd, env=self._env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         self._process = process
+        if self._stopping:  # the stop came while the process was being spawned: end it with the turn
+            self._ending = asyncio.ensure_future(proc_tree.end(process, label=self._label))
         logger.info("%s started a %s turn (pid=%s, %s)", self._label, self.runtime_label, process.pid,
                     f"resuming {resuming}" if resuming else "new session")
         stderr = asyncio.create_task(stderr_tail(process.stderr))
@@ -244,9 +260,11 @@ class PerTurnSession(ABC):
         from . import StopMethod
 
         process = self._process
-        if process is None or self._stopping:
+        if self._stopping or not self._active:
             return None
         self._stopping = True
+        if process is None:  # the turn is still preparing or spawning: run_turn sees the request
+            return StopMethod.KILL
         self._ending = asyncio.ensure_future(proc_tree.end(process, label=self._label))
         await asyncio.shield(self._ending)
         return StopMethod.KILL

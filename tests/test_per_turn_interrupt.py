@@ -213,3 +213,58 @@ def test_a_stopped_turn_returns_only_after_its_process_tree_cleanup(
 
     turn = asyncio.run(asyncio.wait_for(run(), 30))
     assert turn.stopped is StopMethod.KILL
+
+
+@pytest.mark.parametrize("runtime", ["omp", "codex"])
+@pytest.mark.parametrize("phase", ["argv", "spawn"])
+def test_a_stop_before_the_process_exists_is_kept(
+    tmp_path: Path, runtime: str, phase: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, command, env, home = (_omp if runtime == "omp" else _codex)(tmp_path)
+    home.mkdir(parents=True, exist_ok=True)
+    reached, release = asyncio.Event(), asyncio.Event()
+    spawned: list[Any] = []
+
+    async def run() -> Any:
+        await session.start(command, cwd=str(tmp_path), signature="s", env=env)
+        loop = asyncio.get_running_loop()
+        real_argv, real_spawn = session._turn_argv, proc_tree.spawn
+
+        def slow_argv() -> list[str]:
+            if phase == "argv":
+                loop.call_soon_threadsafe(reached.set)
+                asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+            return real_argv()
+
+        async def slow_spawn(*args: Any, **kwargs: Any) -> Any:
+            if phase == "spawn":
+                reached.set()
+                await release.wait()
+            process = await real_spawn(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        monkeypatch.setattr(session, "_turn_argv", slow_argv)
+        monkeypatch.setattr(proc_tree, "spawn", slow_spawn)
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        running = asyncio.create_task(session.run_turn("hello", on_event))
+        try:
+            await asyncio.wait_for(reached.wait(), 8)
+            assert await session.interrupt() is StopMethod.KILL
+            release.set()
+            turn = await asyncio.wait_for(running, 5)
+            for process in spawned:
+                await asyncio.wait_for(process.wait(), 5)  # a process started anyway is ended
+            return turn
+        finally:
+            release.set()
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            await session.stop()
+
+    turn = asyncio.run(asyncio.wait_for(run(), 30))
+    assert turn.stopped is StopMethod.KILL and turn.result_event[USER_STOP]
+    assert (phase == "argv") == (not spawned)
