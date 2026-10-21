@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.12] - 2026-10-21
+
+### Added
+
+- **A User Gates page in the dashboard** (`#gates`, sidebar "User Gates"). It lists the gates of all tasks, open ones by default, with Closed and All, a "Waiting for you only" switch and a project filter; a gate waiting for you is answered in place. The sidebar entry shows how many gates wait for you. New read-only route `GET /api/gates` (`state`, `waiting_on`, `project_id`, `limit`, `offset`). ([#275](https://github.com/foolzzz/looper/pull/275))
+- No model-visible change: no prompt, tool schema or tool contract changed.
+
+### Validation
+
+- Reported in #275: each card's tests, headless-browser screenshots, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.12.md).
+
 ## [2.13.11] - 2026-10-21
 
 ### Changed
