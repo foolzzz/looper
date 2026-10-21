@@ -53,6 +53,7 @@ from ..claude_cli import (
     ended_by,
     exit_note,
 )
+from .. import gate_commands
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
@@ -488,9 +489,16 @@ class ManagerAgent:
             await self._persist_chat(envelope, "user", text, envelope.message_id)
             await self._start_new_session(envelope)
             return
+        # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
+        answer = await self._gate_command(envelope, text)
+        if answer is not None:
+            await self._send_reply(envelope, answer, persist=False)
+            return
         # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
         gate = await self._route_to_gate(envelope)
         if gate.kind is RouteKind.DELIVERED:
+            if gate.reply:
+                await self._send_reply(envelope, gate.reply, persist=False)
             return
         if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
             await self._send_reply(envelope, gate.reply, persist=False)
@@ -1244,6 +1252,17 @@ class ManagerAgent:
             reply_to=original.message_id,
             metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record},
         ))
+
+    async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
+        """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""
+        if self._bus is None or self.ops is None or not gate_commands.is_command(text):
+            return None
+        try:
+            return await gate_commands.handle(envelope, text, has_planner=self.ops.platform.task_router.has_planner,
+                                              bus=self._bus, source=MANAGER_ADDRESS)
+        except Exception as exc:
+            logger.exception("manager: the gate command %r failed", text[:40])
+            return f"关卡命令出错：{exc}"
 
     async def _route_to_gate(self, envelope: MessageEnvelope) -> Route:
         """Where a reply to a user gate's message goes (``gate_routing``); any other message is the Manager's."""

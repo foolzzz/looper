@@ -275,6 +275,22 @@ async def post_message(
             "delivered": "queued" if has_planner else "kept"}
 
 
+async def task_name(task_id: str) -> str:
+    """What the user's receipts call the task (``db.tasks.task_name``); its id when it cannot be read."""
+    try:
+        task = await db_tasks.get_task(task_id)
+    except Exception:
+        logger.warning("could not read the name of task %s", task_id, exc_info=True)
+        return task_id
+    return str(task["name"]) if task and task.get("name") else task_id
+
+
+def receipt(name: str, label: str, *, end: bool, kept: bool = False) -> str:
+    """What code tells the user after their answer (or end) went into a gate; ``kept``: the task is not running."""
+    text = (f"已请规划者按现在的结论结束 {name} 的 {label}" if end else f"已交给 {name} 的 {label}")
+    return text + ("（任务已停止，任务继续后交给规划者。）" if kept else "")
+
+
 def _hours(since: datetime | None) -> int:
     if since is None:
         return 0
