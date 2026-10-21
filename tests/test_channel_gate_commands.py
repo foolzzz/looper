@@ -15,7 +15,8 @@ import pytest
 
 from looper.agents import gate_commands, gate_routing
 from looper.agents.bus import MessageBus
-from looper.agents.channels.chat_history import CHAT_RECORD
+from looper.agents.channels.base import DeliveryReceipt
+from looper.agents.channels.chat_history import CHAT_RECORD, record_reply
 from looper.agents.gate_routing import RouteKind
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.projects import RequestError
@@ -45,6 +46,7 @@ class _World:
         self.posts: list[dict[str, Any]] = []
         self.refuse: RequestError | None = None
         self.delivered = "queued"
+        self.sent_ok = True
         self.model: list[str] = []
         self.stored: list[str] = []
 
@@ -107,6 +109,8 @@ class _World:
                     envelope = queue.get_nowait()
                     if envelope.message_type is MessageType.AGENT_REPLY:
                         sent.append((envelope.payload.get("text"), CHAT_RECORD in envelope.metadata))
+                        # What the channel's outbound loop does once it has tried to send the answer.
+                        await record_reply("lark", envelope, DeliveryReceipt(channel="lark", success=self.sent_ok))
                 await bus.shutdown()
 
         asyncio.run(run())
@@ -215,6 +219,29 @@ class TestAnswer:
         world.refuse = RequestError("409 Conflict", "gate g1 is closed: it does not wait for the user")
         [(text, _)] = world.send("/gate 1 好")
         assert "已经不在等你了" in text and world.model == []
+
+    def test_a_list_that_was_not_delivered_numbers_nothing(self, world: _World) -> None:
+        self._listed(world)
+        world.gates = [_gate("t3", "g1", "新的任务"), _gate("t2", "g2", "报表")]
+        world.sent_ok = False
+        world.send("/gates")
+        world.sent_ok = True
+        [(text, _)] = world.send("/gate 1 end")
+        assert world.posts == [] and "/gates" in text
+
+    def test_a_list_is_the_snapshot_only_once_it_is_delivered(self, world: _World) -> None:
+        world.gates = [_gate("t1", "g1", "登录重构")]
+        envelope = MessageEnvelope.create(
+            source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": "/gates", "channel_context": {"chat_id": "ou_me", "sender_id": "ou_me"}})
+
+        async def listed() -> None:
+            await gate_commands.handle(envelope, "/gates", has_planner=None, bus=None, source=MANAGER_ADDRESS)
+
+        asyncio.run(listed())
+        assert gate_commands._snapshots == {}
+        gate_commands.settle(envelope.message_id, True)
+        assert len(gate_commands._snapshots) == 1
 
     def test_a_missing_answer_gets_the_usage(self, world: _World) -> None:
         self._listed(world)

@@ -50,10 +50,28 @@ class Entry:
 
 # (channel, chat, sender) -> (when it was sent, its entries)
 _snapshots: dict[tuple[str, str, str], tuple[float, list[Entry]]] = {}
+# A list is not yet the snapshot while it is being sent: (channel, chat, sender) -> (the list's token, its entries).
+# ``settle`` makes it the snapshot once the channel has delivered it; until then, and when it is not delivered, no
+# number refers to anything.
+_pending: dict[tuple[str, str, str], tuple[str, list[Entry]]] = {}
+# The metadata key of an answer that carries a list; its value is the list's token.
+SNAPSHOT_TOKEN = "gate_snapshot"
 
 
 def is_command(text: str) -> bool:
     return _COMMAND.match(text.strip()) is not None
+
+
+def settle(token: Any, delivered: bool) -> None:
+    """The channel has tried to send the list ``token`` names: a delivered list becomes its chat's snapshot, unless
+    a newer list was made since; one that was not delivered never does."""
+    if not token:
+        return
+    for key, (pending, entries) in list(_pending.items()):
+        if pending == token:
+            del _pending[key]
+            if delivered:
+                _snapshots[key] = (time.monotonic(), entries)
 
 
 def _waited(moment: Any) -> str:
@@ -114,10 +132,12 @@ def _entry_text(number: int, gate: dict[str, Any]) -> str:
 async def _list(envelope: MessageEnvelope) -> str:
     channel, chat, sender, group, own = _where(envelope)
     gates = (await _waiting(channel, own, group))[:LISTED]
-    _snapshots.pop((channel, chat, sender), None)
+    key = (channel, chat, sender)
+    _snapshots.pop(key, None)
+    _pending.pop(key, None)
     if not gates:
         return NONE_WAITING
-    _snapshots[(channel, chat, sender)] = (time.monotonic(), [
+    _pending[key] = (envelope.message_id, [
         Entry(str(g["task_id"]), str(g["step_key"]), str(g["step_id"]), _name(g)) for g in gates])
     return "\n".join(["在等你的关卡：", *(_entry_text(i, g) for i, g in enumerate(gates, 1)), "", HOW_TO_ANSWER])
 

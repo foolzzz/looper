@@ -530,7 +530,11 @@ class ManagerAgent:
         # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
         answer = await self._gate_command(envelope, text)
         if answer is not None:
-            await self._send_reply(envelope, answer, persist=False)
+            await self._send_reply(envelope, answer, persist=False, snapshot=envelope.message_id)
+            channel = _message_origin(envelope)["channel"]
+            if not (is_lark(channel) or channel == "telegram"):
+                # Only Telegram and Lark report a delivery; the web chat shows what is published.
+                gate_commands.settle(envelope.message_id, True)
             return
         if (command := parse_profile_command(text)) is not None:
             await self._persist_chat(envelope, "user", text, envelope.message_id)
@@ -1420,7 +1424,7 @@ class ManagerAgent:
             logger.warning("manager: could not persist a %s chat turn", channel, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
-                          persist: bool = True) -> None:
+                          persist: bool = True, snapshot: str | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; without ``persist`` it is not kept
         (one about a user gate, whose discussion keeps the message)."""
@@ -1433,7 +1437,8 @@ class ManagerAgent:
             payload={"text": text, **({"error": error} if error else {})},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
-            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record},
+            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
+                      **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
         ))
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:

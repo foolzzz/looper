@@ -32,6 +32,9 @@ def chat_record(session_id: str, message_id: str) -> dict[str, str]:
 async def record_reply(channel: str, envelope: MessageEnvelope, receipt: DeliveryReceipt) -> None:
     """Store the answer ``envelope`` as ``receipt`` says the channel delivered it, when the Manager named its
     record. A storage failure is logged, never raised: the channel goes on."""
+    from .. import gate_commands
+
+    gate_commands.settle(envelope.metadata.get(gate_commands.SNAPSHOT_TOKEN), receipt.success)
     record: Any = envelope.metadata.get(CHAT_RECORD)
     text = str(envelope.payload.get("text") or "")
     if not isinstance(record, dict) or not record.get("session_id") or not record.get("message_id") or not text:
