@@ -434,6 +434,17 @@ async def write_user_turn(stdin: asyncio.StreamWriter, text: str, *, uuid: str |
     await stdin.drain()
 
 
+def write_control(stdin: asyncio.StreamWriter, request: dict[str, Any]) -> str:
+    """One control request in Claude's stream-json input format (the Agent SDK's); returns its ``request_id``.
+    The caller drains ``stdin``."""
+    request_id = str(uuid4())
+    line = json.dumps({"type": "control_request", "request_id": request_id, "request": request}, ensure_ascii=False)
+    stdin.write(line.encode("utf-8") + b"\n")
+    return request_id
+
+
+# How long a resident Claude may take to end its turn after an interrupt request before it is killed.
+INTERRUPT_GRACE_SEC = 5.0
 # How long a stopping resident Claude may take to exit after its stdin closes before it is ended.
 STOP_GRACE_SEC = 5.0
 # How long the rest of an exited Claude's output may take to be read.
@@ -536,6 +547,7 @@ class _UserTurn:
     usage: Usage = field(default_factory=Usage)
     stop: Callable[[], CapStop | None] | None = None  # asked after each event: end the turn at its soft cap?
     capped: CapStop | None = None  # the turn was ended at its soft cap
+    stopping: bool = False  # the user's stop was asked of Claude; its next result ends the turn
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
@@ -596,6 +608,9 @@ class _Output:
     async def _dispatch(self, event: dict[str, Any]) -> None:
         if self._capped:
             return  # what Claude writes before it is killed: the turn has ended
+        if event.get("type") == "control_response":
+            logger.debug("%s: control response: %s", self._claude.label, event)
+            return
         if event.get("type") == "command_lifecycle" or _is_replay(event):
             self._marks_turns = True
         turn = self.turn
@@ -830,10 +845,13 @@ class ResidentClaude:
             await self.stop(kill=True)
             raise
         self._user_turn = None
+        from .runtimes import StopMethod
+
+        if turn.stopping and not self._user_stopped and result_event is not None:
+            return ResidentTurn(result_event, session_started=turn.session_started, usage=turn.usage,
+                                stopped=StopMethod.CONTROL)
         if self._user_stopped:
             self._user_stopped = False
-            from .runtimes import StopMethod
-
             self._totals = self._totals.plus(turn.usage)
             return ResidentTurn(user_stop_result(), session_started=turn.session_started, usage=turn.usage,
                                 stopped=StopMethod.KILL)
@@ -859,14 +877,28 @@ class ResidentClaude:
         return own
 
     async def interrupt(self) -> StopMethod | None:
-        """End the running user turn at once by killing Claude (the turn returns ``user_stop_result``, with what it
-        spent); None when no user turn runs."""
+        """End the running user turn: ask Claude to interrupt it and wait up to ``INTERRUPT_GRACE_SEC`` for the
+        turn's result (``CONTROL``); else, or when the request cannot be written, kill Claude (``KILL``; the turn
+        returns ``user_stop_result``). None when no user turn runs."""
         from .runtimes import StopMethod
 
-        if self._user_turn is None or self._user_stopped:
+        output, process = self._output, self._process
+        turn = output.turn if output is not None else None
+        if turn is None or not turn.started or turn.stopping or process is None or process.stdin is None:
             return None
-        self._user_stopped = True
-        await self.stop(kill=True)
+        turn.stopping = True
+        try:
+            write_control(process.stdin, {"subtype": "interrupt"})
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning("%s: Claude closed stdin before the interrupt was sent", self._label)
+        else:
+            done, _ = await asyncio.wait({turn.done}, timeout=INTERRUPT_GRACE_SEC)
+            if done and not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
+                return StopMethod.CONTROL
+        if self._process is process:
+            self._user_stopped = True
+            await self.stop(kill=True)
         return StopMethod.KILL
 
     async def stop(self, *, kill: bool = False) -> None:

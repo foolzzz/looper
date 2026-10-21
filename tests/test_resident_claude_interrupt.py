@@ -1,0 +1,132 @@
+"""Interrupting a resident Claude's running turn with a control request, and killing it after a grace."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from fake_claude import fake_claude
+from looper.agents import claude_cli
+from looper.agents.claude_cli import ResidentClaude
+from looper.agents.runtimes import StopMethod
+
+_OBEYS = """\
+import json, os, sys, time
+def out(event):
+    print(json.dumps(event), flush=True)
+turns = 0
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if message['type'] == 'control_request':
+        out({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': message['request_id']}})
+        out({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'total_cost_usd': 0.02,
+             'session_id': 's1', 'num_turns': 1})
+        continue
+    turns += 1
+    if turns == 1:
+        out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
+        out({'type': 'stream_event', 'event': {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'hi'}}})
+    else:
+        out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
+        out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'pid=%d' % os.getpid(),
+             'total_cost_usd': 0.03, 'session_id': 's1', 'num_turns': 1})
+"""
+
+_DEAF = """\
+import json, sys, time
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if message['type'] == 'user':
+        print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 's1'}), flush=True)
+        time.sleep(60)
+"""
+
+
+async def _until_streaming(seen: list[dict[str, Any]]) -> None:
+    for _ in range(500):
+        if any(e.get("type") == "stream_event" or e.get("subtype") == "init" for e in seen):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the turn never started")
+
+
+def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path) -> None:
+    claude = fake_claude(tmp_path / "claude", _OBEYS)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        pid = session.pid
+        try:
+            turn = asyncio.create_task(session.run_turn("work", on_event))
+            await _until_streaming(seen)
+            started = time.monotonic()
+            assert await session.interrupt() is StopMethod.CONTROL
+            assert time.monotonic() - started < 1
+            result = await turn
+            assert result.stopped is StopMethod.CONTROL
+            assert result.result_event is not None and result.result_event["is_error"] is True
+            assert not any(e.get("type") == "control_response" for e in seen)
+            assert session.totals.cost_usd == pytest.approx(0.02)
+            assert result.usage.cost_usd == pytest.approx(0.02)
+            again = await session.run_turn("next", on_event)
+            assert again.stopped is None
+            assert again.result_event is not None and again.result_event["result"] == f"pid={pid}"
+            assert session.pid == pid
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_a_deaf_claude_is_killed_after_the_grace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.3)
+    claude = fake_claude(tmp_path / "claude", _DEAF)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        pid = session.pid
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            turn = asyncio.create_task(session.run_turn("work", on_event))
+            await _until_streaming(seen)
+            assert await session.interrupt() is StopMethod.KILL
+            result = await turn
+            assert result.stopped is StopMethod.KILL
+            assert session.started is False
+            assert pid is not None
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_interrupt_with_no_turn_does_nothing(tmp_path: Path) -> None:
+    claude = fake_claude(tmp_path / "claude", _OBEYS)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        try:
+            assert await session.interrupt() is None
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
