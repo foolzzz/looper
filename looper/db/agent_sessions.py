@@ -5,7 +5,8 @@ running totals are stored with its id, so a process that resumes the session
 counts only its own spending (``run_usage.Usage``), and so are the runtime
 type and the provider it belongs to and the Agent Profile that ran it last
 (``runtimes.can_resume``). ``clean_start`` marks a session the user dropped
-(the Manager's ``/new``): the next one starts without a resume brief.
+(the Manager's ``/new``): the next one starts without a resume brief. ``selected_profile_id`` is the Agent Profile the user chose for the
+Manager's current session (``select_profile``); ``save_session`` never writes it.
 """
 
 from __future__ import annotations
@@ -22,11 +23,13 @@ from .connection import get_pool
 async def get_session(
     agent_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any] | None:
-    """``{"session_id", "session_totals", "runtime_type", "provider_id", "profile_id", "clean_start"}`` saved
+    """``{"session_id", "session_totals", "runtime_type", "provider_id", "profile_id", "clean_start",
+    "selected_profile_id"}`` saved
     for ``agent_id``; None when nothing is saved."""
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        "SELECT session_id, session_totals, runtime_type, provider_id, profile_id, clean_start "
+        "SELECT session_id, session_totals, runtime_type, provider_id, profile_id, clean_start, "
+        "selected_profile_id "
         "FROM agent_sessions WHERE agent_id = $1", agent_id,
     )
     if row is None:
@@ -34,7 +37,26 @@ async def get_session(
     totals = row["session_totals"]
     return {"session_id": row["session_id"], "session_totals": json.loads(totals) if isinstance(totals, str) else {},
             "runtime_type": row["runtime_type"], "provider_id": row["provider_id"],
-            "profile_id": row["profile_id"], "clean_start": row["clean_start"]}
+            "profile_id": row["profile_id"], "clean_start": row["clean_start"],
+            "selected_profile_id": row["selected_profile_id"]}
+
+
+async def select_profile(
+    agent_id: str, profile_id: str | None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> None:
+    """Set the Agent Profile the user chose for ``agent_id``'s current session (None: follow Settings).
+
+    Writes only ``selected_profile_id``; with no row yet, inserts one without a session.
+    """
+    pool = pool or get_pool()
+    await pool.execute(
+        """
+        INSERT INTO agent_sessions (agent_id, selected_profile_id, updated_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (agent_id) DO UPDATE SET selected_profile_id = EXCLUDED.selected_profile_id, updated_at = now()
+        """,
+        agent_id, profile_id,
+    )
 
 
 async def save_session(
