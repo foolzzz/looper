@@ -909,6 +909,9 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        if self._manager_ops is not None:
+            # Whether tool calls are refused by their turn binding, and the mismatches seen (chat-stop-v2 §10).
+            status["turn_binding"] = self._manager_ops.binding_report()
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()
 

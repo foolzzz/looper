@@ -672,12 +672,20 @@ def test_profile_reference_does_not_guess_a_name_or_protocol(recorded, monkeypat
     create.assert_not_awaited()
 
 
-# --- calls bound to their turn (X-Looper-Turn) ---
+# --- calls bound to their turn (X-Looper-Turn), enforced: stop on (off, it only observes: test_turn_binding_observe) ---
+
+@pytest.fixture
+def _enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import chat_settings
+
+    monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+
 
 def _bound(ops: _Ops, name: str, arguments: Any, binding: str | None) -> dict[str, Any]:
     return asyncio.run(ops.ops.call(name, arguments, binding=binding))
 
 
+@pytest.mark.usefixtures("_enforced")
 def test_a_call_bound_to_a_stopped_turn_is_refused_even_while_another_turn_is_current() -> None:
     ops = _Ops()
     first, second = _turn("m1"), _turn("m2")
@@ -690,6 +698,7 @@ def test_a_call_bound_to_a_stopped_turn_is_refused_even_while_another_turn_is_cu
     assert ops.ran == [({"n": 2}, "m2")]
 
 
+@pytest.mark.usefixtures("_enforced")
 def test_a_call_bound_to_an_ended_turn_has_expired() -> None:
     ops = _Ops()
     first = _turn("m1")
@@ -700,6 +709,7 @@ def test_a_call_bound_to_an_ended_turn_has_expired() -> None:
     assert ops.ran == []
 
 
+@pytest.mark.usefixtures("_enforced")
 def test_an_unknown_binding_is_claudes_own_turn_which_only_reads() -> None:
     binding = "unknown"
     ops = _Ops()
@@ -709,6 +719,7 @@ def test_an_unknown_binding_is_claudes_own_turn_which_only_reads() -> None:
     assert ops.ran == [({"n": 1}, None)]
 
 
+@pytest.mark.usefixtures("_enforced")
 def test_only_the_last_bindings_are_kept() -> None:
     from looper.agents.ops.service import BINDINGS_KEPT
 

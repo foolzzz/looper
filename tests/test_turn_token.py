@@ -202,6 +202,44 @@ def test_step_and_keep() -> None:
     asyncio.run(run())
 
 
+def test_keep_owns_its_step_a_cancel_or_timeout_ends_it_and_undoes_it() -> None:
+    async def run() -> None:
+        events: list[str] = []
+
+        async def start() -> str:
+            try:
+                await asyncio.sleep(0.2)
+            except asyncio.CancelledError:
+                events.append("start cancelled")
+                raise
+            events.append("started")
+            return "process"
+
+        async def undo() -> None:
+            events.append("undone")
+
+        token = _token(P.PREPARING)
+        with pytest.raises(TimeoutError):
+            await token.keep("claude_start", start(), 0.05, undo=undo)
+        assert events == ["start cancelled", "undone"]
+
+        events.clear()
+        outer = asyncio.ensure_future(_token(P.PREPARING).keep("claude_start", start(), 5, undo=undo))
+        await asyncio.sleep(0.05)
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        assert events == ["start cancelled", "undone"]  # nothing of the step runs on after the turn's task ended
+        await asyncio.sleep(0.3)
+        assert events == ["start cancelled", "undone"]
+
+        events.clear()
+        assert await _token(P.PREPARING).keep("claude_start", start(), 5, undo=undo) == "process"
+        assert events == ["started"]  # undone only when the turn gave it up
+
+    asyncio.run(run())
+
+
 def test_faults_hook_gets_the_step_name(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 

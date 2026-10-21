@@ -88,6 +88,7 @@ class Turn:
     state: TurnState = TurnState.ANSWERING
     # A resident runtime's turns share one bridge: a write call runs only when it matches a tool_use of this turn.
     require_match: bool = False
+    runtime: str | None = None  # the runtime that answers it (its type), once the Manager knows it
 
     @property
     def autonomous(self) -> bool:

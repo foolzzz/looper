@@ -37,6 +37,9 @@ class ManagerOps:
     def listing(self) -> list:
         return []
 
+    def binding_report(self) -> dict:
+        return {"enforced": False, "mismatches": 0, "by": []}
+
 
 @asynccontextmanager
 async def _server(tmp_path: Path, token: str | None = TOKEN) -> AsyncIterator[int]:

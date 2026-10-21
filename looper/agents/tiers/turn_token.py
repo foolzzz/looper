@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from ..ops import Turn
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 # Tests only: awaited with a step's name before the step runs, to stop the turn at that exact point.
 FAULTS: Callable[[str], Awaitable[None]] | None = None
@@ -134,14 +136,56 @@ class TurnToken:
         except TurnCancelled:
             raise TurnStopped() from None
 
-    async def keep(self, name: str, aw: Awaitable[T], timeout: float) -> T:
-        """Await ``aw`` to completion (bounded by ``timeout``), then look at the stop."""
+    async def keep(self, name: str, aw: Awaitable[T], timeout: float, *,
+                   undo: Callable[[], Awaitable[None]] | None = None) -> T:
+        """Await ``aw`` to completion (bounded by ``timeout``), then look at the stop: a stop never cuts it short.
+
+        The step stays the turn's: when the turn's task is cancelled (the Manager closes) or the step runs past
+        ``timeout``, it is cancelled and waited for, and ``undo`` reverts what it did (a started process is
+        ended), before the cancel or the ``TimeoutError`` propagates. Nothing of it runs on after the turn."""
         if FAULTS is not None:
             await FAULTS(name)
-        async with asyncio.timeout(timeout):
-            result = await asyncio.shield(aw)
+        task = asyncio.ensure_future(aw)
+        try:
+            async with asyncio.timeout(timeout):
+                result = await asyncio.shield(task)
+        except BaseException:
+            await _abandon(task, undo)
+            raise
         self.check()
         return result
+
+
+ABANDON_SEC = 10.0  # how long a step given up is waited for, once cancelled, and then its undo
+
+
+async def _abandon(task: asyncio.Future[Any], undo: Callable[[], Awaitable[None]] | None) -> None:
+    """Cancel ``task``, wait for it and run ``undo``, each bounded by ``ABANDON_SEC``; a cancel of the caller that
+    comes meanwhile (``cancel_and_wait`` cancels again) is held until both are done, then raised."""
+    cancelled = False
+
+    async def bounded(aw: Awaitable[Any]) -> None:
+        nonlocal cancelled
+        inner = asyncio.ensure_future(aw)
+        deadline = asyncio.get_running_loop().time() + ABANDON_SEC
+        while not inner.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                inner.cancel()
+                break
+            try:
+                await asyncio.wait({inner}, timeout=remaining)
+            except asyncio.CancelledError:
+                cancelled = True
+        if inner.done() and not inner.cancelled() and inner.exception() is not None:
+            logger.warning("an abandoned turn step failed: %r", inner.exception())
+
+    task.cancel()
+    await bounded(task)
+    if undo is not None:
+        await bounded(undo())
+    if cancelled:
+        raise asyncio.CancelledError()
 
 
 class TurnRegistry:

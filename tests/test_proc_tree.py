@@ -675,3 +675,69 @@ def test_turn_tree_end_returns_within_a_bound_when_the_agent_is_never_reaped() -
         sleeper.kill()
         sleeper.wait()
     assert took < proc_tree.REAP_SEC + proc_tree.TERM_GRACE_SEC + 1
+
+
+# A child of the agent's group, seen by a refresh, that then leaves the group (setsid) while its parent exits:
+# nothing but the snapshot (its pid and start time) links it to the turn any more.
+_LEAVES_THE_GROUP = (
+    "import os, time\n"
+    "open('child.pid', 'w').write(str(os.getpid()))\n"
+    "while not os.path.exists('setsid'):\n    time.sleep(0.01)\n"
+    "os.setsid()\nopen('moved', 'w').write('1')\ntime.sleep(60)\n"
+)
+_MIDDLE = (
+    "import os, subprocess, sys, time\n"
+    "subprocess.Popen([sys.executable, '-c', " + repr(_LEAVES_THE_GROUP) + "])\n"
+    "while not os.path.exists('moved'):\n    time.sleep(0.01)\n"
+)
+
+
+async def _child_that_leaves_its_group(tmp_path: Path, tree: proc_tree.TurnTree) -> int:
+    child = int(await _wait_file(tmp_path / "child.pid"))
+    await tree.refresh(force=True)  # seen while still in the agent's group
+    assert child in tree.seen and tree.seen[child] is not None
+    (tmp_path / "setsid").write_text("go")
+    await _wait_file(tmp_path / "moved")
+    await asyncio.sleep(0.3)  # the middle process has exited: the child is re-parented, in a group of its own
+    return child
+
+
+def test_turn_tree_end_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> None:
+    code = ("import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await _spawn_python(tmp_path, code)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        child = await _child_that_leaves_its_group(tmp_path, tree)
+        try:
+            await tree.end()
+            return _running([child])
+        finally:
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []
+
+
+def test_turn_tree_end_new_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> None:
+    code = ("import subprocess, sys\nsys.stdin.readline()\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
+
+    async def _run() -> tuple[list[int], list[int]]:
+        process = await _spawn_python(tmp_path, code)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree.baseline()
+        process.stdin.write(b"\n")  # type: ignore[union-attr]
+        child = await _child_that_leaves_its_group(tmp_path, tree)
+        try:
+            await tree.end_new()
+            return _running([child]), _running([process.pid], settle=0)
+        finally:
+            for pid in _running([child, process.pid], settle=0):
+                os.kill(pid, signal.SIGKILL)
+            await process.wait()
+
+    child_left, agent = asyncio.run(_run())
+    assert child_left == []
+    assert len(agent) == 1  # the agent survives end_new

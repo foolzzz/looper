@@ -244,3 +244,43 @@ def test_resident_expectation_is_consumed_once(agent_db: Any, monkeypatch: pytes
 
     answers, writes, _ = _resident(script)
     assert answers[0]["status"] == "ok" and answers[1]["error"]["code"] == "not_this_turn" and writes == [{"n": 1}]
+
+
+def test_resident_write_of_a_subagent_matches_its_streamed_tool_use(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A subagent's tool_use carries its parent's id: it is no reply text, and still a call of this turn.
+    from looper.agents.ops import service
+
+    monkeypatch.setattr(service, "MATCH_WAIT_SEC", 0.2)
+
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        nested = _tool_use("tu-sub", "mcp__looper__t_write", {"n": 3})
+        nested["parent_tool_use_id"] = "tu-task"
+        nested["message"]["content"].insert(0, {"type": "text", "text": "subagent's own words"})
+        await on_event(nested)
+        session.answers.append(await session.ops.call("t_write", {"n": 3}, binding=binding, call_id="tu-sub"))
+
+    answers, writes, _ = _resident(script)
+    assert answers[0]["status"] == "ok", answers
+    assert writes == [{"n": 3}]
+
+
+@pytest.mark.parametrize("tool_input", [
+    {"tool_name": "looper__t_write", "tool_input": {"n": 4}},
+    {"tool_name": "looper__t_write", "tool_input": json.dumps({"n": 4})},
+    {"tool_name": "mcp__looper__t_write", "tool_input": {"n": 4}},
+])
+def test_resident_grok_use_tool_matches_the_inner_tool_and_arguments(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch, tool_input: dict[str, Any]) -> None:
+    # Grok ACP calls Looper's tools through its use_tool meta-tool; its MCP call carries no call id.
+    from looper.agents.ops import service
+
+    monkeypatch.setattr(service, "MATCH_WAIT_SEC", 0.2)
+
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        await on_event(_tool_use("acp-1", "use_tool", tool_input))
+        session.answers.append(await session.ops.call("t_write", {"n": 4}, binding=binding))
+
+    answers, writes, _ = _resident(script)
+    assert answers[0]["status"] == "ok", answers
+    assert writes == [{"n": 4}]

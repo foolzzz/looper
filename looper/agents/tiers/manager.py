@@ -31,6 +31,7 @@ The Manager is the only agent that communicates with users. It:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -352,6 +353,30 @@ def channel_line(envelope: MessageEnvelope) -> str:
     else:
         where = CHANNEL_NAMES.get(channel, f"the {channel} channel")
     return f"Channel: {where}"
+
+
+# How a runtime names one of Looper's tools: Claude Code ``mcp__looper__<tool>``, Grok ``looper__<tool>``.
+_LOOPER_TOOL_PREFIXES = ("mcp__looper__", "looper__")
+# Grok's meta-tool that calls an MCP server's tool: ``{"tool_name": "<server>__<tool>", "tool_input": {...}}``.
+_USE_TOOL = "use_tool"
+
+
+def _looper_call(name: Any, raw: Any) -> tuple[str, dict[str, Any]]:
+    """The Looper tool a streamed tool_use calls, and its arguments, as the bridge's call names them: the prefix
+    taken off, and a Grok ``use_tool`` unwrapped to the tool and the arguments inside it."""
+    name, arguments = str(name or ""), raw if isinstance(raw, dict) else {}
+    if name == _USE_TOOL and isinstance(arguments.get("tool_name"), str):
+        name, inner = arguments["tool_name"], arguments.get("tool_input")
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner) if inner.strip() else {}
+            except ValueError:
+                inner = None
+        arguments = inner if isinstance(inner, dict) else {}
+    for prefix in _LOOPER_TOOL_PREFIXES:
+        if name.startswith(prefix):
+            return name.removeprefix(prefix), arguments
+    return name, arguments
 
 
 def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
@@ -876,6 +901,8 @@ class ManagerAgent:
         library = await token.step("library", load_installed(self._runtime_root, AgentType.MANAGER.value))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        if ask.turn is not None:
+            ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
@@ -941,7 +968,8 @@ class ManagerAgent:
                         command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                         totals=self._session_totals if run.resuming else None,
                         autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
-                        price=launch.price), 30)
+                        price=launch.price), 30,
+                        undo=lambda: self._claude.stop(kill=True))  # given up (closed, timed out): no process
                 except TurnStopped:
                     self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
                     raise
@@ -1205,7 +1233,7 @@ class ManagerAgent:
                         streamed_partials = True
                         await self._send_status(context_envelope, chunk, delta=True)
 
-            elif event_type == "assistant" and top_level:
+            elif event_type == "assistant":
                 msg = payload.get("message")
                 if isinstance(msg, dict):
                     content_blocks = msg.get("content", [])
@@ -1213,6 +1241,13 @@ class ManagerAgent:
                         if not isinstance(block, dict):
                             continue
                         block_type = block.get("type", "")
+                        if block_type == "tool_use" and self.ops is not None:
+                            # Every tool call of the turn may come to the bridge, a subagent's too: each is
+                            # expected, though only the Manager's own blocks are shown.
+                            bare, arguments = _looper_call(block.get("name"), block.get("input"))
+                            self.ops.expect(token.binding, bare, arguments, call_id=block.get("id"))
+                        if not top_level:
+                            continue
                         if block_type == "text":
                             chunk = str(block.get("text") or "")
                             if chunk:
@@ -1221,11 +1256,6 @@ class ManagerAgent:
                                     await self._send_status(context_envelope, chunk, delta=True)
                         elif block_type == "tool_use":
                             tool_name = block.get("name", "tool")
-                            if self.ops is not None:
-                                bare = str(tool_name).removeprefix("mcp__looper__")
-                                raw_input = block.get("input")
-                                self.ops.expect(token.binding, bare, raw_input if isinstance(raw_input, dict) else {},
-                                                call_id=block.get("id"))
                             await self._send_status(
                                 context_envelope,
                                 f"正在使用工具: {tool_name}",

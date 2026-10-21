@@ -1004,3 +1004,49 @@ def test_a_stop_with_no_usage_reported_is_incomplete(agent_db: Any) -> None:
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+class _SlowStart(_Session):
+    """Its start spawns a real process after a while, and its stop kills it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.process: asyncio.subprocess.Process | None = None
+        self.starting = asyncio.Event()
+        self.spawned: list[asyncio.subprocess.Process] = []
+
+    async def start(self, command: list[str], **kwargs: Any) -> None:
+        self.starting.set()
+        await asyncio.sleep(0.3)  # the Manager is closed meanwhile
+        self.process = await asyncio.create_subprocess_exec("/bin/sleep", "60")
+        self.spawned.append(self.process)
+        self.started, self.command = True, command
+
+    async def stop(self, *, kill: bool = False) -> None:
+        process, self.process, self.started = self.process, None, False
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+def test_closing_the_manager_while_the_runtime_starts_leaves_no_process(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _SlowStart()
+            manager, bus, _ = _manager(Path(tmp), session)
+            manager._running = True
+            manager._task = asyncio.create_task(manager._handle(_web("你好")))
+            await _until(session.starting.is_set)
+            await manager.stop()
+            await asyncio.sleep(0.6)  # long enough for an abandoned start to have spawned its process
+            try:
+                assert all(p.returncode is not None for p in session.spawned), "a process outlived the close"
+                assert not session.started
+            finally:
+                for process in session.spawned:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
+            await bus.shutdown()
+
+    asyncio.run(run())

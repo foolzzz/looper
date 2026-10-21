@@ -476,6 +476,9 @@ for raw in sys.stdin:
             f.write(str(sleeper.pid))
         out({'type': 'stream_event', 'event': {'type': 'content_block_delta',
              'delta': {'type': 'text_delta', 'text': 'working'}}})
+        if os.environ.get('ANSWER'):  # answers, leaving its background tool running
+            out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done', 'session_id': 's1',
+                 'total_cost_usd': 0.02, 'num_turns': 1})
         continue
     out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'pid=%d' % os.getpid(),
          'total_cost_usd': 0.03, 'session_id': 's1', 'num_turns': 1})
@@ -648,6 +651,39 @@ def test_a_result_queued_behind_the_control_request_is_not_an_answer(
             assert turn.stopped is StopMethod.CONTROL
             assert turn.result_event is not None and turn.result_event["result"] == "an answer"
             assert not any(e.get("type") == "result" for e in seen)
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_a_stop_between_the_result_and_the_return_still_ends_the_turns_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The result is dispatched (the output forgets the turn) and run_turn has not yet returned: the stop is the
+    # turn's, its background tool is ended, and the process stays.
+    session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1", ANSWER="1")
+
+    async def _run() -> None:
+        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
+        pid = session.pid
+        cancel = TurnCancel()
+
+        async def on_event(event: dict[str, Any]) -> None:
+            if event.get("type") == "result":
+                asyncio.get_running_loop().call_soon(cancel.request)  # right after the dispatch clears the turn
+
+        try:
+            turn = await asyncio.wait_for(session.run_turn("work", on_event, cancel=cancel), 5)
+            sleeper = await _until_sleeper(tmp_path)
+            assert cancel.requested
+            assert turn.stopped is StopMethod.CONTROL and turn.usage_complete  # a whole turn's result
+            assert turn.result_event is not None and turn.result_event["result"] == "done"
+            assert _gone(sleeper)
+            assert session.started and session.pid == pid
+            assert session._user_turn is None and session._interrupting is None
+            inbox = (tmp_path / "inbox").read_text()
+            assert "control_request" not in inbox  # nothing left to interrupt: only the turn's tools are ended
         finally:
             await session.stop(kill=True)
 

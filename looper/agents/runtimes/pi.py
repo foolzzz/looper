@@ -103,7 +103,8 @@ _PI_DIRS = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
 _PI_SHELL_METADATA = ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL")
 BRIDGE_URL_ENV = "LOOPER_AGENT_URL"
 BRIDGE_TOKEN_ENV = "LOOPER_AGENT_TOKEN"
-_PLATFORM_ENV = (BRIDGE_URL_ENV, BRIDGE_TOKEN_ENV, "LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN", KEY_ENV)
+BRIDGE_TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"  # the Manager's binding file: which turn a call belongs to
+_PLATFORM_ENV = (BRIDGE_URL_ENV, BRIDGE_TOKEN_ENV, BRIDGE_TURN_FILE_ENV, "LOOPER_PI_AGENT_URL", "LOOPER_PI_AGENT_TOKEN", KEY_ENV)
 _ISOLATION_FLAGS = (
     "--offline", "--no-approve", "--no-context-files", "--no-extensions", "--no-mcp",
     "--no-skills", "--no-prompt-templates", "--no-themes",
@@ -809,7 +810,13 @@ def bridge_env(library: AgentLibrary) -> dict[str, str]:
         raise RuntimeUnsupported("pi's looper MCP env requires a valid HTTP(S) LOOPER_AGENT_URL")
     if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
         raise RuntimeUnsupported("pi's looper MCP env requires a valid Bearer LOOPER_AGENT_TOKEN")
-    return {BRIDGE_URL_ENV: url, BRIDGE_TOKEN_ENV: token}
+    bound = {BRIDGE_URL_ENV: url, BRIDGE_TOKEN_ENV: token}
+    turn_file = env.get(BRIDGE_TURN_FILE_ENV)
+    if turn_file is not None:
+        if not (isinstance(turn_file, str) and Path(turn_file).is_absolute() and turn_file.isprintable()):
+            raise RuntimeUnsupported("pi's looper MCP env requires an absolute LOOPER_AGENT_TURN_FILE")
+        bound[BRIDGE_TURN_FILE_ENV] = turn_file
+    return bound
 
 
 def _isolated_env(visible: Mapping[str, str]) -> dict[str, str]:

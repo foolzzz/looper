@@ -491,18 +491,44 @@ class TurnTree:
             return frozenset()
         return frozenset(pid for pid, started in known.items() if pid in current and current[pid] != started)
 
+    async def begin_end(self) -> None:
+        """Refresh and record the tree before the agent is asked to exit on its own: its record (what the next
+        start's ``sweep`` ends) stays until ``end`` finishes, though the agent exits first."""
+        await self.refresh(force=True)
+        if self.process.pid in _recorded:
+            _ending.add(self.process.pid)
+            await _record_tree(self.process.pid, dict(self._groups))
+
+    async def _strays(self, exclude: frozenset[int]) -> list[_Orphan]:
+        """The seen processes the tree no longer reaches (one that left its group, setsid, once its parent exited):
+        each still running with the start time the snapshot read, so a reused pid is never among them."""
+        reached = _tree(self.process, await asyncio.to_thread(_snapshot), self._groups)
+        known = {pid: started for pid, started in self.seen.items()
+                 if started is not None and pid not in reached and pid not in exclude and pid != self.process.pid}
+        current = await asyncio.to_thread(_start_times, known) or {}
+        return [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
+
+    async def _end_all(self, exclude: frozenset[int]) -> None:
+        """End the tree, and beside it (not delaying its first signal) the seen processes it no longer reaches."""
+        async def end_strays() -> None:
+            strays = await self._strays(exclude)
+            await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude)
+                                   for stray in strays))
+
+        await asyncio.gather(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude),
+                             end_strays())
+
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, then reap the agent."""
         await self.stop_ticker()
         await self.refresh(force=True)
-        await _end(self.process, label=self.label, known=dict(self._groups), exclude=await self._reused())
+        await self._end_all(await self._reused())
         await _reap(self.process, self.label)
 
     async def end_new(self) -> None:
         """End the members that are not in the baseline; the agent and the baseline members survive."""
         await self.refresh(force=True)
-        exclude = self._baseline | {self.process.pid} | await self._reused()
-        await _end(self.process, label=self.label, known=dict(self._groups), exclude=frozenset(exclude))
+        await self._end_all(frozenset(self._baseline | {self.process.pid} | await self._reused()))
 
 
 def track(process: Any, *, label: str = "agent") -> TurnTree:

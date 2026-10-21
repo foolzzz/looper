@@ -550,6 +550,7 @@ class _UserTurn:
     stop: Callable[[], CapStop | None] | None = None  # asked after each event: end the turn at its soft cap?
     capped: CapStop | None = None  # the turn was ended at its soft cap
     stopping: bool = False  # the user's stop was asked of Claude; its next result ends the turn
+    answered: bool = False  # its result had come when the stop was asked: that result is a whole turn's
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
@@ -892,7 +893,7 @@ class ResidentClaude:
             # Claude's result for an interrupted turn reports no spend for the request it aborted; a result queued
             # right behind the request is no answer either.
             return ResidentTurn(result_event, session_started=turn.session_started, usage=turn.usage,
-                                stopped=StopMethod.CONTROL, usage_complete=False, prompt_sent=sent)
+                                stopped=StopMethod.CONTROL, usage_complete=turn.answered, prompt_sent=sent)
         if method is not None:
             self._totals = self._totals.plus(turn.usage)
             return ResidentTurn(user_stop_result(), session_started=turn.session_started, usage=turn.usage,
@@ -935,12 +936,12 @@ class ResidentClaude:
         return own
 
     def _on_stop(self) -> None:
-        """The running turn's cancel was requested: interrupt it (once)."""
-        output, process = self._output, self._process
-        turn = output.turn if output is not None else None
-        if turn is None or turn.stopping or self._interrupting is not None or process is None or process.stdin is None:
+        """The running turn's cancel was requested: interrupt it (once). The turn is ``run_turn``'s until it returns,
+        also once its result was dispatched (the output has forgotten it by then)."""
+        output, process, turn = self._output, self._process, self._user_turn
+        if (turn is None or turn.stopping or self._interrupting is not None or output is None or process is None
+                or process.stdin is None):
             return
-        assert output is not None
         turn.stopping = True
         self._interrupting = asyncio.ensure_future(self._interrupt_turn(turn, process, output))
 
@@ -954,18 +955,19 @@ class ResidentClaude:
         from .runtimes import StopMethod
 
         assert process.stdin is not None
+        if (turn.done.done() and not turn.done.cancelled() and turn.done.exception() is None
+                and turn.done.result() is not None):
+            # Its result came before the stop: nothing is left to interrupt but what the turn started.
+            turn.answered = True
+            await self._end_turn_processes()
+            return StopMethod.CONTROL
         try:
             async with asyncio.timeout(INTERRUPT_GRACE_SEC):  # the write, the drain and the wait share one grace
                 write_control(process.stdin, {"subtype": "interrupt"})
                 await process.stdin.drain()
                 await asyncio.wait({turn.done})
             if not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
-                if self._tree is not None:
-                    try:
-                        await self._tree.end_new()
-                    except Exception:
-                        logger.warning("%s: could not end the interrupted turn's processes", self._label,
-                                       exc_info=True)
+                await self._end_turn_processes()
                 return StopMethod.CONTROL
         except (BrokenPipeError, ConnectionResetError):
             logger.warning("%s: Claude closed stdin before the interrupt was sent", self._label)
@@ -975,6 +977,15 @@ class ResidentClaude:
             output.discard = True
             await self.stop(kill=True)
         return StopMethod.KILL
+
+    async def _end_turn_processes(self) -> None:
+        """End every process the stopped turn started (background tools too); the process and its MCP servers stay."""
+        if self._tree is None:
+            return
+        try:
+            await self._tree.end_new()
+        except Exception:
+            logger.warning("%s: could not end the interrupted turn's processes", self._label, exc_info=True)
 
     async def interrupt(self) -> StopMethod | None:
         """Request the running user turn's cancel and wait for its stop: ``CONTROL`` or ``KILL`` (see ``run_turn``).
@@ -1009,9 +1020,10 @@ class ResidentClaude:
             output.drop_turn()
         try:
             if tree is not None and process.returncode is None:
-                # What Claude started since the last tick, before its stdin closes and it exits.
+                # What Claude started since the last tick, before its stdin closes and it exits; recorded when it
+                # is let exit on its own, so a server that dies meanwhile has the rest ended at its next start.
                 with contextlib.suppress(Exception):
-                    await tree.refresh(force=True)
+                    await (tree.refresh(force=True) if kill else tree.begin_end())
             if process.stdin is not None and not process.stdin.is_closing():
                 process.stdin.close()
             if process.returncode is None and not kill:

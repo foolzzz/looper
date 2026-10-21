@@ -44,7 +44,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from ... import child_env
+from .. import chat_settings
 from ...db import manager_actions as db_actions
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
@@ -142,6 +143,10 @@ class ManagerOps:
         # Per binding, the tool calls its turn's stream showed and no call has claimed yet: (call id, tool, args).
         self._expected: dict[str, list[tuple[str | None, str, str]]] = {}
         self._expected_event: dict[str, asyncio.Event] = {}
+        # The calls whose binding disagreed with how Looper placed them, per (reason, runtime, tool): what
+        # observe-only shows before the binding is enforced (``binding_report``).
+        self._mismatches: Counter[tuple[str, str, str]] = Counter()
+        self._observing: set[asyncio.Task[None]] = set()
 
     @property
     def platform(self) -> Platform:
@@ -203,8 +208,13 @@ class ManagerOps:
 
     async def call(self, name: str, raw: Any, *, binding: str | None = None,
                     call_id: str | None = None) -> dict[str, Any]:
-        """Run one tool call in the turn its ``binding`` names; the protocol's answer. No binding, or one unknown,
-        is Claude's own turn: it only reads."""
+        """Run one tool call; the protocol's answer.
+
+        With stop enabled (``chat.stop_enabled``) the binding is enforced: the call runs in the turn its
+        ``binding`` names (no binding, or one unknown, is Claude's own turn: it only reads), and a resident
+        runtime's write call runs only when it matches a tool_use of that turn's stream. Off (the default), the
+        binding only observes: the call runs in the turn running when it comes, as it did before turns were bound,
+        and each disagreement is logged and counted (``binding_report``), never refused."""
         tool = self._tools.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
@@ -213,16 +223,23 @@ class ManagerOps:
                 return _error(ErrorCode.FORBIDDEN, f"{name} is a tool of a task's Planner, for its own task; the "
                                                    f"Manager's tools are: {', '.join(self._tools)}")
             return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._tools)}")
-        turn = self._bindings.get(binding) if binding else None
-        turn = turn or Turn(channel=None, chat=None)
+        enforced = chat_settings.stop_enabled()
+        bound = self._bindings.get(binding) if binding else None
+        self._observe_turn(name, binding, bound, enforced=enforced)
+        turn = (bound if enforced else self._turn) or Turn(channel=None, chat=None)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
             arguments = check_arguments(tool.schema, raw)
             risk = tool.risk_of(arguments)
             _check_answering(turn)
-            if turn.require_match and binding and (risk is not Risk.READ or tool.name == CONFIRM_TOOL):
-                if not await self._matched(binding, tool.name, arguments, call_id):
+            matched_turn = turn if enforced else bound
+            if (matched_turn is not None and matched_turn.require_match and binding
+                    and (risk is not Risk.READ or tool.name == CONFIRM_TOOL)):
+                if not enforced:
+                    self._observe_match(binding, tool.name, arguments, call_id, matched_turn)
+                elif not await self._matched(binding, tool.name, arguments, call_id):
+                    self._mismatch("not_this_turn", turn, tool.name, enforced=True)
                     raise OpError(ErrorCode.NOT_THIS_TURN, "this call was not made in the running turn; it did not run")
                 _check_answering(turn)
             if tool.name == CONFIRM_TOOL:
@@ -358,6 +375,47 @@ class ManagerOps:
                 await asyncio.wait_for(event.wait(), remaining)
             except asyncio.TimeoutError:
                 return self._take(binding, tool, arguments, call_id)
+
+    # --- Observe-only binding (stop off) ---
+
+    def _observe_turn(self, tool: str, binding: str | None, bound: Turn | None, *, enforced: bool) -> None:
+        """Count a call whose binding names another turn than the one running when it came (which it runs in
+        while the binding only observes)."""
+        running = self._turn
+        if binding is None:
+            if running is not None:
+                self._mismatch("no_binding", running, tool, enforced=enforced)
+        elif bound is None:
+            self._mismatch("unknown_binding", running, tool, enforced=enforced)
+        elif bound is not running:
+            self._mismatch("other_turn", bound, tool, enforced=enforced)
+
+    def _observe_match(self, binding: str, tool: str, arguments: Mapping[str, Any], call_id: str | None,
+                       turn: Turn) -> None:
+        """Look for the call's tool_use as enforcement would (waiting for it), beside the call: it runs meanwhile."""
+        async def look() -> None:
+            if not await self._matched(binding, tool, arguments, call_id):
+                self._mismatch("not_this_turn", turn, tool)
+
+        task = asyncio.get_running_loop().create_task(look())
+        self._observing.add(task)
+        task.add_done_callback(self._observing.discard)
+
+    def _mismatch(self, reason: str, turn: Turn | None, tool: str, *, enforced: bool = False) -> None:
+        runtime = (turn.runtime if turn is not None else None) or "unknown"
+        self._mismatches[(reason, runtime, tool)] += 1
+        logger.warning(
+            "turn binding mismatch (%s): reason=%s runtime=%s tool=%s message=%s total=%d",
+            "enforced" if enforced else "observe-only, the call runs", reason, runtime, tool,
+            turn.message_id if turn is not None else None, sum(self._mismatches.values()),
+            extra={"binding_mismatch": {"reason": reason, "runtime": runtime, "tool": tool,
+                                        "enforced": enforced}})
+
+    def binding_report(self) -> dict[str, Any]:
+        """Whether the binding is enforced, and the mismatches counted since the server started."""
+        return {"enforced": chat_settings.stop_enabled(), "mismatches": sum(self._mismatches.values()),
+                "by": [{"reason": reason, "runtime": runtime, "tool": tool, "count": count}
+                       for (reason, runtime, tool), count in sorted(self._mismatches.items())]}
 
     def publish_binding(self, binding: str | None) -> None:
         """Write the binding file the MCP bridge reads at each call (synchronously and atomically: it must be on
