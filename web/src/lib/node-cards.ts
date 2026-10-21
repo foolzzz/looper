@@ -6,7 +6,10 @@ import { waitCheckText } from "@/lib/waits";
 import { MERGE_ERRORS, shortCommit, workspaceState } from "@/lib/workspaces";
 import {
   reviewingRole,
+  runProfile,
   type GateAgendaItem,
+  type LlmRecord,
+  type TaskRole,
   type RoomStepCounts,
   type StepWorkspace,
   type TaskDetail,
@@ -14,6 +17,22 @@ import {
   type UserGate,
   type TaskWait,
 } from "@/lib/api";
+
+/** The task's runs by role, as `GET /api/llm-records` answers for each. */
+export type TaskRuns = Record<TaskRole, LlmRecord[]>;
+
+/** The runtime, model and effort of the latest of `records` (of one step, when `stepId` is given), or undefined
+ * when none ran. */
+function agentFact(records: LlmRecord[] | undefined, stepId?: string): CardFact | undefined {
+  const latest = (records ?? [])
+    .filter((r) => stepId === undefined || r.metadata?.step_id === stepId)
+    .reduce<LlmRecord | undefined>(
+      (best, r) => (!best || (r.created_at.localeCompare(best.created_at) || r.id - best.id) > 0 ? r : best), undefined);
+  if (!latest) return undefined;
+  const choice = latest.metadata?.model_choice;
+  const parts = [runProfile(latest)?.runtime.name, latest.model || choice?.model, choice?.effort].filter(Boolean);
+  return parts.length ? { label: "Agent", value: parts.join(" · ") } : undefined;
+}
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
 export interface CardLook {
@@ -179,11 +198,13 @@ export interface StepCardContext {
   room?: RoomStepCounts;
   /** The step's worktrees, oldest first, when it had any. */
   workspaces?: StepWorkspace[];
+  /** The task's runs, for the runtime and model each role ran on. */
+  runs?: TaskRuns;
 }
 
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
 export function stepCard(
-  step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces, room }: StepCardContext,
+  step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces, room, runs }: StepCardContext,
 ): NodeCard {
   const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   const span = stepSpan(step, active);
@@ -203,7 +224,9 @@ export function stepCard(
         : []),
       ...facts("Runs", [
         step.worker_id && { label: "Worker", value: step.worker_id, href: historyHref(step.worker_id, taskId) },
+        step.worker_id && agentFact(runs?.worker, step.id),
         step.reviewer_id && { label: "Reviewer", value: step.reviewer_id, href: historyHref(step.reviewer_id, taskId) },
+        step.reviewer_id && agentFact(runs?.reviewer, step.id),
         step.retries > 0 && { label: "Retries", value: String(step.retries) },
         step.review && { label: "Review", value: "Needs a passing review" },
         step.status === "completed" && step.review_stage && {
@@ -297,7 +320,7 @@ export function gateCard(
 }
 
 /** The Planner's card: its agent, the plan's size and its latest progress note. */
-export function plannerCard(task: TaskDetail, look: CardLook): NodeCard {
+export function plannerCard(task: TaskDetail, look: CardLook, runs?: TaskRuns): NodeCard {
   const note = task.progress?.[0];
   const steps = task.steps ?? [];
   const dropped = steps.filter((s) => s.status === "skipped").length;
@@ -309,6 +332,7 @@ export function plannerCard(task: TaskDetail, look: CardLook): NodeCard {
     sections: [
       ...facts("Runs", [
         task.planner_id && { label: "Planner", value: task.planner_id, href: historyHref(task.planner_id, task.task_id) },
+        task.planner_id && agentFact(runs?.planner),
         steps.length > 0 && {
           label: "Plan",
           value: `${planned} step${planned === 1 ? "" : "s"}${dropped ? `, ${dropped} dropped` : ""}`,

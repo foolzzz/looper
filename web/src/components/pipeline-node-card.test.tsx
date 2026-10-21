@@ -16,6 +16,14 @@ const card: NodeCard = {
 };
 
 describe("NodeCardView", () => {
+  it("draws an Agent fact with the runtime and model", () => {
+    const result = renderToStaticMarkup(<NodeCardView card={{ ...card, sections: [
+      { kind: "facts", title: "Runs", facts: [{ label: "Agent", value: "Codex · gpt-5 · high" }] },
+    ] }} />);
+    expect(result).toContain("Agent");
+    expect(result).toContain("Codex · gpt-5 · high");
+  });
+
   it("draws the task's result as Markdown, and a failure's title in the destructive color", () => {
     const result = renderToStaticMarkup(<NodeCardView card={{ ...card, sections: [
       { kind: "text", title: "Error", text: "## Why it ended\nthe step cannot be done", markdown: true, tone: "destructive" },
