@@ -21,7 +21,7 @@ from fake_grok_acp import FAKE_ACP
 from looper.agents.agent_settings import AgentType
 from looper.agents.claude_cli import CapStop
 from looper.agents.run_usage import Usage
-from looper.agents.runtimes import ResidentTransport, adapter
+from looper.agents.runtimes import ResidentTransport, StopMethod, adapter
 from looper.agents.runtimes import grok_acp
 from looper.agents.runtimes.grok import GrokRuntime
 from looper.agents.runtimes.grok_acp import (
@@ -329,6 +329,71 @@ def test_a_turn_over_max_turns_is_cancelled_with_a_max_turns_result(
     # Grok got the cancel and answered it (it logs a cancel it received, then ends the prompt as cancelled).
     assert (root / ".local" / "grok" / "cancels.log").read_text() == "cancel\n"
     assert turn.result_event["stop_reason"] == "max_turns"
+
+
+def test_interrupt_cancels_the_prompt_and_the_next_turn_uses_the_same_session_and_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        idle = await session.interrupt()
+        waiting = asyncio.Event()
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+            if event["type"] == "system":
+                waiting.set()
+
+        task = asyncio.create_task(session.run_turn("HANG", on_event))
+        await waiting.wait()
+        before = session.pid
+        method = await session.interrupt()
+        stopped = await task
+        (after,) = await _turns(session, "next")
+        pids, stale = [before, session.pid], session.stale("s")
+        await session.stop()
+        return idle, method, stopped, after, pids, stale, seen
+
+    idle, method, stopped, after, pids, stale, seen = _go(_run())
+    assert idle is None and method is StopMethod.CANCEL and stopped.stopped is StopMethod.CANCEL
+    assert stopped.usage.output_tokens == 3  # the fake's usage for the cancelled prompt
+    assert seen[-1]["type"] == "result" and seen[-1]["stop_reason"] == "cancelled"
+    assert after.stopped is None and after.result_event["result"].endswith("| next | turn 2")
+    assert pids[0] == pids[1] and len(_acp_runs(root)) == 1 and not stale
+    assert after.result_event["session_id"] == stopped.result_event["session_id"]
+
+
+def test_interrupt_of_a_grok_that_ignores_the_cancel_ends_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    monkeypatch.setattr(grok_acp, "CANCEL_GRACE_SEC", 0.5)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        waiting = asyncio.Event()
+
+        async def on_event(event: dict[str, Any]) -> None:
+            waiting.set()
+
+        task = asyncio.create_task(session.run_turn("DEAF", on_event))
+        await waiting.wait()
+        method = await session.interrupt()
+        stopped = await task
+        stale = session.stale("s")
+        await session.stop()
+        return method, stopped, stale
+
+    method, stopped, stale = _go(_run())
+    assert method is StopMethod.KILL and stopped.stopped is StopMethod.KILL and stale
+    assert stopped.result_event is not None and stopped.result_event.get("looper_user_stop") is True
 
 
 def test_a_cancel_that_cannot_be_written_is_bounded_and_ends_the_process(

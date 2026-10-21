@@ -19,7 +19,8 @@ the session with ``--resume``:
 - **Cancelling** is ``session/cancel``: the turn ends with ``stopReason: cancelled`` within a fraction of a second,
   the tool commands it was running are ended, and the session stays usable. A turn given up (cancellation, a soft
   cap, ``--max-turns``) is cancelled this way; a process that does not answer in ``CANCEL_GRACE_SEC`` is ended
-  through ``proc_tree``.
+  through ``proc_tree``. The user's stop of a turn (``interrupt``) is the same cancel: ``StopMethod.CANCEL`` when
+  Grok ends the turn in time, ``KILL`` when its process had to be ended.
 - **Falling back**: when Grok cannot serve the session over ACP (no ``agent stdio``, no ``initialize`` answer, no
   ``loadSession`` for a saved session, a flag with no ACP form) the session runs per turn (``ResidentGrok``), which
   keeps its sessions in the same home. A process that dies mid-turn is a turn without a result, as for the per-turn
@@ -49,6 +50,7 @@ from .per_turn import session_dir_name, stderr_tail
 if TYPE_CHECKING:
     from ..claude_cli import CapStop, ResidentTurn
     from ..run_usage import Price
+    from . import StopMethod
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,7 @@ _STOP_ERRORS = {"cancelled": "the turn was cancelled", "max_tokens": "the model 
                 "max_turn_requests": "the turn went over its model request limit",
                 "refusal": "the model refused the request"}
 # Notifications that carry the turn's content.
+_USER_STOP: dict[str, Any] = {"looper": "user stop"}  # what ``interrupt`` puts in the inbox for the turn to see
 _UPDATE = "session/update"
 _EXTENSION = "_x.ai/session_notification"
 
@@ -369,6 +372,7 @@ class AcpGrok:
         self._inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self._requests = 0
         self._prompt_id: int | None = None
+        self._stop_ended: asyncio.Future[Any] | None = None  # set by ``interrupt``: how the turn's stop ended
         self._active = False  # the process holds the session
         self._can_load = False
         self._new_session = False
@@ -660,7 +664,8 @@ class AcpGrok:
         self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]],
         stop: Callable[[], CapStop | None] | None,
     ) -> ResidentTurn:
-        from ..claude_cli import ResidentTurn
+        from ..claude_cli import ResidentTurn, user_stop_result
+        from . import StopMethod
 
         assert self._session is not None and self._launch is not None
         session, new = self._session, self._new_session
@@ -672,6 +677,7 @@ class AcpGrok:
         self._prompt_id = self._requests
         reason: str | None = None  # why Looper ended the turn
         capped: CapStop | None = None
+        user_stopped = False  # the user's stop (``interrupt``) ended the turn
         response: dict[str, Any] | None = None
         try:
             await self._send({"id": self._prompt_id, "method": "session/prompt",
@@ -681,6 +687,10 @@ class AcpGrok:
                 message = await self._inbox.get()
                 if message is None:
                     break  # the process ended before it answered
+                if message is _USER_STOP:
+                    user_stopped = True
+                    response = await self._cancel(session)
+                    break
                 if message.get("method") is None:
                     response = message
                     break
@@ -698,8 +708,15 @@ class AcpGrok:
             raise
         finally:
             self._prompt_id = None
+            waiting, self._stop_ended = self._stop_ended, None
+            if waiting is not None and not waiting.done():
+                waiting.set_result(StopMethod.KILL if response is None and user_stopped else StopMethod.CANCEL)
         if response is None:  # the process died mid-turn
-            return ResidentTurn(None, await self._lost(), session_started=True, usage=self._turn_usage(None))
+            code = await self._lost()
+            if user_stopped:
+                return ResidentTurn(user_stop_result(), code, session_started=True, usage=self._turn_usage(None),
+                                    stopped=StopMethod.KILL)
+            return ResidentTurn(None, code, session_started=True, usage=self._turn_usage(None))
         elapsed = int((time.monotonic() - started) * 1000)
         events = turn.finish(response, duration_ms=elapsed, stop="max_turns" if reason == "max_turns" else None)
         for event in events[:-1]:
@@ -712,7 +729,21 @@ class AcpGrok:
             self._totals = self._totals.plus(capped.usage)
             return ResidentTurn(capped.result_event, session_started=True, usage=capped.usage)
         await on_event(result)
-        return ResidentTurn(result, session_started=True, usage=self._turn_usage(result))
+        return ResidentTurn(result, session_started=True, usage=self._turn_usage(result),
+                            stopped=StopMethod.CANCEL if user_stopped else None)
+
+    async def interrupt(self) -> StopMethod | None:
+        """End the running prompt with ``session/cancel``: ``CANCEL`` when Grok answers within ``CANCEL_GRACE_SEC``
+        (the process and the session stay), ``KILL`` when its process had to be ended (the turn returns
+        ``user_stop_result``). None when no prompt is in flight."""
+        if self._fallback:
+            return await self._legacy.interrupt()
+        if self._prompt_id is None or self._stop_ended is not None:
+            return None
+        waiting: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._stop_ended = waiting
+        self._inbox.put_nowait(_USER_STOP)
+        return await asyncio.shield(waiting)
 
     def _turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         own = run_usage(result_event, price=self._price)

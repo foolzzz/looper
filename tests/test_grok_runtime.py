@@ -31,7 +31,7 @@ from looper.agents.profile_registry import (
 )
 from looper.agents.run_usage import Usage, request_context, run_usage
 from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, VendorType, adapter, grok_login
-from looper.agents.runtimes import CostSource, ReadOnly
+from looper.agents.runtimes import CostSource, ReadOnly, StopMethod
 from looper.agents.runtimes.grok import (
     COMPAT_VARS, DIRECTORY_VARS, RESTORED_VARS, RULES_FILE, GrokRuntime, GrokStream, ResidentGrok, write_home,
 )
@@ -633,6 +633,9 @@ text = f'{prompt} | {message} | turn {turns}'
 def emit(event):
     print(json.dumps(event), flush=True)
 emit({'type': 'system', 'subtype': 'init', 'session_id': session, 'model': 'grok-4.7', 'cwd': os.getcwd()})
+if 'HANG' in message:
+    import time
+    time.sleep(60)
 emit({'type': 'assistant', 'session_id': session, 'parent_tool_use_id': None, 'message': {
     'role': 'assistant', 'model': 'grok-4.7', 'content': [{'type': 'text', 'text': text}], 'usage': usage}})
 emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text, 'session_id': session,
@@ -709,6 +712,38 @@ def test_a_new_session_removes_the_owners_earlier_ones(tmp_path: Path) -> None:
     asyncio.run(_run())
     (group,) = (root / ".local" / "grok" / "sessions" / "manager" / "sessions").iterdir()
     assert [p.name for p in group.iterdir()] == ["0199a000-0000-7000-8000-000000000002"]
+
+
+def test_the_per_turn_session_interrupts_by_killing_the_turn_and_keeps_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    root = tmp_path / "runtime"
+    grok = fake_claude(tmp_path / "grok", _FAKE_GROK)
+
+    async def _run() -> tuple[Any, Any, Any, Any]:
+        session = ResidentGrok(label="manager")
+        await session.start(_resident_command(root, grok, "p"), cwd=str(tmp_path), signature="s",
+                            env=_launch().environment())
+        idle = await session.interrupt()
+        waiting = asyncio.Event()
+
+        async def on_event(event: dict[str, Any]) -> None:
+            waiting.set()
+
+        task = asyncio.create_task(session.run_turn("HANG", on_event))
+        await waiting.wait()
+        method = await session.interrupt()
+        stopped = await task
+        after = await session.run_turn("next", lambda event: asyncio.sleep(0))
+        stale = session.stale("s")
+        await session.stop()
+        return idle, method, stopped, (after, stale)
+
+    idle, method, stopped, (after, stale) = asyncio.run(_run())
+    assert idle is None and method is StopMethod.KILL and stopped.stopped is StopMethod.KILL
+    assert after.result_event["result"].endswith("| next | turn 2")  # the same session, resumed
+    assert not stale
 
 
 def test_a_session_grok_no_longer_has_starts_no_session(tmp_path: Path) -> None:

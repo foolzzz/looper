@@ -8,6 +8,7 @@ chosen by its text (the stand-in is told, not guessed):
 - ``LOOP``: model responses in a row (a tool call each) until ``session/cancel``, which it logs to ``cancels.log``;
 - ``ORPHAN``: starts a long ``sleep`` that inherits stdout, then dies;
 - ``HANG``: thinks, then waits for ``session/cancel`` and ends with ``cancelled``;
+- ``DEAF``: thinks, then ignores ``session/cancel`` (never answers the prompt);
 - ``CRASH``: streams a chunk, then dies;
 - ``BADRESP``: responses to the prompt with neither ``result`` nor ``error``, or both, then the answer;
 - ``GARBAGE``: lines that are not JSON objects between the notifications;
@@ -107,6 +108,11 @@ def prompt(request, text):
             if message.get('method') == 'session/cancel':
                 finish(request, 'cancelled', usage(1, 100, 0, 3, 50000000))
                 return
+        sys.exit(0)
+    if 'DEAF' in text:
+        chunk('thinking...', thought=True)
+        for line in sys.stdin:
+            pass
         sys.exit(0)
     if 'CRASH' in text:
         chunk('about to ')
