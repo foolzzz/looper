@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils";
 /** Where a value came from, in words. */
 const LAYER_LABELS: Record<SettingSource, string> = {
   builtin: "built-in default",
+  session: "this Manager session",
   profile: `the ${AGENT_PROFILE.name}`,
   system: "the shared defaults (Settings → Roles)",
   role: "the role (Settings → Roles)",

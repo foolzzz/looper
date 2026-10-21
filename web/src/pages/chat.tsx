@@ -11,6 +11,7 @@ import {
   MessagesSquare,
   MessageCircleQuestionMark,
 } from "lucide-react";
+import { ManagerSessionProfile } from "@/components/manager-session-profile";
 import { Markdown } from "@/components/markdown";
 import { ChannelBadge, ConversationList } from "@/components/chat-conversations";
 import { channelLabel, undeliveredText } from "@/lib/chat-channels";
@@ -262,6 +263,7 @@ export function ChatPage() {
   // The Manager's conversations on every channel, and the Lark or Telegram one open read-only (null: the web thread).
   const [conversations, setConversations] = useState<ChatSession[] | null>(null);
   const [conversationsError, setConversationsError] = useState("");
+  const [profileRefresh, setProfileRefresh] = useState(0);
   const [viewing, setViewing] = useState<ChatSession | null>(null);
   // Its messages as last read, by session id, so another conversation's never show while one loads.
   const [viewingMessages, setViewingMessages] = useState<{ id: string; rows: DbChatMessage[] } | null>(null);
@@ -502,6 +504,7 @@ export function ChatPage() {
 
     if (command === undefined) setInput("");
     setSending(true);
+    const isNewSession = command === NEW_SESSION_COMMAND;
     setPhase("");
 
     const userMsg: ChatMessage = {
@@ -551,6 +554,7 @@ export function ChatPage() {
               );
               setSending(false);
               setPhase("");
+              if (isNewSession) setProfileRefresh((n) => n + 1);
               break;
             }
             case "agent.phase":
@@ -727,6 +731,7 @@ export function ChatPage() {
             {!viewing && sessionId && (
               <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">{sessionId}</span>
             )}
+            {target.kind === "manager" && !viewing && <ManagerSessionProfile refreshKey={profileRefresh} />}
             {target.kind === "manager" && !viewing && (
               <button
                 type="button"
