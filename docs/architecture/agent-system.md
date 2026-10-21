@@ -51,6 +51,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   allowlist resolves, else the open_id), or for Telegram `a Telegram direct
   message` (a group's chat id is negative: `a Telegram group chat`), from the
   message's source channel and chat (`_message_origin`).
+  The session may run its own Agent Profile. `/profile` lists the choices and
+  `/profile <n|name|id>` switches it; `/profile 0` follows Settings again.
+  Looper answers these, never the model (`session_profile.parse_profile_command`).
+  The choice is `agent_sessions.selected_profile_id`, ahead of the manager role
+  and the shared defaults (`Layer.SESSION`). It takes effect on the next user
+  turn: on the same runtime and provider the session resumes natively;
+  otherwise the handoff and resume brief follow, as for any profile change
+  ([New sessions](#new-sessions-handoff-and-resume-brief)). `/new` clears it.
+  Each switch is a Runs record (`metadata.session_profile`)
   The recommended role prompt has Claude answer only the message it was just
   sent: no earlier topic, check or status report unless that message asks for
   one, and a short reply to a greeting or a check-in. A manager row still
@@ -124,7 +133,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   A failed store is logged and never blocks the reply, nor stops the channel
 - `/new`, a chat message that is exactly that (trimmed, any case) from the web
   chat, Lark or Telegram (the sender allowlists apply), is answered by Looper,
-  never by Claude. After any turn under way, the Manager stops its Claude and
+  never by Claude. The dashboard's `POST /api/chat/send` may add
+  `new_session_profile_id`, the Agent Profile the new session runs on; any
+  `/new` clears the session's earlier choice, and one without that field leaves
+  the session following Settings. After any turn under way, the Manager stops its Claude and
   saves the `manager` row with no session and `clean_start`, so the next
   message, from any channel, starts a new session without `--resume` and
   without a `[RESUME]` brief, also after a restart; the projects and goals
@@ -1400,7 +1412,9 @@ Manager tools.
   overrides still select append/replace. API profile views return `model` as
   `{model_id, name, protocol, provider_id}` and derived `provider` information.
   `roles` lists supported roles and `used_by` lists selections; a selected
-  profile cannot be deleted (409). Model deletion returns 409 while profiles
+  profile cannot be deleted (409); that includes the profile the Manager's
+  current session selects (`used_by.manager_session`, shown as "the Manager's
+  current session"). Model deletion returns 409 while profiles
   reference it; provider deletion returns 409 while models reference it.
   Built-in accounts, models and profiles remain protected. The legacy converter
   preserves profile ids (including their `agent-` prefix) and selections;
@@ -1634,7 +1648,11 @@ its next turn, after a handoff.
 | `project` | the project's Agent Profiles tab, All roles in this project | the Planner, Workers and Reviewers of one project |
 | `role_project` | the same tab, the role's row | one of those roles in one project |
 
-The Manager spans every project, so it has the first two only. With no layer
+The Manager spans every project, so it has the first two only, and one more
+for its profile: the Agent Profile chosen for its current session
+(`agent_sessions.selected_profile_id`, `Layer.SESSION`, source `session`),
+which wins over the other layers until `/new` or `/profile 0` clears it
+([Manager](#manager-looperagentstiersmanagerpy)). With no layer
 setting a field, the built-in value applies (`builtin`): the harness
 `DEFAULT_HARNESS_PROMPT` (public and generic), the profile `claude-code/opus`
 (Claude Code, its own login, `opus`, the runtime's own effort), no extra
@@ -2879,7 +2897,7 @@ messages, `db.task_changes`, `agent_settings`, `profile_registry`, `catalog`,
 dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
 409 `conflict`, its 400 `invalid`). The definitions of the 16 tools take
 15.0 KB of the Manager's context (the JSON of `tools/list`, 14,988 bytes), the
-contract 3.3 KB.
+contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 
 - **Reaching Looper.** `looper serve` makes one `ManagerOps`
   (`ops/service.py`) with a random token at start. Every launch of the
@@ -2892,6 +2910,15 @@ contract 3.3 KB.
   `POST /api/agent/v1/ops/<tool>` with the arguments as the body, and the
   answer is the tool result's text (an error result when its `status` is
   `error`). The endpoint refuses any other token with 401.
+- **The contract and `/profile`.** `TOOLS_CONTRACT` tells the Manager that
+  the user switches the Agent Profile of the conversation with `/profile` and
+  starts a new one with `/new`, that Looper answers both itself, that the
+  model cannot switch it (it tells the user to send `/profile`), and that
+  setting the manager role's profile with `looper_settings` applies to later
+  sessions when this one has its own choice. `looper_settings` `view` with
+  `role` `manager`, and a `set` on the manager role's layer, add
+  `manager_session`: `{selected: {profile_id, name} | null}`, and the `set`
+  a `note` when the session has its own choice (`ops/settings.py`).
 - **The turn.** The Manager tells `ManagerOps` which turn runs: the chat
   (channel and chat id), the message it answers and its sender, or a turn
   Claude runs on its own. A call belongs to the turn running when it comes;
@@ -4080,7 +4107,9 @@ does not imply HTTP compatibility.
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
-| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` (the message is stored as a supplement of the task first), 409 when that task has no running Planner |
+| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` (the message is stored as a supplement of the task first), 409 when that task has no running Planner. `new_session_profile_id` goes only with `/new` to the Manager (else 400) and names the Agent Profile the new session runs on; it is checked as `/profile` checks it (400 for an unknown profile or one that cannot run the Manager), and a profile that cannot launch at `/new` leaves the session as it was |
+| `/api/manager/session` | GET | The Manager's session and its Agent Profile, never the session id: `session` (`active`, `runtime`, `profile_id`: what the saved session ran), `selected` (`{profile_id, name}` or null: the session's own choice), `effective` (`{profile, source}`: what the next turn runs and the layer it comes from, `session` or a settings layer), `problem` (why that profile cannot launch, else null) and `choices` (the numbered profiles `/profile` lists, each with its `problem` when it cannot serve the Manager). 503 while the Manager is not running |
+| `/api/manager/session/profile` | PUT | Choose the session's Agent Profile as `/profile` does: `{profile_id}`, null following Settings (a missing `profile_id` is 400, as is a non-string one, an unknown profile or one that cannot serve the Manager; nothing is stored then). Answers the session view with `effect` (`current`, `resumes`, `new_session` or `starts`) and the reply `text`; recorded as a Runs record (`metadata.session_profile`, `via` `api`). 503 while the Manager is not running |
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` (and `task_role` for one that ran as a role) |
 | `/api/chat/sessions` | GET | The Manager's conversations on every channel (Planner threads left out), the 50 most recently active first: `session_id` (`<channel>:<chat id>` for Lark and Telegram), `channel`, `message_count`, `first_message_at`, `last_message_at`, `last_role` and the first 200 characters of the last message (`last_content`); 500 when they cannot be read |
 | `/api/chat/messages` | GET/POST | Chat history. GET returns the session's newest 200 messages, oldest first, each with its `channel`. The server saves both sides of a web chat: the message when it is sent, and its answer when it comes (`<message_id>:reply`), whether or not a page still reads its stream; the answer is also pushed to the chat's open pages (`chat.message`), so a page opened again before it came shows it |
@@ -4229,7 +4258,10 @@ restart.
   Telegram user IDs (a negative id is a group or channel, not a sender); a
   comma-separated string from before is still read.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
-  arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
+  arguments) goes to the Manager as `/new`. `/profile [n|name|id|0]` goes to
+  it as the text `/profile` plus the arguments (`_cmd_profile`), which the
+  Manager answers itself ([Manager](#manager-looperagentstiersmanagerpy)).
+  `/start`, `/status`, `/new`, `/profile` and
   `/help` from an unlisted sender get no answer either.
 - **Lark (bot token)** (`lark_bot.py`, `lark_bot_settings.py`): an independent
   `lark_bot` channel (`channel-lark_bot`), disabled by default, using the same

@@ -3,12 +3,14 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/sidebar";
-import { fetchGates, fetchProjects, type GateList } from "@/lib/api";
+import { fetchGates, fetchOverview, fetchProjects, type GateList } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchGates: vi.fn(), fetchProjects: vi.fn(),
+  fetchGates: vi.fn(), fetchProjects: vi.fn(), fetchOverview: vi.fn(),
 }));
+vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
+vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const gates = (waiting: number): GateList => ({
@@ -20,10 +22,12 @@ let root: Root;
 let host: HTMLElement;
 const onNavigate = vi.fn();
 
+let activePage: "gates" | "dashboard" = "gates";
+
 async function render() {
   await act(async () => {
     root.render(
-      <Sidebar activePage="gates" activeSettingsPage={null} activeProjectId={null} onNavigate={onNavigate}
+      <Sidebar activePage={activePage} activeSettingsPage={null} activeProjectId={null} onNavigate={onNavigate}
         onOpenProject={vi.fn()} onOpenSettings={vi.fn()} open onClose={vi.fn()} />,
     );
   });
@@ -35,6 +39,8 @@ beforeEach(() => {
   vi.mocked(fetchProjects).mockResolvedValue([]);
   vi.mocked(fetchGates).mockResolvedValue(gates(2));
   onNavigate.mockClear();
+  vi.mocked(fetchOverview).mockResolvedValue({} as never);
+  activePage = "gates";
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -101,5 +107,29 @@ describe("Sidebar User Gates item", () => {
     window.dispatchEvent(new Event("looper:gates-changed"));
     expect(fetchGates).toHaveBeenCalledTimes(3);
     root = createRoot(host);
+  });
+});
+
+
+describe("Sidebar version label", () => {
+  it("shows the overview's version next to the brand", async () => {
+    vi.mocked(fetchOverview).mockResolvedValue({ version: "2.13.1" } as never);
+    await render();
+    const label = host.querySelector('[title="2.13.1"]');
+    expect(label?.textContent).toBe("v2.13.1");
+    expect(label?.className).toContain("whitespace-nowrap");
+  });
+
+  it("shows nothing when the overview has no version", async () => {
+    vi.mocked(fetchOverview).mockResolvedValue({} as never);
+    await render();
+    expect(host.textContent).toContain("Looper");
+    expect(host.textContent).not.toMatch(/v\d/);
+  });
+
+  it("shows nothing while loading", async () => {
+    vi.mocked(fetchOverview).mockReturnValue(new Promise(() => {}));
+    await render();
+    expect(host.textContent).not.toMatch(/v\d/);
   });
 });

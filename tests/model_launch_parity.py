@@ -26,6 +26,7 @@ Existing main fixtures are never read or refreshed by this module.
 from __future__ import annotations
 
 import asyncio
+import copy
 import difflib
 import fcntl
 import hashlib
@@ -72,6 +73,11 @@ CODEX_CATALOG = {"name": "capture-codex", "context_window": 128000,
                  "efforts": ["high", "low"]}
 CODEX_TOTALS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cost_usd")
 OMP_LEGACY_REVISION = CLAUDE_LEGACY_REVISION
+# The one deliberate contract change since OMP_LEGACY_REVISION: the overlay turns off bash/eval auto-background
+# (looper/agents/runtimes/omp.py). It is applied to the old checkout's overlay in the capture child, so the
+# checkout stays clean and the pinned blobs stay the provenance; nothing else of the old source is altered.
+OMP_LEGACY_OVERLAY_PATCH = {"bash": {"autoBackground": {"enabled": False}},
+                            "eval": {"autoBackground": {"enabled": False}}}
 OMP_CATALOG = {**CODEX_CATALOG, "name": "capture-omp[1m]", "context_window": 1_000_000}
 OMP_CASES = {
     "responses-default": (["openai-responses"], "", [OMP_CATALOG], "high", "replace"),
@@ -176,12 +182,21 @@ async def _capture_legacy_omp(checkout: Path) -> dict[str, Any]:
     import asyncpg
     import looper
     import agent_launch_parity as tiers
-    from looper.agents.runtimes import adapter
+    from looper.agents.runtimes import adapter, omp as legacy_omp
     from looper.db import agent_sessions, connection
 
     if (Path(looper.__file__).resolve() != checkout / "looper/__init__.py"
             or Path(tiers.__file__).resolve() != checkout / "tests/agent_launch_parity.py"):
         raise LegacyBaselineUnavailable("legacy OMP capture imported a different checkout")
+    legacy_overlay = legacy_omp.overlay
+
+    def patched_overlay(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        settings = legacy_overlay(*args, **kwargs)
+        if settings.keys() & OMP_LEGACY_OVERLAY_PATCH.keys():
+            raise LegacyBaselineUnavailable("legacy OMP overlay already carries the patched settings")
+        return {**settings, **copy.deepcopy(OMP_LEGACY_OVERLAY_PATCH)}
+
+    legacy_omp.overlay = patched_overlay
     dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
     if not dsn:
         raise LegacyBaselineUnavailable("OMP baseline requires a disposable test database")
@@ -1065,6 +1080,23 @@ async def capture_converted_tiers(
                 driver = {"codex": capture_codex_tiers, "omp": capture_omp_tiers, "grok": capture_grok_tiers}[runtime]
                 records = await driver(root, read_state=state)
         return [normalize(record, root=root) for record in records], conversion
+
+
+def above_root_normalized(settings: str, root: str) -> str:
+    """The Claude ``--settings`` text with ``root`` as ``<root>`` and every exclusion for a directory above it as
+    ``<above>/<name>``, each once. The directories above a temporary root depend on the host (``/private/tmp`` on
+    macOS, ``/tmp`` on Linux CI), so a pinned capture cannot name them."""
+    parsed = json.loads(settings)
+    excludes: list[str] = []
+    for pattern in parsed.get("claudeMdExcludes", []):
+        if not pattern.startswith((root + "/", "<root>/")):
+            name = next(n for n in (".claude/rules/**", ".claude/CLAUDE.md", ".claude/AGENTS.md", "CLAUDE.md", "AGENTS.md")
+                        if pattern.endswith("/" + n))
+            pattern = f"<above>/{name}"
+        if pattern not in excludes:
+            excludes.append(pattern)
+    parsed["claudeMdExcludes"] = excludes
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).replace(root, "<root>")
 
 
 def _fields(value: Mapping[str, Any], expected: frozenset[str]) -> None:

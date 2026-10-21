@@ -42,6 +42,13 @@ def pinned(runtime: str) -> dict[str, Any]:
         return transform({role: {"system_prompt": text}})[role]["system_prompt"]
 
     for case, records in baseline["captures"].items():
+        # Declared record-shape delta: a saved agent_sessions row now reads back selected_profile_id (the Manager
+        # session's own /profile choice), null until chosen. Only saved-session rows (not the bare {"session_id"}
+        # of a resumed turn) gain it.
+        for record in records:
+            if isinstance(record["session"], dict) and "session_totals" in record["session"]:
+                assert "selected_profile_id" not in record["session"], case
+                record["session"]["selected_profile_id"] = None
         manager_launches = 2 if runtime in {"codex", "grok"} else 1
         if runtime == "grok" and parity.GROK_CASES[case][0]:
             manager_launches = 4  # refused ACP plus fallback on both turns

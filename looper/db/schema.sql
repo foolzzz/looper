@@ -338,6 +338,18 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS provider_id TEXT;
 -- The user dropped the session (/new in a chat with the Manager): the next session starts clean, without the
 -- resume brief a new session otherwise gets. Cleared once that session has started.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL DEFAULT false;
+-- The Agent Profile the user chose for the Manager's current session (/profile, the dashboard): it wins over the
+-- manager role's and the shared defaults' profile until /new. NULL follows Settings.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'agent_sessions_selected_profile_manager'
+                     AND conrelid = 'agent_sessions'::regclass) THEN
+        ALTER TABLE agent_sessions ADD CONSTRAINT agent_sessions_selected_profile_manager
+            CHECK (selected_profile_id IS NULL OR agent_id = 'manager');
+    END IF;
+END $$;
 
 -- A task's journal: what happened in it that a later agent or session needs.
 -- Code writes an entry, never the model, when its event happens: a step

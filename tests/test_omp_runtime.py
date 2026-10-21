@@ -985,6 +985,10 @@ def test_exact_model_settings_and_all_roles_follow_the_resolved_model(
     assert settings["enabledModels"] == [f"looper/{name}"]
     assert settings["modelRoles"] == {role: f"looper/{name}" for role in ("default", "smol", "slow", "plan", "vision")}
     assert settings["retry"] == {"modelFallback": False}
+    # A command runs to completion inside the turn: omp backgrounds nothing on its own.
+    assert settings["async"] == {"enabled": False}
+    assert settings["bash"] == {"autoBackground": {"enabled": False}}
+    assert settings["eval"] == {"autoBackground": {"enabled": False}}
 
 
 @pytest.mark.parametrize("case", ["responses-default", "chat-proxy", "messages-open", "priority-all",

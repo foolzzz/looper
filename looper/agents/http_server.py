@@ -28,6 +28,7 @@ from . import (
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
+from .message import MANAGER_ADDRESS
 from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
@@ -37,7 +38,7 @@ from .tiers.journal import progress_notes
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
 from .ops.service import ManagerOps
-from .tiers.manager import ManagerAgent
+from .tiers.manager import ManagerAgent, is_new_session_command
 from .tiers.task import TaskRouter
 from .tiers.worker import recheck_limits
 from .tiers.worker import WorkerPool
@@ -420,6 +421,10 @@ class AgentHTTPServer:
             await self._handle_list_tasks(query, writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
+        elif path == "/api/manager/session" and method == "GET":
+            await self._handle_manager_session(writer)
+        elif path == "/api/manager/session/profile" and method == "PUT":
+            await self._handle_manager_session_profile(body, writer)
         elif path == "/api/chat/targets" and method == "GET":
             await self._handle_chat_targets(writer)
         elif path == "/api/chat/sessions" and method == "GET":
@@ -1001,6 +1006,20 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        new_session_profile_id = data.get("new_session_profile_id")
+        if new_session_profile_id is not None:
+            if target != MANAGER_ADDRESS or not is_new_session_command(text):
+                writer.write(_json_response(
+                    HTTP_400, {"error": "new_session_profile_id goes only with /new to the Manager"}))
+                await writer.drain()
+                return
+            try:
+                await profile_registry.check_selection(new_session_profile_id, ["manager"])
+            except profile_registry.RegistryError as exc:
+                writer.write(_json_response(HTTP_400, {"error": str(exc)}))
+                await writer.drain()
+                return
+
         session_id = data.get("session_id", "")
         message_id = data.get("message_id", "")
         # A message to a task's Planner is a supplement to the task, stored before the Planner gets it, so it is
@@ -1026,8 +1045,41 @@ class AgentHTTPServer:
             target=target,
             message_id=message_id or None,
             supplement_id=supplement_id,
+            **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id is not None else {}),
         )
         writer.write(_json_response(HTTP_200, result))
+        await writer.drain()
+
+    async def _handle_manager_session(self, writer: asyncio.StreamWriter) -> None:
+        if self._manager is None:
+            writer.write(_json_response(HTTP_503, {"error": "the Manager is not running"}))
+        else:
+            writer.write(_json_response(HTTP_200, await self._manager.session_view()))
+        await writer.drain()
+
+    async def _handle_manager_session_profile(self, body: bytes, writer: asyncio.StreamWriter) -> None:
+        """Choose the Agent Profile of the Manager's session (``profile_id`` null: follow the Settings)."""
+        if self._manager is None:
+            writer.write(_json_response(HTTP_503, {"error": "the Manager is not running"}))
+            await writer.drain()
+            return
+        try:
+            data = json.loads(body.decode("utf-8"))
+            if not isinstance(data, dict) or "profile_id" not in data:
+                raise ValueError("profile_id is required (null follows the Settings)")
+            profile_id = data["profile_id"]
+            if profile_id is not None and not isinstance(profile_id, str):
+                raise ValueError("profile_id must be a string or null")
+            result = await self._manager.select_session_profile(
+                profile_id, via="api",
+                origin={"channel": "web", "chat": None, "sender": "dashboard", "group": False})
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+        except (ValueError, profile_registry.RegistryError) as exc:
+            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
+        else:
+            writer.write(_json_response(
+                HTTP_200, {**await self._manager.session_view(), "effect": result.effect.value, "text": result.text}))
         await writer.drain()
 
     async def _handle_chat_targets(self, writer: asyncio.StreamWriter) -> None:
@@ -1484,7 +1536,7 @@ class AgentHTTPServer:
             "work_dir": raw.get("work_dir", ""),
             "config": raw.get("config", {}),
             # The Agent Profile the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
-            "profile_overrides": {role: profile_registry.profile_view(profile) for role, profile in overrides.items()},
+            "profile_overrides": await profile_registry.profile_views(overrides),
             # Each task role's Agent Profile, and its Workers' and Reviewers' concurrency, with where each comes from;
             # the task's own choices are source "task" (projects.agents_view).
             "agents": agents,

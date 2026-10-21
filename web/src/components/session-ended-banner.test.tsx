@@ -29,6 +29,14 @@ const OVERVIEW = {
   schedules: { total: 0, enabled: 0, next: [], failing: [], skipped_today: {} },
 };
 
+const MANAGER_SESSION = {
+  session: { active: false, runtime: null, profile_id: null },
+  selected: null,
+  effective: { profile: null, source: "global" },
+  problem: null,
+  choices: [],
+};
+
 describe("session ended screen and sign out", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -69,6 +77,7 @@ describe("session ended screen and sign out", () => {
       if (url === "/api/status") return status.clone();
       if (url === "/login") return new Response("{}", { status: 401 });
       if (url === "/api/overview") return Response.json(OVERVIEW);
+      if (url === "/api/manager/session") return Response.json(MANAGER_SESSION);
       return Response.json({});
     }));
     container = document.createElement("div");

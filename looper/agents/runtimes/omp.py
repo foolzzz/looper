@@ -32,8 +32,10 @@ Verified against omp 18.4.3 (the multi-runtime RFC, section 6):
 - **Settings** go in a ``--config`` overlay (``overlay``), which a project's
   own ``.omp/config.yml`` cannot override: only the agent's model is enabled,
   for every model role, with no fallback to another; no approvals; MCP tools as
-  ordinary tools (``tools.xdev`` off); no background jobs, so a subagent's
-  tokens come with its tool's result; no update check, no issue reports.
+  ordinary tools (``tools.xdev`` off); no background jobs (``async``, and no
+  ``bash`` or ``eval`` command backgrounded on its own), so a subagent's
+  tokens come with its tool's result and a command runs to completion inside
+  the turn; no update check, no issue reports.
 - **The system prompt** is ``--append-system-prompt <file>``: after omp's own
   prompt and the project's context: the work directory's instruction file
   when omp does not read it itself, a short block of runtime notes
@@ -432,6 +434,8 @@ def overlay(launch: Launch, *, outside_repository: bool) -> dict[str, Any]:
         "retry": {"modelFallback": False},
         "tools": {"approvalMode": "yolo", "xdev": False},
         "async": {"enabled": False},
+        "bash": {"autoBackground": {"enabled": False}},
+        "eval": {"autoBackground": {"enabled": False}},
         "startup": {"checkUpdate": False},
         "dev": {"autoqa": False},
     }
