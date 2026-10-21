@@ -22,6 +22,24 @@ How the agent system works today is described in
 
 - **The Manager's chat box keeps working while it replies: a queue, a history and, behind an experimental setting that is off by default, a Stop.** Enter during a reply puts the message in a staging area above the box; after a reply that ends as `answered` the staged messages go as one message joined by a blank line, otherwise they return to the box, and they survive a reload. ↑ pulls them back and ↑/↓ walk this thread's last 100 messages. Stopping a reply is behind the system setting `chat.stop_enabled` (Settings → Chat, experimental, **off by default** until the stop path is redesigned); while it is off, `POST /api/chat/stop` answers `409` `{"state": "disabled"}`, the box has no Stop button and Esc never stops, `/stop` is answered "停止功能暂未开放" without reaching the model, and Telegram's menu leaves `/stop` out. With it on, Esc or the Stop button stops the reply (`POST /api/chat/stop`; `GET /api/chat/turn` tells a reloaded page whether one is running). `/stop` does the same from the web chat, Telegram (a new command) and Lark, and is answered outside the Manager's queue. A stopped turn is recorded `interrupted` with the text and usage so far, keeps the session, and the next turn is told the user stopped it; a confirmation it had asked for is dropped. Claude Code is interrupted with a control request (killed after 5 s), Grok with `session/cancel`, Codex, OMP, Pi and DSH by ending the turn's process tree (a stopped Codex turn records no usage). `answer.final` now carries the reply's `outcome`.
 
+## [2.13.14] - 2026-10-21
+
+### Changed
+
+- **The task page stays responsive on long and running tasks.** The Sessions and Conversation tabs read the latest 1000 messages and load older ones when the scroll nears the top, keeping the reading place; the view follows new events only while it is at the bottom, and the live stream starts after the latest loaded event. The page and the Room poll without overlap, wait while the browser tab is hidden and abort a request in flight when they stop. The task's runs are read in one compact request instead of three. ([#324](https://github.com/foolzzz/looper/pull/324))
+- `GET /api/tasks/<id>/activity` and `GET /api/tasks/<id>/conversation` return the latest 1000 rows by default (`limit` 1 to 1000), oldest first, with `has_more`, `oldest_seq` and `latest_seq`; `before=<seq>` returns the rows just before that seq. `since` or `after` keeps the forward read (at most 500 rows). A non-integer `since`, `after`, `before` or `limit` answers 400. ([#324](https://github.com/foolzzz/looper/pull/324))
+- New `GET /api/tasks/<id>/runs` returns a task's Planner, Worker and Reviewer runs as compact rows (no prompts, metadata body or events). ([#324](https://github.com/foolzzz/looper/pull/324))
+- The Agents tab no longer says that only the latest 500 runs are listed, as all runs are read.
+- No model-visible change: no prompt, tool schema or tool contract changed.
+
+### Fixed
+
+- The Sessions tab showed the oldest 500 events of a task and replayed its whole history on every refresh. ([#324](https://github.com/foolzzz/looper/pull/324))
+
+### Validation
+
+- Reported in #324: database tests for the windows, cursors and run rows, Vitest tests for the upward load, anchoring, stream start, runs request and polling, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
 ## [2.13.13] - 2026-10-21
 
 ### Changed
