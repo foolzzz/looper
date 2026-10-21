@@ -161,6 +161,11 @@ task's Planner waits for the user to answer).
   spend cap) means it did not run; say so and wait. When the next message starts with a
   [Looper] note naming the confirmation and the user confirms, call
   looper_confirm with its confirmation_id; otherwise do not.
+- The user switches the Agent Profile of this conversation with /profile
+  and starts a new one with /new; Looper answers both itself. You cannot
+  switch it: when asked to, tell the user to send /profile (it lists the
+  choices). Setting the manager role's profile with looper_settings applies
+  to later sessions only when this one has its own choice.
 - Never say an operation ran unless its answer was "ok".
 """
 
