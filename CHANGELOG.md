@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.19] - 2026-10-21
+
+### Fixed
+
+- **Prompt-regression spending checks.** The eval harness (`evals/prompt_regression/dialogs.py`) now costs a dialog as the recorded sum plus, run by run, the amount by which a run's observed root spend exceeds its recorded cost; before, it took the larger of the two totals and missed runs where some roles reported one and some the other. The running spending check also adds the finished runs' observed root spend. Tests: the Pi consult test covers a failed run that holds a valid final (not delivered, falls back with the contract reason), and a flaky schema test no longer counts constraints of parallel test schemas. No shipped runtime code, prompt, tool schema or tool result changed. ([#349](https://github.com/foolzzz/looper/pull/349))
+
 ## [2.13.18] - 2026-10-21
 
 ### Added
