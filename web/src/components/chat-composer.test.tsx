@@ -12,12 +12,14 @@ describe("ChatComposer", () => {
   let onSend: ReturnType<typeof vi.fn>;
   let onStop: ReturnType<typeof vi.fn>;
   let seen: { draft: string; staged: string[] };
+  let setOuterDraft: (d: string) => void;
 
   function mount(init: { draft?: string; staged?: string[]; history?: string[]; replying?: boolean; canStop?: boolean }) {
     function Harness() {
       const [draft, setDraft] = useState(init.draft ?? "");
       const [staged, setStaged] = useState(init.staged ?? []);
       seen = { draft, staged };
+      setOuterDraft = setDraft;
       return (
         <ChatComposer
           draft={draft}
@@ -82,6 +84,15 @@ describe("ChatComposer", () => {
     expect(seen.draft).toBe("one");
     key("Escape");
     expect(seen.draft).toBe("mine");
+  });
+
+  it("a draft handed back from outside ends history browsing, so Escape keeps it", () => {
+    mount({ draft: "mine", history: ["one", "two"] });
+    key("ArrowUp");
+    expect(seen.draft).toBe("two");
+    act(() => setOuterDraft("failed text"));
+    key("Escape");
+    expect(seen.draft).toBe("failed text");
   });
 
   it("Escape and the Stop button stop; the Queue button stages", () => {

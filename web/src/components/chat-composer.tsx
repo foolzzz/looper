@@ -1,5 +1,5 @@
 import { Send, Square, X } from "lucide-react";
-import { useLayoutEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { composerKeyAction, joinStaged, pullBack, STAGED_MAX, type ComposerState } from "@/lib/composer";
 
@@ -26,7 +26,14 @@ export function ChatComposer(props: ChatComposerProps) {
   const { draft, onDraft, staged, onStaged, history, replying, canStop, onSend, onStop, notice, disabled } = props;
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const browsingRef = useRef<{ index: number; saved: string } | null>(null);
+  const shownRef = useRef<string | null>(null);
   const caretAtEnd = useRef(false);
+
+  // A draft changed from outside (a failed send handing its text back) ends history browsing,
+  // so a later Esc cannot restore the saved draft over it.
+  useEffect(() => {
+    if (browsingRef.current && draft !== shownRef.current) browsingRef.current = null;
+  }, [draft]);
 
   // Auto-grow up to the max height set by the class.
   useLayoutEffect(() => {
@@ -48,6 +55,7 @@ export function ChatComposer(props: ChatComposerProps) {
 
   const pull = (next: string) => {
     onStaged([]);
+    browsingRef.current = null;
     onDraft(next);
     caretAtEnd.current = true;
   };
@@ -93,6 +101,7 @@ export function ChatComposer(props: ChatComposerProps) {
         break;
       case "show":
         browsingRef.current = action.browsing;
+        shownRef.current = action.draft;
         caretAtEnd.current = true;
         onDraft(action.draft);
         break;
