@@ -18,6 +18,10 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Added
+
+- **The Manager's chat box keeps working while it replies: a queue, a history and a Stop.** Enter during a reply puts the message in a staging area above the box; after a reply that ends as `answered` the staged messages go as one message joined by a blank line, otherwise they return to the box, and they survive a reload. ↑ pulls them back, ↑/↓ walk this thread's last 100 messages, and Esc or the Stop button stops the reply (`POST /api/chat/stop`; `GET /api/chat/turn` tells a reloaded page whether one is running). `/stop` does the same from the web chat, Telegram (a new command) and Lark, and is answered outside the Manager's queue. A stopped turn is recorded `interrupted` with the text and usage so far, keeps the session, and the next turn is told the user stopped it; a confirmation it had asked for is dropped. Claude Code is interrupted with a control request (killed after 5 s), Grok with `session/cancel`, Codex, OMP, Pi and DSH by ending the turn's process tree (a stopped Codex turn records no usage). `answer.final` now carries the reply's `outcome`.
+
 ### Fixed
 
 - **The pre-upgrade backup is verified when `pg_dump` runs in Docker.** A `docker exec ... pg_dump` backup command no longer needs a local `pg_restore`: the dump is listed with `docker exec -i <container> pg_restore --list`, or with the new `[backup] verify_command` (deprecated env `LOOPER_BACKUP_VERIFY_CMD`) for any other setup. `looper doctor` and the startup check report the verifier; without one the backup still fails before any DDL, naming `backup.verify_command`.
