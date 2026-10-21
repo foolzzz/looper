@@ -18,6 +18,10 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The pre-upgrade backup is verified when `pg_dump` runs in Docker.** A `docker exec ... pg_dump` backup command no longer needs a local `pg_restore`: the dump is listed with `docker exec -i <container> pg_restore --list`, or with the new `[backup] verify_command` (deprecated env `LOOPER_BACKUP_VERIFY_CMD`) for any other setup. `looper doctor` and the startup check report the verifier; without one the backup still fails before any DDL, naming `backup.verify_command`.
+
 ## [2.12.5] - 2026-10-20
 
 ### Highlights

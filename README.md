@@ -172,6 +172,20 @@ and dump inside the container (`{dbname}` and `{user}` are filled in):
 command = ["docker", "exec", "agentbox-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
 ```
 
+The dump must also be listed back to prove it is readable. That is done by the
+`pg_restore` beside `pg_dump` (else on PATH). For a `command` of the form
+`docker exec [options] <container> pg_dump ...` Looper lists it with
+`docker exec -i <container> pg_restore --list`, the dump on stdin; no local
+`pg_restore` is needed. Any other command without a local `pg_restore` needs
+`[backup] verify_command`, an argv that reads the dump on stdin and lists it
+like `pg_restore --list`:
+
+```toml
+verify_command = ["docker", "exec", "-i", "agentbox-postgres", "pg_restore", "--list"]
+```
+
+`looper doctor` and the startup log say which verifier is used.
+
 Without a usable `pg_dump`, or when the backup fails, serve exits before it
 changes anything; `looper serve --skip-backup` migrates without a backup and
 logs a warning. To roll back, stop Looper, recreate the database empty, restore
@@ -193,7 +207,7 @@ Looper was called LoopX up to v2.5.0. The rename itself needs no manual step:
   When both exist, Looper uses `~/.looper` and logs a warning.
 - **Environment variables:** the old deployment variables are read for one
   more release (`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
-  `LOOPER_BACKUP_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
+  `LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
   except the notes root), from the environment and then from `.env`, each use
   warned about by name. `looper config init-ops` moves them into the ops file.
   `looper.env` still reads any other `LOOPX_*` name when its `LOOPER_*` name
@@ -307,13 +321,14 @@ never shows the value.
 | `server.log_level` | No | `debug`, `info`, `warning` or `error` (default `info`) |
 | `backup.pg_dump` | No | `pg_dump` to use instead of the one on `PATH`; its major version must be at least the server's |
 | `backup.command` | No | An argv array whose stdout is the dump; `{dbname}` and `{user}` are filled in from the database URL |
+| `backup.verify_command` | No | An argv array that reads the dump on stdin and lists it like `pg_restore --list`; derived from `backup.command` when that is `docker exec ... <container> pg_dump ...`, else the local `pg_restore` |
 | `operator_notes.root` | No | Absolute path of the directory where the operator's Claude Code keeps project notes |
 
 Each setting comes from the first of these: an explicit flag (`--host`,
 `--port`, or `--verbose`, which sets `server.log_level` to `debug`), the
 file, then for this release only the old variable from the environment
 (`LOOPER_DATABASE_URL`, `LOOPER_PUBLIC_URL`, `LOOPER_PG_DUMP`,
-`LOOPER_BACKUP_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
+`LOOPER_BACKUP_CMD`, `LOOPER_BACKUP_VERIFY_CMD`, `LOOPER_OPERATOR_NOTES_ROOT`, and their `LOOPX_*` names
 except the notes root), then the same name in the checkout's `.env`, then the
 built-in default. There is no default database URL. Each use of an old
 variable logs a deprecation warning that names the variable and never its
