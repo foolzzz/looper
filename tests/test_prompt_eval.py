@@ -2719,6 +2719,58 @@ def test_the_stop_dialog_checks_its_replies() -> None:
     assert dialogs._was_stopped(look("已处理（looper_projects：ok）。")) is not None
 
 
+def test_a_withdraw_say_accepts_no_run_or_the_run_the_web_stop_interrupted() -> None:
+    from evals.prompt_regression import dialogs
+
+    class NoRuns:
+        def get(self, path: str, **params: Any) -> dict[str, Any]:
+            return {"records": []}
+
+    dialogs._check_manager_run(NoRuns(), 0, withdraw=True)  # type: ignore[arg-type]
+    dialogs._check_manager_run(_StopApi("interrupted", "web"), 0, withdraw=True)
+    for status, via in (("completed", None), ("interrupted", "telegram"), ("completed", "web")):
+        with pytest.raises(runner.EvalError, match="the turn was not stopped"):
+            dialogs._check_manager_run(_StopApi(status, via), 0, withdraw=True)
+    with pytest.raises(runner.EvalError, match="without a new run record"):
+        dialogs._check_manager_run(NoRuns(), 0)  # type: ignore[arg-type]
+
+
+def test_the_withdraw_dialog_checks_that_the_second_input_starts_with_the_note_and_the_reply_claims_no_work() -> None:
+    from evals.prompt_regression import dialogs
+
+    def look(input_text: str, reply: str, fake: bool = False) -> Any:
+        class Api:
+            def get(self, path: str, **params: Any) -> dict[str, Any]:
+                return {"records": [{"id": 5, "input_text": input_text, "metadata": {}}]}
+
+        return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), fake)  # type: ignore[arg-type]
+
+    note = f'{dialogs.WITHDREW_NOTE} a message before you saw it (it began: "..."). Do not act on it.\n\n我刚才让你做什么了？'
+    assert dialogs._knows_it_was_withdrawn(look(note, "你撤回了一条消息，我没有看到，所以没有做。")) is None
+    assert dialogs._knows_it_was_withdrawn(look("[RESUME] ...\n\n" + note, "没做。")) is not None
+    assert dialogs._knows_it_was_withdrawn(look(dialogs.STOPPED_NOTE + " ...", "没做。")) is not None
+    assert dialogs._knows_it_was_withdrawn(look(note, "我已经逐个查看并汇总好了。")) is not None
+    assert dialogs._knows_it_was_withdrawn(look(note, "已处理。", fake=True)) is None
+
+
+def test_the_withdraw_dialog_withdraws_its_second_say_only() -> None:
+    from evals.prompt_regression import dialogs
+
+    (dialog,) = dialogs.select(["withdraw_then_continue"])
+    assert [say.withdraw for say in dialog.says] == [False, True, False]
+    assert dialog.says[1].text == dialogs.WITHDRAWN_ASK and not dialog.says[1].stop
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
+def test_the_fake_withdraw_dialog_passes(tmp_path: Path) -> None:
+    from evals.prompt_regression import dialogs
+
+    result, _ = dialogs.run(mode="fake", dialogs=dialogs.select(["withdraw_then_continue"]),
+                            admin_url=os.environ["LOOPER_TEST_DATABASE_URL"], out_dir=tmp_path, timeout=30)
+    assert result["aborted"] is None, result
+    assert [row["outcome"] for row in result["dialogs"]] == ["pass"], result["dialogs"]
+
+
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
 def test_the_fake_stop_dialog_passes(tmp_path: Path) -> None:
     from evals.prompt_regression import dialogs

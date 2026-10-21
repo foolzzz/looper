@@ -707,8 +707,25 @@ class ManagerAgent:
         text = envelope.payload.get("text", "")
         if envelope.message_id not in self._persisted:
             await self._persist_user(envelope, text)
+        self._note_stop(envelope, token)
         await self._send_reply(envelope, stopped_reply(stopped.partial, []), outcome=ReplyOutcome.STOPPED)
         token.settle(ReplyOutcome.STOPPED)
+
+    def _note_stop(self, envelope: MessageEnvelope, token: TurnToken) -> None:
+        """What the next user turn is told of this stopped one: the user stopped a reply the model was writing, or
+        withdrew a message it never saw."""
+        first_line = " ".join(str(envelope.payload.get("text", "")).split())[:80]
+        if token.cancel.prompt_sent:
+            note = (f'[Looper] The user stopped your previous reply (to: "{first_line}") before it '
+                    "finished. Tool calls it had already made were not undone; check their effects "
+                    "before you rely on them or repeat them.")
+        else:
+            note = (f'[Looper] The user withdrew a message before you saw it (it began: "{first_line}"). '
+                    "Do not act on it unless they ask again.")
+        if token.stop is not None and token.stop.phase in (TurnPhase.RECEIVED, TurnPhase.PREPARING):
+            logger.info("manager: stopped %s in %s before the model started", envelope.message_id,
+                        token.stop.phase.value)
+        self._stopped_notes = [*self._stopped_notes, note][-3:]
 
     def _acting(self, token: TurnToken) -> None:
         """A command Code answers is about to act: the last look at the stop; after it, a stop is too late."""
@@ -743,21 +760,9 @@ class ManagerAgent:
         except TurnStopped as stopped:
             if turn is None:
                 raise
-            text = envelope.payload.get("text", "")
             if self.ops is not None:
                 self.ops.stop_turn(turn)  # done at the stop already; again for a turn that ended stopped by itself
-            first_line = " ".join(text.split())[:80]
-            if token.cancel.prompt_sent:
-                note = (f'[Looper] The user stopped your previous reply (to: "{first_line}") before it '
-                        "finished. Tool calls it had already made were not undone; check their effects "
-                        "before you rely on them or repeat them.")
-            else:
-                note = (f'[Looper] The user withdrew a message before you saw it (it began: "{first_line}"). '
-                        "Do not act on it unless they ask again.")
-            if token.stop is not None and token.stop.phase in (TurnPhase.RECEIVED, TurnPhase.PREPARING):
-                logger.info("manager: stopped %s in %s before the model started", envelope.message_id,
-                            token.stop.phase.value)
-            self._stopped_notes = [*self._stopped_notes, note][-3:]
+            self._note_stop(envelope, token)
             await self._send_reply(envelope, stopped_reply(stopped.partial, turn.blocks),
                                    outcome=ReplyOutcome.STOPPED)
             token.settle(ReplyOutcome.STOPPED)
@@ -1549,7 +1554,14 @@ class ManagerAgent:
         process = self._process
         handoff: str | None = None
         if self._claude.started and process is not None and not self._claude.stale(process.signature):
-            handoff = await self._handoff(switch, process, cancel)
+            # The handoff's prompt is not the user's message: it gets a cancel of its own, requested with the turn's, so
+            # that writing it does not make the turn "running" or its message "seen".
+            inner = TurnCancel()
+            unregister = cancel.on_request(inner.request)
+            try:
+                handoff = await self._handoff(switch, process, inner)
+            finally:
+                unregister()
         await self._claude.stop()
         logger.warning("manager: starting a new session (%s)%s", switch.describe(),
                        "; its previous session wrote a handoff" if handoff else "")
@@ -1589,6 +1601,7 @@ class ManagerAgent:
             except TurnCancelled as exc:
                 await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                                       status=RecordStatus.INTERRUPTED, usage=Usage())
+                await self._annotate_handoff_stop(recorder, None)
                 raise TurnStopped() from exc
             except Exception as exc:  # the turn was given up, which stopped Claude
                 logger.warning("manager: its previous session wrote no handoff: %s", exc)
@@ -1598,6 +1611,7 @@ class ManagerAgent:
             if turn.stopped is not None or cancel.requested:
                 await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                                       status=RecordStatus.INTERRUPTED, usage=turn.usage)
+                await self._annotate_handoff_stop(recorder, turn)
                 raise TurnStopped()
             result_event = turn.result_event
             handoff = kept_text(answer_text(result_event, parts), HANDOFF_MAX_CHARS)
@@ -1608,6 +1622,17 @@ class ManagerAgent:
                 self._session_totals = self._claude.totals
                 await self._save_session_state()
             return handoff if succeeded else None
+
+    async def _annotate_handoff_stop(self, recorder: ClaudeRunRecorder, turn: ResidentTurn | None) -> None:
+        """The handoff's record says the user's stop ended it, as the record of a stopped turn does."""
+        request = self._running_token.stop if self._running_token is not None else None
+        await recorder.annotate({"user_stop": {
+            "via": request.via if request else None,
+            "phase": request.phase.value if request and request.phase else None,
+            "method": turn.stopped.value if turn and turn.stopped and turn.prompt_sent else None,
+            "requested_at": request.at.isoformat() if request else None,
+            "usage_complete": turn is None or (turn.usage_complete and turn.usage.cost_usd is not None),
+        }})
 
     async def _resume_brief(self, envelope: MessageEnvelope, message: str) -> str:
         """What starts the first turn of a new session: why it is new, the handoff the old session wrote, and

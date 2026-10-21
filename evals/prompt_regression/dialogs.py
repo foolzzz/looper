@@ -140,6 +140,8 @@ class Say:
     fake: tuple[tuple[str, dict[str, Any]], ...] = ()
     # The user stops the Manager's turn once it has made its first tool call (``POST /api/chat/stop``).
     stop: bool = False
+    # The user withdraws the message right after sending it (``POST /api/chat/stop`` before the Manager has begun).
+    withdraw: bool = False
     # The text computed from the previous turn's Look (``text`` is then only a label).
     text_from: Callable[[Look], str] | None = None
 
@@ -317,6 +319,8 @@ def _answered_by_reading(look: Look) -> str | None:
 
 
 STOPPED_NOTE = "[Looper] The user stopped your previous reply"
+WITHDREW_NOTE = "[Looper] The user withdrew"
+WITHDRAWN_ASK = "列出所有项目，然后逐个查看每个项目最近的三个任务，最后汇总。"
 
 
 def _was_stopped(look: Look) -> str | None:
@@ -324,6 +328,23 @@ def _was_stopped(look: Look) -> str | None:
     if reply.endswith("（已停止）") or reply == "已停止，这次没有回复。":
         return None
     return f"the reply does not say it was stopped: {reply[-80:]!r}"
+
+
+def _knows_it_was_withdrawn(look: Look) -> str | None:
+    """The turn after a withdrawn message was told so, first of all; a real Manager must not claim it did the work."""
+    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    new = [r for r in records if r["id"] > look.since and not (r.get("metadata") or {}).get("autonomous")]
+    if not new:
+        return "no Manager run record for the turn"
+    record = max(new, key=lambda row: row["id"])
+    sent = (record.get("input_text") or record.get("input_summary") or "").lstrip()
+    if not sent.startswith(WITHDREW_NOTE):
+        return "the turn's input does not start with the note that the user withdrew a message"
+    if look.fake:
+        return None
+    if "汇总" in look.reply and not re.search(r"没(有)?(看到|收到|执行|做|来得及)|未(执行|完成)|撤回|取消|停|不会", look.reply):
+        return "the reply claims the withdrawn work was done"
+    return None
 
 
 def _knows_it_was_stopped(look: Look) -> str | None:
@@ -1394,6 +1415,11 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_projects", {"action": "list"}), ("__hold__", {})), stop=True),
         Say("刚才停在哪了？", _knows_it_was_stopped),
     ), seed=_enable_stop, tags=("stop",)),
+    Dialog("withdraw_then_continue", (
+        Say("现在有几个项目？", _answered_by_reading, (("looper_projects", {"action": "list"}),)),
+        Say(WITHDRAWN_ASK, _was_stopped, withdraw=True),
+        Say("我刚才让你做什么了？你做了吗？", _knows_it_was_withdrawn),
+    ), seed=_enable_stop, tags=("stop",)),
     Dialog("config_export", (
         Say("把 Looper 的配置导出成一个文件，包括项目和它们的定时任务。", _exported,
             (("looper_config_export", {"include_projects": True}),)),
@@ -1475,18 +1501,21 @@ class SpendingCap(EvalError):
     """The dialog reached its case allowance."""
 
 
-def _check_manager_run(api: Api, since: int, *, stop: bool = False) -> None:
+def _check_manager_run(api: Api, since: int, *, stop: bool = False, withdraw: bool = False) -> None:
     """Score only a completed turn; a failed resume followed by a completed retry is recoverable. A turn the user
-    stopped (``stop``) must instead be an interrupted run the web chat's stop ended."""
+    stopped (``stop``) must instead be an interrupted run the web chat's stop ended; a message withdrawn right after
+    it was sent (``withdraw``) has no run (the model never began), or the same interrupted one."""
     from looper.agents.claude_cli import BUDGET_SUBTYPE
 
     records = api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
     new = [record for record in records if record["id"] > since
            and not (record.get("metadata") or {}).get("autonomous")]
+    if not new and withdraw:
+        return
     if not new:
         raise EvalError("Manager replied without a new run record")
     record = max(new, key=lambda row: row["id"])
-    if stop:
+    if stop or withdraw:
         via = ((record.get("metadata") or {}).get("user_stop") or {}).get("via")
         if record["status"] != "interrupted" or via != "web":
             raise EvalError(f"the turn was not stopped: Manager run {record['id']} is {record['status']}, "
@@ -1527,10 +1556,11 @@ def _made_a_tool_call(api: Api, since: int, database_url: str | None, before: in
 
 
 def _ask(api: Api, session: str, text: str, *, timeout: float,
-         check_budget: Callable[[], None] | None = None, stop: bool = False,
+         check_budget: Callable[[], None] | None = None, stop: bool = False, withdraw: bool = False,
          database_url: str | None = None) -> str:
     """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one.
-    With ``stop``, the turn is stopped through the web chat once it has made its first tool call."""
+    With ``stop``, the turn is stopped through the web chat once it has made its first tool call; with
+    ``withdraw``, right after the message is sent."""
     message_id = f"m-{uuid.uuid4().hex[:12]}"
     if check_budget is not None:
         check_budget()
@@ -1538,6 +1568,11 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
     since = max((record["id"] for record in records), default=0)
     before = _last_action(database_url) if database_url is not None else 0
     api.post("/api/chat/send", {"text": text, "session_id": session, "message_id": message_id})
+    if withdraw:  # the message has its turn from its delivery on: the stop finds it wherever it is
+        turn = api.get("/api/chat/turn", session_id=session).get("turn")
+        if not turn:
+            raise EvalError("no turn to withdraw: the message is not live")
+        api.post("/api/chat/stop", {"message_id": turn["message_id"]})
     deadline = time.monotonic() + timeout
     stopped = not stop
     while time.monotonic() < deadline:
@@ -1555,7 +1590,7 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             if message.get("message_id") == f"{message_id}:reply":
                 # A chat command such as /profile is answered by Looper itself, without a Manager run.
                 if not text.lstrip().startswith("/"):
-                    _check_manager_run(api, since, stop=stop)
+                    _check_manager_run(api, since, stop=stop, withdraw=withdraw)
                 return str(message.get("content") or "")
         time.sleep(1.0)
     raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
@@ -1719,8 +1754,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                     "<task>", task or ""))] for name, arguments in say.fake]
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url)
-            reply = _ask(api, session, text, timeout=timeout, stop=say.stop, database_url=database_url,
-                         **budget_args)
+            reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
+                         database_url=database_url, **budget_args)
             previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
                             runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since)
             problem = say.check(previous)
