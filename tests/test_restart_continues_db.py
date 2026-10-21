@@ -145,6 +145,12 @@ else:
 '''
 
 
+def _builtin_model(api: Any, name: str) -> str:
+    """The id of the built-in Claude Code login's model ``name``."""
+    models = api.get("/api/models", provider_id="prov-claude-subscription")["models"]
+    return next(m["model_id"] for m in models if m["name"] == name)
+
+
 def _install(root: Path) -> tuple[Path, Path]:
     state = root / "state"
     state.mkdir()
@@ -235,7 +241,7 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             (state / "release-plan").touch()
             # The failed task's Workers run on another profile, and one at a time, from its restart on.
             api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                             "provider_id": "prov-claude-subscription", "model": "sonnet"})
+                                             "model_id": _builtin_model(api, "sonnet")})
             agents = api.put(f"/api/tasks/{ids['agents']}/agents", {"profiles": {"worker": "claude-code/sonnet"},
                                                                      "concurrency": {"worker": 1}})["agents"]
 

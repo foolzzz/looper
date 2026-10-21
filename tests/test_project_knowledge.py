@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from looper.agents import knowledge
-from looper.agents.agent_settings import Launch
+from tests.runtime_model_helpers import builtin_launch
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.knowledge import (
     EMPTY_KNOWLEDGE,
@@ -561,7 +561,7 @@ class TestLaunchArgs:
 
     def test_each_directory_is_one_add_dir_after_the_library(self) -> None:
         loaded = AgentKnowledge(index="## Project knowledge", documents=2, add_dirs=("/k", "/p"))
-        args = Launch(knowledge=loaded).args()
+        args = builtin_launch(knowledge=loaded).args()
         assert args[-6:] == ["--add-dir", "/k", "--add-dir", "/p", *TEAMMATE_MODE_ARGS]  # the built-in profile's
-        assert "--add-dir" not in Launch().args()  # nothing without knowledge
+        assert "--add-dir" not in builtin_launch().args()  # nothing without knowledge
 

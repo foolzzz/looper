@@ -192,7 +192,7 @@ async def test_bad_legacy_model_is_skipped_without_default_fallback(monkeypatch)
     data["profiles"][0]["model"] = "outside-catalog"
     plan = await preview(monkeypatch, data)
     assert any(c.section == "profiles" and c.action == transfer.Action.SKIPPED
-               and "model_outside_catalog" in c.reason for c in plan.changes)
+               and c.code == "model_outside_catalog" for c in plan.changes)
     assert any(c.section == "settings.layers" and c.action == transfer.Action.SKIPPED for c in plan.changes)
 
 

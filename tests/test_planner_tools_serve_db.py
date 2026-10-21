@@ -120,6 +120,12 @@ for line in sys.stdin:
 '''
 
 
+def _builtin_model(api: Any, name: str) -> str:
+    """The id of the built-in Claude Code login's model ``name``."""
+    models = api.get("/api/models", provider_id="prov-claude-subscription")["models"]
+    return next(m["model_id"] for m in models if m["name"] == name)
+
+
 def _install(root: Path) -> tuple[Path, Path]:
     state = root / "state"
     state.mkdir()
@@ -160,7 +166,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
         with running_server(**server, log_path=root / "serve.log") as api:
             sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                                      "provider_id": "prov-claude-subscription", "model": "sonnet"})
+                                                      "model_id": _builtin_model(api, "sonnet")})
             ids: dict[str, str] = {}
             for variant in VARIANTS:
                 work = root / f"work-{variant}"

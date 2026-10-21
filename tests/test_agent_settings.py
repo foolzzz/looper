@@ -23,11 +23,14 @@ from looper import child_env
 from looper.agents import agent_settings
 from looper.agents.profile_registry import (
     BUILTIN_PROFILE, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, ResolvedAgentProfile,
+    builtin_resolved_profile,
 )
+from looper.agents.runtimes.pricing import PRICES_AS_OF
 from tests.runtime_model_helpers import resolved_profile
 from looper.agents.agent_settings import (
     BUILTIN_SYSTEM_PROMPT_MODE,
     BUILTIN_SETTINGS,
+    AgentSettings,
     DEFAULT_HARNESS_PROMPT,
     AgentType,
     Concurrency,
@@ -54,6 +57,11 @@ def _sha(text: str) -> str:
 
 def _place(layer: Layer, role: str) -> tuple[Layer, AgentType | None]:
     return layer, AgentType(role) if layer in (Layer.ROLE, Layer.ROLE_PROJECT, Layer.TASK) else None
+
+
+def _builtin_settings() -> AgentSettings:
+    """The built-in defaults as a run resolves them: with the built-in profile's resolved model binding."""
+    return replace(BUILTIN_SETTINGS, profile=builtin_resolved_profile())
 
 
 def _profile(model: str, effort: str | None = None) -> AgentProfile:
@@ -203,7 +211,9 @@ class TestEnvironment:
     ) -> None:
         monkeypatch.setenv("LOOPER_SERVER_ONLY", "kept")
         monkeypatch.setenv("TZ", "Asia/Shanghai")
-        launch = Launch(resolve("worker", {(Layer.SYSTEM, None): LayerValues(env=(("TZ", "UTC"), ("LANG", "C.UTF-8")))}))
+        launch = Launch(replace(
+            resolve("worker", {(Layer.SYSTEM, None): LayerValues(env=(("TZ", "UTC"), ("LANG", "C.UTF-8")))}),
+            profile=builtin_resolved_profile()))
         env = launch.environment()
         assert "LOOPER_SERVER_ONLY" not in env
         assert (env["TZ"], env["LANG"]) == ("UTC", "C.UTF-8")
@@ -216,7 +226,7 @@ class TestEnvironment:
         monkeypatch.delenv(AGENT_TEAMS, raising=False)
         plain = Launch(resolve("worker", {(Layer.SYSTEM, None): LayerValues(profile=_profile("opus"))}))
         assert plain.environment() == child_env.inherited() and plain.env_sha256 is None
-        assert Launch().environment() == {**child_env.inherited(), AGENT_TEAMS: "1"}
+        assert Launch(_builtin_settings()).environment() == {**child_env.inherited(), AGENT_TEAMS: "1"}
 
 
 class TestReviewerHarness:
@@ -255,7 +265,7 @@ class TestRecord:
         record = launch.record()
         assert record["model_choice"] == {"model": "sonnet", "source": "role", "effort": "high"}
         assert record["profile"] == {"id": "agent-sonnet", "name": "claude-code/sonnet", "model": "sonnet",
-                                     "custom_prompt": "",
+                                     "model_id": "model-agent-sonnet", "custom_prompt": "",
                                      "runtime": {"id": "rt-claude-code", "name": "claude-code", "type": "claude-code"},
                                      "provider": {"id": "prov-claude-subscription", "name": "claude-subscription",
                                                   "auth": "oauth"}, "source": "role"}
@@ -272,12 +282,16 @@ class TestRecord:
         from looper.agents.claude_cli import permission_args
 
         # It has agent teams, which keep SendMessage.
-        assert Launch().args() == [*permission_args(), "--disallowedTools", "ListAgents", "--model", "opus",
-                                   *TEAMMATE_MODE_ARGS]
-        assert Launch().record() == {
+        launch = Launch(_builtin_settings())
+        assert launch.args() == [*permission_args(), "--disallowedTools", "ListAgents", "--model", "opus",
+                                 *TEAMMATE_MODE_ARGS]
+        assert launch.record() == {
             "system_prompt_mode": "append",
-            "profile": {**BUILTIN_PROFILE.record(), "source": "builtin"},
+            "profile": {**builtin_resolved_profile().record(), "source": "builtin"},
             "model_choice": {"model": "opus", "source": "builtin", "effort": None},
+            "llm_model": {"model_id": "model-84f4b69e-12a7-5fd7-b665-a9b7d01568eb", "provider_id": BUILTIN_PROVIDER.id,
+                          "name": "opus", "protocol": "anthropic-messages"},
+            "pricing": {"builtin_prices_as_of": PRICES_AS_OF, "cost_source": "runtime", "rule": "runtime_reported"},
             "settings_sources": {"harness": "builtin", "profile": "builtin", "effort": "builtin", "env": {},
                                  "run_budget_usd": "builtin"},
         }
@@ -304,7 +318,7 @@ class TestStoredRows:
 
         monkeypatch.setattr(agent_setting_layers, "list_layers", _down)
         settings = asyncio.run(agent_settings.load_agent_settings("worker", "proj-a"))
-        assert settings == BUILTIN_SETTINGS and settings.error and "ConnectionError" in settings.error
+        assert settings == _builtin_settings() and settings.error and "ConnectionError" in settings.error
 
 
 # --- Validation ---

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,7 @@ from looper.agents.agent_settings import (
     BUILTIN_SETTINGS, BUILTIN_SYSTEM_PROMPT_MODE, AgentSettings, AgentType, Launch, Layer, LayerValues, SettingsError,
     layer_update, resolve, role_system_prompt_mode, system_prompt_mode_choice,
 )
-from looper.agents.profile_registry import BUILTIN_PROFILE
+from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.system_prompt_mode import SystemPromptMode
 
 APPEND, REPLACE = SystemPromptMode.APPEND, SystemPromptMode.REPLACE
@@ -62,8 +63,25 @@ def test_a_stored_value_that_no_longer_validates_is_ignored() -> None:
     assert LayerValues.from_row({"scope": "role", "role": "worker", "system_prompt_mode": "bogus"}) == LayerValues()
 
 
+def _with_runtime(runtime_type: str) -> Any:
+    """The profile of a runtime of ``runtime_type`` with a model that runtime can run: the built-in one, or the
+    login or API key model of the other runtime's own tests."""
+    from looper.agents.profile_registry import ResolvedAgentProfile, RuntimeSpec
+    from looper.agents.runtimes import adapter
+    from test_codex_runtime import _login_provider
+    from test_grok_runtime import LOGIN
+    from test_omp_runtime import _resolved_model
+
+    if runtime_type == "claude-code":
+        return builtin_resolved_profile()
+    resolved = {"codex": _login_provider, "grok": lambda: LOGIN, "omp": _resolved_model}[runtime_type]()
+    runtime = RuntimeSpec(f"rt-{runtime_type}", runtime_type, runtime_type, "", adapter(runtime_type).capabilities)
+    return ResolvedAgentProfile(f"agent-{runtime_type}", runtime_type, runtime, resolved.model.id,
+                                resolved_model=resolved)
+
+
 def _launch(role: AgentType | None, mode: SystemPromptMode | None, runtime_type: str = "claude-code") -> Launch:
-    profile = replace(BUILTIN_PROFILE, runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
+    profile = _with_runtime(runtime_type)
     settings = replace(resolve(role, _layers(role, mode) if role and mode else {}), profile=profile)
     return Launch(replace(BUILTIN_SETTINGS, **{k: getattr(settings, k) for k in ("profile", "system_prompt_mode")}),
                   role=role)
@@ -92,7 +110,7 @@ def test_launch_mode_is_the_same_on_every_runtime(role: AgentType, runtime_type:
                                                   layer: SystemPromptMode | None) -> None:
     layers = {(Layer.TASK, role): LayerValues(system_prompt_mode=task),
               (Layer.ROLE, role): LayerValues(system_prompt_mode=layer)}
-    profile = replace(BUILTIN_PROFILE, runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
+    profile = _with_runtime(runtime_type)
     settings = replace(resolve(role, layers), profile=profile)
     expected = task or layer or BUILTIN_SYSTEM_PROMPT_MODE[role]
     assert Launch(settings, role=role).system_prompt_mode is expected
@@ -101,7 +119,7 @@ def test_launch_mode_is_the_same_on_every_runtime(role: AgentType, runtime_type:
 
 @pytest.mark.parametrize("runtime_type", RUNTIMES)
 def test_a_launch_without_a_role_appends_on_every_runtime(runtime_type: str) -> None:
-    profile = replace(BUILTIN_PROFILE, runtime=replace(BUILTIN_PROFILE.runtime, type=runtime_type))
+    profile = _with_runtime(runtime_type)
     assert Launch(AgentSettings(profile=profile, system_prompt_mode=REPLACE)).system_prompt_mode is APPEND
 
 
@@ -109,14 +127,14 @@ def test_a_runtime_that_cannot_replace_appends(monkeypatch: pytest.MonkeyPatch) 
     from looper.agents.runtimes import ADAPTERS
 
     monkeypatch.setattr(ADAPTERS["codex"], "can_replace_system_prompt", False)
-    profile = replace(BUILTIN_PROFILE, runtime=replace(BUILTIN_PROFILE.runtime, type="codex"))
+    profile = _with_runtime("codex")
     settings = replace(resolve(AgentType.PLANNER, {}), profile=profile)
     assert settings.system_prompt_mode is REPLACE
     assert Launch(settings, role=AgentType.PLANNER).system_prompt_mode is APPEND
 
 
 def _task_role_layers(role: AgentType) -> dict:
-    return {(Layer.TASK_ROLE, role): LayerValues(profile=BUILTIN_PROFILE)}
+    return {(Layer.TASK_ROLE, role): LayerValues(profile=builtin_resolved_profile())}
 
 
 @pytest.mark.parametrize("kind", ["worker", "reviewer", "task-role-worker", "task-role-reviewer",
@@ -126,7 +144,8 @@ def test_every_other_claude_code_launch_appends(kind: str) -> None:
 
     role = {"worker": AgentType.WORKER, "reviewer": AgentType.REVIEWER}.get(kind.split("-")[-1])
     layers = _task_role_layers(role) if kind.startswith("task-role") and role else {}
-    launch = Launch(resolve(role, layers), role=role, consult=kind.startswith("consult"))
+    launch = Launch(replace(resolve(role, layers), profile=builtin_resolved_profile()), role=role,
+                    consult=kind.startswith("consult"))
     runtime = adapter("claude-code")
     command = runtime.run_command(runtime.default_executable, cwd=Path("."), prompt_file=Path("prompt.md"),
                                   launch=launch)

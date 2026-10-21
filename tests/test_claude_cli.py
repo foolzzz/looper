@@ -23,14 +23,23 @@ from looper.agents.claude_cli import isolation_args, iter_lines, system_prompt_a
 def _priced_launch() -> Any:
     """A Claude Code launch with a provider Looper prices: m-main at $2 input and $10 output per million tokens."""
     from looper.agents.agent_settings import AgentSettings, Launch
-    from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec
+    from looper.agents.profile_registry import CatalogModel, LegacyProviderSpec as ProviderSpec, RuntimeSpec
     from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
+    from tests.runtime_model_helpers import resolved_profile
 
     provider = ProviderSpec("prov-x", "x", AuthKind.API_KEY, frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
                             base_url="https://example.invalid/anthropic",
                             catalog=(CatalogModel("m-main", input_usd_per_mtok=2.0, output_usd_per_mtok=10.0),))
     runtime = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", adapter("claude-code").capabilities)
-    return Launch(AgentSettings(profile=AgentProfile("agent-x", "claude-code/m-main", runtime, provider, "m-main")))
+    return Launch(AgentSettings(profile=resolved_profile("agent-x", "claude-code/m-main", runtime, provider, "m-main")))
+
+
+def _builtin_launch(**fields: Any) -> Any:
+    """A launch of the built-in profile with its resolved model binding."""
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import builtin_resolved_profile
+
+    return Launch(AgentSettings(profile=builtin_resolved_profile()), **fields)
 
 
 def _lines(*chunks: bytes) -> list[bytes]:
@@ -394,13 +403,12 @@ class TestPermissionArgs:
         self, tmp_path: Path, role: AgentType | None,
     ) -> None:
         # The agents build their commands from a Launch, so the flags cannot diverge.
-        from looper.agents.agent_settings import Launch
         from looper.agents.claude_cli import permission_args
         from looper.agents.library import AgentLibrary
 
         assert permission_args() == ["--dangerously-skip-permissions"]
         library = AgentLibrary(plugin_dirs=(str(tmp_path / "plugin"),))
-        for launch in (Launch(role=role), Launch(library=library, role=role)):
+        for launch in (_builtin_launch(role=role), _builtin_launch(library=library, role=role)):
             args = launch.args()
             assert args[:len(permission_args())] == permission_args()
             assert args.count("--dangerously-skip-permissions") == 1
@@ -411,7 +419,6 @@ class TestPermissionArgs:
             assert "read_only" not in launch.record()
 
     def test_a_planner_runs_read_only_with_its_mcp_servers_skills_and_web_reads(self, tmp_path: Path) -> None:
-        from looper.agents.agent_settings import Launch
         from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
 
         library = AgentLibrary(items=(LoadedItem(ItemKind.MCP, "looper", "a" * 64, plugin="", scope="builtin"),
@@ -419,7 +426,7 @@ class TestPermissionArgs:
                                       LoadedItem(ItemKind.SKILL, "deploy", "c" * 64, plugin="personal",
                                                  scope="global")),
                                mcp_config=str(tmp_path / "mcp.json"))
-        launch = Launch(library=library, role=AgentType.PLANNER)
+        launch = _builtin_launch(library=library, role=AgentType.PLANNER)
         args = launch.args()
         # Claude Code's default permission mode, pinned against a project's own settings, with no one to answer its
         # prompts, so that what it would ask about is refused; no file-editing tools.
@@ -428,7 +435,7 @@ class TestPermissionArgs:
                             "--disallowedTools", "Edit,Write,NotebookEdit",
                             "--allowedTools", "Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
         assert launch.record()["read_only"] == "permissions"
-        assert Launch(role=AgentType.PLANNER).args()[6:8] == ["--allowedTools", "Skill,WebFetch,WebSearch"]
+        assert _builtin_launch(role=AgentType.PLANNER).args()[6:8] == ["--allowedTools", "Skill,WebFetch,WebSearch"]
 
     @pytest.mark.parametrize(("server", "rule"), [
         ("looper", "mcp__looper"), ("probe.v2", "mcp__probe_v2"), ("my server+x", "mcp__my_server_x"),
@@ -462,9 +469,10 @@ def _teams_launch(role: AgentType | None, *, teams: bool, consult: bool = False)
     from dataclasses import replace
 
     from looper.agents.agent_settings import AgentSettings, Launch
-    from looper.agents.profile_registry import BUILTIN_PROFILE
+    from looper.agents.profile_registry import builtin_resolved_profile
 
-    return Launch(AgentSettings(profile=replace(BUILTIN_PROFILE, agent_teams=teams)), role=role, consult=consult)
+    return Launch(AgentSettings(profile=replace(builtin_resolved_profile(), agent_teams=teams)), role=role,
+                  consult=consult)
 
 
 def _denied(args: list[str]) -> list[str]:

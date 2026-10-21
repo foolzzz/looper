@@ -257,13 +257,14 @@ def test_a_pi_room_run_persists_its_session(tmp_path: Any) -> None:
 
     from fake_claude import fake_claude
     from looper.agents.agent_settings import AgentSettings, Launch
-    from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
+    from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, RuntimeSpec
+    from tests.runtime_model_helpers import resolved_profile
     from looper.agents.room import run_session_dir
     from looper.agents.runtimes import ApiProtocol, AuthKind
     from looper.agents.runtimes.pi import PiRuntime
 
     runtime = PiRuntime()
-    launch = Launch(AgentSettings(profile=AgentProfile(
+    launch = Launch(AgentSettings(profile=resolved_profile(
         "pi-test", "pi-test", RuntimeSpec("pi", "pi", "pi"),
         ProviderSpec("test", "test", auth=AuthKind.API_KEY, api_key="test-key",
                      protocols=frozenset({ApiProtocol.OPENAI_RESPONSES}), base_url="https://pi.example.invalid/v1"),

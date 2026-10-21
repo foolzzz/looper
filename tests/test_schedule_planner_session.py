@@ -954,6 +954,7 @@ def test_dsh_planner_owners_resume_with_new_prompt_token_and_model(tmp_path, mon
     from dataclasses import replace
 
     from looper.agents.ops.service import server_config
+    from tests.runtime_model_helpers import with_model_name
 
     state = _dsh_planner_transport(tmp_path, monkeypatch)
 
@@ -969,8 +970,8 @@ def test_dsh_planner_owners_resume_with_new_prompt_token_and_model(tmp_path, mon
             assert await b._turn("first B") == "planner reply"
             assert b._plan.session_id and b._plan.session_id != first_id
             a._plan.requirement = "new overlay requirement"
-            state.launch = replace(state.launch, settings=replace(state.launch.settings, profile=replace(
-                state.launch.profile, model="deepseek-v4-pro")))
+            state.launch = replace(state.launch, settings=replace(
+                state.launch.settings, profile=with_model_name(state.launch.profile, "deepseek-v4-pro")))
             Path(state.launch.library.mcp_config).write_text(json.dumps({"mcpServers": {
                 "looper": server_config("http://127.0.0.1:19999", "rotated-planner-token"),
             }}))

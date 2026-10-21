@@ -342,7 +342,7 @@ def test_the_provider_api_follows_its_protocols(protocol: ApiProtocol, api: str,
 
 @pytest.mark.parametrize(("provider", "error"), [
     (_resolved_model(api_key=None), "has no API key"),
-    (_resolved_model(vendor=VendorType.GROK_LOGIN), "auth kind"),
+    (_resolved_model(vendor=VendorType.GROK_LOGIN), "only use its own runtime"),
 ])
 def test_a_provider_omp_cannot_use_fails_the_launch(provider: ResolvedModel, error: str, tmp_path: Path) -> None:
     with pytest.raises(RegistryError if provider.provider.auth is AuthKind.OAUTH else RuntimeUnsupported, match=error):

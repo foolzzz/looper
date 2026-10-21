@@ -1,8 +1,12 @@
 """Typed launch snapshots for runtime tests starting at the adapter binding boundary."""
 
+from dataclasses import replace
+from typing import Any
+
+from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.profile_registry import (
     MODEL_FIELDS, Endpoint, LegacyProviderSpec, ModelSpec, ProviderSpec, RegistryError,
-    ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+    ResolvedAgentProfile, ResolvedModel, RuntimeSpec, builtin_resolved_profile,
 )
 from looper.agents.runtimes import ApiProtocol, AuthKind, VendorType
 
@@ -28,3 +32,16 @@ def resolved_profile(id: str, name: str, runtime: RuntimeSpec, provider: LegacyP
                         use_runtime_default=provider.auth is AuthKind.API_KEY and not provider.base_url)
     return ResolvedAgentProfile(id, name, runtime, selected.id, effort or None,
                                 resolved_model=ResolvedModel(selected, account, endpoint), **options)
+
+
+def builtin_launch(**fields: Any) -> Launch:
+    """A launch of the built-in profile (Claude Code's own login) with its resolved model binding."""
+    return Launch(AgentSettings(profile=builtin_resolved_profile()), **fields)
+
+
+def with_model_name(profile: ResolvedAgentProfile, name: str) -> ResolvedAgentProfile:
+    """``profile`` running another exact model of the same account and protocol, as editing its model would."""
+    resolved = profile.resolved_model
+    model = replace(resolved.model, id=f"model-{name}", name=name)
+    return replace(profile, model_id=model.id, resolved_model=ResolvedModel(model, resolved.provider,
+                                                                             resolved.endpoint))

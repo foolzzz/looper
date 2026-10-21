@@ -19,7 +19,7 @@ import pytest
 from library_fixtures import PLUGIN_FILES, fake_claude_home, write
 
 from looper.agents import library
-from looper.agents.agent_settings import Launch
+from tests.runtime_model_helpers import builtin_launch
 from looper.agents.claude_cli import permission_args
 from looper.agents.runtimes.claude_code import TEAMMATE_MODE_ARGS
 from looper.agents.library import (
@@ -319,11 +319,11 @@ class TestResolveInstalled:
 
 class TestLaunch:
     def test_a_launch_carries_and_records_its_library(self) -> None:
-        assert "--plugin-dir" not in Launch().args()
-        assert "library" not in Launch().record()
+        assert "--plugin-dir" not in builtin_launch().args()
+        assert "library" not in builtin_launch().record()
         loaded = AgentLibrary(items=(LoadedItem(ItemKind.PLUGIN, "demo@market", "b" * 64),),
                               plugin_dirs=("/l/demo", "/l/personal"))
-        launch = Launch(library=loaded)
+        launch = builtin_launch(library=loaded)
         # One --plugin-dir per directory: the flag takes one value.
         assert launch.args() == [*permission_args(), "--disallowedTools", "ListAgents", "--model", "opus",
                                  "--plugin-dir", "/l/demo", "--plugin-dir", "/l/personal", *TEAMMATE_MODE_ARGS]

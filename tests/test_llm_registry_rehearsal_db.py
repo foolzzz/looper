@@ -112,10 +112,14 @@ async def _assert_readback(conn, old, conversion, before, history):
     after = await state(conn)
     # Compare every pre-existing table, not just the joined reference counts.
     changed = {"agent_profiles", "llm_providers", "llm_provider_secrets", "schema_migrations",
-               "agent_sessions", "schedules", "agent_setting_layers"}
+               "agent_sessions", "schedules", "agent_setting_layers", "projects"}
     for table, rows in before[1].items():
         if table not in changed:
             assert after[1][table] == rows, table
+    # The seed predates the projects' wait commands: the schema adds that column, NULL, and nothing else changes.
+    projects = [json.loads(r[0]) for r in after[1]["projects"]]
+    assert all(row.pop("wait_commands") is None for row in projects)
+    assert projects == [json.loads(r[0]) for r in before[1]["projects"]]
     layers = [json.loads(r[0]) for r in before[1]["agent_setting_layers"]]
     # The already-completed effort migration left this obsolete column NULL;
     # contract removes it while keeping every reference and role prompt mode.

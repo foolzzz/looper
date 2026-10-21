@@ -33,9 +33,10 @@ async def _ok(chat, tool_name, **arguments):
 
 def test_model_reference_schema_and_fixed_descriptions():
     providers, models = _tool("looper_providers"), _tool("looper_models")
-    assert providers.schema["properties"]["action"]["enum"] == ["list", "register"]
+    assert providers.schema["properties"]["action"]["enum"] == ["list", "register", "update"]
     assert providers.description == ("LLM accounts: list vendors and accounts; register an API-key account "
-        "without its key. Never take or pass a key; the user enters it on the dashboard.")
+        "without its key; update an account's name, endpoints, env or max_concurrency. "
+        "Never take or pass a key; the user enters it on the dashboard.")
     assert models.description == ("LLM models: list (optionally compatible with a runtime); create; update "
         "settings; delete an unused model with confirmation. A model is one provider, exact name and "
         "protocol; use its id or full reference.")
@@ -47,7 +48,7 @@ def test_model_reference_schema_and_fixed_descriptions():
 
 
 @pytest.mark.parametrize("name,arguments", [
-    ("looper_providers", {"action": "update", "provider": "prov-test"}),
+    ("looper_providers", {"action": "update", "provider": "prov-test", "api_key": SECRET}),
     ("looper_providers", {"action": "register", "name": "account", "vendor_type": "custom", "api_key": SECRET}),
     ("looper_providers", {"action": "register", "name": "account", "vendor_type": "custom", "token": SECRET}),
     ("looper_providers", {"action": "register", "name": "account", "vendor_type": "custom", "credential": SECRET}),

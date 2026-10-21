@@ -601,6 +601,7 @@ def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkey
                "roles": ["manager", "planner", "worker", "reviewer"], "builtin": False,
                "used_by": {"layers": [{"scope": "role", "role": "worker"}], "task_count": 0}}
     monkeypatch.setattr(config, "_registry", AsyncMock(return_value={"profiles": [profile], "models": models,
+        "runtime_types": [],
         "runtimes": [{"runtime_id": "rt-test", "name": "Claude", "type": "claude-code", "roles": profile["roles"]}]}))
     monkeypatch.setattr(config.profile_registry, "get_model", AsyncMock(return_value={"model": models[0]}))
     monkeypatch.setattr(config.profile_registry, "list_providers", AsyncMock(return_value={"providers": [provider]}))

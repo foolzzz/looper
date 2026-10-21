@@ -25,6 +25,7 @@ import pytest
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType
 from looper.agents.tiers.manager import NEW_SESSION_REPLY, ManagerAgent, ManagerConfig
+from tests.runtime_model_helpers import with_model_name
 from tests.test_agent_channels import OPEN_ID, OTHER_OPEN_ID, _allowlist, _lark_event, _tg_update
 from tests.test_manager_reply import WEB, _fake_claude, _flag, _resident
 from tests.test_task_capture import CHATS
@@ -265,7 +266,7 @@ def test_dsh_manager_reconfiguration_resumes_same_owner_with_new_overlay_and_mod
         try:
             await manager._handle(_web("before", 0))
             state.settings = replace(state.settings, profile=replace(
-                state.settings.profile, model="deepseek-v4-pro", custom_prompt="NEW {{literal}} PROMPT"))
+                with_model_name(state.settings.profile, "deepseek-v4-pro"), custom_prompt="NEW {{literal}} PROMPT"))
             config = tmp_path / "rotated-mcp.json"
             config.write_text(json.dumps({"mcpServers": {
                 "looper": server_config("http://127.0.0.1:19999", "rotated-test-token"),

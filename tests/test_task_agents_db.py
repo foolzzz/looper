@@ -227,12 +227,12 @@ def test_raising_a_tasks_limit_starts_its_waiting_runs_at_once_and_lowering_it_s
 
 async def _profiles(pool: Any) -> None:
     """claude-code/sonnet, and a profile on a runtime that runs one-off runs only (no Planner, no Manager)."""
-    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                       "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', 'prov-claude-subscription', 'sonnet')")
+    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                       "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'))")
     await pool.execute("INSERT INTO agent_runtimes (id, name, type, capabilities) VALUES "
                        "('rt-one-off', 'one-off', 'claude-code', ARRAY['run'])")
-    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                       "('agent-one-off', 'one-off/opus', 'rt-one-off', 'prov-claude-subscription', 'opus')")
+    await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                       "('agent-one-off', 'one-off/opus', 'rt-one-off', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'opus'))")
 
 
 @pytest.mark.parametrize(("body", "message"), [

@@ -18,10 +18,12 @@ from looper import child_env
 from looper.agents import proc_tree, schedule_gate
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.channels import lark_cli
-from looper.agents.profile_registry import AgentProfile, ProviderSpec, RuntimeSpec
-from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported
+from looper.agents.profile_registry import (
+    Endpoint, ModelSpec, ProviderSpec, RegistryError, ResolvedModel, RuntimeSpec, builtin_resolved_profile,
+)
+from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported, VendorType
 from looper.agents.runtimes.grok import FIXED_ENV
-from test_agent_settings import _profile as claude_profile
+from tests.runtime_model_helpers import resolved_profile
 from test_codex_runtime import _launch as codex_launch, _login_provider, _operator_login
 from test_dsh_runtime import PROVIDER as DSH_PROVIDER, dsh_policy  # noqa: F401 (fixture)
 from test_grok_runtime import LOGIN, _launch as grok_launch, _operator
@@ -103,23 +105,47 @@ def server_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[
     return visible
 
 
-def _launch(runtime: str, auth: str) -> Launch:
+def _api_key_model(runtime: str, auth: str, name: str) -> ResolvedModel:
+    """An API-key account's model for ``runtime``: at the endpoint ``auth`` names, or its runtime default."""
     protocol = ApiProtocol.ANTHROPIC_MESSAGES if runtime == "claude-code" else ApiProtocol.OPENAI_RESPONSES
-    provider = ProviderSpec("provider-test", "test", AuthKind.API_KEY, frozenset({protocol}),
-                            base_url="https://provider.example.invalid/v1" if auth == "endpoint" else "",
-                            api_key="run-api-key")
+    provider = ProviderSpec("provider-test", "test", VendorType.CUSTOM, AuthKind.API_KEY, api_key="run-api-key")
+    base_url = "https://provider.example.invalid/v1" if auth == "endpoint" else ""
+    return ResolvedModel(ModelSpec("model-test", provider.id, name, protocol), provider,
+                         Endpoint(provider.id, protocol, base_url, use_runtime_default=not base_url))
+
+
+def _with_provider_env(launch: Launch, env: tuple[tuple[str, str], ...]) -> Launch:
+    """``launch`` whose account carries ``env``."""
+    resolved = launch.profile.resolved_model
+    resolved = replace(resolved, provider=replace(resolved.provider, env=env))
+    return replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, resolved_model=resolved)))
+
+
+def _with_stored_env(launch: Launch, *env: tuple[str, str]) -> Launch:
+    """``launch`` whose account also holds ``env`` the registry now refuses to accept (a credential-looking name or
+    one a runtime binding owns), as a row stored before that rule could still hold them: every runtime must keep
+    ignoring or scrubbing them."""
+    provider = launch.profile.resolved_model.provider
+    object.__setattr__(provider, "env", (*provider.env, *env))
+    return launch
+
+
+def _launch(runtime: str, auth: str) -> Launch:
     if runtime == "claude-code":
-        profile = claude_profile("opus")
-        launch = Launch(AgentSettings(profile=profile if auth == "login" else replace(profile, provider=provider)))
+        profile = builtin_resolved_profile()
+        if auth != "login":
+            resolved = _api_key_model(runtime, auth, "opus")
+            profile = replace(profile, model_id=resolved.model.id, resolved_model=resolved)
+        launch = Launch(AgentSettings(profile=profile))
     elif runtime == "codex":
-        launch = codex_launch(provider=_login_provider() if auth == "login" else provider)
+        launch = codex_launch(provider=_login_provider() if auth == "login" else _api_key_model(runtime, auth, "gpt-5.5"))
     elif runtime == "grok":
         launch = grok_launch()
     else:
-        launch = omp_launch(provider=provider)
+        launch = omp_launch(resolved=_api_key_model(runtime, auth, "gpt-5.5"))
     # Explicit settings and provider variables must still be added, even though neither is in the allowlist.
-    profile = replace(launch.profile, provider=replace(launch.profile.provider, env=(("PROVIDER_SETTING", "bound"),)))
-    return replace(launch, settings=replace(launch.settings, profile=profile, env=(("RUN_SETTING", "configured"),)))
+    launch = _with_provider_env(launch, (("PROVIDER_SETTING", "bound"),))
+    return replace(launch, settings=replace(launch.settings, env=(("RUN_SETTING", "configured"),)))
 
 
 def _assert_environment(env: dict[str, str], visible: dict[str, str], runtime: str, auth: str) -> None:
@@ -147,10 +173,10 @@ def test_runtime_environments_keep_only_allowed_and_explicit_variables(
 @pytest.mark.parametrize("runtime", ["grok", "omp"])
 def test_unsupported_authentication_stays_unsupported(runtime: str, server_environment: dict[str, str]) -> None:
     launch = _launch(runtime, "api-key" if runtime == "grok" else "login")
-    provider = replace(LOGIN, oauth_runtime_type="omp") if runtime == "omp" else ProviderSpec(
-        "api", "api", AuthKind.API_KEY, frozenset({ApiProtocol.OPENAI_RESPONSES}), api_key="run-api-key")
-    launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, provider=provider)))
-    with pytest.raises(RuntimeUnsupported):
+    resolved = LOGIN if runtime == "omp" else _api_key_model(runtime, "api-key", "grok-4.7")
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(
+        launch.profile, model_id=resolved.model.id, resolved_model=resolved)))
+    with pytest.raises((RegistryError, RuntimeUnsupported)):
         launch.environment()
 
 
@@ -252,8 +278,10 @@ def test_dsh_child_uses_private_homes_and_explicit_binding(tmp_path, monkeypatch
         ("AGENTS_HOME", operator["HOME"]))
     token = "synthetic-run-token"
     provider = replace(DSH_PROVIDER, env=overrides + (("PROVIDER_SETTING", "bound"), ("LOOPER_AGENT_TOKEN", token)))
-    profile = AgentProfile("test", "test", RuntimeSpec("test", "test", dsh_policy.type), provider, "deepseek-flash")
-    launch = Launch(AgentSettings(profile=profile, env=overrides + (("RUN_SETTING", "configured"),)))
+    profile = resolved_profile("test", "test", RuntimeSpec("test", "test", dsh_policy.type),
+                               replace(DSH_PROVIDER, env=(("PROVIDER_SETTING", "bound"),)), "deepseek-flash")
+    launch = _with_stored_env(Launch(AgentSettings(profile=profile, env=overrides + (("RUN_SETTING", "configured"),))),
+                              *overrides, ("LOOPER_AGENT_TOKEN", token))
     home = dsh.write_home(tmp_path / ".local", {"looper.yml": '{"apiKeyEnv":"DEEPSEEK_API_KEY"}\n',
                           "prompt.md": "A synthetic prompt with {{literal}} text.\n"}, owner="child")
     # Exercise Launch.environment's adapter contract without registering an unfinished DSH runtime.
@@ -270,8 +298,10 @@ def test_dsh_child_uses_private_homes_and_explicit_binding(tmp_path, monkeypatch
                               capture_output=True, check=True, timeout=10)
     assert json.loads(isolated.stdout) == dict.fromkeys(names, dict.fromkeys(relatives))
     assert actual | home.paths == actual
-    rotated = replace(launch, settings=replace(launch.settings, profile=replace(profile, provider=replace(
-        provider, api_key="rotated-dsh-key", env=(("LOOPER_AGENT_TOKEN", "rotated-run-token"),)))))
+    account = replace(profile.resolved_model.provider, api_key="rotated-dsh-key", env=())
+    rotated = _with_stored_env(replace(launch, settings=replace(launch.settings, profile=replace(
+        profile, resolved_model=replace(profile.resolved_model, provider=account)))),
+        ("LOOPER_AGENT_TOKEN", "rotated-run-token"))
     rotated_env = rotated.environment()
     assert {name: rotated_env[name] for name in names} == home.paths
     assert rotated_env["DEEPSEEK_API_KEY"] == "rotated-dsh-key"
@@ -300,8 +330,11 @@ def test_dsh_missing_binding_key_cannot_fall_back_to_project_dotenv(tmp_path, mo
     (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=synthetic-project-key\n")
     assert "synthetic-project-key" in (tmp_path / ".env").read_text()
     home = dsh.write_home(tmp_path / ".local", {"looper.yml": "{}\n"})
-    launch = omp_launch(provider=replace(DSH_PROVIDER, api_key=key))
-    launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, model="deepseek-flash")))
+    profile = resolved_profile("test", "test", RuntimeSpec("test", "test", "omp"),
+                               replace(DSH_PROVIDER, api_key=None), "deepseek-flash")
+    # The registry refuses a blank key; a row stored before that rule could still hold one.
+    object.__setattr__(profile.resolved_model.provider, "api_key", key)
+    launch = Launch(AgentSettings(profile=profile))
     with pytest.raises(RuntimeUnsupported, match="API key") as failure:
         dsh.environment(launch, home)
     assert "synthetic-project-key" not in repr(failure.value)
@@ -322,7 +355,8 @@ def test_pi_main_and_nested_shell_keep_personal_config_and_server_secrets_out(
     for name in (*child_env.RUNTIMES, "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_PACKAGE_DIR",
                  "PI_CONFIG_FILES", "PI_SHELL_PREFIX", "XDG_CONFIG_HOME", "XDG_DATA_DIRS"):
         monkeypatch.setenv(name, str(operator))
-    launch = pi_launch(pi_provider(env=(("PROVIDER_SETTING", "explicit"), ("PROVIDER_SECRET", "private-key"))))
+    launch = _with_stored_env(pi_launch(pi_provider(env=(("PROVIDER_SETTING", "explicit"),))),
+                              ("PROVIDER_SECRET", "private-key"))
     launch = replace(launch, settings=replace(launch.settings, env=(("RUN_SETTING", "configured"),)))
     command = pi_command(tmp_path, launch)
     executable = tmp_path / "stand-in-pi"
@@ -372,7 +406,7 @@ def test_pi_bash_tool_scrubs_credentials_and_session_metadata(
     package = next((p for p in Path(executable).resolve().parents if (p / "package.json").exists()), None)
     if package is None or json.loads((package / "package.json").read_text()).get("version") != "1.3.0":
         pytest.skip("the bash tool check targets installed pi 1.3.0")
-    launch = pi_launch(pi_provider(env=(("PROVIDER_SECRET", "provider-secret"),)))
+    launch = _with_stored_env(pi_launch(pi_provider()), ("PROVIDER_SECRET", "provider-secret"))
     env = {**launch.environment(), **_command_env(pi_command(tmp_path, launch)),
            "LOOPER_AGENT_URL": "http://127.0.0.1:1", "LOOPER_AGENT_TOKEN": "bridge-secret"}
     script = tmp_path / "bash-tool.mjs"

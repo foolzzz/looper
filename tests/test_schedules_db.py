@@ -809,9 +809,10 @@ def test_a_project_with_schedules_is_not_deleted_and_a_deleted_schedule_keeps_it
 
 def test_a_profile_a_schedule_chose_is_not_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
+        models = (await env.call("GET", "/api/models", query={"provider_id": "prov-claude-subscription"}))[1]["models"]
         created = await env.ok("POST", "/api/agent-profiles", {
-            "name": "cheap", "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
-            "model": "haiku"})
+            "name": "cheap", "runtime_id": "rt-claude-code",
+            "model_id": next(m["model_id"] for m in models if m["name"] == "haiku")})
         profile_id = created["profile"]["profile_id"]
         sid = (await env.schedule(profile_overrides={"planner": profile_id}))["schedule_id"]
 

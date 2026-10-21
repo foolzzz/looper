@@ -918,14 +918,17 @@ class TestManagerProjectSkills:
 
 def _codex_profile(executable: str) -> dict[str, Any]:
     """An Agent Profile on Codex with an API key provider, as the database gives it."""
-    return {
-        **profile_json("gpt-5.5"), "id": "agent-codex", "name": "codex/gpt-5.5",
-        "runtime_id": "rt-codex", "runtime_name": "codex", "runtime_type": "codex", "runtime_executable": executable,
-        "runtime_capabilities": ["add_dirs", "mcp", "resident_session", "resume", "run", "structured_output"],
-        "provider_id": "prov-cpa", "provider_name": "cpa", "provider_auth": "api_key",
-        "provider_protocols": ["openai-responses"], "provider_oauth_runtime_type": None,
-        "provider_base_url": "http://127.0.0.1:8317/v1", "provider_models": [],
-    }
+    from looper.agents.profile_registry import (
+        Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+    )
+    from looper.agents.runtimes import ApiProtocol, AuthKind, VendorType, adapter
+    from tests.test_agent_settings import _row
+
+    provider = ProviderSpec("prov-cpa", "cpa", VendorType.CPA, AuthKind.API_KEY)
+    model = ModelSpec("model-gpt-5.5", provider.id, "gpt-5.5", ApiProtocol.OPENAI_RESPONSES)
+    resolved = ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, "http://127.0.0.1:8317/v1"))
+    runtime = RuntimeSpec("rt-codex", "codex", "codex", executable, adapter("codex").capabilities)
+    return _row(ResolvedAgentProfile("agent-codex", "codex/gpt-5.5", runtime, model.id, resolved_model=resolved))
 
 
 # A stand-in codex: one turn per process, a new thread unless resumed, answering "codex <thread>: <message>".
@@ -950,6 +953,12 @@ def test_the_manager_moves_to_codex_after_a_handoff_and_resumes_it_turn_by_turn(
     from looper.db import profile_registry as db_registry
 
     monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-manager-codex"))
+    # The run's prices come from the account's models: the one this profile runs.
+    monkeypatch.setattr(db_registry, "list_models", AsyncMock(return_value=[
+        {"id": "model-gpt-5.5", "provider_id": "prov-cpa", "name": "gpt-5.5", "protocol": "openai-responses",
+         "context_window": None, "input_usd_per_mtok": None, "output_usd_per_mtok": None,
+         "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": None,
+         "background_model": None, "catalog_order": 0, "builtin": False}]))
     codex = fake_claude(tmp_path / "codex", _CODEX)
     on_codex = [_manager(profile=_codex_profile(codex))]
     chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], layers=[[], on_codex, on_codex])

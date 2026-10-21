@@ -12,6 +12,7 @@ import pytest
 
 from looper.agents.profile_registry import BUILTIN_PROFILE, RegistryError, RegistryNotFound
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, adapter
+from tests.runtime_model_helpers import resolved_profile
 from tests.test_agent_settings import _row
 from tests.test_catalog_db import _Writer
 
@@ -190,8 +191,9 @@ def test_pi_preview_matches_the_final_prompt_file(monkeypatch, tmp_path, mode):
     monkeypatch.setattr(module, "build_system_prompt", capture)
     result = asyncio.run(module.preview(profile.id, "worker", "proj-demo"))
     launch = Launch(AgentSettings(
-        profile=replace(profile, provider=replace(profile.provider, api_key="test-only",
-                                                  base_url="http://localhost.invalid/v1")),
+        profile=resolved_profile(profile.id, profile.name, profile.runtime, replace(
+            profile.provider, oauth_runtime_type=None, api_key="test-only", base_url="http://localhost.invalid/v1"), profile.model,
+            custom_prompt=profile.custom_prompt),
         system_prompt_mode=SystemPromptMode(mode)), role=AgentType.WORKER)
     command = launch.runtime.run_command("pi", cwd=tmp_path, launch=launch,
                                          prompt_file=prompts[0].write_file(tmp_path / "runtime"))

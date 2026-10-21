@@ -167,6 +167,12 @@ for line in sys.stdin:
 '''.replace("__ROLE_TEXTS__", repr((TESTER, TESTER_V2, TESTER_HARNESS, SECURITY)))
 
 
+def _builtin_model(api: Any, name: str) -> str:
+    """The id of the built-in Claude Code login's model ``name``."""
+    models = api.get("/api/models", provider_id="prov-claude-subscription")["models"]
+    return next(m["model_id"] for m in models if m["name"] == name)
+
+
 def _install(root: Path) -> tuple[Path, Path]:
     state = root / "state"
     state.mkdir()
@@ -196,6 +202,13 @@ def _wait(api: Any, ids: dict[str, str], variants: tuple[str, ...], ended: tuple
         time.sleep(0.2)
 
 
+def _wait_left(api: Any, ids: dict[str, str], variants: tuple[str, ...], status: str) -> None:
+    deadline = time.monotonic() + 60
+    while any(api.get(f"/api/tasks/{ids[variant]}")["status"] == status for variant in variants):
+        assert time.monotonic() < deadline, f"{variants} stayed {status}"
+        time.sleep(0.05)
+
+
 async def _layers(database_url: str, task_ids: list[str]) -> list[dict[str, Any]]:
     import asyncpg
 
@@ -221,7 +234,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
         with running_server(**server, log_path=root / "serve.log") as api:
             sonnet = api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
-                                                      "provider_id": "prov-claude-subscription", "model": "sonnet"})
+                                                      "model_id": _builtin_model(api, "sonnet")})
             # A skill installed for the roles a Planner defines only: it loads for a run of a role naming it.
             notes = api.post("/api/catalog/skills", {"name": "role-notes", "description": "Notes for roles.",
                                                      "content": "Reply ROLE-NOTES.\n"})["item"]
@@ -246,7 +259,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                       "targets": api.get("/api/chat/targets")["targets"]}
             api.post("/api/tasks/start", {"task_id": ids["restart"]})
             api.post("/api/tasks/start", {"task_id": ids["startover"], "start_over": True})
-            time.sleep(0.5)
+            # Until both left their failed state: waiting for an end at once would read the first run's.
+            _wait_left(api, ids, ("restart", "startover"), "failed")
             again = _wait(api, ids, ("restart", "startover"), ("completed", "failed", "stopped", "cancelled"))
         layers = asyncio.run(_layers(database_url, list(ids.values())))
     return {"first": first, "again": again, "before": before, "ids": ids, "state": state, "layers": layers,

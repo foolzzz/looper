@@ -120,9 +120,8 @@ def test_a_schedule_created_this_turn_cannot_start_or_leave_a_pending_confirmati
 def test_creating_takes_every_setting_the_dashboard_takes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
         await _project(pool, "calc", str(tmp_path))
-        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                           "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', 'prov-claude-subscription', "
-                           "'sonnet')")
+        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                           "('agent-sonnet', 'claude-code/sonnet', 'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'))")
         chat = _Chat(tmp_path)
         (created,) = await chat.say("建定时任务", _create(
             overlap="parallel", max_parallel_runs=2, catch_up="skip", run_timeout_seconds=1800, run_budget_usd=1.5,
@@ -398,8 +397,8 @@ def test_the_configuration_is_exported_into_the_runtime_directory_without_secret
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def test(pool: Any) -> None:
-        await _ok("POST", "/api/providers", {"name": "keyed", "protocols": ["anthropic-messages"], "auth": "api_key",
-                                             "api_key": SECRET, "base_url": "https://api.example.test"})
+        await _ok("POST", "/api/providers", {"name": "keyed", "vendor_type": "custom", "api_key": SECRET, "endpoints": [
+            {"protocol": "anthropic-messages", "base_url": "https://api.example.test"}]})
         await _schedule(await _project(pool, "calc", str(tmp_path)), "nightly", enabled=True)
         runtime = tmp_path / "runtime"
         chat = _with(_Chat(tmp_path), runtime_root=runtime)
@@ -413,7 +412,7 @@ def test_the_configuration_is_exported_into_the_runtime_directory_without_secret
         text = path.read_text()
         assert SECRET not in text
         data = json.loads(text)
-        assert data["format"] == result["format"] == "looper-config/v2" and data["secrets"] == "omitted"
+        assert data["format"] == result["format"] == "looper-config/v3" and data["secrets"] == "omitted"
         (project,) = data["projects"]
         assert [s["name"] for s in project["schedules"]] == ["nightly"]
         assert result["counts"]["schedules"] == 1 and result["secrets_left_out"] >= 1

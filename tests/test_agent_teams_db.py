@@ -17,7 +17,9 @@ import pytest
 import agent_launch_parity as parity
 from fake_claude import fake_claude
 from tests.test_catalog_db import DSN
-from tests.test_profile_registry_db import _call, _launch, _ok, _run, _runtime, stand_in  # noqa: F401
+from tests.test_profile_registry_db import (  # noqa: F401
+    _call, _launch, _model_id, _ok, _provider, _run, _runtime, stand_in,
+)
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -25,9 +27,9 @@ TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 
 
 async def _profile(name: str, **fields: Any) -> tuple[int, Any]:
-    return await _call("POST", "/api/agent-profiles", {"name": name, "runtime_id": "rt-claude-code",
-                                                       "provider_id": "prov-claude-subscription", "model": "sonnet",
-                                                       **fields})
+    return await _call("POST", "/api/agent-profiles", {
+        "name": name, "runtime_id": "rt-claude-code",
+        "model_id": await _model_id("prov-claude-subscription", "sonnet"), **fields})
 
 
 def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_takes_them(
@@ -35,11 +37,11 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
 ) -> None:
     async def _test(_pool: Any) -> None:
         # An API key provider, which a Claude Code runtime and the stand-in runtime can both run with.
-        key = (await _ok("POST", "/api/providers", {"name": "key", "protocols": ["anthropic-messages"],
-                                                    "auth": "api_key"}))["provider"]["provider_id"]
+        key = await _provider({"name": "key", "vendor_type": "custom", "endpoints": [
+            {"protocol": "anthropic-messages", "base_url": "https://key.example.invalid/anthropic"}]})
         other = await _runtime(stand_in, name="si")
         created = {name: (await _ok("POST", "/api/agent-profiles", {
-            "name": name, "runtime_id": runtime, "provider_id": key, "model": "sonnet", **fields}))["profile"]
+            "name": name, "runtime_id": runtime, "model_id": await _model_id(key, "sonnet"), **fields}))["profile"]
             for name, runtime, fields in [("cc/default", "rt-claude-code", {}),
                                           ("cc/off", "rt-claude-code", {"agent_teams": False}),
                                           ("si/default", other, {})]}
@@ -49,10 +51,11 @@ def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_take
         off = created["cc/off"]["profile_id"]
         assert (await _ok("PUT", f"/api/agent-profiles/{off}", {"agent_teams": True}))["profile"]["agent_teams"]
         await _ok("PUT", f"/api/agent-profiles/{off}", {"agent_teams": False})
-        assert (await _ok("PUT", f"/api/agent-profiles/{off}", {"model": "opus"}))["profile"]["agent_teams"] is False
+        assert (await _ok("PUT", f"/api/agent-profiles/{off}", {"model_id": await _model_id(key, "opus")}))[
+            "profile"]["agent_teams"] is False
 
         # Another runtime type refuses them when asked; a move that does not say takes the new type's default.
-        status, payload = await _profile("si/teams", runtime_id=other, provider_id=key, agent_teams=True)
+        status, payload = await _profile("si/teams", runtime_id=other, model_id=await _model_id(key, "sonnet"), agent_teams=True)
         assert status == 400 and "agent teams are a Claude Code feature" in payload["error"]
         on = created["cc/default"]["profile_id"]
         status, payload = await _call("PUT", f"/api/agent-profiles/{on}", {"runtime_id": other, "agent_teams": True})
@@ -73,14 +76,19 @@ def test_the_upgrade_turns_agent_teams_on_once_for_every_claude_code_profile(mon
 
     async def _test(pool: Any) -> None:
         await _runtime("codex")
-        await pool.execute("INSERT INTO llm_providers (id, name, protocols, auth) "
-                           "VALUES ('prov-cpa', 'cpa', ARRAY['openai-responses'], 'api_key')")
+        await pool.execute("INSERT INTO llm_providers (id, name, vendor_type, auth) "
+                           "VALUES ('prov-cpa', 'cpa', 'cpa', 'api_key')")
+        await pool.execute("INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) "
+                           "VALUES ('prov-cpa', 'openai-responses', 'http://127.0.0.1:8317/v1')")
+        await pool.execute("INSERT INTO llm_models (id, provider_id, name, protocol) "
+                           "VALUES ('model-cpa-gpt', 'prov-cpa', 'gpt-5.5', 'openai-responses')")
         # A database from before agent teams, with a profile on each runtime type.
         await pool.execute("ALTER TABLE agent_profiles DROP COLUMN agent_teams; "
                            "DELETE FROM schema_migrations WHERE name = 'agent_profiles_agent_teams_on'")
-        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
-                           "('agent-cc', 'cc/sonnet', 'rt-claude-code', 'prov-claude-subscription', 'sonnet'), "
-                           "('agent-cx', 'codex/gpt', 'rt-codex', 'prov-cpa', 'gpt-5.5')")
+        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "
+                           "('agent-cc', 'cc/sonnet', 'rt-claude-code', (SELECT id FROM llm_models "
+                           "WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet')), "
+                           "('agent-cx', 'codex/gpt', 'rt-codex', 'model-cpa-gpt')")
 
         async def teams() -> dict[str, bool]:
             rows = await pool.fetch("SELECT name, agent_teams FROM agent_profiles")

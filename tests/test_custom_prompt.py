@@ -11,7 +11,7 @@ import pytest
 
 from looper.agents.agent_settings import HARNESS_MAX_CHARS, Boundaries, Harness, Layer
 from looper.agents.layer_effort import Before, Derived, _apply, convert
-from looper.agents.profile_registry import BUILTIN_PROFILE, RegistryError
+from looper.agents.profile_registry import RegistryError, builtin_resolved_profile
 from looper.agents.system_prompt import build_role_prompt, build_system_prompt, compose_system_prompt, sha256_text
 from looper.agents.task_roles import RoleKind, TaskRole
 
@@ -75,14 +75,14 @@ def test_custom_prompt_nul_is_refused_before_create_or_update(monkeypatch, value
     from tests.test_agent_settings import _row
     from tests.test_catalog_db import _Writer
 
-    profile = replace(BUILTIN_PROFILE, id="agent-custom", name="custom")
+    profile = replace(builtin_resolved_profile(), id="agent-custom", name="custom")
     monkeypatch.setattr(db, "get_profile", AsyncMock(return_value=_row(profile)))
     insert, update = AsyncMock(), AsyncMock()
     monkeypatch.setattr(db, "insert_profile", insert)
     monkeypatch.setattr(db, "update_profile", update)
     fields = {"custom_prompt": value}
     if method == "POST":
-        fields.update(name="custom", runtime_id=profile.runtime.id, provider_id=profile.provider.id, model="sonnet")
+        fields.update(name="custom", runtime_id=profile.runtime.id, model_id=profile.model_id)
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())
     writer = _Writer()
@@ -105,8 +105,8 @@ def test_rfc_records_custom_prompt_trust_and_unverified_precedence() -> None:
 
 
 def test_derived_profile_identity_and_insert_preserve_custom_prompt() -> None:
-    custom = replace(BUILTIN_PROFILE, id="custom", name="custom", custom_prompt="CUSTOM")
-    plain_high = replace(BUILTIN_PROFILE, id="plain-high", effort="high")
+    custom = replace(builtin_resolved_profile(), id="custom", name="custom", custom_prompt="CUSTOM")
+    plain_high = replace(builtin_resolved_profile(), id="plain-high", effort="high")
     key = (Layer.SYSTEM, None, None)
     before = {key: Before(custom, "high")}
     conversion = convert(before, [custom, plain_high])
@@ -131,11 +131,16 @@ def test_manager_profile_tool_exposes_and_returns_custom_prompt() -> None:
     tool = next(tool for tool in TOOLS if tool.name == "looper_agent_profiles")
     assert tool.schema["properties"]["custom_prompt"]["type"] == "string"
     view = {"profile_id": "profile", "name": "profile", "runtime_name": "Claude Code", "provider_name": "login",
-            "model": "sonnet", "effort": None, "agent_teams": False,
+            "model_id": "model-sonnet",
+            "model": {"model_id": "model-sonnet", "name": "sonnet", "protocol": "anthropic-messages",
+                      "provider_id": "prov-claude-subscription"},
+            "provider": {"provider_id": "prov-claude-subscription", "name": "login",
+                         "vendor_type": "claude-subscription", "auth": "oauth"},
+            "effort": None, "agent_teams": False,
             "custom_prompt": "CUSTOM", "roles": [], "builtin": False,
             "used_by": {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}}
     assert _profile_listed(view)["custom_prompt"] == "CUSTOM"
-    assert replace(BUILTIN_PROFILE, custom_prompt="CUSTOM").record()["custom_prompt"] == "CUSTOM"
+    assert replace(builtin_resolved_profile(), custom_prompt="CUSTOM").record()["custom_prompt"] == "CUSTOM"
 
 
 @pytest.mark.parametrize("verify", [False, True])
@@ -150,7 +155,7 @@ def test_worker_launch_uses_its_selected_profiles_custom_prompt(
     from tests.test_agent_planner_worker import _run_step
 
     settings = AgentSettings(harness=Harness("HARNESS", Layer.SYSTEM),
-                             profile=replace(BUILTIN_PROFILE, custom_prompt="CUSTOM"))
+                             profile=replace(builtin_resolved_profile(), custom_prompt="CUSTOM"))
     monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=settings))
     extra = {}
     if task_role:
@@ -172,7 +177,7 @@ def test_manager_composes_the_selected_profiles_custom_prompt() -> None:
     from looper.agents.tiers.manager import ManagerAgent
 
     settings = AgentSettings(harness=Harness("HARNESS", Layer.SYSTEM),
-                             profile=replace(BUILTIN_PROFILE, custom_prompt="CUSTOM"))
+                             profile=replace(builtin_resolved_profile(), custom_prompt="CUSTOM"))
     prompt = ManagerAgent._composed_prompt(SimpleNamespace(_system_prompt="ROLE", _prompt_recommended=False), settings)
     assert prompt.text.startswith("CUSTOM\n\nHARNESS\n\nROLE\n\n")
     assert prompt.layers["custom_prompt"] == {"sha256": sha256_text("CUSTOM")}
@@ -182,6 +187,7 @@ def test_profile_row_round_trip_and_legacy_default() -> None:
     from looper.agents.profile_registry import AgentProfile
     from tests.test_agent_settings import _row
 
-    profile = replace(BUILTIN_PROFILE, custom_prompt="CUSTOM")
+    profile = replace(builtin_resolved_profile(), custom_prompt="CUSTOM")
     assert AgentProfile.from_row({**_row(profile), "custom_prompt": "CUSTOM"}).custom_prompt == "CUSTOM"
-    assert AgentProfile.from_row(_row(profile)).custom_prompt == ""
+    without = {key: value for key, value in _row(profile).items() if key != "custom_prompt"}
+    assert AgentProfile.from_row(without).custom_prompt == ""
