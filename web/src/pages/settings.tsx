@@ -1,5 +1,6 @@
 import { AgentProfilesSection } from "@/components/agent-profiles";
 import { CatalogCard } from "@/components/catalog-card";
+import { ChatSettingsSection } from "@/components/chat-settings";
 import { ChannelsSection } from "@/components/channel-settings";
 import { ConfigTransferCard } from "@/components/config-transfer";
 import { ProvidersSection } from "@/components/provider-settings";
@@ -30,6 +31,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
   channels:
     "Connect external messaging platforms. Each channel's card says where its credential comes from; saved " +
     "changes take effect after the server restarts. Each channel passes on only the senders it lists.",
+  chat: "How the chat with the Manager behaves, on the dashboard and on the channels.",
   scheduler:
     "System-wide limits of schedules: how close two fires may be, and the run timeout of schedules that follow the default.",
   vault:
@@ -58,6 +60,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "roles" && <RolesSection sub={inner} />}
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
+      {page === "chat" && <ChatSettingsSection />}
       {page === "scheduler" && <SchedulerSection />}
       {page === "vault" && <VaultSettingsSection />}
       {page === "transfer" && <ConfigTransferCard />}

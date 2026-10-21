@@ -18,7 +18,8 @@ export interface ChatComposerProps {
 }
 
 const IDLE_PLACEHOLDER = "Type a message... (Shift+Enter for a new line)";
-const REPLYING_PLACEHOLDER = "Replying… Enter queues, Esc stops";
+const REPLYING_PLACEHOLDER = "Replying… Enter queues";
+const REPLYING_STOPPABLE_PLACEHOLDER = "Replying… Enter queues, Esc stops";
 const FULL_NOTICE = "Queue is full";
 
 export function ChatComposer(props: ChatComposerProps) {
@@ -167,7 +168,7 @@ export function ChatComposer(props: ChatComposerProps) {
             onDraft(e.target.value);
           }}
           onKeyDown={onKeyDown}
-          placeholder={replying ? REPLYING_PLACEHOLDER : IDLE_PLACEHOLDER}
+          placeholder={replying ? (canStop ? REPLYING_STOPPABLE_PLACEHOLDER : REPLYING_PLACEHOLDER) : IDLE_PLACEHOLDER}
           aria-label="Message"
           className="max-h-40 min-h-11 flex-1 resize-none overflow-y-auto rounded-lg border border-input bg-background px-4 py-2.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
           autoFocus

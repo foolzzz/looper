@@ -22,7 +22,7 @@ from typing import Any
 
 from ..db.tasks import TaskGroup, task_group
 from . import (
-    agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
+    agent_settings, catalog, chat_settings, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
     operator_auth, overview, profile_registry, project_skills, projects, prompt_preview, request_guard, role_api,
     schedules, self_check, vault, wait_service,
 )
@@ -705,6 +705,10 @@ class AgentHTTPServer:
         elif path == "/api/scheduler-settings" and method == "PUT":
             await self._answer(writer, HTTP_200,
                                lambda: schedules.update_scheduler_settings(projects.json_object(body)))
+        elif path == "/api/chat-settings" and method == "GET":
+            await self._answer(writer, HTTP_200, self._chat_settings)
+        elif path == "/api/chat-settings" and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: self._update_chat_settings(body))
         elif path == "/api/gate-settings" and method == "GET":
             await self._answer(writer, HTTP_200, gate_service.gate_settings)
         elif path == "/api/gate-settings" and method == "PUT":
@@ -987,7 +991,21 @@ class AgentHTTPServer:
         }))
         await writer.drain()
 
+    async def _chat_settings(self) -> dict[str, Any]:
+        return chat_settings.settings_view()
+
+    async def _update_chat_settings(self, body: bytes) -> dict[str, Any]:
+        try:
+            return await chat_settings.update(projects.json_object(body))
+        except ValueError as exc:
+            raise projects.RequestError(HTTP_400, str(exc)) from None
+
     async def _handle_chat_stop(self, body: bytes, writer: asyncio.StreamWriter) -> None:
+        if not chat_settings.stop_enabled():
+            writer.write(_json_response(HTTP_409, {
+                "state": "disabled", "error": "Stopping a reply is off (Settings → Chat; experimental)."}))
+            await writer.drain()
+            return
         try:
             data = json.loads(body.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):

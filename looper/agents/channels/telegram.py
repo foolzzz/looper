@@ -37,6 +37,7 @@ from ..message import (
 )
 from ..task_notice import NotifyTarget
 from .allowlist import SenderAllowlist
+from .. import chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -58,6 +59,11 @@ _BOT_COMMANDS: list[tuple[str, str]] = [
     ("profile", "查看或切换 Manager 会话的 Agent Profile"),
     ("help", "显示帮助"),
 ]
+
+
+def bot_commands() -> list[tuple[str, str]]:
+    """The command menu: /stop only while stopping a reply is on (``chat_settings``)."""
+    return [(name, desc) for name, desc in _BOT_COMMANDS if name != "stop" or chat_settings.stop_enabled()]
 
 
 def _check_telegram_available() -> bool:
@@ -153,7 +159,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             from telegram import BotCommand
 
             await self._app.bot.set_my_commands(
-                [BotCommand(name, desc) for name, desc in _BOT_COMMANDS]
+                [BotCommand(name, desc) for name, desc in bot_commands()]
             )
         except Exception:
             logger.warning("telegram set_my_commands failed", exc_info=True)

@@ -7,10 +7,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from looper.agents import chat_settings
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.tiers.manager import is_stop_command
 from tests.test_manager_new_session import _drain, _until
 from tests.test_manager_stop import _manager, _Session
+
+@pytest.fixture(autouse=True)
+def _stop_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stopping a reply is off by default (``chat_settings``); these tests are about it working."""
+    monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+
 
 TELEGRAM = channel_address("telegram")
 
@@ -88,6 +97,28 @@ def test_stop_with_arguments_is_an_ordinary_message(agent_db: Any) -> None:
             session, manager, bus, chat, inbox = _setup(tmp)
             await bus.publish(_tg("/stop now"))
             assert inbox.qsize() == 1
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_stop_is_answered_by_looper_when_the_setting_is_off(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chat_settings, "_stop_enabled", False)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session, manager, bus, chat, inbox = _setup(tmp)
+            handling = asyncio.create_task(manager._handle(_tg("写一篇很长的文章")))
+            await _until(session.running.is_set)
+            _drain(chat)
+            await bus.publish(_tg("/stop"))
+            await _until(lambda: not chat.empty())
+            assert _texts(chat) == ["停止功能暂未开放"]
+            assert inbox.empty()  # not queued for the model
+            assert manager.current_turn is not None and manager.current_turn.stop is None
+            assert not session._stopped.is_set()  # nothing was interrupted
+            await manager.stop_turn(manager.current_turn.message_id, via="telegram")  # to end the stand-in's turn
+            await handling
             await bus.shutdown()
 
     asyncio.run(run())

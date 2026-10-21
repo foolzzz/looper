@@ -450,6 +450,28 @@ export async function stopChatReply(messageId: string): Promise<{ state: string;
   return failed(res, "stop reply");
 }
 
+/** The chat's system settings (Settings → Chat). */
+export interface ChatSettings {
+  /** Whether a reply can be stopped (Esc, the Stop button, /stop). Experimental; off by default. */
+  stop_enabled: boolean;
+}
+
+export async function fetchChatSettings(): Promise<ChatSettings> {
+  const res = await fetch(`${API_BASE}/chat-settings`);
+  if (!res.ok) await failed(res, "chat settings");
+  return res.json();
+}
+
+export async function updateChatSettings(body: { stop_enabled: boolean | null }): Promise<ChatSettings> {
+  const res = await fetch(`${API_BASE}/chat-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, "chat settings");
+  return res.json();
+}
+
 /** The Manager's running turn that answers this web chat, or null when none is running. */
 export async function fetchChatTurn(sessionId: string): Promise<ChatTurn | null> {
   const res = await fetch(`${API_BASE}/chat/turn?session_id=${encodeURIComponent(sessionId)}`);

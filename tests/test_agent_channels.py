@@ -587,6 +587,15 @@ class TestTelegramAllowlist:
 
         assert "stop" in dict(_BOT_COMMANDS)
 
+    def test_the_menu_lists_stop_only_while_the_setting_is_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from looper.agents import chat_settings
+        from looper.agents.channels.telegram import _BOT_COMMANDS, bot_commands
+
+        assert "stop" not in dict(bot_commands())  # off by default
+        monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+        assert "stop" in dict(bot_commands())
+        assert [n for n, _ in bot_commands()] == [n for n, _ in _BOT_COMMANDS]
+
     def test_status_names_only_its_chat(self, tmp_path: Path) -> None:
         (message,) = self._run(tmp_path, "_cmd_status", _tg_update(7, "/status", replies_to=17), "7")
         assert message.payload["channel_context"] == {"chat_id": 99}

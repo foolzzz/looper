@@ -11,6 +11,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from looper.agents import chat_settings
 from looper.agents.bus import MessageBus
 from looper.agents.ops import Turn
 from looper.agents.claude_cli import ResidentTurn, user_stop_result
@@ -19,6 +22,12 @@ from looper.agents.run_usage import Usage
 from looper.agents.runtimes import StopMethod
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, StopResult
 from tests.test_manager_new_session import _drain, _until, _web
+
+
+@pytest.fixture(autouse=True)
+def _stop_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stopping a reply is off by default (``chat_settings``); these tests are about it working."""
+    monkeypatch.setattr(chat_settings, "_stop_enabled", True)
 
 
 class _Session:

@@ -63,7 +63,7 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import gate_commands
+from .. import chat_settings, gate_commands
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
@@ -572,6 +572,9 @@ class ManagerAgent:
         try:
             origin = _message_origin(envelope)
             channel, chat = origin["channel"], origin["chat"]
+            if not chat_settings.stop_enabled():
+                await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
+                return
             current = self.current_turn_for(channel, chat) if channel and chat else None
             stopped = False
             if current is not None:

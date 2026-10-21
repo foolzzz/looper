@@ -1,6 +1,7 @@
 # RFC：控制台聊天输入框：暂存消息、历史和 Esc 停止回复（v0）
 
 - **状态：** 已实现（下一个版本，见 CHANGELOG 的 Unreleased）。第 3 节的决定按维护者给的四条需求写成；实现中已核实的「需要验证」处已写明结果，仍标「需要验证」的几处是还没在真实运行时上跑过的。
+- **发布范围：** 暂存队列和历史随下一个版本发布；**停止回复（Esc、Stop 按钮、`POST /api/chat/stop`、Telegram 和飞书的 `/stop`）放在系统设置 `chat.stop_enabled` 后面，默认关闭**，设置页（Settings → Chat）标明是实验功能，等停止路径重新设计后再默认开放。关闭时：`POST /api/chat/stop` 答 409 `{"state": "disabled"}` 且什么都不改，`GET /api/chat/turn` 照常；输入框没有 Stop 按钮，Esc 只还原正在翻看的草稿，输入 `/stop` 也不发请求；Telegram 和飞书的 `/stop` 由 Looper 直接答「停止功能暂未开放」，不进模型、不中断任何东西；Telegram 的命令菜单不列 `/stop`（菜单在服务启动时设置，改设置后重启生效）。下文 D3、D8 和 D2 描述的是开关打开时的行为。队列和历史在两种状态下都一样。
 - **相关：** [引导运行中的 Worker](worker-steering-v0.zh-CN.md)（各运行时的中断原语，3.1、3.2 节已实测 Codex `turn/interrupt` 和 OMP `abort`）、[Grok 运行时](grok-runtime-v0.zh-CN.md)（`session/cancel`）、[操作者接口鉴权](operator-api-auth-v0.zh-CN.md)、管家会话的 Agent Profile RFC（另一分支，未合并：它改聊天头部和「New session」面板，本 RFC 不碰这两处）。
 - **代码基线：** v2.13.0（`3236c4242`）。
 

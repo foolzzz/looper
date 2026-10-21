@@ -8,8 +8,15 @@ from typing import Any
 
 import pytest
 
+from looper.agents import chat_settings
 from looper.agents.runtimes import StopMethod
 from looper.agents.tiers.manager import CurrentTurn, StopRequest, StopResult
+
+
+@pytest.fixture(autouse=True)
+def _stop_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stopping a reply is off by default (``chat_settings``); the tests of the stop itself turn it on."""
+    monkeypatch.setattr(chat_settings, "_stop_enabled", True)
 
 
 class _Writer:
@@ -108,3 +115,40 @@ def test_turn_carries_the_envelope_id_and_the_pages_own_id() -> None:
     manager = _Manager(turn=_turn(client_message_id="c1"))
     _, body = _call(manager, "GET", "/api/chat/turn", query={"session_id": "s1"})
     assert body["turn"]["message_id"] == "m1" and body["turn"]["client_message_id"] == "c1"
+
+
+def test_stop_setting_is_off_by_default() -> None:
+    from looper.agents import chat_settings as fresh
+
+    assert fresh.DEFAULT_STOP_ENABLED is False
+
+
+def test_stop_is_refused_and_changes_nothing_when_the_setting_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chat_settings, "_stop_enabled", False)
+    manager = _Manager(StopResult.STOPPING, _turn())
+    status, body = _call(manager, "POST", "/api/chat/stop", b'{"message_id": "m1"}')
+    assert status == 409 and body["state"] == "disabled" and body["error"]
+    assert manager.stops == [] and manager.current_turn.stop is None
+    # Refused before the body or the Manager is looked at.
+    assert _call(None, "POST", "/api/chat/stop", b"not json")[1]["state"] == "disabled"
+
+
+def test_turn_keeps_working_when_the_setting_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chat_settings, "_stop_enabled", False)
+    manager = _Manager(turn=_turn())
+    status, body = _call(manager, "GET", "/api/chat/turn", query={"session_id": "s1"})
+    assert status == 200 and body["turn"]["message_id"] == "m1"
+
+
+def test_the_dashboard_reads_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chat_settings, "_stop_enabled", False)
+    assert _call(_Manager(), "GET", "/api/chat-settings") == (200, {"stop_enabled": False})
+    monkeypatch.setattr(chat_settings, "_stop_enabled", True)
+    assert _call(_Manager(), "GET", "/api/chat-settings") == (200, {"stop_enabled": True})
+
+
+@pytest.mark.parametrize("body", [b"{}", b'{"stop_enabled": "yes"}', b'{"stop_enabled": 1}', b'{"other": true}'])
+def test_the_setting_refuses_a_bad_update(body: bytes) -> None:
+    status, answer = _call(_Manager(), "PUT", "/api/chat-settings", body)
+    assert status == 400 and answer["error"]
+    assert chat_settings.stop_enabled() is True  # unchanged

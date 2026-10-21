@@ -21,6 +21,7 @@ import {
   sendChat,
   saveChatMessage,
   fetchChatMessages,
+  fetchChatSettings,
   fetchChatTurn,
   stopChatReply,
   fetchChatSessions,
@@ -69,6 +70,7 @@ const legacyMessagesKey = (sessionId: string) => `loopx-chat-messages-${sessionI
 const stagedKey = (sessionId: string) => `looper-chat-staged-${sessionId}`;
 // The server's running turn is asked again this often while the page waits for it to end.
 const TURN_POLL_MS = 3000;
+const STOP_DISABLED_NOTICE = "Stopping a reply is off (Settings → Chat).";
 const OTHER_MESSAGE_NOTICE = "The Manager is answering another message first; this one has not started.";
 
 function readStaged(sessionId: string): string[] {
@@ -304,6 +306,16 @@ export function ChatPage() {
   const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
   // Leaving the page (the session ended, for one) stops the reply stream.
   useEffect(() => () => cleanupRef.current?.(), []);
+
+  // Stopping a reply is a system setting (off by default); until it is read, there is no Stop.
+  const [stopEnabled, setStopEnabled] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetchChatSettings().then((s) => alive && setStopEnabled(s.stop_enabled), () => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const sessionIdRef = useRef(sessionId);
@@ -624,13 +636,15 @@ export function ChatPage() {
   const serverTurnHere = serverTurn && serverTurn.sid === sessionId ? serverTurn : null;
   const replying = sending || serverTurnHere !== null;
   const runningId = sending ? ownId : (serverTurnHere ? serverTurnHere.ids[serverTurnHere.ids.length - 1] : null);
-  const canStop = target.kind === "manager" && runningId !== null;
+  const canStop = stopEnabled && target.kind === "manager" && runningId !== null;
 
   const handleStop = async () => {
     if (!runningId) return;
+    if (!stopEnabled) return setNotice(STOP_DISABLED_NOTICE); // a typed /stop: nothing is sent
     try {
       const { state } = await stopChatReply(runningId);
-      if (state === "other_message") setNotice(OTHER_MESSAGE_NOTICE);
+      if (state === "disabled") setNotice(STOP_DISABLED_NOTICE);
+      else if (state === "other_message") setNotice(OTHER_MESSAGE_NOTICE);
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     }

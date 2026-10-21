@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   streamSSE: vi.fn(),
   fetchChatMessages: vi.fn(),
   fetchChatTurn: vi.fn(),
+  fetchChatSettings: vi.fn(),
   stopChatReply: vi.fn(),
   fetchChatTargets: vi.fn(),
   fetchChatSessions: vi.fn(),
@@ -83,6 +84,7 @@ describe("chat composer flow", () => {
     });
     api.fetchChatMessages.mockResolvedValue([]);
     api.fetchChatTurn.mockResolvedValue(null);
+    api.fetchChatSettings.mockResolvedValue({ stop_enabled: true });
     api.stopChatReply.mockResolvedValue({ state: "stopping", method: "interrupt" });
     api.fetchChatTargets.mockResolvedValue([MANAGER, PLANNER]);
     api.fetchChatSessions.mockResolvedValue([]);
@@ -142,6 +144,44 @@ describe("chat composer flow", () => {
     key("Escape");
     await flush();
     expect(api.stopChatReply).toHaveBeenCalledWith(userId);
+  });
+
+  describe("with stopping off (the default)", () => {
+    beforeEach(() => api.fetchChatSettings.mockResolvedValue({ stop_enabled: false }));
+
+    it("shows no Stop button; Escape only restores the browsed draft and never stops", async () => {
+      await mount();
+      await say("first");
+      expect(stopButton()).toBeNull();
+      expect(input().placeholder).not.toContain("Esc stops");
+      key("Escape");
+      await flush();
+      expect(api.stopChatReply).not.toHaveBeenCalled();
+      await fire("answer.final", { text: "ok", outcome: "answered" });
+      type("draft");
+      key("ArrowUp");
+      expect(input().value).toBe("first");
+      key("Escape");
+      expect(input().value).toBe("draft");
+      expect(api.stopChatReply).not.toHaveBeenCalled();
+    });
+
+    it("sends nothing for a typed /stop while replying", async () => {
+      await mount();
+      await say("first");
+      await say("/stop");
+      expect(api.stopChatReply).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Stopping a reply is off");
+    });
+
+    it("keeps the queue working", async () => {
+      await mount();
+      await say("first");
+      await say("a");
+      expect(container.querySelector('button[aria-label="Remove queued message"]')).not.toBeNull();
+      await fire("answer.final", { text: "ok", outcome: "answered" });
+      expect(api.sendChat.mock.calls[1][0]).toBe("a");
+    });
   });
 
   it("explains an other_message stop", async () => {

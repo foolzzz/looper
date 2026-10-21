@@ -146,6 +146,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   and the chat gets a confirmation. Tasks and their Planners are untouched.
   Any other text, `/new foo` and `/news` included, is handled as before: a
   message for Claude (in Telegram, an unknown command)
+- Stopping a reply is **behind the system setting `chat.stop_enabled`
+  (Settings → Chat, experimental, off by default)**, and everything about
+  `/stop`, `POST /api/chat/stop`, Esc and the Stop button below holds only
+  while it is on. Off, `POST /api/chat/stop` answers `409` with
+  `{"state": "disabled"}` and changes nothing (`GET /api/chat/turn` still
+  works); `/stop` is claimed from the bus as usual but answered by Looper with
+  `停止功能暂未开放`, interrupting nothing; the composer shows no Stop button and
+  Esc only restores a browsed draft; Telegram's command menu (set at startup)
+  leaves `/stop` out. The staging queue and the history do not depend on it
 - `/stop` (the same matching as `/new`: trimmed, any case, so `/stop now` and
   `/stopx` are messages for Claude) stops the user turn the Manager is
   answering for that chat. Unlike `/new` it does not wait in the Manager's
