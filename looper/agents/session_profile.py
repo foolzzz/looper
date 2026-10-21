@@ -71,6 +71,18 @@ def effect(session: Mapping[str, Any] | None, current_profile_id: str, candidate
     return Effect.NEW_SESSION
 
 
+@dataclass(frozen=True)
+class SessionProfileResult:
+    """What a choice of the Manager's session profile did: ``effect`` on the saved session, the profile now
+    chosen (None: follow the settings) with its display ``name``, the choice before it and the reply ``text``."""
+
+    effect: Effect
+    profile_id: str | None
+    name: str
+    previous_profile_id: str | None
+    text: str
+
+
 def display_name(profile_view: Mapping[str, Any]) -> str:
     """The dashboard's label: the name, then ``· effort`` unless the name already ends with it."""
     name, effort = profile_view["name"], profile_view.get("effort")

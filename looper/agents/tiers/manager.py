@@ -43,6 +43,12 @@ from ..bus import MessageBus
 from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..supervisor import cancel_and_wait
 from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settings
+from ..session_profile import (
+    Effect, ProfileCommandKind, ProfileRefError, SessionProfileResult, choices as profile_choices, display_name,
+    effect as profile_effect, format_list, parse_profile_command, resolve_ref,
+)
+from ..profile_registry import RegistryError, ResolvedAgentProfile, check_selection
+from ..agent_settings import profile_launch_problem
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
     AutonomousHandler,
@@ -217,6 +223,15 @@ HANDOFF_TIMEOUT_SEC = 300
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 NEW_SESSION_REPLY = "已开始新的 Manager 会话，下一条消息从全新的上下文开始。"
+# The answers to /profile, by what the choice does to the saved session ({name}: the profile's display name).
+_PROFILE_SHARED = "所有渠道共用这条会话。"
+PROFILE_EFFECT_REPLIES = {
+    Effect.RESUMES: f"下一条消息接着同一会话，上下文完整保留。{_PROFILE_SHARED}",
+    Effect.NEW_SESSION: "下一条消息先由当前会话写交接（至多 5 分钟），再在 {name} 上开新会话；"
+                        f"新会话看不到原对话原文，只拿到交接和最近对话的摘录。{_PROFILE_SHARED}",
+    Effect.STARTS: f"下一条消息在 {{name}} 上开新会话。{_PROFILE_SHARED}",
+}
+PROFILE_CURRENT_REPLY = "本会话已经在用「{name}」，没有变化。"
 
 
 def is_new_session_command(text: str) -> bool:
@@ -487,6 +502,10 @@ class ManagerAgent:
         if is_new_session_command(text):
             await self._persist_chat(envelope, "user", text, envelope.message_id)
             await self._start_new_session(envelope)
+            return
+        if (command := parse_profile_command(text)) is not None:
+            await self._persist_chat(envelope, "user", text, envelope.message_id)
+            await self._handle_profile_command(envelope, command)
             return
         # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
         gate = await self._route_to_gate(envelope)
@@ -916,6 +935,105 @@ class ManagerAgent:
                                                cost_usd=0.0, duration_ms=0)
         except Exception:
             logger.warning("manager: could not record the new session", exc_info=True)
+
+    # --- The Agent Profile of the session (/profile) ---
+
+    async def settings_profile_name(self) -> str:
+        """The display name of the profile the role and system layers give the Manager (the session's choice left
+        out)."""
+        profile = (await load_agent_settings(AgentType.MANAGER, manager_session=False)).profile
+        return display_name({"name": profile.name, "effort": profile.effort})
+
+    async def _handle_profile_command(self, envelope: MessageEnvelope, command: Any) -> None:
+        """``/profile``: list the choices, or choose the session's profile; Claude is never asked."""
+        if not self._session_loaded:
+            await self._load_session_state()
+        try:
+            saved = await db_agent_sessions.get_session(self.agent_id) or {}
+            selected = saved.get("selected_profile_id")
+            listed = await profile_choices(saved or None, await self._load_agent_settings())
+            menu = format_list(listed, settings_name=await self.settings_profile_name(), selected=selected)
+        except Exception as exc:
+            logger.exception("manager: could not list its Agent Profiles")
+            await self._send_reply(envelope, f"Manager 出错，没能读取 Agent Profile：{exc}", error=str(exc))
+            return
+        if command.kind is ProfileCommandKind.LIST:
+            await self._send_reply(envelope, menu)
+            return
+        try:
+            profile_id = None if command.kind is ProfileCommandKind.FOLLOW_SETTINGS \
+                else resolve_ref(command.ref or "", listed).profile_id
+            result = await self.select_session_profile(
+                profile_id, origin=_message_origin(envelope), via="command",
+                input_text=str(envelope.payload.get("text", "")))
+        except (ProfileRefError, RegistryError) as exc:
+            await self._send_reply(envelope, f"{exc}\n\n{menu}", error=str(exc))
+            return
+        except Exception as exc:
+            await self._send_reply(envelope, f"Manager 出错，没能切换 Agent Profile：{exc}", error=str(exc))
+            return
+        await self._send_reply(envelope, result.text)
+
+    async def select_session_profile(self, profile_id: str | None, *, origin: dict[str, Any], via: str,
+                                     input_text: str = "PUT /api/manager/session/profile") -> SessionProfileResult:
+        """Choose the Agent Profile of the Manager's current session (None: follow the settings), from any channel
+        or the API. It takes effect on the next message: a turn under way keeps its launch, and pending
+        confirmations stay. Raises ``RegistryError`` when the profile cannot serve the Manager (nothing written), and
+        what the database raises when the choice cannot be saved."""
+        if not self._session_loaded:
+            await self._load_session_state()
+        saved = await db_agent_sessions.get_session(self.agent_id) or {}
+        previous = saved.get("selected_profile_id")
+        if profile_id is None:
+            settings = await load_agent_settings(AgentType.MANAGER, manager_session=False)
+            if settings.profile_error or settings.error:
+                raise RegistryError(settings.profile_error or settings.error or "cannot read the settings")
+            candidate = settings.profile
+        else:
+            await check_selection(profile_id, [AgentType.MANAGER.value])
+            from ...db import profile_registry as db_registry
+
+            row = await db_registry.get_profile(profile_id)
+            try:
+                candidate = ResolvedAgentProfile.from_row(row)
+            except Exception as exc:
+                raise RegistryError(f"Agent Profile {profile_id!r} has no valid model binding ({exc})") from None
+            problem = await profile_launch_problem(candidate, AgentType.MANAGER)
+            if problem:
+                raise RegistryError(problem)
+        name = display_name({"name": candidate.name, "effort": candidate.effort})
+        if profile_id == previous:
+            return SessionProfileResult(Effect.CURRENT, profile_id, name, previous,
+                                        PROFILE_CURRENT_REPLY.format(name=name))
+        try:
+            await db_agent_sessions.select_profile(self.agent_id, profile_id)
+        except Exception:
+            logger.exception("manager: could not save the Agent Profile chosen for its session")
+            raise
+        # The saved session's own profile is not "current": choosing the one it ran on resumes it.
+        change = profile_effect(saved or None, "", candidate)
+        text = PROFILE_EFFECT_REPLIES[change].format(name=name)
+        text = (f"已切换到「{name}」。" if profile_id else f"已改为跟随设置，现在是「{name}」。") + text
+        await self._record_profile_choice(previous, profile_id, change, origin, via, text, input_text)
+        logger.info("manager: Agent Profile of its session %s -> %s (%s) via %s from %s",
+                    previous or "settings", profile_id or "settings", change.value, via, origin.get("channel"))
+        return SessionProfileResult(change, profile_id, name, previous, text)
+
+    async def _record_profile_choice(self, previous: str | None, profile_id: str | None, change: Effect,
+                                     origin: dict[str, Any], via: str, text: str, input_text: str) -> None:
+        """The choice as one of the Manager's runs; a database error is only logged."""
+        try:
+            launch = self._process.launch if self._process is not None else Launch(
+                await self._load_agent_settings(), role=AgentType.MANAGER)
+            record_id = await db_llm_records.start_record(
+                agent_id=self.agent_id, session_id=self._session_id, input_text=input_text,
+                metadata={**launch.record(), "session_profile": {
+                    "from": previous, "to": profile_id, "effect": change.value, **origin, "via": via}},
+            )
+            await db_llm_records.finish_record(record_id, status="completed", output_text=text,
+                                               cost_usd=0.0, duration_ms=0)
+        except Exception:
+            logger.warning("manager: could not record the Agent Profile choice", exc_info=True)
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 

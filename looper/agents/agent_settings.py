@@ -724,15 +724,16 @@ async def load_task_limit(role: AgentType, task_id: str | None) -> int:
 
 async def load_agent_settings(
     role: AgentType | str, project_id: str | None = None, task_id: str | None = None, step_id: str | None = None,
-    task_role: tuple[str, int] | None = None,
+    task_role: tuple[str, int] | None = None, manager_session: bool = True,
 ) -> AgentSettings:
     """``role``'s settings in ``project_id`` (or outside any project) and, with ``task_id``, the profile that task
     and its Planner chose for it (with ``step_id``, the Planner's choice for that step too; with ``task_role``, a
     role's key and version, the profile of that role of the task), read now; the built-in defaults, with ``error``
-    set, when the layers cannot be read."""
+    set, when the layers cannot be read. The Manager's settings include the profile chosen for its session unless
+    ``manager_session`` is False."""
     from ..db import agent_setting_layers
 
-    extra = {"manager_session": True} if AgentType(role) is AgentType.MANAGER else {}
+    extra = {"manager_session": True} if AgentType(role) is AgentType.MANAGER and manager_session else {}
     try:
         rows = await agent_setting_layers.list_layers(project_id, task_id=task_id, step_id=step_id,
                                                       task_role=task_role,
