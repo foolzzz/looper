@@ -68,8 +68,8 @@ class _World:
         async def task_name(task_id: str) -> str:
             return "登录重构"
 
-        async def invoke(manager: Any, message: str, envelope: Any, *, turn: Any, note: str = "") -> str:
-            self.model.append(message)
+        async def invoke(manager: Any, token: Any, prepared: Any) -> str:
+            self.model.append(prepared.message)
             return "model answer"
 
         async def persist(manager: Any, envelope: Any, role: str, content: str, message_id: str) -> None:
@@ -80,7 +80,7 @@ class _World:
         monkeypatch.setattr(gate_commands, "post_message", post_message)
         monkeypatch.setattr(gate_routing, "post_message", post_message)
         monkeypatch.setattr(gate_routing, "task_name", task_name)
-        monkeypatch.setattr(ManagerAgent, "_invoke_claude", invoke)
+        monkeypatch.setattr(ManagerAgent, "_run_prepared", invoke)
         monkeypatch.setattr(ManagerAgent, "_persist_chat", persist)
         gate_commands._snapshots.clear()
 
@@ -98,9 +98,13 @@ class _World:
                 async def tools_problem() -> None:
                     return None
 
+                async def library_with_server(library: Any, root: Any) -> Any:
+                    return library
+
                 manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
                     has_planner=lambda task_id: True)), tools_problem=tools_problem,
-                    asks_in=lambda message_id: False)
+                    asks_in=lambda message_id: False, begin_turn=lambda turn: "", end_turn=lambda turn: None,
+                    library_with_server=library_with_server)
                 base = {"chat_id": "ou_me", "chat_type": "p2p", "sender_id": "ou_me", "message_id": "om_9"}
                 await manager._handle(MessageEnvelope.create(
                     source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,

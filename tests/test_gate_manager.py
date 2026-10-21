@@ -32,15 +32,15 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
     async def route(envelope: MessageEnvelope, **_: Any) -> Route:
         return routed
 
-    async def invoke(self: Any, message: str, envelope: MessageEnvelope, *, turn: Any, note: str = "") -> str:
-        seen["model"].append((message, note))
+    async def invoke(self: Any, token: Any, prepared: Any) -> str:
+        seen["model"].append((prepared.message, prepared.note))
         return "the Manager's answer"
 
     async def persist(self: Any, envelope: MessageEnvelope, role: str, content: str, message_id: str) -> None:
         seen["stored"].append((role, content))
 
     monkeypatch.setattr(manager_module, "route_to_gate", route)
-    monkeypatch.setattr(ManagerAgent, "_invoke_claude", invoke)
+    monkeypatch.setattr(ManagerAgent, "_run_prepared", invoke)
     monkeypatch.setattr(ManagerAgent, "_persist_chat", persist)
 
     async def run() -> None:
@@ -53,9 +53,13 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
             async def tools_problem() -> None:
                 return None
 
+            async def library_with_server(library: Any, root: Any) -> Any:
+                return library
+
             manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
                 has_planner=lambda task_id: True)), tools_problem=tools_problem,
-                asks_in=lambda message_id: False)
+                asks_in=lambda message_id: False, begin_turn=lambda turn: "", end_turn=lambda turn: None,
+                library_with_server=library_with_server)
             await manager._handle(MessageEnvelope.create(
                 source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                 payload={"text": text, "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p",

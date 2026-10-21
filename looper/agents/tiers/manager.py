@@ -239,6 +239,55 @@ HANDOFF_TIMEOUT_SEC = 300
 # The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
+PREPARATION_STEPS: tuple[str, ...] = (
+    "persist_user_message", "route_to_gate", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "load_session_state", "agent_settings", "library", "library_server", "build_user_message",
+    "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
+    "recorder_annotate",
+)
+
+
+@dataclass(frozen=True)
+class Ask:
+    """The message a model turn answers, with the note before it and the ops turn its calls belong to."""
+
+    message: str
+    note: str = ""
+    turn: Turn | None = None
+    retried: bool = False  # the resume retry: running goes back to starting
+
+
+@dataclass
+class RunState:
+    """What ``_start_turn`` leaves for the run that follows."""
+
+    recorder: Any = None
+    command: list[str] = field(default_factory=list)
+    brief: str = ""
+    resuming: str | None = None
+
+
+@dataclass(frozen=True)
+class Prepared:
+    """A user message ready to run (``_prepare_turn``): the model turn's message, launch and signature; or, for a
+    command or a gate reply, the ``action`` Code answers with, or the tools' ``tools_problem``."""
+
+    envelope: Any = None
+    turn: Turn | None = None
+    action: Callable[[], Any] | None = None
+    tools_problem: str | None = None
+    message: str = ""
+    note: str = ""
+    retried: bool = False
+    system_prompt: Any = None
+    launch: Any = None
+    prompt_file: Any = None
+    signature: Any = None
+    switch: Any = None
+    turn_text: str = ""
+    run: RunState = field(default_factory=RunState)
+
+
 class ProfileUnavailable(RuntimeError):
     """The Agent Profile the Manager would run cannot launch; ``source`` is the layer that gave it."""
 
@@ -310,7 +359,7 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
     so (``chat_type``), and a Telegram chat's id is negative for a group or a channel."""
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
-    channel = envelope.source.channel or envelope.source.agent_id
+    channel = getattr(envelope.source, "channel", None) or getattr(envelope.source, "agent_id", None)
     sender = context.get("sender_id") or context.get("user_id")
     chat = str(context.get("chat_id") or context.get("session_id") or "") or None
     match channel:
@@ -458,6 +507,7 @@ class ManagerAgent:
         self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
         self._turn_lock = asyncio.Lock()
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
+        self._lock_owner: TurnToken | None = None  # the turn that holds ``_turn_lock`` from its preparation
         self._running_token: TurnToken | None = None  # the token of the user turn being answered
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
@@ -680,69 +730,33 @@ class ManagerAgent:
         token.settle(ReplyOutcome.ANSWERED)
 
     async def _answer_user_message(self, envelope: MessageEnvelope, token: TurnToken) -> None:
-        text = envelope.payload.get("text", "")
-        if is_new_session_command(text):
-            await self._persist_user(envelope, text)
-            self._acting(token)
-            await self._start_new_session(envelope)
-            return
-        # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
-        if self._bus is not None and self.ops is not None and gate_commands.is_command(text):
-            self._acting(token)
-            answer = await self._gate_command(envelope, text)
-            await self._send_reply(envelope, answer or "", persist=False, snapshot=envelope.message_id)
-            channel = _message_origin(envelope)["channel"]
-            if not (is_lark(channel) or channel == "telegram"):
-                # Only Telegram and Lark report a delivery; the web chat shows what is published.
-                gate_commands.settle(envelope.message_id, True)
-            return
-        if (command := parse_profile_command(text)) is not None:
-            await self._persist_user(envelope, text)
-            self._acting(token)
-            await self._handle_profile_command(envelope, command)
-            return
-        # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
-        token.check()
-        gate = await self._route_to_gate(envelope)
-        if gate.kind is RouteKind.DELIVERED:
-            self._acting(token)
-            if gate.reply:
-                await self._send_reply(envelope, gate.reply, persist=False)
-            return
-        if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
-            self._acting(token)
-            await self._send_reply(envelope, gate.reply, persist=False)
-            return
-        if not text.strip():
-            return
-        origin = _message_origin(envelope)
-        # The calls Claude makes while answering belong to this message and its chat.
-        turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
-                    envelope=envelope, sender=origin["sender"], group=origin["group"])
-        token.check()
-        token.ops_turn = turn
-        # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
-        self._running_token = token
+        turn: Turn | None = None
         try:
             try:
-                await self._persist_user(envelope, text)
-                await self._send_status(envelope, "thinking", phase=True, activity="thinking")
-                # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
-                problem = await self.ops.tools_problem() if self.ops is not None else None
-                if problem is not None:
-                    logger.error("manager: Looper's tools do not work (%s); %s was not answered", problem,
-                                 envelope.message_id)
-                    token.settle(ReplyOutcome.FAILED)
-                    await self._send_reply(envelope, tools_down_reply(problem), error=problem)
+                prepared = await self._prepare_turn(token, envelope)
+                turn = prepared.turn
+                if prepared.action is not None:
+                    await prepared.action()
                     return
-                token.check()  # asked while the turn was prepared: the model is never started
-                stopped_note, self._stopped_note = self._stopped_note, None
-                response = await self._invoke_claude(
-                    text, envelope, turn=turn,
-                    note="\n".join(part for part in (gate.note, stopped_note) if part))
+                if turn is None:
+                    return
+                if prepared.tools_problem is not None:
+                    await self._send_reply(envelope, tools_down_reply(prepared.tools_problem),
+                                           error=prepared.tools_problem)
+                    return
+                response = await self._run_prepared(token, prepared)
             finally:
                 self._running_token = None
+                if self._lock_owner is token:
+                    self._lock_owner = None
+                    self._turn_lock.release()
+                turn = turn or token.ops_turn
+                if turn is not None and self.ops is not None:
+                    self.ops.end_turn(turn)
         except TurnStopped as stopped:
+            if turn is None:
+                raise
+            text = envelope.payload.get("text", "")
             if self.ops is not None:
                 self.ops.stop_turn(turn)  # done at the stop already; again for a turn that ended stopped by itself
             first_line = " ".join(text.split())[:80]
@@ -754,6 +768,8 @@ class ManagerAgent:
             token.settle(ReplyOutcome.STOPPED)
             return
         except Exception as exc:
+            if turn is None:
+                raise
             token.settle(ReplyOutcome.FAILED)
             if turn.refused:
                 response = ""  # answered below: the tools did not work
@@ -777,6 +793,186 @@ class ManagerAgent:
         asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
         await self._send_reply(envelope, _with_blocks(response, turn.blocks),
                                outcome=ReplyOutcome.CONFIRM if asked else None)
+
+    async def _answer_gate_command(self, envelope: MessageEnvelope, text: str) -> None:
+        answer = await self._gate_command(envelope, text)
+        await self._send_reply(envelope, answer or "", persist=False, snapshot=envelope.message_id)
+        channel = _message_origin(envelope)["channel"]
+        if not (is_lark(channel) or channel == "telegram"):
+            # Only Telegram and Lark report a delivery; the web chat shows what is published.
+            gate_commands.settle(envelope.message_id, True)
+
+    async def _tools_problem(self) -> str | None:
+        return await self.ops.tools_problem() if self.ops is not None else None
+
+    async def _library_with_server(self, library: Any) -> Any:
+        return await self.ops.library_with_server(library, self._runtime_root) if self.ops is not None else library
+
+    async def _prepare_turn(self, token: TurnToken, envelope: MessageEnvelope, *, ask: Ask | None = None) -> Prepared:
+        """Everything a turn needs before its process starts, every await a stoppable ``token.step`` or a
+        ``token.keep`` that runs to its end: the message is classified (a command or a gate reply that Code answers
+        comes back as an ``action``), stored, the tools probed, then the Manager's role, session, agent settings,
+        library, prompt and the message Claude is sent. With ``ask`` (the resume retry, or a caller without a chat
+        message) only the second half runs."""
+        if ask is None:
+            text = envelope.payload.get("text", "")
+            if is_new_session_command(text):
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._start_new_session(envelope))
+            # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
+            if self._bus is not None and self.ops is not None and gate_commands.is_command(text):
+                self._acting(token)
+                return Prepared(action=lambda: self._answer_gate_command(envelope, text))
+            if (command := parse_profile_command(text)) is not None:
+                await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+                self._acting(token)
+                return Prepared(action=lambda: self._handle_profile_command(envelope, command))
+            # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
+            token.check()
+            gate = await token.step("route_to_gate", self._route_to_gate(envelope))
+            if gate.kind is RouteKind.DELIVERED:
+                self._acting(token)
+                if not gate.reply:
+                    return Prepared()
+                return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
+            if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
+                self._acting(token)
+                return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
+            if not text.strip():
+                return Prepared()
+            origin = _message_origin(envelope)
+            # The calls Claude makes while answering belong to this message and its chat.
+            turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
+                        envelope=envelope, sender=origin["sender"], group=origin["group"])
+            token.check()
+            token.ops_turn = turn
+            # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
+            self._running_token = token
+            await token.keep("persist_user_message", self._persist_user(envelope, text), 10)
+            await token.step("status_thinking", self._send_status(envelope, "thinking", phase=True, activity="thinking"))
+            # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
+            problem = await token.step("tools_probe", self._tools_problem())
+            if problem is not None:
+                logger.error("manager: Looper's tools do not work (%s); %s was not answered", problem,
+                             envelope.message_id)
+                token.settle(ReplyOutcome.FAILED)
+                return Prepared(turn=turn, tools_problem=problem)
+            token.check()  # asked while the turn was prepared: the model is never started
+            stopped_note, self._stopped_note = self._stopped_note, None
+            # Turns run one at a time; a stop while this one waits for its turn ends it.
+            await token.step("turn_lock", self._turn_lock.acquire())
+            self._lock_owner = token
+            waiting = self.ops.begin_turn(turn) if self.ops is not None else ""
+            ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn)
+        await token.step("load_db_config", self._load_db_config())
+        if not self._session_loaded:
+            await token.step("load_session_state", self._load_session_state())
+        agent_settings = await token.step("agent_settings", self._load_agent_settings())
+        if agent_settings.profile_error:  # answered as an error; never another profile
+            raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
+        system_prompt = self._composed_prompt(agent_settings)
+        library = await token.step("library", load_installed(self._runtime_root, AgentType.MANAGER.value))
+        library = await token.step("library_server", self._library_with_server(library))
+        launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        try:
+            prompt_file = system_prompt.write_file(self._runtime_root)
+        except OSError as exc:
+            raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
+        # The command carries the model, the effort and the library's directories; the file is named by
+        # its content's hash, kept beside it all the same; the environment and the library are compared
+        # by their hashes.
+        signature = (
+            tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
+            launch.library.sha256, launch.binding_sha256,
+        )
+        switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
+                                               launch, session_provider=self._session_provider)
+        turn_text = await token.step("build_user_message", self._build_user_message(
+            ask.message, ask.note, channel=channel_line(envelope), envelope=envelope))
+        return Prepared(
+            envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
+            launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text)
+
+    async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
+        """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
+        the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
+        run, launch, signature = prepared.run, prepared.launch, prepared.signature
+        envelope = prepared.envelope
+        token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
+        if prepared.switch is not None:
+            # This agent cannot resume the session: a new one starts, after the old one hands over.
+            await token.step("switch_session", self._switch_session(prepared.switch))
+        if launch.runtime is not self._claude_runtime:
+            # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
+            await token.keep("claude_stop", self._claude.stop(), 10)
+            self._claude, self._claude_runtime = launch.runtime.resident_session("manager"), launch.runtime
+        if self._claude.stale(signature):
+            await token.keep("claude_stop", self._claude.stop(), 10)
+        command = self._claude.command if self._claude.started else self._claude_command(prepared.prompt_file, launch)
+        # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
+        # asked for a clean one.
+        brief = "" if self._claude.started or self._session_id or self._clean_start \
+            else await token.step("resume_brief", self._resume_brief(envelope, prepared.message))
+        run.brief = brief
+        asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
+        run.recorder = recorder = ClaudeRunRecorder(
+            agent_id="manager",
+            task_id=envelope.metadata.get("task_id"),
+            command=command,
+            cwd=str(self._config.work_dir),
+            input_text=f"{brief}\n\n{asked}" if brief else asked,
+            session_id=self._session_id,
+            system_prompt=prepared.system_prompt,
+            launch=launch,
+        )
+        try:
+            await token.keep("recorder_start", recorder.start(), 10)
+            # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
+            run.resuming = self._session_id if not self._claude.started else None
+            if not self._claude.started:
+                self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
+                self._session_provider = launch.profile.provider.id
+                try:
+                    await token.keep("claude_start", self._claude.start(
+                        command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                        totals=self._session_totals if run.resuming else None,
+                        autonomous=self._autonomous_turns(command, prepared.system_prompt, launch),
+                        price=launch.price), 30)
+                except TurnStopped:
+                    self._process = _Process(self._claude.command or command, signature, prepared.system_prompt, launch)
+                    raise
+                except OSError as exc:
+                    logger.error("failed to start %s: %s", launch.runtime.label, exc)
+                    if token.phase is TurnPhase.STOPPING:  # asked while it was started: the turn ends stopped
+                        raise TurnStopped() from None
+                    error = f"Cannot start {launch.runtime.label}: {exc}"
+                    await token.keep("recorder_finish", recorder.finish(output_text=None, result_event=None,
+                                                                       error=error), 10)
+                    raise TurnFailed(f"无法启动 {launch.runtime.label}，请检查安装。", error) from None
+                if self._claude.command != command:
+                    # A per-turn runtime may materialize its owner's home at start.
+                    command = self._claude.command
+                    await token.step("recorder_annotate", recorder.annotate({"command": command}))
+                self._process = _Process(command, signature, prepared.system_prompt, launch)
+        except TurnStopped:
+            # Stopped while the record was open: it ends as stopped, with no spend.
+            await token.keep("recorder_finish", self._finish_stopped_early(token, recorder, prepared.turn), 10)
+            raise
+        run.command = command
+
+    async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
+        """Start the prepared turn and run it; the turn's record ends however it ends."""
+        failure: BaseException | None = None
+        try:
+            await self._start_turn(token, prepared)
+            return await self._converse(token, prepared)
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            if prepared.run.recorder is not None:
+                await prepared.run.recorder.end_left_open(failure)
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
         """Ask the user turn of ``message_id`` (the envelope's id or the web page's own), in any phase, to stop.
@@ -823,9 +1019,10 @@ class ManagerAgent:
     def _stop_requested(self) -> bool:
         return self._running_token is not None and self._running_token.phase is TurnPhase.STOPPING
 
-    async def _finish_stopped_early(self, recorder: ClaudeRunRecorder, ops_turn: Turn | None) -> None:
-        """The user stopped the turn before its process started: the record ends as stopped, with no spend."""
-        request = self._running_token.stop if self._running_token is not None else None
+    async def _finish_stopped_early(self, token: TurnToken, recorder: ClaudeRunRecorder,
+                                    ops_turn: Turn | None) -> None:
+        """The user stopped the turn before its process ran it: the record ends as stopped, with no spend."""
+        request = token.stop
         await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                               status=RecordStatus.INTERRUPTED, usage=Usage())
         await recorder.annotate({"user_stop": {
@@ -910,25 +1107,6 @@ class ManagerAgent:
         elif event == "recovered":
             logger.info("agent %s is stable again after crash-looping", agent_id)
 
-    async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope, *, turn: Turn,
-                             note: str = "") -> str:
-        """Send the message to the resident Claude as one user turn and return its reply; the tools Claude calls
-        meanwhile act in ``turn``, and the message starts with the note on a confirmation waiting in its chat, and
-        ``note`` (a gate the message replies to that no longer waits).
-
-        Claude starts on the first message and is restarted, resuming the
-        saved session, after it exits or when the system prompt changes.
-        Turns run one at a time.
-        """
-        async with self._turn_lock:
-            waiting = self.ops.begin_turn(turn) if self.ops is not None else ""
-            try:
-                return await self._run_turn(message, context_envelope, ops_turn=turn,
-                                            note="\n".join(part for part in (waiting, note) if part))
-            finally:
-                if self.ops is not None:
-                    self.ops.end_turn(turn)
-
     async def _load_agent_settings(self) -> AgentSettings:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any)."""
@@ -958,249 +1136,186 @@ class ManagerAgent:
                 logger.warning("could not link the Manager's turn to its task", exc_info=True)
 
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, ops_turn: Turn | None = None,
-                        note: str = "", retried: bool = False) -> str:
-        token = self._running_token
-        if token is not None:  # a user turn: the runtime is about to be started (again, on the resume retry)
-            token.restart() if retried else token.advance(TurnPhase.STARTING)
-        await self._load_db_config()
-        if not self._session_loaded:
-            await self._load_session_state()
-        agent_settings = await self._load_agent_settings()
-        if agent_settings.profile_error:  # answered as an error; never another profile
-            raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
-        system_prompt = self._composed_prompt(agent_settings)
-        library = await load_installed(self._runtime_root, AgentType.MANAGER.value)
-        if self.ops is not None:
-            library = await self.ops.library_with_server(library, self._runtime_root)
-        launch = Launch(agent_settings, library, role=AgentType.MANAGER)
-        try:
-            prompt_file = system_prompt.write_file(self._runtime_root)
-        except OSError as exc:
-            raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
-        # The command carries the model, the effort and the library's directories; the file is named by
-        # its content's hash, kept beside it all the same; the environment and the library are compared
-        # by their hashes.
-        signature = (
-            tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
-            launch.library.sha256, launch.binding_sha256,
-        )
-        switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
-                                               launch, session_provider=self._session_provider)
-        if switch is not None:
-            # This agent cannot resume the session: a new one starts, after the old one hands over.
-            await self._switch_session(switch)
-        if launch.runtime is not self._claude_runtime:
-            # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
-            await self._claude.stop()
-            self._claude, self._claude_runtime = launch.runtime.resident_session("manager"), launch.runtime
-        if self._claude.stale(signature):
-            await self._claude.stop()
-        command = self._claude.command if self._claude.started else self._claude_command(prompt_file, launch)
-        # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
-        # asked for a clean one.
-        brief = "" if self._claude.started or self._session_id or self._clean_start \
-            else await self._resume_brief(context_envelope, message)
+                        note: str = "", retried: bool = False, token: TurnToken | None = None) -> str:
+        """Prepare, start and run one turn for ``message`` (a caller outside a chat message has no token of its
+        own; the resume retry has the turn's)."""
+        token = token or self._running_token or self._detached_token(context_envelope)
+        prepared = await self._prepare_turn(
+            token, context_envelope, ask=Ask(message, note, ops_turn, retried))
+        return await self._run_prepared(token, prepared)
 
+    def _detached_token(self, envelope: MessageEnvelope) -> TurnToken:
+        """A token for a turn run without a chat message: nobody can stop it, but it takes the same path."""
+        token = TurnToken(message_id=envelope.message_id, client_message_id=None, channel="", chat="",
+                          received_at=datetime.now(timezone.utc), envelope=envelope)
+        token.phase = TurnPhase.PREPARING
+        return token
+
+    async def _converse(self, token: TurnToken, prepared: Prepared) -> str:
+        """Send the prepared message to the started Claude, follow its events and end the turn's record."""
+        message, context_envelope, ops_turn, note = prepared.message, prepared.envelope, prepared.turn, prepared.note
+        retried, launch, run = prepared.retried, prepared.launch, prepared.run
+        recorder, command, brief, resuming = run.recorder, run.command, run.brief, run.resuming
         task_id = context_envelope.metadata.get("task_id")
-        asked = f"{note}\n\n{message}" if note else message
-        recorder = ClaudeRunRecorder(
-            agent_id="manager",
-            task_id=task_id,
-            command=command,
-            cwd=str(self._config.work_dir),
-            input_text=f"{brief}\n\n{asked}" if brief else asked,
-            session_id=self._session_id,
-            system_prompt=system_prompt,
-            launch=launch,
-        )
-        async with recorder:  # however the turn ends, the Manager's stop cutting it off too, its record ends
-            # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
-            resuming = self._session_id if not self._claude.started else None
-            if not self._claude.started:
-                self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
-                self._session_provider = launch.profile.provider.id
-                try:
-                    await self._claude.start(
-                        command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                        totals=self._session_totals if resuming else None,
-                        autonomous=self._autonomous_turns(command, system_prompt, launch), price=launch.price,
-                    )
-                except OSError as exc:
-                    logger.error("failed to start %s: %s", launch.runtime.label, exc)
-                    if self._stop_requested:  # asked while it was started: the turn ends stopped, as it would have
-                        await self._finish_stopped_early(recorder, ops_turn)
-                        raise TurnStopped() from None
-                    error = f"Cannot start {launch.runtime.label}: {exc}"
-                    await recorder.finish(output_text=None, result_event=None, error=error)
-                    raise TurnFailed(f"无法启动 {launch.runtime.label}，请检查安装。", error) from None
-                if self._claude.command != command:
-                    # A per-turn runtime may materialize its owner's home at start.
-                    command = self._claude.command
-                    await recorder.annotate({"command": command})
-                self._process = _Process(command, signature, system_prompt, launch)
+        text_parts: list[str] = []
+        streamed_partials = False
 
-            text_parts: list[str] = []
-            streamed_partials = False
+        async def on_event(payload: dict[str, Any]) -> None:
+            nonlocal streamed_partials
+            await recorder.record(payload)
 
-            async def on_event(payload: dict[str, Any]) -> None:
-                nonlocal streamed_partials
-                await recorder.record(payload)
-
-                session_id = payload.get("session_id")
-                if isinstance(session_id, str) and session_id and session_id != self._session_id:
-                    self._session_id, self._clean_start = session_id, False
-                    await self._save_session_state()
-                    self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
-
-                event_type = payload.get("type")
-                # Only the Manager's own turn is the reply; subagent output is internal.
-                top_level = payload.get("parent_tool_use_id") is None
-
-                if event_type == "system":
-                    subtype = payload.get("subtype", "")
-                    if subtype == "init":
-                        await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
-
-                elif event_type == "stream_event":
-                    event = payload.get("event")
-                    delta = event.get("delta") if isinstance(event, dict) else None
-                    if top_level and isinstance(delta, dict) and delta.get("type") == "text_delta":
-                        chunk = str(delta.get("text") or "")
-                        if chunk:
-                            streamed_partials = True
-                            await self._send_status(context_envelope, chunk, delta=True)
-
-                elif event_type == "assistant" and top_level:
-                    msg = payload.get("message")
-                    if isinstance(msg, dict):
-                        content_blocks = msg.get("content", [])
-                        for block in content_blocks:
-                            if not isinstance(block, dict):
-                                continue
-                            block_type = block.get("type", "")
-                            if block_type == "text":
-                                chunk = str(block.get("text") or "")
-                                if chunk:
-                                    text_parts.append(chunk)
-                                    if not streamed_partials:  # else already sent chunk by chunk
-                                        await self._send_status(context_envelope, chunk, delta=True)
-                            elif block_type == "tool_use":
-                                tool_name = block.get("name", "tool")
-                                await self._send_status(
-                                    context_envelope,
-                                    f"正在使用工具: {tool_name}",
-                                    phase=True,
-                                    activity="tool",
-                                    tool=str(tool_name),
-                                )
-                            elif block_type == "thinking":
-                                await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
-
-            try:
-                turn_text = await self._build_user_message(message, note, channel=channel_line(context_envelope),
-                                                           envelope=context_envelope)
-                if brief:
-                    turn_text = f"{brief}\n\n{turn_text}"
-                if self._stop_requested:
-                    await self._finish_stopped_early(recorder, ops_turn)
-                    raise TurnStopped()
-                if token is not None:
-                    token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
-                # A turn cut off by Claude's exit ends without a result; that Claude
-                # is reaped and the next message starts a new process that resumes the session.
-                turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
-                                                   stop=lambda: recorder.cap_stop or self._user_stop(recorder))
-            except TurnStopped:
-                raise
-            except BaseException as exc:
-                self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
-                # Never leave Claude running once the Manager gives up on it.
-                await self._claude.stop(kill=True)
-                await recorder.finish(
-                    output_text="".join(text_parts) or None, result_event=None,
-                    error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}", status=ended_by(exc),
-                )
-                await self._link_turn_task(recorder, ops_turn)
-                raise
-
-            resume_lost = bool(resuming) and not turn.session_started and not retried
-            # A stop asked after the runtime had the result (it had no turn left to interrupt) ends the turn stopped
-            # all the same: the stop was taken, so the turn is not reported as an answer.
-            if turn.stopped is not None or (turn.result_event or {}).get(USER_STOP) or (
-                    self._stop_requested and not resume_lost):
-                partial = "".join(text_parts)
-                request = token.stop if token is not None else None
-                await recorder.finish(
-                    output_text=partial or None, result_event=turn.result_event,
-                    error="stopped by the user", status=RecordStatus.INTERRUPTED, usage=turn.usage,
-                )
-                await recorder.annotate({"user_stop": {
-                    "via": request.via if request else None,
-                    "method": turn.stopped.value if turn.stopped else None,
-                    "requested_at": request.at.isoformat() if request else None,
-                    "usage_complete": turn.usage_complete and turn.usage.cost_usd is not None,
-                }})
-                await self._link_turn_task(recorder, ops_turn)
-                self._session_totals = self._claude.totals
+            session_id = payload.get("session_id")
+            if isinstance(session_id, str) and session_id and session_id != self._session_id:
+                self._session_id, self._clean_start = session_id, False
                 await self._save_session_state()
-                raise TurnStopped(partial)
+                self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
 
-            if resume_lost:
-                # Claude never started the saved session: it no longer exists. Every
-                # turn would resume it again and never answer, so drop it and run
-                # this message in a new session; the context each turn carries does
-                # not depend on the old conversation.
-                logger.warning("manager: session %s could not be resumed; starting a new session", resuming)
-                await recorder.finish(output_text=None, result_event=None, error=(
-                    f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
-                await self._link_turn_task(recorder, ops_turn)
-                if self._stop_requested:
-                    raise TurnStopped()
-                await self._claude.stop()
-                self._session_id, self._session_totals = None, Usage()  # its totals went with it
-                await self._save_session_state()
-                self._pending_switch = session_switch.session_lost(
-                    f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
-                    profile=launch.profile.id)
-                self._pending_handoff = None
-                return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True)
+            event_type = payload.get("type")
+            # Only the Manager's own turn is the reply; subagent output is internal.
+            top_level = payload.get("parent_tool_use_id") is None
 
-            # Decided now, with nothing awaited since the stop was looked at: from here a stop is too late.
-            self._settle()
+            if event_type == "system":
+                subtype = payload.get("subtype", "")
+                if subtype == "init":
+                    await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
 
-            result_event = turn.result_event
-            # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
-            final_text = answer_text(result_event, text_parts)
-            # A turn cut off by Claude's exit is no reply, even after some text.
-            exited = result_event is None
-            # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
-            over_cap = launch.runtime.budget_error(result_event)
-            succeeded = not exited and not result_event.get("is_error") and result_event.get("subtype") == "success"
-            # is_error fails the turn. Assistant text already streamed stays on the record; the chat gets
-            # failure_detail (an OMP HTTP 400, for example).
-            failed: str | None = None
-            if result_event is not None and not over_cap and result_event.get("is_error"):
-                detail = launch.runtime.failure_detail(result_event, launch=launch, command=command)
-                label = launch.runtime.label
-                failed = (f"{label} turn did not succeed: {detail}"[:500] if detail else
-                          f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
-            replied = succeeded and failed is None and not over_cap and bool(final_text)
-            # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
-            # keeps what it spent.
+            elif event_type == "stream_event":
+                event = payload.get("event")
+                delta = event.get("delta") if isinstance(event, dict) else None
+                if top_level and isinstance(delta, dict) and delta.get("type") == "text_delta":
+                    chunk = str(delta.get("text") or "")
+                    if chunk:
+                        streamed_partials = True
+                        await self._send_status(context_envelope, chunk, delta=True)
+
+            elif event_type == "assistant" and top_level:
+                msg = payload.get("message")
+                if isinstance(msg, dict):
+                    content_blocks = msg.get("content", [])
+                    for block in content_blocks:
+                        if not isinstance(block, dict):
+                            continue
+                        block_type = block.get("type", "")
+                        if block_type == "text":
+                            chunk = str(block.get("text") or "")
+                            if chunk:
+                                text_parts.append(chunk)
+                                if not streamed_partials:  # else already sent chunk by chunk
+                                    await self._send_status(context_envelope, chunk, delta=True)
+                        elif block_type == "tool_use":
+                            tool_name = block.get("name", "tool")
+                            await self._send_status(
+                                context_envelope,
+                                f"正在使用工具: {tool_name}",
+                                phase=True,
+                                activity="tool",
+                                tool=str(tool_name),
+                            )
+                        elif block_type == "thinking":
+                            await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
+
+        try:
+            turn_text = f"{brief}\n\n{prepared.turn_text}" if brief else prepared.turn_text
+            if self._stop_requested:
+                await self._finish_stopped_early(token, recorder, ops_turn)
+                raise TurnStopped()
+            token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
+            # A turn cut off by Claude's exit ends without a result; that Claude
+            # is reaped and the next message starts a new process that resumes the session.
+            turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
+                                               stop=lambda: recorder.cap_stop or self._user_stop(recorder))
+        except TurnStopped:
+            raise
+        except BaseException as exc:
+            self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
+            # Never leave Claude running once the Manager gives up on it.
+            await self._claude.stop(kill=True)
             await recorder.finish(
-                output_text=final_text or None,
-                result_event=result_event,
-                error=over_cap or failed or (None if replied else (
-                    f"no reply (exit code {turn.exit_code})" if exited else "no reply"
-                )),
-                usage=turn.usage,
+                output_text="".join(text_parts) or None, result_event=None,
+                error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}", status=ended_by(exc),
             )
             await self._link_turn_task(recorder, ops_turn)
-            if over_cap:
-                await self._claude.stop()
-            if not exited:
-                self._session_totals = self._claude.totals
-                await self._save_session_state()
+            raise
+
+        resume_lost = bool(resuming) and not turn.session_started and not retried
+        # A stop asked after the runtime had the result (it had no turn left to interrupt) ends the turn stopped
+        # all the same: the stop was taken, so the turn is not reported as an answer.
+        if turn.stopped is not None or (turn.result_event or {}).get(USER_STOP) or (
+                self._stop_requested and not resume_lost):
+            partial = "".join(text_parts)
+            request = token.stop
+            await recorder.finish(
+                output_text=partial or None, result_event=turn.result_event,
+                error="stopped by the user", status=RecordStatus.INTERRUPTED, usage=turn.usage,
+            )
+            await recorder.annotate({"user_stop": {
+                "via": request.via if request else None,
+                "method": turn.stopped.value if turn.stopped else None,
+                "requested_at": request.at.isoformat() if request else None,
+                "usage_complete": turn.usage_complete and turn.usage.cost_usd is not None,
+            }})
+            await self._link_turn_task(recorder, ops_turn)
+            self._session_totals = self._claude.totals
+            await self._save_session_state()
+            raise TurnStopped(partial)
+
+        if resume_lost:
+            # Claude never started the saved session: it no longer exists. Every
+            # turn would resume it again and never answer, so drop it and run
+            # this message in a new session; the context each turn carries does
+            # not depend on the old conversation.
+            logger.warning("manager: session %s could not be resumed; starting a new session", resuming)
+            await recorder.finish(output_text=None, result_event=None, error=(
+                f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
+            await self._link_turn_task(recorder, ops_turn)
+            if self._stop_requested:
+                raise TurnStopped()
+            await self._claude.stop()
+            self._session_id, self._session_totals = None, Usage()  # its totals went with it
+            await self._save_session_state()
+            self._pending_switch = session_switch.session_lost(
+                f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
+                profile=launch.profile.id)
+            self._pending_handoff = None
+            return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
+                                        token=token)
+
+        # Decided now, with nothing awaited since the stop was looked at: from here a stop is too late.
+        self._settle()
+
+        result_event = turn.result_event
+        # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
+        final_text = answer_text(result_event, text_parts)
+        # A turn cut off by Claude's exit is no reply, even after some text.
+        exited = result_event is None
+        # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
+        over_cap = launch.runtime.budget_error(result_event)
+        succeeded = not exited and not result_event.get("is_error") and result_event.get("subtype") == "success"
+        # is_error fails the turn. Assistant text already streamed stays on the record; the chat gets
+        # failure_detail (an OMP HTTP 400, for example).
+        failed: str | None = None
+        if result_event is not None and not over_cap and result_event.get("is_error"):
+            detail = launch.runtime.failure_detail(result_event, launch=launch, command=command)
+            label = launch.runtime.label
+            failed = (f"{label} turn did not succeed: {detail}"[:500] if detail else
+                      f"{label} turn did not succeed ({result_event.get('subtype') or 'error'})")
+        replied = succeeded and failed is None and not over_cap and bool(final_text)
+        # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
+        # keeps what it spent.
+        await recorder.finish(
+            output_text=final_text or None,
+            result_event=result_event,
+            error=over_cap or failed or (None if replied else (
+                f"no reply (exit code {turn.exit_code})" if exited else "no reply"
+            )),
+            usage=turn.usage,
+        )
+        await self._link_turn_task(recorder, ops_turn)
+        if over_cap:
+            await self._claude.stop()
+        if not exited:
+            self._session_totals = self._claude.totals
+            await self._save_session_state()
 
         if task_id:
             try:
