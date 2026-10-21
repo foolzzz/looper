@@ -981,7 +981,7 @@ def test_dsh_waits_for_process_exit_after_stdout_eof_before_publishing_result(tm
     asyncio.run(asyncio.wait_for(check(), 5))
 
 
-def _run_launch(tmp_path, *, budget=None, role="worker"):
+def _run_launch(tmp_path, *, budget=None, role="worker", model="deepseek-flash"):
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
     from looper.agents.library import AgentLibrary
     from looper.agents.ops.service import server_config
@@ -992,7 +992,7 @@ def _run_launch(tmp_path, *, budget=None, role="worker"):
         "looper": server_config("http://127.0.0.1:19999", "test-run-token"),
     }}))
     profile = resolved_profile("dsh-test", "DSH test", RuntimeSpec("dsh-test", "DSH", "dsh", "", runtime.capabilities),
-                           PROVIDER, "deepseek-flash", "high")
+                           PROVIDER, model, "high")
     return Launch(AgentSettings(profile=profile, max_budget_usd=budget),
                   AgentLibrary(mcp_config=str(source), role=role), role=AgentType(role))
 
@@ -1353,6 +1353,38 @@ def test_dsh_resident_owners_resume_opening_id_and_count_only_new_tokens(tmp_pat
             homes.append(home)
             await owner.stop()
         assert len(set(sessions)) == len(set(homes)) == 3
+
+    asyncio.run(asyncio.wait_for(check(), 10))
+
+
+def test_dsh_resident_prices_usage_by_the_configured_model_not_the_normalized_one(tmp_path):
+    """``deepseek-v4-pro[1m]`` is sent to the API as ``deepseek-v4-pro`` but is priced as configured."""
+    from looper.agents.runtimes.pricing import RunSpend
+
+    prices = {"deepseek-v4-pro": 1.0, "deepseek-v4-pro[1m]": 5.0}
+    executable = _resident_dsh_stand_in(tmp_path)
+    runtime = runtimes.adapter("dsh")
+    launch = _run_launch(tmp_path, role="manager", model="deepseek-v4-pro[1m]")
+    command = runtime.resident_command(executable, cwd=tmp_path, prompt_file=_run_prompt_file(tmp_path), launch=launch)
+    spend = RunSpend(lambda model, usage: prices[model], launch.model, 3.0)
+
+    async def check():
+        owner = runtime.resident_session("manager")
+        await owner.start(command, cwd=str(tmp_path), signature="a", env=launch.environment(),
+                          price=lambda model, usage: prices[model])
+        events = []
+
+        async def record(event):
+            events.append(event)
+            spend.add(event)
+
+        turn = await owner.run_turn("first", record)
+        assert turn.result_event["modelUsage"].keys() == {"deepseek-v4-pro[1m]"}
+        assert {e["model"] for e in events if e.get("type") == "usage"} == {"deepseek-v4-pro[1m]"}
+        assert spend.observed_cost_usd == 5.0
+        assert turn.result_event["observed_cost_usd"] == 5.0  # what the evals and the budget read from the result
+        assert spend.exceeded  # a 3 USD cap stops it; the normalized model's 1 USD would have missed it
+        await owner.stop()
 
     asyncio.run(asyncio.wait_for(check(), 10))
 
@@ -2820,3 +2852,16 @@ def test_dsh_disposable_serve_reads_back_all_four_roles_and_resident_owners(tmp_
                 assert all(row["resumed"] and row["session"] == turns[0]["session"] for row in turns[1:])
                 assert all(row["read_only"] for row in turns)
                 assert all(row["tool"] == "looper_task_profiles" and row["tool_status"] == "ok" for row in turns)
+
+
+@pytest.mark.parametrize("effort", ["medium", "xhigh"])
+def test_profile_problem_rejects_an_effort_dsh_cannot_run(effort):
+    from looper.agents.agent_settings import AgentType, profile_problem
+
+    runtime = runtimes.adapter("dsh")
+    profile = resolved_profile("dsh-test", "DSH test", RuntimeSpec("dsh-test", "DSH", "dsh", "", runtime.capabilities),
+                               PROVIDER, "deepseek-flash", "high")
+    assert profile_problem(profile, AgentType.MANAGER) is None
+    object.__setattr__(profile, "effort", effort)  # a stored profile bypasses the constructor's check
+    problem = profile_problem(profile, AgentType.MANAGER)
+    assert problem is not None and "effort" in problem

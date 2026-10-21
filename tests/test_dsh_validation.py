@@ -1001,3 +1001,13 @@ def test_smoke_real_serve_stand_in_keeps_the_room_consult_gap_visible(tmp_path, 
     assert {r["session_id"] for r in rows} == {r["session"] for r in calls}
     assert all(r["status"] == "completed" for r in rows)
     assert "synthetic-private-key" not in json.dumps(snapshots, default=str)
+
+
+def test_dialog_cost_uses_observed_root_spend_and_keeps_a_missing_one_unknown():
+    from evals.prompt_regression.dialogs import observed_cost
+
+    evidence = [{"role": "manager", "observed_cost_usd": .25}, {"role": "planner", "observed_cost_usd": .5}]
+    assert observed_cost(0.0, evidence) == (.75, True)
+    assert observed_cost(2.0, evidence) == (2.0, True)
+    assert observed_cost(0.0, [*evidence, {"role": "manager", "observed_cost_usd": None}]) == (.75, False)
+    assert observed_cost(0.0, [{"role": "manager", "observed_cost_usd": None}]) == (0.0, False)
