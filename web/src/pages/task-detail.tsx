@@ -96,7 +96,13 @@ import {
   type RunRole,
 } from "@/lib/api";
 
-type Tab = "overview" | "pipeline" | "room" | "agents" | "sessions" | "conversation";
+export type Tab = "overview" | "pipeline" | "room" | "agents" | "sessions" | "conversation";
+export const TASK_TABS: readonly Tab[] = ["overview", "pipeline", "room", "agents", "sessions", "conversation"];
+
+/** The tab an address names; an unknown or missing one is the Overview. */
+export function parseTab(value: string | null | undefined): Tab {
+  return TASK_TABS.find((t) => t === value) ?? "overview";
+}
 
 function stepStatusIcon(status: string) {
   switch (status) {
@@ -1940,6 +1946,9 @@ function TaskProjectControl({
 interface TaskDetailPageProps {
   taskId: string;
   gateStep?: string | null;
+  /** The tab the address names; with `onTab`, the page shows it and changes it through the address. */
+  tab?: string | null;
+  onTab?: (tab: Tab) => void;
   onBack: () => void;
 }
 
@@ -1949,22 +1958,24 @@ export function TaskDetailRoute(props: TaskDetailPageProps) {
   return <TaskDetailPage key={props.taskId} {...props} />;
 }
 
-function TaskDetailPage({ taskId, gateStep, onBack }: TaskDetailPageProps) {
+function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const taskRuns = useTaskRuns(task);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
   /** Start over waits for its confirmation: it deletes the task's steps and plan. */
   const [confirmStartOver, setConfirmStartOver] = useState(false);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [localTab, setLocalTab] = useState<Tab>("overview");
+  const tab: Tab = onTab ? parseTab(tabParam) : localTab;
+  const setTab = useCallback((next: Tab) => (onTab ? onTab(next) : setLocalTab(next)), [onTab]);
   // Bumped when the task runs again, so the page polls it again.
   const [runs, setRuns] = useState(0);
   // The gate step a Pipeline node asked to show on the Overview tab, until it is shown.
   const [gateFocus, setGateFocus] = useState<TaskStep | null>(null);
   const openGate = useCallback((step: TaskStep) => {
     setGateFocus(step);
-    setTab("overview");
-  }, []);
+    if (tab !== "overview") setTab("overview");
+  }, [tab, setTab]);
   const gateShown = useCallback(() => setGateFocus(null), []);
   const linkedGate = useRef<string | null>(null);
   useEffect(() => {
@@ -2105,11 +2116,13 @@ function TaskDetailPage({ taskId, gateStep, onBack }: TaskDetailPageProps) {
         {startError && <p className="mt-1 text-xs text-destructive">{startError}</p>}
 
         {/* Tabs */}
-        <div className="flex flex-wrap gap-1 mt-3">
+        <div role="tablist" aria-label="Task" className="flex flex-wrap gap-1 mt-3">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               type="button"
+              role="tab"
+              aria-selected={tab === id}
               onClick={() => setTab(id)}
               className={cn(
                 "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",

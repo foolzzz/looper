@@ -136,7 +136,10 @@ function App() {
         <ClaudeCheckBanner />
         <main className="min-h-0 flex-1 overflow-hidden">
           <div className={route.page === "chat" ? "h-full" : "hidden"}>
-            <ChatPage />
+            <ChatPage
+              query={route.page === "chat" ? route.query : undefined}
+              onQuery={(q) => navigateSub("chat", "", q)}
+            />
           </div>
           {route.page === "dashboard" && (
             <div className="h-full overflow-y-auto p-6"><DashboardPage /></div>
