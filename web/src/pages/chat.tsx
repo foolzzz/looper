@@ -11,6 +11,7 @@ import {
   MessagesSquare,
   MessageCircleQuestionMark,
 } from "lucide-react";
+import { NewSessionPanel } from "@/components/new-session-panel";
 import { ManagerSessionProfile } from "@/components/manager-session-profile";
 import { Markdown } from "@/components/markdown";
 import { ChannelBadge, ConversationList } from "@/components/chat-conversations";
@@ -21,6 +22,7 @@ import {
   fetchChatMessages,
   fetchChatSessions,
   fetchChatTargets,
+  fetchManagerSession,
   fetchTaskActivity,
   fetchTaskDetail,
   streamSSE,
@@ -36,7 +38,9 @@ import {
   type DbChatMessage,
   type LlmRecord,
   type UserGate,
+  type ManagerSessionView,
 } from "@/lib/api";
+import { profileLabel } from "@/lib/use-registry";
 import { isGateWaiting } from "@/lib/gates";
 import { randomId } from "@/lib/ids";
 import { RunCard, activityBelongsTo, historyHref, runRoleLabel } from "@/pages/agent-history";
@@ -264,6 +268,9 @@ export function ChatPage() {
   const [conversations, setConversations] = useState<ChatSession[] | null>(null);
   const [conversationsError, setConversationsError] = useState("");
   const [profileRefresh, setProfileRefresh] = useState(0);
+  const [newPanel, setNewPanel] = useState<ManagerSessionView | null>(null);
+  const [newPanelOpen, setNewPanelOpen] = useState(false);
+  const newSessionButtonRef = useRef<HTMLButtonElement>(null);
   const [viewing, setViewing] = useState<ChatSession | null>(null);
   // Its messages as last read, by session id, so another conversation's never show while one loads.
   const [viewingMessages, setViewingMessages] = useState<{ id: string; rows: DbChatMessage[] } | null>(null);
@@ -498,7 +505,22 @@ export function ChatPage() {
     setInput("");
   };
 
-  const handleSend = async (command?: string) => {
+  const closeNewPanel = () => {
+    setNewPanelOpen(false);
+    newSessionButtonRef.current?.focus();
+  };
+
+  const toggleNewPanel = () => {
+    if (newPanelOpen) return closeNewPanel();
+    setNewPanelOpen(true);
+    setNewPanel(null);
+    fetchManagerSession().then(setNewPanel).catch(() => setNewPanel({
+      session: { active: false, runtime: null, profile_id: null }, selected: null,
+      effective: { profile: null, source: "session" }, problem: null, choices: [],
+    }));
+  };
+
+  const handleSend = async (command?: string, newSessionProfileId?: string) => {
     const text = command ?? input.trim();
     if (!text || sending || !current.can_send) return;
 
@@ -528,7 +550,7 @@ export function ChatPage() {
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
-      const { events_url } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target));
+      const { events_url } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target), { newSessionProfileId });
 
       cleanupRef.current = streamSSE(
         events_url,
@@ -735,10 +757,11 @@ export function ChatPage() {
             {target.kind === "manager" && !viewing && (
               <button
                 type="button"
-                onClick={() => handleSend(NEW_SESSION_COMMAND)}
+                ref={newSessionButtonRef}
+                onClick={toggleNewPanel}
                 disabled={sending}
                 className="flex h-7 items-center gap-1.5 rounded-md border border-border px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
-                title="Send /new: the Manager starts a new session, and its next message, from any channel, starts with a clean context"
+                title="Start a new Manager session, optionally on another Agent Profile"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
                 New session
@@ -775,6 +798,23 @@ export function ChatPage() {
           </p>
         )}
       </div>
+
+      {newPanelOpen && target.kind === "manager" && !viewing && (
+        <NewSessionPanel
+          settingsName={
+            newPanel && newPanel.effective.source !== "session" && newPanel.effective.profile
+              ? profileLabel(newPanel.effective.profile)
+              : null
+          }
+          choices={newPanel?.choices ?? []}
+          busy={sending}
+          onStart={(id) => {
+            closeNewPanel();
+            handleSend(NEW_SESSION_COMMAND, id ?? undefined);
+          }}
+          onCancel={closeNewPanel}
+        />
+      )}
 
       {plannerTaskId && gatesWaiting.length > 0 && (
         <div className="border-b border-border px-5 py-3">

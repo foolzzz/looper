@@ -401,11 +401,15 @@ export async function sendChat(
   sessionId?: string,
   messageId?: string,
   target: ChatTarget = { kind: "manager" },
+  options?: { newSessionProfileId?: string },
 ): Promise<ChatSendResponse> {
   const res = await fetch(`${API_BASE}/chat/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, session_id: sessionId, message_id: messageId, target }),
+    body: JSON.stringify({
+      text, session_id: sessionId, message_id: messageId, target,
+      ...(options?.newSessionProfileId ? { new_session_profile_id: options.newSessionProfileId } : {}),
+    }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -2601,6 +2605,8 @@ export interface ProfileUsedBy {
   schedule_count: number;
   /** The names of the projects whose list of profiles the Planner may choose holds it. */
   allowed_in: string[];
+  /** The Manager's current session runs on it. */
+  manager_session?: boolean;
 }
 
 export type SystemPromptMode = "append" | "replace";
