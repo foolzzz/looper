@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents.gate_courier import ANSWER_LINE, GROUP_LINE, message_text
+from looper.agents.gate_courier import ANSWER_LINE, COMMANDS_LINE, GROUP_LINE, message_text
 from looper.agents.gate_service import GateChat
 from looper.agents.task_notice import NotifyChannel, NotifyTarget, TargetKind
 
@@ -49,6 +49,13 @@ def test_the_card_lists_the_open_questions_with_their_options_and_how_to_answer(
                         dashboard_url="http://looper.test")
     assert card == ("⏸ 需要你决定 · settings file\nstorage\n1. Which database?（选项：PostgreSQL / SQLite）\n"
                     f"目前的发现：the service runs PostgreSQL 15\n{ANSWER_LINE}\n{GROUP_LINE}\n"
-                    "[http://looper.test/#tasks/task-a](http://looper.test/#tasks/task-a)")
+                    f"[http://looper.test/#tasks/task-a](http://looper.test/#tasks/task-a)\n{COMMANDS_LINE}")
     # Telegram gets the bare link and no @-the-bot line.
-    assert message_text(_row("opened", state="open"), TELEGRAM).endswith(f"{ANSWER_LINE}\n/#tasks/task-a")
+    assert message_text(_row("opened", state="open"), TELEGRAM).endswith(f"{ANSWER_LINE}\n/#tasks/task-a\n{COMMANDS_LINE}")
+
+
+def test_cards_and_reminders_end_with_the_commands_line() -> None:
+    assert COMMANDS_LINE == "/gates 查看所有等你回答的关卡；/gate 编号 回答，/gate 编号 end 结束讨论"
+    for kind in ("opened", "reminder"):
+        assert message_text(_row(kind, state="open"), GROUP).endswith(COMMANDS_LINE)
+        assert message_text(_row(kind, state="open"), TELEGRAM).endswith(COMMANDS_LINE)

@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.18] - 2026-10-21
+
+### Added
+
+- **Command hints on every channel.** Gate cards that ask for a decision (opened and reminder) now end with a line naming `/gates`, `/gate N answer` and `/gate N end`. `/help` is answered by the Manager on every channel without calling the model, from one shared command list (`looper/agents/chat_commands.py`) that Telegram's command menu also reads. Telegram's `/help` is now headed `Looper 命令：` and omits `/stop` while stopping a reply is off. No prompt, tool schema or tool result changed. ([#344](https://github.com/foolzzz/looper/pull/344))
+
 ## [2.13.17] - 2026-10-21
 
 ### Fixed
