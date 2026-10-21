@@ -228,6 +228,17 @@ def is_new_session_command(text: str) -> bool:
     return text.strip().lower() == NEW_SESSION_COMMAND
 
 
+# ``/stop`` stops the running reply. It is claimed from the bus (``ManagerAgent._claim_stop``) so it does not wait
+# in the Manager's queue behind the turn it stops; "/stop now" and "/stopx" are messages for Claude.
+STOP_COMMAND = "/stop"
+STOP_DONE_REPLY = "已停止当前回复。"
+STOP_IDLE_REPLY = "现在没有正在进行的回复。"
+
+
+def is_stop_command(text: str) -> bool:
+    return text.strip().lower() == STOP_COMMAND
+
+
 # How the line before each message names the channel it came from (``AgentAddress.channel``); for Telegram and
 # Lark, whether it is a direct message or a group chat (``_message_origin``).
 CHANNEL_NAMES = {"web": "the Looper dashboard chat"}
@@ -480,6 +491,7 @@ class ManagerAgent:
         if not self._session_loaded:
             await self._load_session_state()
 
+        bus.subscribe_topic(MessageType.USER_MESSAGE.value, self._claim_stop, consumes=True)
         self._task = asyncio.create_task(self._message_loop())
         logger.info(
             "manager agent started (session=%s)",
@@ -499,8 +511,35 @@ class ManagerAgent:
         except Exception:
             logger.debug("could not load manager config from database", exc_info=True)
 
+    def _claim_stop(self, envelope: MessageEnvelope) -> bool:
+        """Bus consumer: take a ``/stop`` addressed to the Manager out of its queue and handle it at once."""
+        if envelope.target.agent_id != self.agent_id:
+            return False
+        text = envelope.payload.get("text")
+        if not isinstance(text, str) or not is_stop_command(text):
+            return False
+        task = asyncio.create_task(self._stop_from_chat(envelope))
+        self._stop_tasks.add(task)
+        task.add_done_callback(self._stop_tasks.discard)
+        return True
+
+    async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:
+        try:
+            origin = _message_origin(envelope)
+            channel, chat = origin["channel"], origin["chat"]
+            current = self.current_turn_for(channel, chat) if channel and chat else None
+            stopped = False
+            if current is not None:
+                result = await self.stop_turn(current.message_id, via=channel)
+                stopped = result in (StopResult.STOPPING, StopResult.ALREADY_STOPPING)
+            await self._send_reply(envelope, STOP_DONE_REPLY if stopped else STOP_IDLE_REPLY, persist=False)
+        except Exception:
+            logger.exception("manager: could not handle /stop %s", envelope.message_id)
+
     async def stop(self) -> None:
         self._running = False
+        if self._bus is not None:
+            self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._claim_stop)
         if self._task:
             await cancel_and_wait(self._task)
             self._task = None

@@ -560,6 +560,18 @@ class TestTelegramAllowlist:
         (message,) = self._run(tmp_path, "_cmd_new", update, "7")
         assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone"}
 
+    def test_stop_forwards_for_a_listed_sender_only(self, tmp_path: Path) -> None:
+        (message,) = self._run(tmp_path, "_cmd_stop", _tg_update(7, "/stop"), "7")
+        assert message.payload["text"] == "/stop"
+        update = _tg_update(8, "/stop")
+        assert self._run(tmp_path, "_cmd_stop", update, "7") == []
+        update.message.reply_text.assert_not_awaited()
+
+    def test_stop_is_a_registered_command(self) -> None:
+        from looper.agents.channels.telegram import _BOT_COMMANDS
+
+        assert "stop" in dict(_BOT_COMMANDS)
+
     def test_status_names_only_its_chat(self, tmp_path: Path) -> None:
         (message,) = self._run(tmp_path, "_cmd_status", _tg_update(7, "/status", replies_to=17), "7")
         assert message.payload["channel_context"] == {"chat_id": 99}
@@ -722,6 +734,14 @@ class TestLarkAllowlist:
                                                       "sender_name": "Ada Lovelace"}
         # Seen at once; its answer replies to it in the group.
         assert seen.reacted == ["om_7"] and seen.replies_to == {message.correlation_id: "om_7"}
+
+    def test_a_group_mention_of_stop_reaches_the_manager_as_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event = _lark_event(OPEN_ID, "@HelperBot /stop", chat_type="group", chat_id="oc_team",
+                            mentions=[BOT_MENTION], message_id="om_8")
+        (message,) = self._run(tmp_path, monkeypatch, event, OPEN_ID).messages
+        assert message.payload["text"] == "/stop"
 
     @pytest.mark.parametrize(("refs", "seen"), [
         ({"reply_to": "om_card", "root_id": "om_card"}, {"reply_to": "om_card", "root_id": "om_card"}),

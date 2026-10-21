@@ -52,6 +52,7 @@ _CORRELATION_MAX = 1000
 _BOT_COMMANDS: list[tuple[str, str]] = [
     ("status", "查看当前任务进度"),
     ("new", "开始新的 Manager 会话"),
+    ("stop", "停止管家当前的回复"),
     ("help", "显示帮助"),
 ]
 
@@ -133,6 +134,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         # Only /new itself (also /new@<this bot>): "/new foo" stays an unknown command, as before.
         self._app.add_handler(CommandHandler("new", self._cmd_new, has_args=False))
+        self._app.add_handler(CommandHandler("stop", self._cmd_stop, has_args=False))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -325,6 +327,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             "Looper Agent 已就绪。直接发消息给我，或使用:\n"
             "/status — 查看当前任务进度\n"
             "/new — 开始新的 Manager 会话\n"
+            "/stop — 停止管家当前的回复\n"
             "/help — 帮助信息"
         )
 
@@ -361,6 +364,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             "直接发消息 — 提需求或问问题\n"
             "/status — 查看当前任务进度\n"
             "/new — 开始新的 Manager 会话\n"
+            "/stop — 停止管家当前的回复\n"
             "/help — 显示此帮助"
         )
 
@@ -369,6 +373,12 @@ class TelegramChannelAdapter(ChannelAdapter):
         if not self._admits(update):
             return
         await self._forward(update, "/new")
+
+    async def _cmd_stop(self, update: Any, context: Any) -> None:
+        """/stop goes to the Manager as the text ``/stop``, which it answers itself, outside its queue."""
+        if not self._admits(update):
+            return
+        await self._forward(update, "/stop")
 
     async def _on_message(self, update: Any, context: Any) -> None:
         if not self._admits(update):
