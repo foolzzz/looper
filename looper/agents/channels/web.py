@@ -183,6 +183,7 @@ class WebChannelAdapter(ChannelAdapter):
         target: AgentAddress = MANAGER_ADDRESS,
         message_id: str | None = None,
         supplement_id: int | None = None,
+        new_session_profile_id: str | None = None,
     ) -> dict[str, str]:
         """Send a chat message (``message_id``, in the chat ``session_id``) to its agent; its answer is saved to
         that chat under ``reply_message_id(message_id)``. ``supplement_id``: a message to a task's Planner, stored
@@ -211,6 +212,7 @@ class WebChannelAdapter(ChannelAdapter):
                     "client_message_id": message_id,  # what the page's Stop button names (POST /api/chat/stop)
                 },
                 **({"supplement_id": supplement_id} if supplement_id is not None else {}),
+                **({"new_session_profile_id": new_session_profile_id} if new_session_profile_id else {}),
             },
             correlation_id=correlation_id,
             metadata={"origin_channel_id": self.channel_id},

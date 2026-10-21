@@ -264,6 +264,14 @@ def model_registry_contract(expected: dict[str, dict[str, Any]]) -> dict[str, di
          "  Profiles (looper_agent_profiles) are recipes: runtime, model and runtime\n"
          "  options (effort, teams, custom prompt). Select a role's profile with\n"
          "  looper_settings.\n"),
+        # This branch's declared Manager contract lines on the session's /profile.
+        ('- Never say an operation ran unless its answer was "ok".\n',
+         "- The user switches the Agent Profile of this conversation with /profile\n"
+         "  and starts a new one with /new; Looper answers both itself. You cannot\n"
+         "  switch it: when asked to, tell the user to send /profile (it lists the\n"
+         "  choices). Setting the manager role's profile with looper_settings applies\n"
+         "  to later sessions only when this one has its own choice.\n"
+         '- Never say an operation ran unless its answer was "ok".\n'),
     )
     result = dict(expected)
     for case, seen in expected.items():

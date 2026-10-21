@@ -225,6 +225,7 @@ function shortSha(sha: string | null | undefined) {
 /** Where a run's settings came from: the settings layers, then the names runs recorded before the layers used. */
 const SETTING_SOURCES: Record<string, string> = {
   builtin: "built-in default",
+  session: "chosen for this session (/profile)",
   profile: `the ${AGENT_PROFILE.name}'s default`,
   // Runs recorded before Agent Profiles were named.
   agent: `the ${AGENT_PROFILE.name}'s default`,

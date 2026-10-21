@@ -12,6 +12,8 @@ import {
   MessageCircleQuestionMark,
 } from "lucide-react";
 import { ChatComposer } from "@/components/chat-composer";
+import { NewSessionPanel } from "@/components/new-session-panel";
+import { ManagerSessionProfile } from "@/components/manager-session-profile";
 import { Markdown } from "@/components/markdown";
 import { ChannelBadge, ConversationList } from "@/components/chat-conversations";
 import { channelLabel, undeliveredText } from "@/lib/chat-channels";
@@ -23,6 +25,7 @@ import {
   stopChatReply,
   fetchChatSessions,
   fetchChatTargets,
+  fetchManagerSession,
   fetchTaskActivity,
   fetchTaskDetail,
   streamSSE,
@@ -38,8 +41,10 @@ import {
   type DbChatMessage,
   type LlmRecord,
   type UserGate,
+  type ManagerSessionView,
 } from "@/lib/api";
 import { historyFrom, joinStaged, pullBack } from "@/lib/composer";
+import { profileLabel } from "@/lib/use-registry";
 import { isGateWaiting } from "@/lib/gates";
 import { randomId } from "@/lib/ids";
 import { RunCard, activityBelongsTo, historyHref, runRoleLabel } from "@/pages/agent-history";
@@ -307,12 +312,16 @@ export function ChatPage() {
   const stagedRef = useRef<string[]>([]);
   const sendingRef = useRef(false);
   sendingRef.current = sending;
-  const sendRef = useRef<(text: string) => Promise<void>>(async () => {});
+  const sendRef = useRef<(text: string, newSessionProfileId?: string) => Promise<void>>(async () => {});
   const canSendRef = useRef(true);
   const pollRef = useRef<{ sid: string; id: string; stopped: boolean; timer?: ReturnType<typeof setTimeout> } | null>(null);
   // The Manager's conversations on every channel, and the Lark or Telegram one open read-only (null: the web thread).
   const [conversations, setConversations] = useState<ChatSession[] | null>(null);
   const [conversationsError, setConversationsError] = useState("");
+  const [profileRefresh, setProfileRefresh] = useState(0);
+  const [newPanel, setNewPanel] = useState<ManagerSessionView | null>(null);
+  const [newPanelOpen, setNewPanelOpen] = useState(false);
+  const newSessionButtonRef = useRef<HTMLButtonElement>(null);
   const [viewing, setViewing] = useState<ChatSession | null>(null);
   // Its messages as last read, by session id, so another conversation's never show while one loads.
   const [viewingMessages, setViewingMessages] = useState<{ id: string; rows: DbChatMessage[] } | null>(null);
@@ -636,7 +645,22 @@ export function ChatPage() {
     setInput("");
   };
 
-  const handleSend = async (text: string) => {
+  const closeNewPanel = () => {
+    setNewPanelOpen(false);
+    newSessionButtonRef.current?.focus();
+  };
+
+  const toggleNewPanel = () => {
+    if (newPanelOpen) return closeNewPanel();
+    setNewPanelOpen(true);
+    setNewPanel(null);
+    fetchManagerSession().then(setNewPanel).catch(() => setNewPanel({
+      session: { active: false, runtime: null, profile_id: null }, selected: null,
+      effective: { profile: null, source: "session" }, problem: null, choices: [],
+    }));
+  };
+
+  const handleSend = async (text: string, newSessionProfileId?: string) => {
     if (!text.trim() || !current.can_send) return;
 
     const sid = sessionId;
@@ -646,6 +670,7 @@ export function ChatPage() {
     setServerTurn(null);
     setNotice("");
     setSending(true);
+    const isNewSession = text === NEW_SESSION_COMMAND;
     setPhase("");
     let finalSeen = false;
     let aborted = false;
@@ -672,7 +697,7 @@ export function ChatPage() {
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
-      const { events_url } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target));
+      const { events_url } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target), { newSessionProfileId });
 
       const close = streamSSE(
         events_url,
@@ -706,6 +731,7 @@ export function ChatPage() {
               if (current_()) {
                 setSending(false);
                 setPhase("");
+                if (isNewSession) setProfileRefresh((n) => n + 1);
               }
               if (sid !== sessionIdRef.current) break;
               const list = stagedRef.current;
@@ -911,13 +937,15 @@ export function ChatPage() {
             {!viewing && sessionId && (
               <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">{sessionId}</span>
             )}
+            {target.kind === "manager" && !viewing && <ManagerSessionProfile refreshKey={profileRefresh} />}
             {target.kind === "manager" && !viewing && (
               <button
                 type="button"
-                onClick={() => handleSend(NEW_SESSION_COMMAND)}
+                ref={newSessionButtonRef}
+                onClick={toggleNewPanel}
                 disabled={sending}
                 className="flex h-7 items-center gap-1.5 rounded-md border border-border px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
-                title="Send /new: the Manager starts a new session, and its next message, from any channel, starts with a clean context"
+                title="Start a new Manager session, optionally on another Agent Profile"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
                 New session
@@ -954,6 +982,23 @@ export function ChatPage() {
           </p>
         )}
       </div>
+
+      {newPanelOpen && target.kind === "manager" && !viewing && (
+        <NewSessionPanel
+          settingsName={
+            newPanel && newPanel.effective.source !== "session" && newPanel.effective.profile
+              ? profileLabel(newPanel.effective.profile)
+              : null
+          }
+          choices={newPanel?.choices ?? []}
+          busy={sending}
+          onStart={(id) => {
+            closeNewPanel();
+            handleSend(NEW_SESSION_COMMAND, id ?? undefined);
+          }}
+          onCancel={closeNewPanel}
+        />
+      )}
 
       {plannerTaskId && gatesWaiting.length > 0 && (
         <div className="border-b border-border px-5 py-3">
