@@ -296,6 +296,7 @@ export function ChatPage() {
   const [plannerActivity, setPlannerActivity] = useState<ActivityEvent[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const turnRef = useRef(0); // the send in flight; an older stream must not touch a newer turn's state
   // Leaving the page (the session ended, for one) stops the reply stream.
   useEffect(() => () => cleanupRef.current?.(), []);
   const messagesRef = useRef(messages);
@@ -639,6 +640,8 @@ export function ChatPage() {
     if (!text.trim() || !current.can_send) return;
 
     const sid = sessionId;
+    const turn = ++turnRef.current;
+    const current_ = () => turn === turnRef.current;
     stopPoll();
     setServerTurn(null);
     setNotice("");
@@ -700,8 +703,10 @@ export function ChatPage() {
                     : m
                 )
               );
-              setSending(false);
-              setPhase("");
+              if (current_()) {
+                setSending(false);
+                setPhase("");
+              }
               if (sid !== sessionIdRef.current) break;
               const list = stagedRef.current;
               if (list.length > 0) {
@@ -729,14 +734,18 @@ export function ChatPage() {
                 }
                 return prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m));
               });
-              setSending(false);
-              setPhase("");
+              if (current_()) {
+                setSending(false);
+                setPhase("");
+              }
               break;
           }
         },
         () => {
-          setSending(false);
-          setPhase("");
+          if (current_()) {
+            setSending(false);
+            setPhase("");
+          }
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
           );
@@ -757,7 +766,7 @@ export function ChatPage() {
         err instanceof TypeError || !(err instanceof Error)
           ? "Failed to connect. Is the server running?"
           : err.message;
-      setSending(false);
+      if (current_()) setSending(false);
       if (sid !== sessionIdRef.current) return;
       if (text === NEW_SESSION_COMMAND) {
         setMessages((prev) =>

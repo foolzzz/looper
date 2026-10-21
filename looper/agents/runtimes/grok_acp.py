@@ -759,7 +759,9 @@ class AcpGrok:
                 with contextlib.suppress(ConnectionError):
                     await self._send({"method": "session/cancel", "params": {"sessionId": session}})
                 while (message := await self._inbox.get()) is not None:
-                    if message.get("method") is None:
+                    if message is _USER_STOP:
+                        continue  # a stop that raced the cancel: the cancel is already sent
+                    if message.get("method") is None and message.get("id") == self._prompt_id:
                         return message
         except TimeoutError:
             logger.warning("%s: Grok did not end a cancelled turn in %ss; ending its process", self._label,

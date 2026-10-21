@@ -39,6 +39,7 @@ describe("chat composer flow", () => {
   let container: HTMLDivElement;
   let root: Root;
   let emit: Handler;
+  let done: (() => void) | undefined;
 
   const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   const input = () => container.querySelector("textarea") as HTMLTextAreaElement;
@@ -74,8 +75,9 @@ describe("chat composer flow", () => {
     localStorage.setItem("looper-chat-session-id", SID);
     for (const fn of Object.values(api)) fn.mockReset();
     api.sendChat.mockResolvedValue({ events_url: "/events" });
-    api.streamSSE.mockImplementation((_url: string, onEvent: Handler) => {
+    api.streamSSE.mockImplementation((_url: string, onEvent: Handler, onDone?: () => void) => {
       emit = onEvent;
+      done = onDone;
       return () => {};
     });
     api.fetchChatMessages.mockResolvedValue([]);
@@ -115,6 +117,20 @@ describe("chat composer flow", () => {
     expect(api.sendChat).toHaveBeenCalledTimes(1);
     expect(input().value).toBe("a\n\nb");
     if (outcome === "stopped") expect(container.textContent).toContain("Stopped");
+  });
+
+  it("keeps the next turn running when the stream of the one before it closes", async () => {
+    await mount();
+    await say("first");
+    await say("a");
+    const closeFirst = done!;
+    await fire("answer.final", { text: "ok", outcome: "answered" });
+    expect(api.sendChat).toHaveBeenCalledTimes(2);
+    act(() => closeFirst());
+    await flush();
+    expect(stopButton()).not.toBeNull();
+    await say("b");
+    expect(api.sendChat).toHaveBeenCalledTimes(2);
   });
 
   it("stops the running message with Escape", async () => {

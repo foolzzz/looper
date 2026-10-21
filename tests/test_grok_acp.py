@@ -731,3 +731,32 @@ def test_grok_serves_its_resident_sessions_over_acp() -> None:
     assert GROK.resident_transport is ResidentTransport.ACP
     assert isinstance(GROK.resident_session("manager"), AcpGrok)
     assert adapter("codex").resident_transport is ResidentTransport.PER_TURN
+
+
+def test_a_stop_queued_while_a_cancel_waits_is_not_taken_for_its_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _operator(tmp_path, monkeypatch)
+    monkeypatch.setattr(grok_acp, "CANCEL_GRACE_SEC", 0.5)
+    root, grok = tmp_path / "runtime", _fake(tmp_path)
+
+    async def _run() -> tuple[Any, ...]:
+        session = AcpGrok(label="manager")
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s")
+        await session._ensure()
+        session._prompt_id = 7
+        answer = {"id": 7, "result": {"stopReason": "cancelled"}}
+        session._inbox.put_nowait(grok_acp._USER_STOP)  # a stop that raced the cancel
+        session._inbox.put_nowait({"id": 3, "result": {}})  # a response to some other request
+        session._inbox.put_nowait(answer)
+        got = await session._cancel(session._session)
+        session._prompt_id = 8
+        session._inbox.put_nowait(grok_acp._USER_STOP)  # only the stop: no response comes
+        lost = await session._cancel(session._session)
+        stale = session.stale("s")
+        await session.stop()
+        return got, answer, lost, stale
+
+    got, answer, lost, stale = _go(_run())
+    assert got is answer
+    assert lost is None and stale  # the stop is no response: the grace period ran out and the process was ended
