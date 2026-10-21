@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from looper.agents.bus import MessageBus
+from looper.agents.ops import Turn
 from looper.agents.claude_cli import ResidentTurn, user_stop_result
 from looper.agents.message import MessageEnvelope, MessageType
 from looper.agents.run_usage import Usage
@@ -26,8 +27,8 @@ class _Session:
     label = "manager"
     pid = None
 
-    def __init__(self, *, hold: bool = True, on_start: Any = None) -> None:
-        self.hold, self.on_start = hold, on_start
+    def __init__(self, *, hold: bool = True, on_start: Any = None, on_turn: Any = None) -> None:
+        self.hold, self.on_start, self.on_turn = hold, on_start, on_turn
         self.started = False
         self.command: list[str] = []
         self.totals = Usage()
@@ -49,6 +50,8 @@ class _Session:
         await on_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
         await on_event({"type": "stream_event", "event": {"type": "content_block_delta", "delta": delta}})
         await on_event({"type": "assistant", "message": {"content": [{"type": "text", "text": "半截回复"}]}})
+        if self.on_turn is not None:
+            await self.on_turn()
         if not self.hold:
             result = {"type": "result", "subtype": "success", "is_error": False, "result": "好的",
                       "session_id": "sess-1"}
@@ -94,7 +97,7 @@ def test_stop_while_the_turn_runs(agent_db: Any) -> None:
             await handling
             (reply,) = _replies(queue)
             assert reply["text"].endswith("（已停止）") and reply["text"].startswith("半截回复")
-            assert "error" not in reply
+            assert "error" not in reply and reply["outcome"] == "stopped"
             (finish,) = agent_db.finish_record.await_args_list
             assert finish.kwargs["status"] == "interrupted"
             assert finish.kwargs["cost_usd"] == 0.01
@@ -162,7 +165,115 @@ def test_an_ordinary_turn_after_a_stopped_one(agent_db: Any) -> None:
             session.hold = False
             await manager._handle(_web("再来一个", 1))
             (reply,) = _replies(queue)
-            assert reply["text"] == "好的" and "error" not in reply
+            assert reply["text"] == "好的" and "error" not in reply and reply["outcome"] == "answered"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def _with_ops(manager: ManagerAgent) -> Any:
+    """A ``ManagerOps`` over one high-risk stand-in tool that always asks to confirm."""
+    from looper.agents.ops import Risk, Tool
+    from looper.agents.ops.service import ManagerOps, Platform
+
+    async def run(call: Any) -> dict[str, Any]:
+        return {}
+
+    async def escalate(call: Any) -> str | None:
+        return "删除 3？"
+
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok",
+                     tools=(Tool("t_write", "writes", schema, Risk.WRITE, run, escalate=escalate),))
+    ops._working_at = ops._clock()  # the MCP entry was probed
+    manager.ops = ops
+    return ops
+
+
+def test_an_error_reply_is_failed_and_a_turn_that_asked_to_confirm_is_confirm(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            ops = _with_ops(manager)
+            message = _web("删掉它", 0)
+
+            async def ask() -> None:
+                await ops.call("t_write", {})
+
+            session.on_turn = ask
+            await manager._handle(message)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "confirm" and "需要你确认" in reply["text"]
+
+            await manager._send_reply(message, "坏了", error="boom")
+            (failed,) = _replies(queue)
+            assert failed["outcome"] == "failed" and failed["error"] == "boom"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stopped_turn_that_asked_to_confirm_leaves_no_confirmation(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            ops = _with_ops(manager)
+
+            async def ask() -> None:
+                await ops.call("t_write", {})
+
+            session.on_turn = ask
+            envelope = _web("删掉它", 0)
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            assert ops.asks_in(envelope.message_id)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "需要你确认" not in reply["text"]
+            assert not ops.asks_in(envelope.message_id)
+            assert ops.begin_turn(Turn(channel="web", chat=envelope.payload.get("chat", "web"),
+                                       message_id="next")) == ""
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_the_turn_after_a_stop_is_told_once_and_new_clears_it(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            first = _web("先来一个" + "很长" * 50, 0)
+            handling = asyncio.create_task(manager._handle(first))
+            await _until(session.running.is_set)
+            await manager.stop_turn(first.message_id, via="web")
+            await handling
+            session.hold = False
+            await manager._handle(_web("再来一个", 1))
+            await manager._handle(_web("第三个", 2))
+            assert session.turns[1].count("[Looper] The user stopped your previous reply") == 1
+            assert f'(to: "{" ".join(first.payload["text"].split())[:80]}")' in session.turns[1]
+            assert "before it finished. Tool calls it had already made were not undone" in session.turns[1]
+            assert "[Looper] The user stopped" not in session.turns[2]
+
+            # /new between the stop and the next turn clears it
+            session.hold = True
+            session.running.clear()
+            session._stopped.clear()
+            fourth = _web("第四个", 3)
+            handling = asyncio.create_task(manager._handle(fourth))
+            await _until(session.running.is_set)
+            await manager.stop_turn(fourth.message_id, via="web")
+            await handling
+            assert manager._stopped_note is not None
+            await manager._handle(_web("/new", 4))
+            assert manager._stopped_note is None
+            session.hold = False
+            await manager._handle(_web("第五个", 5))
+            assert "[Looper] The user stopped" not in session.turns[-1]
             await bus.shutdown()
 
     asyncio.run(run())

@@ -273,6 +273,7 @@ class WebChannelAdapter(ChannelAdapter):
                     "payload": {
                         "text": envelope.payload.get("text", ""),
                         "response": {"message": envelope.payload.get("text", "")},
+                        "outcome": envelope.payload.get("outcome", "answered"),
                     },
                 }
             case MessageType.STATUS_UPDATE:
@@ -291,6 +292,7 @@ class WebChannelAdapter(ChannelAdapter):
                     "payload": {
                         "text": envelope.payload.get("text", ""),
                         "response": {"message": envelope.payload.get("text", "")},
+                        "outcome": envelope.payload.get("outcome", "answered"),
                     },
                 }
             case _:

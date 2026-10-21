@@ -306,6 +306,15 @@ def _with_blocks(text: str, blocks: list[str]) -> str:
     return "\n\n".join(part for part in (text.strip(), *blocks) if part)
 
 
+class ReplyOutcome(str, Enum):
+    """How a turn ended, as its reply says."""
+
+    ANSWERED = "answered"
+    FAILED = "failed"
+    STOPPED = "stopped"
+    CONFIRM = "confirm"
+
+
 class StopResult(str, Enum):
     """What ``ManagerAgent.stop_turn`` did with a request to stop the running user turn."""
 
@@ -414,6 +423,7 @@ class ManagerAgent:
         self._current: CurrentTurn | None = None  # the user turn being answered (stop_turn's target)
         self._current_envelope: MessageEnvelope | None = None
         self._stop_tasks: set[asyncio.Task[Any]] = set()
+        self._stopped_note: str | None = None  # told to the next user turn: the user stopped the one before
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
         self._process: _Process | None = None  # what the running Claude was started with
         # Why the session was last dropped and the handoff its old session wrote, until the new session's first
@@ -566,11 +576,23 @@ class ManagerAgent:
                                     started_at=datetime.now(timezone.utc))
         try:
             try:
-                response = await self._invoke_claude(text, envelope, turn=turn, note=gate.note)
+                stopped_note, self._stopped_note = self._stopped_note, None
+                response = await self._invoke_claude(
+                    text, envelope, turn=turn,
+                    note="\n".join(part for part in (gate.note, stopped_note) if part))
             finally:
                 self._current, self._current_envelope = None, None
         except TurnStopped as stopped:
-            await self._send_reply(envelope, stopped_reply(stopped.partial, turn.blocks))
+            if self.ops is not None:
+                block = self.ops.drop_asked_in(envelope.message_id)
+                if block in turn.blocks:
+                    turn.blocks.remove(block)
+            first_line = " ".join(text.split())[:80]
+            self._stopped_note = (f'[Looper] The user stopped your previous reply (to: "{first_line}") before it '
+                                  "finished. Tool calls it had already made were not undone; check their effects "
+                                  "before you rely on them or repeat them.")
+            await self._send_reply(envelope, stopped_reply(stopped.partial, turn.blocks),
+                                   outcome=ReplyOutcome.STOPPED)
             return
         except Exception as exc:
             if turn.refused:
@@ -587,7 +609,9 @@ class ManagerAgent:
                          "sent", envelope.message_id)
             await self._send_reply(envelope, _with_blocks(tools_down_reply(problem), turn.blocks), error=problem)
             return
-        await self._send_reply(envelope, _with_blocks(response, turn.blocks))
+        asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
+        await self._send_reply(envelope, _with_blocks(response, turn.blocks),
+                               outcome=ReplyOutcome.CONFIRM if asked else None)
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
         """Ask the running user turn of ``message_id`` to stop. Does not wait for the turn's lock: the turn ends by
@@ -1026,6 +1050,7 @@ class ManagerAgent:
                 await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                 return
             self._pending_switch = self._pending_handoff = None
+            self._stopped_note = None
             if self.ops is not None:
                 self.ops.forget_confirmations()
             await self._record_new_session(envelope, origin, previous[0])
@@ -1361,17 +1386,19 @@ class ManagerAgent:
             logger.warning("manager: could not persist a %s chat turn", channel, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
-                          persist: bool = True) -> None:
+                          persist: bool = True, outcome: ReplyOutcome | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
         The channel keeps the answer in the chat's history once it has sent it; without ``persist`` it is not kept
-        (one about a user gate, whose discussion keeps the message)."""
+        (one about a user gate, whose discussion keeps the message). ``outcome`` is how the turn ended; by default
+        failed with an ``error``, else answered."""
         assert self._bus is not None
         record = _chat_record(original, f"{original.message_id}:reply") if persist else {}
+        outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(MessageEnvelope.create(
             source=MANAGER_ADDRESS,
             target=original.source,
             message_type=MessageType.AGENT_REPLY,
-            payload={"text": text, **({"error": error} if error else {})},
+            payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
             metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record},

@@ -207,6 +207,14 @@ class TestWebChannelAdapter:
         assert event["kind"] == kind
         if kind == "answer.final":
             assert event["payload"]["text"] == "hello user"
+            assert event["payload"]["outcome"] == payload.get("outcome", "answered")
+
+    def test_answer_final_carries_the_reply_outcome(self) -> None:
+        env = MessageEnvelope.create(
+            source=MANAGER_ADDRESS, target=channel_address("web"), message_type=MessageType.AGENT_REPLY,
+            payload={"text": "x", "outcome": "stopped"},
+        )
+        assert WebChannelAdapter._envelope_to_sse_event(env)["payload"]["outcome"] == "stopped"
 
 
 class TestTelegramAdapter:

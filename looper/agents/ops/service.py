@@ -313,6 +313,18 @@ class ManagerOps:
         if pending is not None and not turn.autonomous and pending.answer_turn == turn.message_id:
             del self._pending[turn.chat_key]
 
+    def asks_in(self, message_id: str) -> bool:
+        """Whether a confirmation asked in the turn of ``message_id`` waits."""
+        return any(pending.asked_in == message_id for pending in self._pending.values())
+
+    def drop_asked_in(self, message_id: str) -> str | None:
+        """Drop the confirmation asked in the turn of ``message_id``; the block the user was shown, if any."""
+        for key, pending in self._pending.items():
+            if pending.asked_in == message_id:
+                del self._pending[key]
+                return pending.block
+        return None
+
     def forget_confirmations(self) -> None:
         """Drop every waiting confirmation (the Manager's session was reset)."""
         self._pending.clear()

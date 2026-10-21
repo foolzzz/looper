@@ -197,8 +197,8 @@ class StatusLines:
             line.edits += 1
             line.last_edit = self._clock()
 
-    async def finish(self, correlation_id: str, *, error: str | None = None) -> None:
-        """The message ``correlation_id`` was answered: close its status message (done, or the error)."""
+    async def finish(self, correlation_id: str, *, error: str | None = None, stopped: bool = False) -> None:
+        """The message ``correlation_id`` was answered: close its status message (done, stopped, or the error)."""
         self._finished[correlation_id] = None
         while len(self._finished) > FINISHED_MAX:
             self._finished.popitem(last=False)
@@ -209,7 +209,7 @@ class StatusLines:
         if line.trailing is not None:
             await asyncio.gather(line.trailing, return_exceptions=True)
         elapsed = int(self._clock() - line.started)
-        text = (f"❌ 出错：{' '.join(error.split())[:REASON_MAX_CHARS]}" if error
+        text = ("已停止" if stopped else f"❌ 出错：{' '.join(error.split())[:REASON_MAX_CHARS]}" if error
                 else f"✅ 完成 · 用时 {elapsed}s · 工具 {line.tools} 次")
         async with line.lock:
             if not line.broken:
