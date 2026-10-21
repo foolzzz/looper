@@ -1,12 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchLlmRecords, type TaskDetail } from "@/lib/api";
+import { fetchTaskRuns, type LlmRecord, type TaskDetail, type TaskRunRow } from "@/lib/api";
 import type { TaskRuns } from "@/lib/node-cards";
 
-// The most runs of one role `GET /api/llm-records` answers with.
-export const RUN_LIMIT = 500;
+/** A compact run as the record the cards read: its profile, model and effort, not its prompts or events. */
+function asRecord(run: TaskRunRow): LlmRecord {
+  const profile = run.profile.name || run.profile.source || run.runtime.name || run.runtime.type;
+  return {
+    id: run.id,
+    agent_id: run.agent_id,
+    task_id: null,
+    session_id: null,
+    status: run.status,
+    model: run.model,
+    created_at: run.created_at,
+    metadata: {
+      ...(run.step_id ? { step_id: run.step_id } : {}),
+      ...(run.model || run.effort ? { model_choice: { model: run.model ?? "", source: "default", effort: run.effort } } : {}),
+      ...(profile
+        ? {
+            profile: {
+              name: run.profile.name ?? "",
+              source: run.profile.source,
+              runtime: { name: run.runtime.name ?? "", type: run.runtime.type ?? "" },
+            },
+          }
+        : {}),
+    },
+  } as unknown as LlmRecord;
+}
 
 /** The task's Planner, Worker and Reviewer runs, read again whenever a step or the Planner changes (a new run or a
- * run's end moves one); null until read. */
+ * run's end moves one); null until read. One compact request (`GET /api/tasks/<id>/runs`). */
 export function useTaskRuns(task: TaskDetail | null): { runs: TaskRuns | null; error: string } {
   const [runs, setRuns] = useState<TaskRuns | null>(null);
   const [error, setError] = useState("");
@@ -23,18 +47,19 @@ export function useTaskRuns(task: TaskDetail | null): { runs: TaskRuns | null; e
   useEffect(() => {
     if (!taskId) return;
     const seq = ++latest.current;
-    Promise.all(
-      (["planner", "worker", "reviewer"] as const).map((role) => fetchLlmRecords({ task_id: taskId, role, limit: RUN_LIMIT })),
-    ).then(
-      ([planner, worker, reviewer]) => {
+    const abort = new AbortController();
+    fetchTaskRuns(taskId, abort.signal).then(
+      (rows) => {
         if (seq !== latest.current) return;
-        setRuns({ planner, worker, reviewer });
+        const by = (role: TaskRunRow["role"]) => rows.filter((r) => r.role === role).map(asRecord);
+        setRuns({ planner: by("planner"), worker: by("worker"), reviewer: by("reviewer") });
         setError("");
       },
       (err) => {
-        if (seq === latest.current) setError(err instanceof Error ? err.message : String(err));
+        if (seq === latest.current && !abort.signal.aborted) setError(err instanceof Error ? err.message : String(err));
       },
     );
+    return () => abort.abort();
   }, [taskId, changes]);
 
   return { runs, error };

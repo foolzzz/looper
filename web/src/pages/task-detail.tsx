@@ -44,6 +44,8 @@ import { WAIT_STATES, waitAnchor } from "@/lib/waits";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { TaskRoomTab } from "@/components/task-room";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
+import { useEventWindow } from "@/lib/use-event-window";
+import { startPolling } from "@/lib/polling";
 import { useTaskRuns } from "@/lib/use-task-runs";
 import { type NodeCard, type TaskRuns, gateCard, waitCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
@@ -67,6 +69,7 @@ import { useProjects } from "@/lib/use-projects";
 import {
   fetchTaskDetail,
   fetchTaskActivity,
+  fetchTaskActivityWindow,
   fetchTaskConversation,
   streamTaskActivity,
   stopTask,
@@ -1321,51 +1324,28 @@ function AgentTimeline({ taskId, runRoles }: { taskId: string; runRoles?: Record
 
 // --- Sessions Tab ---
 
-function SessionsTab({ taskId }: { taskId: string }) {
-  const [events, setEvents] = useState<ActivityEvent[]>([]);
+function EarlierLine() {
+  return (
+    <p className="flex items-center justify-center gap-1.5 py-1 text-xs text-muted-foreground">
+      <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+      loading earlier…
+    </p>
+  );
+}
+
+export function SessionsTab({ taskId }: { taskId: string }) {
   const [live, setLive] = useState(true);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const cleanupRef = useRef<(() => void) | null>(null);
+  const { events, loadingEarlier, latestSeq, scrollRef, onScroll, append } = useEventWindow(
+    taskId,
+    (before, signal) => fetchTaskActivityWindow(taskId, before, signal),
+  );
 
-  const scrollToBottom = useCallback(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, []);
-
+  // Stream what comes after the latest loaded event, once the first page is read.
   useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const { activity } = await fetchTaskActivity(taskId, 0, 500);
-        if (cancelled) return;
-        setEvents(activity);
-      } catch {
-        // ignore
-      }
-
-      const maxSeq = events.length > 0 ? Math.max(...events.map((e) => e.seq)) : 0;
-
-      cleanupRef.current = streamTaskActivity(
-        taskId,
-        maxSeq,
-        (event) => {
-          if (cancelled) return;
-          setEvents((prev) => {
-            if (prev.some((e) => e.seq === event.seq)) return prev;
-            return [...prev, event];
-          });
-        },
-        () => setLive(false),
-      );
-    })();
-
-    return () => {
-      cancelled = true;
-      cleanupRef.current?.();
-    };
-  }, [taskId]);
-
-  useEffect(scrollToBottom, [events, scrollToBottom]);
+    if (latestSeq === null) return;
+    setLive(true);
+    return streamTaskActivity(taskId, latestSeq, append, () => setLive(false));
+  }, [taskId, latestSeq, append]);
 
   const grouped = new Map<string, ActivityEvent[]>();
   for (const ev of events) {
@@ -1390,7 +1370,8 @@ function SessionsTab({ taskId }: { taskId: string }) {
           </span>
         )}
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-1.5">
+      <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto p-4 space-y-1.5">
+        {loadingEarlier && <EarlierLine />}
         {events.length === 0 && (
           <div className="flex h-full items-center justify-center">
             <p className="text-sm text-muted-foreground">No activity yet</p>
@@ -1430,17 +1411,15 @@ function SessionsTab({ taskId }: { taskId: string }) {
 
 // --- Conversation Tab ---
 
-function ConversationTab({ taskId }: { taskId: string }) {
-  const [messages, setMessages] = useState<ActivityEvent[]>([]);
-
-  useEffect(() => {
-    fetchTaskConversation(taskId)
-      .then(({ conversation }) => setMessages(conversation))
-      .catch(() => {});
-  }, [taskId]);
+export function ConversationTab({ taskId }: { taskId: string }) {
+  const { events: messages, loadingEarlier, scrollRef, onScroll } = useEventWindow(
+    taskId,
+    (before, signal) => fetchTaskConversation(taskId, before, signal),
+  );
 
   return (
-    <div className="p-5 space-y-3">
+    <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto p-5 space-y-3">
+      {loadingEarlier && <EarlierLine />}
       {messages.length === 0 && (
         <div className="flex h-48 items-center justify-center">
           <p className="text-sm text-muted-foreground">No conversation for this task</p>
@@ -1987,22 +1966,19 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, onBack }: Task
   }, [task, gateStep, openGate]);
 
   useEffect(() => {
-    let timer: ReturnType<typeof setInterval>;
     let stopped = false;
-    const load = () =>
-      fetchTaskDetail(taskId)
-        .then((t) => {
-          if (stopped) return;
-          setTask(t);
-          setError("");
-          if (["completed", "failed", "cancelled", "stopped", "init"].includes(t.status)) {
-            clearInterval(timer);
-          }
-        })
-        .catch((e) => { if (!stopped) setError(e.message); });
-    load();
-    timer = setInterval(load, 2000);
-    return () => { stopped = true; clearInterval(timer); };
+    const stop = startPolling(async (signal) => {
+      try {
+        const t = await fetchTaskDetail(taskId, signal);
+        if (stopped) return;
+        setTask(t);
+        setError("");
+        return ["completed", "failed", "cancelled", "stopped", "init"].includes(t.status);
+      } catch (e) {
+        if (!stopped) setError(e instanceof Error ? e.message : String(e));
+      }
+    }, 2000);
+    return () => { stopped = true; stop(); };
   }, [taskId, runs]);
 
   // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.

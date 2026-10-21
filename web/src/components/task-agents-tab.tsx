@@ -14,7 +14,6 @@ import {
 import type { TaskRuns } from "@/lib/node-cards";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
-import { RUN_LIMIT } from "@/lib/use-task-runs";
 import { profileName } from "@/lib/use-registry";
 import { cn } from "@/lib/utils";
 import { historyHref, sourceName } from "@/pages/agent-history";
@@ -166,9 +165,6 @@ export function StepRunsTable({ runs, taskId }: { runs: StepRun[]; taskId: strin
 /** What each of the task's step runs ran on. */
 function StepRuns({ task, records, error }: { task: TaskDetail; records: TaskRuns | null; error: string }) {
   const steps = task.steps || [];
-  const clipped = records
-    ? (["worker", "reviewer"] as const).filter((role) => records[role].length >= RUN_LIMIT).map(roleLabel)
-    : [];
   const runs = records ? stepRuns(steps, records) : [];
   return (
     <section aria-labelledby="task-step-runs-title">
@@ -192,11 +188,6 @@ function StepRuns({ task, records, error }: { task: TaskDetail; records: TaskRun
       )}
       {records && runs.length === 0 && <p className="text-xs text-muted-foreground">No step has run yet.</p>}
       {runs.length > 0 && <StepRunsTable runs={runs} taskId={task.task_id} />}
-      {clipped.length > 0 && (
-        <p className="mt-1 text-xs text-muted-foreground">
-          Only the latest {RUN_LIMIT} {clipped.join(" and ")} runs are listed.
-        </p>
-      )}
     </section>
   );
 }

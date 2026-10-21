@@ -23,7 +23,7 @@ export type TaskRuns = Record<TaskRole, LlmRecord[]>;
 
 /** The runtime, model and effort of the latest of `records` (of one step, when `stepId` is given), or undefined
  * when none ran. */
-function agentFact(records: LlmRecord[] | undefined, stepId?: string): CardFact | undefined {
+export function agentFact(records: LlmRecord[] | undefined, stepId?: string): CardFact | undefined {
   const latest = (records ?? [])
     .filter((r) => stepId === undefined || r.metadata?.step_id === stepId)
     .reduce<LlmRecord | undefined>(
