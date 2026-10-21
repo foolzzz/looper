@@ -115,6 +115,10 @@ class MessageBus:
     def journal(self) -> MessageJournal:
         return self._journal
 
+    def settle(self, message_id: str) -> None:
+        """Mark a message delivered although it is still queued (the user stopped it): a restart does not replay it."""
+        self._journal.mark_delivered(message_id)
+
     async def start(self) -> None:
         """Replay undelivered messages from the journal, then compact it.
 

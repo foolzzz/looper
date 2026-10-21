@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ..broadcast import Broadcaster
@@ -73,7 +74,7 @@ from .. import session_switch
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
-from .turn_token import StopRequest, TurnStopped  # noqa: F401  (re-exported)
+from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from ..ops import Turn
 from ..ops.service import tools_down_reply
@@ -270,7 +271,7 @@ def is_new_session_command(text: str) -> bool:
     return text.strip().lower() == NEW_SESSION_COMMAND
 
 
-# ``/stop`` stops the running reply. It is claimed from the bus (``ManagerAgent._claim_stop``) so it does not wait
+# ``/stop`` stops the running reply. It is claimed from the bus (``ManagerAgent._receive``) so it does not wait
 # in the Manager's queue behind the turn it stops; "/stop now" and "/stopx" are messages for Claude.
 STOP_COMMAND = "/stop"
 STOP_DONE_REPLY = "已停止当前回复。"
@@ -377,21 +378,6 @@ class StopResult(str, Enum):
     OTHER_MESSAGE = "other_message"
 
 
-@dataclass
-class CurrentTurn:
-    """The user turn the Manager is answering, and the stop asked for it, if any."""
-
-    message_id: str
-    channel: str
-    chat: str
-    started_at: datetime
-    stop: StopRequest | None = None
-    method: Any = None  # StopMethod: how interrupt() ended the turn; None until it returns
-    client_message_id: str | None = None  # the web page's own id for the message, which its Stop button names
-    turn: Turn | None = None  # the turn its tool calls act in, which a stop marks stopped (``ManagerOps.stop_turn``)
-    settled: bool = False  # its end is decided (recorded as an answer or a failure): a stop comes too late
-
-
 class TurnFailed(RuntimeError):
     """The turn failed with what the user is told, as written (the runtime cannot start); ``error`` is why, for the
     chat's status line. Raised, not returned: the turn is answered as failed, so a queue staged behind it is not
@@ -471,8 +457,9 @@ class ManagerAgent:
         self._claude = CLAUDE_CODE.resident_session("manager")
         self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
         self._turn_lock = asyncio.Lock()
-        self._current: CurrentTurn | None = None  # the user turn being answered (stop_turn's target)
-        self._current_envelope: MessageEnvelope | None = None
+        self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
+        self._running_token: TurnToken | None = None  # the token of the user turn being answered
+        self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
         self._stopped_note: str | None = None  # told to the next user turn: the user stopped the one before
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
@@ -531,7 +518,7 @@ class ManagerAgent:
         if not self._session_loaded:
             await self._load_session_state()
 
-        bus.subscribe_topic(MessageType.USER_MESSAGE.value, self._claim_stop, consumes=True)
+        bus.subscribe_topic(MessageType.USER_MESSAGE.value, self._receive, consumes=True)
         self._task = asyncio.create_task(self._message_loop())
         logger.info(
             "manager agent started (session=%s)",
@@ -551,17 +538,42 @@ class ManagerAgent:
         except Exception:
             logger.debug("could not load manager config from database", exc_info=True)
 
-    def _claim_stop(self, envelope: MessageEnvelope) -> bool:
-        """Bus consumer: take a ``/stop`` addressed to the Manager out of its queue and handle it at once."""
+    def _receive(self, envelope: MessageEnvelope) -> bool:
+        """Bus consumer, run in ``bus.publish`` before the queue: take a ``/stop`` addressed to the Manager out of
+        its queue and handle it at once; give any other user message its turn token, so a stop finds it from here
+        on, queued or not."""
         if envelope.target.agent_id != self.agent_id:
             return False
         text = envelope.payload.get("text")
         if not isinstance(text, str) or not is_stop_command(text):
+            self._register_turn(envelope)
             return False
         task = asyncio.create_task(self._stop_from_chat(envelope))
         self._stop_tasks.add(task)
         task.add_done_callback(self._stop_tasks.discard)
         return True
+
+    def _register_turn(self, envelope: MessageEnvelope) -> TurnToken:
+        origin = _message_origin(envelope)
+        context = envelope.payload.get("channel_context")
+        client_id = context.get("client_message_id") if isinstance(context, dict) else None
+        token = self._turns.receive(envelope, channel=origin["channel"] or "", chat=origin["chat"] or "",
+                                    client_message_id=client_id if isinstance(client_id, str) and client_id else None)
+        token.cancel.on_request(self._interrupt_for(token))
+        return token
+
+    def _interrupt_for(self, token: TurnToken) -> Callable[[], None]:
+        """Transitional, until the runtimes take ``token.cancel``: a stop that found the prompt written interrupts
+        the resident session."""
+        def interrupt() -> None:
+            request = token.stop
+            if request is None or request.phase is not TurnPhase.RUNNING or not token.live:
+                return
+            task = asyncio.create_task(self._interrupt_claude(token))
+            self._stop_tasks.add(task)
+            task.add_done_callback(self._stop_tasks.discard)
+
+        return interrupt
 
     async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:
         try:
@@ -582,10 +594,13 @@ class ManagerAgent:
     async def stop(self) -> None:
         self._running = False
         if self._bus is not None:
-            self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._claim_stop)
+            self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
         if self._task:
             await cancel_and_wait(self._task)
             self._task = None
+        for token in self._turns.live():
+            token.settle(ReplyOutcome.STOPPED)
+        self._turns.clear()
         async with self._turn_lock:
             await self._claude.stop()
 
@@ -627,31 +642,70 @@ class ManagerAgent:
 
     async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
+        token = self._turns.find(envelope.message_id) or self._register_turn(envelope)
+        try:
+            try:
+                token.advance(TurnPhase.PREPARING)
+                await self._answer_user_message(envelope, token)
+            except TurnStopped as stopped:
+                if token.ops_turn is None:  # stopped before the model's turn took over (that one answers itself)
+                    await self._answer_stopped_early(envelope, token, stopped)
+                else:
+                    raise
+        finally:
+            self._persisted.discard(envelope.message_id)
+            token.settle(token.outcome)
+
+    async def _persist_user(self, envelope: MessageEnvelope, text: str) -> None:
+        self._persisted.add(envelope.message_id)
+        await self._persist_chat(envelope, "user", text, envelope.message_id)
+
+    async def _answer_stopped_early(self, envelope: MessageEnvelope, token: TurnToken, stopped: TurnStopped) -> None:
+        """The user stopped the message before the model had it: nothing ran, and the reply says so."""
+        text = envelope.payload.get("text", "")
+        if envelope.message_id not in self._persisted:
+            await self._persist_user(envelope, text)
+        await self._send_reply(envelope, stopped_reply(stopped.partial, []), outcome=ReplyOutcome.STOPPED)
+        token.settle(ReplyOutcome.STOPPED)
+
+    def _acting(self, token: TurnToken) -> None:
+        """A command Code answers is about to act: the last look at the stop; after it, a stop is too late."""
+        token.kind = TurnKind.CODE
+        token.check()
+        token.settle(ReplyOutcome.ANSWERED)
+
+    async def _answer_user_message(self, envelope: MessageEnvelope, token: TurnToken) -> None:
         text = envelope.payload.get("text", "")
         if is_new_session_command(text):
-            await self._persist_chat(envelope, "user", text, envelope.message_id)
+            await self._persist_user(envelope, text)
+            self._acting(token)
             await self._start_new_session(envelope)
             return
         # /gates and /gate N ...: answered by code, never by the model; the discussion keeps an answer.
-        answer = await self._gate_command(envelope, text)
-        if answer is not None:
-            await self._send_reply(envelope, answer, persist=False, snapshot=envelope.message_id)
+        if self._bus is not None and self.ops is not None and gate_commands.is_command(text):
+            self._acting(token)
+            answer = await self._gate_command(envelope, text)
+            await self._send_reply(envelope, answer or "", persist=False, snapshot=envelope.message_id)
             channel = _message_origin(envelope)["channel"]
             if not (is_lark(channel) or channel == "telegram"):
                 # Only Telegram and Lark report a delivery; the web chat shows what is published.
                 gate_commands.settle(envelope.message_id, True)
             return
         if (command := parse_profile_command(text)) is not None:
-            await self._persist_chat(envelope, "user", text, envelope.message_id)
+            await self._persist_user(envelope, text)
+            self._acting(token)
             await self._handle_profile_command(envelope, command)
             return
         # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
+        token.check()
         gate = await self._route_to_gate(envelope)
         if gate.kind is RouteKind.DELIVERED:
+            self._acting(token)
             if gate.reply:
                 await self._send_reply(envelope, gate.reply, persist=False)
             return
         if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
+            self._acting(token)
             await self._send_reply(envelope, gate.reply, persist=False)
             return
         if not text.strip():
@@ -660,33 +714,29 @@ class ManagerAgent:
         # The calls Claude makes while answering belong to this message and its chat.
         turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
                     envelope=envelope, sender=origin["sender"], group=origin["group"])
+        token.check()
+        token.ops_turn = turn
         # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
-        self._current_envelope = envelope
-        context = envelope.payload.get("channel_context")
-        client_id = context.get("client_message_id") if isinstance(context, dict) else None
-        self._current = CurrentTurn(message_id=envelope.message_id, channel=origin["channel"], chat=origin["chat"],
-                                    started_at=datetime.now(timezone.utc),
-                                    client_message_id=client_id if isinstance(client_id, str) and client_id else None,
-                                    turn=turn)
+        self._running_token = token
         try:
             try:
-                await self._persist_chat(envelope, "user", text, envelope.message_id)
+                await self._persist_user(envelope, text)
                 await self._send_status(envelope, "thinking", phase=True, activity="thinking")
                 # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
                 problem = await self.ops.tools_problem() if self.ops is not None else None
                 if problem is not None:
                     logger.error("manager: Looper's tools do not work (%s); %s was not answered", problem,
                                  envelope.message_id)
+                    token.settle(ReplyOutcome.FAILED)
                     await self._send_reply(envelope, tools_down_reply(problem), error=problem)
                     return
-                if self._stop_requested:
-                    raise TurnStopped()  # asked while the turn was prepared: the model is never started
+                token.check()  # asked while the turn was prepared: the model is never started
                 stopped_note, self._stopped_note = self._stopped_note, None
                 response = await self._invoke_claude(
                     text, envelope, turn=turn,
                     note="\n".join(part for part in (gate.note, stopped_note) if part))
             finally:
-                self._current, self._current_envelope = None, None
+                self._running_token = None
         except TurnStopped as stopped:
             if self.ops is not None:
                 self.ops.stop_turn(turn)  # done at the stop already; again for a turn that ended stopped by itself
@@ -696,8 +746,10 @@ class ManagerAgent:
                                   "before you rely on them or repeat them.")
             await self._send_reply(envelope, stopped_reply(stopped.partial, turn.blocks),
                                    outcome=ReplyOutcome.STOPPED)
+            token.settle(ReplyOutcome.STOPPED)
             return
         except Exception as exc:
+            token.settle(ReplyOutcome.FAILED)
             if turn.refused:
                 response = ""  # answered below: the tools did not work
             elif isinstance(exc, TurnFailed):
@@ -722,59 +774,53 @@ class ManagerAgent:
                                outcome=ReplyOutcome.CONFIRM if asked else None)
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
-        """Ask the running user turn of ``message_id`` to stop. Does not wait for the turn's lock: the turn ends by
-        itself, replying with what it had written."""
-        current = self._current
-        if current is None or current.settled:
+        """Ask the user turn of ``message_id`` (the envelope's id or the web page's own), in any phase, to stop.
+        Does not wait for the turn's lock: the turn ends by itself, replying with what it had written."""
+        token = self._turns.find(message_id)
+        if token is None:
             return StopResult.NOT_RUNNING
-        if message_id not in (current.message_id, current.client_message_id):
-            return StopResult.OTHER_MESSAGE
-        if current.stop is not None:
+        if token.phase is TurnPhase.STOPPING:
             return StopResult.ALREADY_STOPPING
-        current.stop = StopRequest(via=via, at=datetime.now(timezone.utc))
-        if current.turn is not None and self.ops is not None:
+        # Before anything is awaited: the stop is for this turn, never for one that starts meanwhile.
+        if not token.request_stop(via):
+            return StopResult.NOT_RUNNING
+        if token.ops_turn is not None and self.ops is not None:
             # At once, before Claude is stopped: a call it still has under way asks the user nothing and runs nothing.
-            self.ops.stop_turn(current.turn)
-        # Before anything is awaited: the interrupt is for this turn, never for one that starts meanwhile.
-        task = asyncio.create_task(self._interrupt_claude(current))
-        self._stop_tasks.add(task)
-        task.add_done_callback(self._stop_tasks.discard)
-        envelope = self._current_envelope
-        if envelope is not None and self._bus is not None:
-            await self._send_status(envelope, "Stopping…", phase=True)
+            self.ops.stop_turn(token.ops_turn)
+        if self._bus is not None:
+            self._bus.settle(token.message_id)  # a restart does not replay a message the user stopped
+            if token.envelope is not None:
+                await self._send_status(token.envelope, "Stopping…", phase=True)
         return StopResult.STOPPING
 
-    @property
-    def current_turn(self) -> CurrentTurn | None:
-        return self._current
+    def turn_for(self, message_id: str) -> TurnToken | None:
+        """The live turn of a message, by the envelope's id or the web page's own."""
+        return self._turns.find(message_id)
 
-    def current_turn_for(self, channel: str, chat: str) -> CurrentTurn | None:
-        """The running user turn if it answers ``chat`` on ``channel``."""
-        current = self._current
-        if current is not None and current.channel == channel and current.chat == chat:
-            return current
-        return None
+    def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
+        """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""
+        return self._turns.oldest_for(channel, chat)
 
-    async def _interrupt_claude(self, current: CurrentTurn) -> None:
-        if self._current is not current:
-            return  # the turn ended (by the stop= hook) before its interrupt ran
+    async def _interrupt_claude(self, token: TurnToken) -> None:
+        if not token.live:
+            return  # the turn ended before its interrupt ran
         try:
-            current.method = await self._claude.interrupt()
+            token.method = await self._claude.interrupt()
         except Exception:
             logger.warning("manager: could not interrupt the running turn", exc_info=True)
 
     def _settle(self) -> None:
         """The running turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on."""
-        if self._current is not None:
-            self._current.settled = True
+        if self._running_token is not None:
+            self._running_token.settle()
 
     @property
     def _stop_requested(self) -> bool:
-        return self._current is not None and self._current.stop is not None
+        return self._running_token is not None and self._running_token.phase is TurnPhase.STOPPING
 
     async def _finish_stopped_early(self, recorder: ClaudeRunRecorder, ops_turn: Turn | None) -> None:
         """The user stopped the turn before its process started: the record ends as stopped, with no spend."""
-        request = self._current.stop if self._current is not None else None
+        request = self._running_token.stop if self._running_token is not None else None
         await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                               status=RecordStatus.INTERRUPTED, usage=Usage())
         await recorder.annotate({"user_stop": {
@@ -785,8 +831,8 @@ class ManagerAgent:
 
     def _user_stop(self, recorder: ClaudeRunRecorder) -> CapStop | None:
         """The stop= hook: once the user asked to stop the turn, the result it ends with and what it spent."""
-        current = self._current
-        if current is None or current.stop is None:
+        token = self._running_token
+        if token is None or token.stop is None:
             return None
         return CapStop(user_stop_result(), recorder._usage_so_far)
 
@@ -908,6 +954,9 @@ class ManagerAgent:
 
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, ops_turn: Turn | None = None,
                         note: str = "", retried: bool = False) -> str:
+        token = self._running_token
+        if token is not None:  # a user turn: the runtime is about to be started (again, on the resume retry)
+            token.restart() if retried else token.advance(TurnPhase.STARTING)
         await self._load_db_config()
         if not self._session_loaded:
             await self._load_session_state()
@@ -1050,6 +1099,8 @@ class ManagerAgent:
                 if self._stop_requested:
                     await self._finish_stopped_early(recorder, ops_turn)
                     raise TurnStopped()
+                if token is not None:
+                    token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
                 # A turn cut off by Claude's exit ends without a result; that Claude
                 # is reaped and the next message starts a new process that resumes the session.
                 turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
@@ -1073,7 +1124,7 @@ class ManagerAgent:
             if turn.stopped is not None or (turn.result_event or {}).get(USER_STOP) or (
                     self._stop_requested and not resume_lost):
                 partial = "".join(text_parts)
-                request = self._current.stop if self._current is not None else None
+                request = token.stop if token is not None else None
                 await recorder.finish(
                     output_text=partial or None, result_event=turn.result_event,
                     error="stopped by the user", status=RecordStatus.INTERRUPTED, usage=turn.usage,

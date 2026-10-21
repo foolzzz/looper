@@ -75,6 +75,7 @@ class TurnToken:
     kind: TurnKind = TurnKind.MODEL
     outcome: Any = None  # ReplyOutcome
     method: Any = None  # StopMethod: how the runtime ended the turn; None until known
+    envelope: MessageEnvelope | None = field(default=None, repr=False)  # what the stop's status is published for
     on_settle: Callable[[TurnToken], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -154,6 +155,7 @@ class TurnRegistry:
             channel=channel,
             chat=chat,
             received_at=datetime.now(timezone.utc),
+            envelope=envelope,
             on_settle=self.drop,
         )
         self._tokens[token.message_id] = token
@@ -167,6 +169,9 @@ class TurnRegistry:
             if token.live and token.client_message_id == id:
                 return token
         return None
+
+    def live(self) -> list[TurnToken]:
+        return [t for t in self._tokens.values() if t.live]
 
     def live_for(self, channel: str, chat: str) -> list[TurnToken]:
         return [t for t in self._tokens.values() if t.live and t.channel == channel and t.chat == chat]

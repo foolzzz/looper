@@ -113,7 +113,7 @@ def test_stop_while_the_turn_runs(agent_db: Any) -> None:
             (_, notes), = [call.args for call in agent_db.add_metadata.await_args_list if "user_stop" in call.args[1]]
             assert notes["user_stop"]["via"] == "web" and notes["user_stop"]["method"] == "kill"
             assert manager._session_id == "sess-1"
-            assert manager._current is None
+            assert manager._running_token is None
             await bus.shutdown()
 
     asyncio.run(run())
@@ -128,7 +128,7 @@ def test_stop_of_another_message_or_when_idle(agent_db: Any) -> None:
             envelope = _web("写一篇很长的文章")
             handling = asyncio.create_task(manager._handle(envelope))
             await _until(session.running.is_set)
-            assert await manager.stop_turn("other", via="web") is StopResult.OTHER_MESSAGE
+            assert await manager.stop_turn("other", via="web") is StopResult.NOT_RUNNING
             assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
             await handling
             await bus.shutdown()
@@ -146,7 +146,7 @@ def test_the_web_page_stops_its_message_by_the_id_it_sent(agent_db: Any) -> None
             envelope.payload["channel_context"]["client_message_id"] = "m-page-1"
             handling = asyncio.create_task(manager._handle(envelope))
             await _until(session.running.is_set)
-            assert await manager.stop_turn("m-page-2", via="web") is StopResult.OTHER_MESSAGE
+            assert await manager.stop_turn("m-page-2", via="web") is StopResult.NOT_RUNNING
             assert await manager.stop_turn("m-page-1", via="web") is StopResult.STOPPING
             await handling
             await bus.shutdown()
@@ -198,7 +198,7 @@ def test_stop_while_the_turn_is_prepared_starts_no_model(agent_db: Any) -> None:
             assert session.turns == [] and not session.started
             (reply,) = _replies(queue)
             assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
-            assert manager._current is None
+            assert manager._running_token is None
             await bus.shutdown()
 
     asyncio.run(run())
@@ -472,7 +472,6 @@ def test_calls_that_come_after_the_stop_are_refused_as_stopped(agent_db: Any) ->
             confirm = _web("确认", 1)
             handling = asyncio.create_task(manager._handle(confirm))
             await _until(session.running.is_set)
-            await manager._interrupt_claude(manager.current_turn)
             await handling
             assert [a["error"]["code"] for a in answers] == ["stopped", "stopped"]
             assert ran == [] and not ops._pending
@@ -668,6 +667,124 @@ def test_a_failed_process_start_replies_failed(agent_db: Any) -> None:
             # As written, naming the runtime: not wrapped as the Manager's own error.
             assert reply["text"] == "无法启动 Claude Code，请检查安装。"
             assert reply["error"] == "Cannot start Claude Code: no such executable"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def _received(manager: ManagerAgent, bus: MessageBus) -> None:
+    """The Manager takes delivery of user messages from the bus, as ``start()`` has it do."""
+    manager._running = True
+    bus.subscribe_topic(MessageType.USER_MESSAGE.value, manager._receive, consumes=True)
+
+
+def test_a_message_queued_behind_a_running_turn_is_stoppable(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            _received(manager, bus)
+            first, second = _web("写一篇很长的文章", 0), _web("再来一篇", 1)
+            await bus.publish(first)
+            await bus.publish(second)
+            inbox = bus.get_queue("manager")
+            assert inbox.qsize() == 2
+            handling = asyncio.create_task(manager._handle(inbox.get_nowait()))
+            await _until(session.running.is_set)
+            assert await manager.stop_turn(second.message_id, via="web") is StopResult.STOPPING
+            assert await manager.stop_turn(second.message_id, via="web") is StopResult.ALREADY_STOPPING
+            assert not session._stopped.is_set()  # the running turn is not the one stopped
+            assert second.message_id in bus.journal._delivered
+            assert first.message_id not in bus.journal._delivered
+            await manager.stop_turn(first.message_id, via="web")
+            await handling
+            _drain(queue)
+            await manager._handle(inbox.get_nowait())  # dequeued: the model never runs
+            assert len(session.turns) == 1
+            (reply,) = _replies(queue)
+            assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
+            assert manager.turn_for(second.message_id) is None
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_right_after_publish_is_stopping_not_not_running(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            _received(manager, bus)
+            envelope = _web("你好")
+            await bus.publish(envelope)  # not dequeued yet
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            await manager._handle(bus.get_queue("manager").get_nowait())
+            assert session.turns == [] and not session.started
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_the_web_pages_id_finds_a_queued_token(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, bus, queue = _manager(Path(tmp), _Session())
+            _received(manager, bus)
+            envelope = _web("你好")
+            envelope.payload["channel_context"]["client_message_id"] = "m-page-1"
+            await bus.publish(envelope)
+            assert manager.turn_for("m-page-1") is manager.turn_for(envelope.message_id) is not None
+            assert await manager.stop_turn("m-page-1", via="web") is StopResult.STOPPING
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_new_stopped_before_it_acts_resets_nothing(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("/new")
+            acted: list[str] = []
+            results: list[StopResult] = []
+            persist = manager._persist_chat
+
+            async def stopping_persist(*args: Any, **kwargs: Any) -> Any:
+                results.append(await manager.stop_turn(envelope.message_id, via="web"))
+                return await persist(*args, **kwargs)
+
+            async def acting(env: MessageEnvelope) -> None:
+                acted.append(env.message_id)
+
+            manager._persist_chat = stopping_persist  # type: ignore[method-assign]
+            manager._start_new_session = acting  # type: ignore[method-assign]
+            await manager._handle(envelope)
+            assert results == [StopResult.STOPPING] and acted == []
+            (reply,) = _replies(queue)
+            assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_new_that_has_acted_is_not_running(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("/new")
+            results: list[StopResult] = []
+
+            async def acting(env: MessageEnvelope) -> None:
+                results.append(await manager.stop_turn(env.message_id, via="web"))
+
+            manager._start_new_session = acting  # type: ignore[method-assign]
+            await manager._handle(envelope)
+            assert results == [StopResult.NOT_RUNNING]
+            assert manager.turn_for(envelope.message_id) is None
             await bus.shutdown()
 
     asyncio.run(run())

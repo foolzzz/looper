@@ -39,7 +39,7 @@ def _setup(tmp: str) -> tuple[Any, Any, Any, Any, asyncio.Queue[MessageEnvelope]
     session = _Session()
     manager, bus, _ = _manager(Path(tmp), session)
     manager._running = True
-    bus.subscribe_topic(MessageType.USER_MESSAGE.value, manager._claim_stop, consumes=True)
+    bus.subscribe_topic(MessageType.USER_MESSAGE.value, manager._receive, consumes=True)
     return session, manager, bus, bus.get_queue(TELEGRAM.agent_id), bus.get_queue("manager")
 
 
@@ -83,8 +83,8 @@ def test_stop_from_another_chat_or_idle(agent_db: Any) -> None:
             await bus.publish(_tg("/stop", chat=5))
             await _until(lambda: not chat.empty())
             assert "现在没有正在进行的回复。" in _texts(chat)
-            assert manager.current_turn is not None and manager.current_turn.stop is None
-            await manager.stop_turn(manager.current_turn.message_id, via="telegram")
+            assert manager._running_token is not None and manager._running_token.stop is None
+            await manager.stop_turn(manager._running_token.message_id, via="telegram")
             await handling
             await bus.shutdown()
 
@@ -115,9 +115,9 @@ def test_stop_is_answered_by_looper_when_the_setting_is_off(agent_db: Any, monke
             await _until(lambda: not chat.empty())
             assert _texts(chat) == ["停止功能暂未开放"]
             assert inbox.empty()  # not queued for the model
-            assert manager.current_turn is not None and manager.current_turn.stop is None
+            assert manager._running_token is not None and manager._running_token.stop is None
             assert not session._stopped.is_set()  # nothing was interrupted
-            await manager.stop_turn(manager.current_turn.message_id, via="telegram")  # to end the stand-in's turn
+            await manager.stop_turn(manager._running_token.message_id, via="telegram")  # to end the stand-in's turn
             await handling
             await bus.shutdown()
 

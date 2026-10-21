@@ -1023,7 +1023,7 @@ class AgentHTTPServer:
         else:
             result = await self._manager.stop_turn(message_id, via="web")
             if result.value in ("stopping", "already_stopping"):
-                current = self._manager.current_turn
+                current = self._manager.turn_for(message_id)
                 method = current.method if current is not None else None
                 response = _json_response(HTTP_200, {
                     "state": result.value, "method": getattr(method, "value", method)})
@@ -1044,7 +1044,7 @@ class AgentHTTPServer:
             current = self._manager.current_turn_for("web", session_id)
             response = _json_response(HTTP_200, {"turn": None if current is None else {
                 "message_id": current.message_id, "client_message_id": current.client_message_id,
-                "channel": current.channel, "started_at": current.started_at.isoformat(), "stopping": current.stop is not None}})
+                "channel": current.channel, "started_at": current.received_at.isoformat(), "stopping": current.stop is not None}})
         writer.write(response)
         await writer.drain()
 

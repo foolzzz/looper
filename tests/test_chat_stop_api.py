@@ -10,7 +10,8 @@ import pytest
 
 from looper.agents import chat_settings
 from looper.agents.runtimes import StopMethod
-from looper.agents.tiers.manager import CurrentTurn, StopRequest, StopResult
+from looper.agents.tiers.manager import StopRequest, StopResult
+from looper.agents.tiers.turn_token import TurnToken
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +32,7 @@ class _Writer:
 
 
 class _Manager:
-    def __init__(self, result: StopResult = StopResult.STOPPING, turn: CurrentTurn | None = None) -> None:
+    def __init__(self, result: StopResult = StopResult.STOPPING, turn: TurnToken | None = None) -> None:
         self.result = result
         self.current_turn = turn
         self.stops: list[tuple[str, str]] = []
@@ -40,7 +41,10 @@ class _Manager:
         self.stops.append((message_id, via))
         return self.result
 
-    def current_turn_for(self, channel: str, chat: str) -> CurrentTurn | None:
+    def turn_for(self, message_id: str) -> TurnToken | None:
+        return self.current_turn
+
+    def current_turn_for(self, channel: str, chat: str) -> TurnToken | None:
         turn = self.current_turn
         return turn if turn and turn.channel == channel and turn.chat == chat else None
 
@@ -60,9 +64,9 @@ def _call(manager: Any, method: str, path: str, body: bytes = b"",
     return asyncio.run(run())
 
 
-def _turn(**kw: Any) -> CurrentTurn:
-    return CurrentTurn(message_id="m1", channel="web", chat="s1",
-                       started_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), **kw)
+def _turn(**kw: Any) -> TurnToken:
+    return TurnToken(message_id="m1", client_message_id=kw.pop("client_message_id", None), channel="web", chat="s1",
+                     received_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc), **kw)
 
 
 @pytest.mark.parametrize("body", [b"not json", b"{}", b'{"message_id": ""}', b"[]"])
