@@ -1067,6 +1067,23 @@ async def capture_converted_tiers(
         return [normalize(record, root=root) for record in records], conversion
 
 
+def above_root_normalized(settings: str, root: str) -> str:
+    """The Claude ``--settings`` text with ``root`` as ``<root>`` and every exclusion for a directory above it as
+    ``<above>/<name>``, each once. The directories above a temporary root depend on the host (``/private/tmp`` on
+    macOS, ``/tmp`` on Linux CI), so a pinned capture cannot name them."""
+    parsed = json.loads(settings)
+    excludes: list[str] = []
+    for pattern in parsed.get("claudeMdExcludes", []):
+        if not pattern.startswith((root + "/", "<root>/")):
+            name = next(n for n in (".claude/rules/**", ".claude/CLAUDE.md", ".claude/AGENTS.md", "CLAUDE.md", "AGENTS.md")
+                        if pattern.endswith("/" + n))
+            pattern = f"<above>/{name}"
+        if pattern not in excludes:
+            excludes.append(pattern)
+    parsed["claudeMdExcludes"] = excludes
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).replace(root, "<root>")
+
+
 def _fields(value: Mapping[str, Any], expected: frozenset[str]) -> None:
     if not isinstance(value, dict) or value.keys() != expected:
         actual = set(value) if isinstance(value, dict) else set()
