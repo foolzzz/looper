@@ -1,8 +1,14 @@
 // @vitest-environment happy-dom
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPage } from "@/pages/chat";
+
+/** Holds the address query the way the app does, so choosing an agent takes effect. */
+function ChatWithQuery() {
+  const [query, setQuery] = useState("");
+  return <ChatPage query={query} onQuery={setQuery} />;
+}
 
 type Handler = (e: { kind: string; payload: Record<string, unknown> }) => void;
 
@@ -71,7 +77,7 @@ describe("chat composer flow", () => {
   const stopButton = () => container.querySelector('button[aria-label^="Stop the reply"]') as HTMLButtonElement | null;
 
   async function mount() {
-    act(() => root.render(<ChatPage />));
+    act(() => root.render(<ChatWithQuery />));
     await flush();
   }
 

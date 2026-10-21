@@ -2235,8 +2235,8 @@ export class TaskDetailError extends Error {
   }
 }
 
-export async function fetchTaskDetail(taskId: string): Promise<TaskDetail> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}`);
+export async function fetchTaskDetail(taskId: string, signal?: AbortSignal): Promise<TaskDetail> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}`, { signal });
   if (!res.ok) throw new TaskDetailError(res.status);
   return res.json();
 }
@@ -2253,12 +2253,58 @@ export async function fetchTaskActivity(
   return res.json();
 }
 
+/** A window of a task's events or conversation, oldest first: the latest ones, or those just before `before`. */
+export interface EventWindow {
+  events: ActivityEvent[];
+  hasMore: boolean;
+}
+
+/** The latest events of a task (1000), or those just before the seq `before`. */
+export async function fetchTaskActivityWindow(
+  taskId: string,
+  before?: number,
+  signal?: AbortSignal,
+): Promise<EventWindow> {
+  const qs = before === undefined ? "" : `?before=${before}`;
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/activity${qs}`, { signal });
+  if (!res.ok) throw new Error(`activity ${res.status}`);
+  const data = await res.json();
+  return { events: data.activity ?? [], hasMore: !!data.has_more };
+}
+
+/** The latest messages of a task's conversation (1000), or those just before the seq `before`. */
 export async function fetchTaskConversation(
   taskId: string,
-): Promise<{ conversation: ActivityEvent[] }> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/conversation`);
+  before?: number,
+  signal?: AbortSignal,
+): Promise<EventWindow> {
+  const qs = before === undefined ? "" : `?before=${before}`;
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/conversation${qs}`, { signal });
   if (!res.ok) throw new Error(`conversation ${res.status}`);
-  return res.json();
+  const data = await res.json();
+  return { events: data.conversation ?? [], hasMore: !!data.has_more };
+}
+
+/** One run of a task as `GET /api/tasks/<id>/runs` answers: no prompts, metadata body or events. */
+export interface TaskRunRow {
+  id: number;
+  role: TaskRole;
+  agent_id: string;
+  step_id: string | null;
+  status: LlmRecord["status"];
+  created_at: string;
+  runtime: { type: string | null; name: string | null };
+  model: string | null;
+  effort: string | null;
+  profile: { name: string | null; source: string | null };
+}
+
+/** A task's Planner, Worker and Reviewer runs, oldest first, in one compact request. */
+export async function fetchTaskRuns(taskId: string, signal?: AbortSignal): Promise<TaskRunRow[]> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/runs`, { signal });
+  if (!res.ok) throw new Error(`runs ${res.status}`);
+  const data = await res.json();
+  return data.runs ?? [];
 }
 
 export function streamTaskActivity(

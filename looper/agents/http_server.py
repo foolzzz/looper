@@ -350,6 +350,7 @@ class AgentHTTPServer:
     _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
+    _RE_TASK_RUNS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/runs$")
     _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
     _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
@@ -456,7 +457,9 @@ class AgentHTTPServer:
         elif (m := self._RE_TASK_ACTIVITY.match(path)) and method == "GET":
             await self._handle_task_activity(m.group(1), query, writer)
         elif (m := self._RE_TASK_CONVERSATION.match(path)) and method == "GET":
-            await self._handle_task_conversation(m.group(1), writer)
+            await self._handle_task_conversation(m.group(1), query, writer)
+        elif (m := self._RE_TASK_RUNS.match(path)) and method == "GET":
+            await self._handle_task_runs(m.group(1), writer)
         elif (m := self._RE_TASK_CONFIG.match(path)) and method == "PUT":
             await self._handle_task_config_update(m.group(1), body, writer)
         elif (m := self._RE_TASK_PROJECT.match(path)) and method == "PUT":
@@ -1679,14 +1682,27 @@ class AgentHTTPServer:
     async def _handle_task_activity(
         self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
     ) -> None:
-        since = int(query.get("since", "0"))
-        limit = min(int(query.get("limit", "100")), 500)
+        """Without ``since``/``after``: the latest ``limit`` rows (``before``: those just before that seq), oldest
+        first, with ``has_more``, ``oldest_seq`` and ``latest_seq``. With one: the rows after it, as streaming reads
+        them."""
+        forward = query.get("after", query.get("since"))
         try:
-            from ..db.activity import list_activity
-            rows = await list_activity(task_id, since_seq=since, limit=limit)
+            if forward is not None:
+                from ..db.activity import list_activity
+                rows = await list_activity(task_id, since_seq=int(forward), limit=min(int(query.get("limit", "100")), 500))
+                body: dict[str, Any] = {"activity": [_serialize(r) for r in rows]}
+            else:
+                from ..db.activity import WINDOW_LIMIT, activity_window
+                before = int(query["before"]) if "before" in query else None
+                window = await activity_window(task_id, before=before, limit=int(query.get("limit", WINDOW_LIMIT)))
+                body = {"activity": [_serialize(r) for r in window.pop("rows")], **window}
+        except ValueError:
+            writer.write(_json_response(HTTP_400, {"error": "since, after, before and limit must be integers"}))
+            await writer.drain()
+            return
         except Exception:
-            rows = []
-        writer.write(_json_response(HTTP_200, {"activity": [_serialize(r) for r in rows]}))
+            body = {"activity": []}
+        writer.write(_json_response(HTTP_200, body))
         await writer.drain()
 
     async def _handle_task_activity_detail(
@@ -1767,14 +1783,29 @@ class AgentHTTPServer:
             self._broadcaster.unsubscribe(task_id, sub)
 
     async def _handle_task_conversation(
-        self, task_id: str, writer: asyncio.StreamWriter,
+        self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
     ) -> None:
         try:
-            from ..db.activity import list_conversation
-            rows = await list_conversation(task_id)
+            from ..db.activity import WINDOW_LIMIT, conversation_window
+            before = int(query["before"]) if "before" in query else None
+            window = await conversation_window(task_id, before=before, limit=int(query.get("limit", WINDOW_LIMIT)))
+            body: dict[str, Any] = {"conversation": [_serialize(r) for r in window.pop("rows")], **window}
+        except ValueError:
+            writer.write(_json_response(HTTP_400, {"error": "before and limit must be integers"}))
+            await writer.drain()
+            return
         except Exception:
-            rows = []
-        writer.write(_json_response(HTTP_200, {"conversation": [_serialize(r) for r in rows]}))
+            body = {"conversation": []}
+        writer.write(_json_response(HTTP_200, body))
+        await writer.drain()
+
+    async def _handle_task_runs(self, task_id: str, writer: asyncio.StreamWriter) -> None:
+        try:
+            from ..db.llm_records import task_run_rows
+            runs = await task_run_rows(task_id)
+        except Exception:
+            runs = []
+        writer.write(_json_response(HTTP_200, {"runs": runs}))
         await writer.drain()
 
     # --- Role config handlers ---

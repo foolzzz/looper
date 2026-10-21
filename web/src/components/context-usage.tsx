@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Shrink } from "lucide-react";
 import { fetchAgentUsage, type AgentTurn, type AgentUsage } from "@/lib/api";
+import { startPolling } from "@/lib/polling";
 import { compactionChange as change, formatTokens, formatUsd } from "@/lib/usage";
 
 const POLL_MS = 10_000;
@@ -98,7 +99,7 @@ export function ContextUsagePanel({ agentId }: { agentId: string }) {
 
   useEffect(() => {
     let stopped = false;
-    const load = () =>
+    const load = async () =>
       fetchAgentUsage(agentId, TURNS)
         .then((u) => {
           if (!stopped) {
@@ -107,11 +108,12 @@ export function ContextUsagePanel({ agentId }: { agentId: string }) {
           }
         })
         .catch((e) => !stopped && setError(e instanceof Error ? e.message : String(e)));
-    load();
-    const timer = setInterval(load, POLL_MS);
+    const stop = startPolling(async () => {
+      await load();
+    }, POLL_MS);
     return () => {
       stopped = true;
-      clearInterval(timer);
+      stop();
     };
   }, [agentId]);
 

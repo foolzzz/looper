@@ -45,6 +45,7 @@ import {
   roomAnchor,
   roomRoles,
 } from "@/lib/room";
+import { startPolling } from "@/lib/polling";
 import { cn } from "@/lib/utils";
 
 /** How often a running task's room is read again. */
@@ -120,12 +121,16 @@ function useRoom(taskId: string, active: boolean) {
       }
     };
     // Also once when the task ends, for its last messages.
-    load();
-    if (!active) return () => { stopped = true; };
-    const timer = setInterval(load, ROOM_REFRESH_MS);
+    if (!active) {
+      load();
+      return () => { stopped = true; };
+    }
+    const stop = startPolling(async () => {
+      await load();
+    }, ROOM_REFRESH_MS);
     return () => {
       stopped = true;
-      clearInterval(timer);
+      stop();
     };
   }, [taskId, active, attempt]);
 
