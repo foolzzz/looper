@@ -158,6 +158,8 @@ def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytes
 
         status, body = await _get(server, "/api/overview")
         assert status == 200
+        from looper import __version__
+        assert body["version"] == __version__
         agents = body["agents"]
         assert agents["manager"] == {"agent_id": "manager", "state": "busy"}
         assert [(p["agent_id"], p["project_name"], p["requirement"], p["name"]) for p in agents["planners"]] == [
