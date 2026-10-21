@@ -487,6 +487,10 @@ def test_steer_pipe_failure_cleans_the_request(tmp_path: Path, monkeypatch: pyte
         with pytest.raises(error):
             await channel.send('broken write')
         assert not channel._pending and not channel._steers
+        # The line was written before drain failed. Let the child read it before the run is finished: a child that
+        # sees the finish marker first leaves it unread on stdin and fails its closing "stdin is empty" assert.
+        while 'broken write' not in (tmp_path / 'requests.jsonl').read_text():
+            await asyncio.sleep(0.005)
 
     asyncio.run(_steering_run(tmp_path, 'steer_wait', check))
 

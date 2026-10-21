@@ -33,3 +33,19 @@ def test_settings_comparison_ignores_the_hosts_temp_root_ancestors(ancestors: tu
     pinned = json.dumps({"claudeMdExcludes": [f"<root>/{n}" for n in NAMES] + [f"<above>/{n}" for n in NAMES]
                          + ["<root>/home/.claude/CLAUDE.md"]}, separators=(",", ":"))
     assert above_root_normalized(text, root) == above_root_normalized(pinned, root) == pinned
+
+
+def test_launch_parity_ignores_the_temp_root_ancestors_in_a_pinned_claude_launch(tmp_path: Path) -> None:
+    import copy
+    from test_model_launch_parity_db import pinned
+    import model_launch_parity as parity
+
+    expected = pinned("claude")["oauth-default"]
+    actual = copy.deepcopy(expected)
+    swap = lambda text: text.replace("/private/tmp/", "/tmp/").replace("/private/", "/")  # noqa: E731
+    row = actual[0]
+    assert "/private/tmp/" in json.dumps(row)
+    row["config"]["settings"] = swap(row["config"]["settings"])
+    row["argv"] = [swap(a) if a.startswith("{") else a for a in row["argv"]]
+    row["isolation"] = json.loads(swap(json.dumps(row["isolation"])))
+    parity.assert_parity(expected, actual, expected_root=tmp_path, actual_root=tmp_path)
