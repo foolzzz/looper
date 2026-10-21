@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.20] - 2026-10-21
+
+### Fixed
+
+- **Chat and Room addresses.** The Chat page keeps the open Web conversation in `?conversation=<id>`, so a link, refresh, Back and Forward reopen it. `GET /api/chat/sessions` takes an optional `session_id` and returns only that conversation, however old, so deep links beyond the newest 50 open, an open read-only channel conversation stays read-only, and loading and error states are shown. The task Room tab keeps its kind and role filters in `?tab=room&filter=..&role=..`. No prompt, tool schema or tool result changed. ([#350](https://github.com/foolzzz/looper/pull/350))
+
 ## [2.13.19] - 2026-10-21
 
 ### Fixed
