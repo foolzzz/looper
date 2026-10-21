@@ -31,6 +31,7 @@ from .pricing import RunSpend, usage_event
 
 if TYPE_CHECKING:
     from ..claude_cli import CapStop, ResidentTurn
+    from .cancel import TurnCancel
     from . import StopMethod
     from ..agent_settings import Launch
     from ..library import AgentLibrary
@@ -634,8 +635,9 @@ class ResidentDsh(PerTurnSession):
         self._ended = stream._result(stream.process.returncode)["is_error"] if stream.process is not None else True
 
     async def run_turn(self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *,
-                       tag: Any = None, stop: Callable[[], CapStop | None] | None = None) -> ResidentTurn:
-        turn = await super().run_turn(text, on_event, tag=tag, stop=stop)
+                       tag: Any = None, stop: Callable[[], CapStop | None] | None = None,
+                       cancel: TurnCancel | None = None) -> ResidentTurn:
+        turn = await super().run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
         # Missing opening metadata does not prove a turn was safe to replay after model/tool execution.
         if turn.stopped is None and not turn.session_started and (self._turn_stream._execution_seen or not self._turn_stream._startup_rejected):
             raise RuntimeError("DSH turn ended without an opening session; input cannot be safely replayed")

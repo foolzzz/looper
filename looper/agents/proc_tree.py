@@ -503,3 +503,8 @@ class TurnTree:
         await self.refresh(force=True)
         exclude = self._baseline | {self.process.pid} | await self._reused()
         await _end(self.process, label=self.label, known=dict(self._groups), exclude=frozenset(exclude))
+
+
+def track(process: Any, *, label: str = "agent") -> TurnTree:
+    """Snapshot ``process``'s tree now, to follow while its turn runs and to end from."""
+    return TurnTree.track(process, label=label)

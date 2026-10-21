@@ -49,6 +49,7 @@ from .pricing import usage_event
 if TYPE_CHECKING:
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
+    from .cancel import TurnCancel
     from ..library import AgentLibrary
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
 
@@ -666,13 +667,13 @@ class ResidentPi(PerTurnSession):
 
     async def run_turn(
         self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
-        stop: Callable[[], CapStop | None] | None = None,
+        stop: Callable[[], CapStop | None] | None = None, cancel: TurnCancel | None = None,
     ) -> ResidentTurn:
         from ..claude_cli import ResidentTurn
 
         new_session = self._session is None
         try:
-            turn = await super().run_turn(text, on_event, tag=tag, stop=stop)
+            turn = await super().run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
         except _SessionLost:
             self._ended = True
             return ResidentTurn(None, 1, session_started=False)

@@ -32,6 +32,7 @@ from looper.agents.claude_cli import USER_STOP, CapStop, ResidentClaude, user_st
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import StopMethod
 from looper.agents.runtimes import grok_acp
+from looper.agents.runtimes.cancel import TurnCancel
 
 BOUND = 8.0  # every stopped turn ends within this (the graces are cut to fractions of a second)
 BIG = "x" * (4 << 20)  # a message no pipe takes whole: its write blocks while the process reads nothing
@@ -287,7 +288,9 @@ def test_per_turn_stop_in_every_window(
                 return real_argv()
 
             monkeypatch.setattr(session, "_turn_argv", slow_argv)
-        running = asyncio.create_task(session.run_turn(BIG if window == "blocked" else "work", seen, stop=stop))
+        cancel = TurnCancel()
+        running = asyncio.create_task(
+            session.run_turn(BIG if window == "blocked" else "work", seen, stop=stop, cancel=cancel))
         try:
             if window == "before_spawn":
                 await asyncio.wait_for(reached.wait(), BOUND)
@@ -300,7 +303,11 @@ def test_per_turn_stop_in_every_window(
                     await asyncio.sleep(0.3)  # what it wrote reaches the turn
             pids = _pids(directory)
             stop.asked = True
-            method = await asyncio.wait_for(session.interrupt(), BOUND)
+            if runtime == "codex" and window == "tool":  # one cell stops through ``interrupt()``
+                method = await asyncio.wait_for(session.interrupt(), BOUND)
+            else:
+                cancel.request()
+                method = StopMethod.KILL
             release.set()
             turn = await asyncio.wait_for(running, BOUND)
         finally:
@@ -342,8 +349,8 @@ def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
     real_tail = per_turn.stderr_tail
     holding, release = asyncio.Event(), asyncio.Event()
 
-    async def held_tail(stream: Any) -> str:
-        text = await real_tail(stream)
+    async def held_tail(stream: Any, *args: Any) -> str:
+        text = await real_tail(stream, *args)
         holding.set()
         await release.wait()
         return text
@@ -356,7 +363,7 @@ def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
         running = asyncio.create_task(session.run_turn("work", Seen()))
         try:
             await asyncio.wait_for(holding.wait(), BOUND)
-            stopping = asyncio.create_task(session.interrupt())
+            stopping = asyncio.create_task(session.interrupt())  # (the cancel of a turn run without one)
             await asyncio.sleep(0.1)
             release.set()
             method, turn = await asyncio.wait_for(stopping, BOUND), await asyncio.wait_for(running, BOUND)
