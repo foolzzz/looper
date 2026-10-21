@@ -208,6 +208,7 @@ class WebChannelAdapter(ChannelAdapter):
                 "channel_context": {
                     "session_id": session_id,
                     "goal_id": goal_id,
+                    "client_message_id": message_id,  # what the page's Stop button names (POST /api/chat/stop)
                 },
                 **({"supplement_id": supplement_id} if supplement_id is not None else {}),
             },

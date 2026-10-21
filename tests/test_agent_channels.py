@@ -90,6 +90,21 @@ class TestWebChannelAdapter:
 
         asyncio.run(_run())
 
+    def test_the_message_carries_the_id_the_page_chose_for_the_stop_button(self) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                adapter = WebChannelAdapter()
+                await adapter.start(bus)
+                await adapter.handle_user_message(text="hi", session_id="chat-1", message_id="m1")
+                queue = bus.get_queue(MANAGER_ADDRESS.agent_id)
+                envelope = await asyncio.wait_for(queue.get(), 1)
+                assert envelope.payload["channel_context"]["client_message_id"] == "m1"
+                await adapter.stop()
+                await bus.shutdown()
+
+        asyncio.run(_run())
+
     @pytest.mark.parametrize("page_left", [False, True])
     def test_a_messages_answer_is_saved_to_its_chat_under_its_reply_id_even_after_the_page_left(
         self, monkeypatch: pytest.MonkeyPatch, page_left: bool,

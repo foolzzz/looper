@@ -127,6 +127,24 @@ def test_stop_of_another_message_or_when_idle(agent_db: Any) -> None:
     asyncio.run(run())
 
 
+def test_the_web_page_stops_its_message_by_the_id_it_sent(agent_db: Any) -> None:
+    """The page knows its message by the id it chose for the chat, not the envelope's: its Stop button names that."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("写一篇很长的文章")
+            envelope.payload["channel_context"]["client_message_id"] = "m-page-1"
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            assert await manager.stop_turn("m-page-2", via="web") is StopResult.OTHER_MESSAGE
+            assert await manager.stop_turn("m-page-1", via="web") is StopResult.STOPPING
+            await handling
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_stop_before_the_process_starts(agent_db: Any) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:

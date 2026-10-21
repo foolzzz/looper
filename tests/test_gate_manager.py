@@ -54,7 +54,8 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
                 return None
 
             manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
-                has_planner=lambda task_id: True)), tools_problem=tools_problem)
+                has_planner=lambda task_id: True)), tools_problem=tools_problem,
+                asks_in=lambda message_id: False)
             await manager._handle(MessageEnvelope.create(
                 source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                 payload={"text": text, "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p",

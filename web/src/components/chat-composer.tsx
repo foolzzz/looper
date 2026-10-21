@@ -131,7 +131,7 @@ export function ChatComposer(props: ChatComposerProps) {
               Edit
             </Button>
           </div>
-          <ul className="flex flex-col gap-1">
+          <ul className="flex max-h-[30vh] flex-col gap-1 overflow-y-auto">
             {staged.map((item, i) => (
               <li key={i} className="flex items-start gap-2">
                 <span className="line-clamp-3 min-w-0 flex-1 whitespace-pre-wrap break-words text-sm">{item}</span>
@@ -172,14 +172,17 @@ export function ChatComposer(props: ChatComposerProps) {
           className="max-h-40 min-h-11 flex-1 resize-none overflow-y-auto rounded-lg border border-input bg-background px-4 py-2.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
           autoFocus
         />
-        {replying && canStop && !hasDraft ? (
-          <Button type="button" variant="destructive" className="h-11 w-11 p-0" aria-label="Stop the reply (Esc)" onClick={onStop}>
-            <Square className="h-4 w-4 fill-current" aria-hidden="true" />
-          </Button>
-        ) : replying ? (
-          <Button type="submit" className="h-11 min-w-11" disabled={disabled || !hasDraft || full}>
-            Queue
-          </Button>
+        {replying ? (
+          <>
+            {canStop && (
+              <Button type="button" variant="destructive" className="h-11 w-11 shrink-0 p-0" aria-label="Stop the reply (Esc)" onClick={onStop}>
+                <Square className="h-4 w-4 fill-current" aria-hidden="true" />
+              </Button>
+            )}
+            <Button type="submit" className="h-11 min-w-11 shrink-0" aria-label="Queue message" disabled={disabled || !hasDraft || full}>
+              Queue
+            </Button>
+          </>
         ) : (
           <Button type="submit" className="h-11 w-11 p-0" aria-label="Send" disabled={disabled || !hasDraft}>
             <Send className="h-4 w-4" aria-hidden="true" />

@@ -92,8 +92,23 @@ describe("ChatComposer", () => {
     expect(onStop).toHaveBeenCalledTimes(2);
 
     mount({ draft: "later", replying: true, canStop: true });
-    act(() => button("Queue").click());
+    act(() => button("Queue message").click());
     expect(seen).toEqual({ draft: "", staged: ["later"] });
+  });
+
+  it("a touch user can stop the reply with text in the box: Stop sits beside Queue", () => {
+    mount({ draft: "later", replying: true, canStop: true });
+    expect(button("Queue message")).toBeTruthy();
+    act(() => button("Stop the reply (Esc)").click());
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual({ draft: "later", staged: [] });
+  });
+
+  it("a long queue scrolls inside the staging area instead of pushing the thread off the screen", () => {
+    mount({ staged: Array.from({ length: 20 }, (_, i) => `queued ${i + 1}`), replying: true, canStop: true });
+    const list = container.querySelector("ul") as HTMLElement;
+    expect(list.className).toMatch(/max-h-/);
+    expect(list.className).toContain("overflow-y-auto");
   });
 
   it("does nothing while an input method is composing", () => {

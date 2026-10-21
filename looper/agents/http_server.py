@@ -996,7 +996,7 @@ class AgentHTTPServer:
             result = await self._manager.stop_turn(message_id, via="web")
             if result.value in ("stopping", "already_stopping"):
                 current = self._manager.current_turn
-                method = current.method if current is not None and current.message_id == message_id else None
+                method = current.method if current is not None else None
                 response = _json_response(HTTP_200, {
                     "state": result.value, "method": getattr(method, "value", method)})
             else:

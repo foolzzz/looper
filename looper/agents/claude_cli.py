@@ -635,7 +635,8 @@ class _Output:
                 self.turn = None
                 if not turn.done.done():  # else the turn was given up (cancelled) meanwhile
                     turn.done.set_result(event)
-            elif turn.stop is not None and (capped := turn.stop()) is not None:
+            elif not turn.stopping and turn.stop is not None and (capped := turn.stop()) is not None:
+                # (Not while an interrupt is under way: it ends the turn itself, with Claude's result or a kill.)
                 turn.capped, self.turn, self._capped = capped, None, True
                 if not turn.done.done():
                     turn.done.set_result(capped.result_event)
@@ -848,8 +849,9 @@ class ResidentClaude:
         from .runtimes import StopMethod
 
         if turn.stopping and not self._user_stopped and result_event is not None:
+            # Claude's result for an interrupted turn reports no spend for the request it aborted.
             return ResidentTurn(result_event, session_started=turn.session_started, usage=turn.usage,
-                                stopped=StopMethod.CONTROL)
+                                stopped=StopMethod.CONTROL, usage_complete=False)
         if self._user_stopped:
             self._user_stopped = False
             self._totals = self._totals.plus(turn.usage)
@@ -859,7 +861,8 @@ class ResidentClaude:
             await self.stop(kill=True)
             self._totals = self._totals.plus(turn.capped.usage)
             return ResidentTurn(turn.capped.result_event, session_started=turn.session_started,
-                                usage=turn.capped.usage)
+                                usage=turn.capped.usage,
+                                stopped=StopMethod.KILL if turn.capped.result_event.get(USER_STOP) else None)
         if result_event is None or input_lost:
             await self.stop()
         return ResidentTurn(

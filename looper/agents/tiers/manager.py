@@ -353,6 +353,7 @@ class CurrentTurn:
     started_at: datetime
     stop: StopRequest | None = None
     method: Any = None  # StopMethod: how interrupt() ended the turn; None until it returns
+    client_message_id: str | None = None  # the web page's own id for the message, which its Stop button names
 
 
 class TurnStopped(Exception):
@@ -612,8 +613,11 @@ class ManagerAgent:
         turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
                     envelope=envelope, sender=origin["sender"], group=origin["group"])
         self._current_envelope = envelope
+        context = envelope.payload.get("channel_context")
+        client_id = context.get("client_message_id") if isinstance(context, dict) else None
         self._current = CurrentTurn(message_id=envelope.message_id, channel=origin["channel"], chat=origin["chat"],
-                                    started_at=datetime.now(timezone.utc))
+                                    started_at=datetime.now(timezone.utc),
+                                    client_message_id=client_id if isinstance(client_id, str) and client_id else None)
         try:
             try:
                 stopped_note, self._stopped_note = self._stopped_note, None
@@ -659,7 +663,7 @@ class ManagerAgent:
         current = self._current
         if current is None:
             return StopResult.NOT_RUNNING
-        if current.message_id != message_id:
+        if message_id not in (current.message_id, current.client_message_id):
             return StopResult.OTHER_MESSAGE
         if current.stop is not None:
             return StopResult.ALREADY_STOPPING

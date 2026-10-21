@@ -37,6 +37,47 @@ for raw in sys.stdin:
              'total_cost_usd': 0.03, 'session_id': 's1', 'num_turns': 1})
 """
 
+# Streams text while it listens: the interrupt arrives (and is answered) between two of its deltas.
+_STREAMS = """\
+import json, os, sys, threading, time
+lock = threading.Lock()
+def out(event):
+    with lock:
+        print(json.dumps(event), flush=True)
+interrupted = threading.Event()
+def listen():
+    for raw in sys.stdin:
+        message = json.loads(raw)
+        if message['type'] == 'control_request':
+            interrupted.set()
+            time.sleep(0.15)
+            out({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': message['request_id']}})
+            out({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'total_cost_usd': 0.02,
+                 'session_id': 's1', 'num_turns': 1})
+        elif message['type'] == 'user':
+            inbox.append(message)
+inbox = []
+threading.Thread(target=listen, daemon=True).start()
+turns = 0
+while True:
+    if not inbox:
+        time.sleep(0.01)
+        continue
+    inbox.pop(0)
+    turns += 1
+    out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
+    if turns == 1:
+        while not interrupted.is_set():
+            out({'type': 'stream_event', 'event': {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'hi'}}})
+            time.sleep(0.05)
+        for _ in range(20):
+            out({'type': 'stream_event', 'event': {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'hi'}}})
+            time.sleep(0.01)
+    else:
+        out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'pid=%d' % os.getpid(),
+             'total_cost_usd': 0.03, 'session_id': 's1', 'num_turns': 1})
+"""
+
 _DEAF = """\
 import json, sys, time
 for raw in sys.stdin:
@@ -75,6 +116,8 @@ def test_an_obeyed_interrupt_ends_the_turn_and_keeps_the_process(tmp_path: Path)
             assert time.monotonic() - started < 1
             result = await turn
             assert result.stopped is StopMethod.CONTROL
+            # Claude's interrupted result does not carry what the aborted request spent (measured with 2.1.x).
+            assert result.usage_complete is False
             assert result.result_event is not None and result.result_event["is_error"] is True
             assert not any(e.get("type") == "control_response" for e in seen)
             assert session.totals.cost_usd == pytest.approx(0.02)
@@ -126,6 +169,62 @@ def test_interrupt_with_no_turn_does_nothing(tmp_path: Path) -> None:
         await session.start([claude], cwd=str(tmp_path), signature=None)
         try:
             assert await session.interrupt() is None
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_an_event_during_the_interrupt_does_not_end_the_next_turn(tmp_path: Path) -> None:
+    """The stop hook that fires on the next event must not also end the turn while the interrupt is under way:
+    the process is kept, so its output after the turn must still reach the next one."""
+    claude = fake_claude(tmp_path / "claude", _STREAMS)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        seen: list[dict[str, Any]] = []
+        asked = False
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        def stop() -> claude_cli.CapStop | None:
+            return claude_cli.CapStop(claude_cli.user_stop_result(), claude_cli.Usage()) if asked else None
+
+        try:
+            turn = asyncio.create_task(session.run_turn("work", on_event, stop=stop))
+            await _until_streaming(seen)
+            asked = True
+            assert await session.interrupt() is StopMethod.CONTROL
+            result = await asyncio.wait_for(turn, 5)
+            assert result.stopped is StopMethod.CONTROL
+            again = await asyncio.wait_for(session.run_turn("next", on_event), 5)
+            assert again.result_event is not None and again.result_event["result"].startswith("pid=")
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_a_stop_that_lands_on_an_event_before_the_interrupt_kills_and_says_so(tmp_path: Path) -> None:
+    claude = fake_claude(tmp_path / "claude", _STREAMS)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        def stop() -> claude_cli.CapStop | None:
+            return claude_cli.CapStop(claude_cli.user_stop_result(), claude_cli.Usage()) if len(seen) > 3 else None
+
+        try:
+            result = await asyncio.wait_for(session.run_turn("work", on_event, stop=stop), 5)
+            assert result.stopped is StopMethod.KILL
+            assert session.started is False
         finally:
             await session.stop(kill=True)
 
