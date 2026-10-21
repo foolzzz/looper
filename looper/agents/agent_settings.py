@@ -776,6 +776,17 @@ async def load_agent_settings(
     return replace(settings, profile_error=problem)
 
 
+async def profile_launch_problem(profile: AgentProfile, role: AgentType) -> str | None:
+    """Why ``profile`` cannot launch ``role`` now: the checks ``load_agent_settings`` runs after resolving, in its
+    order (``profile_problem``, then the API key or the runtime's own login); None when it can."""
+    problem = profile_problem(profile, role)
+    if problem is not None:
+        return problem
+    if profile.provider.auth is AuthKind.API_KEY:
+        return (await _with_api_key(replace(BUILTIN_SETTINGS, profile=profile)))[1]
+    return await _login_problem(profile)
+
+
 async def _login_problem(profile: AgentProfile) -> str | None:
     """Why ``profile``'s runtime cannot run with its own login now (``RuntimeAdapter.login_problem``)."""
     from .runtimes import adapter
