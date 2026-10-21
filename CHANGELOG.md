@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.13] - 2026-10-21
+
+### Changed
+
+- **A refresh keeps every dashboard page where it was.** The task page tab (`#tasks/<id>?tab=<tab>`), the task list's status filter (`?status=<value>`) and the Chat page's open agent and read-only conversation (`#chat?target=<id>&conversation=<id>`) are kept in the address, so a refresh reopens the same place and Back and Forward move between them. Default values are not written, unknown values fall back to the default, and existing deep links keep working. ([#323](https://github.com/foolzzz/looper/pull/323))
+- No model-visible change: no prompt, tool schema or tool contract changed.
+
+### Validation
+
+- Reported in #323: Vitest tests per page, the TypeScript check, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
 ## [2.13.12] - 2026-10-21
 
 ### Added
