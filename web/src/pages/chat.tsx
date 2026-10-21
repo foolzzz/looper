@@ -584,10 +584,11 @@ export function ChatPage() {
         poll.timer = setTimeout(tick, TURN_POLL_MS);
         return;
       }
-      pollRef.current = null;
-      setServerTurn(null);
+      // Still replying while the history is re-read: a message sent now stops this poll, and its read is dropped.
       const rows = await fetchChatMessages(sid).catch(() => []);
       if (poll.stopped || sid !== sessionIdRef.current) return;
+      pollRef.current = null;
+      setServerTurn(null);
       if (rows.length > 0) setMessages(fromDb(rows));
       pullStagedToDraft();
     };
@@ -1181,6 +1182,7 @@ export function ChatPage() {
           </div>
         ) : (
         <ChatComposer
+          key={sessionId}
           draft={input}
           onDraft={setInput}
           staged={staged}

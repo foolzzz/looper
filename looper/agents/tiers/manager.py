@@ -979,7 +979,8 @@ class ManagerAgent:
                         raise TurnStopped() from None
                     await recorder.finish(output_text=None, result_event=None,
                                           error=f"Cannot start {launch.runtime.label}: {exc}")
-                    return f"无法启动 {launch.runtime.label}，请检查安装。"
+                    # Raised, not returned: the turn is answered as failed, so a queue staged behind it is not sent.
+                    raise RuntimeError(f"无法启动 {launch.runtime.label}，请检查安装。") from None
                 if self._claude.command != command:
                     # A per-turn runtime may materialize its owner's home at start.
                     command = self._claude.command

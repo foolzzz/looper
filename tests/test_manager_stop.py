@@ -602,3 +602,22 @@ def test_a_stop_while_the_process_fails_to_start_ends_the_turn_stopped(agent_db:
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+def test_a_failed_process_start_replies_failed(agent_db: Any) -> None:
+    """The runtime cannot start (nobody asked to stop): the reply is a failure, not an answer, so the page does not
+    send the queue staged behind it."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            async def fail() -> None:
+                raise OSError("no such executable")
+
+            session = _Session(on_start=fail)
+            manager, bus, queue = _manager(Path(tmp), session)
+            await manager._handle(_web("你好"))
+            assert session.turns == []
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "failed" and "无法启动" in reply["text"]
+            await bus.shutdown()
+
+    asyncio.run(run())

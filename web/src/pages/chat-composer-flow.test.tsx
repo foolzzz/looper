@@ -43,7 +43,11 @@ describe("chat composer flow", () => {
   let emit: Handler;
   let done: (() => void) | undefined;
 
-  const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  const flush = () =>
+    act(async () => {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(1);
+      else await new Promise((r) => setTimeout(r, 0));
+    });
   const input = () => container.querySelector("textarea") as HTMLTextAreaElement;
   const type = (text: string) =>
     act(() => {
@@ -301,5 +305,53 @@ describe("chat composer flow", () => {
     await flush();
     expect(container.textContent).toContain("the full saved reply");
     expect(container.textContent).not.toContain("partial words");
+  });
+
+  it("keeps replying while the history is re-read after a followed turn, so a new message is staged", async () => {
+    vi.useFakeTimers();
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false });
+    await mount();
+    expect(stopButton()).not.toBeNull();
+    let release!: (rows: unknown[]) => void;
+    api.fetchChatMessages.mockReturnValue(new Promise((r) => { release = r; }));
+    api.fetchChatTurn.mockResolvedValue(null);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    expect(api.fetchChatMessages).toHaveBeenCalled();
+    await say("next");
+    expect(api.sendChat).not.toHaveBeenCalled();
+    await act(async () => { release([]); });
+    await flush();
+    expect(api.sendChat).not.toHaveBeenCalled();
+    expect(input().value).toBe("next");
+  });
+
+  it("drops a history read that a newer message has overtaken", async () => {
+    vi.useFakeTimers();
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m1", channel: "web", started_at: "", stopping: false });
+    await mount();
+    let release!: (rows: unknown[]) => void;
+    api.fetchChatMessages.mockReturnValue(new Promise((r) => { release = r; }));
+    api.fetchChatTurn.mockResolvedValue(null);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    api.fetchChatTurn.mockResolvedValue({ message_id: "m2", channel: "web", started_at: "", stopping: false });
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    await act(async () => { release([{ message_id: "m0", role: "user", content: "old", created_at: "2026-01-01T00:00:00Z" }]); });
+    await flush();
+    expect(container.textContent).not.toContain("old");
+  });
+
+  it("starts a new thread with no history cursor and no draft of the old one", async () => {
+    api.fetchChatMessages.mockResolvedValue([
+      { message_id: "m0", role: "user", content: "old question", created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    await mount();
+    type("mine");
+    key("ArrowUp");
+    expect(input().value).toBe("old question");
+    api.fetchChatMessages.mockResolvedValue([]);
+    act(() => (container.querySelector('button[title^="New conversation"]') as HTMLButtonElement).click());
+    await flush();
+    key("Escape");
+    expect(input().value).toBe("");
   });
 });
