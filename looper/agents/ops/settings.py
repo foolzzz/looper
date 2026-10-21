@@ -17,10 +17,12 @@ set lets what waits check again (``recheck_limits``), as the dashboard does.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ...db import agent_sessions as db_agent_sessions
 from ...db import agent_setting_layers as db_layers, profile_registry as db_profiles, role_configs as db_roles
 from .. import agent_settings, projects, schedules, scheduler_settings, vault, wait_service, waits
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, LayerValues, SettingsError
@@ -31,6 +33,8 @@ from ..tiers.worker import recheck_limits
 from . import Call, ErrorCode, OpError, Risk, Tool
 from .concurrency import COUNTS, shown
 from .config import answered, by_id_or_name, project_named
+
+logger = logging.getLogger(__name__)
 
 # A role's timeout per turn or run, at most (as a configuration import takes it).
 TIMEOUT_MAX_SECONDS = 365 * 86400
@@ -324,6 +328,19 @@ def _own(place: _Place, view: Mapping[str, Any]) -> dict[str, Any]:
     return view["system" if place.layer is Layer.SYSTEM else "project"]["values"]
 
 
+
+async def _manager_session(profiles: Mapping[str, str]) -> dict[str, Any] | None:
+    """The Manager session's own Agent Profile choice (``/profile``), as ``{"selected": {...} | null}``; None when
+    it cannot be read (a warning, never a failure)."""
+    try:
+        session = await db_agent_sessions.get_session("manager")
+    except Exception:
+        logger.warning("could not read the Manager session's profile choice", exc_info=True)
+        return None
+    chosen = session["selected_profile_id"] if session else None
+    return {"selected": None if chosen is None else {"profile_id": chosen, "name": profiles.get(chosen, chosen)}}
+
+
 async def _set(call: Call) -> dict[str, Any]:
     place = await _place(call.arguments)
     values = _values(call.arguments)
@@ -343,8 +360,15 @@ async def _set(call: Call) -> dict[str, Any]:
                 "after": _shown_value(name, after[name], profiles)} for name in data]
     if "timeout_seconds" in values:
         changes.append({"setting": "timeout_seconds", "before": timeout_before, "after": await _timeout(place)})
-    return {"layer": place.name, "changes": changes,
-            "effective": {role.value: _effective(view["roles"][role.value]["effective"]) for role in place.roles}}
+    answer = {"layer": place.name, "changes": changes,
+              "effective": {role.value: _effective(view["roles"][role.value]["effective"]) for role in place.roles}}
+    if place.layer is Layer.ROLE and place.role is AgentType.MANAGER and place.project_id is None:
+        if (session := await _manager_session(profiles)) is not None:
+            answer["manager_session"] = session
+            if session["selected"] is not None:
+                answer["note"] = ("the Manager's current session keeps its own profile (chosen with /profile); "
+                                  "this setting applies from its next session")
+    return answer
 
 
 # --- Reading them ---
@@ -375,7 +399,7 @@ async def _view(call: Call) -> dict[str, Any]:
         timeouts = {c["role"]: c["timeout_seconds"] for c in await db_roles.list_configs()}
         scheduler = await scheduler_settings.settings_view()
         vault_view = await vault.settings_view()
-        return {"scheduler": {name: _scheduler_shown(entry) for name, entry in scheduler.items()},
+        answer = {"scheduler": {name: _scheduler_shown(entry) for name, entry in scheduler.items()},
                 "waits": await waits.settings_view(),
                 "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
@@ -383,6 +407,9 @@ async def _view(call: Call) -> dict[str, Any]:
                           for role, entry in view["roles"].items()},
                 "knowledge_vault": {key: vault_view[key] for key in
                                     ("configured", "path", "writable", "rules_file", "problem")}}
+        if call.arguments.get("role") == AgentType.MANAGER.value and (session := await _manager_session(profiles)):
+            answer["manager_session"] = session
+        return answer
     project = await project_named(call.arguments["project"])
     view = await _read(_Place(Layer.PROJECT, None, project))
     allowed = await answered(projects.allowed_profiles_view(project["id"]))
@@ -444,7 +471,7 @@ TOOLS: tuple[Tool, ...] = (
                     "knowledge_vault: the notes folder agents read in projects that turn it on, and "
                     "the folders they may write (the user confirms first). The user confirms shared defaults, limits and "
                     "higher spend caps first. Model and "
-                    "effort are the profile's.",
+                    "effort are the profile's. The Manager's current session may run its own profile (/profile).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {

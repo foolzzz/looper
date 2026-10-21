@@ -47,14 +47,16 @@ def _row(row: asyncpg.Record) -> dict[str, Any]:
 
 async def list_layers(
     project_id: str | None = None, *, task_id: str | None = None, step_id: str | None = None,
-    task_role: tuple[str, int] | None = None, pool: asyncpg.Pool | None = None,
+    task_role: tuple[str, int] | None = None, manager_session: bool = False,
+    pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """Every row outside projects (system and role layers), and ``project_id``'s rows when given, each with its
     ``profile`` (``profile_registry.PROFILE_JSON``, or None); with ``task_id``, also a ``task`` row per role the task
     chose a profile or a concurrency limit for, and a ``planner_task`` row per role its Planner chose a profile for
     the rest of the task (one its project allows); with ``step_id`` too, a ``planner_step`` row per role its
     Planner chose one for that step; with ``task_role`` too (a role's key and version), a ``task_role`` row for the
-    role's kind when that version of the role has a profile its project allows."""
+    role's kind when that version of the role has a profile its project allows; with ``manager_session``, a
+    ``session`` row for the Manager when the user chose a profile for its current session."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
@@ -66,6 +68,12 @@ async def list_layers(
         project_id,
     )
     layers = [_row(r) for r in rows]
+    if manager_session:
+        chosen_session = await pool.fetch(
+            f"SELECT 'session' AS scope, 'manager' AS role, s.selected_profile_id AS profile_id, "
+            f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = s.selected_profile_id) AS profile "
+            "FROM agent_sessions s WHERE s.agent_id = 'manager' AND s.selected_profile_id IS NOT NULL")
+        layers += [_row(r) for r in chosen_session]
     if task_id:
         overrides = await pool.fetch(
             f"SELECT COALESCE(t.role, c.role) AS role, t.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} "

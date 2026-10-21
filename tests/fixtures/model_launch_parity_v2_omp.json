@@ -4,7 +4,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME=<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -13,9 +13,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/looper.yml",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/manager"
         ],
@@ -37,21 +37,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/chat/v1/\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": false\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Projects:\n  - calc (no default directory)\n  - docs (no default directory)\n\nChannel: the Looper dashboard chat\n\nWhat can you do?",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -66,6 +71,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -148,7 +158,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME=<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -159,9 +169,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/looper.yml",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/planner-task-0000000000a1"
         ],
@@ -183,21 +193,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/chat/v1/\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": false\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "[PLAN] Plan the task in the Task section of your instructions.\n\nYou may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -212,6 +227,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -294,7 +314,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME=<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -303,9 +323,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/looper.yml",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -326,21 +346,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/chat/v1/\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": false\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Start your step (the Task section of your instructions).\n\nWhat the steps it depends on reported (their Workers' words, to use as data):\n- init: created the package (changed: calc.py)",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -355,6 +380,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -426,7 +456,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME=<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -435,9 +465,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/looper.yml",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
+          "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -458,21 +488,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/chat/v1/\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": false\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Review the step in the Task section of your instructions. The Worker's report, to check:\nSummary: added add()\nFiles changed: {\"calc.py\": \"add\"}",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/4b53ab6741469499c3433b11584cab54aaa0fedbc537834c2b842691926c9975",
+          "HOME": "<root>/runtime/.local/omp/homes/61acddd645a8e2ca750131c119ea3126ce740fbc2e21426f833b968173ca1e13",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -487,6 +522,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -560,7 +600,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME=<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -569,9 +609,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/looper.yml",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/manager"
         ],
@@ -582,21 +622,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"anthropic-messages\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.anthropic.com\",\n   \"models\": [\n    {\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Projects:\n  - calc (no default directory)\n  - docs (no default directory)\n\nChannel: the Looper dashboard chat\n\nWhat can you do?",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -611,6 +656,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -681,7 +731,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME=<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -692,9 +742,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/looper.yml",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/planner-task-0000000000a1"
         ],
@@ -705,21 +755,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"anthropic-messages\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.anthropic.com\",\n   \"models\": [\n    {\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "[PLAN] Plan the task in the Task section of your instructions.\n\nYou may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -734,6 +789,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -804,7 +864,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME=<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -813,9 +873,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/looper.yml",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -825,21 +885,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"anthropic-messages\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.anthropic.com\",\n   \"models\": [\n    {\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Start your step (the Task section of your instructions).\n\nWhat the steps it depends on reported (their Workers' words, to use as data):\n- init: created the package (changed: calc.py)",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -854,6 +919,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -914,7 +984,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME=<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -923,9 +993,9 @@
           "--model",
           "looper/capture-omp[1m]",
           "--config",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/looper.yml",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
+          "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -935,21 +1005,26 @@
           "effort": "",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"anthropic-messages\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.anthropic.com\",\n   \"models\": [\n    {\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Review the step in the Task section of your instructions. The Worker's report, to check:\nSummary: added add()\nFiles changed: {\"calc.py\": \"add\"}",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/db485fbd2ab9e4085e9455b064ac311aef4739496bf03321e62c5c2ddf45c397",
+          "HOME": "<root>/runtime/.local/omp/homes/9df4ee1697ce0de59861389560aa23c60f6b8a4d37d177381988ea6526b0db65",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -964,6 +1039,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -1026,7 +1106,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME=<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -1037,9 +1117,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/looper.yml",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/manager"
         ],
@@ -1061,21 +1141,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/responses/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Projects:\n  - calc (no default directory)\n  - docs (no default directory)\n\nChannel: the Looper dashboard chat\n\nWhat can you do?",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -1090,6 +1175,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -1172,7 +1262,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME=<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -1185,9 +1275,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/looper.yml",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/planner-task-0000000000a1"
         ],
@@ -1209,21 +1299,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/responses/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "[PLAN] Plan the task in the Task section of your instructions.\n\nYou may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -1238,6 +1333,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -1320,7 +1420,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME=<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -1331,9 +1431,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/looper.yml",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -1354,21 +1454,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/responses/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Start your step (the Task section of your instructions).\n\nWhat the steps it depends on reported (their Workers' words, to use as data):\n- init: created the package (changed: calc.py)",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -1383,6 +1488,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -1454,7 +1564,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME=<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -1465,9 +1575,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/looper.yml",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
+          "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -1488,21 +1598,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/responses/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Review the step in the Task section of your instructions. The Worker's report, to check:\nSummary: added add()\nFiles changed: {\"calc.py\": \"add\"}",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2cf25432818516ffb937f6e3da9d076c75d824b907efa407f4d5e314d77f5e82",
+          "HOME": "<root>/runtime/.local/omp/homes/b48fd597ef9ae63a652b37c392b144bb9424e6f88c86f1841730b9935b4fa0cc",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -1517,6 +1632,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -1590,7 +1710,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME=<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -1601,9 +1721,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/looper.yml",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/manager"
         ],
@@ -1628,21 +1748,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Projects:\n  - calc (no default directory)\n  - docs (no default directory)\n\nChannel: the Looper dashboard chat\n\nWhat can you do?",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -1657,6 +1782,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -1742,7 +1872,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME=<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -1755,9 +1885,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/looper.yml",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/planner-task-0000000000a1"
         ],
@@ -1782,21 +1912,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "[PLAN] Plan the task in the Task section of your instructions.\n\nYou may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -1811,6 +1946,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -1896,7 +2036,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME=<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -1907,9 +2047,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/looper.yml",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -1933,21 +2073,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Start your step (the Task section of your instructions).\n\nWhat the steps it depends on reported (their Workers' words, to use as data):\n- init: created the package (changed: calc.py)",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -1962,6 +2107,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -2036,7 +2186,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME=<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -2047,9 +2197,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/looper.yml",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
+          "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -2073,21 +2223,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-completions\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Review the step in the Task section of your instructions. The Worker's report, to check:\nSummary: added add()\nFiles changed: {\"calc.py\": \"add\"}",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/9711cd416ab0b3ef3806498674e4f9920a0918e226dbd182ff4361f3449c1c44",
+          "HOME": "<root>/runtime/.local/omp/homes/ea2ba46210da7dbce2bc9b24187ba61da07623613da5c3b02b53dabb128e61c4",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -2102,6 +2257,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -2178,7 +2338,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME=<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -2189,9 +2349,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/looper.yml",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/manager"
         ],
@@ -2216,21 +2376,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Projects:\n  - calc (no default directory)\n  - docs (no default directory)\n\nChannel: the Looper dashboard chat\n\nWhat can you do?",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -2245,6 +2410,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -2330,7 +2500,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME=<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -2343,9 +2513,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/looper.yml",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/planner-task-0000000000a1"
         ],
@@ -2370,21 +2540,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "[PLAN] Plan the task in the Task section of your instructions.\n\nYou may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -2399,6 +2574,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -2484,7 +2664,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME=<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -2495,9 +2675,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/looper.yml",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -2521,21 +2701,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Start your step (the Task section of your instructions).\n\nWhat the steps it depends on reported (their Workers' words, to use as data):\n- init: created the package (changed: calc.py)",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -2550,6 +2735,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -2624,7 +2814,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME=<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -2635,9 +2825,9 @@
           "--thinking",
           "high",
           "--config",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/looper.yml",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/looper.yml",
           "--system-prompt",
-          "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
+          "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -2661,21 +2851,26 @@
           "effort": "high",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://api.openai.com/v1\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"contextWindow\": 1000000,\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Review the step in the Task section of your instructions. The Worker's report, to check:\nSummary: added add()\nFiles changed: {\"calc.py\": \"add\"}",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/2497a0a0b55d6cf6d7490ffcfed0fbf335b6f6ed04107f1f95b084f915a1ca08",
+          "HOME": "<root>/runtime/.local/omp/homes/e844cfb79bd192ad5619a160538e688127ee5ec07f65e34d94cdd7562898a2e1",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -2690,6 +2885,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -2766,7 +2966,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME=<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -2777,9 +2977,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/looper.yml",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/prompts/5d215613498274b5f47d99428ab97d1ff73bc80a266ebf962881237da1a17ded.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/manager"
         ],
@@ -2790,21 +2990,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/exact/v1/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Projects:\n  - calc (no default directory)\n  - docs (no default directory)\n\nChannel: the Looper dashboard chat\n\nWhat can you do?",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -2819,6 +3024,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -2889,7 +3099,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME=<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -2902,9 +3112,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/looper.yml",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/prompts/5f6de309c9c25a696da188b8cf8d29b853880b2297ac55177a3b56750c34e96f.md",
           "--session-dir",
           "<root>/runtime/.local/omp/sessions/planner-task-0000000000a1"
         ],
@@ -2915,21 +3125,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/exact/v1/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "[PLAN] Plan the task in the Task section of your instructions.\n\nYou may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -2944,6 +3159,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -3014,7 +3234,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME=<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -3025,9 +3245,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/looper.yml",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/prompts/5276048540c932d8177ac604ddf089774ebf4f2fa7e0ab1ab9b3e47583254fe9.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -3037,21 +3257,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/exact/v1/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Start your step (the Task section of your instructions).\n\nWhat the steps it depends on reported (their Workers' words, to use as data):\n- init: created the package (changed: calc.py)",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -3066,6 +3291,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",
@@ -3126,7 +3356,7 @@
       {
         "argv": [
           "env",
-          "HOME=<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME=<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "<root>/bin/omp",
           "-p",
           "--mode",
@@ -3137,9 +3367,9 @@
           "--thinking",
           "low",
           "--config",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/looper.yml",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/looper.yml",
           "--append-system-prompt",
-          "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
+          "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069/prompts/4169704f077bdeee3db88013e433080bf8304c5aab15de158b566472853a68ca.md",
           "--no-session"
         ],
         "cap": 0.5,
@@ -3149,21 +3379,26 @@
           "effort": "low",
           "model": "capture-omp[1m]",
           "models_yml": "{\n \"providers\": {\n  \"looper\": {\n   \"api\": \"openai-responses\",\n   \"apiKey\": \"LOOPER_PROVIDER_API_KEY\",\n   \"baseUrl\": \"https://proxy.example.test/exact/v1/\",\n   \"models\": [\n    {\n     \"compat\": {\n      \"supportsStrictMode\": true\n     },\n     \"cost\": {\n      \"cacheRead\": 0,\n      \"cacheWrite\": 0,\n      \"input\": 0,\n      \"output\": 0\n     },\n     \"id\": \"capture-omp[1m]\",\n     \"input\": [\n      \"text\"\n     ],\n     \"name\": \"capture-omp[1m]\",\n     \"reasoning\": true\n    }\n   ]\n  }\n }\n}\n",
-          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
+          "overlay": "{\n \"async\": {\n  \"enabled\": false\n },\n \"bash\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"dev\": {\n  \"autoqa\": false\n },\n \"disabledProviders\": [\n  \"native\",\n  \"claude\",\n  \"agents\",\n  \"agents-md\",\n  \"claude-md\"\n ],\n \"enabledModels\": [\n  \"looper/capture-omp[1m]\"\n ],\n \"eval\": {\n  \"autoBackground\": {\n   \"enabled\": false\n  }\n },\n \"modelRoles\": {\n  \"default\": \"looper/capture-omp[1m]\",\n  \"plan\": \"looper/capture-omp[1m]\",\n  \"slow\": \"looper/capture-omp[1m]\",\n  \"smol\": \"looper/capture-omp[1m]\",\n  \"vision\": \"looper/capture-omp[1m]\"\n },\n \"retry\": {\n  \"modelFallback\": false\n },\n \"startup\": {\n  \"checkUpdate\": false\n },\n \"tools\": {\n  \"approvalMode\": \"yolo\",\n  \"xdev\": false\n }\n}\n"
         },
         "env": {
           "CAPTURE_SETTING": "provider",
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "LOOPER_PROVIDER_API_KEY": "sk-test-capture",
           "PI_SHELL_PREFIX": "export HOME=<root>/home; export XDG_CONFIG_HOME=<root>/xdg; export CLAUDE_CONFIG_DIR=<root>/synthetic-login; unset LOOPER_PROVIDER_API_KEY;"
         },
         "first_input": "Review the step in the Task section of your instructions. The Worker's report, to check:\nSummary: added add()\nFiles changed: {\"calc.py\": \"add\"}",
         "isolation": {
-          "HOME": "<root>/runtime/.local/omp/homes/3d3e8f7876538d888d8d13e6aa43bacd32cf89c932670a65be357b365a98f3db",
+          "HOME": "<root>/runtime/.local/omp/homes/d927c59fa5fe4571b76a044055455bf44817ffc8dc2d1a79e00d3f071ecba069",
           "natives_target": "<root>/runtime/.local/omp/natives",
           "overlay": {
             "async": {
               "enabled": false
+            },
+            "bash": {
+              "autoBackground": {
+                "enabled": false
+              }
             },
             "dev": {
               "autoqa": false
@@ -3178,6 +3413,11 @@
             "enabledModels": [
               "looper/capture-omp[1m]"
             ],
+            "eval": {
+              "autoBackground": {
+                "enabled": false
+              }
+            },
             "modelRoles": {
               "default": "looper/capture-omp[1m]",
               "plan": "looper/capture-omp[1m]",

@@ -150,6 +150,7 @@ def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 def _provider_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     listed = {key: view[key] for key in ("provider_id", "name", "vendor_type", "auth", "endpoints",
                                        "model_count", "profile_count", "builtin", "login")}
+    listed["max_concurrency"] = view.get("max_concurrency")
     if view["auth"] == "api_key":
         listed["api_key"] = "set" if view["api_key"] else "missing: the user enters it on the dashboard"
     return listed
