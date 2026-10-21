@@ -30,6 +30,7 @@ import {
 } from "@/lib/api";
 import { gateAnchor, gateLook, gatePostsText, gateWaitsOn, isGateShown, isGateWaiting, sinceText } from "@/lib/gates";
 import { errorText, useAction } from "@/lib/use-action";
+import { startPolling } from "@/lib/polling";
 import { cn } from "@/lib/utils";
 
 /** How often a gate that waits reads its discussion again while its task runs. */
@@ -103,7 +104,7 @@ function useGateThread(taskId: string, step: string, { enabled, follow, signatur
   const latest = useRef(0);
   const load = useCallback(() => {
     const request = ++latest.current;
-    fetchGateThread(taskId, step).then(
+    return fetchGateThread(taskId, step).then(
       (thread) => {
         if (request !== latest.current) return;
         setMessages(thread.messages);
@@ -119,8 +120,9 @@ function useGateThread(taskId: string, step: string, { enabled, follow, signatur
   }, [load, enabled, signature]);
   useEffect(() => {
     if (!enabled || !follow) return;
-    const timer = setInterval(load, THREAD_POLL_MS);
-    return () => clearInterval(timer);
+    return startPolling(async () => {
+      await load();
+    }, THREAD_POLL_MS);
   }, [load, enabled, follow]);
   const add = (message: GateMessage) =>
     setMessages((current) => (current && !current.some((m) => m.id === message.id) ? [...current, message] : current));
