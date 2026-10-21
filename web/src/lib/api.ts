@@ -753,6 +753,9 @@ export async function cancelConfigImport(importId: string): Promise<void> {
 
 export const PROJECTS_CHANGED_EVENT = "looper:projects-changed";
 
+/** Sent on window when a gate was answered or changed here, so the sidebar's waiting count refreshes at once. */
+export const GATES_CHANGED_EVENT = "looper:gates-changed";
+
 function notifyProjectsChanged() {
   window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT));
 }
@@ -3641,4 +3644,55 @@ export function streamSSE(
   })();
 
   return () => abortController.abort();
+}
+
+/** Which gates `GET /api/gates` lists: waiting ones, closed ones (passed, cancelled, skipped) or all. */
+export type GateListState = "open" | "closed" | "all";
+
+/** One row of `GET /api/gates`: a gate, its task, and what the list shows beside it. */
+export interface GateListRow {
+  task: {
+    task_id: string;
+    name: string;
+    status: string;
+    group: TaskGroup;
+    project_id: string;
+    project_name: string;
+  };
+  gate: UserGate;
+  /** The agenda questions still open. */
+  agenda_open: number;
+  /** The last user or Planner message; null for none. */
+  last_message: { role: string; author: string | null; via: string; created_at: string } | null;
+}
+
+export interface GateList {
+  gates: GateListRow[];
+  /** The rows under the filter. */
+  total: number;
+  /** Counts under the project filter only. */
+  counts: { open: number; waiting_user: number; waiting_planner: number; closed: number; all: number };
+  limit: number;
+  offset: number;
+}
+
+export async function fetchGates(
+  filters: {
+    state?: GateListState;
+    waitingOn?: "user" | "planner";
+    projectId?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<GateList> {
+  const params = new URLSearchParams();
+  if (filters.state && filters.state !== "open") params.set("state", filters.state);
+  if (filters.waitingOn) params.set("waiting_on", filters.waitingOn);
+  if (filters.projectId) params.set("project_id", filters.projectId);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.offset) params.set("offset", String(filters.offset));
+  const qs = params.toString();
+  const res = await fetch(`${API_BASE}/gates${qs ? `?${qs}` : ""}`);
+  if (!res.ok) await failed(res, "gates");
+  return res.json();
 }
