@@ -122,3 +122,27 @@ def test_stop_is_answered_by_looper_when_the_setting_is_off(agent_db: Any, monke
             await bus.shutdown()
 
     asyncio.run(run())
+
+
+def test_stop_takes_the_whole_chat_with_its_queued_messages(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session, manager, bus, chat, inbox = _setup(tmp)
+            first = _tg("写一篇很长的文章")
+            handling = asyncio.create_task(manager._handle(first))
+            await _until(session.running.is_set)
+            queued = [_tg("第二条"), _tg("第三条")]
+            other = _tg("别的聊天", chat=5)
+            for envelope in (*queued, other):
+                manager._register_turn(envelope)
+            _drain(chat)
+            await bus.publish(_tg("/stop"))
+            await _until(lambda: "已停止当前回复，另取消了 2 条排队的消息。" in _texts(chat))
+            await handling
+            assert manager._turns.find(other.message_id) is not None
+            assert manager._turns.find(other.message_id).stop is None
+            for envelope in queued:
+                assert manager._turns.find(envelope.message_id).stop is not None
+            await bus.shutdown()
+
+    asyncio.run(run())

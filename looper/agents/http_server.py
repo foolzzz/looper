@@ -1025,8 +1025,11 @@ class AgentHTTPServer:
             if result.value in ("stopping", "already_stopping"):
                 current = self._manager.turn_for(message_id)
                 method = current.method if current is not None else None
+                found = current.stop.phase if current is not None and current.stop is not None else None
+                phase = found if found is not None else (current.phase if current is not None else None)
                 response = _json_response(HTTP_200, {
-                    "state": result.value, "method": getattr(method, "value", method)})
+                    "state": result.value, "phase": getattr(phase, "value", phase),
+                    "method": getattr(method, "value", method)})
             else:
                 errors = {"not_running": "No turn is running.",
                           "other_message": "The running turn answers a different message."}
@@ -1044,7 +1047,8 @@ class AgentHTTPServer:
             current = self._manager.current_turn_for("web", session_id)
             response = _json_response(HTTP_200, {"turn": None if current is None else {
                 "message_id": current.message_id, "client_message_id": current.client_message_id,
-                "channel": current.channel, "started_at": current.received_at.isoformat(), "stopping": current.stop is not None}})
+                "channel": current.channel, "started_at": current.received_at.isoformat(), "state": current.phase.value,
+                "method": getattr(current.method, "value", current.method), "stopping": current.stop is not None}})
         writer.write(response)
         await writer.drain()
 

@@ -582,12 +582,17 @@ class ManagerAgent:
             if not chat_settings.stop_enabled():
                 await self._send_reply(envelope, chat_settings.STOP_DISABLED_REPLY, persist=False)
                 return
-            current = self.current_turn_for(channel, chat) if channel and chat else None
-            stopped = False
-            if current is not None:
-                result = await self.stop_turn(current.message_id, via=channel)
-                stopped = result in (StopResult.STOPPING, StopResult.ALREADY_STOPPING)
-            await self._send_reply(envelope, STOP_DONE_REPLY if stopped else STOP_IDLE_REPLY, persist=False)
+            tokens = self._turns.live_for(channel, chat) if channel and chat else []
+            stopped = 0
+            for token in tokens:
+                result = await self.stop_turn(token.message_id, via=channel)
+                if result in (StopResult.STOPPING, StopResult.ALREADY_STOPPING):
+                    stopped += 1
+            if stopped > 1:
+                reply = f"已停止当前回复，另取消了 {stopped - 1} 条排队的消息。"
+            else:
+                reply = STOP_DONE_REPLY if stopped else STOP_IDLE_REPLY
+            await self._send_reply(envelope, reply, persist=False)
         except Exception:
             logger.exception("manager: could not handle /stop %s", envelope.message_id)
 
