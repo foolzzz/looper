@@ -18,6 +18,22 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.10] - 2026-10-21
+
+### Fixed
+
+- **A failed DSH consult run is no longer delivered as an answer.** A result with `is_error`, or a `subtype` other than `success`, falls back with a contract reason. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **Resident DSH is priced by the configured model**, not the normalized API model, so usage and budget stops use the right price; resident turn results gain `observed_cost_usd`, and the prompt-regression eval records `observed_cost_complete` instead of counting a missing value as 0. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **An unsupported effort is refused** when a profile is selected or launched (for example `dsh` with `medium` or `xhigh`), not only on config import. ([#300](https://github.com/foolzzz/looper/pull/300))
+- **The `[1m]` suffix warning follows each runtime's real model mapping** (new adapter `api_model`): DSH and Claude Code no longer warn about a suffix they strip. ([#300](https://github.com/foolzzz/looper/pull/300))
+- No model-visible change: no prompt or tool schema changed.
+
+### Validation
+
+- Reported in #300: 495 passed, 2 skipped across the DSH runtime, DSH validation, provider pricing and room consult tests; 148 passed in the agent settings tests; the new effort test fails without the fix. No full-suite run or review is reported. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.10.md).
+
 ## [2.13.9] - 2026-10-21
 
 ### Added
