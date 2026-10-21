@@ -43,7 +43,8 @@ def test_schema_applies_twice_with_column_and_constraint(monkeypatch: pytest.Mon
             "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() "
             "AND table_name = 'agent_sessions' AND column_name = 'selected_profile_id'") == 1
         assert await pool.fetchval(
-            "SELECT count(*) FROM pg_constraint WHERE conname = 'agent_sessions_selected_profile_manager'") == 1
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'agent_sessions_selected_profile_manager' "
+            "AND connamespace = current_schema()::regnamespace") == 1
 
     _run(body, monkeypatch)
 

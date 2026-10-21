@@ -2779,3 +2779,32 @@ def test_the_fake_stop_dialog_passes(tmp_path: Path) -> None:
                             admin_url=os.environ["LOOPER_TEST_DATABASE_URL"], out_dir=tmp_path, timeout=30)
     assert result["aborted"] is None, result
     assert [row["outcome"] for row in result["dialogs"]] == ["pass"], result["dialogs"]
+
+
+def _tool_use(name: str, **arguments: Any) -> dict[str, Any]:
+    return {"seq": 1, "event": {"type": "assistant", "parent_tool_use_id": None,
+                                "message": {"content": [{"type": "tool_use", "name": name, "input": arguments}]}}}
+
+
+@pytest.mark.parametrize("after,problem", [
+    ([], None),
+    ([_tool_use("Bash", command="sleep 60")], "the Manager ran ['Bash'] after starting the task"),
+])
+def test_start_no_wait_rejects_a_native_shell_after_the_start(
+    monkeypatch: pytest.MonkeyPatch, after: list[dict[str, Any]], problem: str | None,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    start = {"tool": "looper_task_control", "status": "ok", "risk": "write",
+             "arguments": {"action": "start", "task_id": "t"}}
+    events = [_tool_use("mcp__looper__looper_task_control", action="start", task_id="t"), *after]
+
+    class Api:
+        def get(self, path: str, **_: Any) -> dict[str, Any]:
+            if path == "/api/llm-records":
+                return {"records": [{"id": 7, "metadata": {}}]}
+            return {"events": events if _ == {} or _.get("after") == 0 else []}
+
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [start])
+    look = dialogs.Look(Api(), "t", "", "", 0, frozenset(), True)  # type: ignore[arg-type]
+    assert dialogs._started_without_waiting(look) == problem
