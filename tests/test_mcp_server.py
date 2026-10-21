@@ -711,3 +711,20 @@ def test_dsh_optional_catalog_failure_keeps_diagnostic_and_runs_model(tmp_path, 
     assert done.returncode == 0, (done.stderr, report)
     assert dsh_mcp_state.model_requests == 1
     assert report["diagnostics"] == [{"serverName": "unavailable", "status": "failed"}]
+
+
+def test_the_trace_writes_the_keys_of_meta_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("LOOPER_MCP_TRACE", str(trace))
+    meta = {"claudecode/toolUseId": "toolu-secret-value", "progressToken": "tok-secret"}
+    handle(_request("tools/call", {"name": "create_task", "arguments": {}, "_meta": meta}, 1), _StubClient())
+    handle(_request("tools/call", {"name": "create_task", "arguments": {}}, 2), _StubClient())
+    lines = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert lines == [{"meta_keys": ["claudecode/toolUseId", "progressToken"]}, {"meta_keys": None}]
+    assert "secret" not in trace.read_text()
+
+
+def test_no_trace_without_the_variable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("LOOPER_MCP_TRACE", raising=False)
+    handle(_request("tools/call", {"name": "create_task", "arguments": {}}, 1), _StubClient())
+    assert list(tmp_path.iterdir()) == []

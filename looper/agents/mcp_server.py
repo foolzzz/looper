@@ -13,6 +13,7 @@ forwards: every validation, confirmation and execution happens in ``looper serve
 - **Failures.** Both requests send ``Authorization: Bearer <token>``; anything but a 200 with a JSON object,
   or no answer within 120 s, is a failure. A failed ``tools/list`` is a JSON-RPC error; a failed ``tools/call``
   is an error tool result that tells the model why, since it can read that and decide what to do.
+- **Trace.** With ``LOOPER_MCP_TRACE=<file>``, each ``tools/call`` appends the keys of its ``_meta`` to the file.
 """
 
 from __future__ import annotations
@@ -190,6 +191,7 @@ def _call_tool(message_id: Any, params: dict[str, Any], client: Client) -> dict[
         return _error(message_id, INVALID_PARAMS, "tools/call params.arguments must be an object")
     try:
         meta = params.get("_meta")
+        _trace_meta(meta)
         answer = client.call_tool(name, arguments, meta if isinstance(meta, dict) else None)
     except LooperTimedOut as exc:
         logger.warning("tools/call %s: %s", name, exc)
@@ -250,6 +252,20 @@ def main() -> int:
     client = AgentClient(url, token, turn_file=os.environ.get("LOOPER_AGENT_TURN_FILE", "").strip() or None)
     logger.info("forwarding tool calls to %s", client.url)
     return serve(client, sys.stdin.buffer, sys.stdout.buffer)
+
+
+def _trace_meta(meta: Any) -> None:
+    """With ``LOOPER_MCP_TRACE=<file>``, append one line to it: the keys of this call's ``_meta`` (never values,
+    never the token); ``null`` when the call had none. A trace that cannot be written is ignored."""
+    path = os.environ.get("LOOPER_MCP_TRACE", "").strip()
+    if not path:
+        return
+    keys = sorted(str(key) for key in meta) if isinstance(meta, dict) else None
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"meta_keys": keys}) + "\n")
+    except OSError:
+        pass
 
 
 def _result(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:
