@@ -264,6 +264,11 @@ def model_registry_contract(expected: dict[str, dict[str, Any]]) -> dict[str, di
          "  Profiles (looper_agent_profiles) are recipes: runtime, model and runtime\n"
          "  options (effort, teams, custom prompt). Select a role's profile with\n"
          "  looper_settings.\n"),
+        ("  looper_confirm with its confirmation_id; otherwise do not.\n",
+         "  looper_confirm with its confirmation_id; otherwise do not.\n"
+         "- After starting or changing a task, do not wait or poll inside the turn (no\n"
+         "  sleep, no repeated status calls): end the reply. Looper brings the task's\n"
+         "  questions (gates) and its end to the user.\n"),
         # This branch's declared Manager contract lines on the session's /profile.
         ('- Never say an operation ran unless its answer was "ok".\n',
          "- The user switches the Agent Profile of this conversation with /profile\n"

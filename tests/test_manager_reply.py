@@ -118,6 +118,8 @@ class TestManagerReply:
         assert start["metadata"]["system_prompt"] == system_prompt
         assert system_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou are the Manager Agent")
         assert system_prompt.endswith(TOOLS_CONTRACT)
+        assert "do not wait or poll inside the turn" in TOOLS_CONTRACT
+        assert "Looper brings the task's" in TOOLS_CONTRACT
         assert start["metadata"]["system_prompt_sha256"] == _sha(system_prompt)
         layers = start["metadata"]["prompt_layers"]
         assert layers["harness"] == {"source": "builtin", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}

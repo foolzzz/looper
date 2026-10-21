@@ -147,6 +147,7 @@ class Dialog:
     id: str
     says: tuple[Say, ...]
     running_task: bool = False
+    ready_task: bool = False  # a task of the project is created and not started (``task`` is it)
     schedule: bool = False  # an enabled schedule SCHEDULE is made in the project first
     gate: bool = False  # the running task has a gate GATE_LABEL waiting for the user (``open_gate``)
     # What the dialog's server holds first, made through the API: (the API, the dialog's project id).
@@ -975,6 +976,30 @@ def _not_relayed(look: Look) -> str | None:
     return None
 
 
+def _started_without_waiting(look: Look) -> str | None:
+    """Started once; no waiting after it: no shell (a sleep) and at most one status read."""
+    calls = look.actions()
+    starts = [a for a in calls if a["tool"] == "looper_task_control" and a["arguments"].get("action") == "start"
+              and a["status"] == "ok"]
+    if len(starts) != 1:
+        return f"looper_task_control start ran {len(starts)} times, not once"
+    after = calls[calls.index(starts[0]) + 1:]
+    shell = [a["tool"] for a in after if not a["tool"].startswith("looper_")]
+    if shell:
+        return f"the Manager ran {shell} after starting the task"
+    if len(after) > 1:
+        return f"the Manager made {len(after)} calls after starting the task, polling instead of ending the reply"
+    if look.fake:  # the stand-in's replies are status-only
+        return None
+    if _raw_json(look.reply):
+        return "the reply shows raw JSON"
+    if not any(word in look.reply for word in ("开始", "启动", "已开", "已启")):
+        return "the reply does not say the task started"
+    if not any(word in look.reply for word in ("问题", "提问", "闸门", "gate", "确认")):
+        return "the reply does not say the task's questions will come to the user"
+    return None
+
+
 # --- The Manager's session profile (/profile) ---
 
 SWITCH = "eval/switch"
@@ -1231,6 +1256,9 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本",
                                      "project": PROJECT}),)),
     )),
+    Dialog("start_no_wait", (
+        Say("开始", _started_without_waiting, (("looper_task_control", {"task_id": "<task>", "action": "start"}),)),
+    ), ready_task=True),
     Dialog("gate_relay", (
         Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,
             (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL}),)),
@@ -1587,6 +1615,8 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     try:
         if dialog.id == "task_cost":
             task = _make_cost_task(database_url, project_id)
+        elif dialog.ready_task:
+            task = api.post("/api/tasks/create", {"requirement": SLOW_TASK, "project_id": project_id})["task_id"]
         else:
             task = _start_slow_task(api, project_id, timeout=timeout, **budget_args) if dialog.running_task else None
         if dialog.gate and task is not None:
