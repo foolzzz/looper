@@ -241,7 +241,23 @@ function saveMessages(sessionId: string, messages: ChatMessage[]) {
   localStorage.setItem(messagesKey(sessionId), JSON.stringify(toSave));
 }
 
-export function ChatPage() {
+/** The hash query for an open agent and read-only conversation; the Manager and no conversation are left out. */
+function chatQuery(targetId: string, conversationId = ""): string {
+  const query = new URLSearchParams();
+  if (targetId && targetId !== MANAGER_TARGET.id) query.set("target", targetId);
+  if (conversationId) query.set("conversation", conversationId);
+  return query.toString();
+}
+
+/** `#chat?target=<agent id>&conversation=<session id>`: the agent open (the Manager when left out or unknown) and, with the
+ * Manager, a Lark or Telegram conversation read-only. `query` is undefined while another page is shown: the chat stays
+ * mounted, and keeps what it last read. */
+export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query: string) => void }) {
+  const seenQuery = useRef("");
+  if (query !== undefined) seenQuery.current = query;
+  const urlParams = new URLSearchParams(seenQuery.current);
+  const wantTarget = urlParams.get("target") || MANAGER_TARGET.id;
+  const wantConversation = urlParams.get("conversation") || "";
   const [sessionId, setSessionId] = useState(getOrCreateSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -249,6 +265,7 @@ export function ChatPage() {
   const [phase, setPhase] = useState("");
   const [roleConfigs, setRoleConfigs] = useState<RoleConfig[]>([]);
   const [targets, setTargets] = useState<ChatTargetInfo[]>([MANAGER_TARGET]);
+  const [targetsLoaded, setTargetsLoaded] = useState(false);
   const [target, setTarget] = useState<ChatTargetInfo>(MANAGER_TARGET);
   const [agentDropdown, setAgentDropdown] = useState(false);
   // Tasks the user opened or closed in the agent list; others follow the default.
@@ -271,7 +288,6 @@ export function ChatPage() {
   const [newPanel, setNewPanel] = useState<ManagerSessionView | null>(null);
   const [newPanelOpen, setNewPanelOpen] = useState(false);
   const newSessionButtonRef = useRef<HTMLButtonElement>(null);
-  const [viewing, setViewing] = useState<ChatSession | null>(null);
   // Its messages as last read, by session id, so another conversation's never show while one loads.
   const [viewingMessages, setViewingMessages] = useState<{ id: string; rows: DbChatMessage[] } | null>(null);
   // Below the md breakpoint the list takes the messages' place while it is open.
@@ -287,7 +303,10 @@ export function ChatPage() {
   }, []);
 
   const refreshTargets = useCallback(() => {
-    fetchChatTargets().then(setTargets).catch(() => {});
+    fetchChatTargets().then((rows) => {
+      setTargets(rows);
+      setTargetsLoaded(true);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -363,6 +382,10 @@ export function ChatPage() {
   }, [target.kind, sending, refreshConversations]);
 
   // A Lark or Telegram conversation is read-only here: its newest messages, re-read on the same cadence.
+  const viewing =
+    target.kind === "manager" && wantConversation
+      ? conversations?.find((c) => c.session_id === wantConversation && c.channel !== "web") ?? null
+      : null;
   const viewingId = viewing?.session_id;
   useEffect(() => {
     if (!viewingId) return;
@@ -382,11 +405,11 @@ export function ChatPage() {
   const openConversation = (session: ChatSession) => {
     setListOpen(false);
     if (session.channel !== "web") {
-      setViewing(session);
+      onQuery?.(chatQuery(target.id, session.session_id));
       return;
     }
     // A dashboard chat thread opens as the web chat, as if the page had been opened on it.
-    setViewing(null);
+    if (wantConversation) onQuery?.(chatQuery(target.id));
     if (session.session_id === sessionId) return;
     cleanupRef.current?.();
     cleanupRef.current = null;
@@ -399,8 +422,13 @@ export function ChatPage() {
 
   const selectTarget = (next: ChatTargetInfo) => {
     setAgentDropdown(false);
-    setViewing(null);
     setListOpen(false);
+    onQuery?.(chatQuery(next.id));
+  };
+
+  // The agent the address names, whether it was chosen here or the address changed (a link, Back, a refresh). An
+  // unknown one is the Manager, once the agents are listed.
+  const applyTarget = (next: ChatTargetInfo) => {
     if (next.id === target.id) return;
     cleanupRef.current?.();
     cleanupRef.current = null;
@@ -410,6 +438,13 @@ export function ChatPage() {
     setTarget(next);
     setSessionId(sessionFor(next));
   };
+  useEffect(() => {
+    if (query === undefined || wantTarget === target.id) return;
+    const next = wantTarget === MANAGER_TARGET.id ? MANAGER_TARGET : targets.find((t) => t.id === wantTarget);
+    if (next) applyTarget(next);
+    else if (targetsLoaded) applyTarget(MANAGER_TARGET);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, wantTarget, target.id, targets, targetsLoaded]);
 
   const scrollToBottom = useCallback(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -493,7 +528,7 @@ export function ChatPage() {
   }, [messages, sessionId]);
 
   const handleNewChat = () => {
-    setViewing(null);
+    if (wantConversation) onQuery?.(chatQuery(target.id));
     cleanupRef.current?.();
     cleanupRef.current = null;
     const newId = `session-${randomId().slice(0, 8)}`;
@@ -895,10 +930,12 @@ export function ChatPage() {
         {(target.kind === "worker" || target.kind === "reviewer") && <StepAgentView agent={current} />}
 
         {viewing && (
+          <div data-viewing={viewing.session_id} className="contents">
           <ChannelMessages
             session={conversations?.find((c) => c.session_id === viewing.session_id) ?? viewing}
             messages={viewingMessages?.id === viewing.session_id ? viewingMessages.rows : null}
           />
+          </div>
         )}
 
         {messages.length === 0 && target.kind === "manager" && !viewing && (

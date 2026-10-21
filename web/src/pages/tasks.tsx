@@ -180,11 +180,12 @@ interface TasksPageProps {
   onNavigate?: (sub: string, query?: string) => void;
 }
 
-function filterQuery(project: string, group: TaskGroup | null, schedule = ""): string {
+function filterQuery(project: string, group: TaskGroup | null, schedule = "", status: StatusFilter = "all"): string {
   const query = new URLSearchParams();
   if (project) query.set("project", project);
   if (group) query.set("group", group);
   if (schedule) query.set("schedule", schedule);
+  if (status !== "all") query.set("status", status);
   return query.toString();
 }
 
@@ -210,9 +211,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const groupFilter = isTaskGroup(groupParam) ? groupParam : null;
   const group = TASK_GROUPS.find((g) => g.id === groupFilter) ?? null;
   const scheduleFilter = params.get("schedule") || "";
-  const [filter, setFilter] = useState<StatusFilter>("all");
+  const statusParam = params.get("status");
+  const filter: StatusFilter = STATUS_FILTERS.find((f) => f === statusParam) ?? "all";
   // What the list shows: the server filters by all four.
-  const listKey = `${filterQuery(projectFilter, groupFilter, scheduleFilter)}|${filter}`;
+  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter, filter);
   const { projects, reload: reloadProjects } = useProjects();
   const selectedProject = projects?.find((p) => p.project_id === projectFilter) ?? null;
   // A filter for a project the list does not hold yet (just created elsewhere) is
@@ -259,6 +261,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [taskPath, taskQuery = ""] = (sub || "").split("?");
   const selectedTaskId = taskPath ? decodeURIComponent(taskPath) : null;
   const gateStep = new URLSearchParams(taskQuery).get("gate");
+  const tabParam = new URLSearchParams(taskQuery).get("tab");
   // The list's filter, so leaving a task's detail returns to the list it was opened from.
   const listQuery = useRef("");
   useEffect(() => {
@@ -266,9 +269,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }, [sub, query]);
   const setSelectedTaskId = (id: string | null) =>
     id ? onNavigate?.(id) : onNavigate?.("", listQuery.current);
-  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter));
-  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter));
-  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter));
+  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter, filter));
+  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, filter));
+  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", filter));
+  const setFilter = (next: StatusFilter) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, next));
 
   // Drop answers for a filter the page has already left.
   const currentFilter = useRef(listKey);
@@ -465,6 +469,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       <TaskDetailRoute
         taskId={selectedTaskId}
         gateStep={gateStep}
+        tab={tabParam}
+        onTab={(tab) => onNavigate?.(`${taskPath}${tab === "overview" ? "" : `?tab=${tab}`}`)}
         onBack={() => setSelectedTaskId(null)}
       />
     );
