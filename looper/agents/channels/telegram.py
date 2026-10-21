@@ -37,7 +37,7 @@ from ..message import (
 )
 from ..task_notice import NotifyTarget
 from .allowlist import SenderAllowlist
-from .. import chat_settings
+from .. import chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -49,21 +49,12 @@ logger = logging.getLogger(__name__)
 # the oldest is safe. Matches the web channel's bound.
 _CORRELATION_MAX = 1000
 
-# The slash commands published to the Telegram client's menu (setMyCommands).
-_BOT_COMMANDS: list[tuple[str, str]] = [
-    ("status", "查看当前任务进度"),
-    ("new", "开始新的 Manager 会话"),
-    ("stop", "停止管家当前的回复"),
-    ("gates", "列出等你回答的关卡"),
-    ("gate", "回答或结束一个关卡：/gate 编号 回答，/gate 编号 end"),
-    ("profile", "查看或切换 Manager 会话的 Agent Profile"),
-    ("help", "显示帮助"),
-]
+_BOT_COMMANDS = chat_commands.COMMANDS
 
 
 def bot_commands() -> list[tuple[str, str]]:
-    """The command menu: /stop only while stopping a reply is on (``chat_settings``)."""
-    return [(name, desc) for name, desc in _BOT_COMMANDS if name != "stop" or chat_settings.stop_enabled()]
+    """The command menu (setMyCommands), from the list every channel's /help shares."""
+    return chat_commands.available()
 
 
 def _check_telegram_available() -> bool:
@@ -373,17 +364,7 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def _cmd_help(self, update: Any, context: Any) -> None:
         if not self._admits(update):
             return
-        await update.message.reply_text(
-            "Looper Agent 命令:\n"
-            "直接发消息 — 提需求或问问题\n"
-            "/status — 查看当前任务进度\n"
-            "/new — 开始新的 Manager 会话\n"
-            "/stop — 停止管家当前的回复\n"
-            "/gates — 列出等你回答的关卡\n"
-            "/gate 编号 回答 — 回答关卡；/gate 编号 end — 结束\n"
-            "/profile — 查看或切换本会话的 Agent Profile\n"
-            "/help — 显示此帮助"
-        )
+        await update.message.reply_text(chat_commands.help_text())
 
     async def _cmd_new(self, update: Any, context: Any) -> None:
         """/new goes to the Manager as the text ``/new``, which it answers itself by starting a new session."""

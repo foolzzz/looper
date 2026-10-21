@@ -1723,6 +1723,24 @@ def _stop_leftovers(api: Api) -> None:
         pass
 
 
+def _root_overrun(api: Api, seen: dict[int, float]) -> float:
+    """What the finished runs' observed root spend adds to their recorded cost, for the spending check while a
+    dialog runs; ``seen`` keeps the runs already read (a run's result does not change)."""
+    offset = 0
+    while True:
+        page = api.get("/api/llm-records", limit=200, offset=offset)["records"]
+        for record in page:
+            if record["id"] in seen or record.get("status") == "running":
+                continue
+            finals = [row["event"] for row in _all_events(api, record["id"])
+                      if row["event"].get("type") == "result"]
+            observed = (finals[-1] if finals else {}).get("observed_cost_usd")
+            seen[record["id"]] = max(float(observed or 0.0) - float(record.get("cost_usd") or 0.0), 0.0)
+        offset += len(page)
+        if len(page) < 200:
+            return sum(seen.values())
+
+
 def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, scenarios: Path, mode: str,
                timeout: float, runtime_root: Path | None = None, cap_left: float | None = None,
                switch_spec: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1734,8 +1752,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
     turns: list[dict[str, Any]] = []
     error: dict[str, Any] = {}
 
+    overrun: dict[int, float] = {}
+
     def check_budget() -> None:
-        if cap_left is not None and _usage(database_url)[0] >= cap_left:
+        if cap_left is not None and _usage(database_url)[0] + _root_overrun(api, overrun) >= cap_left:
             raise SpendingCap("the dialog reached its spending cap")
 
     budget_args = {"check_budget": check_budget} if cap_left is not None else {}
@@ -1850,6 +1870,7 @@ def runtime_evidence(api: Api) -> list[dict[str, Any]]:
             "executable": Path(command[0]).name if command else None,
             "system_prompt_mode": metadata.get("system_prompt_mode"),
             "session_id": record.get("session_id"), "status": record.get("status"),
+            "cost_usd": record.get("cost_usd"),
             "root_usage_complete": final.get("root_usage_complete"),
             "observed_cost_usd": final.get("observed_cost_usd"),
             "tokens": {key: record.get(key) for key in
@@ -1858,10 +1879,13 @@ def runtime_evidence(api: Api) -> list[dict[str, Any]]:
 
 
 def observed_cost(recorded: float, evidence: list[dict[str, Any]]) -> tuple[float, bool]:
-    """The dialog's cost for the suite's cap: the larger of the recorded sum and the observed root spend of the
-    runs, and whether every run reported one. A run that did not stays unknown instead of counting as zero."""
+    """The dialog's cost for the suite's cap: the recorded sum plus, run by run, what the observed root spend
+    exceeds the run's recorded cost by, and whether every run reported one. A run that did not stays unknown
+    instead of counting as zero."""
     known = [run["observed_cost_usd"] for run in evidence if run.get("observed_cost_usd") is not None]
-    return max(recorded, sum(known)), len(known) == len(evidence)
+    extra = sum(max(run["observed_cost_usd"] - (run.get("cost_usd") or 0.0), 0.0)
+                for run in evidence if run.get("observed_cost_usd") is not None)
+    return recorded + extra, len(known) == len(evidence)
 
 
 def run(

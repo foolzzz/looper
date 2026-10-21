@@ -47,6 +47,7 @@ POST_BATCH = 50
 FINDINGS_CHARS = 300
 QUESTION_CHARS = 200
 ANSWER_LINE = "直接回复这条消息作答。"
+COMMANDS_LINE = "/gates 查看所有等你回答的关卡；/gate 编号 回答，/gate 编号 end 结束讨论"
 GROUP_LINE = "在群里回复请 @机器人。"
 # Tries of a post that sends nothing, and the waits between them: about ten minutes in all.
 POST_ATTEMPTS = 3
@@ -117,7 +118,7 @@ def message_text(row: Mapping[str, Any], chat: GateChat, *, dashboard_url: str =
     match kind:
         case MessageKind.OPENED:
             lines = [f"⏸ 需要你决定 · {_name(row)}", _clip(row["topic"], QUESTION_CHARS), *_questions(agenda),
-                     *findings, ANSWER_LINE, *group, link]
+                     *findings, ANSWER_LINE, *group, link, COMMANDS_LINE]
         case MessageKind.REPLY:
             lines = [str(row.get("text") or "").strip(), *group]
         case MessageKind.UPDATED:
@@ -125,7 +126,8 @@ def message_text(row: Mapping[str, Any], chat: GateChat, *, dashboard_url: str =
             lines = [f"✏️ 规划者更新了问题{note}", *_questions(agenda), *findings, *group]
         case MessageKind.REMINDER:
             lines = [f"⏰ 还在等你 · 已等 {_hours_since(row.get('opened_at'))} 小时 · {_name(row)}",
-                     _clip(row["topic"], QUESTION_CHARS), *_questions(agenda), ANSWER_LINE, *group, link]
+                     _clip(row["topic"], QUESTION_CHARS), *_questions(agenda), ANSWER_LINE, *group, link,
+                     COMMANDS_LINE]
         case MessageKind.CANCELLED:
             lines = [f"✅ 不用回答了：{_clip(row.get('resolution') or row.get('text'), QUESTION_CHARS)}"]
         case MessageKind.CLOSED:

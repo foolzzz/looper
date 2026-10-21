@@ -18,6 +18,32 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.19] - 2026-10-21
+
+### Fixed
+
+- **Prompt-regression spending checks.** The eval harness (`evals/prompt_regression/dialogs.py`) now costs a dialog as the recorded sum plus, run by run, the amount by which a run's observed root spend exceeds its recorded cost; before, it took the larger of the two totals and missed runs where some roles reported one and some the other. The running spending check also adds the finished runs' observed root spend. Tests: the Pi consult test covers a failed run that holds a valid final (not delivered, falls back with the contract reason), and a flaky schema test no longer counts constraints of parallel test schemas. No shipped runtime code, prompt, tool schema or tool result changed. ([#349](https://github.com/foolzzz/looper/pull/349))
+
+## [2.13.18] - 2026-10-21
+
+### Added
+
+- **Command hints on every channel.** Gate cards that ask for a decision (opened and reminder) now end with a line naming `/gates`, `/gate N answer` and `/gate N end`. `/help` is answered by the Manager on every channel without calling the model, from one shared command list (`looper/agents/chat_commands.py`) that Telegram's command menu also reads. Telegram's `/help` is now headed `Looper 命令：` and omits `/stop` while stopping a reply is off. No prompt, tool schema or tool result changed. ([#344](https://github.com/foolzzz/looper/pull/344))
+
+## [2.13.17] - 2026-10-21
+
+### Fixed
+
+- **A per-turn runtime turn no longer waits on a grandchild that holds a pipe open.** After the turn's output ended, the turn waited for the child with `Process.wait()`, which also waits for every pipe to close; a grandchild keeping stderr open delayed the turn until it exited. The turn now waits only for the child's own exit. This is the one change in the `looper` package and it applies whether or not `chat.stop_enabled` is on. ([#346](https://github.com/foolzzz/looper/pull/346))
+
+### Changed
+
+- Tests only: fixes for tests that failed only on the CI runner (the shared database counting a constraint once per schema, the model launch parity check on temp-root ancestors such as `/private/tmp`, and timing races in the Pi steer, per-turn interrupt and Grok fallback stop-matrix tests). No model-visible change. ([#346](https://github.com/foolzzz/looper/pull/346))
+
+### Validation
+
+- Reported in #346: the card's tests, the full local suite before the merge, and Codex and Grok reviews that left no P0. CI runs after the release.
+
 ## [2.13.16] - 2026-10-21
 
 ### Changed

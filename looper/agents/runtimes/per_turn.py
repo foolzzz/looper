@@ -68,6 +68,14 @@ async def stderr_tail(stream: asyncio.StreamReader | None, timeout: float | None
     return kept.decode("utf-8", errors="replace")
 
 
+async def _exited(process: asyncio.subprocess.Process) -> None:
+    """Return once ``process`` has exited. ``Process.wait()`` also waits for every pipe to close, so a grandchild that
+    holds stderr open would keep a turn waiting for the grandchild when the exit was reported after the output ended;
+    the exit status is set as soon as the child is reaped, whatever the pipes do."""
+    while process.returncode is None:
+        await asyncio.sleep(0.01)
+
+
 def _end_bound() -> float:
     """How long a turn waits for the cleanup of its process tree: the grace, the reap and a second."""
     return proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 1
@@ -290,7 +298,7 @@ class PerTurnSession(ABC):
                     break
                 if event.get("type") == "result":
                     result = event
-            await process.wait()
+            await _exited(process)
         except BaseException as exc:
             await self._end_tree(process, tree)
             if not (cancel.requested and isinstance(exc, Exception)):  # a stopped turn's closed pipe is not a failure
