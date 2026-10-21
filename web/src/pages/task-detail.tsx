@@ -51,7 +51,7 @@ import { type NodeCard, type TaskRuns, gateCard, waitCard, nodeCardId, plannerCa
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
-import { roomNote } from "@/lib/room";
+import { type RoomFilter, roomNote } from "@/lib/room";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -1928,6 +1928,10 @@ interface TaskDetailPageProps {
   /** The tab the address names; with `onTab`, the page shows it and changes it through the address. */
   tab?: string | null;
   onTab?: (tab: Tab) => void;
+  /** The Room tab's filters the address names, and how it changes them (with `onTab`). */
+  roomFilter?: string | null;
+  roomRole?: string | null;
+  onRoomFilter?: (filter: RoomFilter, role: string) => void;
   onBack: () => void;
 }
 
@@ -1937,7 +1941,7 @@ export function TaskDetailRoute(props: TaskDetailPageProps) {
   return <TaskDetailPage key={props.taskId} {...props} />;
 }
 
-function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, onBack }: TaskDetailPageProps) {
+function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, roomRole, onRoomFilter, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const taskRuns = useTaskRuns(task);
   const [error, setError] = useState("");
@@ -2144,7 +2148,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, onBack }: Task
           />
         )}
         {task && tab === "pipeline" && <PipelineTab task={task} runs={taskRuns.runs} onOpenGate={openGate} />}
-        {task && tab === "room" && <TaskRoomTab key={`${task.task_id}:${runs}`} task={task} />}
+        {task && tab === "room" && <TaskRoomTab key={`${task.task_id}:${runs}`} task={task} filter={roomFilter} role={roomRole} onFilter={onRoomFilter} />}
         {task && tab === "agents" && (
           <TaskAgentsTab task={task} runs={taskRuns.runs} runsError={taskRuns.error} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
         )}

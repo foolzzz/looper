@@ -571,6 +571,15 @@ export async function fetchChatSessions(): Promise<ChatSession[]> {
   return data.sessions ?? [];
 }
 
+/** One conversation by its id, however long ago it was active (null when it has no messages): the list holds only the
+ * newest. */
+export async function fetchChatSession(sessionId: string): Promise<ChatSession | null> {
+  const res = await fetch(`${API_BASE}/chat/sessions?session_id=${encodeURIComponent(sessionId)}`);
+  if (!res.ok) await failed(res, "load the conversation");
+  const data = await res.json();
+  return data.sessions?.[0] ?? null;
+}
+
 /** How long a dropped chat watch waits before it reconnects. */
 const CHAT_WATCH_RETRY_MS = 3000;
 

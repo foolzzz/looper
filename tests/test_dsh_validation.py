@@ -1008,6 +1008,24 @@ def test_dialog_cost_uses_observed_root_spend_and_keeps_a_missing_one_unknown():
 
     evidence = [{"role": "manager", "observed_cost_usd": .25}, {"role": "planner", "observed_cost_usd": .5}]
     assert observed_cost(0.0, evidence) == (.75, True)
-    assert observed_cost(2.0, evidence) == (2.0, True)
+    mixed = [{"role": "manager", "cost_usd": 2.0, "observed_cost_usd": None},
+             {"role": "planner", "cost_usd": None, "observed_cost_usd": .5}]
+    assert observed_cost(2.0, mixed) == (2.5, False)
+    priced = [{"role": "planner", "cost_usd": .4, "observed_cost_usd": .5}]
+    assert observed_cost(.4, priced) == (pytest.approx(.5), True)
     assert observed_cost(0.0, [*evidence, {"role": "manager", "observed_cost_usd": None}]) == (.75, False)
     assert observed_cost(0.0, [{"role": "manager", "observed_cost_usd": None}]) == (0.0, False)
+
+
+def test_a_dialogs_running_check_counts_observed_root_spend():
+    from evals.prompt_regression import dialogs
+
+    class Api:
+        def get(self, path, **params):
+            if path == "/api/llm-records":
+                return {"records": [{"id": 1, "status": "completed", "cost_usd": None}]}
+            return {"events": [{"seq": 1, "event": {"type": "result", "observed_cost_usd": 1.2}}]}
+
+    seen: dict[int, float] = {}
+    assert dialogs._root_overrun(Api(), seen) == pytest.approx(1.2)
+    assert dialogs._root_overrun(Api(), seen) == pytest.approx(1.2)
