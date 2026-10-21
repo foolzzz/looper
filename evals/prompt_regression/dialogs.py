@@ -758,6 +758,11 @@ def _make_light_profile(api: Api, project_id: str) -> None:
     _subscription_profile(api, LIGHT, "haiku", None)
 
 
+def _enable_stop(api: Api, project_id: str) -> None:
+    """Stopping a reply is off by default (Settings → Chat): the stop dialog turns it on for its own server."""
+    api.put("/api/chat-settings", {"stop_enabled": True})
+
+
 def _restrict_planner_choices(api: Api, project_id: str) -> None:
     """The project's Planners may choose LIGHT only: an empty list allows every profile, so adding to it would
     restrict the choice instead of widening it."""
@@ -1388,7 +1393,7 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("列出所有项目，然后逐个查看每个项目最近的三个任务，最后汇总。", _was_stopped,
             (("looper_projects", {"action": "list"}), ("__hold__", {})), stop=True),
         Say("刚才停在哪了？", _knows_it_was_stopped),
-    ), tags=("stop",)),
+    ), seed=_enable_stop, tags=("stop",)),
     Dialog("config_export", (
         Say("把 Looper 的配置导出成一个文件，包括项目和它们的定时任务。", _exported,
             (("looper_config_export", {"include_projects": True}),)),

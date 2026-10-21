@@ -407,6 +407,16 @@ class TurnStopped(Exception):
         self.partial = partial
 
 
+class TurnFailed(RuntimeError):
+    """The turn failed with what the user is told, as written (the runtime cannot start); ``error`` is why, for the
+    chat's status line. Raised, not returned: the turn is answered as failed, so a queue staged behind it is not
+    sent."""
+
+    def __init__(self, reply: str, error: str) -> None:
+        super().__init__(reply)
+        self.reply, self.error = reply, error
+
+
 def stopped_reply(partial: str, blocks: list[str]) -> str:
     """The reply of a stopped turn: what was written, marked as stopped; a line of its own when nothing was."""
     if not partial.strip():
@@ -705,6 +715,10 @@ class ManagerAgent:
         except Exception as exc:
             if turn.refused:
                 response = ""  # answered below: the tools did not work
+            elif isinstance(exc, TurnFailed):
+                logger.error("manager failed to answer %s: %s", envelope.message_id, exc.error)
+                await self._send_reply(envelope, _with_blocks(exc.reply, turn.blocks), error=exc.error)
+                return
             else:
                 # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
                 logger.exception("manager failed to answer %s", envelope.message_id)
@@ -977,10 +991,9 @@ class ManagerAgent:
                     if self._stop_requested:  # asked while it was started: the turn ends stopped, as it would have
                         await self._finish_stopped_early(recorder, ops_turn)
                         raise TurnStopped() from None
-                    await recorder.finish(output_text=None, result_event=None,
-                                          error=f"Cannot start {launch.runtime.label}: {exc}")
-                    # Raised, not returned: the turn is answered as failed, so a queue staged behind it is not sent.
-                    raise RuntimeError(f"无法启动 {launch.runtime.label}，请检查安装。") from None
+                    error = f"Cannot start {launch.runtime.label}: {exc}"
+                    await recorder.finish(output_text=None, result_event=None, error=error)
+                    raise TurnFailed(f"无法启动 {launch.runtime.label}，请检查安装。", error) from None
                 if self._claude.command != command:
                     # A per-turn runtime may materialize its owner's home at start.
                     command = self._claude.command

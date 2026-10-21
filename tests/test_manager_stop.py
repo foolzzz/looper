@@ -618,6 +618,9 @@ def test_a_failed_process_start_replies_failed(agent_db: Any) -> None:
             assert session.turns == []
             (reply,) = _replies(queue)
             assert reply["outcome"] == "failed" and "无法启动" in reply["text"]
+            # As written, naming the runtime: not wrapped as the Manager's own error.
+            assert reply["text"] == "无法启动 Claude Code，请检查安装。"
+            assert reply["error"] == "Cannot start Claude Code: no such executable"
             await bus.shutdown()
 
     asyncio.run(run())

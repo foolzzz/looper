@@ -298,7 +298,11 @@ class ManagerOps:
 
     def begin_turn(self, turn: Turn) -> str:
         """``turn`` runs now; the note its message starts with when an operation in its chat waits for the user's
-        word ('' otherwise). That operation may be confirmed in this turn only."""
+        word ('' otherwise). That operation may be confirmed in this turn only.
+
+        A turn begun again after it ended is live again, and its calls run; one the user stopped stays stopped."""
+        if turn.state is TurnState.ENDED:
+            turn.state = TurnState.ANSWERING
         self._turn = turn
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
