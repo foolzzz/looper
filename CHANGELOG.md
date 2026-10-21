@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.4] - 2026-10-20
+
+### Changed
+
+- **Pipeline hover cards show each run's agent runtime and model.** The Worker, Reviewer and Planner lines gain an Agent fact (runtime, model, effort) from the latest run of that role, and of that step for Worker and Reviewer; it appears only when such a run exists. The task page now reads the task's Planner, Worker and Reviewer runs once through a shared hook, also used by the Agents tab, so it makes those `GET /api/llm-records` requests even when the Agents tab is closed. Dashboard-only; no API, prompt, tool or model-facing text changed. ([#274](https://github.com/foolzzz/looper/pull/274))
+
+### Validation
+
+- Reported in #274: vitest for the cards and node card component, tsc, headless-browser screenshots, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.4.md).
+
 ## [2.13.3] - 2026-10-20
 
 ### Changed
