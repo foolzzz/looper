@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -586,7 +587,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
-    from looper.db import agent_sessions, journal as db_journal, plans, step_workspaces, task_changes, tasks
+    from looper.db import agent_sessions, connection as db_connection, journal as db_journal, plans, step_workspaces, task_changes, tasks
     from looper.db import user_gates, waits as db_waits
 
     db.store = store = _PlanStore()
@@ -617,6 +618,12 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(side_effect=method)
         monkeypatch.setattr(module, function, mock)
         setattr(db, name, mock)
+    # A transaction on the in-memory store: its writes go straight to the store, the connection is a placeholder.
+    @contextlib.asynccontextmanager
+    async def _transaction() -> Any:
+        yield None
+
+    monkeypatch.setattr(db_connection, "transaction", _transaction)
     # The Planner imports this one by name rather than through its module.
     monkeypatch.setattr(planner_module, "update_task_phase", db.update_task_phase)
     # Agent tests never ask the loop which waits are ready; that read stays off the real database and on the

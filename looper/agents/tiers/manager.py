@@ -42,7 +42,7 @@ from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..supervisor import cancel_and_wait
-from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settings
+from ..agent_settings import AgentSettings, AgentType, Launch, Layer, load_agent_settings
 from ..session_profile import (
     Effect, ProfileCommandKind, ProfileRefError, SessionProfileResult, choices as profile_choices, display_name,
     effect as profile_effect, format_list, parse_profile_command, resolve_ref,
@@ -87,6 +87,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
+from ...db import connection as db_connection
 from ...db import role_configs as db_role_configs
 from ...db import tasks as db_tasks
 from ...db import chat as db_chat
@@ -222,6 +223,22 @@ HANDOFF_TIMEOUT_SEC = 300
 # The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
+class ProfileUnavailable(RuntimeError):
+    """The Agent Profile the Manager would run cannot launch; ``source`` is the layer that gave it."""
+
+    def __init__(self, message: str, source: Layer) -> None:
+        super().__init__(message)
+        self.source = source
+
+    def hint(self) -> str:
+        """What the user can do about it, for the layers they can change from the chat."""
+        if self.source is Layer.SESSION:
+            return "\n\n发送 /profile 换一个 Agent Profile，或 /profile 0 跟随设置。"
+        if self.source is Layer.ROLE:
+            return "\n\n发送 /profile 选另一个 Agent Profile。"
+        return ""
+
+
 NEW_SESSION_REPLY = "已开始新的 Manager 会话，下一条消息从全新的上下文开始。"
 # The answers to /profile, by what the choice does to the saved session ({name}: the profile's display name).
 _PROFILE_SHARED = "所有渠道共用这条会话。"
@@ -420,10 +437,11 @@ class ManagerAgent:
         except Exception:
             logger.exception("manager: failed to save its session")
 
-    async def _write_session_state(self) -> None:
+    async def _write_session_state(self, pool: Any = None) -> None:
         await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
                                              runtime_type=self._session_runtime, provider_id=self._session_provider,
-                                             profile_id=self._session_profile, clean_start=self._clean_start)
+                                             profile_id=self._session_profile, clean_start=self._clean_start,
+                                             pool=pool)
 
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
@@ -537,8 +555,9 @@ class ManagerAgent:
             else:
                 # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
                 logger.exception("manager failed to answer %s", envelope.message_id)
-                await self._send_reply(envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{exc}", turn.blocks),
-                                       error=str(exc))
+                hint = exc.hint() if isinstance(exc, ProfileUnavailable) else ""
+                await self._send_reply(
+                    envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{exc}{hint}", turn.blocks), error=str(exc))
                 return
         if turn.refused:
             problem = "Looper 拒绝了管家工具的令牌"
@@ -670,8 +689,8 @@ class ManagerAgent:
         if not self._session_loaded:
             await self._load_session_state()
         agent_settings = await self._load_agent_settings()
-        if agent_settings.profile_error:
-            raise RuntimeError(agent_settings.profile_error)  # answered as an error; never another profile
+        if agent_settings.profile_error:  # answered as an error; never another profile
+            raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         system_prompt = self._composed_prompt(agent_settings)
         library = await load_installed(self._runtime_root, AgentType.MANAGER.value)
         if self.ops is not None:
@@ -897,7 +916,17 @@ class ManagerAgent:
         resume brief; record the reset as a run and confirm it in the chat it came from. A turn under way finishes
         first. Tasks and their Planners are not touched."""
         origin = _message_origin(envelope)
+        chosen = envelope.payload.get("new_session_profile_id") or None
         async with self._turn_lock:
+            name = None
+            if chosen is not None:
+                try:
+                    candidate = await self._selectable_profile(chosen)
+                    name = display_name({"name": candidate.name, "effort": candidate.effort})
+                except Exception as exc:
+                    # Nothing is reset: the session and its Claude stay as they were.
+                    await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
+                    return
             if not self._session_loaded:
                 await self._load_session_state()
             # First: what a stopping Claude still writes (a turn of its own ending) saves the old session again.
@@ -905,7 +934,9 @@ class ManagerAgent:
             previous = self._session_id, self._session_totals, self._clean_start
             self._session_id, self._session_totals, self._clean_start = None, Usage(), True
             try:
-                await self._write_session_state()
+                async with db_connection.transaction() as conn:
+                    await self._write_session_state(conn)
+                    await db_agent_sessions.select_profile(self.agent_id, chosen, pool=conn)
             except Exception as exc:
                 # Nothing is dropped: the next message resumes the saved session in a new process.
                 self._session_id, self._session_totals, self._clean_start = previous
@@ -915,13 +946,13 @@ class ManagerAgent:
             self._pending_switch = self._pending_handoff = None
             if self.ops is not None:
                 self.ops.forget_confirmations()
-            await self._record_new_session(envelope, origin, previous[0])
+            await self._record_new_session(envelope, origin, previous[0], chosen)
         logger.info("manager: a new session on /new from %s (sender %s); the previous one was %s",
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
-        await self._send_reply(envelope, NEW_SESSION_REPLY)
+        await self._send_reply(envelope, NEW_SESSION_REPLY + (f"这次会话用「{name}」。" if name else ""))
 
     async def _record_new_session(self, envelope: MessageEnvelope, origin: dict[str, Any],
-                                  previous: str | None) -> None:
+                                  previous: str | None, chosen: str | None = None) -> None:
         """The reset as one of the Manager's runs, under the session it ended (``metadata.session_reset``: who
         asked, from which channel and chat); a database error is logged, as for any run."""
         try:
@@ -929,7 +960,8 @@ class ManagerAgent:
                 await self._load_agent_settings(), role=AgentType.MANAGER)
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=previous, input_text=str(envelope.payload.get("text", "")),
-                metadata={**launch.record(), "session_reset": {**origin, "previous_session_id": previous}},
+                metadata={**launch.record(), "session_reset": {
+                    **origin, "previous_session_id": previous, "selected_profile_id": chosen}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=NEW_SESSION_REPLY,
                                                cost_usd=0.0, duration_ms=0)
@@ -990,17 +1022,7 @@ class ManagerAgent:
                 raise RegistryError(settings.profile_error or settings.error or "cannot read the settings")
             candidate = settings.profile
         else:
-            await check_selection(profile_id, [AgentType.MANAGER.value])
-            from ...db import profile_registry as db_registry
-
-            row = await db_registry.get_profile(profile_id)
-            try:
-                candidate = ResolvedAgentProfile.from_row(row)
-            except Exception as exc:
-                raise RegistryError(f"Agent Profile {profile_id!r} has no valid model binding ({exc})") from None
-            problem = await profile_launch_problem(candidate, AgentType.MANAGER)
-            if problem:
-                raise RegistryError(problem)
+            candidate = await self._selectable_profile(profile_id)
         name = display_name({"name": candidate.name, "effort": candidate.effort})
         if profile_id == previous:
             return SessionProfileResult(Effect.CURRENT, profile_id, name, previous,
@@ -1018,6 +1040,21 @@ class ManagerAgent:
         logger.info("manager: Agent Profile of its session %s -> %s (%s) via %s from %s",
                     previous or "settings", profile_id or "settings", change.value, via, origin.get("channel"))
         return SessionProfileResult(change, profile_id, name, previous, text)
+
+    async def _selectable_profile(self, profile_id: str) -> Any:
+        """The profile ``profile_id`` names when it can serve and launch the Manager now; else ``RegistryError``."""
+        await check_selection(profile_id, [AgentType.MANAGER.value])
+        from ...db import profile_registry as db_registry
+
+        row = await db_registry.get_profile(profile_id)
+        try:
+            candidate = ResolvedAgentProfile.from_row(row)
+        except Exception as exc:
+            raise RegistryError(f"Agent Profile {profile_id!r} has no valid model binding ({exc})") from None
+        problem = await profile_launch_problem(candidate, AgentType.MANAGER)
+        if problem:
+            raise RegistryError(problem)
+        return candidate
 
     async def _record_profile_choice(self, previous: str | None, profile_id: str | None, change: Effect,
                                      origin: dict[str, Any], via: str, text: str, input_text: str) -> None:
