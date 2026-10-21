@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.21] - 2026-10-21
+
+### Fixed
+
+- **Task run rows and dashboard polling.** `GET /api/tasks/<id>/runs` rows gain `task_role` (the role the run's Planner defined, else null), read from the run's `prompt_layers`; the dashboard restores it, so slim runs no longer lose it. The Context usage panel, the task Room and the Gate thread pass the polling abort signal to their requests, so a stopped poll cancels its request, and the Gate thread has one reader (polling when following, else one read per change) instead of a first read racing the poll. No prompt, tool schema or tool result changed. ([#345](https://github.com/foolzzz/looper/pull/345))
+
 ## [2.13.20] - 2026-10-21
 
 ### Fixed
