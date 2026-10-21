@@ -18,6 +18,23 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.9] - 2026-10-21
+
+### Added
+
+- **Answer and end user gates from a chat with `/gates` and `/gate`.** In a Lark or Telegram chat, `/gates` lists the user gates that wait for the user (a private chat: all of them; a group: that group's) as a numbered list, and `/gate N <answer>` and `/gate N end` add the answer to, or end, gate N. Looper answers these itself before the Manager's model; the numbers refer to the last list delivered to that chat (one hour, per sender), so a number never lands on another gate. A reply under a gate's card with exactly `end` (or `/end`) ends the gate. Telegram registers `/gates` and `/gate` in its menu and help. ([#277](https://github.com/foolzzz/looper/pull/277))
+
+### Changed
+
+- Code-written receipts now follow an answer that reaches a gate (including a reply under a gate's card, which was silent before): "delivered to <task> <step>", "asked the Planner to end it on what is settled", or, for a stopped task, that the answer is saved for when it continues. ([#277](https://github.com/foolzzz/looper/pull/277))
+- No model-visible change: the commands and their replies are not stored in the Manager's chat history or shown to its model.
+
+### Validation
+
+- Reported in #277: unit tests for the commands, scopes, numbering, end, receipts and the Telegram handlers; the full local suite before the merge; Codex and Grok reviews with no P0. Not tested on a real Lark or Telegram chat. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.9.md).
+
 ## [2.13.8] - 2026-10-21
 
 ### Added
