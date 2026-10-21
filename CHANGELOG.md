@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Changed
+
+- **Stopping a reply, v2 (still behind `chat.stop_enabled`, off by default).** A stop now covers the whole turn from the moment a message is received, not only once the model runs ([RFC](docs/architecture/rfcs/chat-stop-v2.zh-CN.md)).
+  - A message waiting in the queue can be stopped (it used to answer `other_message`); `/stop` stops the chat's running and queued messages.
+  - Tool calls that arrive after a stop are always refused; on resident runtimes a write call that does not match a tool call in its own turn's stream is refused with `not_this_turn`. Each call is bound to its turn through a binding file the MCP bridge reads (`X-Looper-Turn`).
+  - A message stopped before the model saw it leaves no Runs record, and the next turn is told it was withdrawn. A stopped turn is recorded `interrupted` with the phase and method of the stop; a stop whose usage is wholly unknown records `null` and shows "usage not reported" instead of 0.
+
 ## [2.13.15] - 2026-10-21
 
 ### Added

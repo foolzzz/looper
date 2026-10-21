@@ -207,9 +207,9 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
   - 回复期间按 Enter，消息进入输入框上方的暂存区（最多 20 条），不发出。回复正常结束（`answer.final` 的 `outcome` 为 `answered`）后，暂存的消息用空行连成一条消息发出一次；回复出错、被停止或在等用户确认时不发，暂存的消息回到输入框里。暂存区按聊天存在 `sessionStorage`，刷新页面不丢
   - ↑（光标在第一行、没有选中文字）或暂存区的 Edit 按钮把暂存的消息拉回输入框，排在已输入文字之前
   - 暂存区为空时，↑、↓ 翻看这个线程里用户自己发过的消息（最近 100 条，相邻重复合并）；Esc 或翻到底的 ↓ 回到原来输入的文字
-  - 停止管家当前的回复：回复期间按 Esc，或点输入框为空时代替发送的 Stop 按钮（`POST /api/chat/stop`），也可以直接发 `/stop`。刷新页面后用 `GET /api/chat/turn` 判断回复是否还在跑。规划者的聊天有暂存和历史，没有 Stop
+  - 停止管家当前的回复：回复期间按 Esc，或点输入框为空时代替发送的 Stop 按钮（`POST /api/chat/stop`），也可以直接发 `/stop`。排队中还没开始的消息也能停（页面上撤回）。刷新页面后用 `GET /api/chat/turn` 判断回复是否还在跑。规划者的聊天有暂存和历史，没有 Stop
   - 触屏上没有方向键和 Esc，靠按钮：Queue、Stop、Edit，点击区域不小于 44 px；触屏上的历史翻看暂未提供
-- 任何渠道发来的消息只要正好是 `/stop`（去掉首尾空白，不分大小写），就停止管家正在回答这个聊天的那一轮：它不进管家的消息队列（不然要等被停的那一轮结束才轮到），由 Looper 自己回复，不交给 Claude。被停的一轮记为 `interrupted`，保留已输出的文字、已花费的用量和会话；下一轮开头有一句 `[Looper]` 说明用户停止了上一次回复，工具调用不会撤销；这一轮里等用户确认的操作作废
+- 任何渠道发来的消息只要正好是 `/stop`（去掉首尾空白，不分大小写），就停止管家正在回答这个聊天的那一轮：它不进管家的消息队列（不然要等被停的那一轮结束才轮到），由 Looper 自己回复，不交给 Claude。被停的一轮记为 `interrupted`，保留已输出的文字、已花费的用量和会话；下一轮开头有一句 `[Looper]` 说明用户停止了上一次回复，工具调用不会撤销；这一轮里等用户确认的操作作废。`/stop` 停这个聊天正在答的和排队的所有消息；模型没看到就被停的消息不产生运行记录，下一轮带一句「用户撤回了一条消息」的说明。Runs 页上被停的一轮显示 `interrupted`，并带停止时的阶段（phase）和中断方式（method：`control`、`cancel`、`kill`，进程没起来时为空）；用量完全未知的停止（如被杀的 Codex）显示「usage not reported」，花费记 null 而不是 0。停止之后迟到的工具调用一律拒绝，常驻运行时上和这一轮流里对不上的写调用也被拒绝（`not_this_turn`）。整个停止功能仍在 `chat.stop_enabled` 后面（默认关）
 - 选中 Manager 时，左侧按渠道（Dashboard chat、Lark、Telegram）列出它的对话（`GET /api/chat/sessions`，不含 Planner 线程），每条显示最后一条消息的开头和时间；选网页对话就接着在那个线程里聊，选 Lark 或 Telegram 的对话只读显示历史，没有输入框。窄屏时列表收进标题栏的按钮里。每个对话只取最新的 200 条消息（`GET /api/chat/messages`），更早的不翻页
 - 任何渠道发来的消息只要正好是 `/new`（去掉首尾空白，不分大小写），就由 Looper 自己处理、不交给 Claude：Manager 停掉常驻 Claude、丢掉保存的会话，下一条消息（不论来自哪个渠道）开新会话，不带续接简报；重置记成一次运行。Manager 聊天顶部的「New session」按钮打开一个面板：先选新会话用的 Agent Profile（默认「Follow Settings」，不能启动的 Profile 置灰并写明原因），再点「Start new session」，发出 `/new`，选了 Profile 时同时带 `new_session_profile_id`；`/new` 总会清掉会话原来的选择。
 - Manager 聊天顶部的「Agent:」控件显示这个会话现在用的 Agent Profile 和来源（「this session」或「Settings」），下拉框切换它（`GET /api/manager/session`、`PUT /api/manager/session/profile`，与对话里的 `/profile` 同一条路径，「Follow Settings」即 `/profile 0`）。运行时或 provider 变了、切换之后要开新会话（先让当前会话写交接）时，先用 `confirm()` 说明；同一运行时和 provider 的切换直接续接，不确认。生效的 Profile 不能启动时，控件下面显示原因（`problem`）；列表里不能服务 Manager 的 Profile 置灰并带原因
