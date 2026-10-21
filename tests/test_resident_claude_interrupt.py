@@ -11,9 +11,10 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents import claude_cli
+from looper.agents import claude_cli, proc_tree
 from looper.agents.claude_cli import ResidentClaude
 from looper.agents.runtimes import StopMethod
+from looper.agents.runtimes.cancel import TurnCancel
 
 _OBEYS = """\
 import json, os, sys, time
@@ -297,7 +298,7 @@ def test_a_killed_turn_returns_only_after_its_process_tree_is_gone(
 ) -> None:
     monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.2)
     claude = fake_claude(tmp_path / "claude", _DEAF)
-    real_end = claude_cli.proc_tree.end
+    real_end = proc_tree.TurnTree.end
     ended: list[bool] = []
 
     async def slow_end(*args: Any, **kwargs: Any) -> Any:
@@ -307,7 +308,7 @@ def test_a_killed_turn_returns_only_after_its_process_tree_is_gone(
         finally:
             ended.append(True)
 
-    monkeypatch.setattr(claude_cli.proc_tree, "end", slow_end)
+    monkeypatch.setattr(proc_tree.TurnTree, "end", slow_end)
 
     async def _run() -> None:
         session = ResidentClaude(label="manager")
@@ -433,6 +434,220 @@ def test_an_interrupt_blocked_by_stdin_backpressure_still_kills_after_the_grace(
             assert pid is not None
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+# --- the turn's cancel (``run_turn(cancel=)``) ---
+
+# Logs each line it reads to ``inbox``; a user message starts a turn whose tool ``setsid``s a sleeper (its pid in
+# ``sleeper.pid``) and goes on; ``obey`` is its ``OBEY`` env: it answers an interrupt, else it is deaf to it. After
+# the interrupt it keeps writing text (``LATE``) and, with ``QUEUED``, a success result right behind its answer.
+_TOOL = """\
+import json, os, subprocess, sys, time
+def out(event):
+    print(json.dumps(event), flush=True)
+for raw in sys.stdin:
+    with open('inbox', 'a') as f:
+        f.write(raw)
+    message = json.loads(raw)
+    if message['type'] == 'control_request':
+        if os.environ.get('OBEY') != '1':
+            continue
+        out({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': message['request_id']}})
+        if os.environ.get('LATE'):
+            for _ in range(5):
+                out({'type': 'stream_event', 'event': {'type': 'content_block_delta',
+                     'delta': {'type': 'text_delta', 'text': 'late text'}}})
+                time.sleep(0.02)
+        if os.environ.get('QUEUED'):
+            out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'an answer', 'session_id': 's1',
+                 'total_cost_usd': 0.02, 'num_turns': 1})
+        else:
+            out({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'session_id': 's1',
+                 'total_cost_usd': 0.02, 'num_turns': 1})
+        continue
+    out({'type': 'system', 'subtype': 'init', 'session_id': 's1'})
+    if message['message']['content'] == 'work':
+        sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+        with open('sleeper.pid', 'w') as f:
+            f.write(str(sleeper.pid))
+        out({'type': 'stream_event', 'event': {'type': 'content_block_delta',
+             'delta': {'type': 'text_delta', 'text': 'working'}}})
+        continue
+    out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'pid=%d' % os.getpid(),
+         'total_cost_usd': 0.03, 'session_id': 's1', 'num_turns': 1})
+"""
+
+
+_ENV: dict[str, str] = {}
+
+
+def _gone(pid: int) -> bool:
+    return pid not in proc_tree._snapshot()
+
+
+async def _next_turn_answers(session: ResidentClaude, on_event: Any) -> Any:
+    return await asyncio.wait_for(session.run_turn("next", on_event), 5)
+
+
+def test_a_cancel_before_run_turn_writes_nothing_and_leaves_the_process(tmp_path: Path) -> None:
+    claude = fake_claude(tmp_path / "claude", _OBEYS)
+
+    async def _run() -> None:
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None)
+        pid = session.pid
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            cancel = TurnCancel()
+            cancel.request()
+            turn = await asyncio.wait_for(session.run_turn("work", on_event, cancel=cancel), 5)
+            assert turn.stopped is StopMethod.KILL and turn.prompt_sent is False
+            assert turn.result_event is not None and turn.result_event[claude_cli.USER_STOP]
+            assert seen == [] and session.started and session.pid == pid
+            assert pid is not None
+            os.kill(pid, 0)
+            assert session._output is not None and session._output.turn is None
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def _tool_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env: str) -> tuple[ResidentClaude, str]:
+    """A session and a stand-in; the session's ``start`` gets ``_ENV`` (the process' environment is filtered)."""
+    _ENV.clear()
+    _ENV.update({**os.environ, **env})
+    monkeypatch.setattr(claude_cli, "INTERRUPT_GRACE_SEC", 0.5)
+    monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
+    return ResidentClaude(label="manager"), fake_claude(tmp_path / "claude", _TOOL)
+
+
+async def _until_sleeper(tmp_path: Path) -> int:
+    await _until(lambda: (tmp_path / "sleeper.pid").exists() and (tmp_path / "sleeper.pid").read_text())
+    return int((tmp_path / "sleeper.pid").read_text())
+
+
+def test_an_obeyed_cancel_ends_the_tools_and_keeps_the_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1")
+
+    async def _run() -> None:
+        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
+        pid = session.pid
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            cancel = TurnCancel()
+            running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
+            sleeper = await _until_sleeper(tmp_path)
+            await _until_streaming(seen)
+            assert not _gone(sleeper)
+            cancel.request()
+            turn = await asyncio.wait_for(running, 5)
+            assert turn.stopped is StopMethod.CONTROL and turn.prompt_sent is True
+            assert session.started and session.pid == pid
+            assert _gone(sleeper)
+            _ENV["OBEY"] = "0"
+            again = await _next_turn_answers(session, on_event)
+            assert again.stopped is None and session.pid == pid
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_a_deaf_claude_is_killed_with_its_whole_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session, claude = _tool_session(tmp_path, monkeypatch)
+
+    async def _run() -> None:
+        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
+        pid = session.pid
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            cancel = TurnCancel()
+            running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
+            sleeper = await _until_sleeper(tmp_path)
+            await _until_streaming(seen)
+            started = time.monotonic()
+            cancel.request()
+            turn = await asyncio.wait_for(running, 5)
+            assert time.monotonic() - started < 3
+            assert turn.stopped is StopMethod.KILL and not session.started
+            assert pid is not None and _gone(pid) and _gone(sleeper)
+            await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)  # resumes the session
+            again = await _next_turn_answers(session, on_event)
+            assert again.stopped is None
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_nothing_of_a_stopped_turn_reaches_on_event_after_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1", LATE="1")
+
+    async def _run() -> None:
+        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            cancel = TurnCancel()
+            running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
+            await _until_streaming(seen)
+            await asyncio.sleep(0.1)
+            before = list(seen)
+            cancel.request()
+            turn = await asyncio.wait_for(running, 5)
+            assert turn.stopped is StopMethod.CONTROL
+            await asyncio.sleep(0.2)
+            assert seen == before
+        finally:
+            await session.stop(kill=True)
+
+    asyncio.run(_run())
+
+
+def test_a_result_queued_behind_the_control_request_is_not_an_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, claude = _tool_session(tmp_path, monkeypatch, OBEY="1", QUEUED="1")
+
+    async def _run() -> None:
+        await session.start([claude], cwd=str(tmp_path), signature=None, env=_ENV)
+        seen: list[dict[str, Any]] = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            cancel = TurnCancel()
+            running = asyncio.create_task(session.run_turn("work", on_event, cancel=cancel))
+            await _until_streaming(seen)
+            cancel.request()
+            turn = await asyncio.wait_for(running, 5)
+            assert turn.stopped is StopMethod.CONTROL
+            assert turn.result_event is not None and turn.result_event["result"] == "an answer"
+            assert not any(e.get("type") == "result" for e in seen)
         finally:
             await session.stop(kill=True)
 

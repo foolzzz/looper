@@ -385,9 +385,9 @@ def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
 # --- Claude Code: one resident stream-json process (``claude_cli.ResidentClaude``) ---
 
 # What the stand-in does with each user message is told by the message: ``mode:<window>``. ``obey`` in it makes it
-# answer an interrupt of a running turn (a control response, then the turn's error result) and end the tool it
-# started; else it is deaf to the interrupt. A ``stall`` file makes it stop reading its input after the message it is
-# answering.
+# answer an interrupt of a running turn (a control response, then the turn's error result; the tool it started,
+# a ``setsid`` sleeper, is left to the stop to end); else it is deaf to the interrupt. A ``stall`` file
+# makes it stop reading its input after the message it is answering.
 _CLAUDE = r"""
 import json, os, subprocess, sys, threading, time
 DIR = os.environ['STOP_MATRIX_DIR']
@@ -399,7 +399,7 @@ def out(event):
 put('pids', '%d\n' % os.getpid())
 state = {'running': False, 'tool': None, 'obey': False}
 def child():
-    c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+    c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)  # setsid
     put('pids', '%d\n' % c.pid)
     return c
 def result(text, ok=True):
@@ -431,9 +431,6 @@ for raw in sys.stdin:
     message = json.loads(raw)
     if message['type'] == 'control_request':
         if state['obey']:
-            if state['tool'] is not None:
-                state['tool'].kill()
-                state['tool'] = None
             out({'type': 'control_response', 'response': {'subtype': 'success',
                  'request_id': message['request_id']}})
             if state['running']:
@@ -471,14 +468,20 @@ def test_resident_claude_stop_in_every_window(
         first = await session.run_turn("hello", Seen())
         assert _answered(first), first.result_event
         process = session.pid
-        seen, stop = Seen(hold_at="result" if window == "done" else None), Stop()
+        seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
         text = BIG if window == "blocked" else f"mode:{window}{' obey' if obey else ''}"
-        running = asyncio.create_task(session.run_turn(text, seen, stop=stop))
+        running = asyncio.create_task(session.run_turn(text, seen, stop=stop, cancel=cancel))
+        via_interrupt = window == "tool" and obey  # the one cell stopped through ``interrupt()``
         try:
             if window == "done":
                 await asyncio.wait_for(seen.holding.wait(), BOUND)
                 pids = [int(p) for p in (directory / "pids").read_text().split()]
-                method, turn = await _interrupt_held(session, seen, stop, running)
+                stop.asked = True
+                cancel.request()
+                await asyncio.sleep(0.2)
+                seen.release.set()
+                turn = await asyncio.wait_for(running, BOUND)
+                method = turn.stopped
             else:
                 await _until(lambda: (directory / "reached").exists())
                 if window == "blocked":
@@ -488,8 +491,12 @@ def test_resident_claude_stop_in_every_window(
                     await asyncio.sleep(0.2)
                 pids = [int(p) for p in (directory / "pids").read_text().split()]
                 stop.asked = True
-                method = await asyncio.wait_for(session.interrupt(), BOUND)
+                if via_interrupt:
+                    method = await asyncio.wait_for(session.interrupt(), BOUND)
+                else:
+                    cancel.request()
                 turn = await asyncio.wait_for(running, BOUND)
+                method = turn.stopped
         finally:
             seen.release.set()
             running.cancel()
