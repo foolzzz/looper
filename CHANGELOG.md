@@ -18,12 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.16] - 2026-10-21
+
 ### Changed
 
-- **Stopping a reply, v2 (still behind `chat.stop_enabled`, off by default).** A stop now covers the whole turn from the moment a message is received, not only once the model runs ([RFC](docs/architecture/rfcs/chat-stop-v2.zh-CN.md)).
+- **Stopping a reply, v2 (still behind `chat.stop_enabled`, off by default).** A stop now covers the whole turn from the moment a message is received, not only once the model runs ([RFC](docs/architecture/rfcs/chat-stop-v2.zh-CN.md)). ([#337](https://github.com/foolzzz/looper/pull/337))
   - A message waiting in the queue can be stopped (it used to answer `other_message`); `/stop` stops the chat's running and queued messages.
   - Tool calls that arrive after a stop are always refused; on resident runtimes a write call that does not match a tool call in its own turn's stream is refused with `not_this_turn`. Each call is bound to its turn through a binding file the MCP bridge (and Pi's own bridge) reads (`X-Looper-Turn`). While `chat.stop_enabled` is off the binding only observes: no call is refused for it, and each mismatch is logged as `turn binding mismatch` and counted in `GET /api/status` (`turn_binding`); zero mismatches over real use is a criterion for turning Stop on.
   - A message stopped before the model saw it leaves no Runs record, and the next turn is told it was withdrawn. A stopped turn is recorded `interrupted` with the phase and method of the stop; a stop whose usage is wholly unknown records `null` and shows "usage not reported" instead of 0.
+
+- Model-visible: the turn after a stopped reply gets a `[Looper]` line that says either that the user stopped the previous reply (tool calls already made were not undone) or that they withdrew a message before the model saw it. A refused late or unmatched tool call returns the errors `stopped`, `expired` or `not_this_turn` to the model, and tool calls carry the turn's binding as the `X-Looper-Turn` header. No tool schema changed. ([#337](https://github.com/foolzzz/looper/pull/337))
+
+### Validation
+
+- Reported in #337: each card's tests including the runtime x window and Manager phase x runtime matrices, the full local suite before the merge, and Codex and Grok reviews that left no P0. The real-path stop check runs after the merge. CI runs after the release.
 
 ## [2.13.15] - 2026-10-21
 
