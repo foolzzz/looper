@@ -1,0 +1,16 @@
+{
+  "runtime": {
+    "type": "omp"
+  },
+  "provider": {
+    "name": "eval-deepseek",
+    "protocols": ["openai-chat"],
+    "auth": "api_key",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key_env": "LOOPER_EVAL_API_KEY"
+  },
+  "agent": {
+    "name": "omp/deepseek/deepseek-flash",
+    "model": "deepseek-flash"
+  }
+}

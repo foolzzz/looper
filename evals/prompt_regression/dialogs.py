@@ -109,6 +109,7 @@ class Look:
     fake: bool
     runtime_root: Path | None = None  # the server's, where a configuration export is written
     registry_before: dict[str, Any] | None = None
+    runs_since: int = 0  # the Manager's newest run record before the dialog (the session-profile dialogs only)
 
     def actions(self) -> list[dict[str, Any]]:
         return _trail(self.database_url, self.since)
@@ -137,6 +138,8 @@ class Say:
     # The stand-in Manager's calls: "<task>" is the dialog's task, "<task id>" the last task id an answer gave,
     # "<confirmation>" the confirmation id the note before the message names.
     fake: tuple[tuple[str, dict[str, Any]], ...] = ()
+    # The text computed from the previous turn's Look (``text`` is then only a label).
+    text_from: Callable[[Look], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -972,6 +975,129 @@ def _not_relayed(look: Look) -> str | None:
     return None
 
 
+# --- The Manager's session profile (/profile) ---
+
+SWITCH = "eval/switch"
+_SWITCH_NUMBER = re.compile(r"^\s*(\d+)\.\s*" + re.escape(SWITCH) + r"\b", re.MULTILINE)
+
+
+def _make_switch_profile(api: Api, project_id: str, *, fake: bool = True, spec: dict[str, Any] | None = None) -> None:
+    """Register SWITCH. Fake: Claude Code on a provider of its own (the stand-in ignores it, and another provider
+    makes the switch start a new session). Real: the login provider, which resumes; ``spec`` replaces both."""
+    if spec is not None:
+        register_agent(api, {**spec, "agent": {**spec["agent"], "name": SWITCH}})
+    elif fake:
+        provider = api.post("/api/providers", {"name": "eval-switch", "vendor_type": "custom", "api_key": FAKE_KEY,
+            "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://switch.example.invalid"}]})["provider"]
+        register_agent(api, {"runtime": {"type": "claude-code"}, "provider": {"provider_id": provider["provider_id"]},
+            "model": {"name": "haiku", "protocol": "anthropic-messages"}, "agent": {"name": SWITCH}})
+    else:
+        _subscription_profile(api, SWITCH, "haiku", None)
+
+
+def _manager_runs(look: Look) -> list[dict[str, Any]]:
+    """The Manager's runs since the dialog started, oldest first."""
+    records = look.api.get("/api/llm-records", agent_id="manager", limit=500)["records"]
+    return sorted((r for r in records if r["id"] > look.runs_since
+                   and not (r.get("metadata") or {}).get("autonomous")), key=lambda r: r["id"])
+
+
+def _input(record: dict[str, Any]) -> str:
+    return record.get("input_text") or record.get("input_summary") or ""
+
+
+def _is_switch(record: dict[str, Any]) -> bool:
+    return bool((record.get("metadata") or {}).get("session_profile"))
+
+
+def _answers(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in runs if not _is_switch(r) and not _input(r).startswith("[HANDOFF]")]
+
+
+def _switch_id(look: Look) -> str | None:
+    return next((p["profile_id"] for p in look.api.get("/api/registry")["profiles"] if p["name"] == SWITCH), None)
+
+
+def _profile_listed(look: Look) -> str | None:
+    if not _SWITCH_NUMBER.search(look.reply):
+        return f"the reply does not list {SWITCH} with a number"
+    started = _manager_runs(look)
+    return f"/profile started {len(started)} Manager run(s)" if started else None
+
+
+def _switch_text(look: Look) -> str:
+    found = _SWITCH_NUMBER.search(look.reply)
+    if found is None:
+        raise EvalError(f"no number for {SWITCH} in the reply")
+    return f"/profile {found.group(1)}"
+
+
+def _selected(look: Look) -> dict[str, Any] | None:
+    return look.api.get("/api/manager/session")["selected"]
+
+
+def _switch_selected(look: Look) -> str | None:
+    chosen = _selected(look)
+    if not chosen or chosen.get("name") != SWITCH:
+        return f"the session's selected profile is {chosen}, not {SWITCH}"
+    recorded = [r for r in _manager_runs(look) if _is_switch(r)]
+    if not recorded:
+        return "no Manager run records the choice"
+    if recorded[-1]["metadata"]["session_profile"].get("to") != _switch_id(look):
+        return f"the choice is recorded as {recorded[-1]['metadata']['session_profile']}"
+    return None
+
+
+def _answered_on_the_switch_profile(look: Look) -> str | None:
+    runs = _manager_runs(look)
+    answers = _answers(runs)
+    if not answers:
+        return "no Manager run answered"
+    answer = answers[-1]
+    profile = (answer.get("metadata") or {}).get("profile") or {}
+    wanted = _switch_id(look)
+    if profile.get("id") != wanted or profile.get("source") != "session":
+        return f"the answer ran on {profile.get('id')} from {profile.get('source')}, not {wanted} from session"
+    switched = [r for r in runs if _is_switch(r) and r["metadata"]["session_profile"].get("to") == wanted]
+    if switched and switched[-1]["metadata"]["session_profile"].get("effect") == "new_session":
+        handoffs = [r for r in runs if _input(r).startswith("[HANDOFF]") and r["id"] < answer["id"]]
+        if not handoffs:
+            return "no HANDOFF run precedes the answer in the new session"
+        if (handoffs[-1].get("metadata") or {}).get("profile", {}).get("id") == wanted:
+            return "the HANDOFF ran on the new profile, not the old one"
+        if not _input(answer).startswith("[RESUME]"):
+            return "the answer's input does not start with [RESUME]"
+    return _raw_json(look.reply)
+
+
+def _follows_settings(look: Look) -> str | None:
+    chosen = _selected(look)
+    return None if chosen is None else f"the session still has {chosen} selected"
+
+
+def _remembered_after_switching_back(look: Look) -> str | None:
+    if not look.fake and "TEAL-42" not in look.reply:
+        return "the reply lacks TEAL-42"
+    answers = _answers(_manager_runs(look))
+    if not answers:
+        return "no Manager run answered"
+    source = ((answers[-1].get("metadata") or {}).get("profile") or {}).get("source")
+    return "the answer still ran on the session's profile" if source == "session" else None
+
+
+def _switch_not_done_by_the_manager(look: Look) -> str | None:
+    if _writes(look):
+        return f"the Manager changed something: {[a['tool'] for a in _writes(look)]}"
+    chosen = _selected(look)
+    if chosen is not None:
+        return f"the session has {chosen} selected though only the user's /profile selects"
+    if look.fake:
+        return None
+    if claims_change(look.reply):
+        return "the reply claims the change was made"
+    return None if "/profile" in look.reply else "the reply does not point to /profile"
+
+
 _PROVIDER = {"action": "register", "name": "eval-deepseek", "vendor_type": "deepseek", "endpoints": [
     {"protocol": "anthropic-messages", "base_url": "https://api.deepseek.com/anthropic"}]}
 _DEEPSEEK_MODEL = {"action": "create", "provider": "eval-deepseek", "name": "deepseek-flash",
@@ -1208,6 +1334,17 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_config_export", {"include_projects": True, "include_secrets": True}),
              ("looper_config_export", {"include_projects": True}))),
     ), seed=lambda api, project_id: _make_schedule(api, project_id)),
+    Dialog("session_profile_switch", (
+        Say("/profile", _profile_listed),
+        Say("/profile <number>", _switch_selected, text_from=_switch_text),
+        Say("记住暗号 TEAL-42。然后告诉我现在有几个项目。", _answered_on_the_switch_profile,
+            (("looper_projects", {"action": "list"}),)),
+        Say("/profile 0", _follows_settings),
+        Say("刚才的暗号是什么？", _remembered_after_switching_back, (("looper_projects", {"action": "list"}),)),
+    ), seed=_make_switch_profile),
+    Dialog("session_profile_ask", (
+        Say(f"把这个会话的 Agent Profile 切到 {SWITCH}。", _switch_not_done_by_the_manager),
+    ), seed=_make_switch_profile),
 )
 
 
@@ -1317,7 +1454,9 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
             check_budget()
         for message in api.get("/api/chat/messages", session_id=session)["messages"]:
             if message.get("message_id") == f"{message_id}:reply":
-                _check_manager_run(api, since)
+                # A chat command such as /profile is answered by Looper itself, without a Manager run.
+                if not text.lstrip().startswith("/"):
+                    _check_manager_run(api, since)
                 return str(message.get("content") or "")
         time.sleep(1.0)
     raise ReplyTimeout(f"no reply to {text!r} within {timeout:g} s")
@@ -1430,7 +1569,8 @@ def _stop_leftovers(api: Api) -> None:
 
 
 def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, scenarios: Path, mode: str,
-               timeout: float, runtime_root: Path | None = None, cap_left: float | None = None) -> dict[str, Any]:
+               timeout: float, runtime_root: Path | None = None, cap_left: float | None = None,
+               switch_spec: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run ``dialog`` on the server it has to itself; its row without its cost (read once the server stopped).
     No reply within ``timeout`` is an error of class ``timeout``, and any other exception, such as the slow task
     not getting under way, one of class ``harness``; the turns after an error are not sent. With ``cap_left``,
@@ -1453,7 +1593,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             open_gate(database_url, task)
         if dialog.schedule:
             _make_schedule(api, project_id)
-        if dialog.seed is not None:
+        runs_since = 0
+        if dialog.seed is _make_switch_profile:
+            _make_switch_profile(api, project_id, fake=mode == "fake", spec=switch_spec)
+            runs_since = max((r["id"] for r in api.get("/api/llm-records", agent_id="manager",
+                                                       limit=1)["records"]), default=0)
+        elif dialog.seed is not None:
             dialog.seed(api, project_id)
         if dialog.id == "model_price_history":
             _price_history(database_url, seed=True)
@@ -1463,8 +1608,10 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             "model_login_runtime", "model_missing_endpoint"} else None
         session = f"eval-{dialog.id}-{uuid.uuid4().hex[:6]}"
         known = frozenset(t["task_id"] for t in api.get("/api/tasks")["tasks"])
+        previous: Look | None = None
         for say in dialog.says:
-            text = say.text.replace("<task>", task or "")
+            text = say.text_from(previous) if say.text_from and previous else say.text
+            text = text.replace("<task>", task or "")
             if mode == "fake":
                 data = json.loads(scenarios.read_text(encoding="utf-8"))
                 data.setdefault("manager", {})[text] = [[name, json.loads(json.dumps(arguments).replace(
@@ -1472,9 +1619,9 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url)
             reply = _ask(api, session, text, timeout=timeout, **budget_args)
-            problem = say.check(Look(api, task, reply, database_url, since, known,
-                                     fake=mode == "fake", runtime_root=runtime_root,
-                                     registry_before=registry_before))
+            previous = Look(api, task, reply, database_url, since, known, fake=mode == "fake",
+                            runtime_root=runtime_root, registry_before=registry_before, runs_since=runs_since)
+            problem = say.check(previous)
             trail = _trail(database_url, before)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
                      for a in trail]
@@ -1557,7 +1704,7 @@ def run(
     agent: str | None = None, register: dict[str, Any] | None = None, max_budget_usd: float | None = None,
     total_cap_usd: float | None = None, timeout: float | None = None, keep_work_dirs: bool = False,
     manager_model: str | None = None, manager_effort: str | None = None, reps: int = 1, jobs: int = 1,
-    case_budget_usd: float | None = None,
+    case_budget_usd: float | None = None, switch_agent: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``dialogs`` ``reps`` times each in ``mode``, rep-major, ``jobs`` at a time, each (dialog, rep) on a
     database, a server, a working directory and a project of its own (``runner.run``'s setup); the run and the JSON file written to
@@ -1615,7 +1762,8 @@ def run(
                                           {"name": PROJECT, "work_dir": str(work_dir)})["project_id"]
                     row = run_dialog(api, dialog, database_url=database_url, project_id=project_id,
                                      scenarios=scenarios, mode=mode, timeout=timeout,
-                                     runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None)
+                                     runtime_root=case / "runtime", cap_left=cap_left if jobs > 1 else None,
+                                     switch_spec=switch_agent)
                     if mode == "real" and register is not None and register.get("runtime", {}).get("type") == "dsh":
                         row["runtime_evidence"] = runtime_evidence(api)
                 cost, models = _usage(database_url)
