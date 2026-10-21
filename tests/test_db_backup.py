@@ -484,6 +484,19 @@ def test_a_docker_backup_is_dumped_and_listed_inside_the_container(tmp_path, mon
     assert path.read_bytes() == b"PGDMP docker"
 
 
+def test_the_derived_verifier_expands_placeholders_in_the_container(tmp_path, monkeypatch):
+    calls = _install_docker(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    command = ["docker", "exec", "{dbname}", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
+    dumper = db_backup.find_dumper(16, _ops_file(tmp_path, {"command": command}))
+
+    _, checked = db_backup.back_up(dumper, "postgresql://alice@127.0.0.1:1/loopx", tmp_path / "backups")
+
+    assert checked == "listed with docker exec -i loopx pg_restore --list"
+    _, listing = _docker_calls(calls)
+    assert listing["argv"] == ["exec", "-i", "loopx", "pg_restore", "--list"]
+
+
 def test_an_explicit_verify_command_wins_over_the_derived_one(tmp_path, monkeypatch):
     calls = _install_docker(tmp_path / "bin")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))

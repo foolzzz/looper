@@ -225,8 +225,12 @@ def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetim
     archive; the partial file is removed.
     """
     bare_dsn, password, dbname, user = _connection(dsn)
+
+    def fill(text: str) -> str:
+        return _PLACEHOLDER.sub(lambda m: dbname if m.group(1) == "dbname" else user, text)
+
     if dumper.command:
-        argv = [_PLACEHOLDER.sub(lambda m: dbname if m.group(1) == "dbname" else user, arg) for arg in dumper.argv]
+        argv = [fill(arg) for arg in dumper.argv]
         env = child_env.backup()
     else:
         argv = [*dumper.argv, "--format=custom", "--no-password", f"--dbname={bare_dsn}"]
@@ -247,8 +251,8 @@ def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetim
         if dump.returncode != 0:
             reason = _tail(dump.stderr.decode("utf-8", "replace"), password=password)
             raise BackupFailed(f"`{argv[0]}` exited with {dump.returncode}: {reason or 'no message'}")
-        checked = _verify(partial, dumper.pg_restore, password=password, verify=dumper.verify,
-                         verify_label=dumper.verify_label)
+        checked = _verify(partial, dumper.pg_restore, password=password, verify=tuple(fill(arg) for arg in dumper.verify),
+                         verify_label=fill(dumper.verify_label))
         os.replace(partial, path)
     except BaseException:
         partial.unlink(missing_ok=True)
