@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.2] - 2026-10-20
+
+### Fixed
+
+- **CI runs the legacy parity tests on a shallow-clone runner.** The `Agent system tests` job checks out the full history, and the Claude Code launch parity test no longer depends on the host's temporary-root ancestors (`/private/tmp` on macOS, `/tmp` on Linux). CI workflow and test-only change; no product or model-visible change. ([#270](https://github.com/foolzzz/looper/pull/270), follow-up of [#267](https://github.com/foolzzz/looper/issues/267))
+
+### Validation
+
+- Retained #270 report: targeted tests on a disposable PostgreSQL passed; no local full-suite run or review record is reported. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.2.md).
+
 ## [2.13.1] - 2026-10-20
 
 ### Fixed
