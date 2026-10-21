@@ -18,6 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.17] - 2026-10-21
+
+### Fixed
+
+- **A per-turn runtime turn no longer waits on a grandchild that holds a pipe open.** After the turn's output ended, the turn waited for the child with `Process.wait()`, which also waits for every pipe to close; a grandchild keeping stderr open delayed the turn until it exited. The turn now waits only for the child's own exit. This is the one change in the `looper` package and it applies whether or not `chat.stop_enabled` is on. ([#346](https://github.com/foolzzz/looper/pull/346))
+
+### Changed
+
+- Tests only: fixes for tests that failed only on the CI runner (the shared database counting a constraint once per schema, the model launch parity check on temp-root ancestors such as `/private/tmp`, and timing races in the Pi steer, per-turn interrupt and Grok fallback stop-matrix tests). No model-visible change. ([#346](https://github.com/foolzzz/looper/pull/346))
+
+### Validation
+
+- Reported in #346: the card's tests, the full local suite before the merge, and Codex and Grok reviews that left no P0. CI runs after the release.
+
 ## [2.13.16] - 2026-10-21
 
 ### Changed
