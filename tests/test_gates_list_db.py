@@ -149,7 +149,7 @@ def test_row_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize("query", [
     {"state": "bogus"}, {"waiting_on": "user", "state": "closed"}, {"waiting_on": "nobody"},
-    {"limit": "0"}, {"limit": "201"}, {"offset": "-1"}, {"offset": "x"},
+    {"limit": "0"}, {"limit": "201"}, {"offset": "-1"}, {"offset": "x"}, {"limit": "²"}, {"offset": "²"},
 ])
 def test_bad_queries_are_refused(monkeypatch: pytest.MonkeyPatch, query: dict[str, str]) -> None:
     async def test(pool: Any) -> None:
