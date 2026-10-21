@@ -344,7 +344,7 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     project_id, project_name}`` (system, then roles, then projects by name), ``task_count``, how many tasks
     chose it for one of their roles, ``schedule_count``, how many schedules did, and ``allowed_in``, the names of
     the projects whose Planners may choose it (a Planner's choice counts only while its project allows it, so it is
-    not counted). A profile nothing selects is not in the result."""
+    not counted), and ``manager_session``, whether the Manager's current session selects it. A profile nothing selects is not in the result."""
     pool = pool or get_pool()
     layers = await pool.fetch(
         "SELECT l.profile_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
@@ -365,10 +365,15 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         "SELECT profile_id, count(DISTINCT schedule_id) AS n FROM schedule_profile_overrides "
         "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
     )
+    manager = await pool.fetch(
+        "SELECT selected_profile_id FROM agent_sessions WHERE agent_id = 'manager' "
+        "AND selected_profile_id IS NOT NULL AND ($1::text IS NULL OR selected_profile_id = $1)", profile_id,
+    )
     uses: dict[str, dict[str, Any]] = {}
 
     def use(profile: str) -> dict[str, Any]:
-        return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []})
+        return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
+                                         "manager_session": False})
 
     for row in layers:
         use(row["profile_id"])["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
@@ -378,6 +383,8 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         use(row["profile_id"])["schedule_count"] = row["n"]
     for row in allowed:
         use(row["profile_id"])["allowed_in"].append(row["name"])
+    for row in manager:
+        use(row["selected_profile_id"])["manager_session"] = True
     return uses
 
 

@@ -41,6 +41,15 @@ async def get_session(
             "selected_profile_id": row["selected_profile_id"]}
 
 
+async def selects_profile(
+    agent_id: str, profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> bool:
+    """Whether ``agent_id``'s current session has ``profile_id`` selected."""
+    pool = pool or get_pool()
+    return bool(await pool.fetchval(
+        "SELECT 1 FROM agent_sessions WHERE agent_id = $1 AND selected_profile_id = $2", agent_id, profile_id))
+
+
 async def select_profile(
     agent_id: str, profile_id: str | None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> None:
