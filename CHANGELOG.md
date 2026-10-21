@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.3] - 2026-10-20
+
+### Changed
+
+- **The dashboard sidebar shows the running Looper version.** `GET /api/overview` gains a `version` field (the installed `looper.__version__`), and the sidebar shows it as a small muted label next to "Looper". A client talking to an older server shows no label. The overview response gains a field; no prompt, tool or model-facing text changed. ([#272](https://github.com/foolzzz/looper/pull/272))
+
+### Validation
+
+- Reported in #272: overview API test, sidebar vitest and tsc, the full local suite before the merge, and Codex and Grok reviews with no P0. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.3.md).
+
 ## [2.13.2] - 2026-10-20
 
 ### Fixed
