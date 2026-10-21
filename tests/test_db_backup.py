@@ -513,6 +513,28 @@ def test_an_explicit_verify_command_serves_a_local_pg_dump_without_pg_restore(tm
     assert any("LOOPER_BACKUP_VERIFY_CMD in the environment is deprecated" in warning for warning in ops.warnings)
 
 
+def test_a_verify_command_timeout_does_not_leak_its_argv(tmp_path, monkeypatch):
+    _install_docker(tmp_path / "bin")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    secret = "Sekr1t-pw"
+    verify = ["docker", "exec", "-e", f"PGPASSWORD={secret}", "-i", "pgc", "pg_restore", "--list"]
+    dumper = db_backup.find_dumper(16, _ops_file(tmp_path, {"command": DOCKER_DUMP, "verify_command": verify}))
+    real_run = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if secret in " ".join(argv):
+            raise subprocess.TimeoutExpired(argv, 5)
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(db_backup.subprocess, "run", run)
+
+    with pytest.raises(db_backup.BackupFailed, match="did not finish: timed out after 5s") as failure:
+        db_backup.back_up(dumper, "postgresql://alice@127.0.0.1:1/loopx", tmp_path / "backups")
+
+    assert secret not in str(failure.value)
+    assert "backup.verify_command" in str(failure.value)
+
+
 @pytest.mark.parametrize(("listing", "reason"), [
     ("fail", "cannot read the dump: pg_restore: error: input file is too short"),
     ("empty", "not a full database backup"),

@@ -243,7 +243,7 @@ def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetim
                 dump = subprocess.run(argv, stdout=out, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env,
                                       timeout=_DUMP_TIMEOUT_SECONDS)
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise BackupFailed(f"`{argv[0]}` did not finish: {exc}") from None
+                raise BackupFailed(f"`{argv[0]}` did not finish: {_why(exc)}") from None
         if dump.returncode != 0:
             reason = _tail(dump.stderr.decode("utf-8", "replace"), password=password)
             raise BackupFailed(f"`{argv[0]}` exited with {dump.returncode}: {reason or 'no message'}")
@@ -255,6 +255,13 @@ def back_up(dumper: Dumper, dsn: str, backup_dir: Path, *, now: datetime.datetim
         raise
     prune(backup_dir, dbname)
     return path, checked
+
+
+def _why(exc: OSError | subprocess.TimeoutExpired) -> str:
+    # TimeoutExpired's text embeds the full argv, which can carry secrets.
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"timed out after {exc.timeout:g}s"
+    return exc.strerror or type(exc).__name__
 
 
 def _verify(path: Path, pg_restore: str | None, *, password: str | None, verify: tuple[str, ...] = (),
@@ -274,7 +281,7 @@ def _verify(path: Path, pg_restore: str | None, *, password: str | None, verify:
                                     stdin=dump if verify else subprocess.DEVNULL, env=child_env.backup(),
                                     timeout=_LIST_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise BackupFailed(f"`{label}` did not finish: {exc}") from None
+        raise BackupFailed(f"`{label}` did not finish: {_why(exc)}") from None
     if listed.returncode != 0:
         reason = _tail(listed.stderr.decode("utf-8", "replace"), password=password)
         raise BackupFailed(f"`{label}` cannot read the dump: {reason or 'no message'}")
