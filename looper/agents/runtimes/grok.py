@@ -688,6 +688,9 @@ class GrokStream:
     session_id: str | None = None
     usage: Usage = field(default_factory=Usage)  # this process's tokens so far
 
+    def usage_so_far(self) -> Usage:
+        return self.usage
+
     async def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
         from ..claude_cli import stream_events
 

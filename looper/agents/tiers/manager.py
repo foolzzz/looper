@@ -959,7 +959,7 @@ class ManagerAgent:
                     "via": request.via if request else None,
                     "method": turn.stopped.value if turn.stopped else None,
                     "requested_at": request.at.isoformat() if request else None,
-                    "usage_complete": turn.usage.cost_usd is not None,
+                    "usage_complete": turn.usage_complete and turn.usage.cost_usd is not None,
                 }})
                 await self._link_turn_task(recorder, ops_turn)
                 self._session_totals = self._claude.totals

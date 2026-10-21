@@ -69,6 +69,10 @@ class TurnStream(Protocol):
 
     def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]: ...
 
+    # A stream that reports usage per request also has ``usage_so_far() -> Usage``: what the turn spent so far,
+    # for a turn the user stopped. One without it (Codex reports usage only at a turn's end) gives ``Usage()``,
+    # and the stopped turn's ``usage_complete`` is False.
+
 
 class PerTurnSession(ABC):
     """The Manager's or a Planner's session on a runtime that runs one process per turn (the module's notes)."""
@@ -85,6 +89,7 @@ class PerTurnSession(ABC):
         self._session: str | None = None  # the session the next turn resumes
         self._process: asyncio.subprocess.Process | None = None  # the turn running now, if any
         self._ended = False  # the last turn ended without a result: the owner starts over
+        self._stopping = False  # the user's stop is ending the running turn
         self._totals = Usage()
         self._price: Price | None = None  # prices the totals at the provider's prices
 
@@ -162,7 +167,8 @@ class PerTurnSession(ABC):
         the cap's result, its process killed, the session's totals moved on by
         what it spent.
         """
-        from ..claude_cli import ResidentTurn
+        from ..claude_cli import ResidentTurn, user_stop_result
+        from . import StopMethod
 
         assert self.started
         argv = await asyncio.to_thread(self._turn_argv)
@@ -179,6 +185,7 @@ class PerTurnSession(ABC):
         result: dict[str, Any] | None = None
         session_started = False
         capped: CapStop | None = None
+        failure: Exception | None = None
         try:
             assert process.stdin is not None and process.stdout is not None
             try:
@@ -198,12 +205,23 @@ class PerTurnSession(ABC):
                 if event.get("type") == "result":
                     result = event
             await process.wait()
-        except BaseException:
+        except BaseException as exc:
             await proc_tree.end(process, label=self._label)
-            stderr.cancel()
-            self._process, self._ended = None, True
-            raise
+            if not (self._stopping and isinstance(exc, Exception)):  # a stopped turn's closed pipe is not a failure
+                stderr.cancel()
+                self._process, self._ended, self._stopping = None, True, False
+                raise
+            failure = exc
         self._process = None
+        if self._stopping:
+            self._stopping = False
+            stderr.cancel()
+            usage = getattr(stream, "usage_so_far", Usage)()
+            self._totals = self._totals.plus(usage)
+            return ResidentTurn(user_stop_result(), session_started=session_started, usage=usage,
+                                stopped=StopMethod.KILL, usage_complete=hasattr(stream, "usage_so_far"))
+        if failure is not None:
+            raise failure
         errors = await stderr
         if capped is not None:
             self._totals = self._totals.plus(capped.usage)
@@ -218,8 +236,16 @@ class PerTurnSession(ABC):
                             session_started=session_started, usage=self.turn_usage(result))
 
     async def interrupt(self) -> StopMethod | None:
-        """End the running user turn (not implemented yet: no turn is stopped)."""
-        return None
+        """End the running turn's process tree at once; the turn returns ``user_stop_result`` and the session is
+        kept for the next turn. None when no turn runs."""
+        from . import StopMethod
+
+        process = self._process
+        if process is None or self._stopping:
+            return None
+        self._stopping = True
+        await proc_tree.end(process, label=self._label)
+        return StopMethod.KILL
 
     async def stop(self, *, kill: bool = False) -> None:
         """Forget the session's command and the session; a turn still running is killed."""

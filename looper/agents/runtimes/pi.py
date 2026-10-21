@@ -517,6 +517,12 @@ class PiStream:
             return [self._result(aborted=raw.get("aborted") is True)]
         return self._diagnostic(raw)
 
+    def usage_so_far(self) -> Usage:
+        total = Usage()
+        for usage in self._model_usage.values():
+            total = total.plus(usage)
+        return total
+
     def _usage(self, raw: Any, *, model: Any = None, **extra: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, Mapping):
             return []
