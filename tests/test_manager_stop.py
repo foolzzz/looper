@@ -395,6 +395,53 @@ def test_a_confirmation_asked_after_the_stop_is_refused_and_never_runs(agent_db:
     asyncio.run(run())
 
 
+def test_a_call_whose_escalate_found_nothing_to_confirm_is_refused_after_the_stop(agent_db: Any) -> None:
+    """A call still in ``escalate`` when the user stops the turn, and whose escalate then returns None (nothing to
+    confirm), does not run its tool: the turn was stopped."""
+    from looper.agents.ops import Risk, Tool
+    from looper.agents.ops.service import ManagerOps, Platform
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            release, ran = asyncio.Event(), []
+
+            async def tool_run(call: Any) -> dict[str, Any]:
+                ran.append(call.turn.message_id)
+                return {}
+
+            async def escalate(call: Any) -> str | None:
+                await release.wait()
+                return None
+
+            schema = {"type": "object", "properties": {}, "additionalProperties": False}
+            ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok",
+                             tools=(Tool("t_write", "writes", schema, Risk.WRITE, tool_run, escalate=escalate),))
+            ops._working_at = ops._clock()
+            manager.ops = ops
+            calls: list[asyncio.Task[Any]] = []
+
+            async def ask() -> None:
+                calls.append(asyncio.create_task(ops.call("t_write", {})))
+                await asyncio.sleep(0)
+
+            session.on_turn = ask
+            envelope = _web("建个任务", 0)
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+
+            release.set()
+            answer = await calls[0]
+            assert answer["status"] == "error" and answer["error"]["code"] == "stopped"
+            assert ran == []
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_calls_that_come_after_the_stop_are_refused_as_stopped(agent_db: Any) -> None:
     """Once the user stopped the turn, a call it still makes (a write, a looper_confirm of the confirmation its
     message answered) is refused and told the turn was stopped; nothing runs."""

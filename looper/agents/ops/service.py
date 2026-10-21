@@ -212,9 +212,9 @@ class ManagerOps:
                                                          "message; tell the user what you would do instead")
             call = Call(arguments, turn, self._platform)
             impact = await tool.escalate(call) if tool.escalate is not None else None
+            _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
-                _check_answering(turn)  # stopped while escalate read: the user is asked nothing
                 pending = self._ask(tool, arguments, impact, turn)
                 await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
