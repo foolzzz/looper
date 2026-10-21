@@ -280,7 +280,7 @@ def test_pi_limits_tools_only_for_planners_and_consults(tmp_path: Path, role: st
 
 
 @pytest.mark.parametrize("git_checkout", [False, True])
-@pytest.mark.parametrize("outcome", ["answer", "exception", "cancel", "missing-session"])
+@pytest.mark.parametrize("outcome", ["answer", "exception", "cancel", "missing-session", "failed-run"])
 def test_pi_consult_service_cleans_up_and_keeps_source_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, git_checkout: bool,
 ) -> None:
@@ -328,7 +328,8 @@ def test_pi_consult_service_cleans_up_and_keeps_source_state(
             raise OSError("execution failed")
         if outcome == "cancel":
             raise asyncio.CancelledError()
-        return {"result": '{"answers":[{"reply_to":17,"body":"answer"}]}'}, True, False
+        final = {"result": '{"answers":[{"reply_to":17,"body":"answer"}]}'}
+        return ({**final, "is_error": True} if outcome == "failed-run" else final), True, False
 
     executed = AsyncMock(side_effect=execute)
     monkeypatch.setattr(service, "_execute", executed)
@@ -338,7 +339,7 @@ def test_pi_consult_service_cleans_up_and_keeps_source_state(
             expected = pytest.raises(OSError, match="execution failed")
         elif outcome == "cancel":
             expected = pytest.raises(asyncio.CancelledError)
-        elif outcome == "missing-session":
+        elif outcome in ("missing-session", "failed-run"):
             expected = pytest.raises(consult._Failed)
         else:
             await service._consult(1, "task", "worker@s1", MemberKind.WORK, AgentType.WORKER,
@@ -352,6 +353,8 @@ def test_pi_consult_service_cleans_up_and_keeps_source_state(
         if outcome == "missing-session":
             assert error.value.reason is FallbackReason.RUNTIME_CANNOT
             executed.assert_not_awaited()
+        if outcome == "failed-run":  # a valid final of a failed run is not delivered: it falls back
+            assert error.value.reason is FallbackReason.CONTRACT
         room.finish_consult.assert_not_awaited()
 
     asyncio.run(run())
