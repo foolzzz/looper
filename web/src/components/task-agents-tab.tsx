@@ -1,9 +1,7 @@
-import { useEffect, useRef, useState } from "react";
 import { Bot, ChevronRight, Loader2 } from "lucide-react";
 import { TaskAgentsSection } from "@/components/task-agents";
 import { Badge } from "@/components/ui/badge";
 import {
-  fetchLlmRecords,
   runProfile,
   type LlmRecord,
   type PlannerRole,
@@ -13,15 +11,15 @@ import {
   type TaskRole,
   type TaskStep,
 } from "@/lib/api";
+import type { TaskRuns } from "@/lib/node-cards";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
+import { RUN_LIMIT } from "@/lib/use-task-runs";
 import { profileName } from "@/lib/use-registry";
 import { cn } from "@/lib/utils";
 import { historyHref, sourceName } from "@/pages/agent-history";
 
 const ROLES: TaskRole[] = ["planner", "worker", "reviewer"];
-// The most runs of one role `GET /api/llm-records` answers with.
-const RUN_LIMIT = 500;
 
 /** The task's Agent Profile per role on one line, opening the Agents tab. */
 export function TaskAgentsSummary({ agents, onOpen }: { agents: TaskAgents; onOpen: () => void }) {
@@ -165,35 +163,9 @@ export function StepRunsTable({ runs, taskId }: { runs: StepRun[]; taskId: strin
   );
 }
 
-/** What each of the task's step runs ran on, read again whenever a step changes. */
-function StepRuns({ task }: { task: TaskDetail }) {
-  const [records, setRecords] = useState<Record<TaskLimitRole, LlmRecord[]> | null>(null);
-  const [error, setError] = useState("");
-  const latest = useRef(0);
+/** What each of the task's step runs ran on. */
+function StepRuns({ task, records, error }: { task: TaskDetail; records: TaskRuns | null; error: string }) {
   const steps = task.steps || [];
-  // A new run or a run's end moves its step, so the records are read again when a step changes.
-  const changes = [
-    task.status,
-    ...steps.map((s) => [s.id, s.status, s.worker_id, s.reviewer_id, s.review_stage, s.retries].join(":")),
-  ].join("|");
-
-  useEffect(() => {
-    const seq = ++latest.current;
-    Promise.all([
-      fetchLlmRecords({ task_id: task.task_id, role: "worker", limit: RUN_LIMIT }),
-      fetchLlmRecords({ task_id: task.task_id, role: "reviewer", limit: RUN_LIMIT }),
-    ]).then(
-      ([worker, reviewer]) => {
-        if (seq !== latest.current) return;
-        setRecords({ worker, reviewer });
-        setError("");
-      },
-      (err) => {
-        if (seq === latest.current) setError(err instanceof Error ? err.message : String(err));
-      },
-    );
-  }, [task.task_id, changes]);
-
   const clipped = records
     ? (["worker", "reviewer"] as const).filter((role) => records[role].length >= RUN_LIMIT).map(roleLabel)
     : [];
@@ -256,12 +228,18 @@ function DefinedRoles({ roles }: { roles: PlannerRole[] }) {
 
 /** Which agents the task runs on: each role's Agent Profile and limits (changed here until the task completes), the
  * roles its Planner defined, and what each step run ran on. */
-export function TaskAgentsTab({ task, onAgents }: { task: TaskDetail; onAgents: (agents: TaskAgents) => void }) {
+export function TaskAgentsTab({ task, onAgents, runs = null, runsError = "" }: {
+  task: TaskDetail;
+  onAgents: (agents: TaskAgents) => void;
+  /** The task's runs, read once by the page (`useTaskRuns`). */
+  runs?: TaskRuns | null;
+  runsError?: string;
+}) {
   return (
     <div className="space-y-6 p-5">
       {task.agents && <TaskAgentsSection taskId={task.task_id} agents={task.agents} onSaved={onAgents} />}
       {task.roles?.length ? <DefinedRoles roles={task.roles} /> : null}
-      <StepRuns task={task} />
+      <StepRuns task={task} records={runs} error={runsError} />
     </div>
   );
 }
