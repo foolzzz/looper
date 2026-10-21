@@ -101,15 +101,15 @@ function useRoom(taskId: string, active: boolean) {
     // Per run of the effect: a read of an earlier run (before the task ended) never holds back this one's.
     let stopped = false;
     let busy = false;
-    const load = async () => {
+    const load = async (signal?: AbortSignal) => {
       if (busy) return;
       busy = true;
       try {
         const after = last.current;
-        let next = await fetchTaskRoom(taskId, { after });
+        let next = await fetchTaskRoom(taskId, { after, signal });
         // More newer messages than one read gives: read the newest whole, so none in between is left out.
         const whole = !after || next.more;
-        if (after && next.more) next = await fetchTaskRoom(taskId);
+        if (after && next.more) next = await fetchTaskRoom(taskId, { signal });
         if (stopped) return;
         const newest = next.messages.length ? next.messages[next.messages.length - 1].id : 0;
         last.current = whole ? newest : Math.max(after, newest);
@@ -126,8 +126,8 @@ function useRoom(taskId: string, active: boolean) {
       load();
       return () => { stopped = true; };
     }
-    const stop = startPolling(async () => {
-      await load();
+    const stop = startPolling(async (signal) => {
+      await load(signal);
     }, ROOM_REFRESH_MS);
     return () => {
       stopped = true;

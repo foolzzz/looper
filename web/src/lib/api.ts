@@ -1830,9 +1830,12 @@ export interface RoomView extends RoomSummary {
 }
 
 /** The task's room: its seats, its numbers and its messages; with `after` (a message id) only the newer ones. */
-export async function fetchTaskRoom(taskId: string, { after = 0 }: { after?: number } = {}): Promise<RoomView> {
+export async function fetchTaskRoom(
+  taskId: string,
+  { after = 0, signal }: { after?: number; signal?: AbortSignal } = {},
+): Promise<RoomView> {
   const query = after > 0 ? `?after=${after}` : "";
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/room${query}`);
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/room${query}`, { signal });
   if (!res.ok) await failed(res, "room");
   return res.json();
 }
@@ -1995,8 +1998,11 @@ export const GATE_MESSAGE_MAX_CHARS = 8000;
 export async function fetchGateThread(
   taskId: string,
   step: string,
+  signal?: AbortSignal,
 ): Promise<{ task_id: string; gate: UserGate; messages: GateMessage[] }> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/messages`);
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/messages`, {
+    signal,
+  });
   if (!res.ok) await failed(res, "gate discussion");
   return res.json();
 }
@@ -2306,6 +2312,8 @@ export interface TaskRunRow {
   model: string | null;
   effort: string | null;
   profile: { name: string | null; source: string | null };
+  /** The role its task's Planner defined that it ran as; null for a built-in role's run. */
+  task_role?: RunRole | null;
 }
 
 /** A task's Planner, Worker and Reviewer runs, oldest first, in one compact request. */
@@ -2559,8 +2567,8 @@ export interface AgentUsage {
   latest_context_tokens: number | null;
 }
 
-export async function fetchAgentUsage(agentId: string, turns = 100): Promise<AgentUsage> {
-  const res = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/usage?turns=${turns}`);
+export async function fetchAgentUsage(agentId: string, turns = 100, signal?: AbortSignal): Promise<AgentUsage> {
+  const res = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/usage?turns=${turns}`, { signal });
   if (!res.ok) throw new Error(`agent usage ${res.status}`);
   return res.json();
 }
