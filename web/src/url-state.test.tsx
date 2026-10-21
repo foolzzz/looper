@@ -27,7 +27,11 @@ function answer(url: string): unknown {
   if (/\/api\/tasks\/task-a$/.test(url)) return task;
   if (/\/api\/tasks(\?|$)/.test(url)) return { tasks: [], counts: { failed: 2 }, next_before: null };
   if (url.includes("/chat/targets")) return { targets: [{ kind: "manager", id: "manager", can_send: true }, planner("task-a")] };
-  if (url.includes("/chat/sessions")) return { sessions: [web("web-1"), lark("lark-1")] };
+  if (url.includes("/chat/sessions")) {
+    const asked = new URL(url, "http://x").searchParams.get("session_id");
+    if (asked === "lark-old") return { sessions: [lark("lark-old")] }; // past the newest 50: only by its id
+    return { sessions: asked ? [] : [web("web-1"), lark("lark-1")] };
+  }
   if (url.includes("/chat/messages")) return [];
   if (url.includes("/activity")) return { activity: [] };
   if (url.includes("/conversation")) return { conversation: [] };
@@ -182,6 +186,57 @@ describe("the dashboard keeps its place in the URL", () => {
       expect(container.querySelector("[data-viewing]")?.getAttribute("data-viewing")).toBe("lark-1");
       await goto("#chat?conversation=missing");
       expect(container.querySelector("[data-viewing]")).toBeNull();
+    });
+  });
+
+  describe("the chat conversations", () => {
+    it("opens a conversation older than the list by its id", async () => {
+      await open("#chat?conversation=lark-old");
+      expect(container.querySelector("[data-viewing]")?.getAttribute("data-viewing")).toBe("lark-old");
+    });
+
+    it("keeps a conversation open while the list no longer holds it", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        await open("#chat?conversation=lark-old");
+        await act(async () => vi.advanceTimersByTimeAsync(20000));
+        await settle();
+        expect(container.querySelector("[data-viewing]")?.getAttribute("data-viewing")).toBe("lark-old");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("opens the web thread the address names, and writes the one chosen", async () => {
+      localStorage.setItem("looper-chat-session-id", "session-other");
+      await open("#chat?conversation=web-1");
+      expect(localStorage.getItem("looper-chat-session-id")).toBe("web-1");
+      expect(requests.some((u) => u.includes("/chat/messages") && u.includes("session_id=web-1"))).toBe(true);
+      await act(async () => (container.querySelector('button[title^="New conversation"]') as HTMLButtonElement).click());
+      await settle();
+      expect(new URLSearchParams(window.location.hash.split("?")[1]).get("conversation")).toBe(localStorage.getItem("looper-chat-session-id"));
+      expect(localStorage.getItem("looper-chat-session-id")).not.toBe("web-1");
+    });
+  });
+
+  describe("the room's filters", () => {
+    const pressed = (label: string) => button(label)?.getAttribute("aria-pressed");
+    const roleSelect = () => container.querySelector<HTMLSelectElement>('select[aria-label="From or to a role"]');
+
+    it("opens the kind and role filters from the hash", async () => {
+      await open("#tasks/task-a?tab=room&filter=unanswered&role=planner");
+      expect(pressed("Unanswered")).toBe("true");
+      expect(roleSelect()?.value).toBe("planner");
+    });
+
+    it("writes the chosen kind and keeps the role, and writes no default", async () => {
+      await open("#tasks/task-a?tab=room&role=planner");
+      await click("Interface");
+      expect(hash()).toBe("#tasks/task-a?tab=room&filter=interface&role=planner");
+      await click("All");
+      expect(hash()).toBe("#tasks/task-a?tab=room&role=planner");
+      await goto("#tasks/task-a?tab=room&filter=bogus");
+      expect(pressed("All")).toBe("true");
     });
   });
 

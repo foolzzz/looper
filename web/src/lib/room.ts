@@ -68,6 +68,11 @@ export function mergeRoom(prev: RoomView | null, next: RoomView, appended: boole
 
 export type RoomFilter = "all" | "interface" | "unanswered";
 
+/** The filter an address names; anything else is all. */
+export function parseRoomFilter(value: string | null | undefined): RoomFilter {
+  return value === "interface" || value === "unanswered" ? value : "all";
+}
+
 /** The messages a filter keeps; with a role, those from it or addressed to it (or to one of its seats). */
 export function filterMessages(messages: RoomMessage[], filter: RoomFilter, role: string): RoomMessage[] {
   return messages.filter(
