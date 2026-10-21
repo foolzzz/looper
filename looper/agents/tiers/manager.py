@@ -34,6 +34,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -46,12 +47,15 @@ from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settin
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
     AutonomousHandler,
+    USER_STOP,
     AutonomousRun,
+    CapStop,
     ClaudeRunRecorder,
     ResidentTurn,
     answer_text,
     ended_by,
     exit_note,
+    user_stop_result,
 )
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
@@ -86,6 +90,7 @@ from ...db import tasks as db_tasks
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
 from ...db import llm_records as db_llm_records
+from ...db.llm_records import RecordStatus
 from ...db import projects as db_projects
 from ...db import user_gates as db_user_gates
 
@@ -301,6 +306,49 @@ def _with_blocks(text: str, blocks: list[str]) -> str:
     return "\n\n".join(part for part in (text.strip(), *blocks) if part)
 
 
+class StopResult(str, Enum):
+    """What ``ManagerAgent.stop_turn`` did with a request to stop the running user turn."""
+
+    STOPPING = "stopping"
+    ALREADY_STOPPING = "already_stopping"
+    NOT_RUNNING = "not_running"
+    OTHER_MESSAGE = "other_message"
+
+
+@dataclass(frozen=True)
+class StopRequest:
+    """A user's request to stop the running turn: where it came from and when."""
+
+    via: str
+    at: datetime
+
+
+@dataclass
+class CurrentTurn:
+    """The user turn the Manager is answering, and the stop asked for it, if any."""
+
+    message_id: str
+    channel: str
+    chat: str
+    started_at: datetime
+    stop: StopRequest | None = None
+
+
+class TurnStopped(Exception):
+    """The user stopped the turn; ``partial`` is what Claude had written."""
+
+    def __init__(self, partial: str = "") -> None:
+        super().__init__("stopped by the user")
+        self.partial = partial
+
+
+def stopped_reply(partial: str, blocks: list[str]) -> str:
+    """The reply of a stopped turn: what was written, marked as stopped; a line of its own when nothing was."""
+    if not partial.strip():
+        return _with_blocks("已停止，这次没有回复。", blocks)
+    return _with_blocks(f"{partial.strip()}\n\n（已停止）", blocks)
+
+
 @dataclass(frozen=True)
 class _Process:
     """What the resident Claude was started with; a turn on it is recorded with these."""
@@ -363,6 +411,9 @@ class ManagerAgent:
         self._claude = CLAUDE_CODE.resident_session("manager")
         self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
         self._turn_lock = asyncio.Lock()
+        self._current: CurrentTurn | None = None  # the user turn being answered (stop_turn's target)
+        self._current_envelope: MessageEnvelope | None = None
+        self._stop_tasks: set[asyncio.Task[Any]] = set()
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
         self._process: _Process | None = None  # what the running Claude was started with
         # Why the session was last dropped and the handoff its old session wrote, until the new session's first
@@ -510,8 +561,17 @@ class ManagerAgent:
         # The calls Claude makes while answering belong to this message and its chat.
         turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
                     envelope=envelope, sender=origin["sender"], group=origin["group"])
+        self._current_envelope = envelope
+        self._current = CurrentTurn(message_id=envelope.message_id, channel=origin["channel"], chat=origin["chat"],
+                                    started_at=datetime.now(timezone.utc))
         try:
-            response = await self._invoke_claude(text, envelope, turn=turn, note=gate.note)
+            try:
+                response = await self._invoke_claude(text, envelope, turn=turn, note=gate.note)
+            finally:
+                self._current, self._current_envelope = None, None
+        except TurnStopped as stopped:
+            await self._send_reply(envelope, stopped_reply(stopped.partial, turn.blocks))
+            return
         except Exception as exc:
             if turn.refused:
                 response = ""  # answered below: the tools did not work
@@ -528,6 +588,53 @@ class ManagerAgent:
             await self._send_reply(envelope, _with_blocks(tools_down_reply(problem), turn.blocks), error=problem)
             return
         await self._send_reply(envelope, _with_blocks(response, turn.blocks))
+
+    async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
+        """Ask the running user turn of ``message_id`` to stop. Does not wait for the turn's lock: the turn ends by
+        itself, replying with what it had written."""
+        current = self._current
+        if current is None:
+            return StopResult.NOT_RUNNING
+        if current.message_id != message_id:
+            return StopResult.OTHER_MESSAGE
+        if current.stop is not None:
+            return StopResult.ALREADY_STOPPING
+        current.stop = StopRequest(via=via, at=datetime.now(timezone.utc))
+        envelope = self._current_envelope
+        if envelope is not None and self._bus is not None:
+            await self._send_status(envelope, "Stopping…", phase=True)
+        task = asyncio.create_task(self._interrupt_claude())
+        self._stop_tasks.add(task)
+        task.add_done_callback(self._stop_tasks.discard)
+        return StopResult.STOPPING
+
+    async def _interrupt_claude(self) -> None:
+        try:
+            await self._claude.interrupt()
+        except Exception:
+            logger.warning("manager: could not interrupt the running turn", exc_info=True)
+
+    @property
+    def _stop_requested(self) -> bool:
+        return self._current is not None and self._current.stop is not None
+
+    async def _finish_stopped_early(self, recorder: ClaudeRunRecorder, ops_turn: Turn | None) -> None:
+        """The user stopped the turn before its process started: the record ends as stopped, with no spend."""
+        request = self._current.stop if self._current is not None else None
+        await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
+                              status=RecordStatus.INTERRUPTED, usage=Usage())
+        await recorder.annotate({"user_stop": {
+            "via": request.via if request else None, "method": None,
+            "requested_at": request.at.isoformat() if request else None, "usage_complete": True,
+        }})
+        await self._link_turn_task(recorder, ops_turn)
+
+    def _user_stop(self, recorder: ClaudeRunRecorder) -> CapStop | None:
+        """The stop= hook: once the user asked to stop the turn, the result it ends with and what it spent."""
+        current = self._current
+        if current is None or current.stop is None:
+            return None
+        return CapStop(user_stop_result(), recorder._usage_so_far)
 
     async def _handle_goal_status(self, envelope: MessageEnvelope) -> None:
         goal_id = envelope.payload.get("goal_id", "")
@@ -783,10 +890,15 @@ class ManagerAgent:
                                                            envelope=context_envelope)
                 if brief:
                     turn_text = f"{brief}\n\n{turn_text}"
+                if self._stop_requested:
+                    await self._finish_stopped_early(recorder, ops_turn)
+                    raise TurnStopped()
                 # A turn cut off by Claude's exit ends without a result; that Claude
                 # is reaped and the next message starts a new process that resumes the session.
                 turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
-                                                   stop=lambda: recorder.cap_stop)
+                                                   stop=lambda: recorder.cap_stop or self._user_stop(recorder))
+            except TurnStopped:
+                raise
             except BaseException as exc:
                 # Never leave Claude running once the Manager gives up on it.
                 await self._claude.stop(kill=True)
@@ -797,6 +909,24 @@ class ManagerAgent:
                 await self._link_turn_task(recorder, ops_turn)
                 raise
 
+            if turn.stopped is not None or (turn.result_event or {}).get(USER_STOP):
+                partial = "".join(text_parts)
+                request = self._current.stop if self._current is not None else None
+                await recorder.finish(
+                    output_text=partial or None, result_event=turn.result_event,
+                    error="stopped by the user", status=RecordStatus.INTERRUPTED, usage=turn.usage,
+                )
+                await recorder.annotate({"user_stop": {
+                    "via": request.via if request else None,
+                    "method": turn.stopped.value if turn.stopped else None,
+                    "requested_at": request.at.isoformat() if request else None,
+                    "usage_complete": turn.usage.cost_usd is not None,
+                }})
+                await self._link_turn_task(recorder, ops_turn)
+                self._session_totals = self._claude.totals
+                await self._save_session_state()
+                raise TurnStopped(partial)
+
             if resuming and not turn.session_started and not retried:
                 # Claude never started the saved session: it no longer exists. Every
                 # turn would resume it again and never answer, so drop it and run
@@ -806,6 +936,8 @@ class ManagerAgent:
                 await recorder.finish(output_text=None, result_event=None, error=(
                     f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
                 await self._link_turn_task(recorder, ops_turn)
+                if self._stop_requested:
+                    raise TurnStopped()
                 await self._claude.stop()
                 self._session_id, self._session_totals = None, Usage()  # its totals went with it
                 await self._save_session_state()

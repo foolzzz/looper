@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
-    from .runtimes import RuntimeAdapter
+    from .runtimes import RuntimeAdapter, StopMethod
     from .runtimes.pricing import RunSpend
     from .system_prompt import SystemPrompt
 
@@ -203,6 +203,8 @@ def budget_args(max_budget_usd: float | None) -> list[str]:
 BUDGET_SUBTYPE = "error_max_budget_usd"
 # Marks the result Looper ends a run with when it stops the run at its soft cap (``soft_cap_result``).
 SOFT_CAP = "looper_soft_cap"
+# Marks the result a user turn ends with when the user stopped it (``user_stop_result``).
+USER_STOP = "looper_user_stop"
 
 
 def budget_error(result_event: dict[str, Any] | None) -> str | None:
@@ -240,6 +242,12 @@ def soft_cap_result(spent: float, cap: float) -> dict[str, Any]:
 
     return {"type": "result", "subtype": BUDGET_SUBTYPE, "is_error": True, "result": "", SOFT_CAP: True,
             "errors": [f"${format_usd(spent)} at the provider's prices is over the ${format_usd(cap)} cap"]}
+
+
+def user_stop_result() -> dict[str, Any]:
+    """The result a user turn the user stopped ends with."""
+    return {"type": "result", "subtype": "error_user_stop", "is_error": True, "result": "", USER_STOP: True,
+            "errors": ["stopped by the user"]}
 
 
 def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]]) -> dict[str, Any] | None:
@@ -483,6 +491,7 @@ class ResidentTurn:
     exit_code: int | None = None
     session_started: bool = True
     usage: Usage = field(default_factory=Usage)
+    stopped: StopMethod | None = None  # how the user's stop ended the turn, if it did
 
 
 def exit_note(exit_code: int | None) -> str:
@@ -709,6 +718,8 @@ class ResidentClaude:
         self._command: list[str] = []
         self._signature: Any = None
         self._totals = Usage()  # the session's running totals at its last result
+        self._user_turn: _UserTurn | None = None  # the user turn being run (what ``interrupt`` ends)
+        self._user_stopped = False
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
 
     @property
@@ -811,10 +822,20 @@ class ResidentClaude:
                 logger.warning("%s: Claude closed stdin before the turn was sent", self._label)
                 input_lost = True
                 await proc_tree.end(process, label=self._label)
+            self._user_turn = turn
             result_event = await turn.done
         except BaseException:
+            self._user_turn, self._user_stopped = None, False
             await self.stop(kill=True)
             raise
+        self._user_turn = None
+        if self._user_stopped:
+            self._user_stopped = False
+            from .runtimes import StopMethod
+
+            self._totals = self._totals.plus(turn.usage)
+            return ResidentTurn(user_stop_result(), session_started=turn.session_started, usage=turn.usage,
+                                stopped=StopMethod.KILL)
         if turn.capped is not None:
             await self.stop(kill=True)
             self._totals = self._totals.plus(turn.capped.usage)
@@ -835,6 +856,17 @@ class ResidentClaude:
         if result_event is not None:
             self._totals = self._totals.updated(reported_totals(result_event, self._price))
         return own
+
+    async def interrupt(self) -> StopMethod | None:
+        """End the running user turn at once by killing Claude (the turn returns ``user_stop_result``, with what it
+        spent); None when no user turn runs."""
+        from .runtimes import StopMethod
+
+        if self._user_turn is None or self._user_stopped:
+            return None
+        self._user_stopped = True
+        await self.stop(kill=True)
+        return StopMethod.KILL
 
     async def stop(self, *, kill: bool = False) -> None:
         """End the process, if any, and forget it.
@@ -1205,7 +1237,7 @@ class ClaudeRunRecorder:
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
         if usage is None:
             usage = run_usage(result_event, price=self._launch.price if self._launch is not None else None)
-        if result_event is None or result.get(SOFT_CAP):
+        if result_event is None or result.get(SOFT_CAP) or result.get(USER_STOP):
             # No result reported the run's spend: what its usage events add up to is what is known.
             usage = usage.filled_from(self._usage_so_far)
         notes: dict[str, Any] = {}

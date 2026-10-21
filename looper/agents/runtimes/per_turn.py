@@ -38,6 +38,7 @@ from ..run_usage import Usage
 
 if TYPE_CHECKING:
     from ..claude_cli import CapStop, ResidentTurn
+    from . import StopMethod
     from ..run_usage import Price
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,10 @@ class PerTurnSession(ABC):
             self._turn_ended(new_session=resuming is None and session_started)
         return ResidentTurn(result, None if result is not None else process.returncode,
                             session_started=session_started, usage=self.turn_usage(result))
+
+    async def interrupt(self) -> StopMethod | None:
+        """End the running user turn (not implemented yet: no turn is stopped)."""
+        return None
 
     async def stop(self, *, kill: bool = False) -> None:
         """Forget the session's command and the session; a turn still running is killed."""
