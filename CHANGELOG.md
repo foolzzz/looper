@@ -18,6 +18,22 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.8] - 2026-10-21
+
+### Added
+
+- **Choose and switch the Manager session's Agent Profile.** A new nullable `agent_sessions.selected_profile_id` (foreign key to `agent_profiles`, `ON DELETE RESTRICT`, `manager` row only) holds the profile chosen for the Manager's current session; it is the Manager's last settings layer (`session`), over the role and shared layers. `/profile` (dashboard chat, Telegram, Lark) lists the profiles that can run the Manager, selects one by number, id or name, and `/profile 0` follows the Settings again; Looper answers it itself, takes effect on the next message, resumes the session on the same runtime and provider and otherwise starts a new one with a handoff, and records each switch as a run. `/new` clears the choice. New `GET /api/manager/session` and `PUT /api/manager/session/profile`, `new_session_profile_id` on `POST /api/chat/send` (only with `/new`), a chat-header selector and a profile choice in the new-session panel. A profile a Manager session selects cannot be deleted or edited so it cannot run the Manager. A Manager profile error from the session or role layer now suggests `/profile`. ([#287](https://github.com/foolzzz/looper/pull/287))
+
+### Changed
+
+- **Model-visible:** the Manager's tools contract says the user switches profiles with `/profile` and the model cannot; the `looper_settings` description gains one sentence, and its `view` (role `manager`) and `set` (manager role) answers carry `manager_session.selected` (and a `note` after `set` when a choice exists). ([#287](https://github.com/foolzzz/looper/pull/287))
+
+### Validation
+
+- Reported in #287: each card's tests, the full local suite on a fresh PostgreSQL before the merge, and Codex and Grok reviews with no P0; the real switch is stated to follow the merge. CI runs after the release.
+
+See the [bilingual release notes](docs/releases/v2.13.8.md).
+
 ## [2.13.7] - 2026-10-20
 
 ### Fixed
