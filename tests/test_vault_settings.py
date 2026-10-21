@@ -20,6 +20,8 @@ from looper.agents.tiers.task import TaskRouter
 from looper.db import manager_actions
 from tests.test_projects_api import _call, _server
 
+pytestmark = pytest.mark.usefixtures("current_turn")
+
 
 @pytest.fixture
 def stored_vault(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:

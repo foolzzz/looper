@@ -19,6 +19,8 @@ from tests.test_ops_tasks_db import _Chat
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 SECRET = "sk-synthetic-manager-only"
 
+pytestmark = pytest.mark.usefixtures("current_turn")
+
 
 def _tool(name):
     return next(t for t in TOOLS if t.name == name)

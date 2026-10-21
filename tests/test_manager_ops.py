@@ -21,6 +21,8 @@ from looper.db import manager_actions
 _SCHEMA = {"type": "object", "additionalProperties": False,
            "properties": {"n": {"type": "integer"}, "big": {"type": "boolean"}, "api_key": {"type": "string"}}}
 
+pytestmark = pytest.mark.usefixtures("current_turn")
+
 
 class _Clock:
     def __init__(self) -> None:
@@ -326,7 +328,7 @@ def test_a_high_call_runs_only_when_the_next_message_in_its_chat_confirms_it(
     assert statuses[0] == ("t_write", "high", "needs_confirmation", asked["confirmation_id"])
     assert statuses[-1] == ("t_write", "high", "ok", asked["confirmation_id"])
     assert ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})["error"]["code"] in (
-        "needs_user_turn", "not_found")
+        "needs_user_turn", "not_found", "expired")
 
 
 @pytest.mark.parametrize("how", ["next-message-did-not-confirm", "too-late", "own-turn"])
@@ -668,3 +670,86 @@ def test_profile_reference_does_not_guess_a_name_or_protocol(recorded, monkeypat
     assert answer["error"]["code"] == "not_found", answer
     assert "exact name and protocol" in answer["error"]["message"]
     create.assert_not_awaited()
+
+
+# --- calls bound to their turn (X-Looper-Turn) ---
+
+def _bound(ops: _Ops, name: str, arguments: Any, binding: str | None) -> dict[str, Any]:
+    return asyncio.run(ops.ops.call(name, arguments, binding=binding))
+
+
+def test_a_call_bound_to_a_stopped_turn_is_refused_even_while_another_turn_is_current() -> None:
+    ops = _Ops()
+    first, second = _turn("m1"), _turn("m2")
+    ops.ops.begin_turn(first, binding="b1")
+    ops.ops.stop_turn(first)
+    ops.ops.begin_turn(second, binding="b2")
+    refused = _bound(ops, "t_write", {"n": 1}, "b1")
+    assert refused["error"]["code"] == "stopped" and ops.ran == []
+    assert _bound(ops, "t_write", {"n": 2}, "b2")["status"] == "ok"
+    assert ops.ran == [({"n": 2}, "m2")]
+
+
+def test_a_call_bound_to_an_ended_turn_has_expired() -> None:
+    ops = _Ops()
+    first = _turn("m1")
+    ops.ops.begin_turn(first, binding="b1")
+    ops.ops.end_turn(first)
+    ops.ops.begin_turn(_turn("m2"), binding="b2")
+    assert _bound(ops, "t_write", {"n": 1}, "b1")["error"]["code"] == "expired"
+    assert ops.ran == []
+
+
+def test_an_unknown_binding_is_claudes_own_turn_which_only_reads() -> None:
+    binding = "unknown"
+    ops = _Ops()
+    ops.ops.begin_turn(_turn("m1"), binding="b1")  # current, but not whose call this is
+    assert _bound(ops, "t_write", {"n": 1}, binding)["error"]["code"] == "needs_user_turn"
+    assert _bound(ops, "t_read", {"n": 1}, binding)["status"] == "ok"
+    assert ops.ran == [({"n": 1}, None)]
+
+
+def test_only_the_last_bindings_are_kept() -> None:
+    from looper.agents.ops.service import BINDINGS_KEPT
+
+    ops = _Ops()
+    for i in range(BINDINGS_KEPT + 1):
+        ops.ops.begin_turn(_turn(f"m{i}"), binding=f"b{i}")
+    assert _bound(ops, "t_write", {"n": 1}, "b0")["error"]["code"] == "needs_user_turn"  # forgotten
+    assert _bound(ops, "t_write", {"n": 1}, "b1")["status"] == "ok"
+
+
+def test_a_confirmation_with_the_stopped_turns_binding_is_refused_and_gone(recorded: list[dict[str, Any]]) -> None:
+    ops = _Ops()
+    first = _turn("m1")
+    ops.ops.begin_turn(first, binding="b1")
+    asked = _bound(ops, "t_write", {"n": 3, "big": True}, "b1")
+    ops.ops.end_turn(first)
+    second = _turn("m2")
+    assert asked["confirmation_id"] in ops.ops.begin_turn(second, binding="b2")
+    ops.ops.stop_turn(second)
+    refused = _bound(ops, "looper_confirm", {"confirmation_id": asked["confirmation_id"]}, "b2")
+    assert refused["error"]["code"] == "stopped" and ops.ran == []
+    third = _turn("m3")
+    assert ops.ops.begin_turn(third, binding="b3") == ""  # the pending is gone
+    assert _bound(ops, "looper_confirm", {"confirmation_id": asked["confirmation_id"]}, "b3")[
+        "error"]["code"] == "not_found"
+
+
+def test_publish_binding_writes_atomically_with_mode_0600(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    path = tmp_path / ".local" / "manager-turn.json"
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok", turn_file=path)
+    assert ops.server_config()["env"]["LOOPER_AGENT_TURN_FILE"] == str(path)
+    ops.publish_binding("b1")
+    first = json.loads(path.read_text())
+    assert first["turn"] == "b1" and stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    ops.publish_binding(None)
+    second = json.loads(path.read_text())
+    assert second["turn"] is None and second["epoch"] > first["epoch"]
+    assert [p.name for p in path.parent.iterdir()] == [path.name]  # no temp file left
+    bare = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok")
+    assert "LOOPER_AGENT_TURN_FILE" not in bare.server_config()["env"]
+    bare.publish_binding("b1")  # no file configured: nothing to write

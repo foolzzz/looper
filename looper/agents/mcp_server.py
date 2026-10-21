@@ -59,15 +59,18 @@ class Client(Protocol):
 
     def list_tools(self) -> list[Any]: ...
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]: ...
+    def call_tool(self, name: str, arguments: dict[str, Any], meta: dict[str, Any] | None = None
+                  ) -> dict[str, Any]: ...
 
 
 class AgentClient:
     """The two requests to ``looper serve``'s agent API."""
 
-    def __init__(self, url: str, token: str, *, timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
+    def __init__(self, url: str, token: str, *, timeout: float = REQUEST_TIMEOUT_SECONDS,
+                 turn_file: str | None = None) -> None:
         self.url = url.rstrip("/")
         self._token = token
+        self._turn_file = turn_file
         self._timeout = timeout
         # The URL is the local server that started the Manager; a proxy from the environment must not carry it.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -79,19 +82,42 @@ class AgentClient:
             raise LooperUnavailable("its answer has no tools list")
         return tools
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def call_tool(self, name: str, arguments: dict[str, Any], meta: dict[str, Any] | None = None
+                  ) -> dict[str, Any]:
         """The JSON object ``POST /api/agent/v1/ops/<name>`` answers; raises LooperUnavailable. A call of the room's
-        inbox that waits gets its wait more time than any other."""
+        inbox that waits gets its wait more time than any other. The turn the call belongs to is read from the
+        binding file now (``X-Looper-Turn``), and the runtime's own call id from ``meta`` (``X-Looper-Call``)."""
+        extra: dict[str, str] = {}
+        binding = self._read_binding()
+        if binding:
+            extra["X-Looper-Turn"] = binding
+        if isinstance(meta, dict):
+            for key in ("claudecode/toolUseId", "toolCallId"):
+                call_id = meta.get(key)
+                if isinstance(call_id, str) and call_id:
+                    extra["X-Looper-Call"] = call_id
+                    break
         timeout = self._timeout
         wait = arguments.get("wait_seconds") if name == WAITING_TOOL else None
         if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
             timeout = max(timeout, float(wait) + WAIT_MARGIN_SECONDS)
-        return self._request(f"/api/agent/v1/ops/{urllib.parse.quote(name, safe='')}", body=arguments, timeout=timeout)
+        return self._request(f"/api/agent/v1/ops/{urllib.parse.quote(name, safe='')}", body=arguments, timeout=timeout,
+                             headers=extra)
 
-    def _request(self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None
-                 ) -> dict[str, Any]:
+    def _read_binding(self) -> str | None:
+        if not self._turn_file:
+            return None
+        try:
+            with open(self._turn_file, encoding="utf-8") as handle:
+                turn = json.load(handle).get("turn")
+        except (OSError, ValueError, AttributeError):
+            return None
+        return turn if isinstance(turn, str) and turn.isprintable() and turn else None
+
+    def _request(self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None,
+                 headers: dict[str, str] | None = None) -> dict[str, Any]:
         timeout = self._timeout if timeout is None else timeout
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json", **(headers or {})}
         data = None
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -163,7 +189,8 @@ def _call_tool(message_id: Any, params: dict[str, Any], client: Client) -> dict[
     if not isinstance(arguments, dict):
         return _error(message_id, INVALID_PARAMS, "tools/call params.arguments must be an object")
     try:
-        answer = client.call_tool(name, arguments)
+        meta = params.get("_meta")
+        answer = client.call_tool(name, arguments, meta if isinstance(meta, dict) else None)
     except LooperTimedOut as exc:
         logger.warning("tools/call %s: %s", name, exc)
         return _tool_result(message_id, f"Looper did not answer the call to {name}: {exc}. It may still have run, "
@@ -220,7 +247,7 @@ def main() -> int:
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         print(f"error: LOOPER_AGENT_URL must be an http:// or https:// URL, not {url!r}", file=sys.stderr)
         return 2
-    client = AgentClient(url, token)
+    client = AgentClient(url, token, turn_file=os.environ.get("LOOPER_AGENT_TURN_FILE", "").strip() or None)
     logger.info("forwarding tool calls to %s", client.url)
     return serve(client, sys.stdin.buffer, sys.stdout.buffer)
 

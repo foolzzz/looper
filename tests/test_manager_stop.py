@@ -24,6 +24,8 @@ from looper.agents.runtimes import StopMethod
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, StopResult
 from tests.test_manager_new_session import _drain, _until, _web
 
+pytestmark = pytest.mark.usefixtures("current_turn")
+
 
 @pytest.fixture(autouse=True)
 def _stop_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -36,6 +38,7 @@ class _Session:
 
     label = "manager"
     pid = None
+    shares_bridge = True
 
     def __init__(self, *, hold: bool = True, on_start: Any = None, on_turn: Any = None) -> None:
         self.hold, self.on_start, self.on_turn = hold, on_start, on_turn

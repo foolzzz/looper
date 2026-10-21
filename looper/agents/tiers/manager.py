@@ -858,7 +858,7 @@ class ManagerAgent:
             # Turns run one at a time; a stop while this one waits for its turn ends it.
             await token.step("turn_lock", self._turn_lock.acquire())
             self._lock_owner = token
-            waiting = self.ops.begin_turn(turn) if self.ops is not None else ""
+            waiting = self.ops.begin_turn(turn, binding=token.binding) if self.ops is not None else ""
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn)
         await token.step("load_db_config", self._load_db_config())
         if not self._session_loaded:
@@ -957,6 +957,14 @@ class ManagerAgent:
             await token.keep("recorder_finish", self._finish_stopped_early(token, recorder, prepared.turn), 10)
             raise
         run.command = command
+        if not self._claude.shares_bridge:
+            # A process of its own per turn: its bridge starts after this, and the last turn's tree is gone.
+            self._publish_binding(token)
+
+    def _publish_binding(self, token: TurnToken | None) -> None:
+        """The binding file the MCP bridge reads at each call names ``token``'s turn, or no turn (None)."""
+        if self.ops is not None:
+            self.ops.publish_binding(token.binding if token is not None else None)
 
     async def _run_prepared(self, token: TurnToken, prepared: Prepared) -> str:
         """Start the prepared turn and run it; the turn's record ends however it ends."""
@@ -970,6 +978,7 @@ class ManagerAgent:
         finally:
             if prepared.run.recorder is not None:
                 await prepared.run.recorder.end_left_open(failure)
+            self._publish_binding(None)  # whatever way it ended, the turn's runtime is done (killed, if it failed)
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
         """Ask the user turn of ``message_id`` (the envelope's id or the web page's own), in any phase, to stop.
@@ -1221,11 +1230,14 @@ class ManagerAgent:
             if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()
+            if self._claude.shares_bridge:
+                self._publish_binding(token)  # on disk before the runtime gets the prompt
             token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
             # A turn cut off by Claude's exit ends without a result; that Claude
             # is reaped and the next message starts a new process that resumes the session.
             turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
                                                stop=lambda: recorder.cap_stop, cancel=token.cancel)
+            self._publish_binding(None)  # its result was read, or the cancel's cleanup ran: the bridge is quiet
         except TurnStopped:
             raise
         except TurnCancelled:

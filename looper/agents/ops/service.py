@@ -37,11 +37,13 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
 import subprocess
 import sys
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
@@ -63,6 +65,8 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "looper"
 URL_ENV = "LOOPER_AGENT_URL"
 TOKEN_ENV = "LOOPER_AGENT_TOKEN"
+TURN_FILE_ENV = "LOOPER_AGENT_TURN_FILE"
+BINDINGS_KEPT = 64
 CONFIRMATION_SECONDS = 600
 # The most chats with a confirmation waiting at once; past it, the oldest one's is dropped.
 CONFIRMATION_CHATS = 50
@@ -120,13 +124,16 @@ MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOL
 class ManagerOps:
     def __init__(self, platform: Platform, *, url: str, token: str | None = None,
                  tools: Sequence[Tool] = MANAGER_TOOLS,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, turn_file: Path | None = None) -> None:
         self._platform = platform
         self._url = url.rstrip("/")
         self._token = token or secrets.token_urlsafe(32)
         self._tools = {tool.name: tool for tool in tools}
         self._clock = clock
         self._turn: Turn | None = None
+        self._turn_file = turn_file
+        self._epoch = 0
+        self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
         self._pending: dict[tuple[str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
 
@@ -188,8 +195,10 @@ class ManagerOps:
         last = (done.stderr.strip().splitlines() or [""])[-1]
         return f"looper mcp-server exited ({done.returncode}) without listing the tools{': ' + last if last else ''}"
 
-    async def call(self, name: str, raw: Any) -> dict[str, Any]:
-        """Run one tool call in the current turn; the protocol's answer."""
+    async def call(self, name: str, raw: Any, *, binding: str | None = None,
+                    call_id: str | None = None) -> dict[str, Any]:
+        """Run one tool call in the turn its ``binding`` names; the protocol's answer. No binding, or one unknown,
+        is Claude's own turn: it only reads."""
         tool = self._tools.get(name)
         if tool is None:
             from .planner import TOOLS as PLANNER_TOOLS
@@ -198,7 +207,8 @@ class ManagerOps:
                 return _error(ErrorCode.FORBIDDEN, f"{name} is a tool of a task's Planner, for its own task; the "
                                                    f"Manager's tools are: {', '.join(self._tools)}")
             return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._tools)}")
-        turn = self._turn or Turn(channel=None, chat=None)
+        turn = self._bindings.get(binding) if binding else None
+        turn = turn or Turn(channel=None, chat=None)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
@@ -296,7 +306,32 @@ class ManagerOps:
 
     # --- The Manager's turns ---
 
-    def begin_turn(self, turn: Turn) -> str:
+    def register(self, turn: Turn, binding: str) -> None:
+        """Calls that carry ``binding`` belong to ``turn``; the last ``BINDINGS_KEPT`` stay, ended turns too."""
+        self._bindings[binding] = turn
+        self._bindings.move_to_end(binding)
+        while len(self._bindings) > BINDINGS_KEPT:
+            self._bindings.popitem(last=False)
+
+    def publish_binding(self, binding: str | None) -> None:
+        """Write the binding file the MCP bridge reads at each call (synchronously and atomically: it must be on
+        disk before the prompt reaches the runtime). ``None``: no turn runs."""
+        if self._turn_file is None:
+            return
+        self._epoch += 1
+        path = self._turn_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"epoch": self._epoch, "turn": binding}))
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def begin_turn(self, turn: Turn, binding: str | None = None) -> str:
         """``turn`` runs now; the note its message starts with when an operation in its chat waits for the user's
         word ('' otherwise). That operation may be confirmed in this turn only.
 
@@ -304,6 +339,8 @@ class ManagerOps:
         if turn.state is TurnState.ENDED:
             turn.state = TurnState.ANSWERING
         self._turn = turn
+        if binding:
+            self.register(turn, binding)
         pending = self._pending.get(turn.chat_key)
         if turn.autonomous or pending is None:
             return ""
@@ -320,7 +357,9 @@ class ManagerOps:
         any, is dropped, with what its reply would have shown."""
         turn.state = TurnState.STOPPED
         for key, pending in list(self._pending.items()):
-            if pending.asked_in == turn.message_id and not turn.autonomous:
+            # Asked in this turn, or waiting for this turn's word: a stopped turn confirms nothing.
+            if (pending.asked_in == turn.message_id or pending.answer_turn == turn.message_id) \
+                    and not turn.autonomous:
                 del self._pending[key]
                 if pending.block in turn.blocks:
                     turn.blocks.remove(pending.block)
@@ -346,7 +385,10 @@ class ManagerOps:
     # --- The Manager's MCP entry ---
 
     def server_config(self) -> dict[str, Any]:
-        return server_config(self._url, self._token)
+        config = server_config(self._url, self._token)
+        if self._turn_file is not None:
+            config["env"][TURN_FILE_ENV] = str(self._turn_file)
+        return config
 
     async def library_with_server(self, library: Any, runtime_root: Path) -> Any:
         """``library`` (``AgentLibrary``) with Looper's own MCP server added: always there for the Manager, and

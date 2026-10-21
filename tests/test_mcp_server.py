@@ -54,7 +54,8 @@ class _StubClient:
             raise self.failure
         return TOOLS
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def call_tool(self, name: str, arguments: dict[str, Any], meta: dict[str, Any] | None = None
+                  ) -> dict[str, Any]:
         self.calls.append((name, arguments))
         if self.failure:
             raise self.failure
@@ -232,6 +233,7 @@ class _AgentAPI(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.headers_seen.append({k.lower(): v for k, v in self.headers.items() if k.lower().startswith("x-looper")})
         self.server.posts.append({"path": self.path, "content_type": self.headers.get("Content-Type"), "body": body})
         name = self.path.removeprefix("/api/agent/v1/ops/")
         if name in ("slow", "looper_room_inbox"):
@@ -250,12 +252,14 @@ class _AgentAPI(BaseHTTPRequestHandler):
 
 class _AgentAPIServer(ThreadingHTTPServer):
     posts: list[dict[str, Any]]
+    headers_seen: list[dict[str, str]]
 
 
 @pytest.fixture
 def agent_api() -> Iterator[_AgentAPIServer]:
     server = _AgentAPIServer(("127.0.0.1", 0), _AgentAPI)
     server.posts = []
+    server.headers_seen = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield server
@@ -276,6 +280,55 @@ def test_agent_client_lists_the_tools_and_posts_the_arguments(agent_api: _AgentA
     assert client.call_tool("create_task", {"requirement": "写测试"}) == ANSWER
     assert agent_api.posts == [{"path": "/api/agent/v1/ops/create_task", "content_type": "application/json",
                                 "body": {"requirement": "写测试"}}]
+
+
+def test_agent_client_sends_the_binding_it_reads_at_each_call(agent_api: _AgentAPIServer, tmp_path: Path) -> None:
+    turn_file = tmp_path / "turn.json"
+    client = AgentClient(_url(agent_api), TOKEN, turn_file=str(turn_file))
+    client.call_tool("create_task", {})  # no file yet: no header
+    turn_file.write_text(json.dumps({"epoch": 1, "turn": "bind-one"}))
+    client.call_tool("create_task", {})
+    turn_file.write_text(json.dumps({"epoch": 2, "turn": "bind-two"}))
+    client.call_tool("create_task", {}, {"claudecode/toolUseId": "toolu_1"})
+    turn_file.write_text(json.dumps({"epoch": 3, "turn": None}))
+    client.call_tool("create_task", {}, {"toolCallId": "call-9"})
+    turn_file.write_text("{not json")
+    client.call_tool("create_task", {}, {"other": "x"})
+    assert agent_api.headers_seen == [
+        {}, {"x-looper-turn": "bind-one"}, {"x-looper-turn": "bind-two", "x-looper-call": "toolu_1"},
+        {"x-looper-call": "call-9"}, {}]
+
+
+def test_tools_call_hands_the_meta_to_the_client() -> None:
+    seen: list[Any] = []
+
+    class Recording(_StubClient):
+        def call_tool(self, name: str, arguments: dict[str, Any], meta: dict[str, Any] | None = None
+                      ) -> dict[str, Any]:
+            seen.append(meta)
+            return ANSWER
+
+    meta = {"claudecode/toolUseId": "toolu_7"}
+    handle(_request("tools/call", {"name": "create_task", "arguments": {}, "_meta": meta}, 4), Recording())
+    handle(_request("tools/call", {"name": "create_task", "arguments": {}}, 5), Recording())
+    assert seen == [meta, None]
+
+
+def test_the_process_sends_the_binding_and_logs_neither_it_nor_the_token(
+        agent_api: _AgentAPIServer, tmp_path: Path) -> None:
+    turn_file = tmp_path / "turn.json"
+    env = _environ(LOOPER_AGENT_URL=_url(agent_api), LOOPER_AGENT_TOKEN=TOKEN, LOOPER_AGENT_TURN_FILE=str(turn_file))
+    call = {"name": "create_task", "arguments": {}, "_meta": {"claudecode/toolUseId": "toolu_3"}}
+    with _mcp_process(env) as mcp:
+        mcp.send(INITIALIZE)
+        turn_file.write_text(json.dumps({"epoch": 1, "turn": "secret-bind-1"}))
+        mcp.send(_request("tools/call", call, 2))
+        turn_file.write_text(json.dumps({"epoch": 2, "turn": "secret-bind-2"}))
+        mcp.send(_request("tools/call", call, 3))
+        _, _, stderr = mcp.close()
+    assert agent_api.headers_seen == [{"x-looper-turn": "secret-bind-1", "x-looper-call": "toolu_3"},
+                                      {"x-looper-turn": "secret-bind-2", "x-looper-call": "toolu_3"}]
+    assert "secret-bind" not in stderr and TOKEN not in stderr
 
 
 @pytest.mark.parametrize(("name", "failure", "reason"), [
@@ -323,7 +376,7 @@ def test_agent_client_raises_when_nothing_listens() -> None:
 
 def _environ(**overrides: str) -> dict[str, str]:
     """This environment without the agent variables or a proxy bypass, with a dead proxy, plus ``overrides``."""
-    dropped = {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", "no_proxy", "NO_PROXY"}
+    dropped = {"LOOPER_AGENT_URL", "LOOPER_AGENT_TOKEN", "LOOPER_AGENT_TURN_FILE", "no_proxy", "NO_PROXY"}
     env = {key: value for key, value in os.environ.items() if key not in dropped}
     # The server must reach Looper directly even when the environment names a proxy.
     return {**env, "http_proxy": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9", **overrides}
@@ -456,7 +509,7 @@ class Client:
         state['lists'] += 1
         state_path.write_text(json.dumps(state))
         return state['tools']
-    def call_tool(self, name, arguments):
+    def call_tool(self, name, arguments, meta=None):
         state = self.state()
         state['posts'].append({'path':'/api/agent/v1/ops/'+name, 'body':arguments})
         state_path.write_text(json.dumps(state))
