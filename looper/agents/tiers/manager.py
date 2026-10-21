@@ -867,7 +867,8 @@ class ManagerAgent:
             raise RuntimeError(failed)
         if not replied:
             raise RuntimeError(
-                f"Claude Code 没有返回内容（退出码 {turn.exit_code}）" if exited else "Claude Code 没有返回内容"
+                f"{launch.runtime.label} 没有返回内容（退出码 {turn.exit_code}）" if exited
+                else f"{launch.runtime.label} 没有返回内容"
             )
         return final_text
 
