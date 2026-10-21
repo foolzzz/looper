@@ -38,8 +38,6 @@ from .user_gates import MESSAGE_MAX_CHARS, GateState
 
 logger = logging.getLogger(__name__)
 
-# What the user is told when they answer a gate of a task that is not running.
-KEPT_REPLY = "任务已停止，你的回答已保存，任务继续后交给规划者。"
 # What the user is told when the gate cannot take their reply as it is.
 EMPTY_REPLY = "这条回复没有文字，没能交给关卡：请写下你的回答再回复一次。"
 TOO_LONG_REPLY = f"这条回答太长（最多 {MESSAGE_MAX_CHARS} 个字），没能交给关卡：请分几条回复。"
@@ -137,10 +135,8 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
             # It stopped waiting meanwhile, or the task completed: the Manager hears it as a closed gate's.
             return _closed(task_id, label, str(exc))
         kept = posted["delivered"] == "kept"
-        said = receipt(await task_name(task_id), label, end=end)
-        if kept:
-            return Route(RouteKind.KEPT, reply=f"{said}。{KEPT_REPLY}")
-        return Route(RouteKind.DELIVERED, reply=said)
+        said = receipt(await task_name(task_id), label, end=end, kept=kept)
+        return Route(RouteKind.KEPT if kept else RouteKind.DELIVERED, reply=said)
     return _closed(task_id, label, f"gate {label} is {gate['state']}")
 
 

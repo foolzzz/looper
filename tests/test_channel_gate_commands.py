@@ -178,7 +178,14 @@ class TestAnswer:
         self._listed(world)
         world.delivered = "kept"
         [(text, _)] = world.send("/gate 1 好")
-        assert text.startswith("已交给 登录重构 的 g1") and "任务已停止" in text
+        assert text.startswith("任务已停止") and "登录重构 g1" in text and "已交给" not in text
+
+    def test_ending_a_gate_of_a_stopped_task_is_kept_too(self, world: _World) -> None:
+        self._listed(world)
+        world.delivered = "kept"
+        [(text, _)] = world.send("/gate 1 end")
+        assert world.posts[0]["end"] is True
+        assert text.startswith("任务已停止") and "登录重构 g1" in text and "已请规划者" not in text
 
     def test_without_a_list_the_user_is_sent_to_the_list(self, world: _World) -> None:
         world.gates = [_gate("t1", "g1", "登录重构")]
