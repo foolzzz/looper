@@ -1,6 +1,6 @@
 # RFC：控制台聊天输入框：暂存消息、历史和 Esc 停止回复（v0）
 
-- **状态：** 设计稿，待维护者批准。第 3 节的决定按维护者给的四条需求写成；标「需要验证」的几处在实现或实跑时核实。
+- **状态：** 已实现（下一个版本，见 CHANGELOG 的 Unreleased）。第 3 节的决定按维护者给的四条需求写成；实现中已核实的「需要验证」处已写明结果，仍标「需要验证」的几处是还没在真实运行时上跑过的。
 - **相关：** [引导运行中的 Worker](worker-steering-v0.zh-CN.md)（各运行时的中断原语，3.1、3.2 节已实测 Codex `turn/interrupt` 和 OMP `abort`）、[Grok 运行时](grok-runtime-v0.zh-CN.md)（`session/cancel`）、[操作者接口鉴权](operator-api-auth-v0.zh-CN.md)、管家会话的 Agent Profile RFC（另一分支，未合并：它改聊天头部和「New session」面板，本 RFC 不碰这两处）。
 - **代码基线：** v2.13.0（`3236c4242`）。
 
@@ -38,7 +38,7 @@
 
 | 运行时 | 管家的会话 | 现有中断原语 | 停止后能拿到的 |
 |---|---|---|---|
-| Claude Code | 常驻一个 `--input-format stream-json` 进程（`ResidentClaude`，`claude_cli.py:684`） | Looper 没用过；CLI 的控制协议有 `{"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}`（需要验证：2.1.285 的回应和随后的 `result`） | 增量文字、每次请求的 `usage`；结果里的会话累计 |
+| Claude Code | 常驻一个 `--input-format stream-json` 进程（`ResidentClaude`，`claude_cli.py:684`） | 已实现：`write_control` 写 `{"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}`，等这一轮的 `result` 至多 `INTERRUPT_GRACE_SEC`（5 秒），没有就杀进程（2.1.285 的回应和随后的 `result` 需要验证：目前只有离线测试，没在真实 Claude 上跑过） | 增量文字、每次请求的 `usage`；结果里的会话累计 |
 | Codex | 每轮一个 `codex exec --json … resume <thread> -`（`ResidentCodex`，`codex.py:911`，`PerTurnSession`） | `exec` 没有；`app-server` 的 `turn/interrupt` 只给 Worker 用 | 增量文字；**没有用量**（只在 `turn.completed` 报，被杀就没有） |
 | OMP | 每轮一个 `omp -p --mode json --resume`（`omp.py:928`） | `--mode rpc` 的 `abort` 只给 Worker | 每条消息带用量（`omp.py:57-62`） |
 | Pi | 每轮一个 `pi -p --mode json --session <file>`（`pi.py:613`） | rpc 的 `abort`（要先 `clear_queue`）只给 Worker | 每条消息带用量 |
@@ -106,7 +106,7 @@
 4. **一轮还没起进程时**（读设置、交接、续接失败重试之前）：`_run_turn` 在调 `run_turn` 前和重试前看 `self._current.stop`，已有就不启动进程，直接按停止收尾（没有花费）。另外 `stop=` 改为 `lambda: recorder.cap_stop or self._user_stop(recorder)`：`interrupt()` 那时还没东西可停，第一个事件到来时也会停下。
 5. **运行时返回：** `ResidentTurn` 多一个字段 `stopped: StopMethod | None`（`control`、`cancel`、`kill`）。被停的一轮的 `result_event` 是运行时自己的结果（Claude Code 中断后的结果、Grok 的 `cancelled`），或合成的 `user_stop_result()`（带 `USER_STOP` 标记，像 `SOFT_CAP` 一样让 `finish` 用 `_usage_so_far` 补用量）。
 6. **记录：** `recorder.finish(output_text=已流出的文字 or None, result_event, error="stopped by the user", status=RecordStatus.INTERRUPTED, usage=turn.usage)`，再 `annotate({"user_stop": {"via": "web"|"telegram"|"lark"|"lark_bot", "method": "control"|"cancel"|"kill", "requested_at", "usage_complete": bool}})`。会话累计照常前移并写库（`_save_session_state`）；会话 id 不清，下一轮续接（被杀的进程按现有路径以 `--resume` 重启）。Runs 页的运行卡片已显示 `interrupted` 状态，不改界面。
-7. **回复：** `_handle_user_message` 捕获 `TurnStopped(partial_text)`，`_send_reply(envelope, stopped_reply(partial, turn.blocks), outcome=ReplyOutcome.STOPPED)`，不带 `error`（飞书状态行不显示「❌」，`status_line.finish` 显示「已停止」，需要验证文案位置）。文字：有已流出的文字时是它加一行 `（已停止）`；没有时是 `已停止，这次没有回复。`。已执行的工具块（`turn.blocks`）照现有 `_with_blocks` 附上，让用户看到停止前做了什么。web 渠道照旧把它存成 `<id>:reply`。
+7. **回复：** `_handle_user_message` 捕获 `TurnStopped(partial_text)`，`_send_reply(envelope, stopped_reply(partial, turn.blocks), outcome=ReplyOutcome.STOPPED)`，不带 `error`（飞书状态行不显示「❌」，`status_line.finish(stopped=True)` 显示「已停止」，已实现，在 `channels/status_line.py`）。文字：有已流出的文字时是它加一行 `（已停止）`；没有时是 `已停止，这次没有回复。`。已执行的工具块（`turn.blocks`）照现有 `_with_blocks` 附上，让用户看到停止前做了什么。web 渠道照旧把它存成 `<id>:reply`。
 8. **确认：** 被停的一轮里提出、等待用户确认的高风险操作作废（`ManagerOps.drop_asked_in(message_id)`：删掉 `asked_in` 是这条消息的 `_Pending`，并从 `turn.blocks` 去掉它的块）。用户按了停止，就不该留下一句「回复确认就执行」。
 
 ### D4 每个运行时怎么中断
