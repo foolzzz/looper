@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1005,6 +1005,28 @@ class ManagerAgent:
             await self._send_reply(envelope, f"Manager 出错，没能切换 Agent Profile：{exc}", error=str(exc))
             return
         await self._send_reply(envelope, result.text)
+
+    async def session_view(self) -> dict[str, Any]:
+        """The Manager's session and its Agent Profile for the API; the session id is never in it."""
+        if not self._session_loaded:
+            await self._load_session_state()
+        saved = await db_agent_sessions.get_session(self.agent_id) or {}
+        effective = await self._load_agent_settings()
+        listed = await profile_choices(saved or None, effective)
+        selected_id = saved.get("selected_profile_id")
+        selected = None
+        if selected_id:
+            name = next((c.name for c in listed if c.profile_id == selected_id), selected_id)
+            selected = {"profile_id": selected_id, "name": name}
+        profile = effective.view()["profile"]
+        return {
+            "session": {"active": bool(saved.get("session_id")), "runtime": saved.get("runtime_type"),
+                        "profile_id": saved.get("profile_id")},
+            "selected": selected,
+            "effective": {"profile": profile["value"], "source": profile["source"]},
+            "problem": effective.profile_error,
+            "choices": [asdict(c) for c in listed],
+        }
 
     async def select_session_profile(self, profile_id: str | None, *, origin: dict[str, Any], via: str,
                                      input_text: str = "PUT /api/manager/session/profile") -> SessionProfileResult:

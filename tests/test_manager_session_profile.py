@@ -35,7 +35,8 @@ def _runs(agent_db: Any) -> list[dict[str, Any]]:
 
 
 def _chat(monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path, messages: list[str], *,
-          key: bool = True, hold: bool = False, saved: bool = False) -> SimpleNamespace:
+          key: bool = True, hold: bool = False, saved: bool = False,
+          view: list[Any] | None = None) -> SimpleNamespace:
     """Send ``messages`` one at a time from the web chat to one Manager and return what happened.
 
     ``replies`` are the AGENT_REPLY envelopes, ``argvs`` every process started and ``turn_runs`` the metadata of the
@@ -101,6 +102,8 @@ def _chat(monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path, messag
                 for index, text in enumerate(messages):
                     await manager._handle(_web(text, index))
                     replies += [e.payload["text"] for e in _drain(queue) if e.message_type == MessageType.AGENT_REPLY]
+            if view is not None:
+                view.append(await manager.session_view())
             await manager.stop()
             await bus.shutdown()
             return replies
@@ -215,3 +218,17 @@ class TestProfileCommand:
         assert chat.replies == ["turn 1: /profiles"]
         assert len(chat.argvs) == 1
         assert _runs(agent_db) == []
+
+    def test_the_session_view_shows_the_choice_and_never_the_session_id(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path,
+    ) -> None:
+        import json
+
+        views: list[Any] = []
+        _chat(monkeypatch, agent_db, tmp_path, ["/profile 2"], saved=True, view=views)
+        (view,) = views
+        assert view["selected"] == {"profile_id": "agent-codex", "name": "codex/gpt-5.5"}
+        assert view["effective"]["source"] == "session"
+        assert view["effective"]["profile"]["profile_id"] == "agent-codex"
+        assert view["problem"] is None and len(view["choices"]) == 2
+        assert "session_id" not in json.dumps(view)
