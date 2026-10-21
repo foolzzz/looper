@@ -169,6 +169,32 @@ def test_stop_before_the_process_starts(agent_db: Any) -> None:
     asyncio.run(run())
 
 
+def test_stop_while_the_turn_is_prepared_starts_no_model(agent_db: Any) -> None:
+    """A Stop during the persisting, the status and the tools probe (before the process) is kept, not ``not_running``."""
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = _web("你好")
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            results: list[StopResult] = []
+            persist = manager._persist_chat
+
+            async def slow_persist(*args: Any, **kwargs: Any) -> Any:
+                results.append(await manager.stop_turn(envelope.message_id, via="web"))
+                return await persist(*args, **kwargs)
+
+            manager._persist_chat = slow_persist  # type: ignore[method-assign]
+            await asyncio.wait_for(manager._handle(envelope), 20)
+            assert results == [StopResult.STOPPING]
+            assert session.turns == [] and not session.started
+            (reply,) = _replies(queue)
+            assert reply["text"] == "已停止，这次没有回复。" and reply["outcome"] == "stopped"
+            assert manager._current is None
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_an_ordinary_turn_after_a_stopped_one(agent_db: Any) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:

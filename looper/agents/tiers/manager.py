@@ -659,18 +659,10 @@ class ManagerAgent:
         if not text.strip():
             return
         origin = _message_origin(envelope)
-        await self._persist_chat(envelope, "user", text, envelope.message_id)
-        await self._send_status(envelope, "thinking", phase=True, activity="thinking")
-        # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
-        problem = await self.ops.tools_problem() if self.ops is not None else None
-        if problem is not None:
-            logger.error("manager: Looper's tools do not work (%s); %s was not answered", problem,
-                         envelope.message_id)
-            await self._send_reply(envelope, tools_down_reply(problem), error=problem)
-            return
         # The calls Claude makes while answering belong to this message and its chat.
         turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
                     envelope=envelope, sender=origin["sender"], group=origin["group"])
+        # Registered before the first await: a Stop during the persisting, the status and the tools probe is kept.
         self._current_envelope = envelope
         context = envelope.payload.get("channel_context")
         client_id = context.get("client_message_id") if isinstance(context, dict) else None
@@ -680,6 +672,17 @@ class ManagerAgent:
                                     turn=turn)
         try:
             try:
+                await self._persist_chat(envelope, "user", text, envelope.message_id)
+                await self._send_status(envelope, "thinking", phase=True, activity="thinking")
+                # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
+                problem = await self.ops.tools_problem() if self.ops is not None else None
+                if problem is not None:
+                    logger.error("manager: Looper's tools do not work (%s); %s was not answered", problem,
+                                 envelope.message_id)
+                    await self._send_reply(envelope, tools_down_reply(problem), error=problem)
+                    return
+                if self._stop_requested:
+                    raise TurnStopped()  # asked while the turn was prepared: the model is never started
                 stopped_note, self._stopped_note = self._stopped_note, None
                 response = await self._invoke_claude(
                     text, envelope, turn=turn,

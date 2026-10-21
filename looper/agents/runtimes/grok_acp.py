@@ -682,6 +682,12 @@ class AcpGrok:
             if isinstance(exc, AcpUnavailable):
                 await self._fall_back(str(exc))
                 self._readying = False
+                if self._stop_ended is not None:
+                    # The user's stop came while falling back, before the legacy turn existed to take it.
+                    logger.info("%s: the user stopped the turn while Grok fell back; no process is started",
+                                self._label)
+                    return ResidentTurn(user_stop_result(), session_started=False, usage=Usage(),
+                                        stopped=StopMethod.KILL)
                 return await self._legacy.run_turn(text, on_event, tag=tag, stop=stop)
             if isinstance(exc, SessionGone):
                 logger.warning("%s: Grok no longer has session %s (%s)", self._label, self._session, exc)

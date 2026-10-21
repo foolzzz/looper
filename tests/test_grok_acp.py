@@ -809,6 +809,46 @@ def test_a_stop_while_the_session_is_readied_sends_no_prompt(tmp_path: Path, mon
     assert after.result_event["result"].endswith("| next | turn 1")  # the stopped prompt never reached Grok
 
 
+def test_a_stop_while_acp_falls_back_starts_no_per_turn_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop that lands while the session falls back to per turn (``interrupt`` has no legacy turn to take it yet)
+    ends the turn stopped: the per-turn process is never started."""
+    from looper.agents.claude_cli import USER_STOP
+    from looper.agents.runtimes.grok import ResidentGrok
+
+    _operator(tmp_path, monkeypatch)
+    root, grok = tmp_path / "runtime", _fake_with_headless(tmp_path)
+    fall_back = AcpGrok._fall_back
+    methods: list[Any] = []
+    legacy_turns: list[str] = []
+
+    async def stopping_fall_back(self: AcpGrok, reason: str) -> None:
+        methods.append(asyncio.create_task(self.interrupt()))
+        await asyncio.sleep(0)  # the stop is asked before the fall back is done
+        await fall_back(self, reason)
+
+    legacy_run_turn = ResidentGrok.run_turn
+
+    async def spying_run_turn(self: ResidentGrok, text: str, *args: Any, **kwargs: Any) -> Any:
+        legacy_turns.append(text)
+        return await legacy_run_turn(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(AcpGrok, "_fall_back", stopping_fall_back)
+    monkeypatch.setattr(ResidentGrok, "run_turn", spying_run_turn)
+
+    async def _run() -> tuple[Any, Any]:
+        session = AcpGrok(label="manager")
+        env = {**_launch().environment(), "FAKE_ACP_DEAD": "1"}
+        await session.start(_command(root, grok), cwd=str(tmp_path), signature="s", env=env)
+        stopped = await session.run_turn("work", Events())
+        method = await methods[0]
+        await session.stop()
+        return stopped, method
+
+    stopped, method = _go(_run())
+    assert legacy_turns == []
+    assert method is StopMethod.KILL and stopped.stopped is StopMethod.KILL and stopped.result_event[USER_STOP]
+
+
 def test_a_normal_result_queued_before_a_stop_does_not_end_the_turn_as_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
