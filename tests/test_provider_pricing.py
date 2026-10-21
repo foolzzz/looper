@@ -177,6 +177,31 @@ def test_profile_context_suffix_warnings_follow_its_runtime(
                 assert name in warnings[0]
 
 
+@pytest.mark.parametrize(("runtime_type", "expected"), [("dsh", 0), ("pi", 1)])
+def test_profile_suffix_warning_follows_the_adapters_actual_model_mapping(
+    monkeypatch: pytest.MonkeyPatch, runtime_type: str, expected: int,
+) -> None:
+    """dsh strips the ``[1m]`` of a model it supports before the API call; pi sends it verbatim."""
+    from unittest.mock import AsyncMock
+
+    from looper.agents.profile_registry import _profile_answer
+    from looper.db import profile_registry as db
+
+    model = "deepseek-v4-pro[1m]"
+    row = {"id": "profile-test", "name": "test", "builtin": False, "effort": None,
+           "runtime_id": "rt-test", "runtime_name": "test", "runtime_type": runtime_type,
+           "provider_id": "prov-test", "provider_name": "test"}
+    resolved = _resolved(model)
+    row.update(model_id=resolved.model.id, model=asdict(resolved.model),
+               provider=asdict(resolved.provider), endpoint=asdict(resolved.endpoint))
+    monkeypatch.setattr(db, "get_profile", AsyncMock(return_value=row))
+    monkeypatch.setattr(db, "profile_usage", AsyncMock(return_value={}))
+    warnings = asyncio.run(_profile_answer(row["id"]))["warnings"]
+    assert len(warnings) == expected
+    if expected:
+        assert model in warnings[0]
+
+
 def test_manager_provider_registration_keeps_registry_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
     from unittest.mock import AsyncMock

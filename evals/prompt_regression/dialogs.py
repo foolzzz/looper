@@ -1552,6 +1552,13 @@ def runtime_evidence(api: Api) -> list[dict[str, Any]]:
     return evidence
 
 
+def observed_cost(recorded: float, evidence: list[dict[str, Any]]) -> tuple[float, bool]:
+    """The dialog's cost for the suite's cap: the larger of the recorded sum and the observed root spend of the
+    runs, and whether every run reported one. A run that did not stays unknown instead of counting as zero."""
+    known = [run["observed_cost_usd"] for run in evidence if run.get("observed_cost_usd") is not None]
+    return max(recorded, sum(known)), len(known) == len(evidence)
+
+
 def run(
     *, mode: str, dialogs: tuple[Dialog, ...], admin_url: str, out_dir: Path, model: str | None = None,
     agent: str | None = None, register: dict[str, Any] | None = None, max_budget_usd: float | None = None,
@@ -1622,7 +1629,7 @@ def run(
                 if "runtime_evidence" in row:
                     # DSH's full bill is unknown. Use reported root spend for the
                     # suite's observable soft cap rather than a null bill as zero.
-                    cost = max(cost, sum(run["observed_cost_usd"] or 0 for run in row["runtime_evidence"]))
+                    cost, row["observed_cost_complete"] = observed_cost(cost, row["runtime_evidence"])
             return {**row, "cost_usd": round(cost, 6), "models": models}
 
         # A failure to set a dialog's server up is not caught: it stops the run (catch off).
