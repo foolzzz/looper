@@ -305,3 +305,37 @@ class TestNewSessionWithProfile:
         assert "manager" not in agent_db.store.selected_profile_id
         (reset,) = _resets(agent_db)
         assert reset["metadata"]["session_reset"]["selected_profile_id"] is None
+
+
+def test_a_stop_during_the_handoff_keeps_the_old_session_and_the_next_message_hands_off_again(
+        agent_db: Any, tmp_path: Path) -> None:
+    from looper.agents.tiers.manager import StopResult, _Process
+    from tests.test_manager_stop import _manager, _replies, _Session, _until
+
+    async def run() -> None:
+        session = _Session()
+        manager, bus, queue = _manager(tmp_path, session)
+        manager._session_loaded = True
+        manager._session_id, manager._session_runtime = "old-session", "omp"
+        session.started = True
+        manager._process = _Process(["claude"], None, None, None)  # type: ignore[arg-type]
+        stops: list[str] = []
+        session.stop = AsyncMock(side_effect=lambda **kw: stops.append("stop"))  # type: ignore[method-assign]
+        first = _web("你好", 0)
+        handling = asyncio.create_task(manager._handle(first))
+        await _until(session.running.is_set)
+        assert session.turns[0].startswith("[HANDOFF]")
+        assert await manager.stop_turn(first.message_id, via="web") is StopResult.STOPPING
+        await asyncio.wait_for(handling, 5)
+        (reply,) = _replies(queue)
+        assert reply["outcome"] == "stopped"
+        assert stops == [] and session.started
+        assert manager._session_id == "old-session" and manager._pending_switch is None
+        session.hold = False
+        session.running.clear()
+        session._stopped.clear()
+        await asyncio.wait_for(manager._handle(_web("再来", 1)), 5)
+        assert len([t for t in session.turns if t.startswith("[HANDOFF]")]) == 2
+        await bus.shutdown()
+
+    asyncio.run(run())

@@ -38,7 +38,7 @@ from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
@@ -72,6 +72,7 @@ from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import session_switch
 from ..runtimes import CLAUDE_CODE
+from ..runtimes.cancel import TurnCancel, TurnCancelled
 from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
@@ -609,21 +610,7 @@ class ManagerAgent:
         client_id = context.get("client_message_id") if isinstance(context, dict) else None
         token = self._turns.receive(envelope, channel=origin["channel"] or "", chat=origin["chat"] or "",
                                     client_message_id=client_id if isinstance(client_id, str) and client_id else None)
-        token.cancel.on_request(self._interrupt_for(token))
         return token
-
-    def _interrupt_for(self, token: TurnToken) -> Callable[[], None]:
-        """Transitional, until the runtimes take ``token.cancel``: a stop that found the prompt written interrupts
-        the resident session."""
-        def interrupt() -> None:
-            request = token.stop
-            if request is None or request.phase is not TurnPhase.RUNNING or not token.live:
-                return
-            task = asyncio.create_task(self._interrupt_claude(token))
-            self._stop_tasks.add(task)
-            task.add_done_callback(self._stop_tasks.discard)
-
-        return interrupt
 
     async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:
         try:
@@ -902,7 +889,9 @@ class ManagerAgent:
         token.restart() if prepared.retried else token.advance(TurnPhase.STARTING)
         if prepared.switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
-            await token.step("switch_session", self._switch_session(prepared.switch))
+            # Not abandoned by a stop: the handoff's turn takes the token's cancel and ends itself.
+            await token.keep("switch_session", self._switch_session(prepared.switch, token.cancel),
+                             HANDOFF_TIMEOUT_SEC + 30)
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await token.keep("claude_stop", self._claude.stop(), 10)
@@ -1002,22 +991,32 @@ class ManagerAgent:
         """The oldest live user turn of ``chat`` on ``channel``: the one being answered, else the first queued."""
         return self._turns.oldest_for(channel, chat)
 
-    async def _interrupt_claude(self, token: TurnToken) -> None:
-        if not token.live:
-            return  # the turn ended before its interrupt ran
-        try:
-            token.method = await self._claude.interrupt()
-        except Exception:
-            logger.warning("manager: could not interrupt the running turn", exc_info=True)
+    async def _end_stopped(self, token: TurnToken, prepared: Prepared, turn: ResidentTurn | None,
+                           partial: str) -> NoReturn:
+        """The turn ends stopped (its token already settled): the record finishes as interrupted, with what it
+        spent, and the reply is the partial text."""
+        recorder, ops_turn = prepared.run.recorder, prepared.turn
+        request = token.stop
+        await recorder.finish(
+            output_text=partial or None, result_event=turn.result_event if turn else None,
+            error="stopped by the user", status=RecordStatus.INTERRUPTED, usage=turn.usage if turn else Usage(),
+        )
+        await recorder.annotate({"user_stop": {
+            "via": request.via if request else None,
+            "method": turn.stopped.value if turn and turn.stopped else None,
+            "requested_at": request.at.isoformat() if request else None,
+            "usage_complete": turn is None or (turn.usage_complete and turn.usage.cost_usd is not None),
+        }})
+        await self._link_turn_task(recorder, ops_turn)
+        if turn is not None:
+            self._session_totals = self._claude.totals
+        await self._save_session_state()
+        raise TurnStopped(partial)
 
     def _settle(self) -> None:
         """The running turn's end is decided (an answer or a failure): ``stop_turn`` refuses it from now on."""
         if self._running_token is not None:
             self._running_token.settle()
-
-    @property
-    def _stop_requested(self) -> bool:
-        return self._running_token is not None and self._running_token.phase is TurnPhase.STOPPING
 
     async def _finish_stopped_early(self, token: TurnToken, recorder: ClaudeRunRecorder,
                                     ops_turn: Turn | None) -> None:
@@ -1030,13 +1029,6 @@ class ManagerAgent:
             "requested_at": request.at.isoformat() if request else None, "usage_complete": True,
         }})
         await self._link_turn_task(recorder, ops_turn)
-
-    def _user_stop(self, recorder: ClaudeRunRecorder) -> CapStop | None:
-        """The stop= hook: once the user asked to stop the turn, the result it ends with and what it spent."""
-        token = self._running_token
-        if token is None or token.stop is None:
-            return None
-        return CapStop(user_stop_result(), recorder._usage_so_far)
 
     async def _handle_goal_status(self, envelope: MessageEnvelope) -> None:
         goal_id = envelope.payload.get("goal_id", "")
@@ -1216,16 +1208,20 @@ class ManagerAgent:
 
         try:
             turn_text = f"{brief}\n\n{prepared.turn_text}" if brief else prepared.turn_text
-            if self._stop_requested:
+            if token.cancel.requested:
                 await self._finish_stopped_early(token, recorder, ops_turn)
                 raise TurnStopped()
             token.cancel.sent()  # the prompt goes to the runtime now: starting -> running
             # A turn cut off by Claude's exit ends without a result; that Claude
             # is reaped and the next message starts a new process that resumes the session.
             turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
-                                               stop=lambda: recorder.cap_stop or self._user_stop(recorder))
+                                               stop=lambda: recorder.cap_stop, cancel=token.cancel)
         except TurnStopped:
             raise
+        except TurnCancelled:
+            # A runtime that lets the turn's cancel escape was stopped by the user: not a failure.
+            token.settle(ReplyOutcome.STOPPED)
+            await self._end_stopped(token, prepared, None, "".join(text_parts))
         except BaseException as exc:
             self._settle()  # the turn failed: a stop that comes while it is cleaned up is too late
             # Never leave Claude running once the Manager gives up on it.
@@ -1238,26 +1234,15 @@ class ManagerAgent:
             raise
 
         resume_lost = bool(resuming) and not turn.session_started and not retried
-        # A stop asked after the runtime had the result (it had no turn left to interrupt) ends the turn stopped
-        # all the same: the stop was taken, so the turn is not reported as an answer.
-        if turn.stopped is not None or (turn.result_event or {}).get(USER_STOP) or (
-                self._stop_requested and not resume_lost):
-            partial = "".join(text_parts)
-            request = token.stop
-            await recorder.finish(
-                output_text=partial or None, result_event=turn.result_event,
-                error="stopped by the user", status=RecordStatus.INTERRUPTED, usage=turn.usage,
-            )
-            await recorder.annotate({"user_stop": {
-                "via": request.via if request else None,
-                "method": turn.stopped.value if turn.stopped else None,
-                "requested_at": request.at.isoformat() if request else None,
-                "usage_complete": turn.usage_complete and turn.usage.cost_usd is not None,
-            }})
-            await self._link_turn_task(recorder, ops_turn)
-            self._session_totals = self._claude.totals
-            await self._save_session_state()
-            raise TurnStopped(partial)
+        # Decided here, in one place and with nothing awaited since the runtime returned: a stop asked until now
+        # ends the turn stopped, even when the runtime came back with an answer; from the settle on, a stop is too
+        # late (the token has ended).
+        stopped = token.cancel.requested
+        if stopped:
+            if turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
+                logger.error("stop lost: the runtime answered a turn that was asked to stop (%s)", token.message_id)
+            token.settle(ReplyOutcome.STOPPED)
+            await self._end_stopped(token, prepared, turn, "".join(text_parts))
 
         if resume_lost:
             # Claude never started the saved session: it no longer exists. Every
@@ -1268,7 +1253,7 @@ class ManagerAgent:
             await recorder.finish(output_text=None, result_event=None, error=(
                 f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
             await self._link_turn_task(recorder, ops_turn)
-            if self._stop_requested:
+            if token.cancel.requested:
                 raise TurnStopped()
             await self._claude.stop()
             self._session_id, self._session_totals = None, Usage()  # its totals went with it
@@ -1280,7 +1265,6 @@ class ManagerAgent:
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
                                         token=token)
 
-        # Decided now, with nothing awaited since the stop was looked at: from here a stop is too late.
         self._settle()
 
         result_event = turn.result_event
@@ -1528,14 +1512,16 @@ class ManagerAgent:
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 
-    async def _switch_session(self, switch: SessionSwitch) -> None:
+    async def _switch_session(self, switch: SessionSwitch, cancel: TurnCancel) -> None:
         """Move to a new session because the Manager's agent changed. While the old session's Claude still runs,
         it first writes a handoff for the new one (one HANDOFF turn, recorded as a run and never sent to a
         chat)."""
+        if cancel.requested:
+            raise TurnStopped()
         process = self._process
         handoff: str | None = None
         if self._claude.started and process is not None and not self._claude.stale(process.signature):
-            handoff = await self._handoff(switch, process)
+            handoff = await self._handoff(switch, process, cancel)
         await self._claude.stop()
         logger.warning("manager: starting a new session (%s)%s", switch.describe(),
                        "; its previous session wrote a handoff" if handoff else "")
@@ -1543,8 +1529,9 @@ class ManagerAgent:
         await self._save_session_state()
         self._pending_switch, self._pending_handoff = switch, handoff
 
-    async def _handoff(self, switch: SessionSwitch, process: _Process) -> str | None:
-        """The handoff the running session writes before ``switch``; None when it writes none in time."""
+    async def _handoff(self, switch: SessionSwitch, process: _Process, cancel: TurnCancel) -> str | None:
+        """The handoff the running session writes before ``switch``; None when it writes none in time. A stop
+        ends it with ``TurnStopped``: the old session and its process stay, and the next turn switches again."""
         text = (
             f"[HANDOFF] This session ends here ({switch.describe()}), and the next one cannot read this "
             "conversation. Write a compact handoff for it: what you and the user are working on in each chat, "
@@ -1569,12 +1556,21 @@ class ManagerAgent:
                                  if isinstance(block, dict) and block.get("type") == "text")
 
             try:
-                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event), HANDOFF_TIMEOUT_SEC)
+                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, cancel=cancel),
+                                              HANDOFF_TIMEOUT_SEC)
+            except TurnCancelled as exc:
+                await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
+                                      status=RecordStatus.INTERRUPTED, usage=Usage())
+                raise TurnStopped() from exc
             except Exception as exc:  # the turn was given up, which stopped Claude
                 logger.warning("manager: its previous session wrote no handoff: %s", exc)
                 await recorder.finish(output_text=None, result_event=None,
                                       error=f"no handoff: {type(exc).__name__}: {exc}")
                 return None
+            if turn.stopped is not None or cancel.requested:
+                await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
+                                      status=RecordStatus.INTERRUPTED, usage=turn.usage)
+                raise TurnStopped()
             result_event = turn.result_event
             handoff = kept_text(answer_text(result_event, parts), HANDOFF_MAX_CHARS)
             succeeded = result_event is not None and not result_event.get("is_error") and bool(handoff)

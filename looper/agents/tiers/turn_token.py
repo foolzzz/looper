@@ -103,6 +103,7 @@ class TurnToken:
         if self.phase is not TurnPhase.RUNNING:
             raise AssertionError(f"turn {self.message_id}: restart from {self.phase.value}")
         self.phase = TurnPhase.STARTING
+        self.cancel.prompt_sent = False  # the second start sends its prompt again: starting -> running
 
     def request_stop(self, via: str) -> bool:
         if self.phase in (TurnPhase.ENDED, TurnPhase.STOPPING):
