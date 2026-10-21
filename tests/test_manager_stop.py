@@ -7,6 +7,7 @@ is requested, the way a killed process does. The database is ``agent_db``'s in-m
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,8 @@ class _Session:
             return ResidentTurn(result)
         self.running.set()
         await self._stopped.wait()
-        return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, usage=Usage(cost_usd=0.01))
+        return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, usage=Usage(cost_usd=0.01),
+                            prompt_sent=True)
 
     async def stop(self, *, kill: bool = False) -> None:
         self.started = False
@@ -320,9 +322,9 @@ def test_the_turn_after_a_stop_is_told_once_and_new_clears_it(agent_db: Any) -> 
             await _until(session.running.is_set)
             await manager.stop_turn(fourth.message_id, via="web")
             await handling
-            assert manager._stopped_note is not None
+            assert manager._stopped_notes
             await manager._handle(_web("/new", 4))
-            assert manager._stopped_note is None
+            assert not manager._stopped_notes
             session.hold = False
             await manager._handle(_web("第五个", 5))
             assert "[Looper] The user stopped" not in session.turns[-1]
@@ -530,7 +532,7 @@ def test_a_stop_after_the_runtime_answered_ends_the_turn_stopped(agent_db: Any) 
             assert not ops.asks_in(envelope.message_id)
             (finish,) = agent_db.finish_record.await_args_list
             assert finish.kwargs["status"] == "interrupted"
-            assert manager._stopped_note is not None and manager._session_id == "sess-1"
+            assert manager._stopped_notes and manager._session_id == "sess-1"
             await bus.shutdown()
 
     asyncio.run(run())
@@ -858,6 +860,144 @@ def test_the_resume_retry_after_a_stop_starts_no_second_process(agent_db: Any) -
             assert session.starts == 1 and len(session.turns) == 1
             (reply,) = _replies(queue)
             assert reply["outcome"] == "stopped"
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def _user_stop(agent_db: Any) -> dict[str, Any]:
+    (_, notes), = [call.args for call in agent_db.add_metadata.await_args_list if "user_stop" in call.args[1]]
+    return notes["user_stop"]
+
+
+def test_a_stop_while_running_records_phase_and_method_and_leaves_a_stopped_note(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("写一篇很长的文章")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            stop = _user_stop(agent_db)
+            assert stop["phase"] == "running" and stop["method"] == "kill"
+            session.hold = False
+            await manager._handle(_web("再来", 1))
+            assert "[Looper] The user stopped" in session.turns[-1]
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_in_starting_is_withdrawn_with_no_method(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = _web("你好")
+            holder: dict[str, ManagerAgent] = {}
+
+            async def stop_now() -> None:
+                await holder["manager"].stop_turn(envelope.message_id, via="web")
+
+            session = _Session(hold=False, on_start=stop_now)
+            manager, bus, queue = _manager(Path(tmp), session)
+            holder["manager"] = manager
+            await manager._handle(envelope)
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["status"] == "interrupted"
+            stop = _user_stop(agent_db)
+            assert stop["method"] is None and stop["phase"] == "starting"
+            await manager._handle(_web("再来", 1))
+            assert "[Looper] The user withdrew a message before you saw it (it began: \"你好\")" in session.turns[-1]
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_prepared_writes_no_record_and_withdraws(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = _web("排队的消息")
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            persist = manager._persist_chat
+
+            async def stopping_persist(*args: Any, **kwargs: Any) -> Any:
+                await manager.stop_turn(envelope.message_id, via="web")
+                return await persist(*args, **kwargs)
+
+            manager._persist_chat = stopping_persist  # type: ignore[method-assign]
+            await manager._handle(envelope)
+            assert not agent_db.finish_record.await_args_list
+            manager._persist_chat = persist  # type: ignore[method-assign]
+            await manager._handle(_web("再来", 1))
+            assert session.turns[-1].count("[Looper] The user withdrew a message") == 1
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_two_stops_leave_both_notes_in_order_and_new_clears_them(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            first = _web("甲", 0)
+            handling = asyncio.create_task(manager._handle(first))
+            await _until(session.running.is_set)
+            await manager.stop_turn(first.message_id, via="web")
+            await handling
+            second = _web("乙", 1)
+            persist = manager._persist_chat
+
+            async def stopping_persist(*args: Any, **kwargs: Any) -> Any:
+                await manager.stop_turn(second.message_id, via="web")
+                return await persist(*args, **kwargs)
+
+            manager._persist_chat = stopping_persist  # type: ignore[method-assign]
+            await manager._handle(second)
+            manager._persist_chat = persist  # type: ignore[method-assign]
+            assert len(manager._stopped_notes) == 2
+            session.hold = False
+            await manager._handle(_web("丙", 2))
+            sent = session.turns[-1]
+            assert sent.index('(to: "甲")') < sent.index('(it began: "乙")')
+            session.hold = True
+            session.running.clear()
+            session._stopped.clear()
+            envelope = _web("丁", 3)
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            await manager._handle(_web("/new", 4))
+            assert manager._stopped_notes == []
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_with_no_usage_reported_is_incomplete(agent_db: Any) -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            real = session.run_turn
+
+            async def no_usage(*args: Any, **kwargs: Any) -> ResidentTurn:
+                turn = await real(*args, **kwargs)
+                return dataclasses.replace(turn, usage=Usage())
+
+            session.run_turn = no_usage  # type: ignore[method-assign]
+            envelope = _web("写")
+            handling = asyncio.create_task(manager._handle(envelope))
+            await _until(session.running.is_set)
+            await manager.stop_turn(envelope.message_id, via="web")
+            await handling
+            (finish,) = agent_db.finish_record.await_args_list
+            assert finish.kwargs["cost_usd"] is None
+            assert _user_stop(agent_db)["usage_complete"] is False
+            assert manager._session_totals == Usage()
             await bus.shutdown()
 
     asyncio.run(run())

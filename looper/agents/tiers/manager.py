@@ -512,7 +512,7 @@ class ManagerAgent:
         self._running_token: TurnToken | None = None  # the token of the user turn being answered
         self._persisted: set[str] = set()  # user messages already stored in chat_messages
         self._stop_tasks: set[asyncio.Task[Any]] = set()
-        self._stopped_note: str | None = None  # told to the next user turn: the user stopped the one before
+        self._stopped_notes: list[str] = []  # told to the next user turn: the user stopped or withdrew the ones before
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
         self._process: _Process | None = None  # what the running Claude was started with
         # Why the session was last dropped and the handoff its old session wrote, until the new session's first
@@ -747,9 +747,17 @@ class ManagerAgent:
             if self.ops is not None:
                 self.ops.stop_turn(turn)  # done at the stop already; again for a turn that ended stopped by itself
             first_line = " ".join(text.split())[:80]
-            self._stopped_note = (f'[Looper] The user stopped your previous reply (to: "{first_line}") before it '
-                                  "finished. Tool calls it had already made were not undone; check their effects "
-                                  "before you rely on them or repeat them.")
+            if token.cancel.prompt_sent:
+                note = (f'[Looper] The user stopped your previous reply (to: "{first_line}") before it '
+                        "finished. Tool calls it had already made were not undone; check their effects "
+                        "before you rely on them or repeat them.")
+            else:
+                note = (f'[Looper] The user withdrew a message before you saw it (it began: "{first_line}"). '
+                        "Do not act on it unless they ask again.")
+            if token.stop is not None and token.stop.phase in (TurnPhase.RECEIVED, TurnPhase.PREPARING):
+                logger.info("manager: stopped %s in %s before the model started", envelope.message_id,
+                            token.stop.phase.value)
+            self._stopped_notes = [*self._stopped_notes, note][-3:]
             await self._send_reply(envelope, stopped_reply(stopped.partial, turn.blocks),
                                    outcome=ReplyOutcome.STOPPED)
             token.settle(ReplyOutcome.STOPPED)
@@ -846,7 +854,7 @@ class ManagerAgent:
                 token.settle(ReplyOutcome.FAILED)
                 return Prepared(turn=turn, tools_problem=problem)
             token.check()  # asked while the turn was prepared: the model is never started
-            stopped_note, self._stopped_note = self._stopped_note, None
+            stopped_note, self._stopped_notes = "\n".join(self._stopped_notes), []
             # Turns run one at a time; a stop while this one waits for its turn ends it.
             await token.step("turn_lock", self._turn_lock.acquire())
             self._lock_owner = token
@@ -1003,7 +1011,8 @@ class ManagerAgent:
         )
         await recorder.annotate({"user_stop": {
             "via": request.via if request else None,
-            "method": turn.stopped.value if turn and turn.stopped else None,
+            "phase": request.phase.value if request and request.phase else None,
+            "method": turn.stopped.value if turn and turn.stopped and turn.prompt_sent else None,
             "requested_at": request.at.isoformat() if request else None,
             "usage_complete": turn is None or (turn.usage_complete and turn.usage.cost_usd is not None),
         }})
@@ -1025,7 +1034,8 @@ class ManagerAgent:
         await recorder.finish(output_text=None, result_event=None, error="stopped by the user",
                               status=RecordStatus.INTERRUPTED, usage=Usage())
         await recorder.annotate({"user_stop": {
-            "via": request.via if request else None, "method": None,
+            "via": request.via if request else None,
+            "phase": request.phase.value if request and request.phase else None, "method": None,
             "requested_at": request.at.isoformat() if request else None, "usage_complete": True,
         }})
         await self._link_turn_task(recorder, ops_turn)
@@ -1359,7 +1369,7 @@ class ManagerAgent:
                 await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                 return
             self._pending_switch = self._pending_handoff = None
-            self._stopped_note = None
+            self._stopped_notes = []
             if self.ops is not None:
                 self.ops.forget_confirmations()
             await self._record_new_session(envelope, origin, previous[0], chosen)
