@@ -763,7 +763,11 @@ class AcpGrok:
         return await self._prompt(text, on_event, stop, cancel)
 
     async def end_turn_processes(self) -> None:
-        """After a ``CANCEL``: end what the turn started (tools of Grok's that outlived the cancel)."""
+        """After a ``CANCEL``: end what the turn started (tools of Grok's that outlived the cancel). A session that
+        fell back runs per turn: the turn's tree is the per-turn session's."""
+        if self._fallback:
+            await self._legacy.end_turn_processes()
+            return
         tree = self._tree
         if tree is None:
             return

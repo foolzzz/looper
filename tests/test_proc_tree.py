@@ -860,3 +860,73 @@ def test_turn_tree_end_ends_a_child_that_left_at_once_without_any_lineage_record
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run()) == []
+
+
+# Two quick forks, the second leaving the session (setsid) and running a system binary: macOS shows no environment
+# for a system binary, and the fork watch can lose both middle processes before their children are listed. The
+# agent's responsibility for what it starts depends on neither.
+_DOUBLE_FORK_EXEC = (
+    "import os\n"
+    "if os.fork() == 0:\n"
+    "    if os.fork() == 0:\n"
+    "        os.setsid()\n"
+    "        open('child.pid', 'w').write(str(os.getpid()))\n"
+    "        os.execv('/bin/sleep', ['/bin/sleep', '60'])\n"
+    "    os._exit(0)\n"
+    "os.wait()\n"
+)
+
+
+@pytest.mark.skipif(not proc_tree._DISCLAIMS, reason="no responsibility on this platform")
+def test_turn_tree_end_ends_a_double_forked_system_binary_without_any_lineage_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proc_tree._Lineage, "_follow", lambda self: None)  # the fork watch lost every middle process
+    code = "import sys\nsys.stdin.readline()\n" + _DOUBLE_FORK_EXEC + "sys.stdin.read()\n"
+
+    async def _run() -> list[int]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        process.stdin.write(b"\n")  # type: ignore[union-attr]
+        child = await _unseen_child_that_left_at_once(tmp_path, tree)
+        try:
+            await tree.end()
+            return _running([child])
+        finally:
+            for pid in _running([child], settle=0):
+                os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []
+
+
+@pytest.mark.skipif(not proc_tree.FOLLOWS_OWNERSHIP, reason="no ownership facility on this platform")
+def test_turn_tree_end_ends_what_the_agent_starts_in_a_session_of_its_own_as_it_exits(tmp_path: Path) -> None:
+    # Told to exit, the agent starts a background command that leaves its group at once: it did not run when the end
+    # began, yet the end goes on looking for what the turn owns until it has finished. (Started ignoring SIGTERM, the
+    # shell in between lives to start it.)
+    code = ("import os, signal, subprocess, sys, time\n"
+            "def on_term(*_):\n"
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "    subprocess.Popen([sys.executable, '-c', " + repr(_QUICK_MIDDLE) + "]).wait()\n"
+            "    while not os.path.exists('child.pid'):\n        time.sleep(0.01)\n"
+            "    time.sleep(0.3)\n"
+            "    sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "print('ready', flush=True)\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path,
+                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        assert process.stdout
+        await process.stdout.readline()
+        try:
+            await tree.end()
+            child = int((tmp_path / "child.pid").read_text())
+            return _running([child])
+        finally:
+            if (tmp_path / "child.pid").exists():
+                for pid in _running([int((tmp_path / "child.pid").read_text())], settle=0):
+                    os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []

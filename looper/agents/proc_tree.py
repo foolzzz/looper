@@ -29,13 +29,16 @@ server still runs is left alone.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import signal
 import secrets
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -212,9 +215,10 @@ async def _reap(process: Any, label: str) -> None:
         logger.warning("%s: pid %s was not reaped within %.1f s of SIGKILL", label, process.pid, REAP_SEC)
 
 
-async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset()) -> None:
+async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset(),
+               grace: float | None = None) -> None:
     """End the tree, recording it so the next start can finish an end cut short by the server's exit. Processes
-    in ``exclude`` are never signalled."""
+    in ``exclude`` are never signalled; ``grace`` replaces ``TERM_GRACE_SEC``."""
     recorded = _recorded.get(process.pid)
     if recorded is not None:
         _ending.add(process.pid)
@@ -235,7 +239,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                     alive = {}
                     return
             _signal(process, alive, signal.SIGTERM)
-        deadline = time.monotonic() + TERM_GRACE_SEC
+        deadline = time.monotonic() + (TERM_GRACE_SEC if grace is None else grace)
         while alive and time.monotonic() < deadline:
             await asyncio.sleep(_POLL_SEC)
             alive = members(await asyncio.to_thread(_snapshot), seen)
@@ -316,14 +320,23 @@ def _write_record(
 async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any) -> asyncio.subprocess.Process:
     """Start an agent process in a session of its own, so its children share its process group, and record it
     until it is reaped (once ``sweep`` has run). Without ``env``, start with ``child_env.inherited()``. Where the
-    turn's ownership is an inherited mark (``_MARKS``), the process gets one of its own (``OWNER_ENV``)."""
+    turn's ownership is an inherited mark (``_MARKS``), the process gets one of its own (``OWNER_ENV``); on macOS it
+    is started responsible for what it starts (``_DISCLAIMS``)."""
     environment = dict(child_env.inherited() if env is None else env)
     owner = None
     if _MARKS:
         owner = environment[OWNER_ENV] = secrets.token_hex(12)
+    disclaimed = False
+    if _DISCLAIMS and (launcher := _launcher()) is not None \
+            and (program := _program(argv[0], environment, kwargs.get("cwd"))) is not None:
+        environment[_EXEC_ENV], environment[_ARGV0_ENV] = program, argv[0]
+        kwargs = {**kwargs, "executable": launcher}
+        disclaimed = True
     process = await asyncio.create_subprocess_exec(*argv, env=environment, start_new_session=True, **kwargs)
     if owner is not None:
         _owners[process.pid] = owner
+    if disclaimed:
+        _disclaimed.add(process.pid)
     if _records is not None and _server is not None:
         if (started := _start_time(process.pid)) is None:
             logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
@@ -434,7 +447,12 @@ async def sweep(runtime_root: Path) -> None:
 #   descendant (``NOTE_FORK``) records every new process's version as its parent creates it, so a command that
 #   exits at once still links the processes it started to the agent.
 #   That watch is a race: a short-lived shell can exit before its children are listed, and the version that
-#   links its children is lost. So it is only a complement to the mark below.
+#   links its children is lost. So it is only a complement to responsibility and the mark below.
+# - macOS: the process responsible for each process, which the kernel passes to every process it creates, through
+#   re-parenting, ``setsid`` and ``exec`` of any binary. ``spawn`` starts the agent responsible for itself
+#   (``_DISCLAIMS``), so while it runs every process it started, however detached and whichever of its ancestors
+#   have exited, names it. Each one found has its version recorded, so what it starts once the agent has exited is
+#   still linked by the lineage.
 # - An environment variable the agent gets at spawn (``OWNER_ENV``), inherited by everything it starts, whether or
 #   not its ancestors still run. Linux: ``/proc/<pid>/environ``; macOS: ``KERN_PROCARGS2`` (it shows no
 #   environment for system binaries, which the lineage still covers when they are not detached).
@@ -497,15 +515,23 @@ _PIDUNIQIDENTIFIERINFO = 17  # proc_pidinfo flavor: struct proc_uniqidentifierin
 _UNIQ_SIZE = 56
 
 
-def _versions(pid: int) -> tuple[int, int] | None:
-    """macOS: ``pid``'s (id version, its creator's id version); None when it does not run or cannot be read."""
+def _identity(pid: int) -> tuple[int, int, int] | None:
+    """macOS: ``pid``'s (unique id, id version, its creator's id version); None when it does not run or cannot be
+    read. The unique id stays through ``exec``; the version changes."""
     import ctypes
 
     buffer = ctypes.create_string_buffer(_UNIQ_SIZE)
     if _LIBPROC.proc_pidinfo(pid, _PIDUNIQIDENTIFIERINFO, 0, buffer, _UNIQ_SIZE) != _UNIQ_SIZE:
         return None
     raw = buffer.raw
-    return int.from_bytes(raw[32:36], sys.byteorder), int.from_bytes(raw[36:40], sys.byteorder)
+    return (int.from_bytes(raw[16:24], sys.byteorder), int.from_bytes(raw[32:36], sys.byteorder),
+            int.from_bytes(raw[36:40], sys.byteorder))
+
+
+def _versions(pid: int) -> tuple[int, int] | None:
+    """macOS: ``pid``'s (id version, its creator's id version); None when it does not run or cannot be read."""
+    identity = _identity(pid)
+    return identity[1:] if identity is not None else None
 
 
 def _listed(call: Callable[[Any, int], int]) -> list[int]:
@@ -554,24 +580,27 @@ class _Lineage:
 
     _POLL_SEC = 0.25
 
-    def __init__(self, pid: int, label: str) -> None:
+    def __init__(self, pid: int, label: str, *, responsible: bool = False) -> None:
         import select
 
         self.label = label
         self._root = pid
+        self._responsible = responsible  # the agent was started responsible for itself (``_DISCLAIMS``)
+        self._root_id: int | None = None
         self._versions: set[int] = set()
         self._known: dict[int, int] = {}  # pid -> version of each recorded process seen running
         self._watched: set[int] = set()
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._kq = select.kqueue()
-        versions = _versions(pid)
-        if versions is None:
+        identity = _identity(pid)
+        if identity is None:
             self._kq.close()
             self._closed.set()
             return
-        self._versions.add(versions[0])
-        self._known[pid] = versions[0]
+        self._root_id = identity[0]
+        self._versions.add(identity[1])
+        self._known[pid] = identity[1]
         self._watch(pid)
         self._scan()
         if pid not in self._watched:  # it exited already: nothing more to follow
@@ -607,13 +636,20 @@ class _Lineage:
                     pending.append(child)
 
     def _scan(self) -> set[int]:
-        """Record every running process created by a recorded one, until none is left; return the running ones."""
+        """Record every running process created by a recorded one, or (while the agent runs) that the agent is
+        responsible for, until none is left; return the running ones."""
         with self._lock:
             table: dict[int, tuple[int, int]] = {}
             for pid in _all_pids():
                 if (versions := _versions(pid)) is not None:
                     table[pid] = versions
             owned: set[int] = set()
+            root = _identity(self._root)
+            if root is not None and root[0] == self._root_id:  # the agent runs: its version since its last exec
+                self._versions.add(root[1])
+                if self._responsible:
+                    owned = {pid for pid in table if _RESPONSIBLE_FOR(pid) == self._root}  # type: ignore[misc]
+                    self._versions.update(table[pid][0] for pid in owned)
             grew = True
             while grew:
                 grew = False
@@ -642,8 +678,8 @@ class _Lineage:
                 forked = [event.ident for event in events if event.fflags & select.KQ_NOTE_FORK]
                 for parent in forked:
                     self._adopt(parent)
-                if forked:
-                    self._scan()
+                if forked or self._responsible:
+                    self._scan()  # (responsibility: also now and then, to record versions while the agent runs)
                 if any(event.ident == self._root and event.fflags & select.KQ_NOTE_EXIT for event in events):
                     self._scan()  # once the agent has exited nothing new is followed; what it left stays owned
                     return
@@ -722,6 +758,83 @@ _LINEAGE = _readable_versions()
 FOLLOWS_OWNERSHIP = _LINEAGE or _MARKS  # whether this platform has a facility ``_owned`` can use
 
 
+# macOS responsibility. A process started with responsibility disclaimed is responsible for itself; the processes it
+# creates inherit that. Python cannot spawn so, so ``spawn`` runs the agent through a launcher (``_LAUNCHER``) that
+# replaces itself with the agent (same pid) with responsibility disclaimed.
+
+_EXEC_ENV, _ARGV0_ENV = "LOOPER_PROC_EXEC", "LOOPER_PROC_ARGV0"  # what the launcher runs; removed before it does
+_LAUNCHER = r"""
+import ctypes, os, sys
+environ = dict(os.environb)
+path, argv0 = environ.pop(b"LOOPER_PROC_EXEC"), environ.pop(b"LOOPER_PROC_ARGV0")
+libc = ctypes.CDLL(None, use_errno=True)
+attr = ctypes.c_void_p()
+defaults = ctypes.c_uint32((1 << (13 - 1)) | (1 << (25 - 1)))  # SIGPIPE, SIGXFSZ: what Python ignores, restored
+if (libc.posix_spawnattr_init(ctypes.byref(attr))
+        or libc.posix_spawnattr_setflags(ctypes.byref(attr), ctypes.c_short(0x40 | 0x04))  # SETEXEC, SETSIGDEF
+        or libc.posix_spawnattr_setsigdefault(ctypes.byref(attr), ctypes.byref(defaults))
+        or libc.responsibility_spawnattrs_setdisclaim(ctypes.byref(attr), 1)):
+    sys.stderr.write("looper: cannot prepare the agent's start\n")
+    sys.exit(127)
+args = [argv0, *map(os.fsencode, sys.argv[1:])]
+argv = (ctypes.c_char_p * (len(args) + 1))(*args, None)
+envp = (ctypes.c_char_p * (len(environ) + 1))(*(k + b"=" + v for k, v in environ.items()), None)
+error = libc.posix_spawn(None, path, None, ctypes.byref(attr), argv, envp)
+sys.stderr.write(f"looper: cannot run {os.fsdecode(path)}: {os.strerror(error)}\n")
+sys.exit(127)
+"""
+
+
+def _responsibility() -> Callable[[int], int] | None:
+    if not _LINEAGE:
+        return None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        libc.responsibility_spawnattrs_setdisclaim  # noqa: B018 (present)
+        lookup = libc.responsibility_get_pid_responsible_for_pid
+        lookup.argtypes, lookup.restype = [ctypes.c_int], ctypes.c_int
+    except (OSError, AttributeError):
+        return None
+    return lookup
+
+
+_RESPONSIBLE_FOR = _responsibility()
+_DISCLAIMS = _RESPONSIBLE_FOR is not None and " " not in sys.executable  # (a shebang interpreter path holds no space)
+_disclaimed: set[int] = set()  # agent pids ``spawn`` started responsible for themselves
+_launcher_path: str | None = None
+
+
+def _launcher() -> str | None:
+    """The launcher, written once: a script run by this Python (the kernel passes the agent's arguments on)."""
+    global _launcher_path
+    if _launcher_path is None:
+        text = f"#!{sys.executable} -I\n{_LAUNCHER}"
+        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        path = Path(tempfile.gettempdir()) / f"looper-launcher-{os.getuid()}-{digest}.py"
+        try:
+            if not path.exists() or path.read_text(encoding="utf-8") != text:
+                partial = path.with_suffix(f".{os.getpid()}.tmp")
+                partial.write_text(text, encoding="utf-8")
+                partial.chmod(0o700)
+                partial.replace(path)
+        except OSError as exc:
+            logger.warning("cannot write the agent launcher, so agents are not followed by responsibility: %s", exc)
+            return None
+        _launcher_path = str(path)
+    return _launcher_path
+
+
+def _program(program: str, env: Mapping[str, str], cwd: Any) -> str | None:
+    """The file ``program`` runs, as ``exec`` finds it; None when there is none (the start fails as it would)."""
+    if os.sep in program:
+        path = os.path.join(os.fspath(cwd) if cwd is not None else os.getcwd(), program)
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    found = shutil.which(program, path=env.get("PATH", os.defpath))
+    return os.path.abspath(found) if found is not None else None
+
+
 def _owned(process: Any, label: str) -> _Owned | None:
     """How ``process``'s descendants are followed here, or None where only its tree is."""
     owned: list[_Owned] = []
@@ -729,7 +842,7 @@ def _owned(process: Any, label: str) -> _Owned | None:
         owned.append(_Marked(process.pid, mark))
     if _LINEAGE:
         try:
-            owned.append(_Lineage(process.pid, label))
+            owned.append(_Lineage(process.pid, label, responsible=process.pid in _disclaimed))
         except Exception:
             logger.warning("%s: cannot follow the agent's processes", label, exc_info=True)
     if len(owned) > 1:
@@ -856,14 +969,32 @@ class TurnTree:
         return strays
 
     async def _end_all(self, exclude: frozenset[int]) -> None:
-        """End the tree, and beside it (not delaying its first signal) the seen processes it no longer reaches."""
-        async def end_strays() -> None:
-            strays = await self._strays(exclude)
-            await asyncio.gather(*(_end(stray, label=f"{self.label} (left the tree)", known={}, exclude=exclude)
-                                   for stray in strays))
-
-        await asyncio.gather(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude),
-                             end_strays())
+        """End the tree, and beside it (not delaying its first signal) the processes it no longer reaches: those
+        running now and, until every end has finished, each that appears meanwhile (a command a tool's shell starts
+        in a session of its own as it is told to exit). One that appears after ``TERM_GRACE_SEC`` is killed at once;
+        none is looked for after twice that."""
+        await asyncio.to_thread(self._live_owned)  # what the agent owns, found while it still runs
+        ends = [asyncio.ensure_future(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude))]
+        found: set[int] = set()
+        started = time.monotonic()
+        try:
+            while True:
+                strays = await self._strays(exclude | found)
+                found.update(stray.pid for stray in strays)
+                late = time.monotonic() - started >= TERM_GRACE_SEC
+                ends += [asyncio.ensure_future(_end(stray, label=f"{self.label} (left the tree)", known={},
+                                                    exclude=exclude, grace=0 if late else None))
+                         for stray in strays]
+                if (not strays and all(end.done() for end in ends)) \
+                        or time.monotonic() - started >= 2 * TERM_GRACE_SEC:
+                    break
+                await asyncio.sleep(_POLL_SEC)
+        except BaseException:
+            for end in ends:
+                end.cancel()  # each kills what is left of its tree at once
+            await asyncio.gather(*ends, return_exceptions=True)
+            raise
+        await asyncio.gather(*ends)
 
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, and every one the agent owns, then reap

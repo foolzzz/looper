@@ -497,3 +497,18 @@ def test_grok_fallback_stop_in_every_window(tmp_path: Path, window: str, monkeyp
     if window == "tail":
         assert not any(e.get("type") == "result" and not e.get("is_error") for e in seen.events)
 
+
+
+def test_grok_fallback_end_turn_processes_ends_the_per_turn_sessions_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stop while the events are handled, after run_turn has returned an answer: the Manager has the turn's processes
+    # ended. A session that fell back keeps the turn's tree on its per-turn session (it has none of its own).
+    session = grok_acp.AcpGrok(label="manager")
+    session._fallback = True
+    ended: list[bool] = []
+
+    async def end_turn_processes() -> None:
+        ended.append(True)
+
+    monkeypatch.setattr(session._legacy, "end_turn_processes", end_turn_processes)
+    asyncio.run(session.end_turn_processes())
+    assert ended == [True]
