@@ -898,7 +898,9 @@ class ManagerAgent:
         await token.step("load_db_config", self._load_db_config())
         if not self._session_loaded:
             await token.step("load_session_state", self._load_session_state())
-        agent_settings = await token.step("agent_settings", self._load_agent_settings())
+        agent_settings = await token.step("agent_settings", self._load_agent_settings(fallback=False))
+        if agent_settings.error:  # the session's choice may be among what could not be read
+            raise ProfileUnavailable(agent_settings.error, agent_settings.profile_source)
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
         system_prompt = self._composed_prompt(agent_settings)
@@ -1156,12 +1158,13 @@ class ManagerAgent:
         elif event == "recovered":
             logger.info("agent %s is stable again after crash-looping", agent_id)
 
-    async def _load_agent_settings(self) -> AgentSettings:
+    async def _load_agent_settings(self, *, fallback: bool = True) -> AgentSettings:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
-        cannot be read (the built-in defaults before any)."""
+        cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
+        never runs on a profile the user did not choose."""
         agent_settings = await load_agent_settings(AgentType.MANAGER)
         if agent_settings.error is not None:
-            return self._agent_settings or agent_settings
+            return (self._agent_settings or agent_settings) if fallback else agent_settings
         self._agent_settings = agent_settings
         return agent_settings
 
@@ -1502,12 +1505,17 @@ class ManagerAgent:
             name = next((c.name for c in listed if c.profile_id == selected_id), selected_id)
             selected = {"profile_id": selected_id, "name": name}
         profile = effective.view()["profile"]
+        settings = await load_agent_settings(AgentType.MANAGER, manager_session=False)
+        follow = None if settings.error or settings.profile_error else {
+            "name": display_name({"name": settings.profile.name, "effort": settings.profile.effort}),
+            "effect": profile_effect(saved or None, "", settings.profile).value}
         return {
             "session": {"active": bool(saved.get("session_id")), "runtime": saved.get("runtime_type"),
                         "profile_id": saved.get("profile_id")},
             "selected": selected,
             "effective": {"profile": profile["value"], "source": profile["source"]},
             "problem": effective.profile_error,
+            "follow_settings": follow,
             "choices": [asdict(c) for c in listed],
         }
 

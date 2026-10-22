@@ -69,6 +69,19 @@ def test_view_and_set_show_the_selected_profile(monkeypatch: pytest.MonkeyPatch,
 
 
 @needs_db
+def test_only_a_profile_change_gets_the_note(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.db import agent_sessions
+
+    async def test(pool: Any) -> None:
+        chat = _Chat(tmp_path)
+        await agent_sessions.select_profile("manager", await _profile_id(pool))
+        changed = await _settings(chat, action="set", role="manager", values={"run_budget_usd": 5})
+        assert "note" not in changed
+
+    _run(test, monkeypatch)
+
+
+@needs_db
 def test_without_a_selection_there_is_no_note(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
         chat = _Chat(tmp_path)

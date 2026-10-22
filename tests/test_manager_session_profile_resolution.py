@@ -91,3 +91,25 @@ def test_list_layers_returns_the_session_row_only_when_asked(monkeypatch: pytest
         assert not [r for r in await agent_setting_layers.list_layers() if r["scope"] == "session"]
 
     _run(_test, monkeypatch)
+
+
+def test_a_turn_never_falls_back_to_cached_settings_when_they_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any,
+) -> None:
+    import asyncio
+    from dataclasses import replace
+
+    from looper.agents.tiers import manager as manager_module
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    cached = resolve(AgentType.MANAGER, {}, None)
+    failed = replace(cached, error="cannot read the agent settings (RuntimeError)")
+
+    async def fake(*args: Any, **kwargs: Any) -> Any:
+        return failed
+
+    monkeypatch.setattr(manager_module, "load_agent_settings", fake)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    manager._agent_settings = cached
+    assert asyncio.run(manager._load_agent_settings()) is cached  # listings may show the last ones read
+    assert asyncio.run(manager._load_agent_settings(fallback=False)).error == failed.error
