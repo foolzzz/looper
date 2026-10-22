@@ -879,6 +879,7 @@ async def _run_agent_system(
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                          url=_local_url(host, port), config=manager_config, broadcaster=broadcaster)
+    task_router.manager_running = fleet.is_running
     await fleet.load()
     manager = fleet.default
     manager_ops = fleet.ops("manager")

@@ -81,7 +81,7 @@ from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStop
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from ..ops import Turn
 from ..ops.service import tools_down_reply
-from ..task_notice import Notice
+from ..task_notice import Notice, ends_task
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -1235,7 +1235,20 @@ class ManagerAgent:
 
         origin = envelope.metadata.get("origin_channel_id")
         notice = Notice.from_payload(envelope.payload.get("notice"))
-        if notice is not None:
+        thread = envelope.metadata.get("origin_thread")
+        status = envelope.payload.get("status", "")
+        if thread and (ends_task(status) or status == "cancelled"):
+            # A web task's end goes into the thread it was asked in: the answer stream is long closed.
+            title = envelope.metadata.get("task_title") or ""
+            summary = (envelope.payload.get("summary") or "")[:2000]
+            if status == "completed":
+                text = f"任务「{title}」已完成：{summary}"
+            elif status == "failed":
+                text = f"任务「{title}」失败：{summary}"
+            else:
+                text = f"任务「{title}」已取消。"
+            await self._web_thread_reply(envelope, thread, text)
+        elif notice is not None:
             # A Telegram or Lark task's end goes to who it recorded, instead of its final summary, behind the
             # progress sent before it (``task_notice``).
             await self._bus.publish(MessageEnvelope.create(
@@ -1258,9 +1271,24 @@ class ManagerAgent:
                     metadata={"origin_channel_id": origin},
                 ))
 
+    async def _web_thread_reply(self, envelope: MessageEnvelope, thread: str, text: str) -> None:
+        await self._bus.publish(MessageEnvelope.create(
+            source=self.agent_address,
+            target=channel_address("web"),
+            message_type=MessageType.AGENT_REPLY,
+            payload={"text": text, "chat_session_id": thread},
+            correlation_id=envelope.correlation_id,
+            metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
+        ))
+
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
         origin = envelope.metadata.get("origin_channel_id")
-        if origin:
+        thread = envelope.metadata.get("origin_thread")
+        if thread:
+            title = envelope.metadata.get("task_title") or ""
+            step_count = envelope.payload.get("step_count", 0)
+            await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
+        elif origin:
             step_count = envelope.payload.get("step_count", 0)
             await self._bus.publish(MessageEnvelope.create(
                 source=self.agent_address,

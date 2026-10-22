@@ -474,6 +474,9 @@ async def _create(call: Call) -> dict[str, Any]:
         "workspace_dir": work_dir, "workspace_mode": workspace["mode"], "workspace_base": workspace["base"],
         "manager_id": call.manager_id,
     }
+    if origin == "channel-web" and envelope is not None:
+        thread = (envelope.payload.get("channel_context") or {}).get("session_id")
+        row["origin_thread"] = thread if isinstance(thread, str) and thread else None
     if template is not None:
         row["template"] = template.snapshot(values, roles=roles)
     try:
