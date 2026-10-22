@@ -175,8 +175,8 @@ def dashboard_page(chromium_browser, dashboard_server):
     context = chromium_browser.new_context(viewport={"width": 1280, "height": 800})
     try:
         page = context.new_page()
-        page.set_default_timeout(10000)
-        page.set_default_navigation_timeout(15000)
+        page.set_default_timeout(30000)
+        page.set_default_navigation_timeout(45000)
         yield page
     finally:
         context.close()

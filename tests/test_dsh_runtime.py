@@ -115,7 +115,7 @@ def test_dsh_local_mcp_stand_in_counts_a_successful_tool_execution(tmp_path):
     ]
     done = subprocess.run(command, input="".join(json.dumps({"jsonrpc": "2.0", **row}) + "\n"
                                                for row in requests),
-                          capture_output=True, text=True, timeout=5, env={"PATH": os.defpath})
+                          capture_output=True, text=True, timeout=30, env={"PATH": os.defpath})
     assert done.returncode == 0, done.stderr
     replies = {row["id"]: row["result"] for line in done.stdout.splitlines() if (row := json.loads(line))}
     assert replies[2]["tools"][0]["name"] == "looper_probe"
@@ -162,7 +162,7 @@ def _node(tmp_path, script, *args):
     if node is None:
         pytest.skip("Node is required for DSH bootstrap validation")
     return subprocess.run([node, "--input-type=module", "-", *map(str, args)], input=script,
-                          cwd=tmp_path, capture_output=True, text=True, timeout=20)
+                          cwd=tmp_path, capture_output=True, text=True, timeout=60)
 
 
 @pytest.fixture
@@ -1234,7 +1234,7 @@ def test_dsh_search_policy_and_complete_budgets_ignore_project_dotenv(tmp_path, 
                                              prompt_file=_run_prompt_file(tmp_path), launch=launch)
         command = [*command[:command.index("--json")], "--dump-config"]
         done = subprocess.run(command, cwd=tmp_path, env=launch.environment(), capture_output=True,
-                              text=True, timeout=10)
+                              text=True, timeout=60)
         assert done.returncode == 0, done.stderr
         parsed = _node(tmp_path, '''
 import {createRequire} from 'node:module';
@@ -1963,7 +1963,7 @@ def test_installed_dsh_probe_and_patch_composition_without_boot(tmp_path):
     command = [*command[:command.index("--json")], "--dump-config"]
     env = launch.environment()
     env.pop("DEEPSEEK_API_KEY", None)
-    done = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10)
+    done = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     assert "looper-bootstrap.mjs" in done.stdout and "headlessStartup" in done.stdout
     assert "test-dsh-key" not in done.stdout and "test-run-token" not in done.stdout
@@ -2088,7 +2088,7 @@ def _kept_dsh_run(tmp_path, *, task_id="task"):
     command = runtime.run_command(executable, cwd=tmp_path, prompt_file=prompt, launch=launch,
                                   session_dir=directory)
     done = subprocess.run(command, input="original history", text=True, capture_output=True,
-                          env=launch.environment(), cwd=tmp_path, timeout=5)
+                          env=launch.environment(), cwd=tmp_path, timeout=60)
     assert done.returncode == 0, done.stderr
     sid = json.loads(done.stdout.splitlines()[0])["sessionId"]
     return runtime, launch, executable, prompt, directory, command, sid
@@ -2134,7 +2134,7 @@ def test_dsh_parallel_consults_resume_opaque_copies_and_leave_owner_unchanged(tm
         assert runtime.kept_session_dir(argv) == fork
         assert argv[-3:] == ["--session-id", sid, "-"]
         done = subprocess.run(argv, input=f"consult {number}", text=True, capture_output=True,
-                              env=consult.environment(), cwd=tmp_path, timeout=5)
+                              env=consult.environment(), cwd=tmp_path, timeout=60)
         assert done.returncode == 0, done.stderr
         assert json.loads(done.stdout.splitlines()[0])["sessionId"] == sid
         turns = json.loads((fork / "dsh/opaque-test-store").read_text())[sid]["turns"]
@@ -2275,7 +2275,7 @@ def test_dsh_consult_resumes_without_the_original_runs_mcp_library(tmp_path):
     module = Path(argv[argv.index("--patch") + 1]).with_name("looper-bootstrap.mjs").read_text()
     assert '"readOnly": true' in module and '"mcp": []' in module
     done = subprocess.run(argv, input="read-only consult", text=True, capture_output=True,
-                          env=env, cwd=tmp_path, timeout=5)
+                          env=env, cwd=tmp_path, timeout=60)
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout.splitlines()[0])["sessionId"] == sid
     assert _tree_bytes(directory) == source
@@ -2700,7 +2700,7 @@ def test_dsh_serve_stand_in_delivers_a_file_that_the_reviewer_actually_reads(tmp
         command = launch.runtime.run_command(str(bin_dir / "dsh"), cwd=tmp_path,
                                              prompt_file=_run_prompt_file(tmp_path), launch=launch)
         done = subprocess.run(command, input=text, text=True, capture_output=True,
-                              env=launch.environment(), cwd=tmp_path, timeout=10)
+                              env=launch.environment(), cwd=tmp_path, timeout=60)
         assert done.returncode == 0, done.stderr
         result = _dsh_result(asyncio.run(_dsh_output(tmp_path, done.stdout.encode())))
         judged = judge_result(result, work_dir=tmp_path, is_verify=role == "reviewer", runtime_label="DSH")

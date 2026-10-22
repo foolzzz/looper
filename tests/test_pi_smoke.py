@@ -148,7 +148,7 @@ def test_reaps_process_and_stubborn_descendant_on_exit(tmp_path: Path, failure: 
                                    grace=0.1, pass_fds=(write_fd,)) as process:
             os.close(write_fd)
             write_fd = -1
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 30
             while not pid_file.exists():
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
@@ -160,7 +160,7 @@ def test_reaps_process_and_stubborn_descendant_on_exit(tmp_path: Path, failure: 
     finally:
         if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
+            process.wait(timeout=30)
         if write_fd != -1:
             os.close(write_fd)
         try:

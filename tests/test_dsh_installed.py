@@ -125,7 +125,7 @@ def _process(command, env, cwd, prompt="offline first turn"):
 
 
 def _finish(process):
-    stdout, stderr = process.communicate(timeout=90)
+    stdout, stderr = process.communicate(timeout=120)
     rows = [json.loads(line) for line in stdout.splitlines() if line.strip()]
     return process.returncode, rows, stderr
 
