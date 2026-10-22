@@ -309,5 +309,55 @@ describe("chat Manager picker", () => {
         "hello", pointer, expect.any(String), { kind: "manager", id: "manager-review" }, expect.anything(),
       );
     });
+
+    it("switching to a Manager whose pointer names the other's thread shows and watches none of it", async () => {
+      localStorage.setItem("looper-chat-session-id", "a-sid");
+      localStorage.setItem(KEY_REVIEW, "a-sid");
+      const watched: { sid: string; cb: (m: unknown) => void; closed: boolean }[] = [];
+      api.watchChat.mockImplementation((sid: string, cb: (m: unknown) => void) => {
+        const w = { sid, cb, closed: false };
+        watched.push(w);
+        return () => { w.closed = true; };
+      });
+      await mount();
+      expect(container.textContent).toContain("A's secret history");
+      expect(watched.map((w) => w.sid)).toEqual(["a-sid"]);
+      const before = server.mock.calls.length;
+      await pick("Code review");
+      await flush();
+      const afterSwitch = server.mock.calls.slice(before).map(([url]) => url as string)
+        .filter((url) => url.includes("/chat/messages") && url.includes("session_id=a-sid"));
+      // The only read of A's thread under B is the scoped one, which the server refuses.
+      expect(afterSwitch).toEqual([expect.stringContaining("manager=manager-review")]);
+      expect(watched[0].closed).toBe(true);
+      expect(watched.filter((w) => w.sid === "a-sid")).toHaveLength(1);
+      expect(container.textContent).not.toContain("A's secret history");
+      const pointer = localStorage.getItem(KEY_REVIEW);
+      expect(pointer).not.toBe("a-sid");
+      expect(localStorage.getItem("looper-chat-session-id")).toBe("a-sid");
+      // B watches its own new thread only.
+      expect(watched.slice(1).map((w) => w.sid)).toEqual([pointer]);
+      // A late event on A's subscription is dropped.
+      await act(async () => watched[0].cb({
+        message_id: "late", role: "assistant", content: "A's late reply", created_at: "2026-01-01T00:00:01Z",
+      }));
+      expect(container.textContent).not.toContain("A's late reply");
+    });
+
+    it("watches nothing until the Manager-scoped read confirms the thread", async () => {
+      localStorage.setItem(KEY_REVIEW, "a-sid");
+      const pending = deferred<unknown[]>();
+      api.fetchChatMessages.mockImplementation((sid: string) => (sid === "a-sid" ? pending.promise : Promise.resolve([])));
+      await mount("target=manager-review");
+      expect(api.fetchChatMessages).toHaveBeenCalledWith("a-sid", expect.anything(), "manager-review");
+      expect(api.watchChat.mock.calls.some(([sid]) => sid === "a-sid")).toBe(false);
+      expect(api.fetchChatTurn.mock.calls.some(([sid]) => sid === "a-sid")).toBe(false);
+      const real = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+      await act(async () => pending.reject(new real.ForeignConversationError("A's", "manager")));
+      await flush();
+      expect(api.watchChat.mock.calls.some(([sid]) => sid === "a-sid")).toBe(false);
+      expect(api.fetchChatTurn.mock.calls.some(([sid]) => sid === "a-sid")).toBe(false);
+      expect(localStorage.getItem(KEY_REVIEW)).not.toBe("a-sid");
+    });
   });
 });
