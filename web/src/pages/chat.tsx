@@ -41,6 +41,7 @@ import {
   type ChatTargetInfo,
   type ActivityEvent,
   type ChatSession,
+  type ChatTurn,
   type DbChatMessage,
   type LlmRecord,
   type UserGate,
@@ -346,8 +347,14 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       alive = false;
     };
   }, []);
-  // Whether the Manager's runtime can interrupt a reply (the turn's `can_interrupt`); a runtime run per turn cannot.
-  const [interruptible, setInterruptible] = useState(true);
+  // Whether the Manager's runtime can interrupt the reply to a message (its turn's `can_interrupt`, last read), by the
+  // ids the turn answers; a runtime run per turn cannot. Another message's answer says nothing of this one: its turn
+  // may switch the runtime first.
+  const [interrupt, setInterrupt] = useState<{ ids: string[]; can: boolean } | null>(null);
+  const readInterrupt = (turn: ChatTurn) => {
+    const ids = [turn.message_id, turn.client_message_id].filter((id): id is string => !!id);
+    setInterrupt({ ids, can: turn.can_interrupt });
+  };
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const sessionIdRef = useRef(sessionId);
@@ -773,7 +780,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
         turn = undefined;
       }
       if (poll.stopped) return;
-      if (turn) setInterruptible(turn.can_interrupt);
+      if (turn && turnAnswers(turn, ids)) readInterrupt(turn);
       if (turn === undefined || turnAnswers(turn, ids)) {
         poll.timer = setTimeout(tick, TURN_POLL_MS);
         return;
@@ -805,7 +812,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     }
     if (sid !== sessionIdRef.current || managerId !== currentRef.current.managerId || sendingRef.current) return;
     if (turn) {
-      setInterruptible(turn.can_interrupt);
+      readInterrupt(turn);
       followTurn(sid, turn.client_message_id ? [turn.message_id, turn.client_message_id] : [turn.message_id]);
     } else {
       stopPoll();
@@ -836,14 +843,25 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const replying = sending || serverTurnHere !== null;
   const runningId = sending ? ownId : (serverTurnHere ? serverTurnHere.ids[serverTurnHere.ids.length - 1] : null);
   const stoppable = stopEnabled && target.kind === "manager" && runningId !== null;
+  // Not read yet for the running message: the server decides (it refuses a stop its runtime cannot make).
+  const interruptible = !runningId || !interrupt?.ids.includes(runningId) || interrupt.can;
   const canStop = stoppable && interruptible;
-  // The page's own reply: read whether its runtime can interrupt it (the server's turns are read as they are followed).
+  // The page's own reply: read whether its runtime can interrupt it, again until it ends, since the turn may switch
+  // the runtime after its first read (the server's turns are read as they are followed).
   useEffect(() => {
     if (!sending || !ownId || !stopEnabled || target.kind !== "manager") return;
     let alive = true;
-    fetchChatTurn(sessionId).then((turn) => alive && turn && setInterruptible(turn.can_interrupt), () => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = async () => {
+      const turn = await fetchChatTurn(sessionId).catch(() => null);
+      if (!alive) return;
+      if (turn && turnAnswers(turn, [ownId])) readInterrupt(turn);
+      timer = setTimeout(read, TURN_POLL_MS);
+    };
+    void read();
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
   }, [sending, ownId, stopEnabled, target.kind, sessionId]);
 
@@ -856,7 +874,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       if (state === "disabled") setNotice(STOP_DISABLED_NOTICE);
       else if (state === "other_message") setNotice(OTHER_MESSAGE_NOTICE);
       else if (state === "cannot_interrupt") {
-        setInterruptible(false);
+        setInterrupt({ ids: [runningId], can: false });
         setNotice(CANNOT_INTERRUPT_NOTICE);
       }
     } catch (err) {

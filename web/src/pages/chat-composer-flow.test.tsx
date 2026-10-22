@@ -54,6 +54,7 @@ describe("chat composer flow", () => {
       if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(1);
       else await new Promise((r) => setTimeout(r, 0));
     });
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
   const input = () => container.querySelector("textarea") as HTMLTextAreaElement;
   const type = (text: string) =>
     act(() => {
@@ -208,6 +209,39 @@ describe("chat composer flow", () => {
     expect(container.textContent).toContain("This runtime cannot interrupt a reply.");
   });
 
+  it.each(["no turn yet", "the old runtime's turn"])(
+    "enables Stop for a message whose turn first read %s, once its switch from Codex to Claude is done",
+    async (first) => {
+      vi.useFakeTimers();
+      // The server's turn for the page's latest message, while it runs, on a runtime that can interrupt or not.
+      let running = true;
+      let capable = false;
+      api.fetchChatTurn.mockImplementation(async () => {
+        const sent = api.sendChat.mock.calls.at(-1);
+        return sent && running
+          ? { message_id: `env-${sent[2]}`, client_message_id: sent[2], channel: "web", started_at: "", stopping: false,
+              can_interrupt: capable }
+          : null;
+      });
+      await mount();
+      await say("first");
+      expect(container.querySelector('button[aria-label^="Stop the reply:"]')).not.toBeNull();
+      await fire("answer.final", { text: "ok", outcome: "answered" });
+
+      // The next message switches to Claude: its turn is not registered yet, or still prepares on Codex.
+      running = first !== "no turn yet";
+      await say("second");
+      const secondId = api.sendChat.mock.calls[1][2];
+      running = true;
+      capable = true;
+      await advance(3000);
+      expect(container.querySelector('button[aria-label="Stop the reply (Esc)"]')).not.toBeNull();
+      key("Escape");
+      await flush();
+      expect(api.stopChatReply).toHaveBeenCalledWith(secondId);
+    },
+  );
+
   it("disables Stop once the server refuses it for the runtime", async () => {
     api.stopChatReply.mockResolvedValue({ state: "cannot_interrupt", method: null });
     await mount();
@@ -276,7 +310,6 @@ describe("chat composer flow", () => {
     expect(stopButton()).toBeNull();
   });
 
-  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
   const envelopeTurn = { message_id: "env-1", client_message_id: "", channel: "web", started_at: "", stopping: false, can_interrupt: true };
 
   it("keeps following a turn named by the envelope id after the page's own stream ends without a final", async () => {
