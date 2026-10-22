@@ -605,6 +605,7 @@ def _role_view(row: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> di
         **({"profile_not_allowed": row["profile_name"]} if row["profile_id"] and not row["profile_allowed"] else {}),
         "role_prompt": row["role_prompt"], "harness": row["harness"], "reason": row["reason"],
         **({"edited_by_user": True} if row.get("via") == Via.USER.value else {}),
+        **({"from_task_template": True} if row.get("via") == Via.TEMPLATE.value else {}),
         **({"template": row["template_key"]} if row.get("template_key") else {}),
         **({"items": list(row["items"])} if row.get("items") else {}),
         "steps": _naming(steps, key),
@@ -673,6 +674,9 @@ async def _role_set(call: PlannerCall) -> dict[str, Any]:
     current = await db_roles.get(call.task_id, key)
     if current is not None and current.get("via") == Via.USER.value:
         raise OpError(ErrorCode.FORBIDDEN, f"the user edited role {key} (v{current['version']}); their definition "
+                                           "stands: name it in steps as it is, or define another role under a new id")
+    if current is not None and current.get("via") == Via.TEMPLATE.value:
+        raise OpError(ErrorCode.FORBIDDEN, f"role {key} (v{current['version']}) comes from the task's template; it "
                                            "stands: name it in steps as it is, or define another role under a new id")
     if current is not None and current["kind"] != kind.value:
         raise OpError(ErrorCode.INVALID, f"{key} is a {RoleKind(current['kind']).noun}; a role keeps its kind: give "

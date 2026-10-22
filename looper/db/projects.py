@@ -78,7 +78,7 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     pool = pool or get_pool()
     row = await pool.fetchrow(
         "SELECT p.*, t.budget_usd AS task_own_budget_usd, t.schedule_id AS task_schedule_id, "
-        "t.planner_session_label AS task_planner_session_label "
+        "t.planner_session_label AS task_planner_session_label, t.template AS task_template "
         "FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1", task_id,
     )
     if row is None:
@@ -86,6 +86,8 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     project = dict(row)
     if (own := project.pop("task_own_budget_usd")) is not None:
         project["task_budget_usd"] = own
+    if isinstance(project.get("task_template"), str):
+        project["task_template"] = json.loads(project["task_template"])
     return project
 
 

@@ -401,3 +401,19 @@ def test_a_projects_role_summary_sums_each_role_across_its_tasks(monkeypatch: py
         assert (await _call("GET", "/api/projects/proj-nope/role-stats"))[0] == 404
 
     _run(test, monkeypatch)
+
+
+def test_a_role_from_the_tasks_template_cannot_be_redefined_by_its_planner(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _roles_on(pool, project)
+        await pool.execute("INSERT INTO task_roles (task_id, role_key, version, kind, role_prompt, via) "
+                           "VALUES ('task-a', 'tester', 1, 'work', 'x', 'template')")
+        planner = _Planner(_ops(), "task-a")
+        answer = await planner("looper_task_role_set", {**TESTER, "role_prompt": "Mine."})
+        assert _error(answer) == "forbidden" and "comes from the task's template" in answer["error"]["message"]
+        read = {r["id"]: r for r in (await planner("looper_task_roles", {}))["result"]["roles"]}
+        assert read["tester"]["from_task_template"] is True
+
+    _run(test, monkeypatch)

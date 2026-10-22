@@ -389,6 +389,27 @@ async def delete_task(
     return result == "DELETE 1"
 
 
+async def _restore_template_roles(conn: asyncpg.Connection, task_id: str) -> None:
+    """Give the task back, as version 1, the roles its template had when it was created (planned anew, the Planner
+    sees them again)."""
+    from . import task_roles as db_task_roles  # task_roles imports projects, which imports this module
+
+    template = await conn.fetchval("SELECT template FROM tasks WHERE id = $1", task_id)
+    if isinstance(template, str):
+        template = json.loads(template)
+    for item in (template or {}).get("roles") or ():
+        profile_id = item.get("profile_id")
+        if profile_id is not None and not await conn.fetchval(
+                "SELECT 1 FROM agent_profiles WHERE id = $1", profile_id):
+            profile_id = None
+        name = template.get("name") or ""
+        await db_task_roles.add_first_version(
+            conn, task_id, item["role_key"],
+            {**item, "via": "template", "reason": f"from template {name}", "profile_id": profile_id},
+            {"step_id": "", "kind": "role_defined", "learnings": [],
+             "summary": f"Role {item['role_key']} v1 restored from the task template {name}"})
+
+
 async def reset_task_for_restart(
     task_id: str,
     *,
@@ -403,14 +424,16 @@ async def reset_task_for_restart(
     """
     pool = pool or get_pool()
     if not keep_steps:
-        await pool.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
-        # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
-        for table in ("room_consults", "room_watches", "room_reads", "room_messages"):
-            await pool.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
+            await _restore_template_roles(conn, task_id)
+            # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
+            for table in ("room_consults", "room_watches", "room_reads", "room_messages"):
+                await conn.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
     result = await pool.execute(
         """
         UPDATE tasks
