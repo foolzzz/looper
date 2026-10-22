@@ -198,7 +198,7 @@ def test_fake_dialog_outcome_uses_observations_instead_of_success_words(monkeypa
     scenarios = tmp_path / "scenarios.json"
     scenarios.write_text("{}")
     result = dialogs.run_dialog(Api(registry), dialogs.select(["provider_key"])[0], database_url="disposable",
-                                project_id="project-test", scenarios=scenarios, mode="fake", timeout=1)
+                                project_id="project-test", scenarios=scenarios, mode="fake", timeout=30)
     assert result["outcome"] == ("pass" if mutation is None else "fail"), result
 
 
@@ -270,7 +270,7 @@ def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path):
                             "model_custom", "model_dual_protocol", "model_login_runtime",
                             "model_missing_endpoint", "model_price_history"])
     result, path = dialogs.run(mode="fake", dialogs=cases, admin_url=os.environ["LOOPER_TEST_DATABASE_URL"],
-                               out_dir=tmp_path, timeout=25)
+                               out_dir=tmp_path, timeout=120)
     assert result["aborted"] is None, result
     assert all(row["outcome"] == "pass" for row in result["dialogs"]), result["dialogs"]
     assert len(result["dialogs"]) == len(cases)

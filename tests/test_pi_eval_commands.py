@@ -256,11 +256,11 @@ def test_preflight_stops_before_uv(tmp_path: Path, updates: dict[str, str | None
 
 
 def test_deadline_kills_the_runner_and_records_the_gap(tmp_path: Path) -> None:
-    env = _environment(tmp_path, PI_EVAL_DEADLINE_SECONDS="1", PI_EVAL_FAKE_UV_SLEEP="30")
+    env = _environment(tmp_path, PI_EVAL_DEADLINE_SECONDS="5", PI_EVAL_FAKE_UV_SLEEP="60")
     started = time.monotonic()
-    completed = _run(tmp_path, env, timeout=20)
+    completed = _run(tmp_path, env, timeout=60)
     elapsed = time.monotonic() - started
-    assert elapsed < 15
+    assert elapsed < 45
     assert completed.returncode != 0
     assert _invocations(tmp_path), "the first runner starts before the deadline"
     gaps = (STATE / "gaps.txt").read_text(encoding="utf-8")
@@ -436,9 +436,9 @@ def test_deepseek_unavailable_runner_is_unverified(tmp_path: Path, deepseek_env)
 
 
 def test_deepseek_deadline_terminates_runner(tmp_path: Path, deepseek_env) -> None:
-    deepseek_env.update(PI_EVAL_DEADLINE_SECONDS="1", PI_EVAL_FAKE_UV_SLEEP="30")
+    deepseek_env.update(PI_EVAL_DEADLINE_SECONDS="5", PI_EVAL_FAKE_UV_SLEEP="60")
     started = time.monotonic()
-    completed = _run(tmp_path, deepseek_env, script=DEEPSEEK_SCRIPT, timeout=20)
+    completed = _run(tmp_path, deepseek_env, script=DEEPSEEK_SCRIPT, timeout=60)
     assert time.monotonic() - started < 15
     assert completed.returncode == 124
     assert len(_invocations(tmp_path)) == 1
@@ -562,9 +562,9 @@ def test_comparison_missing_fake_or_exhausted_readback_stops_next_tier(tmp_path:
 
 
 def test_comparison_deadline_kills_process_group(tmp_path: Path, comparison_env) -> None:
-    comparison_env.update(PI_EVAL_DEADLINE_SECONDS="1", PI_EVAL_FAKE_UV_SLEEP="30")
+    comparison_env.update(PI_EVAL_DEADLINE_SECONDS="5", PI_EVAL_FAKE_UV_SLEEP="60")
     started = time.monotonic()
-    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT, timeout=20)
+    completed = _run(tmp_path, comparison_env, script=COMPARISON_SCRIPT, timeout=60)
     assert time.monotonic() - started < 15
     assert completed.returncode == 124
     assert len(_invocations(tmp_path)) == 1

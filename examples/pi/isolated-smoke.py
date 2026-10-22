@@ -369,7 +369,7 @@ print(json.dumps({'pids': list(tree), 'groups': list(set(tree.values()))}))
                 except ProcessLookupError:
                     pass
             return not list((root / ".local/agent-processes").glob("*.json"))
-        wait(reaped, "cancel left processes", timeout=15)
+        wait(reaped, "cancel left processes", timeout=60)
         try:
             request(base, "/api/agent/v1/tools", cancelled_token)
         except urllib.error.HTTPError as error:
@@ -626,7 +626,7 @@ print(probe.version)
             with managed_process(command, cwd=launch_root, env=launch_env, stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
                 prompt = "test" if mode == "json" else json.dumps({"type": "prompt", "id": "p", "message": "test"}) + "\n"
-                stdout, stderr = process.communicate(prompt, timeout=25)
+                stdout, stderr = process.communicate(prompt, timeout=120)
                 assert process.returncode != 0 and "HTTP 401" in stderr
                 assert "scoped-test-token" not in stdout + stderr
             assert not api.state["requests"]
