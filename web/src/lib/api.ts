@@ -3881,3 +3881,101 @@ export async function fetchGates(
   if (!res.ok) await failed(res, "gates");
   return res.json();
 }
+
+// --- Managers: each with its own duty, tools, task visibility and task templates ---
+
+export type ManagerTools = "all" | "tasks";
+export type TaskScope = "all" | "own";
+export type TaskPolicy = "free" | "templates_only";
+
+export interface TemplateInput {
+  key: string;
+  label: string;
+  kind: "text" | "url";
+  required: boolean;
+  pattern: string;
+  hint: string;
+}
+
+export interface TaskTemplate {
+  key: string;
+  name: string;
+  description: string;
+  project_id: string | null;
+  work_dir: string;
+  workspace_mode: "worktree" | "in_place" | null;
+  requirement: string;
+  planner_instructions: string;
+  profiles: Partial<Record<"planner" | "worker" | "reviewer", string>>;
+  role_templates: string[];
+  inputs: TemplateInput[];
+  updated_at: string;
+}
+
+export type TaskTemplateFields = Omit<TaskTemplate, "key" | "updated_at">;
+
+export interface ManagerInfo {
+  id: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  enabled: boolean;
+  tools: ManagerTools;
+  task_scope: TaskScope;
+  task_policy: TaskPolicy;
+  system_prompt: string | null;
+  profile_id: string | null;
+  profile_name: string | null;
+  templates: TaskTemplate[];
+  state: { running: boolean; busy: boolean; healthy: boolean; sync: "ok" | "pending"; sync_error?: string };
+  spend: { today_usd: number; last_7d_usd: number; runs_today: number };
+}
+
+export interface ManagerFields {
+  key?: string;
+  name?: string;
+  description?: string;
+  system_prompt?: string | null;
+  profile_id?: string | null;
+  tools?: ManagerTools;
+  task_scope?: TaskScope;
+  task_policy?: TaskPolicy;
+  enabled?: boolean;
+}
+
+const managerPath = (id: string) => `${API_BASE}/managers/${encodeURIComponent(id)}`;
+
+async function managerJson<T>(url: string, method: string, body: unknown | undefined, label: string): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, label);
+  return res.json();
+}
+
+export async function fetchManagers(): Promise<ManagerInfo[]> {
+  const data = await managerJson<{ managers?: ManagerInfo[] }>(`${API_BASE}/managers`, "GET", undefined, "managers");
+  return data.managers ?? [];
+}
+
+export function createManager(body: ManagerFields): Promise<ManagerInfo> {
+  return managerJson(`${API_BASE}/managers`, "POST", body, "create manager");
+}
+
+export function updateManager(id: string, body: ManagerFields): Promise<ManagerInfo> {
+  return managerJson(managerPath(id), "PUT", body, "update manager");
+}
+
+export async function deleteManager(id: string): Promise<void> {
+  await managerJson(managerPath(id), "DELETE", undefined, "delete manager");
+}
+
+export function putManagerTemplate(id: string, key: string, body: TaskTemplateFields): Promise<ManagerInfo> {
+  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "PUT", body, "save template");
+}
+
+export function deleteManagerTemplate(id: string, key: string): Promise<ManagerInfo> {
+  return managerJson(`${managerPath(id)}/templates/${encodeURIComponent(key)}`, "DELETE", undefined, "delete template");
+}
