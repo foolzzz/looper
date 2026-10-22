@@ -90,6 +90,7 @@ from ..message import (
     channel_address,
     is_lark,
     manager_address,
+    parse_channel_id,
 )
 
 if TYPE_CHECKING:
@@ -478,7 +479,9 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
     if context.get("session_id"):
         return str(context["session_id"])
     if origin["channel"] and origin["chat"]:
-        return f"{origin['channel']}:{origin['chat']}"
+        parsed = parse_channel_id(origin["channel_id"])
+        prefix = origin["channel_id"] if parsed is not None and not parsed.builtin else origin["channel"]
+        return f"{prefix}:{origin['chat']}"
     return None
 
 
