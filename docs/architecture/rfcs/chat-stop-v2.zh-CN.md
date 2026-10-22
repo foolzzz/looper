@@ -118,7 +118,7 @@ class TurnCancel:
     def on_request(self, cb: Callable[[], None]) -> Callable[[], None]:
         """注册回调；已经请求过就立刻调用。返回注销函数。"""
     async def race(self, aw: Awaitable[T], *, timeout: float | None = None) -> T:
-        """等 aw，停止先到就取消它并抛 TurnCancelled；超时抛 TimeoutError。"""
+        """等 aw，停止先到就取消它并抛 TurnCancelled；超时抛 TimeoutError。取消后等它结束最多 ABANDON_SEC。"""
     def sent(self) -> None: ...           # 运行时写出了提示：令牌 starting → running
     prompt_sent: bool
 ```
@@ -177,7 +177,7 @@ _run_model(token, p)   run_turn(..., cancel=token.cancel)；运行时调 cancel.
 _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settle(结局)；然后记录、保存、回复
 ```
 
-- `token.step(name, aw)`：与停止赛跑，停止先到就取消 `aw` 并抛 `TurnStopped`。用于可放弃的步骤：发状态、`tools_problem`（线程里的探测被放弃，结果丢掉）、`_gate_command`、`_route_to_gate`、`_load_db_config`、`_load_session_state`、`_load_agent_settings`、`load_installed`、`library_with_server`、写提示文件、`_resume_brief`、`_build_user_message`。
+- `token.step(name, aw)`：与停止赛跑，停止先到就取消 `aw`，等它结束最多 `ABANDON_SEC`（`cancel.abandon`：数据库连不上时，被取消的 asyncpg 调用在把连接还回池子时可能永远结束不了，过了上限就留下它不管），再抛 `TurnStopped`。用于可放弃的步骤：发状态、`tools_problem`（线程里的探测被放弃，结果丢掉）、`_gate_command`、`_route_to_gate`、`_load_db_config`、`_load_session_state`、`_load_agent_settings`、`load_installed`、`library_with_server`、写提示文件、`_resume_brief`、`_build_user_message`。
 - `token.keep(name, aw, timeout, *, undo=None)`：停止不能打断它，跑完（有上限）再检查停止。用于持久化用户消息、`_save_session_state`、`recorder.start`/`finish`、`self._claude.start`（进程起了一半被取消会成孤儿）、`self._claude.stop`。步骤始终归这一轮所有（不用 `shield` 放它独自跑下去）：这一轮的任务被取消（管家关闭）或超时，`keep` 先取消步骤并等它结束，再跑 `undo`（各自有 `ABANDON_SEC` 上限，期间再来的取消先压着，做完再抛），然后才让取消或 `TimeoutError` 传出去。`claude_start` 的 `undo` 是 `self._claude.stop(kill=True)`：关闭返回之后不会再冒出一个常驻进程。
 - 交接（`_switch_session` → `_handoff`）在 `starting` 里，把 `token.cancel` 传给交接的 `run_turn`。被停：交接作废，**不**丢旧会话、不 `_claude.stop()`，`TurnStopped` 抛出；下一轮重新计算 `profile_switch`，再做一次交接。什么都不丢。
 - 续接失败重试（`manager.py:1107-1125`，`resume_lost`）：转移表里没有 `running → starting`，重试走专门的 `token.restart()`：没有停止时把阶段退回 `starting`，有停止就抛 `TurnStopped`。
@@ -213,7 +213,7 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 所以对常驻运行时（`ResidentSession.shares_bridge`：`ResidentClaude` 为真，`AcpGrok` 不在退回模式时为真），**非只读的调用和 `looper_confirm`** 还要对上这一轮自己的流：
 
-- 管家的 `on_event` 看到这一轮的 `tool_use` 块，调 `ops.expect(binding, tool, input, call_id=block["id"])`。登记是同步的，在事件交到 `on_event` 的那一刻做完（`_converse` 的 `observe`，连同记账和软上限要用的用量）；记录事件（数据库）、保存会话和发状态排在一个按序处理的任务里，`run_turn` 返回后等它做完。运行时是读完一个事件、`on_event` 返回之后才读下一行，所以记录慢不会拖住下一个 `tool_use` 的读取和登记（#339 的第二条：记录一个事件花了 2.1 秒，后面那个正常的写调用等过了 `MATCH_WAIT_SEC`，被拒为 `not_this_turn`）。停止请求之后这个任务不再往聊天里发状态（R1）。这个任务每处理完一个事件让出一次事件循环：运行时一次读到的一大串增量（Claude Code 会把整段回复的流事件一起写出）排在它前面时，用户看到第一个增量就发的停止立刻被处理，而不是等前面读到的增量全部发完（真实路径格 e：之前停止后 17–19 秒才有 `answer.final`）。状态（`STATUS_UPDATE`：增量、阶段）不写消息总线的日志：重启后重放只会出一条过时的状态，而日志每条都同步 `fsync`（本机约 20 毫秒），流式回复每个增量都要付一次。登记和展示分开：子 agent 的 `assistant` 事件（带 `parent_tool_use_id`）不进回复、不发状态，但它的 `tool_use` 照样登记——子 agent 经同一个桥发的写调用也是这一轮的。名字和参数先规范化成桥接请求里的样子（`_looper_call`）：去掉 `mcp__looper__`（Claude Code）或 `looper__`（Grok）前缀；Grok 经 `use_tool` 调 MCP 工具，`{"tool_name": "looper__<tool>", "tool_input": {...}}` 解包成内层的工具名和参数（`tool_input` 是 JSON 字符串时先解析）。Grok 的 MCP 请求不带调用 id，只能按名字和参数对上，所以这一步不能省。
+- 管家的 `on_event` 看到这一轮的 `tool_use` 块，调 `ops.expect(binding, tool, input, call_id=block["id"])`。登记是同步的，在事件交到 `on_event` 的那一刻做完（`_converse` 的 `observe`，连同记账和软上限要用的用量）；记录事件（数据库）、保存会话和发状态排在一个按序处理的任务里，`run_turn` 返回后等它做完。运行时是读完一个事件、`on_event` 返回之后才读下一行，所以记录慢不会拖住下一个 `tool_use` 的读取和登记（#339 的第二条：记录一个事件花了 2.1 秒，后面那个正常的写调用等过了 `MATCH_WAIT_SEC`，被拒为 `not_this_turn`）。停止请求之后这个任务不再往聊天里发状态（R1），这一轮最多再等它 `STOP_HANDLING_SEC`，然后取消它、等它结束最多 `ABANDON_SEC`（同 `token.step`），不管数据库怎样，停止都能结束这一轮、放开管家的锁。这个任务每处理完一个事件让出一次事件循环：运行时一次读到的一大串增量（Claude Code 会把整段回复的流事件一起写出）排在它前面时，用户看到第一个增量就发的停止立刻被处理，而不是等前面读到的增量全部发完（真实路径格 e：之前停止后 17–19 秒才有 `answer.final`）。状态（`STATUS_UPDATE`：增量、阶段）不写消息总线的日志：重启后重放只会出一条过时的状态，而日志每条都同步 `fsync`（本机约 20 毫秒），流式回复每个增量都要付一次。登记和展示分开：子 agent 的 `assistant` 事件（带 `parent_tool_use_id`）不进回复、不发状态，但它的 `tool_use` 照样登记——子 agent 经同一个桥发的写调用也是这一轮的。名字和参数先规范化成桥接请求里的样子（`_looper_call`）：去掉 `mcp__looper__`（Claude Code）或 `looper__`（Grok）前缀；Grok 经 `use_tool` 调 MCP 工具，`{"tool_name": "looper__<tool>", "tool_input": {...}}` 解包成内层的工具名和参数（`tool_input` 是 JSON 字符串时先解析）。Grok 的 MCP 请求不带调用 id，只能按名字和参数对上，所以这一步不能省。
 - `ops.call` 对这类调用：有 `X-Looper-Call` 时按 id 找；没有时按 `(tool, 规范化 JSON 参数)` 找这一轮还没用掉的期望，最多等 `MATCH_WAIT_SEC = 2`（流里的事件可能晚于 HTTP 到达）。找到就消耗掉并执行；找不到就拒绝，`ErrorCode.NOT_THIS_TURN`：「这个调用不是正在进行的这一轮发出的，没有执行」。
 - 只读调用不做匹配（归错轮只影响 `manager_actions` 的记账，不改东西）。
 - 每轮一个进程的运行时不需要匹配。

@@ -74,7 +74,7 @@ from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import session_switch
 from ..runtimes import CLAUDE_CODE
-from ..runtimes.cancel import TurnCancel, TurnCancelled
+from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
 from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
@@ -1472,10 +1472,8 @@ class ManagerAgent:
                         await abandon_handling()
 
         async def abandon_handling() -> None:
-            if handling is not None and not handling.done():
-                handling.cancel()
-            if handling is not None:
-                await asyncio.gather(handling, return_exceptions=True)
+            if handling is not None:  # a cancelled write may never end (an unreachable database): bounded too
+                await abandon(handling)
 
         async def show(text: str, **kwargs: Any) -> None:
             if not token.cancel.requested:  # (R1: what a stopped turn wrote before the stop is handled after it)

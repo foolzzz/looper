@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import inspect
 import os
 import signal
@@ -18,6 +19,7 @@ import pytest
 from fake_claude import fake_claude
 from looper.agents import proc_tree
 from looper.agents.claude_cli import ResidentClaude
+from looper.agents.runtimes import cancel as cancel_module
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import PREPARATION_STEPS, ManagerAgent, StopResult
 from looper.agents.tiers.turn_token import TurnPhase
@@ -335,6 +337,106 @@ def test_a_stop_while_the_database_holds_every_write_still_replies_and_frees_the
                 assert finish.kwargs["status"] == "interrupted"
             finally:
                 unlocked.set()
+                if not handling.done():
+                    handling.cancel()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
+class _Unreachable:
+    """A database call once the network to the server drops: it never returns, and once cancelled it never ends
+    either (asyncpg hands the connection back to its pool behind a shield, and resetting it waits on the server);
+    here not even a second cancel ends it, until ``restore()``."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.cancelled = 0  # cancelled, and still cleaning up
+        self.reached = asyncio.Event()
+        self._back = asyncio.Event()
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.calls += 1
+        self.reached.set()
+        try:
+            await self._back.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            while not self._back.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._back.wait()
+            raise
+
+    def restore(self) -> None:
+        self._back.set()
+
+
+def test_a_stop_while_the_database_is_unreachable_still_replies_and_frees_the_lock(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The database drops off the network while the turn's events are handled: the session's write never returns, and
+    # the handling the stop gives up on and cancels never ends either. Waiting for it is bounded all the same: the
+    # turn ends stopped, replies, and leaves the Manager's lock free.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+    monkeypatch.setattr(manager_module, "STOP_FINISH_SEC", 0.3, raising=False)
+    monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.3)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            database = _Unreachable()
+            monkeypatch.setattr(manager_module.db_agent_sessions, "save_session", database)
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(session.running.wait(), 5)
+                await asyncio.wait_for(database.reached.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert database.calls == database.cancelled == 2  # the handling's write, then the stopped turn's
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped" and "error" not in reply
+                assert not manager.busy and manager._lock_owner is None
+                assert manager.turn_for(envelope.message_id) is None
+            finally:
+                database.restore()
+                if not handling.done():
+                    handling.cancel()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_a_preparation_read_finds_the_database_unreachable_still_replies_and_frees_the_lock(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same outage while the turn reads its saved session, a step the stop abandons with the Manager's lock held:
+    # the cancelled read never ends, and the stop waits for it only within a bound.
+    monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.3)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            database = _Unreachable()
+            monkeypatch.setattr(manager_module.db_agent_sessions, "get_session", database)
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(database.reached.wait(), 5)
+                assert manager._lock_owner is not None
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert database.calls == database.cancelled == 1
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped" and "error" not in reply
+                assert not manager.busy and manager._lock_owner is None
+                assert manager.turn_for(envelope.message_id) is None and session.turns == []
+            finally:
+                database.restore()
                 if not handling.done():
                     handling.cancel()
                 await asyncio.gather(handling, return_exceptions=True)

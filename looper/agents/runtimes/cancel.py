@@ -11,7 +11,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import TypeVar
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +78,12 @@ class TurnCancel:
             await asyncio.wait({task, asked}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
             if task.done():
                 return task.result()
-            await _cancel(task)
+            await abandon(task)
             if asked.done():
                 raise TurnCancelled()
             raise TimeoutError()
         except asyncio.CancelledError:
-            await _cancel(task)
+            await abandon(task)
             raise
         finally:
             unregister()
@@ -91,10 +91,41 @@ class TurnCancel:
                 asked.cancel()
 
 
-async def _cancel(task: asyncio.Future[object]) -> None:
-    if not task.done():
-        task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+# How long what a turn gave up on is waited for, once cancelled, and then its undo. A cancelled database call may
+# never end: asyncpg hands its connection back to the pool behind a shield, and resetting it waits on a server the
+# network may no longer reach.
+ABANDON_SEC = 10.0
+
+
+async def abandon(task: asyncio.Future[Any], undo: Callable[[], Awaitable[None]] | None = None) -> None:
+    """Cancel ``task``, wait for it and run ``undo``, each bounded by ``ABANDON_SEC`` (past it, what still runs is
+    cancelled again and left behind); a cancel of the caller that comes meanwhile (``cancel_and_wait`` cancels
+    again) is held until both are done, then raised."""
+    cancelled = False
+
+    async def bounded(aw: Awaitable[Any]) -> None:
+        nonlocal cancelled
+        inner = asyncio.ensure_future(aw)
+        deadline = asyncio.get_running_loop().time() + ABANDON_SEC
+        while not inner.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logger.warning("an abandoned turn step did not end within %.1f s; left behind", ABANDON_SEC)
+                inner.cancel()
+                break
+            try:
+                await asyncio.wait({inner}, timeout=remaining)
+            except asyncio.CancelledError:
+                cancelled = True
+        if inner.done() and not inner.cancelled() and inner.exception() is not None:
+            logger.warning("an abandoned turn step failed: %r", inner.exception())
+
+    task.cancel()
+    await bounded(task)
+    if undo is not None:
+        await bounded(undo())
+    if cancelled:
+        raise asyncio.CancelledError()
 
 
 def _register(
