@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from fake_claude import fake_claude
 from looper.agents import proc_tree
 from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ResidentClaude
+from looper.agents.runtimes import per_turn
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from tests.test_agent_planner_worker import _fake_claude, _start_warm, _work_item, _worker_row
 from tests.test_codex_runtime import CODEX, _launch, _resident_command
@@ -1009,10 +1010,12 @@ _LEAVES_ONCE_TOLD = (
 )
 
 
-def _ends_what_leaves_the_tree_during_a_slow_ownership_scan(tmp_path: Path, scan: float) -> list[int]:
+def _ends_what_leaves_the_tree_during_a_slow_ownership_scan(
+    tmp_path: Path, scan: float, end: Callable[[proc_tree.TurnTree], Awaitable[None]] = proc_tree.TurnTree.end,
+) -> list[int]:
     # A child of the agent, still in the agent's group when the end lists every process, leaves for a session of its
     # own only then, while the ownership scan takes ``scan`` more seconds; the agent has exited, so the tree's end
-    # finishes without it. The child still running afterwards is returned.
+    # finishes without it. ``end`` ends the tree. The child still running afterwards is returned.
     code = ("import os, subprocess, sys, time\n"
             "subprocess.Popen([sys.executable, '-c', " + repr(_LEAVES_ONCE_TOLD) + "])\n"
             "while not os.path.exists('child.pid'):\n    time.sleep(0.01)\n"
@@ -1051,7 +1054,7 @@ def _ends_what_leaves_the_tree_during_a_slow_ownership_scan(tmp_path: Path, scan
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
         try:
-            await tree.end()
+            await end(tree)
             assert agent_ended.is_set() and (tmp_path / "left").exists()
             return _running([int((tmp_path / "child.pid").read_text())])
         finally:
@@ -1078,6 +1081,23 @@ def test_turn_tree_end_ends_what_left_the_tree_during_a_scan_that_outlasts_the_d
     monkeypatch.setattr(proc_tree, "REAP_SEC", 0.3)
     assert _ends_what_leaves_the_tree_during_a_slow_ownership_scan(
         tmp_path, 2 * (proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC)) == []
+
+
+def test_a_stop_after_the_turn_ends_what_left_the_tree_during_a_scan_that_outlasts_the_stops_wait(
+    tmp_path: Path,
+) -> None:
+    # The production grace and reap: the scan outlasts how long the stop waits for the end. The wait stops, the end
+    # does not: its last look still finds the child that left the tree and kills it.
+    async def stop(tree: proc_tree.TurnTree) -> None:
+        session = CODEX.resident_session("planner-task-1")
+        session._finished_tree = tree
+        began = time.monotonic()
+        await session.end_turn_processes()
+        assert time.monotonic() - began < per_turn._end_bound() + 1
+        await asyncio.gather(*(task for task in asyncio.all_tasks() if task is not asyncio.current_task()))
+
+    assert _ends_what_leaves_the_tree_during_a_slow_ownership_scan(
+        tmp_path, 2 * (proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC), stop) == []
 
 
 @pytest.mark.skipif(not proc_tree._MARKS, reason=_DETACHED_BEST_EFFORT)

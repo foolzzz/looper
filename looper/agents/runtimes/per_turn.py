@@ -119,6 +119,7 @@ class PerTurnSession(ABC):
         self._tree: proc_tree.TurnTree | None = None  # the running turn's process tree, once spawned
         self._end_task: asyncio.Future[None] | None = None  # the cleanup of that tree, once started
         self._finished_tree: proc_tree.TurnTree | None = None  # the last turn's tree, until the next turn starts
+        self._finished_end: asyncio.Future[None] | None = None  # the end of that tree, once a stop started it
         self._totals = Usage()
         self._price: Price | None = None  # prices the totals at the provider's prices
 
@@ -346,8 +347,12 @@ class PerTurnSession(ABC):
         tree, self._finished_tree = self._finished_tree, None
         if tree is None:
             return
+        # Shielded: the bound stops the wait, not the end, whose last look and SIGKILL of strays still run.
+        self._finished_end = end = asyncio.ensure_future(tree.end())
         try:
-            await asyncio.wait_for(tree.end(), _end_bound())
+            await asyncio.wait_for(asyncio.shield(end), _end_bound())
+        except asyncio.TimeoutError:
+            logger.warning("%s: the stopped turn's processes were not ended within %.1f s", self._label, _end_bound())
         except Exception:
             logger.warning("%s: could not end the stopped turn's processes", self._label, exc_info=True)
 
