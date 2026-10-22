@@ -641,6 +641,10 @@ class ManagerAgent:
         return self._definition.id
 
     @property
+    def name(self) -> str:
+        return self._definition.name
+
+    @property
     def agent_address(self) -> AgentAddress:
         return manager_address(self.agent_id)
 

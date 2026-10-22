@@ -74,32 +74,41 @@ async def list_sessions(
     *,
     limit: int = 50,
     session_id: str | None = None,
+    manager_id: str = "manager",
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """The Manager's conversations on every channel, the most recently active first: each session's channel,
+    """Manager ``manager_id``'s (default: the default Manager's) conversations on every channel, the most recently active first: each session's channel,
     message count, first and last message times, and its last message's role and start (``last_role``,
     ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads are left out. With ``session_id``, only
-    that session, however long ago it was active (none when it has no messages)."""
+    that session, however long ago it was active (none when it has no messages). A session without a
+    ``chat_threads`` row is the default Manager's; a deleted Manager's threads keep their row, so they are in no list."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
         SELECT s.session_id, s.channel, s.message_count, s.first_message_at, s.last_message_at,
                last.role AS last_role, left(last.content, $3) AS last_content
         FROM (
-            SELECT session_id, min(channel) AS channel, count(*) AS message_count,
-                   min(created_at) AS first_message_at, max(created_at) AS last_message_at, max(id) AS last_id
-            FROM chat_messages
+            SELECT session_id, min(m.channel) AS channel, count(*) AS message_count,
+                   min(m.created_at) AS first_message_at, max(m.created_at) AS last_message_at, max(m.id) AS last_id
+            FROM chat_messages m
+            LEFT JOIN chat_threads t USING (session_id)
             WHERE NOT starts_with(session_id, $2) AND ($4::text IS NULL OR session_id = $4)
+              AND coalesce(t.manager_id, 'manager') = $5
             GROUP BY session_id
-            ORDER BY max(created_at) DESC, max(id) DESC
+            ORDER BY max(m.created_at) DESC, max(m.id) DESC
             LIMIT $1
         ) s
         JOIN chat_messages last ON last.id = s.last_id
         ORDER BY s.last_message_at DESC, s.last_id DESC
         """,
-        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS, session_id,
+        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS, session_id, manager_id,
     )
     return [dict(r) for r in rows]
+
+
+async def has_messages(session_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
+    pool = pool or get_pool()
+    return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM chat_messages WHERE session_id = $1)", session_id))
 
 
 async def recent_conversations(

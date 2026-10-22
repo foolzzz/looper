@@ -46,6 +46,14 @@ class TestBuildChatTargets:
         assert _ids(targets) == ["manager", "planner-t2", "planner-t1"]
         assert targets[0] == {"kind": "manager", "id": "manager", "can_send": True}
 
+    def test_running_managers_come_first_with_their_names(self) -> None:
+        targets = build_chat_targets(
+            tasks=[_task("t1", 0)], live_planners=[], steps=[], runs=[],
+            managers=[{"id": "manager", "name": "Manager"}, {"id": "manager-review", "name": "Code review"}],
+        )
+        assert _ids(targets) == ["manager", "manager-review", "planner-t1"]
+        assert targets[1] == {"kind": "manager", "id": "manager-review", "name": "Code review", "can_send": True}
+
     def test_only_a_live_planner_takes_messages(self) -> None:
         targets = build_chat_targets(
             tasks=[_task("t1", 0, "running"), _task("t2", 5, "stopped")],
