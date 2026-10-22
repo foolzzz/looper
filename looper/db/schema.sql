@@ -341,13 +341,22 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL
 -- The Agent Profile the user chose for the Manager's current session (/profile, the dashboard): it wins over the
 -- manager role's and the shared defaults' profile until /new. NULL follows Settings.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS selected_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT;
+-- Every Manager's session may hold its own choice ('manager', 'manager-<key>'). The constraint keeps its name
+-- (an older binary adds it only when no constraint of that name exists) and only its definition widens.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint
                    WHERE conname = 'agent_sessions_selected_profile_manager'
                      AND conrelid = 'agent_sessions'::regclass) THEN
         ALTER TABLE agent_sessions ADD CONSTRAINT agent_sessions_selected_profile_manager
-            CHECK (selected_profile_id IS NULL OR agent_id = 'manager');
+            CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%');
+    ELSIF EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'agent_sessions_selected_profile_manager'
+                    AND conrelid = 'agent_sessions'::regclass
+                    AND pg_get_constraintdef(oid) NOT LIKE '%manager-%') THEN
+        ALTER TABLE agent_sessions DROP CONSTRAINT agent_sessions_selected_profile_manager;
+        ALTER TABLE agent_sessions ADD CONSTRAINT agent_sessions_selected_profile_manager
+            CHECK (selected_profile_id IS NULL OR agent_id = 'manager' OR agent_id LIKE 'manager-%');
     END IF;
 END $$;
 
@@ -1177,6 +1186,111 @@ CREATE TABLE IF NOT EXISTS project_role_templates (
     PRIMARY KEY (project_id, template_key)
 );
 ALTER TABLE project_role_templates ADD COLUMN IF NOT EXISTS items TEXT[] NOT NULL DEFAULT '{}';
+
+-- A task role a template set is fixed like the user's: the Planner may not change it. task_roles_via_check gains
+-- 'template' (drop and re-add under the same name, guarded by the definition).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_roles_via_check'
+               AND conrelid = 'task_roles'::regclass
+               AND pg_get_constraintdef(oid) NOT LIKE '%''template''%') THEN
+        ALTER TABLE task_roles DROP CONSTRAINT task_roles_via_check;
+        ALTER TABLE task_roles ADD CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user', 'template'));
+    END IF;
+END $$;
+
+-- A Manager: the default one ('manager', the one every install had) or a scenario Manager the operator defined
+-- (manager-<key>). Its id is its agent id: its session (agent_sessions), its runs (llm_records.agent_id), its bus
+-- queue. The default Manager's prompt and profile stay in role_configs.manager and Settings → Roles, so its row
+-- holds neither, uses every tool, sees every task and cannot be disabled.
+CREATE TABLE IF NOT EXISTS managers (
+    id            TEXT PRIMARY KEY
+                  CONSTRAINT managers_id_check CHECK (id = 'manager' OR id ~ '^manager-[a-z][a-z0-9-]{1,30}$'),
+    name          TEXT NOT NULL CONSTRAINT managers_name_check CHECK (btrim(name) <> '' AND length(name) <= 60),
+    description   TEXT NOT NULL DEFAULT '' CONSTRAINT managers_description_check CHECK (length(description) <= 300),
+    system_prompt TEXT,
+    profile_id    TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+    tools         TEXT NOT NULL DEFAULT 'tasks' CONSTRAINT managers_tools_check CHECK (tools IN ('all', 'tasks')),
+    -- Which tasks the Manager sees and may act on (its task tools, overview counts, spend, task-derived reads):
+    -- 'all' every task, 'own' only the tasks it created. Independent of tools; any combination is valid.
+    task_scope    TEXT NOT NULL DEFAULT 'own' CONSTRAINT managers_task_scope_check CHECK (task_scope IN ('all', 'own')),
+    task_policy   TEXT NOT NULL DEFAULT 'free'
+                  CONSTRAINT managers_task_policy_check CHECK (task_policy IN ('free', 'templates_only')),
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    -- Bumped in the same transaction by every write that changes what the Manager may do (tools, task_scope,
+    -- task_policy, enabled, a template saved or removed): ManagerOps compares it at each call.
+    revision      BIGINT NOT NULL DEFAULT 0,
+    -- Deleted on the dashboard: the row stays so its chat threads keep their owner (they never fall to the default
+    -- Manager) and its id is never reused; a deleted row is disabled and hidden from every view.
+    deleted_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
+        (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
+         AND deleted_at IS NULL)),
+    CONSTRAINT managers_deleted_check CHECK (deleted_at IS NULL OR NOT enabled),
+    CONSTRAINT managers_prompt_check CHECK (id = 'manager' OR btrim(coalesce(system_prompt, '')) <> '')
+);
+-- A deleted Manager's name is free again; its id is not.
+CREATE UNIQUE INDEX IF NOT EXISTS managers_name_key ON managers (lower(btrim(name))) WHERE deleted_at IS NULL;
+INSERT INTO managers (id, name, tools, task_scope) VALUES ('manager', 'Manager', 'all', 'all') ON CONFLICT (id) DO NOTHING;
+-- Once: the default Manager keeps the display name it had in Settings → Roles.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'managers_default_name') THEN
+        UPDATE managers SET name = left(btrim(rc.display_name), 60)
+            FROM role_configs rc
+            WHERE managers.id = 'manager' AND managers.name = 'Manager' AND rc.role = 'manager'
+              AND btrim(coalesce(rc.display_name, '')) <> '';
+        INSERT INTO schema_migrations (name) VALUES ('managers_default_name');
+    END IF;
+END $$;
+
+-- A Manager's task templates: the task configuration code applies when the Manager creates a task with one
+-- (looper/agents/task_templates.py checks every field; inputs is a typed list, see TemplateInput).
+CREATE TABLE IF NOT EXISTS manager_task_templates (
+    manager_id           TEXT NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+    key                  TEXT NOT NULL CONSTRAINT manager_task_templates_key_check
+                         CHECK (key ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    name                 TEXT NOT NULL CHECK (btrim(name) <> '' AND length(name) <= 60),
+    description          TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 300),
+    project_id           TEXT REFERENCES projects(id) ON DELETE RESTRICT,
+    work_dir             TEXT NOT NULL DEFAULT '',
+    workspace_mode       TEXT CHECK (workspace_mode IN ('worktree', 'in_place')),
+    requirement          TEXT NOT NULL DEFAULT '',
+    planner_instructions TEXT NOT NULL DEFAULT '',
+    planner_profile_id   TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+    worker_profile_id    TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+    reviewer_profile_id  TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+    role_templates       TEXT[] NOT NULL DEFAULT '{}',
+    inputs               JSONB NOT NULL DEFAULT '[]',
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (manager_id, key)
+);
+
+-- The Manager a task belongs to: the one that created it, which hears of its progress and end
+-- (the dashboard's and the schedules' tasks belong to the default Manager). template: what the template it was
+-- created from said then (key, name, updated_at, inputs, planner_instructions, and roles: each task role it copied,
+-- {role_key, kind, profile_id, role_prompt, harness, items, template_key}, so planning anew restores them);
+-- NULL without one.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager'
+    REFERENCES managers(id) ON DELETE RESTRICT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS template JSONB;
+-- The web chat thread (chat_threads.session_id) a task was asked for in; its progress and end are written there.
+-- NULL for a task from elsewhere (Lark, Telegram, the dashboard, a schedule).
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS origin_thread TEXT;
+CREATE INDEX IF NOT EXISTS idx_tasks_manager ON tasks (manager_id, created_at DESC);
+
+-- Which Manager made a call (no foreign key: the audit outlives a deleted Manager).
+ALTER TABLE manager_actions ADD COLUMN IF NOT EXISTS manager_id TEXT NOT NULL DEFAULT 'manager';
+
+-- The Manager a chat thread belongs to, for good; a thread without a row (from before, Lark's and Telegram's) is
+-- the default Manager's. A Manager is only ever soft-deleted, so the owner of a thread never changes or vanishes.
+CREATE TABLE IF NOT EXISTS chat_threads (
+    session_id  TEXT PRIMARY KEY,
+    manager_id  TEXT NOT NULL REFERENCES managers(id) ON DELETE RESTRICT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the version its latest attempt
 -- ran with; the review roles that review it after the built-in Reviewer, in order (review_roles, only on a
 -- reviewed step: each {role, required, version}, required false for one that only advises the Planner, version

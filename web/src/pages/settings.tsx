@@ -3,6 +3,7 @@ import { CatalogCard } from "@/components/catalog-card";
 import { ChatSettingsSection } from "@/components/chat-settings";
 import { ChannelsSection } from "@/components/channel-settings";
 import { ConfigTransferCard } from "@/components/config-transfer";
+import { ManagersSection } from "@/components/managers-settings";
 import { ProvidersSection } from "@/components/provider-settings";
 import { RolesSection } from "@/components/role-settings";
 import { RuntimesSection } from "@/components/runtime-cards";
@@ -25,6 +26,8 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "The agent runtimes this version can run, as found on the server's PATH. A runtime's capabilities decide the " +
     "roles it can run. Runtimes are built in; a different binary comes from the server's PATH.",
   [AGENT_PROFILE.slug]: AGENT_PROFILE.help,
+  managers:
+    "Managers you talk to, each with its own duty, session and spend. Task templates set what a Manager's tasks run with. Managers and templates are not in Import / Export yet.",
   catalog:
     "Plugins, skills and MCP servers: import, upload, take from git or write them, then install them globally or " +
     "in a project, for the roles that load them.",
@@ -58,6 +61,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "runtimes" && <RuntimesSection />}
       {page === AGENT_PROFILE.slug && <AgentProfilesSection />}
       {page === "roles" && <RolesSection sub={inner} />}
+      {page === "managers" && <ManagersSection />}
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
       {page === "chat" && <ChatSettingsSection />}

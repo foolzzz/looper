@@ -678,7 +678,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
 
     import looper.db as db
     from looper.agents import (
-        consult, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
+        consult, managers, operator_auth, operator_notes, proc_tree, profile_registry, read_only_copies, room,
         scheduler_settings, serve, state_import, step_workspaces, task_workspaces,
     )
     from looper.agents.ops import planner as planner_ops, room as room_ops, service as manager_ops
@@ -704,7 +704,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
                                    register=MagicMock(), resume_all=AsyncMock(), notify=AsyncMock(),
                                    post=AsyncMock(), task_ended=AsyncMock(), list_channels=lambda: [])
 
-        bus = SimpleNamespace(shutdown=AsyncMock())
+        bus = SimpleNamespace(shutdown=AsyncMock(), queue_ids=lambda: [])
         router = SimpleNamespace(has_planner=lambda task_id: task_id == "task-active")
         for name in ("Broadcaster", "ManagerConfig", "WorkerConfig"):
             monkeypatch.setattr(serve, name, MagicMock())
@@ -715,6 +715,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
                             ("TaskRouter", router), ("WorkerPool", fake("workers")),
                             ("AgentHTTPServer", fake("http"))):
             constructor = MagicMock(return_value=value)
+            if name == "AgentSupervisor":
+                value.bus = bus  # the Manager fleet's bus
             if name == "ChannelRegistry":
                 value.register = AsyncMock()
             monkeypatch.setattr(serve, name, constructor)
@@ -755,7 +757,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         ):
             monkeypatch.setattr(module, name, AsyncMock(return_value=result))
         monkeypatch.setattr(room, "sweep_run_sessions", lambda *args: None)
-        for module, name in ((manager_ops, "Platform"), (manager_ops, "ManagerOps"),
+        # The Manager fleet builds each Manager's tools on the real Platform (a plain record of what they act on).
+        for module, name in ((manager_ops, "ManagerOps"), (managers, "ManagerOps"),
                              (planner_ops, "PlannerOps"), (room_ops, "RoomOps"), (room, "RoomService")):
             monkeypatch.setattr(module, name, MagicMock())
         monkeypatch.setattr(consult, "ConsultService", MagicMock(return_value=fake("consults")))

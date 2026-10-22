@@ -571,8 +571,51 @@ function managerActionLabel(action: ManagerAction): string {
   return `${tool}${verb}`;
 }
 
+const URL_PATTERN = /^https?:\/\/\S+$/;
+
+/** Under the title: which Manager created the task and from which template; nothing for a plain default one. */
+function TaskCreatedBy({ task }: { task: TaskDetail }) {
+  const template = task.template ?? null;
+  const managerId = task.manager_id ?? "manager";
+  if (managerId === "manager" && !template) return null;
+  return (
+    <div className="mt-1 text-xs text-muted-foreground">
+      <p>
+        Created by {task.manager_name || managerId}
+        {template && <> · template {template.name}</>}
+      </p>
+      {template && (
+        <details className="mt-1">
+          <summary className="cursor-pointer">Template inputs</summary>
+          <ul className="mt-1 space-y-0.5">
+            {template.inputs.map((input) => (
+              <li key={input.key}>
+                {input.label}:{" "}
+                {URL_PATTERN.test(input.value) ? (
+                  <a href={input.value} target="_blank" rel="noreferrer" className="text-primary underline">
+                    {input.value}
+                  </a>
+                ) : (
+                  <span className="text-foreground">{input.value}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {template.planner_instructions && (
+            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted px-3 py-2 font-mono">
+              {template.planner_instructions}
+            </pre>
+          )}
+        </details>
+      )}
+    </div>
+  );
+}
+
 /** What the Manager did to the task through its tools, newest first ("由管家操作"). */
-function TaskManagerActions({ actions }: { actions: ManagerAction[] }) {
+function TaskManagerActions({ actions, managerId, managerName }: {
+  actions: ManagerAction[]; managerId?: string; managerName?: string | null;
+}) {
   if (!actions.length) return null;
   return (
     <div>
@@ -588,6 +631,9 @@ function TaskManagerActions({ actions }: { actions: ManagerAction[] }) {
             ) : null}
             <span>
               {a.channel || "—"} · {new Date(a.created_at).toLocaleString()}
+              {a.manager_id && a.manager_id !== "manager" && (
+                <> · {a.manager_id === managerId && managerName ? managerName : a.manager_id}</>
+              )}
             </span>
           </li>
         ))}
@@ -672,7 +718,7 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
           )}
         </div>
         <TaskSupplements supplements={task.supplements ?? []} />
-        <TaskManagerActions actions={task.manager_actions ?? []} />
+        <TaskManagerActions actions={task.manager_actions ?? []} managerId={task.manager_id} managerName={task.manager_name} />
         <div>
           <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
             <FolderOpen className="h-3 w-3" />
@@ -2112,6 +2158,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
                 />
               )}
             </div>
+            {task && <TaskCreatedBy task={task} />}
           </div>
           {task && isActiveTask(task) && (
             <button

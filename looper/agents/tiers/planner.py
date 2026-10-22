@@ -842,6 +842,8 @@ class PlannerAgent:
         self._token_files: set[str] = set()
         self._bus: MessageBus | None = None
         self._plan: TaskPlan | None = None
+        # What the task's template said when the task was created (None for a task from none); it never changes.
+        self._template: Mapping[str, Any] | None = None
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
         self._claude = CLAUDE_CODE.resident_session(self.agent_id)
@@ -3711,6 +3713,7 @@ class PlannerAgent:
             task=plan_task_section(
                 task_id=self._task_id, requirement=plan.requirement, project_name=plan.project_name,
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
+                template=self._template,
             ),
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
@@ -4285,6 +4288,7 @@ class PlannerAgent:
         plan.project_background = str(project.get("background") or "")
         plan.project_work_dir = str(project.get("work_dir") or "")
         self._execution = ProjectExecution.from_row(project)
+        self._template = project.get("task_template")
         self._scheduled = project.get("task_schedule_id") is not None
         self._schedule_id = project.get("task_schedule_id")
         if project.get("task_planner_session_label") and not self._own_session_label:

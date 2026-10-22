@@ -47,14 +47,15 @@ class Entry:
     label: str
     step_id: str
     name: str
+    manager_id: str
 
 
-# (channel, chat, sender) -> (when it was sent, its entries)
-_snapshots: dict[tuple[str, str, str], tuple[float, list[Entry]]] = {}
-# A list is not yet the snapshot while it is being sent: (channel, chat, sender) -> (the list's token, its entries).
+# (manager, channel, chat, sender) -> (when it was sent, its entries)
+_snapshots: dict[tuple[str, str, str, str], tuple[float, list[Entry]]] = {}
+# A list is not yet the snapshot while it is being sent: (manager, channel, chat, sender) -> (the list's token, its entries).
 # ``settle`` makes it the snapshot once the channel has delivered it; until then, and when it is not delivered, no
 # number refers to anything.
-_pending: dict[tuple[str, str, str], tuple[str, list[Entry]]] = {}
+_pending: dict[tuple[str, str, str, str], tuple[str, list[Entry]]] = {}
 # The metadata key of an answer that carries a list; its value is the list's token.
 SNAPSHOT_TOKEN = "gate_snapshot"
 
@@ -99,12 +100,12 @@ def _where(envelope: MessageEnvelope) -> tuple[str, str, str, bool, str]:
     return channel, chat, sender, group, own
 
 
-async def _waiting(channel: str, own: str, group: bool, limit: int) -> list[dict[str, Any]]:
+async def _waiting(channel: str, own: str, group: bool, limit: int, manager_id: str | None) -> list[dict[str, Any]]:
     if not group:
-        return await db_user_gates.open_gates(limit)
+        return await db_user_gates.open_gates(limit, manager_id=manager_id)
     dashboard = await dashboard_target()
     gates = await db_user_gates.open_gates(
-        limit, chat=(channel, own),
+        limit, chat=(channel, own), manager_id=manager_id,
         dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) == (channel, own))
     here = []
     for gate in gates:
@@ -130,41 +131,46 @@ def _entry_text(number: int, gate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _list(envelope: MessageEnvelope, page: int = 1) -> str:
+async def _list(envelope: MessageEnvelope, manager_id: str | None, page: int = 1) -> str:
     channel, chat, sender, group, own = _where(envelope)
     first = (max(page, 1) - 1) * LISTED
-    waiting = await _waiting(channel, own, group, first + LISTED + 1)
+    waiting = await _waiting(channel, own, group, first + LISTED + 1, manager_id)
     gates, more = waiting[first:first + LISTED], len(waiting) > first + LISTED
-    key = (channel, chat, sender)
+    key = (manager_id or "*", channel, chat, sender)
     _snapshots.pop(key, None)
     _pending.pop(key, None)
     if not gates:
         return NONE_WAITING if first == 0 else f"没有第 {page} 页，最近一次列表以 /gates 为准。"
     numbered = list(enumerate(gates, first + 1))
     _pending[key] = (envelope.message_id, [
-        Entry(i, str(g["task_id"]), str(g["step_key"]), str(g["step_id"]), _name(g)) for i, g in numbered])
+        Entry(i, str(g["task_id"]), str(g["step_key"]), str(g["step_id"]), _name(g),
+              str(g.get("task_manager_id") or "")) for i, g in numbered])
     next_page = [f"还有更多：/gates {page + 1} 看下一页。"] if more else []
     return "\n".join(["在等你的关卡：", *(_entry_text(i, g) for i, g in numbered), "", *next_page, HOW_TO_ANSWER])
 
 
-async def _fresh_list(envelope: MessageEnvelope, why: str) -> str:
-    return f"{why}\n\n{await _list(envelope)}"
+async def _fresh_list(envelope: MessageEnvelope, why: str, manager_id: str | None) -> str:
+    return f"{why}\n\n{await _list(envelope, manager_id)}"
 
 
 async def _gate(envelope: MessageEnvelope, number: str, answer: str, *, has_planner: Any, bus: MessageBus,
-                source: AgentAddress) -> str:
+                source: AgentAddress, manager_id: str | None) -> str:
     channel, chat, sender, group, own = _where(envelope)
-    key = (channel, chat, sender)
+    key = (manager_id or "*", channel, chat, sender)
     saved = _snapshots.get(key)
     if saved is not None and time.monotonic() - saved[0] > SNAPSHOT_TTL_SEC:
         saved = _snapshots.pop(key, None) and None
     if saved is None:
-        return await _fresh_list(envelope, "请先用 /gates 看一下列表，编号以最近一次列表为准。")
+        return await _fresh_list(envelope, "请先用 /gates 看一下列表，编号以最近一次列表为准。", manager_id)
     entries = saved[1]
     index = int(number)
     entry = next((e for e in entries if e.number == index), None)
     if entry is None:
-        return await _fresh_list(envelope, f"没有第 {number} 个关卡，编号以最近一次列表为准。")
+        return await _fresh_list(envelope, f"没有第 {number} 个关卡，编号以最近一次列表为准。", manager_id)
+    if manager_id is not None:
+        task = await db_tasks.get_task(entry.task_id)
+        if task is None or task.get("manager_id") != manager_id:
+            return await _fresh_list(envelope, f"【{entry.name}】的 {entry.label} 不在这个管家的范围里。", manager_id)
     end = answer.lower() == "end"
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
@@ -177,7 +183,7 @@ async def _gate(envelope: MessageEnvelope, number: str, answer: str, *, has_plan
                                     via=f"command:{channel}", end=end, origin=origin)
     except RequestError as exc:
         if exc.status in (HTTP_404, HTTP_409):
-            return await _fresh_list(envelope, f"【{entry.name}】的 {entry.label} 已经不在等你了（{exc}）。")
+            return await _fresh_list(envelope, f"【{entry.name}】的 {entry.label} 已经不在等你了（{exc}）。", manager_id)
         if exc.status == HTTP_400:
             return f"没能交给 {entry.label}：{exc}"
         raise
@@ -185,7 +191,7 @@ async def _gate(envelope: MessageEnvelope, number: str, answer: str, *, has_plan
 
 
 async def handle(envelope: MessageEnvelope, text: str, *, has_planner: Any, bus: MessageBus,
-                 source: AgentAddress) -> str | None:
+                 source: AgentAddress, manager_id: str | None = None) -> str | None:
     """The reply to ``/gates`` or ``/gate N ...``, written by code; None when ``text`` is neither."""
     match = _COMMAND.match(text.strip())
     if match is None:
@@ -194,9 +200,10 @@ async def handle(envelope: MessageEnvelope, text: str, *, has_planner: Any, bus:
     if word == "gates":
         if rest and not rest.isdigit():
             return USAGE
-        return await _list(envelope, int(rest) if rest else 1)
+        return await _list(envelope, manager_id, int(rest) if rest else 1)
     number, _, answer = rest.partition(" ")
     answer = answer.strip()
     if not number.isdigit() or not answer:
         return USAGE
-    return await _gate(envelope, number, answer, has_planner=has_planner, bus=bus, source=source)
+    return await _gate(envelope, number, answer, has_planner=has_planner, bus=bus, source=source,
+                       manager_id=manager_id)

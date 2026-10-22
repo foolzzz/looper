@@ -260,6 +260,22 @@ class MessageBus:
                 break
         return result
 
+    def take_queue(self, agent_id: str) -> list[MessageEnvelope]:
+        """Remove every queued message for an agent and return them, not marked delivered: the caller settles
+        each one (``settle``) once it is dealt with, so a crash in between replays it."""
+        q = self._queues.get(agent_id)
+        result: list[MessageEnvelope] = []
+        while q is not None and not q.empty():
+            try:
+                result.append(q.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return result
+
+    def queue_ids(self) -> list[str]:
+        """The ids of the agents that have a queue."""
+        return list(self._queues)
+
     def pending_count(self, agent_id: str) -> int:
         q = self._queues.get(agent_id)
         return q.qsize() if q else 0

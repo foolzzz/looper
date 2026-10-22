@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
@@ -164,6 +164,8 @@ def _task(row: Mapping[str, Any]) -> dict[str, Any]:
     task = dict(row)
     if "config" in task:
         task["config"] = _read_config(task["config"])
+    if isinstance(task.get("template"), str):
+        task["template"] = json.loads(task["template"])
     task["name"] = task_name(title=task.get("title"), goal_id=task.get("goal_id"),
                              requirement=task.get("requirement"), task_id=str(task.get("id") or ""))
     return task
@@ -190,6 +192,9 @@ async def create_task(
     workspace_dir: str = "",
     workspace_mode: str | None = None,
     workspace_base: str = "",
+    manager_id: str = "manager",
+    template: Mapping[str, Any] | None = None,
+    origin_thread: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
@@ -201,6 +206,8 @@ async def create_task(
     Telegram chat, a Lark sender's open_id, or a Lark group and the sender to @-mention there; None for a task that
     did not come from either. ``original_user_text`` is the user's message the
     Manager's task JSON answered (kept as history); ``title`` the few words the Manager names the task with.
+    ``manager_id`` is the Manager the task belongs to, ``template`` what the task template it came from said then.
+    ``origin_thread`` is the web chat thread it was asked in (None for a task from anywhere else).
     """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
@@ -210,13 +217,16 @@ async def create_task(
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
-                           workspace_dir, workspace_mode, workspace_base)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20)
+                           workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
+                $21, $22::jsonb, $23)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
         config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, task_title(title), now,
         schedule_id, budget_usd, chat_kind, chat_mention, workspace_dir, workspace_mode, workspace_base,
+        manager_id, json.dumps(dict(template)) if template is not None else None,
+        origin_thread or None,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
@@ -233,12 +243,21 @@ async def active_workspaces(*, besides: str | None = None,
     for a task from before workspaces), but ``besides``."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT id, title, goal_id, requirement, status, workspace_mode, "
+        "SELECT id, title, goal_id, requirement, status, workspace_mode, manager_id, "
         "COALESCE(NULLIF(workspace_dir, ''), work_dir) AS workspace FROM tasks "
         "WHERE status = ANY($1::text[]) AND id <> COALESCE($2, '') ORDER BY created_at",
         list(ACTIVE_STATUSES), besides,
     )
     return [_task(row) for row in rows]
+
+
+async def manager_of(task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, str]:
+    """The Manager each of the tasks belongs to (a task that does not exist is left out)."""
+    if not task_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT id, manager_id FROM tasks WHERE id = ANY($1::text[])", list(task_ids))
+    return {row["id"]: row["manager_id"] for row in rows}
 
 
 async def update_task_status(
@@ -373,6 +392,27 @@ async def delete_task(
     return result == "DELETE 1"
 
 
+async def _restore_template_roles(conn: asyncpg.Connection, task_id: str) -> None:
+    """Give the task back, as version 1, the roles its template had when it was created (planned anew, the Planner
+    sees them again)."""
+    from . import task_roles as db_task_roles  # task_roles imports projects, which imports this module
+
+    template = await conn.fetchval("SELECT template FROM tasks WHERE id = $1", task_id)
+    if isinstance(template, str):
+        template = json.loads(template)
+    for item in (template or {}).get("roles") or ():
+        profile_id = item.get("profile_id")
+        if profile_id is not None and not await conn.fetchval(
+                "SELECT 1 FROM agent_profiles WHERE id = $1", profile_id):
+            profile_id = None
+        name = template.get("name") or ""
+        await db_task_roles.add_first_version(
+            conn, task_id, item["role_key"],
+            {**item, "via": "template", "reason": f"from template {name}", "profile_id": profile_id},
+            {"step_id": "", "kind": "role_defined", "learnings": [],
+             "summary": f"Role {item['role_key']} v1 restored from the task template {name}"})
+
+
 async def reset_task_for_restart(
     task_id: str,
     *,
@@ -387,14 +427,16 @@ async def reset_task_for_restart(
     """
     pool = pool or get_pool()
     if not keep_steps:
-        await pool.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
-        # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
-        for table in ("room_consults", "room_watches", "room_reads", "room_messages"):
-            await pool.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
-        await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
+            await _restore_template_roles(conn, task_id)
+            # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
+            for table in ("room_consults", "room_watches", "room_reads", "room_messages"):
+                await conn.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
+            await conn.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
     result = await pool.execute(
         """
         UPDATE tasks
@@ -531,11 +573,12 @@ async def list_tasks(
     group: TaskGroup | None = None,
     schedule_id: str | None = None,
     before: str | None = None,
+    manager_id: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
     project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those in ``status``, or in
-    ``group``, when it is, and only those older than the task ``before`` when it is."""
+    ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
@@ -543,9 +586,10 @@ async def list_tasks(
         {_WITH_PROJECT}
         WHERE {_FILTERS}
           AND ($6::text IS NULL OR (t.created_at, t.id) < (SELECT b.created_at, b.id FROM tasks b WHERE b.id = $6))
+          AND ($9::text IS NULL OR t.manager_id = $9)
         ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
-        project_id, status, statuses, inside, schedule_id, before, limit, offset,
+        project_id, status, statuses, inside, schedule_id, before, limit, offset, manager_id,
     )
     return [_task(r) for r in rows]
 
@@ -572,16 +616,18 @@ async def task_exists(task_id: str, *, pool: asyncpg.Pool | None = None) -> bool
     return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)", task_id))
 
 
-async def status_counts(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """How many tasks are in each status, every task counted: one row per project and status
-    (``project_id``, ``project_name``, ``status``, ``count``). A project without tasks has one row with
-    ``status`` None and ``count`` 0; tasks of no project have ``project_id`` None."""
+async def status_counts(*, manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """How many tasks are in each status, every task counted (with ``manager_id``, that Manager's only): one row
+    per project and status (``project_id``, ``project_name``, ``status``, ``count``). A project without tasks has
+    one row with ``status`` None and ``count`` 0; tasks of no project have ``project_id`` None."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
         SELECT p.id AS project_id, p.name AS project_name, t.status, count(t.id) AS count
-        FROM projects p FULL JOIN tasks t ON t.project_id = p.id
+        FROM projects p FULL JOIN (SELECT * FROM tasks WHERE $1::text IS NULL OR manager_id = $1) t
+             ON t.project_id = p.id
         GROUP BY p.id, p.name, t.status
         """,
+        manager_id,
     )
     return [dict(r) for r in rows]

@@ -132,7 +132,7 @@ class TestResolveChatTarget:
     def test_manager_is_the_default(self, raw: Any, expected: Any) -> None:
         from looper.agents.chat_targets import resolve_chat_target
         with tempfile.TemporaryDirectory() as tmp:
-            assert resolve_chat_target(raw, self._router(tmp)) == expected
+            assert asyncio.run(resolve_chat_target(raw, self._router(tmp))) == expected
 
     @pytest.mark.parametrize(
         ("raw", "status"),
@@ -147,7 +147,7 @@ class TestResolveChatTarget:
         from looper.agents.chat_targets import ChatTargetError, resolve_chat_target
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(ChatTargetError) as excinfo:
-                resolve_chat_target(raw, self._router(tmp))
+                asyncio.run(resolve_chat_target(raw, self._router(tmp)))
             assert excinfo.value.status == status
 
 

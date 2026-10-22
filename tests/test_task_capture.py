@@ -411,7 +411,8 @@ class TestManagerContinuity:
             < brief.index("Yes, it finished") < brief.index("Chat session-a") \
             < brief.index("Plan the calc refactor") < brief.index("parser first, then the CLI")
         assert "- user: hello" not in brief
-        assert agent_db.recent_conversations.await_args.kwargs == {"sessions": 3, "messages": 9}
+        assert agent_db.recent_conversations.await_args.kwargs == {"sessions": 3, "messages": 9,
+                                                                    "manager_id": "manager"}
 
     def test_the_recent_chats_are_capped(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         long = [{"role": "user", "content": f"m{n} " + "z" * 400, "created_at": None} for n in range(9)]

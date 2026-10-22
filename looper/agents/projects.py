@@ -161,15 +161,15 @@ def _name_taken(name: str) -> RequestError:
     return RequestError(HTTP_409, f"a project named {name!r} already exists")
 
 
-async def _existing_project(project_id: str) -> dict[str, Any]:
-    project = await db_projects.get_project(project_id)
+async def _existing_project(project_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
+    project = await db_projects.get_project(project_id, manager_id=manager_id)
     if project is None:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
     return project
 
 
-async def list_projects() -> dict[str, Any]:
-    return {"projects": [project_view(row) for row in await db_projects.list_projects()]}
+async def list_projects(*, manager_id: str | None = None) -> dict[str, Any]:
+    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id)]}
 
 
 async def create_project(data: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +181,7 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
     return project_view(row)
 
 
-async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
+async def update_project(project_id: str, data: dict[str, Any], *, manager_id: str | None = None) -> dict[str, Any]:
     fields = _project_fields(data, update=True)
     if not fields:
         raise RequestError(
@@ -194,7 +194,7 @@ async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any
         raise _name_taken(fields["name"]) from None
     if not updated:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
-    return project_view(await _existing_project(project_id))
+    return project_view(await _existing_project(project_id, manager_id=manager_id))
 
 
 def _still_used(project: dict[str, Any]) -> RequestError:
@@ -213,11 +213,22 @@ async def deletable_project(project_id: str) -> dict[str, Any]:
     return project
 
 
+def _used_by_template(project_id: str, used: tuple[str, str]) -> RequestError:
+    return RequestError(HTTP_409, f"project {project_id!r} is used by template {used[0]!r} of Manager {used[1]!r}: "
+                                  "change the template first")
+
+
 async def delete_project(project_id: str) -> dict[str, Any]:
+    from ..db import managers as db_managers
+
     project = await deletable_project(project_id)
+    if used := await db_managers.template_using_project(project_id):
+        raise _used_by_template(project_id, used)
     try:
         await db_projects.delete_project(project_id)
-    except asyncpg.ForeignKeyViolationError:  # a task or a schedule was added meanwhile
+    except asyncpg.ForeignKeyViolationError:  # a task, a schedule or a template was added meanwhile
+        if used := await db_managers.template_using_project(project_id):
+            raise _used_by_template(project_id, used) from None
         raise _still_used(project) from None
     return {"deleted": project_id}
 
@@ -306,9 +317,10 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
 
 
 async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, project_dir: str,
-                         project_mode: TaskWorkspaces) -> dict[str, Any]:
+                         project_mode: TaskWorkspaces, visible_to: str | None = None) -> dict[str, Any]:
     """A new task's ``workspace_mode`` (as ``data`` asks, else by ``task_workspaces.resolve_mode``) and ``base``,
-    checked: the mode, the base and the workspace check, or a 400."""
+    checked: the mode, the base and the workspace check, or a 400. ``visible_to``: the Manager the check's
+    warnings name tasks to; another Manager's tasks stay anonymous."""
     from . import task_workspaces
 
     requested, base = data.get("workspace_mode"), data.get("base")
@@ -325,7 +337,8 @@ async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, pr
     if base and mode is not TaskWorkspaces.WORKTREE:
         raise RequestError(HTTP_400, "base is where a task's worktree starts: give it with workspace_mode worktree")
     try:
-        check = await task_workspaces.check(work_dir, mode=mode, base=base, asked=bool(requested))
+        check = await task_workspaces.check(work_dir, mode=mode, base=base, asked=bool(requested),
+                                            visible_to=visible_to)
     except task_workspaces.TaskWorkspaceError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     return {"mode": mode.value, "base": base, "check": check}

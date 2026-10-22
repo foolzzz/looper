@@ -31,6 +31,7 @@ The Manager is the only agent that communicates with users. It:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -80,7 +81,7 @@ from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStop
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from ..ops import Turn
 from ..ops.service import tools_down_reply
-from ..task_notice import Notice
+from ..task_notice import Notice, ends_task
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -88,6 +89,7 @@ from ..message import (
     MessageType,
     channel_address,
     is_lark,
+    manager_address,
 )
 
 if TYPE_CHECKING:
@@ -97,7 +99,15 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
 from ...db import connection as db_connection
+from ...db import managers as db_managers
 from ...db import role_configs as db_role_configs
+from ..managers_api import (
+    DEFAULT_MANAGER_ID,
+    ManagerDefinition,
+    ManagerTools,
+    TaskPolicy,
+    TaskScope,
+)
 from ...db import tasks as db_tasks
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
@@ -105,6 +115,57 @@ from ...db import llm_records as db_llm_records
 from ...db.llm_records import RecordStatus
 from ...db import projects as db_projects
 from ...db import user_gates as db_user_gates
+
+TURNED_OFF_REPLY = "This Manager was turned off; your message was not handled."
+
+SCOPE_HEADING = "## This Manager's scope"
+SCOPE_TOOLS = {
+    ManagerTools.TASKS: """\
+You have the task tools only; the projects you can only list and read. Agent
+Profiles, providers, settings, skills and schedules are not yours: when asked,
+tell the user to use the general Manager or the dashboard.""",
+    ManagerTools.ALL: "You have every platform tool.",
+}
+SCOPE_TASKS = {
+    TaskScope.OWN: """\
+You see and act on only the tasks you created. Other Managers' tasks are hidden
+from you and not yours: when asked about one, tell the user to use the general
+Manager or the dashboard.""",
+    TaskScope.ALL: """\
+You see and act on every task, also those other Managers created. The Ready
+tasks and Open gates in each message list only the tasks you created; find the
+others with looper_tasks.""",
+}
+
+
+TEMPLATES_CONTRACT = """\
+## Task templates
+Each user message lists your task templates. Create a task with the template
+that fits (looper_task_create with template and inputs); the template sets the
+project, the roles and how the Planner works. Ask the user for every required
+input you do not have, as the template's hint describes it, and never make one
+up. Even when you have every input, first restate the task with its template
+and inputs and ask the user to confirm; create it only after the user confirms,
+as for any task. When no template fits, say so{only}."""
+TEMPLATES_ONLY_SENTENCE = " and do not create a task"
+
+
+def scope_contract(definition: ManagerDefinition, *, has_templates: bool = False) -> str:
+    """What a scenario Manager's tools and task scope are, and, with templates, how to use them, in the words it
+    reads."""
+    parts = [("heading", SCOPE_HEADING), ("tools", SCOPE_TOOLS[definition.tools]),
+             ("tasks", SCOPE_TASKS[definition.task_scope])]
+    if has_templates:
+        only = TEMPLATES_ONLY_SENTENCE if definition.task_policy is TaskPolicy.TEMPLATES_ONLY else ""
+        parts.append(("templates", "\n" + TEMPLATES_CONTRACT.format(only=only)))
+    return "\n".join(text for _, text in parts)
+
+
+def default_definition() -> ManagerDefinition:
+    return ManagerDefinition(id=DEFAULT_MANAGER_ID, name="Manager", description="", system_prompt=None,
+                             profile_id=None, tools=ManagerTools.ALL, task_scope=TaskScope.ALL,
+                             task_policy=TaskPolicy.FREE, enabled=True, builtin=True, revision=0)
+
 
 # Appended to the (editable) system prompt on every call: Looper's tools are code's, so is how to use them.
 TOOLS_CONTRACT = """\
@@ -243,7 +304,7 @@ HANDOFF_TIMEOUT_SEC = 300
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "route_to_gate", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
-    "load_session_state", "agent_settings", "library", "library_server", "build_user_message",
+    "load_session_state", "agent_settings", "templates", "library", "library_server", "build_user_message",
     "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
@@ -497,6 +558,26 @@ class GoalSnapshot:
     last_update: str = ""
 
 
+def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
+                   outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
+                   snapshot: str | None = None) -> MessageEnvelope:
+    """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
+    the chat's history (``record``)."""
+    outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
+    if record is None:
+        record = _chat_record(original, f"{original.message_id}:reply")
+    return MessageEnvelope.create(
+        source=source,
+        target=original.source,
+        message_type=MessageType.AGENT_REPLY,
+        payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
+        correlation_id=original.correlation_id,
+        reply_to=original.message_id,
+        metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
+                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
+    )
+
+
 class ManagerAgent:
     """Long-running Manager Agent backed by a resident Claude Code process."""
 
@@ -506,7 +587,15 @@ class ManagerAgent:
         config: ManagerConfig,
         runtime_root: Path,
         broadcaster: Broadcaster | None = None,
+        definition: ManagerDefinition | None = None,
     ) -> None:
+        self._definition = definition or default_definition()
+        self._log = self._definition.id
+        # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
+        self._turned_off = False
+        self._turned_off_told = False
+        self._has_templates = False  # from the last read of the Manager's task templates
+        self.on_turned_off: Callable[[str], None] | None = None
         self._config = config
         self._runtime_root = runtime_root
         self._broadcaster = broadcaster
@@ -524,12 +613,14 @@ class ManagerAgent:
         self._running = False
         self._system_prompt: str = DEFAULT_SYSTEM_PROMPT
         self._prompt_recommended = True  # whether _system_prompt is the recommended one (default_prompt)
+        if self._definition.id != DEFAULT_MANAGER_ID:  # until _load_db_config reads it again
+            self._system_prompt, self._prompt_recommended = self._definition.system_prompt or "", False
         # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
         self._agent_settings: AgentSettings | None = None
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
-        self._claude = CLAUDE_CODE.resident_session("manager")
+        self._claude = CLAUDE_CODE.resident_session(self.agent_id)
         self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
         self._turn_lock = asyncio.Lock()
         self._turns = TurnRegistry()  # every user message from its delivery to its end (stop_turn's targets)
@@ -549,14 +640,31 @@ class ManagerAgent:
         self._clean_start = False
         # Looper's platform tools (set by ``serve``): what Claude's calls in a turn act through.
         self.ops: ManagerOps | None = None
+        # The envelope the message loop is handling, and the ones a stop found unfinished (the fleet settles or
+        # hands them over when it retires this Manager).
+        self._handling: MessageEnvelope | None = None
+        self.stopped_in_flight: tuple[MessageEnvelope, ...] = ()
+
+    @property
+    def name(self) -> str:
+        return self._definition.name
+
+    @property
+    def process_started(self) -> bool:
+        """Whether the runtime process has started."""
+        return bool(self._claude.started)
 
     @property
     def agent_id(self) -> str:
-        return "manager"
+        return self._definition.id
+
+    @property
+    def name(self) -> str:
+        return self._definition.name
 
     @property
     def agent_address(self) -> AgentAddress:
-        return MANAGER_ADDRESS
+        return manager_address(self.agent_id)
 
     async def _load_session_state(self) -> None:
         """Read the session a previous run saved, once; without a readable one the next turn starts a new one."""
@@ -564,7 +672,7 @@ class ManagerAgent:
         try:
             saved = await db_agent_sessions.get_session(self.agent_id)
         except Exception:
-            logger.warning("manager: cannot read its saved session; starting a new one", exc_info=True)
+            logger.warning("%s: cannot read its saved session; starting a new one", self._log, exc_info=True)
             return
         if saved:
             self._session_id = saved.get("session_id")
@@ -578,7 +686,7 @@ class ManagerAgent:
         try:
             await self._write_session_state()
         except Exception:
-            logger.exception("manager: failed to save its session")
+            logger.exception("%s: failed to save its session", self._log)
 
     async def _write_session_state(self, pool: Any = None) -> None:
         await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
@@ -597,12 +705,25 @@ class ManagerAgent:
         bus.subscribe_topic(MessageType.USER_MESSAGE.value, self._receive, consumes=True)
         self._task = asyncio.create_task(self._message_loop())
         logger.info(
-            "manager agent started (session=%s)",
+            "%s agent started (session=%s)", self._log,
             self._session_id or "new",
         )
 
     async def _load_db_config(self) -> None:
         """Load the role prompt from DB; keep the last one read on failure."""
+        if self.agent_id != DEFAULT_MANAGER_ID:
+            try:
+                row = await db_managers.get_manager(self.agent_id)
+            except Exception:
+                logger.debug("could not load manager config from database", exc_info=True)
+                return
+            if row is None or not row.get("enabled"):
+                self._turned_off = True
+                return
+            self._definition = ManagerDefinition.from_row(row)
+            self._system_prompt = row["system_prompt"]
+            self._prompt_recommended = False
+            return
         try:
             config = await db_role_configs.get_config("manager")
             if config and config.get("system_prompt"):
@@ -656,10 +777,14 @@ class ManagerAgent:
                 reply = STOP_DONE_REPLY if stopped else STOP_IDLE_REPLY
             await self._send_reply(envelope, reply, persist=False)
         except Exception:
-            logger.exception("manager: could not handle /stop %s", envelope.message_id)
+            logger.exception("%s: could not handle /stop %s", self._log, envelope.message_id)
 
     async def stop(self) -> None:
         self._running = False
+        # Before the cancel: it runs the handlers' finally blocks, which end the tokens and clear ``_handling``.
+        pending = ([self._handling] if self._handling is not None else []) + [
+            t.envelope for t in self._turns.live() if t.envelope is not None]
+        self.stopped_in_flight = tuple({e.message_id: e for e in pending}.values())
         if self._bus is not None:
             self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
         if self._task:
@@ -684,13 +809,16 @@ class ManagerAgent:
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
-            async for envelope in self._bus.subscribe("manager"):
+            async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
+                self._handling = envelope
                 try:
                     await self._handle(envelope)
                 except Exception:
                     logger.exception("error handling message %s", envelope.message_id)
+                finally:
+                    self._handling = None
         except asyncio.CancelledError:
             pass
 
@@ -748,7 +876,7 @@ class ManagerAgent:
             note = (f'[Looper] The user withdrew a message before you saw it (it began: "{first_line}"). '
                     "Do not act on it unless they ask again.")
         if token.stop is not None and token.stop.phase in (TurnPhase.RECEIVED, TurnPhase.PREPARING):
-            logger.info("manager: stopped %s in %s before the model started", envelope.message_id,
+            logger.info("%s: stopped %s in %s before the model started", self._log, envelope.message_id,
                         token.stop.phase.value)
         self._stopped_notes = [*self._stopped_notes, note][-3:]
 
@@ -799,20 +927,20 @@ class ManagerAgent:
             if turn.refused:
                 response = ""  # answered below: the tools did not work
             elif isinstance(exc, TurnFailed):
-                logger.error("manager failed to answer %s: %s", envelope.message_id, exc.error)
+                logger.error("%s failed to answer %s: %s", self._log, envelope.message_id, exc.error)
                 await self._send_reply(envelope, _with_blocks(exc.reply, turn.blocks), error=exc.error)
                 return
             else:
                 # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
-                logger.exception("manager failed to answer %s", envelope.message_id)
+                logger.exception("%s failed to answer %s", self._log, envelope.message_id)
                 hint = exc.hint() if isinstance(exc, ProfileUnavailable) else ""
                 await self._send_reply(
                     envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{exc}{hint}", turn.blocks), error=str(exc))
                 return
         if turn.refused:
             problem = "Looper 拒绝了管家工具的令牌"
-            logger.error("manager: Looper refused the tools' token in the turn answering %s; Claude's reply was not "
-                         "sent", envelope.message_id)
+            logger.error("%s: Looper refused the tools' token in the turn answering %s; Claude's reply was not "
+                         "sent", self._log, envelope.message_id)
             await self._send_reply(envelope, _with_blocks(tools_down_reply(problem), turn.blocks), error=problem)
             return
         asked = self.ops is not None and self.ops.asks_in(envelope.message_id)
@@ -884,7 +1012,7 @@ class ManagerAgent:
             # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
             problem = await token.step("tools_probe", self._tools_problem())
             if problem is not None:
-                logger.error("manager: Looper's tools do not work (%s); %s was not answered", problem,
+                logger.error("%s: Looper's tools do not work (%s); %s was not answered", self._log, problem,
                              envelope.message_id)
                 token.settle(ReplyOutcome.FAILED)
                 return Prepared(turn=turn, tools_problem=problem)
@@ -896,6 +1024,12 @@ class ManagerAgent:
             waiting = self.ops.begin_turn(turn, binding=token.binding) if self.ops is not None else ""
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn)
         await token.step("load_db_config", self._load_db_config())
+        if self._turned_off:  # the fleet has not stopped this instance yet: it must not act as the Manager
+            self._acting(token)
+            if not self._turned_off_told and self.on_turned_off is not None:
+                self._turned_off_told = True
+                self.on_turned_off(self.agent_id)
+            return Prepared(action=lambda: self._send_reply(envelope, TURNED_OFF_REPLY))
         if not self._session_loaded:
             await token.step("load_session_state", self._load_session_state())
         agent_settings = await token.step("agent_settings", self._load_agent_settings(fallback=False))
@@ -903,6 +1037,7 @@ class ManagerAgent:
             raise ProfileUnavailable(agent_settings.error, agent_settings.profile_source)
         if agent_settings.profile_error:  # answered as an error; never another profile
             raise ProfileUnavailable(agent_settings.profile_error, agent_settings.profile_source)
+        await token.step("templates", self._read_templates())
         system_prompt = self._composed_prompt(agent_settings)
         library = await token.step("library", load_installed(self._runtime_root, AgentType.MANAGER.value))
         library = await token.step("library_server", self._library_with_server(library))
@@ -920,6 +1055,10 @@ class ManagerAgent:
             tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
             launch.library.sha256, launch.binding_sha256,
         )
+        if self._has_templates or self.agent_id != DEFAULT_MANAGER_ID:
+            # The MCP tool list is read when the process starts: a changed one restarts it.
+            listing = json.dumps(self.ops.listing(), sort_keys=True) if self.ops is not None else ""
+            signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
         switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider)
         turn_text = await token.step("build_user_message", self._build_user_message(
@@ -942,7 +1081,7 @@ class ManagerAgent:
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
             await token.keep("claude_stop", self._claude.stop(), 10)
-            self._claude, self._claude_runtime = launch.runtime.resident_session("manager"), launch.runtime
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
         if self._claude.stale(signature):
             await token.keep("claude_stop", self._claude.stop(), 10)
         command = self._claude.command if self._claude.started else self._claude_command(prepared.prompt_file, launch)
@@ -953,7 +1092,7 @@ class ManagerAgent:
         run.brief = brief
         asked = f"{prepared.note}\n\n{prepared.message}" if prepared.note else prepared.message
         run.recorder = recorder = ClaudeRunRecorder(
-            agent_id="manager",
+            agent_id=self.agent_id,
             task_id=envelope.metadata.get("task_id"),
             command=command,
             cwd=str(self._config.work_dir),
@@ -1100,11 +1239,24 @@ class ManagerAgent:
 
         origin = envelope.metadata.get("origin_channel_id")
         notice = Notice.from_payload(envelope.payload.get("notice"))
-        if notice is not None:
+        thread = envelope.metadata.get("origin_thread")
+        status = envelope.payload.get("status", "")
+        if thread and (ends_task(status) or status == "cancelled"):
+            # A web task's end goes into the thread it was asked in: the answer stream is long closed.
+            title = envelope.metadata.get("task_title") or ""
+            summary = (envelope.payload.get("summary") or "")[:2000]
+            if status == "completed":
+                text = f"任务「{title}」已完成：{summary}"
+            elif status == "failed":
+                text = f"任务「{title}」失败：{summary}"
+            else:
+                text = f"任务「{title}」已取消。"
+            await self._web_thread_reply(envelope, thread, text)
+        elif notice is not None:
             # A Telegram or Lark task's end goes to who it recorded, instead of its final summary, behind the
             # progress sent before it (``task_notice``).
             await self._bus.publish(MessageEnvelope.create(
-                source=MANAGER_ADDRESS,
+                source=self.agent_address,
                 target=channel_address(notice.channel.value),
                 message_type=MessageType.CHAT_NOTICE,
                 payload=notice.payload(),
@@ -1115,7 +1267,7 @@ class ManagerAgent:
             progress_text = envelope.payload.get("summary", "")
             if progress_text:
                 await self._bus.publish(MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
+                    source=self.agent_address,
                     target=AgentAddress(agent_type="channel", agent_id=origin),
                     message_type=MessageType.STATUS_UPDATE,
                     payload={"text": progress_text},
@@ -1123,12 +1275,27 @@ class ManagerAgent:
                     metadata={"origin_channel_id": origin},
                 ))
 
+    async def _web_thread_reply(self, envelope: MessageEnvelope, thread: str, text: str) -> None:
+        await self._bus.publish(MessageEnvelope.create(
+            source=self.agent_address,
+            target=channel_address("web"),
+            message_type=MessageType.AGENT_REPLY,
+            payload={"text": text, "chat_session_id": thread},
+            correlation_id=envelope.correlation_id,
+            metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
+        ))
+
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
         origin = envelope.metadata.get("origin_channel_id")
-        if origin:
+        thread = envelope.metadata.get("origin_thread")
+        if thread:
+            title = envelope.metadata.get("task_title") or ""
+            step_count = envelope.payload.get("step_count", 0)
+            await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
+        elif origin:
             step_count = envelope.payload.get("step_count", 0)
             await self._bus.publish(MessageEnvelope.create(
-                source=MANAGER_ADDRESS,
+                source=self.agent_address,
                 target=AgentAddress(agent_type="channel", agent_id=origin),
                 message_type=MessageType.STATUS_UPDATE,
                 payload={"text": f"任务已分解为 {step_count} 个步骤，开始执行..."},
@@ -1141,7 +1308,7 @@ class ManagerAgent:
         origin = envelope.metadata.get("origin_channel_id")
         if origin:
             await self._bus.publish(MessageEnvelope.create(
-                source=MANAGER_ADDRESS,
+                source=self.agent_address,
                 target=AgentAddress(agent_type="channel", agent_id=origin),
                 message_type=MessageType.AGENT_REPLY,
                 payload={"text": summary},
@@ -1162,7 +1329,7 @@ class ManagerAgent:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
         never runs on a profile the user did not choose."""
-        agent_settings = await load_agent_settings(AgentType.MANAGER)
+        agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id)
         if agent_settings.error is not None:
             return (self._agent_settings or agent_settings) if fallback else agent_settings
         self._agent_settings = agent_settings
@@ -1170,11 +1337,15 @@ class ManagerAgent:
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
+        contract_name, contract = "TOOLS_CONTRACT", TOOLS_CONTRACT
+        if self.agent_id != DEFAULT_MANAGER_ID:
+            contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
+            contract = TOOLS_CONTRACT + "\n" + scope_contract(self._definition, has_templates=self._has_templates)
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
-            role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
-            contract_name="TOOLS_CONTRACT", contract=TOOLS_CONTRACT,
+            role_id=self.agent_id, role=self._system_prompt, recommended=self._prompt_recommended,
+            contract_name=contract_name, contract=contract,
         )
 
     async def _link_turn_task(self, recorder: ClaudeRunRecorder, turn: Turn | None) -> None:
@@ -1319,7 +1490,7 @@ class ManagerAgent:
             # turn would resume it again and never answer, so drop it and run
             # this message in a new session; the context each turn carries does
             # not depend on the old conversation.
-            logger.warning("manager: session %s could not be resumed; starting a new session", resuming)
+            logger.warning("%s: session %s could not be resumed; starting a new session", self._log, resuming)
             await recorder.finish(output_text=None, result_event=None, error=(
                 f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
             await self._link_turn_task(recorder, ops_turn)
@@ -1375,7 +1546,7 @@ class ManagerAgent:
             try:
                 await db_activity.insert_activity(
                     task_id=task_id,
-                    worker="manager",
+                    worker=self.agent_id,
                     kind="text",
                     summary=final_text[:500] if final_text else None,
                     detail=final_text if len(final_text) > 500 else None,
@@ -1425,7 +1596,7 @@ class ManagerAgent:
             except Exception as exc:
                 # Nothing is dropped: the next message resumes the saved session in a new process.
                 self._session_id, self._session_totals, self._clean_start = previous
-                logger.exception("manager: could not drop its session for /new")
+                logger.exception("%s: could not drop its session for /new", self._log)
                 await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                 return
             self._pending_switch = self._pending_handoff = None
@@ -1433,7 +1604,7 @@ class ManagerAgent:
             if self.ops is not None:
                 self.ops.forget_confirmations()
             await self._record_new_session(envelope, origin, previous[0], chosen)
-        logger.info("manager: a new session on /new from %s (sender %s); the previous one was %s",
+        logger.info("%s: a new session on /new from %s (sender %s); the previous one was %s", self._log,
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
         await self._send_reply(envelope, NEW_SESSION_REPLY + (f"这次会话用「{name}」。" if name else ""))
 
@@ -1452,14 +1623,14 @@ class ManagerAgent:
             await db_llm_records.finish_record(record_id, status="completed", output_text=NEW_SESSION_REPLY,
                                                cost_usd=0.0, duration_ms=0)
         except Exception:
-            logger.warning("manager: could not record the new session", exc_info=True)
+            logger.warning("%s: could not record the new session", self._log, exc_info=True)
 
     # --- The Agent Profile of the session (/profile) ---
 
     async def settings_profile_name(self) -> str:
         """The display name of the profile the role and system layers give the Manager (the session's choice left
         out)."""
-        profile = (await load_agent_settings(AgentType.MANAGER, manager_session=False)).profile
+        profile = (await load_agent_settings(AgentType.MANAGER, manager_session=False, manager_id=self.agent_id)).profile
         return display_name({"name": profile.name, "effort": profile.effort})
 
     async def _handle_profile_command(self, envelope: MessageEnvelope, command: Any) -> None:
@@ -1472,7 +1643,7 @@ class ManagerAgent:
             listed = await profile_choices(saved or None, await self._load_agent_settings())
             menu = format_list(listed, settings_name=await self.settings_profile_name(), selected=selected)
         except Exception as exc:
-            logger.exception("manager: could not list its Agent Profiles")
+            logger.exception("%s: could not list its Agent Profiles", self._log)
             await self._send_reply(envelope, f"Manager 出错，没能读取 Agent Profile：{exc}", error=str(exc))
             return
         if command.kind is ProfileCommandKind.LIST:
@@ -1530,7 +1701,7 @@ class ManagerAgent:
         saved = await db_agent_sessions.get_session(self.agent_id) or {}
         previous = saved.get("selected_profile_id")
         if profile_id is None:
-            settings = await load_agent_settings(AgentType.MANAGER, manager_session=False)
+            settings = await load_agent_settings(AgentType.MANAGER, manager_session=False, manager_id=self.agent_id)
             if settings.profile_error or settings.error:
                 raise RegistryError(settings.profile_error or settings.error or "cannot read the settings")
             candidate = settings.profile
@@ -1543,14 +1714,14 @@ class ManagerAgent:
         try:
             await db_agent_sessions.select_profile(self.agent_id, profile_id)
         except Exception:
-            logger.exception("manager: could not save the Agent Profile chosen for its session")
+            logger.exception("%s: could not save the Agent Profile chosen for its session", self._log)
             raise
         # The saved session's own profile is not "current": choosing the one it ran on resumes it.
         change = profile_effect(saved or None, "", candidate)
         text = PROFILE_EFFECT_REPLIES[change].format(name=name)
         text = (f"已切换到「{name}」。" if profile_id else f"已改为跟随设置，现在是「{name}」。") + text
         await self._record_profile_choice(previous, profile_id, change, origin, via, text, input_text)
-        logger.info("manager: Agent Profile of its session %s -> %s (%s) via %s from %s",
+        logger.info("%s: Agent Profile of its session %s -> %s (%s) via %s from %s", self._log,
                     previous or "settings", profile_id or "settings", change.value, via, origin.get("channel"))
         return SessionProfileResult(change, profile_id, name, previous, text)
 
@@ -1583,7 +1754,7 @@ class ManagerAgent:
             await db_llm_records.finish_record(record_id, status="completed", output_text=text,
                                                cost_usd=0.0, duration_ms=0)
         except Exception:
-            logger.warning("manager: could not record the Agent Profile choice", exc_info=True)
+            logger.warning("%s: could not record the Agent Profile choice", self._log, exc_info=True)
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 
@@ -1605,7 +1776,7 @@ class ManagerAgent:
             finally:
                 unregister()
         await self._claude.stop()
-        logger.warning("manager: starting a new session (%s)%s", switch.describe(),
+        logger.warning("%s: starting a new session (%s)%s", self._log, switch.describe(),
                        "; its previous session wrote a handoff" if handoff else "")
         self._session_id, self._session_totals = None, Usage()
         await self._save_session_state()
@@ -1622,7 +1793,7 @@ class ManagerAgent:
             "see it."
         )
         recorder = ClaudeRunRecorder(
-            agent_id="manager", task_id=None, command=process.command, cwd=str(self._config.work_dir),
+            agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._config.work_dir),
             input_text=text, session_id=self._session_id, system_prompt=process.system_prompt,
             launch=process.launch,
         )
@@ -1646,7 +1817,7 @@ class ManagerAgent:
                 await self._annotate_handoff_stop(recorder, None)
                 raise TurnStopped() from exc
             except Exception as exc:  # the turn was given up, which stopped Claude
-                logger.warning("manager: its previous session wrote no handoff: %s", exc)
+                logger.warning("%s: its previous session wrote no handoff: %s", self._log, exc)
                 await recorder.finish(output_text=None, result_event=None,
                                       error=f"no handoff: {type(exc).__name__}: {exc}")
                 return None
@@ -1698,9 +1869,10 @@ class ManagerAgent:
         ``CONVERSATION_MAX_CHARS``. Nothing when none is stored or they cannot be read."""
         try:
             chats = await db_chat.recent_conversations(sessions=CONVERSATION_CHATS,
-                                                       messages=CONVERSATION_MESSAGES + 1)
+                                                       messages=CONVERSATION_MESSAGES + 1,
+                                                       manager_id=self.agent_id)
         except Exception:
-            logger.warning("manager: cannot read the recent chat messages for a new session", exc_info=True)
+            logger.warning("%s: cannot read the recent chat messages for a new session", self._log, exc_info=True)
             return []
         current = _session_key(envelope)  # the chat this turn answers (web session, or <channel>:<chat_id>)
         title = ("Recent conversations before this session (from the stored chat messages, the most recent chat "
@@ -1752,7 +1924,7 @@ class ManagerAgent:
             if self.ops is not None:
                 self.ops.begin_turn(turn)
             recorder = ClaudeRunRecorder(
-                agent_id="manager",
+                agent_id=self.agent_id,
                 task_id=None,
                 command=command,
                 cwd=str(self._config.work_dir),
@@ -1785,14 +1957,14 @@ class ManagerAgent:
         channel adds it to that chat instead of a message's stream.
         """
         if last is None or self._bus is None:
-            logger.info("manager: Claude spoke on its own before any message; its words are only recorded")
+            logger.info("%s: Claude spoke on its own before any message; its words are only recorded", self._log)
             return
         payload: dict[str, Any] = {"text": text, "autonomous": True}
         context = last.payload.get("channel_context")
         if isinstance(context, dict) and context.get("session_id"):
             payload["chat_session_id"] = context["session_id"]
         await self._bus.publish(MessageEnvelope.create(
-            source=MANAGER_ADDRESS,
+            source=self.agent_address,
             target=last.source,
             message_type=MessageType.AGENT_REPLY,
             payload=payload,
@@ -1813,6 +1985,7 @@ class ManagerAgent:
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None) -> str:
         parts = await self._projects_section()
+        parts += await self._templates_section()
         parts += await self._ready_tasks_section()
         parts += await self._open_gates_section(envelope)
 
@@ -1834,7 +2007,7 @@ class ManagerAgent:
         try:
             projects = await db_projects.list_projects()
         except Exception:
-            logger.warning("manager could not list projects", exc_info=True)
+            logger.warning("%s could not list projects", self._log, exc_info=True)
             return ["Projects: (could not be read)", ""]
         lines = ["Projects:"]
         for project in projects:
@@ -1849,12 +2022,44 @@ class ManagerAgent:
         lines.append("")
         return lines
 
+    async def _read_templates(self) -> list[dict[str, Any]]:
+        """The Manager's task templates; ``_has_templates`` follows the last read that worked."""
+        templates = await db_managers.list_templates(self.agent_id)
+        self._has_templates = bool(templates)
+        return templates
+
+    async def _templates_section(self) -> list[str]:
+        """The Manager's task templates and their inputs, so Claude can pick one; none, no section."""
+        try:
+            templates = await self._read_templates()
+            names: dict[str, str] = {}
+            if any(t["project_id"] for t in templates):
+                names = {p["id"]: p["name"] for p in await db_projects.list_projects()}
+        except Exception:
+            logger.warning("%s could not read the task templates", self._log, exc_info=True)
+            return ["Task templates: (could not be read)", ""]
+        if not templates:
+            return []
+        lines = ["Task templates (create tasks with one of these; template is its key):"]
+        for template in templates:
+            project = f" (project {names.get(template['project_id'], template['project_id'])})" \
+                if template["project_id"] else ""
+            description = f": {clip(template['description'], 120)}" if template["description"] else ""
+            lines.append(f"  - {template['key']}: {template['name']}{project}{description}")
+            for item in template["inputs"]:
+                needs = "required" if item.get("required", True) else "optional"
+                hint = f"; {item['hint']}" if item.get("hint") else ""
+                lines.append(f'      inputs: {item["key"]} "{item["label"]}" ({needs}{hint})')
+        lines.append("")
+        return lines
+
     async def _ready_tasks_section(self) -> list[str]:
         """The tasks created but not started, newest first, so Claude can start one by its id; none, no section."""
         try:
-            tasks = await db_tasks.list_tasks(limit=READY_TASKS_LISTED, status=db_tasks.READY)
+            tasks = await db_tasks.list_tasks(limit=READY_TASKS_LISTED, status=db_tasks.READY,
+                                          manager_id=self.agent_id)
         except Exception:
-            logger.warning("manager could not list the ready tasks", exc_info=True)
+            logger.warning("%s could not list the ready tasks", self._log, exc_info=True)
             return ["Ready tasks: (could not be read)", ""]
         if not tasks:
             return []
@@ -1879,14 +2084,14 @@ class ManagerAgent:
             if here:
                 dashboard = await gate_dashboard_target()
                 gates = await db_user_gates.open_gates(
-                    OPEN_GATES_LISTED, chat=(origin["channel"], chat),
+                    OPEN_GATES_LISTED, chat=(origin["channel"], chat), manager_id=self.agent_id,
                     dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) ==
                     (origin["channel"], chat))
             else:
-                gates = await db_user_gates.open_gates(OPEN_GATES_LISTED)
+                gates = await db_user_gates.open_gates(OPEN_GATES_LISTED, manager_id=self.agent_id)
                 dashboard = await gate_dashboard_target() if gates else None
         except Exception:
-            logger.warning("manager could not list the open gates", exc_info=True)
+            logger.warning("%s could not list the open gates", self._log, exc_info=True)
             return ["Open gates: (could not be read)", ""]
         listed: list[tuple[dict[str, Any], str]] = []
         for gate in gates:
@@ -1926,7 +2131,13 @@ class ManagerAgent:
                 role=role, content=content, channel=channel,
             )
         except Exception:
-            logger.warning("manager: could not persist a %s chat turn", channel, exc_info=True)
+            logger.warning("%s: could not persist a %s chat turn", self._log, channel, exc_info=True)
+            return
+        if self.agent_id != "manager":
+            try:
+                await db_chat.claim_thread(key, self.agent_id)
+            except Exception:
+                logger.warning("%s: could not claim the chat thread %s", self._log, key, exc_info=True)
 
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True, outcome: ReplyOutcome | None = None,
@@ -1938,16 +2149,8 @@ class ManagerAgent:
         assert self._bus is not None
         record = _chat_record(original, f"{original.message_id}:reply") if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
-        await self._bus.publish(MessageEnvelope.create(
-            source=MANAGER_ADDRESS,
-            target=original.source,
-            message_type=MessageType.AGENT_REPLY,
-            payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
-            correlation_id=original.correlation_id,
-            reply_to=original.message_id,
-            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
-                      **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
-        ))
+        await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
+                                               record=record, snapshot=snapshot))
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
         """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""
@@ -1955,9 +2158,10 @@ class ManagerAgent:
             return None
         try:
             return await gate_commands.handle(envelope, text, has_planner=self.ops.platform.task_router.has_planner,
-                                              bus=self._bus, source=MANAGER_ADDRESS)
+                                              bus=self._bus, source=self.agent_address,
+                                              manager_id=self.agent_id)
         except Exception as exc:
-            logger.exception("manager: the gate command %r failed", text[:40])
+            logger.exception("%s: the gate command %r failed", self._log, text[:40])
             return f"关卡命令出错：{exc}"
 
     async def _route_to_gate(self, envelope: MessageEnvelope) -> Route:
@@ -1967,9 +2171,9 @@ class ManagerAgent:
         router = self.ops.platform.task_router
         try:
             return await route_to_gate(envelope, has_planner=router.has_planner, bus=self._bus,
-                                       source=MANAGER_ADDRESS)
+                                       source=self.agent_address)
         except Exception:
-            logger.warning("manager: could not route %s to a gate; answering it", envelope.message_id, exc_info=True)
+            logger.warning("%s: could not route %s to a gate; answering it", self._log, envelope.message_id, exc_info=True)
             return NOT_A_REPLY
 
     async def _send_status(
@@ -1987,7 +2191,7 @@ class ManagerAgent:
         assert self._bus is not None
         extra = {key: value for key, value in (("activity", activity), ("tool", tool)) if value}
         await self._bus.publish(MessageEnvelope.create(
-            source=MANAGER_ADDRESS,
+            source=self.agent_address,
             target=original.source,
             message_type=MessageType.STATUS_UPDATE,
             payload={"text": text, "delta": delta, "phase": phase, **extra},
