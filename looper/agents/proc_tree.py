@@ -1126,7 +1126,7 @@ class TurnTree:
     async def _strays(self, exclude: frozenset[int]) -> list[_Orphan]:
         """The processes of the turn the tree no longer reaches (one that left its group, setsid, once its parent
         exited): each seen one still running with the start time the snapshot read, so a reused pid is never among
-        them, and each the agent owns (``_owned``) that runs now."""
+        them, and each the agent owns (``_owned``) that runs now, whether or not the snapshot lists it."""
         table = await asyncio.to_thread(_snapshot)
         reached = _tree(self.process, table, self._groups)
         known = {pid: started for pid, started in self.seen.items()
@@ -1134,7 +1134,9 @@ class TurnTree:
         current = await asyncio.to_thread(_start_times, known) or {}
         strays = [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
         owned = await asyncio.to_thread(self._live_owned)
-        unseen = [pid for pid in owned if pid in table and pid not in reached and pid not in exclude
+        # Every one it owns, not only those the snapshot lists: one started since (a setsid command a shell starts
+        # as it is told to exit) would otherwise be missed, and the end finish while it runs.
+        unseen = [pid for pid in owned if pid not in reached and pid not in exclude
                   and pid not in known and pid != self.process.pid]
         if unseen:
             starts = await asyncio.to_thread(_start_times, unseen) or {}

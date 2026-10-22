@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -929,6 +930,66 @@ def test_turn_tree_end_ends_what_the_agent_starts_in_a_session_of_its_own_as_it_
             child = int((tmp_path / "child.pid").read_text())
             return _running([child])
         finally:
+            if (tmp_path / "child.pid").exists():
+                for pid in _running([int((tmp_path / "child.pid").read_text())], settle=0):
+                    os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []
+
+
+@pytest.mark.skipif(not proc_tree.FOLLOWS_OWNERSHIP, reason="no ownership facility on this platform")
+def test_turn_tree_end_ends_what_the_agent_owns_that_started_after_the_ends_last_listing(tmp_path: Path) -> None:
+    # Told to exit, the agent double-forks a command into a session of its own only once the end has listed every
+    # process, then exits: the ownership listing that follows finds it, though the listing before did not.
+    code = ("import os, signal, sys, time\n"
+            "def on_term(*_):\n"
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "    while not os.path.exists('go'):\n        time.sleep(0.01)\n"
+            + "".join("    " + line + "\n" for line in _DOUBLE_FORK_EXEC.splitlines()[1:])  # (os is imported)
+            + "    while not os.path.exists('child.pid'):\n        time.sleep(0.01)\n"
+            "    os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "print('ready', flush=True)\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            start_new_session=True)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        assert process.stdout
+        await process.stdout.readline()
+        agent_ended = threading.Event()
+
+        class _Ended(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if f"ended the process tree of pid {process.pid}:" in record.getMessage():
+                    agent_ended.set()
+
+        live_owned, calls = tree._live_owned, []
+
+        def listing_after_the_snapshot() -> set[int]:
+            # The first call comes before any signal; the next follows the end's first listing of every process.
+            calls.append(None)
+            if len(calls) == 2:
+                (tmp_path / "go").write_text("1")
+                deadline = time.monotonic() + 10
+                while not ((tmp_path / "child.pid").exists() and agent_ended.is_set()) \
+                        and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            return live_owned()
+
+        tree._live_owned = listing_after_the_snapshot  # type: ignore[method-assign]
+        handler, logger = _Ended(), logging.getLogger(proc_tree.__name__)
+        level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            await tree.end()
+            child = int(await _wait_file(tmp_path / "child.pid"))
+            return _running([child])
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
             if (tmp_path / "child.pid").exists():
                 for pid in _running([int((tmp_path / "child.pid").read_text())], settle=0):
                     os.kill(pid, signal.SIGKILL)
