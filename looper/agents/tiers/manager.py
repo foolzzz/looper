@@ -541,6 +541,26 @@ class GoalSnapshot:
     last_update: str = ""
 
 
+def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *, error: str | None = None,
+                   outcome: ReplyOutcome | None = None, record: dict[str, Any] | None = None,
+                   snapshot: str | None = None) -> MessageEnvelope:
+    """The reply from ``source`` to ``original``, addressed to the channel it came from; by default it is kept in
+    the chat's history (``record``)."""
+    outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
+    if record is None:
+        record = _chat_record(original, f"{original.message_id}:reply")
+    return MessageEnvelope.create(
+        source=source,
+        target=original.source,
+        message_type=MessageType.AGENT_REPLY,
+        payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
+        correlation_id=original.correlation_id,
+        reply_to=original.message_id,
+        metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
+                  **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
+    )
+
+
 class ManagerAgent:
     """Long-running Manager Agent backed by a resident Claude Code process."""
 
@@ -602,6 +622,19 @@ class ManagerAgent:
         self._clean_start = False
         # Looper's platform tools (set by ``serve``): what Claude's calls in a turn act through.
         self.ops: ManagerOps | None = None
+        # The envelope the message loop is handling, and the ones a stop found unfinished (the fleet settles or
+        # hands them over when it retires this Manager).
+        self._handling: MessageEnvelope | None = None
+        self.stopped_in_flight: tuple[MessageEnvelope, ...] = ()
+
+    @property
+    def name(self) -> str:
+        return self._definition.name
+
+    @property
+    def process_started(self) -> bool:
+        """Whether the runtime process has started."""
+        return bool(self._claude.started)
 
     @property
     def agent_id(self) -> str:
@@ -726,6 +759,10 @@ class ManagerAgent:
 
     async def stop(self) -> None:
         self._running = False
+        # Before the cancel: it runs the handlers' finally blocks, which end the tokens and clear ``_handling``.
+        pending = ([self._handling] if self._handling is not None else []) + [
+            t.envelope for t in self._turns.live() if t.envelope is not None]
+        self.stopped_in_flight = tuple({e.message_id: e for e in pending}.values())
         if self._bus is not None:
             self._bus.unsubscribe_topic(MessageType.USER_MESSAGE.value, self._receive)
         if self._task:
@@ -753,10 +790,13 @@ class ManagerAgent:
             async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
+                self._handling = envelope
                 try:
                     await self._handle(envelope)
                 except Exception:
                     logger.exception("error handling message %s", envelope.message_id)
+                finally:
+                    self._handling = None
         except asyncio.CancelledError:
             pass
 
@@ -2006,16 +2046,8 @@ class ManagerAgent:
         assert self._bus is not None
         record = _chat_record(original, f"{original.message_id}:reply") if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
-        await self._bus.publish(MessageEnvelope.create(
-            source=self.agent_address,
-            target=original.source,
-            message_type=MessageType.AGENT_REPLY,
-            payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
-            correlation_id=original.correlation_id,
-            reply_to=original.message_id,
-            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
-                      **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
-        ))
+        await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
+                                               record=record, snapshot=snapshot))
 
     async def _gate_command(self, envelope: MessageEnvelope, text: str) -> str | None:
         """What code answers to ``/gates`` or ``/gate N ...`` (``gate_commands``); None for any other message."""

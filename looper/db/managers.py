@@ -42,10 +42,13 @@ def _template(row: Mapping[str, Any]) -> dict[str, Any]:
     return template
 
 
-async def list_managers(*, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
-    """Every Manager not deleted, the default first, then by name; each with its ``profile_name``."""
+async def list_managers(*, include_deleted: bool = False,
+                        pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """Every Manager not deleted (with ``include_deleted``, the deleted ones too), the default first, then by
+    name; each with its ``profile_name``."""
     pool = pool or get_pool()
-    rows = await pool.fetch(f"{_SELECT} WHERE m.deleted_at IS NULL ORDER BY (m.id <> 'manager'), lower(m.name), m.id")
+    rows = await pool.fetch(f"{_SELECT} WHERE ($1::boolean OR m.deleted_at IS NULL) ORDER BY (m.id <> 'manager'), lower(m.name), m.id",
+                           include_deleted)
     return [_manager(row) for row in rows]
 
 

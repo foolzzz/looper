@@ -37,6 +37,7 @@ from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
 from .ops.planner import PlannerOps
 from .ops.room import RoomOps
+from .managers import ManagerFleet
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent, is_new_session_command
 from .tiers.task import TaskRouter
@@ -152,6 +153,7 @@ class AgentHTTPServer:
         claude_bin: str = "claude",
         scheduler: Scheduler | None = None,
         manager_ops: ManagerOps | None = None,
+        managers: ManagerFleet | None = None,
         planner_ops: PlannerOps | None = None,
         room_ops: RoomOps | None = None,
     ) -> None:
@@ -185,6 +187,7 @@ class AgentHTTPServer:
         self._scheduler = scheduler
         # The Manager's platform tools, behind /api/agent/v1/ (its token only), and each task's Planner's (its own).
         self._manager_ops = manager_ops
+        self._managers = managers
         self._planner_ops = planner_ops
         # The agent room's tools of the steps' runs, each with a token of its own (``run.``).
         self._room_ops = room_ops
@@ -656,7 +659,9 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: role_api.delete_template(m.group(1), m.group(2)))
         elif path == "/api/managers" and method == "GET":
-            await self._answer(writer, HTTP_200, managers_api.managers_view)
+            await self._answer(
+                writer, HTTP_200,
+                lambda: managers_api.managers_view(extra=self._managers.state if self._managers else None))
         elif path == "/api/managers" and method == "POST":
             await self._answer(writer, HTTP_201, lambda: managers_api.create_manager(projects.json_object(body)))
         elif (m := self._RE_MANAGER.match(path)) and method == "PUT":
@@ -766,10 +771,13 @@ class AgentHTTPServer:
         if self._room_ops is not None and self._room_ops.claims(headers.get("authorization")):
             await self._handle_room_api(method, path, headers, body, writer)
             return
-        ops = self._manager_ops
-        if ops is None or not ops.authorized(headers.get("authorization")):
-            if ops is not None:
-                ops.refuse(path)
+        authorization = headers.get("authorization")
+        ops = self._managers.ops_for(authorization) if self._managers is not None else self._manager_ops
+        if ops is None or not ops.authorized(authorization):
+            default_ops = self._managers.ops("manager") if self._managers is not None else self._manager_ops
+            if default_ops is not None:
+                default_ops.refuse(path)
+            ops = None
             writer.write(_json_response(HTTP_401, {"error": "this endpoint is the Manager's: a valid token is "
                                                             "required"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
@@ -926,8 +934,14 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
-        if self._manager_ops is not None:
+        if self._managers is not None:
             # Whether tool calls are refused by their turn binding, and the mismatches seen (chat-stop-v2 §10).
+            status["turn_binding"] = self._managers.binding_report()
+            status["managers"] = [
+                {"id": agent.agent_id, "name": agent.name, **self._managers.state(agent.agent_id),
+                 "turn_binding": self._managers.ops(agent.agent_id).binding_report()}
+                for agent in self._managers.agents() if self._managers.ops(agent.agent_id) is not None]
+        elif self._manager_ops is not None:
             status["turn_binding"] = self._manager_ops.binding_report()
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()
