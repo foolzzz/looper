@@ -757,6 +757,10 @@ class ResidentClaude:
         return True
 
     @property
+    def can_interrupt(self) -> bool:
+        return True
+
+    @property
     def started(self) -> bool:
         return self._process is not None
 
@@ -832,8 +836,8 @@ class ResidentClaude:
         ``cancel`` is the one way to stop the turn by the user: once it is
         requested, Claude is asked to interrupt the turn with a control
         request and given ``INTERRUPT_GRACE_SEC`` to end it with its result
-        (``CONTROL``; the process stays and every process the turn started
-        is ended from the tree's snapshot); else the whole tree is killed
+        (``CONTROL``; the process stays, and what Claude leaves running with
+        the interrupt is its own); else Claude is killed with its tree
         (``KILL``; the turn returns ``user_stop_result``). A turn stopped
         before its message was written writes nothing and leaves the process
         alone. From the request on, the turn's events are not handed to
@@ -851,13 +855,11 @@ class ResidentClaude:
         from .runtimes import StopMethod
         from .runtimes.cancel import TurnCancel
 
-        process, output, tree = self._process, self._output, self._tree
+        process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         cancel = cancel or TurnCancel.never()
         if cancel.requested:  # stopped before anything was written: the process is untouched
             return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
-        if tree is not None:
-            tree.baseline()  # the process and its MCP servers: what the turn starts is what a stop ends
         turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag, on_event=on_event,
                          done=asyncio.get_running_loop().create_future(), stop=stop)
         input_lost = False
@@ -949,7 +951,7 @@ class ResidentClaude:
         self, turn: _UserTurn, process: asyncio.subprocess.Process, output: _Output,
     ) -> StopMethod:
         """Ask Claude to interrupt ``turn`` and wait up to ``INTERRUPT_GRACE_SEC`` for its result (``CONTROL``: the
-        turn's tools, background ones too, are ended and the process stays); else, or when the request cannot be
+        turn is over and no process is signalled); else, or when the request cannot be
         written, kill Claude with its whole tree (``KILL``). A turn Claude has not yet begun (no output so far) is
         stopped the same way, so a silent Claude cannot hang the turn."""
         from .runtimes import StopMethod
@@ -957,9 +959,8 @@ class ResidentClaude:
         assert process.stdin is not None
         if (turn.done.done() and not turn.done.cancelled() and turn.done.exception() is None
                 and turn.done.result() is not None):
-            # Its result came before the stop: nothing is left to interrupt but what the turn started.
+            # Its result came before the stop: the turn is over, nothing is left to interrupt.
             turn.answered = True
-            await self._end_turn_processes()
             return StopMethod.CONTROL
         try:
             async with asyncio.timeout(INTERRUPT_GRACE_SEC):  # the write, the drain and the wait share one grace
@@ -967,7 +968,6 @@ class ResidentClaude:
                 await process.stdin.drain()
                 await asyncio.wait({turn.done})
             if not turn.done.cancelled() and turn.done.exception() is None and turn.done.result() is not None:
-                await self._end_turn_processes()
                 return StopMethod.CONTROL
         except (BrokenPipeError, ConnectionResetError):
             logger.warning("%s: Claude closed stdin before the interrupt was sent", self._label)
@@ -977,15 +977,6 @@ class ResidentClaude:
             output.discard = True
             await self.stop(kill=True)
         return StopMethod.KILL
-
-    async def _end_turn_processes(self) -> None:
-        """End every process the stopped turn started (background tools too); the process and its MCP servers stay."""
-        if self._tree is None:
-            return
-        try:
-            await self._tree.end_new()
-        except Exception:
-            logger.warning("%s: could not end the interrupted turn's processes", self._label, exc_info=True)
 
     async def interrupt(self) -> StopMethod | None:
         """Request the running user turn's cancel and wait for its stop: ``CONTROL`` or ``KILL`` (see ``run_turn``).
@@ -1249,7 +1240,12 @@ class ClaudeRunRecorder:
         await self.end_left_open(exc)
 
     async def record(self, event: dict[str, Any]) -> None:
-        await self._heartbeat()
+        self.account(event)
+        await self.persist(event)
+
+    def account(self, event: dict[str, Any]) -> None:
+        """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
+        it to the record, which may wait on the database."""
         if event.get("type") == "usage":  # internal: counted, not part of the transcript
             from .runtimes.pricing import event_usage
 
@@ -1269,7 +1265,11 @@ class ClaudeRunRecorder:
             self._context_tokens = context
         if (compacted := compaction(event)) is not None:
             self._compactions.append(compacted)
-        if self._record_id is None:
+
+    async def persist(self, event: dict[str, Any]) -> None:
+        """Write ``event``, once ``account`` has taken it, to the run's record."""
+        await self._heartbeat()
+        if self._record_id is None or event.get("type") in ("usage", "stream_event"):
             return
         from ..db import llm_records
 

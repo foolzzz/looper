@@ -295,10 +295,10 @@ sys.exit(1)
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, notes_root: Path | None = None,
                    gh_diffs: dict[str, str] | None = None,
-                   startup_timeout: float = 90.0) -> Iterator[Api]:
+                   startup_timeout: float = 90.0, env: dict[str, str] | None = None) -> Iterator[Api]:
     """``looper serve`` on a free port, with an ops file of its own in ``runtime_root`` naming ``database_url``;
     stopped with SIGINT, as the operator would. ``notes_root`` stands in for the operator's ``~/.claude/projects``
-    (the operator's notes)."""
+    (the operator's notes). ``env``: variables the server gets on top of this process's (a key read for it alone)."""
     install_gh(bin_dir, diffs=gh_diffs)
     port = free_port()
     manager_dir = runtime_root / "manager"
@@ -307,15 +307,16 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
                                database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "")
     ops_config.write_private(ops.path, ops_config.render(ops))
     # None of the operator's ops variables: the file names the eval's database.
-    env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},
-           "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-           "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")]))}
+    server_env = {**{k: v for k, v in os.environ.items() if k not in ops_config.VARIABLES},
+                  "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                  "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")])),
+                  **(env or {})}
     if home is not None:
-        env["HOME"] = str(home)
+        server_env["HOME"] = str(home)
     log = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
         [sys.executable, "-c", _SERVE, str(port), str(runtime_root), str(manager_dir)],
-        cwd=str(runtime_root), env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        cwd=str(runtime_root), env=server_env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
     )
     api = Api(f"http://127.0.0.1:{port}")
     try:

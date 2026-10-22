@@ -116,6 +116,11 @@ opening()
 if mode == 'streaming':
     say('half an answer')
     wait()
+if mode == 'slow':  # streams, then answers once there is a ``go`` file (a reply nothing stops)
+    say('half an answer')
+    put('reached', mode, 'w')
+    while not os.path.exists(os.path.join(DIR, 'go')):
+        time.sleep(0.02)
 if mode == 'tool':
     tool()
     wait()
@@ -247,7 +252,7 @@ def _pids(directory: Path) -> list[int]:
 # What the stand-in does with each user message is told by the message, ``mode:<window>``, or by a ``mode`` file
 # (the Manager's message is its own text): ``obey`` after the window makes it
 # answer an interrupt of a running turn (a control response, then the turn's error result; the tool it started,
-# a ``setsid`` sleeper, is left to the stop to end); else it is deaf to the interrupt. A ``stall`` file
+# a ``setsid`` sleeper, runs on: an obeyed stop signals nothing); else it is deaf to the interrupt. A ``stall`` file
 # makes it stop reading its input after the message it is answering.
 _CLAUDE = r"""
 import json, os, subprocess, sys, threading, time

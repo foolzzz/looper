@@ -28,7 +28,7 @@ v2 的做法：消息一到就生成一个令牌（第一个 `await` 之前）�
 | # | 决定 | 落点 |
 |---|---|---|
 | D1 | 每条发给管家的用户消息在**总线投递时**（同步，入队之前）得到一个 `TurnToken`，登记在管家的 `TurnRegistry`；有类型的阶段 `received → preparing → starting → running → stopping → ended`，转移只能经 `advance()` | 新模块 `looper/agents/tiers/turn_token.py`；`manager.py:_claim_stop`（569）改为 `_receive` |
-| D2 | 停止 = `token.request_stop(via)`：同步、幂等，任何非终止阶段都接受；排队中的消息也能停（取消 v0 D7） | `ManagerAgent.stop_turn` |
+| D2 | 停止 = `token.request_stop(via)`：同步、幂等，任何非终止阶段都接受；排队中的消息也能停（取消 v0 D7）。停止只在有中断的运行时上提供（Claude Code、Grok ACP，`can_interrupt`）；每轮一个进程的运行时拒绝停止（6.6） | `ManagerAgent.stop_turn` |
 | D3 | 准备阶段每个 `await` 都经 `token.step()`（与停止赛跑，可放弃）或 `token.keep()`（必须完成、有上限，完成后再看停止）；一条 AST 测试钉住「准备函数里没有别的 `await`」，故障注入测试逐个步骤停止 | `manager.py` 拆成 `_prepare_turn`/`_start_turn`/`_run_model`/`_end_turn` |
 | D4 | 运行时只认一个取消原语 `TurnCancel`，作为 `run_turn(..., cancel=)` 传入；`on_request(cb)` 在已置位时立即调用，所以「起进程之前」「第一个事件之前」「退回旧路径时」都不需要特判 | 新模块 `looper/agents/runtimes/cancel.py`；四条运行时路径 |
 | D5 | 每轮一个 `TurnTree`：进程起来时拍快照，每个事件和每 0.5 秒刷新，清理按快照的并集（pid + 启动时间）结束；所有等待和读取都有上限 | `proc_tree.py` |
@@ -102,9 +102,9 @@ class TurnToken:
 
 ### 3.4 渠道与 API
 
-- `POST /api/chat/stop`：200 `{"state": "stopping"|"already_stopping", "phase": "<停止到达时的阶段>", "method": null}`。`method` 在 200 时一般还不知道（中断在后台进行）；`GET /api/chat/turn` 在知道后报出。409 `not_running`、`disabled` 不变。
-- `GET /api/chat/turn?session_id=`：返回这个 web 聊天里**最早的**活令牌（正在答的，或排队中的），多一个 `state` 字段（阶段名）和 `method`。
-- Telegram、飞书 `/stop`：停这个聊天的**所有**活令牌（正在答的和排队的）。回复：停了 1 条 → `已停止当前回复。`；还取消了排队的 → `已停止当前回复，另取消了 N 条排队的消息。`；没有 → `现在没有正在进行的回复。`。
+- `POST /api/chat/stop`：200 `{"state": "stopping"|"already_stopping", "phase": "<停止到达时的阶段>", "method": null}`。`method` 在 200 时一般还不知道（中断在后台进行）；`GET /api/chat/turn` 在知道后报出。409 `not_running`、`disabled` 不变；管家的运行时没有中断时 409 `cannot_interrupt`（「This runtime cannot interrupt a reply.」，6.6）。
+- `GET /api/chat/turn?session_id=`：返回这个 web 聊天里**最早的**活令牌（正在答的，或排队中的），多一个 `state` 字段（阶段名）、`method` 和 `can_interrupt`（管家的运行时能否中断回复）。`/api/registry` 的 `runtime_types[].can_interrupt` 是运行时类型的同一能力（`RuntimeAdapter.can_interrupt`）。页面在 `can_interrupt` 为假时把停止按钮显示为禁用，提示同一句话，Esc 不做事。
+- Telegram、飞书 `/stop`：停这个聊天的**所有**活令牌（正在答的和排队的）。回复：停了 1 条 → `已停止当前回复。`；还取消了排队的 → `已停止当前回复，另取消了 N 条排队的消息。`；没有 → `现在没有正在进行的回复。`；运行时没有中断 → `当前运行时不能中断回复，回复会照常完成。`，什么都不停。
 - `chat.stop_enabled` 关闭时：令牌照常生成（无副作用），停止入口照 v0 拒绝。
 
 ## 4. 运行时：一个取消原语（D4、D5）
@@ -118,7 +118,7 @@ class TurnCancel:
     def on_request(self, cb: Callable[[], None]) -> Callable[[], None]:
         """注册回调；已经请求过就立刻调用。返回注销函数。"""
     async def race(self, aw: Awaitable[T], *, timeout: float | None = None) -> T:
-        """等 aw，停止先到就取消它并抛 TurnCancelled；超时抛 TimeoutError。"""
+        """等 aw，停止先到就取消它并抛 TurnCancelled；超时抛 TimeoutError。取消后等它结束最多 ABANDON_SEC。"""
     def sent(self) -> None: ...           # 运行时写出了提示：令牌 starting → running
     prompt_sent: bool
 ```
@@ -136,10 +136,9 @@ class TurnCancel:
 
 - `seen: dict[pid, start_time]`：进程本身、父链在树里的、树成员领导的进程组的成员（`_tree` 的现有规则）。
 - `refresh()`：读循环每个事件调一次，另有一个 0.5 秒的计时任务；新出现的进程连同启动时间并入 `seen`。工具 `setsid` 出去、父进程退出后被重新挂靠，只要被刷新到过一次就还在 `seen` 里。
-- `baseline()`：常驻进程在一轮开始时的成员（Claude 的 MCP 桥接进程等），`since_baseline()` 给出这一轮新起的进程。
-- `end()`：结束 `seen ∪ 当前树`，每个 pid 先核对启动时间（防 pid 复用），SIGTERM → `TERM_GRACE_SEC` → SIGKILL，`REAP_SEC = 2` 内回收不了就记日志放弃等待，不挂住这一轮。按进程组从树里够不到的 `seen` 成员（被刷新到过、之后自己 `setsid` 出组、父进程又退出了）不靠 pgid 找：按快照里的 pid ＋ 启动时间逐个独立回收（连同它领导的组），启动时间对不上的不碰。`end_new()` 同样如此。
+- `end()`：结束 `seen ∪ 当前树`，每个 pid 先核对启动时间（防 pid 复用），SIGTERM → `TERM_GRACE_SEC` → SIGKILL，`REAP_SEC = 2` 内回收不了就记日志放弃等待，不挂住这一轮。按进程组从树里够不到的 `seen` 成员（被刷新到过、之后自己 `setsid` 出组、父进程又退出了）不靠 pgid 找：按快照里的 pid ＋ 启动时间逐个独立回收（连同它领导的组），启动时间对不上的不碰。
 - `begin_end()`：常驻进程被允许自己退出（`stop()` 不带 `kill`）之前，刷新并把树写进进程记录，记录留到 `end` 完成；服务器在这期间死掉，下次启动的 `sweep` 照记录结束剩下的。
-- `end_new()`：只结束 `since_baseline()`，用于常驻进程被 `control`/`cancel` 正常中断之后：这一轮起的工具进程（含后台命令）不留，常驻进程和它的 MCP 桥接留着。
+- 用户的停止只在运行时不理中断时用到它：杀掉智能体时连同进程组和树一起结束（`end()`）。运行时按中断正常结束了这一轮，就不发任何信号（6.6）。
 
 有上限的等待一览（测试里调小）：
 
@@ -157,10 +156,10 @@ class TurnCancel:
 
 | 路径 | `on_request` 做什么 | 进程 | 用量 | 会话 |
 |---|---|---|---|---|
-| Claude Code 常驻（`ResidentClaude`） | 提示没写出：不写，直接以停止返回；`result` 已派发、`run_turn` 还没返回（输出端已经忘了这一轮，停止按 `run_turn` 自己的 `_user_turn` 认）：不写 interrupt，只 `tree.end_new()` 结束这一轮起的进程，以 `control` 返回，用量完整；已写出：起任务写 `control_request interrupt`，`INTERRUPT_GRACE_SEC` 内等这一轮的 `result`（`control`），之后 `tree.end_new()`；超时或写不进：`stop(kill=True)` 按快照结束整棵树（`kill`） | `control`：常驻进程留着；`kill`：下一轮 `--resume` | `control`：结果里的累计差（被打断的那次请求不计，`usage_complete=False`）；`kill`：`_usage_so_far` | id 不变 |
-| 每轮一个进程（`PerTurnSession`：Codex/OMP/Pi/DSH/Grok 每轮） | 没起进程：不起，以停止返回；起了：`tree.end()` | 这一轮的整棵树结束；`_session` 保留、`_ended` 不置 | `stream.usage_so_far()`；Codex 没有，`usage_complete=False` | 下一轮带 `resume_args` |
-| Grok ACP（`AcpGrok`） | 还在准备会话：结束进程（`kill`）；提示已发：`session/cancel`，`CANCEL_GRACE_SEC` 内等 `stopReason: cancelled`（`cancel`），之后 `tree.end_new()`；超时：`_end_process`（`kill`） | `cancel`：进程和会话留着 | `_meta.usage` | 留着 |
-| Grok ACP 退回每轮进程 | **同一个** `cancel` 传给 `self._legacy.run_turn(..., cancel=cancel)`；已请求就立即生效 | 同每轮进程 | 同上 | 同上 |
+| Claude Code 常驻（`ResidentClaude`） | 提示没写出：不写，直接以停止返回；`result` 已派发、`run_turn` 还没返回（输出端已经忘了这一轮，停止按 `run_turn` 自己的 `_user_turn` 认）：什么都不写、不发信号，以 `control` 返回，用量完整；已写出：起任务写 `control_request interrupt`，`INTERRUPT_GRACE_SEC` 内等这一轮的 `result`（`control`，到此为止，不发信号）；超时或写不进：`stop(kill=True)` 按快照结束智能体、进程组和整棵树（`kill`） | `control`：常驻进程留着；`kill`：下一轮 `--resume` | `control`：结果里的累计差（被打断的那次请求不计，`usage_complete=False`）；`kill`：`_usage_so_far` | id 不变 |
+| 每轮一个进程（`PerTurnSession`：Codex/OMP/Pi/DSH/Grok 每轮） | 没有中断：它跑着时管家拒绝停止（`can_interrupt` 为假，6.6），不杀它的进程。`cancel` 交给它之前已请求（停止在换运行时或退回之前就到了）：不起进程，以停止返回；起了之后才请求（只有不经 `stop_turn` 的调用方）：`tree.end()` | 这一轮的整棵树结束；`_session` 保留、`_ended` 不置 | `stream.usage_so_far()`；Codex 没有，`usage_complete=False` | 下一轮带 `resume_args` |
+| Grok ACP（`AcpGrok`） | 还在准备会话：结束进程（`kill`）；提示已发：`session/cancel`，`CANCEL_GRACE_SEC` 内等 `stopReason: cancelled`（`cancel`，到此为止，不发信号）；超时：`_end_process`（`kill`） | `cancel`：进程和会话留着 | `_meta.usage` | 留着 |
+| Grok ACP 退回每轮进程 | **同一个** `cancel` 传给 `self._legacy.run_turn(..., cancel=cancel)`；已请求就立即生效（不起进程）。退回之后 `can_interrupt` 为假，新的停止被拒绝 | 同每轮进程 | 同上 | 同上 |
 
 删掉的特判：`per_turn.py:196` 和 `:208` 的两处 `_stopping` 检查、`grok_acp.py:686` 和 `:718` 的退回/准备中特判、`claude_cli.py` 的 `_user_stopped`/`_capped` 借道。它们都变成「在入口注册 `on_request`」。
 
@@ -178,7 +177,7 @@ _run_model(token, p)   run_turn(..., cancel=token.cancel)；运行时调 cancel.
 _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settle(结局)；然后记录、保存、回复
 ```
 
-- `token.step(name, aw)`：与停止赛跑，停止先到就取消 `aw` 并抛 `TurnStopped`。用于可放弃的步骤：发状态、`tools_problem`（线程里的探测被放弃，结果丢掉）、`_gate_command`、`_route_to_gate`、`_load_db_config`、`_load_session_state`、`_load_agent_settings`、`load_installed`、`library_with_server`、写提示文件、`_resume_brief`、`_build_user_message`。
+- `token.step(name, aw)`：与停止赛跑，停止先到就取消 `aw`，等它结束最多 `ABANDON_SEC`（`cancel.abandon`：数据库连不上时，被取消的 asyncpg 调用在把连接还回池子时可能永远结束不了，过了上限就留下它不管），再抛 `TurnStopped`。用于可放弃的步骤：发状态、`tools_problem`（线程里的探测被放弃，结果丢掉）、`_gate_command`、`_route_to_gate`、`_load_db_config`、`_load_session_state`、`_load_agent_settings`、`load_installed`、`library_with_server`、写提示文件、`_resume_brief`、`_build_user_message`。
 - `token.keep(name, aw, timeout, *, undo=None)`：停止不能打断它，跑完（有上限）再检查停止。用于持久化用户消息、`_save_session_state`、`recorder.start`/`finish`、`self._claude.start`（进程起了一半被取消会成孤儿）、`self._claude.stop`。步骤始终归这一轮所有（不用 `shield` 放它独自跑下去）：这一轮的任务被取消（管家关闭）或超时，`keep` 先取消步骤并等它结束，再跑 `undo`（各自有 `ABANDON_SEC` 上限，期间再来的取消先压着，做完再抛），然后才让取消或 `TimeoutError` 传出去。`claude_start` 的 `undo` 是 `self._claude.stop(kill=True)`：关闭返回之后不会再冒出一个常驻进程。
 - 交接（`_switch_session` → `_handoff`）在 `starting` 里，把 `token.cancel` 传给交接的 `run_turn`。被停：交接作废，**不**丢旧会话、不 `_claude.stop()`，`TurnStopped` 抛出；下一轮重新计算 `profile_switch`，再做一次交接。什么都不丢。
 - 续接失败重试（`manager.py:1107-1125`，`resume_lost`）：转移表里没有 `running → starting`，重试走专门的 `token.restart()`：没有停止时把阶段退回 `starting`，有停止就抛 `TurnStopped`。
@@ -214,10 +213,11 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 所以对常驻运行时（`ResidentSession.shares_bridge`：`ResidentClaude` 为真，`AcpGrok` 不在退回模式时为真），**非只读的调用和 `looper_confirm`** 还要对上这一轮自己的流：
 
-- 管家的 `on_event` 看到这一轮的 `tool_use` 块，调 `ops.expect(binding, tool, input, call_id=block["id"])`。登记和展示分开：子 agent 的 `assistant` 事件（带 `parent_tool_use_id`）不进回复、不发状态，但它的 `tool_use` 照样登记——子 agent 经同一个桥发的写调用也是这一轮的。名字和参数先规范化成桥接请求里的样子（`_looper_call`）：去掉 `mcp__looper__`（Claude Code）或 `looper__`（Grok）前缀；Grok 经 `use_tool` 调 MCP 工具，`{"tool_name": "looper__<tool>", "tool_input": {...}}` 解包成内层的工具名和参数（`tool_input` 是 JSON 字符串时先解析）。Grok 的 MCP 请求不带调用 id，只能按名字和参数对上，所以这一步不能省。
+- 管家的 `on_event` 看到这一轮的 `tool_use` 块，调 `ops.expect(binding, tool, input, call_id=block["id"])`。登记是同步的，在事件交到 `on_event` 的那一刻做完（`_converse` 的 `observe`，连同记账和软上限要用的用量）；记录事件（数据库）、保存会话和发状态排在一个按序处理的任务里，`run_turn` 返回后等它做完。运行时是读完一个事件、`on_event` 返回之后才读下一行，所以记录慢不会拖住下一个 `tool_use` 的读取和登记（#339 的第二条：记录一个事件花了 2.1 秒，后面那个正常的写调用等过了 `MATCH_WAIT_SEC`，被拒为 `not_this_turn`）。停止请求之后这个任务不再往聊天里发状态（R1），这一轮最多再等它 `STOP_HANDLING_SEC`，然后取消它、等它结束最多 `ABANDON_SEC`（同 `token.step`），不管数据库怎样，停止都能结束这一轮、放开管家的锁。这个任务每处理完一个事件让出一次事件循环：运行时一次读到的一大串增量（Claude Code 会把整段回复的流事件一起写出）排在它前面时，用户看到第一个增量就发的停止立刻被处理，而不是等前面读到的增量全部发完（真实路径格 e：之前停止后 17–19 秒才有 `answer.final`）。状态（`STATUS_UPDATE`：增量、阶段）不写消息总线的日志：重启后重放只会出一条过时的状态，而日志每条都同步 `fsync`（本机约 20 毫秒），流式回复每个增量都要付一次。登记和展示分开：子 agent 的 `assistant` 事件（带 `parent_tool_use_id`）不进回复、不发状态，但它的 `tool_use` 照样登记——子 agent 经同一个桥发的写调用也是这一轮的。名字和参数先规范化成桥接请求里的样子（`_looper_call`）：去掉 `mcp__looper__`（Claude Code）或 `looper__`（Grok）前缀；Grok 经 `use_tool` 调 MCP 工具，`{"tool_name": "looper__<tool>", "tool_input": {...}}` 解包成内层的工具名和参数（`tool_input` 是 JSON 字符串时先解析）。Grok 的 MCP 请求不带调用 id，只能按名字和参数对上，所以这一步不能省。
 - `ops.call` 对这类调用：有 `X-Looper-Call` 时按 id 找；没有时按 `(tool, 规范化 JSON 参数)` 找这一轮还没用掉的期望，最多等 `MATCH_WAIT_SEC = 2`（流里的事件可能晚于 HTTP 到达）。找到就消耗掉并执行；找不到就拒绝，`ErrorCode.NOT_THIS_TURN`：「这个调用不是正在进行的这一轮发出的，没有执行」。
 - 只读调用不做匹配（归错轮只影响 `manager_actions` 的记账，不改东西）。
 - 每轮一个进程的运行时不需要匹配。
+- 要不要匹配（`Turn.require_match`）由实际跑这一轮的会话决定：在发布这一轮 binding 的时候（`_publish_binding`，已经换过运行时之后）按 `self._claude.shares_bridge` 设，不在准备阶段按换之前的会话设。这一轮的调用要读到它的 binding 才会带上它，所以之前不存在要匹配的调用（#339 的第三条：从每轮进程换到常驻运行时的第一轮没有匹配）。
 
 需要验证（真实路径第 3 步）：Claude Code 当前版本的 `tools/call` 是否带 `_meta["claudecode/toolUseId"]`；stream-json 是否在执行工具之前写出带完整 `input` 的 `assistant` 事件；Grok ACP 的 `tool_call` 更新里的名字和 `rawInput`。任何一项不成立，匹配退回到「按名字和参数、等 2 秒」，测试两种都覆盖。
 
@@ -242,8 +242,18 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 - 观察模式下 `not_this_turn` 的匹配在调用旁边单独跑（同样等 `MATCH_WAIT_SEC`、同样消耗期望），调用不等它，不加延迟。
 - 日志：`looper.agents.ops.service` 的 WARNING，`turn binding mismatch (observe-only, the call runs): reason=… runtime=… tool=… message=… total=N`，记录的 `extra` 里有 `binding_mismatch = {reason, runtime, tool, enforced}`。`runtime` 是这一轮的运行时类型（`Turn.runtime`，管家拿到 `Launch` 时填上）。
-- 计数：`ManagerOps.binding_report()`，`GET /api/status` 的 `turn_binding`：`{"enforced": bool, "mismatches": N, "by": [{reason, runtime, tool, count}]}`，从服务器启动累计。开关打开后同样记录和计数（`enforced: true`），只是这时会拒绝。
+- 计数：`ManagerOps.binding_report()`，`GET /api/status` 的 `turn_binding`：`{"enforced": bool, "mismatches": N, "by": [{reason, runtime, tool, count}], "matches": [{by, when, count}]}`，从服务器启动累计。开关打开后同样记录和计数（`enforced: true`），只是这时会拒绝。`matches` 是做过匹配的调用：`by` 为 `id`（桥接带了运行时的调用 id）或 `arguments`，`when` 为 `at_arrival`（请求到达时 `tool_use` 已经读到）、`waited`（等到了）或 `missed`；6.3 节的需要验证项据此在真实路径上读出。
 - 不放宽、也不收紧：关着时轮结束、轮被停的调用只在 main 本来就拒绝的地方拒绝（没有轮在跑时的写 → `needs_user_turn`；`self._turn` 已被停 → `stopped`）。
+
+### 6.6 停止的契约：结束这一轮，不追进程
+
+停止（Esc、停止按钮、`/stop`）结束当前这一轮，和 Claude Code 里按 Esc 一样；它不去找这一轮起过的进程。
+
+- **只在有中断的运行时上提供**：Claude Code（control 请求 `interrupt`）和 Grok ACP（`session/cancel`）。运行时类型的能力是 `RuntimeAdapter.can_interrupt`，跑着的会话的是 `ResidentSession.can_interrupt`（Grok 退回每轮进程后为假）；管家按自己当前会话的这一项判断。
+- **运行时按中断结束了这一轮，就到此为止**：不发任何信号。这一轮起的工具进程（后台命令也一样）运行时自己结束了就结束了，留下的归运行时管，Looper 不追。
+- **只在运行时不理中断时杀进程**：宽限（`INTERRUPT_GRACE_SEC`、`CANCEL_GRACE_SEC`）内没结束这一轮，就把智能体连同它的进程组和 `proc_tree` 找得到的树一起结束（`kill`），和关掉一个不响应的智能体一样。
+- **没有中断的运行时不提供停止**：每轮一个进程的运行时（Codex exec、OMP `-p`、Pi、DSH）没有中断通道，「运行时不能中断，我们也不中断」。`POST /api/chat/stop` 答 409 `cannot_interrupt`，Telegram 和飞书的 `/stop` 回 `当前运行时不能中断回复，回复会照常完成。`，网页的停止按钮禁用并提示原因，Esc 不做事。停止从不杀每轮进程的运行时的进程。
+- **脱离的进程永远不追**：通过 `setsid`、两次 fork 或祖先退出脱离了智能体进程树的进程，不在停止的范围里，所有平台都一样。
 
 ## 7. 记录、下一轮、续接（D7）
 
@@ -264,15 +274,15 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 | `tests/test_turn_token.py` | 转移表每一格（合法/非法）；`request_stop` 幂等；`advance` 在 `stopping` 抛 `TurnStopped`；`TurnCancel.on_request` 已请求时立即触发、注销、`race` 的三种结局 |
 | `tests/test_manager_stop.py`（改） | 投递即登记；`received`、`preparing`、`starting`、`running` 停止各自的回复、记录、下一轮说明；排队消息可停；`/new` 动手前后；交接被停不丢会话；`stop lost` 不变式 |
 | `tests/test_manager_stop_faults.py`（新） | 故障注入：对 `PREPARATION_STEPS` 参数化，在该步骤挂住，停止，放开；断言模型的 `run_turn` 从未被调用（步骤在 `running` 之前）、`STOP_REPLY_BOUND` 内回 `outcome: stopped`、没有成功记录、没有遗留确认；外加 AST 测试（第 5 节） |
-| `tests/test_proc_tree.py`（加） | `TurnTree`：快照、刷新抓到 `setsid` 出去的孙进程、父进程先退出后照样结束、pid 复用不误杀、`REAP_SEC` 上限、`end_new` 留下基线成员 |
-| `tests/test_per_turn_interrupt.py`、`tests/test_resident_claude_interrupt.py`、`tests/test_grok_acp.py`（改） | `cancel=` 在各入口的语义；R1（停止后没有事件进 `on_event`）；退回旧路径时停止不丢 |
+| `tests/test_proc_tree.py`（加） | `TurnTree`：快照、刷新抓到 `setsid` 出去的孙进程、父进程先退出后照样结束、pid 复用不误杀、`REAP_SEC` 上限 |
+| `tests/test_per_turn_interrupt.py`、`tests/test_resident_claude_interrupt.py`、`tests/test_grok_acp.py`（改） | `cancel=` 在各入口的语义；R1（停止后没有事件进 `on_event`）；退回旧路径时停止不丢；中断成功后不发任何信号；不理中断时智能体连同进程组被杀；每轮一个进程和退回的 Grok `can_interrupt` 为假 |
 | `tests/test_mcp_server.py`、`tests/test_manager_ops.py`、`tests/test_manager_turn_binding.py`（新） | 绑定文件读写与头；按 binding 归属；迟到请求（含确认）被拒；常驻运行时的匹配：按 id、按参数、等待上限、自己的轮的调用不匹配被拒 |
 
 ### 8.2 停止矩阵（常驻测试）
 
 `tests/test_stop_matrix.py` 保留 v0 的运行时级矩阵（真实子进程、真实管道），扩成两层：
 
-**运行时层**（每格断言：以停止结束、绝不当回答；`STOP_REPLY_BOUND` 内结束；这一轮起的进程树全部结束（`control`/`cancel` 留常驻进程和基线成员）；停止之后没有事件进 `on_event`；下一轮照常回答并续接同一会话）：
+**运行时层**（每格断言：以停止结束、绝不当回答；`STOP_REPLY_BOUND` 内结束；`control`/`cancel` 不发任何信号，常驻进程和这一轮的工具进程都留着；`kill` 结束智能体、进程组和它的树；停止之后没有事件进 `on_event`；下一轮照常回答并续接同一会话。每轮进程的格测的是 `cancel=` 这个运行时原语，管家不会对跑着的每轮进程请求它）：
 
 | 窗口 | Claude 常驻（deaf / obeys） | 每轮进程 ×（codex, omp, pi, dsh） | Grok ACP | Grok 退回 |
 |---|---|---|---|---|
@@ -285,7 +295,7 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 | 有了结果、返回之前 | ✓ | ✓ | ✓ | ✓ |
 | 进程退出后读尾巴时 | ✓ | ✓ | — | ✓ |
 
-**管家层**（新，`tests/test_manager_stop_matrix.py`）：阶段 × 运行时替身，管家用真实的 `ManagerAgent`、`agent_db`、总线，运行时用上面同一批替身进程：`received`（排在另一轮后面）、`preparing`（故障注入挂在第一个步骤）、`starting`（交接中、启动中）、`running`（流式、工具中）、`ended` 之后（`not_running`、什么都不改）。每格还检查：`/api/chat/turn` 的 `state`、记录的 `user_stop.phase`、下一轮的说明是「被停」还是「撤回」、迟到的工具请求被拒。
+**管家层**（新，`tests/test_manager_stop_matrix.py`）：阶段 × 运行时替身，管家用真实的 `ManagerAgent`、`agent_db`、总线，运行时用上面同一批替身进程：`received`（排在另一轮后面）、`preparing`（故障注入挂在第一个步骤）、`starting`（交接中、启动中）、`running`（流式、工具中）、`ended` 之后（`not_running`、什么都不改）。每格还检查：`/api/chat/turn` 的 `state`、记录的 `user_stop.phase`、下一轮的说明是「被停」还是「撤回」、迟到的工具请求被拒、工具中被停时只有不理中断的运行时的进程被结束。每轮一个进程的运行时（omp、codex）只有一格：跑着的和排队的停止都答 `cannot_interrupt`，不发信号，两条回复照常完成。
 
 ### 8.3 dialogs 评测
 
@@ -295,8 +305,8 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 `evals/stop_realpath.py`（卡片 14）：在 worktree 里起 `looper serve`（新数据库、临时 `--runtime-root`、8767 以外的空闲端口，不碰 `~/.looper`），打开 `chat.stop_enabled`，设置管家档案，经 HTTP 驱动；每格重复 3 次，输出 Markdown 报告（不含本机路径）：
 
-1. **Claude Code：** (a) 发送后立即停（`received`/`preparing`）；(b) 「运行 `sleep 60; echo done`」，工具开始后停；(c) 「运行 `setsid sleep 120 &` 然后 `sleep 60`」，工具中停；(d) 长文本输出中停；(e) 让它调用一个高风险工具（会要求确认），确认块出现前停。核对：`STOP_REPLY_BOUND` 内 `outcome: stopped`；`ps` 里这一轮起的进程（含 `setsid` 的）都没了；记录 `interrupted` + `user_stop.phase/method`（`control`，或 `kill` 并写明）；`manager_actions` 里停止之后的调用是 `stopped`；没有遗留确认；下一轮「刚才怎么了」答得出，会话 id 不变。
-2. **OMP + DeepSeek：** 同 (a)–(d)，`method` 为 `kill`，用量来自 `usage_so_far`，下一轮 `--resume` 同一会话。
+1. **Claude Code：** (a) 发送后立即停（`received`/`preparing`）；(b) 「运行 `sleep 60; echo done`」，工具开始后停；(c) 长文本输出中停；(d) 脱离进程树的 `setsid` 进程：不在范围内（6.6），不设格；(e) 让它调用一个高风险工具（会要求确认），确认块出现前停。核对：`STOP_REPLY_BOUND` 内 `outcome: stopped`；`kill` 时智能体、其进程组和它的树已结束，`control` 时 Claude 留下的进程只记录、不算失败（归 Claude 管）；记录 `interrupted` + `user_stop.phase/method`（`control`，或 `kill` 并写明）；`manager_actions` 里停止之后的调用是 `stopped`；没有遗留确认；下一轮「刚才怎么了」答得出，会话 id 不变。
+2. **OMP + DeepSeek：** 每轮一个进程、没有中断：工具开始后停，核对停止被拒（409 `cannot_interrupt`）、回复照常完成（脚本的格 r）。
 3. **6.3 节的需要验证项：** 记下 Claude Code 版本、`tools/call` 的 `_meta`、`assistant` 与工具执行的先后。
 4. **Telegram 或飞书：** 长任务中发 `/stop`，排队两条再 `/stop`（渠道不可用就写明缺口）。
 
@@ -327,9 +337,9 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 1. 第 8.1、8.2 节的测试在 CI 的 macOS 和 Linux 上全绿，并在本机连续跑 20 遍停止相关的测试文件无一次失败（`for i in $(seq 20); do pytest -q tests/test_stop_matrix.py tests/test_manager_stop_matrix.py tests/test_manager_stop_faults.py || break; done`）。
 2. AST 测试通过：准备阶段没有未登记的 `await`。
-3. 真实路径报告：Claude Code 和 OMP + DeepSeek 的每一格 3/3 通过；6.3 节的需要验证项有结论，匹配方式据此定下。
+3. 真实路径报告：Claude Code 和 OMP + DeepSeek 的每一格 3/3 通过（格 d，脱离的进程，不在范围内，6.6）；6.3 节的需要验证项有结论，匹配方式据此定下。
 4. dialogs 评测 `stop_then_continue`、`withdraw_then_continue`：fake 模式进 CI；real 模式 haiku 两次通过。
-5. 维护者打开开关自用，累计至少 30 次真实停止（含 Telegram 或飞书至少 5 次），日志里 `stop lost` 为零，没有残留进程的报告。
+5. 维护者打开开关自用，累计至少 30 次真实停止（含 Telegram 或飞书至少 5 次），日志里 `stop lost` 为零，没有不理中断而被杀的智能体留下进程组或树的报告（中断成功后运行时留下的进程、脱离的进程不算，6.6）。
 6. 绑定观察（6.5）：开关关着的真实使用里，每个用到的运行时（至少 Claude Code、Grok ACP、Pi 和一个每轮一个进程的运行时）都有写调用，`/api/status` 的 `turn_binding.mismatches` 为零，日志里没有 `turn binding mismatch`。有一条就先查清原因、修好，计数从修好的版本重新算。
 
 默认打开时：`DEFAULT_STOP_ENABLED = True`；数据库里显式存的 `false` 仍然生效（用户关过的保持关）；设置页去掉「实验」标记；Telegram 菜单照 `stop_enabled` 列出 `/stop`；CHANGELOG 写明行为变化（Esc 停止、排队消息可停、`/stop`）。
@@ -337,6 +347,7 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 ## 11. 默认行为的变化（相对 v2.13.15，开关打开时）
 
 - 排队中的消息可以停止（v0 是 `other_message`）。
+- 停止只在有中断的运行时（Claude Code、Grok ACP）上提供；每轮一个进程的运行时拒绝停止（`cannot_interrupt`），回复照常完成。停止结束这一轮，不追这一轮起的进程（6.6）。
 - `/stop` 停这个聊天正在答的和排队的所有消息。
 - 停止之后迟到的工具调用一律拒绝；常驻运行时上和这一轮流里对不上的写调用被拒绝（`not_this_turn`）；没带或带错 `X-Looper-Turn` 的写调用被拒绝（`needs_user_turn`）。开关关着时这些都只记日志和计数（6.5）。
 - 模型没看到就被停的消息：没有运行记录；下一轮带「撤回」说明。

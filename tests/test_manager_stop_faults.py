@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import inspect
+import os
+import signal
 import tempfile
 import textwrap
 from pathlib import Path
@@ -13,10 +16,15 @@ from typing import Any
 
 import pytest
 
+from fake_claude import fake_claude
+from looper.agents import proc_tree
+from looper.agents.claude_cli import ResidentClaude
+from looper.agents.runtimes import cancel as cancel_module
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import PREPARATION_STEPS, ManagerAgent, StopResult
 from looper.agents.tiers.turn_token import TurnPhase
 from tests.stop_faults import hold_at
+from tests.stop_matrix_support import _alive
 from tests.test_manager_new_session import _until, _web
 from tests.test_manager_stop import _manager, _replies, _Session, _stop_on  # noqa: F401
 
@@ -107,6 +115,126 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
     asyncio.run(run())
 
 
+def test_a_stop_after_a_resident_result_while_persistence_is_blocked_ends_the_turn_and_signals_nothing(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
+    claude = fake_claude(tmp_path / "claude", """
+import json, os, subprocess, sys, time
+sys.stdin.readline()
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)
+print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
+while not os.path.exists('spawn'):
+    time.sleep(0.01)
+child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+open('child.pid', 'w').write(str(child.pid))
+sys.stdin.read()
+""")
+
+    async def run() -> None:
+        session = ResidentClaude(label="manager")
+        manager, bus, queue = _manager(tmp_path, session)  # type: ignore[arg-type]
+        manager._config.claude_bin = claude
+        persisting, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_run = session.run_turn
+
+        async def run_turn(*args: Any, **kwargs: Any) -> Any:
+            turn = await original_run(*args, **kwargs)
+            returned.set()
+            return turn
+
+        async def blocked() -> None:
+            if not persisting.is_set():
+                persisting.set()
+                await release.wait()
+
+        monkeypatch.setattr(session, "run_turn", run_turn)
+        monkeypatch.setattr(manager, "_save_session_state", blocked)
+        signalled: list[int] = []
+        real_signal = proc_tree._signal
+
+        def signal_(process: Any, tree: Any, sig: int) -> None:
+            signalled.append(sig)
+            real_signal(process, tree, sig)
+
+        monkeypatch.setattr(proc_tree, "_signal", signal_)
+        (tmp_path / "spawn").touch()
+        envelope = _web("你好")
+        handling = asyncio.create_task(manager._handle(envelope))
+        child = None
+        try:
+            await asyncio.wait_for(persisting.wait(), 8)
+            await asyncio.wait_for(returned.wait(), 8)  # the real runtime dropped its cancellation callback
+            await _until(lambda: (tmp_path / "child.pid").exists(), timeout=2)
+            child = int((tmp_path / "child.pid").read_text())
+            assert _alive(child)
+            assert session.started
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            await asyncio.wait_for(asyncio.shield(handling), 5)
+            assert not release.is_set()  # the stop does not wait for the database
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "error" not in reply
+            assert session.started and _alive(child)  # the turn is over; Claude and what it started are its own
+            assert signalled == []
+        finally:
+            release.set()
+            if not handling.done():
+                handling.cancel()
+            await asyncio.gather(handling, return_exceptions=True)
+            await session.stop(kill=True)
+            if child is not None and _alive(child):
+                os.kill(child, signal.SIGKILL)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_the_init_event_is_persisted_keeps_its_session(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The database holds the persistence of the turn's first event (init, naming the session) until the stop has
+    # given up on the handling: the session it names is still saved, so the next process resumes it.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            persisting, release = asyncio.Event(), asyncio.Event()
+            saved: list[str | None] = []
+
+            async def blocked(self: Any, payload: dict[str, Any]) -> None:
+                if not persisting.is_set():
+                    persisting.set()
+                    await release.wait()
+
+            async def save() -> None:
+                saved.append(manager._session_id)
+
+            monkeypatch.setattr(manager_module.ClaudeRunRecorder, "persist", blocked)
+            manager._save_session_state = save  # type: ignore[method-assign]
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(persisting.wait(), 5)
+                await asyncio.wait_for(session.running.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert not release.is_set()  # the handling was given up on
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped"
+                assert manager._session_id == "sess-1"
+                assert saved and saved[-1] == "sess-1"
+            finally:
+                release.set()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_a_stop_during_the_user_message_persist_still_stores_it(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,5 +258,188 @@ def test_a_stop_during_the_user_message_persist_still_stores_it(agent_db: Any, m
             assert reply["outcome"] == "stopped"
             assert session.turns == []
             await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_the_events_are_handled_waits_for_the_handling_within_a_bound(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The database holds the handling of the turn's events (persisting the session) after the runtime answered: the
+    # stop is taken (no 409), and the turn ends stopped once the handling has had its time.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            persisting, release = asyncio.Event(), asyncio.Event()
+
+            async def blocked() -> None:
+                if not persisting.is_set():  # the first write, while the events are handled
+                    persisting.set()
+                    await release.wait()
+
+            manager._save_session_state = blocked  # type: ignore[method-assign]
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(persisting.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert not release.is_set()
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped"
+            finally:
+                release.set()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("held", "held_writes"), [
+    ((manager_module.db_agent_sessions, "save_session"), 2),  # the handling's, then the stopped turn's
+    ((manager_module.db_llm_records, "add_metadata"), 1),  # the stopped turn's annotation
+], ids=["session", "record"])
+def test_a_stop_while_the_database_holds_every_write_still_replies_and_frees_the_lock(
+    held: tuple[Any, str], held_writes: int, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A row lock held elsewhere and never released holds every write to its table, the handling's and the stopped
+    # turn's own: the turn still ends stopped within a bound, replies, and leaves the Manager's lock free.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+    monkeypatch.setattr(manager_module, "STOP_FINISH_SEC", 0.3, raising=False)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            unlocked = asyncio.Event()
+            writes: list[Any] = []
+
+            async def locked(*args: Any, **kwargs: Any) -> None:
+                writes.append(args)
+                await unlocked.wait()
+
+            monkeypatch.setattr(*held, locked)
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(session.running.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert not unlocked.is_set() and len(writes) == held_writes  # the stopped turn's own was given up on
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped" and "error" not in reply
+                assert not manager.busy and manager._lock_owner is None
+                assert manager.turn_for(envelope.message_id) is None
+                (finish,) = agent_db.finish_record.await_args_list
+                assert finish.kwargs["status"] == "interrupted"
+            finally:
+                unlocked.set()
+                if not handling.done():
+                    handling.cancel()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
+class _Unreachable:
+    """A database call once the network to the server drops: it never returns, and once cancelled it never ends
+    either (asyncpg hands the connection back to its pool behind a shield, and resetting it waits on the server);
+    here not even a second cancel ends it, until ``restore()``."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.cancelled = 0  # cancelled, and still cleaning up
+        self.reached = asyncio.Event()
+        self._back = asyncio.Event()
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> None:
+        self.calls += 1
+        self.reached.set()
+        try:
+            await self._back.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            while not self._back.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._back.wait()
+            raise
+
+    def restore(self) -> None:
+        self._back.set()
+
+
+def test_a_stop_while_the_database_is_unreachable_still_replies_and_frees_the_lock(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The database drops off the network while the turn's events are handled: the session's write never returns, and
+    # the handling the stop gives up on and cancels never ends either. Waiting for it is bounded all the same: the
+    # turn ends stopped, replies, and leaves the Manager's lock free.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+    monkeypatch.setattr(manager_module, "STOP_FINISH_SEC", 0.3, raising=False)
+    monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.3)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            database = _Unreachable()
+            monkeypatch.setattr(manager_module.db_agent_sessions, "save_session", database)
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(session.running.wait(), 5)
+                await asyncio.wait_for(database.reached.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert database.calls == database.cancelled == 2  # the handling's write, then the stopped turn's
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped" and "error" not in reply
+                assert not manager.busy and manager._lock_owner is None
+                assert manager.turn_for(envelope.message_id) is None
+            finally:
+                database.restore()
+                if not handling.done():
+                    handling.cancel()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_a_preparation_read_finds_the_database_unreachable_still_replies_and_frees_the_lock(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same outage while the turn reads its saved session, a step the stop abandons with the Manager's lock held:
+    # the cancelled read never ends, and the stop waits for it only within a bound.
+    monkeypatch.setattr(cancel_module, "ABANDON_SEC", 0.3)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            database = _Unreachable()
+            monkeypatch.setattr(manager_module.db_agent_sessions, "get_session", database)
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(database.reached.wait(), 5)
+                assert manager._lock_owner is not None
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                assert database.calls == database.cancelled == 1
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped" and "error" not in reply
+                assert not manager.busy and manager._lock_owner is None
+                assert manager.turn_for(envelope.message_id) is None and session.turns == []
+            finally:
+                database.restore()
+                if not handling.done():
+                    handling.cancel()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
 
     asyncio.run(run())
