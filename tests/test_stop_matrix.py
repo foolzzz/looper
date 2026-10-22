@@ -226,6 +226,12 @@ def test_resident_claude_stop_in_every_window(
         first = await session.run_turn("hello", Seen())
         assert _answered(first), first.result_event
         process = session.pid
+        agent = int((directory / "pids").read_text().split()[0])
+        if process in proc_tree._disclaimed:
+            children = {pid: pair for pid, pair in proc_tree._snapshot().items() if pair[0] == process}
+            assert children == {agent: (process, process)}  # exactly the resident, in the keeper's group
+        else:
+            assert agent == process
         seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
         text = BIG if window == "blocked" else f"mode:{window}{' obey' if obey else ''}"
         running = asyncio.create_task(session.run_turn(text, seen, stop=stop, cancel=cancel))
@@ -269,12 +275,12 @@ def test_resident_claude_stop_in_every_window(
         nxt = Seen()
         after = await asyncio.wait_for(session.run_turn("mode:answer", nxt), BOUND)
         await session.stop(kill=True)
-        return method, turn, seen, kept, alive, after, nxt, process
+        return method, turn, seen, kept, alive, after, nxt, agent
 
-    method, turn, seen, kept, alive, after, nxt, process = asyncio.run(asyncio.wait_for(run(), 60))
+    method, turn, seen, kept, alive, after, nxt, agent = asyncio.run(asyncio.wait_for(run(), 60))
     if window == "done" or (obey and window != "blocked"):
         assert method is StopMethod.CONTROL and kept  # the process and its session stay for the next turn
-        assert alive == [process]  # a tool the turn started is gone
+        assert alive == [agent]  # a tool the turn started is gone
     else:
         assert method is StopMethod.KILL and alive == []
     assert _stopped(turn) and turn.stopped is method, turn.result_event

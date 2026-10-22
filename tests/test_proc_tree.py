@@ -9,6 +9,7 @@ path that stops an agent must leave none of them running.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -304,7 +305,8 @@ def test_the_next_start_ends_the_tree_of_an_agent_whose_server_is_gone(
     tree, record = asyncio.run(_run())
     assert _running(list(tree.values())) == []
     assert not record.exists()
-    assert _ended_line(caplog).endswith(": 4 found, 4 exited on SIGTERM, 0 killed")
+    found = 5 if proc_tree._DISCLAIMS else 4  # (macOS: the agent's keeper too)
+    assert _ended_line(caplog).endswith(f": {found} found, {found} exited on SIGTERM, 0 killed")
 
 
 @pytest.mark.parametrize("server", ["gone", "running"])
@@ -405,7 +407,7 @@ def test_a_graceful_stop_records_the_tree_before_the_agent_exits(
 
         await session.run_turn("hello", on_event)
         tree = await _started(tmp_path, trees)
-        record = runtime_root / proc_tree.RECORDS_DIR / f"{tree['agent']}.json"
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{session.pid}.json"
         monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 10)
         stopping = asyncio.create_task(session.stop())
         try:
@@ -806,8 +808,10 @@ def test_turn_tree_end_new_ends_an_unseen_child_that_left_at_once_and_spares_an_
             await tree.end_new()
             return _running([child]), _running([process.pid, earlier], settle=0)
         finally:
-            for pid in _running([child, earlier, process.pid], settle=0):
+            for pid in _running([child, earlier], settle=0):
                 os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)  # the agent's group (macOS: its keeper too)
             await process.wait()
 
     child_left, survivors = asyncio.run(_run())
@@ -923,6 +927,39 @@ def test_turn_tree_end_ends_what_the_agent_starts_in_a_session_of_its_own_as_it_
         try:
             await tree.end()
             child = int((tmp_path / "child.pid").read_text())
+            return _running([child])
+        finally:
+            if (tmp_path / "child.pid").exists():
+                for pid in _running([int((tmp_path / "child.pid").read_text())], settle=0):
+                    os.kill(pid, signal.SIGKILL)
+
+    assert asyncio.run(_run()) == []
+
+
+@pytest.mark.skipif(not proc_tree._DISCLAIMS, reason="no responsibility on this platform")
+def test_turn_tree_end_ends_what_the_agent_double_forks_as_it_exits_without_any_lineage_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Told to exit, the agent double-forks a system binary into a session of its own and exits at once: every
+    # ancestor of the binary is gone before the end lists it, and the fork watch lost them all. The agent's
+    # responsibility for it outlives the agent.
+    monkeypatch.setattr(proc_tree._Lineage, "_follow", lambda self: None)
+    code = ("import signal, sys\n"
+            "def on_term(*_):\n"
+            + "".join("    " + line + "\n" for line in _DOUBLE_FORK_EXEC.splitlines())
+            + "    os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "print('ready', flush=True)\nsys.stdin.read()\n")
+
+    async def _run() -> list[int]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path,
+                                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        assert process.stdout
+        await process.stdout.readline()
+        try:
+            await tree.end()
+            child = int(await _wait_file(tmp_path / "child.pid"))
             return _running([child])
         finally:
             if (tmp_path / "child.pid").exists():

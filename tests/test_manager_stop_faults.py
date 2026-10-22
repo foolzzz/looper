@@ -6,6 +6,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import os
+import signal
 import tempfile
 import textwrap
 from pathlib import Path
@@ -13,10 +15,14 @@ from typing import Any
 
 import pytest
 
+from fake_claude import fake_claude
+from looper.agents import proc_tree
+from looper.agents.claude_cli import ResidentClaude
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import PREPARATION_STEPS, ManagerAgent, StopResult
 from looper.agents.tiers.turn_token import TurnPhase
 from tests.stop_faults import hold_at
+from tests.stop_matrix_support import _alive
 from tests.test_manager_new_session import _until, _web
 from tests.test_manager_stop import _manager, _replies, _Session, _stop_on  # noqa: F401
 
@@ -107,6 +113,69 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
     asyncio.run(run())
 
 
+def test_stop_after_a_resident_result_ends_detached_processes_while_event_persistence_is_blocked(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)
+    claude = fake_claude(tmp_path / "claude", """
+import json, subprocess, sys
+sys.stdin.readline()
+child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+open('child.pid', 'w').write(str(child.pid))
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)
+print(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'ok'}), flush=True)
+sys.stdin.read()
+""")
+
+    async def run() -> None:
+        session = ResidentClaude(label="manager")
+        manager, bus, queue = _manager(tmp_path, session)  # type: ignore[arg-type]
+        manager._config.claude_bin = claude
+        persisting, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_run = session.run_turn
+
+        async def run_turn(*args: Any, **kwargs: Any) -> Any:
+            turn = await original_run(*args, **kwargs)
+            returned.set()
+            return turn
+
+        async def blocked() -> None:
+            if not persisting.is_set():
+                persisting.set()
+                await release.wait()
+
+        monkeypatch.setattr(session, "run_turn", run_turn)
+        monkeypatch.setattr(manager, "_save_session_state", blocked)
+        envelope = _web("你好")
+        handling = asyncio.create_task(manager._handle(envelope))
+        child = None
+        try:
+            await asyncio.wait_for(persisting.wait(), 8)
+            await asyncio.wait_for(returned.wait(), 8)  # the real runtime dropped its cancellation callback
+            child = int((tmp_path / "child.pid").read_text())
+            assert _alive(child) and session.started
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            await _until(lambda: not _alive(child), timeout=2)
+            assert not release.is_set()  # cleanup does not depend on the database becoming available
+            await asyncio.wait_for(asyncio.shield(handling), 5)
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "error" not in reply
+            assert session.started  # the resident and its baseline survive this turn's stop
+        finally:
+            release.set()
+            if not handling.done():
+                handling.cancel()
+            await asyncio.gather(handling, return_exceptions=True)
+            await session.stop(kill=True)
+            if child is not None and _alive(child):
+                os.kill(child, signal.SIGKILL)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_a_stop_during_the_user_message_persist_still_stores_it(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,5 +223,43 @@ def test_a_stop_while_the_events_are_handled_ends_the_turns_processes(agent_db: 
             assert reply["outcome"] == "stopped"
             assert session.ended_turns == 1
             await bus.shutdown()
+
+    asyncio.run(run())
+
+
+def test_a_stop_while_the_events_are_handled_ends_the_processes_at_once_and_waits_for_the_handling_within_a_bound(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The database holds the handling of the turn's events (persisting the session): the stop ends the turn's
+    # processes at once, without waiting for it, and the turn ends stopped once the handling has had its time.
+    monkeypatch.setattr(manager_module, "STOP_HANDLING_SEC", 0.3, raising=False)
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session(hold=False)
+            manager, bus, queue = _manager(Path(tmp), session)
+            envelope = _web("你好")
+            persisting, release = asyncio.Event(), asyncio.Event()
+
+            async def blocked() -> None:
+                if not persisting.is_set():  # the first write, while the events are handled
+                    persisting.set()
+                    await release.wait()
+
+            manager._save_session_state = blocked  # type: ignore[method-assign]
+            handling = asyncio.create_task(manager._handle(envelope))
+            try:
+                await asyncio.wait_for(persisting.wait(), 5)
+                assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+                await _until(lambda: session.ended_turns == 1, timeout=2)
+                assert not release.is_set()
+                await asyncio.wait_for(asyncio.shield(handling), 5)
+                (reply,) = _replies(queue)
+                assert reply["outcome"] == "stopped"
+                assert session.ended_turns == 1
+            finally:
+                release.set()
+                await asyncio.gather(handling, return_exceptions=True)
+                await bus.shutdown()
 
     asyncio.run(run())

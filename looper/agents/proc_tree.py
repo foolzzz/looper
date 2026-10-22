@@ -29,13 +29,15 @@ server still runs is left alone.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import os
-import signal
 import secrets
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -320,8 +322,9 @@ def _write_record(
 async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any) -> asyncio.subprocess.Process:
     """Start an agent process in a session of its own, so its children share its process group, and record it
     until it is reaped (once ``sweep`` has run). Without ``env``, start with ``child_env.inherited()``. Where the
-    turn's ownership is an inherited mark (``_MARKS``), the process gets one of its own (``OWNER_ENV``); on macOS it
-    is started responsible for what it starts (``_DISCLAIMS``)."""
+    turn's ownership is an inherited mark (``_MARKS``), the process gets one of its own (``OWNER_ENV``); on macOS the
+    process is a keeper responsible for what the agent, its child in its group, starts (``_DISCLAIMS``): it is ended
+    by its group (``end``), not by a signal to it alone."""
     environment = dict(child_env.inherited() if env is None else env)
     owner = None
     if _MARKS:
@@ -329,14 +332,36 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
     disclaimed = False
     if _DISCLAIMS and (launcher := _launcher()) is not None \
             and (program := _program(argv[0], environment, kwargs.get("cwd"))) is not None:
-        environment[_EXEC_ENV], environment[_ARGV0_ENV] = program, argv[0]
-        kwargs = {**kwargs, "executable": launcher}
+        ready, written = os.pipe()
+        held, release = os.pipe()
+        environment[_EXEC_ENV], environment[_ARGV0_ENV], environment[_READY_ENV] = program, argv[0], str(written)
+        environment[_KEEP_ENV] = str(held)
+        kwargs = {**kwargs, "executable": launcher, "pass_fds": (*kwargs.get("pass_fds", ()), written, held)}
         disclaimed = True
-    process = await asyncio.create_subprocess_exec(*argv, env=environment, start_new_session=True, **kwargs)
+    try:
+        process = await asyncio.create_subprocess_exec(*argv, env=environment, start_new_session=True, **kwargs)
+    except BaseException:
+        if disclaimed:
+            os.close(ready)
+            os.close(release)
+        raise
+    finally:
+        if disclaimed:
+            os.close(written)
+            os.close(held)
+    if disclaimed:
+        _keepers[process.pid] = release
+        _disclaimed.add(process.pid)
+        forgetting = asyncio.create_task(_forget_keeper(process))
+        _forgetting.add(forgetting)
+        forgetting.add_done_callback(_forgetting.discard)
+        try:
+            await asyncio.to_thread(_await_agent, ready)  # the agent runs (or its start failed) once ``spawn`` returns
+        except BaseException:
+            await TurnTree.track(process, label="agent start").end()
+            raise
     if owner is not None:
         _owners[process.pid] = owner
-    if disclaimed:
-        _disclaimed.add(process.pid)
     if _records is not None and _server is not None:
         if (started := _start_time(process.pid)) is None:
             logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
@@ -352,6 +377,26 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
         _forgetting.add(forget)
         forget.add_done_callback(_forgetting.discard)
     return process
+
+
+def _await_agent(ready: int) -> None:
+    """Wait (for ``_READY_SEC`` at most) until the keeper closes ``ready``: it has started the agent or failed to."""
+    try:
+        select.select([ready], [], [], _READY_SEC)
+    finally:
+        os.close(ready)
+
+
+def _release_keeper(pid: int) -> None:
+    if (fd := _keepers.pop(pid, None)) is not None:
+        os.close(fd)
+
+
+async def _forget_keeper(process: asyncio.subprocess.Process) -> None:
+    try:
+        await process.wait()
+    finally:
+        _release_keeper(process.pid)
 
 
 async def _forget(process: asyncio.subprocess.Process, path: Path, started: str) -> None:
@@ -449,10 +494,11 @@ async def sweep(runtime_root: Path) -> None:
 #   That watch is a race: a short-lived shell can exit before its children are listed, and the version that
 #   links its children is lost. So it is only a complement to responsibility and the mark below.
 # - macOS: the process responsible for each process, which the kernel passes to every process it creates, through
-#   re-parenting, ``setsid`` and ``exec`` of any binary. ``spawn`` starts the agent responsible for itself
-#   (``_DISCLAIMS``), so while it runs every process it started, however detached and whichever of its ancestors
-#   have exited, names it. Each one found has its version recorded, so what it starts once the agent has exited is
-#   still linked by the lineage.
+#   re-parenting, ``setsid`` and ``exec`` of any binary, while that process runs. ``spawn`` starts the agent under
+#   a keeper responsible for itself (``_DISCLAIMS``), which an end keeps running until it has finished, so every
+#   process the agent started, however detached and whichever of its ancestors (the agent too) have exited, names
+#   the keeper. Each one found has its version recorded, so what it starts once the keeper has exited is still
+#   linked by the lineage.
 # - An environment variable the agent gets at spawn (``OWNER_ENV``), inherited by everything it starts, whether or
 #   not its ancestors still run. Linux: ``/proc/<pid>/environ``; macOS: ``KERN_PROCARGS2`` (it shows no
 #   environment for system binaries, which the lineage still covers when they are not detached).
@@ -759,29 +805,91 @@ FOLLOWS_OWNERSHIP = _LINEAGE or _MARKS  # whether this platform has a facility `
 
 
 # macOS responsibility. A process started with responsibility disclaimed is responsible for itself; the processes it
-# creates inherit that. Python cannot spawn so, so ``spawn`` runs the agent through a launcher (``_LAUNCHER``) that
-# replaces itself with the agent (same pid) with responsibility disclaimed.
+# creates inherit that, until it exits: then each becomes responsible for itself. Python cannot spawn so, so ``spawn``
+# runs a launcher (``_LAUNCHER``) that replaces itself (same pid) with a keeper started with responsibility disclaimed.
+# The keeper starts the agent in its group, with its standard streams; it passes on what is sent to it alone (SIGINT,
+# SIGHUP, SIGQUIT, SIGUSR1; a group's SIGTERM reaches the agent itself) and exits as the agent did. Told to hold
+# (SIGUSR2, ``TurnTree.end``), it stays once the agent has exited until the server closes its keep pipe after cleanup.
+# If the server dies, its pipe closes too; no keeper waits forever for a dead server.
 
-_EXEC_ENV, _ARGV0_ENV = "LOOPER_PROC_EXEC", "LOOPER_PROC_ARGV0"  # what the launcher runs; removed before it does
+_EXEC_ENV, _ARGV0_ENV = "LOOPER_PROC_EXEC", "LOOPER_PROC_ARGV0"  # what the keeper runs; removed before it does
+_READY_ENV = "LOOPER_PROC_READY"  # the pipe the keeper closes once the agent runs
+_KEEP_ENV = "LOOPER_PROC_KEEP_FD"  # held open by the server until the cleanup finishes
+_READY_SEC = 5.0
+_HOLD = signal.SIGUSR2
+_keepers: dict[int, int] = {}  # keeper pid -> the server's end of its keep pipe
 _LAUNCHER = r"""
-import ctypes, os, sys
+import ctypes, os, signal, sys
 environ = dict(os.environb)
-path, argv0 = environ.pop(b"LOOPER_PROC_EXEC"), environ.pop(b"LOOPER_PROC_ARGV0")
 libc = ctypes.CDLL(None, use_errno=True)
 attr = ctypes.c_void_p()
+
+
+def spawn(path, args, env, flags, disclaim, pid=None):
+    if (libc.posix_spawnattr_init(ctypes.byref(attr))
+            or libc.posix_spawnattr_setflags(ctypes.byref(attr), ctypes.c_short(flags))
+            or (flags & 0x04 and libc.posix_spawnattr_setsigdefault(ctypes.byref(attr), ctypes.byref(defaults)))
+            or (disclaim and libc.responsibility_spawnattrs_setdisclaim(ctypes.byref(attr), 1))):
+        sys.stderr.write("looper: cannot prepare the agent's start\n")
+        sys.exit(127)
+    argv = (ctypes.c_char_p * (len(args) + 1))(*args, None)
+    envp = (ctypes.c_char_p * (len(env) + 1))(*(k + b"=" + v for k, v in env.items()), None)
+    return libc.posix_spawn(pid, path, None, ctypes.byref(attr), argv, envp)
+
+
 defaults = ctypes.c_uint32((1 << (13 - 1)) | (1 << (25 - 1)))  # SIGPIPE, SIGXFSZ: what Python ignores, restored
-if (libc.posix_spawnattr_init(ctypes.byref(attr))
-        or libc.posix_spawnattr_setflags(ctypes.byref(attr), ctypes.c_short(0x40 | 0x04))  # SETEXEC, SETSIGDEF
-        or libc.posix_spawnattr_setsigdefault(ctypes.byref(attr), ctypes.byref(defaults))
-        or libc.responsibility_spawnattrs_setdisclaim(ctypes.byref(attr), 1)):
-    sys.stderr.write("looper: cannot prepare the agent's start\n")
+if environ.pop(b"LOOPER_PROC_KEEP", None) is None:  # the launcher: become the keeper, responsible for itself
+    error = spawn(os.fsencode(sys.argv[0]), [os.fsencode(a) for a in sys.argv], {**environ, b"LOOPER_PROC_KEEP": b"1"},
+                  0x40, True)  # SETEXEC
+    sys.stderr.write(f"looper: cannot start the agent's keeper: {os.strerror(error)}\n")
     sys.exit(127)
-args = [argv0, *map(os.fsencode, sys.argv[1:])]
-argv = (ctypes.c_char_p * (len(args) + 1))(*args, None)
-envp = (ctypes.c_char_p * (len(environ) + 1))(*(k + b"=" + v for k, v in environ.items()), None)
-error = libc.posix_spawn(None, path, None, ctypes.byref(attr), argv, envp)
-sys.stderr.write(f"looper: cannot run {os.fsdecode(path)}: {os.strerror(error)}\n")
-sys.exit(127)
+path, argv0 = environ.pop(b"LOOPER_PROC_EXEC"), environ.pop(b"LOOPER_PROC_ARGV0")
+ready = int(environ.pop(b"LOOPER_PROC_READY", b"-1"))
+held = int(environ.pop(b"LOOPER_PROC_KEEP_FD"))
+agent, hold = None, False
+
+
+def forward(sig, frame):
+    if agent is not None:
+        try:
+            os.kill(agent, sig)
+        except OSError:
+            pass
+
+
+def keep(sig, frame):
+    global hold
+    hold = True
+
+
+signal.signal(signal.SIGTERM, lambda sig, frame: None)  # a group's: the agent has it too
+signal.signal(signal.SIGUSR2, keep)
+for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1):
+    signal.signal(sig, forward)
+if ready >= 0:
+    os.set_inheritable(ready, False)
+os.set_inheritable(held, False)
+child = ctypes.c_int()
+error = spawn(path, [argv0, *map(os.fsencode, sys.argv[1:])], environ, 0x04, False, ctypes.byref(child))  # SETSIGDEF
+if error:
+    sys.stderr.write(f"looper: cannot run {os.fsdecode(path)}: {os.strerror(error)}\n")
+    sys.exit(127)
+agent = child.value
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)  # the agent's streams are its own: they end when it and what it started close them
+os.close(null)
+if ready >= 0:
+    os.close(ready)
+_, status = os.waitpid(agent, 0)
+if hold:
+    os.read(held, 1)  # EOF: cleanup finished, or the server exited
+os.close(held)
+if os.WIFSIGNALED(status):
+    signal.signal(os.WTERMSIG(status), signal.SIG_DFL)
+    os.kill(os.getpid(), os.WTERMSIG(status))
+    os._exit(128 + os.WTERMSIG(status))
+os._exit(os.waitstatus_to_exitcode(status))
 """
 
 
@@ -973,7 +1081,10 @@ class TurnTree:
         running now and, until every end has finished, each that appears meanwhile (a command a tool's shell starts
         in a session of its own as it is told to exit). One that appears after ``TERM_GRACE_SEC`` is killed at once;
         none is looked for after twice that."""
-        await asyncio.to_thread(self._live_owned)  # what the agent owns, found while it still runs
+        if self.process.pid not in exclude:
+            # Record ownership before a root that can exit is signalled. A resident or a held keeper stays alive:
+            # signal its descendants first, without delaying them for an ownership scan of every process.
+            await asyncio.to_thread(self._live_owned)
         ends = [asyncio.ensure_future(_end(self.process, label=self.label, known=dict(self._groups), exclude=exclude))]
         found: set[int] = set()
         started = time.monotonic()
@@ -998,14 +1109,31 @@ class TurnTree:
 
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, and every one the agent owns, then reap
-        the agent."""
+        the agent. An agent's keeper (macOS, ``_LAUNCHER``) is told to hold first and is left out of the end: what
+        the agent starts as it exits is still the keeper's responsibility, and found, until the end has finished."""
         await self.stop_ticker()
         await self.refresh(force=True)
+        keeper = self.process.pid in _disclaimed and self.process.returncode is None
+        exclude = await self._reused()
+        if keeper:
+            with contextlib.suppress(ProcessLookupError):
+                self.process.send_signal(_HOLD)
+            exclude |= {self.process.pid}
         try:
-            await self._end_all(await self._reused())
+            await self._end_all(exclude)
+            if keeper:
+                _release_keeper(self.process.pid)
+                # Cleanup has finished: the keeper may now exit as the agent did.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self.process.wait(), REAP_SEC)
         finally:
+            if keeper:
+                _release_keeper(self.process.pid)
             if self._owned is not None:
                 self._owned.close()
+            if keeper and self.process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    self.process.kill()  # the end has finished: nothing is left for it to hold
         await _reap(self.process, self.label)
 
     async def end_new(self) -> None:

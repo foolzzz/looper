@@ -237,6 +237,8 @@ CONVERSATION_MESSAGE_CHARS = 300
 CONVERSATION_MAX_CHARS = 4_000
 # How long the old session may take to write its handoff before the new one starts without it.
 HANDOFF_TIMEOUT_SEC = 300
+# How long a stopped turn still waits for its events to be handled (a slow database write) before it ends without.
+STOP_HANDLING_SEC = 3.0
 
 # The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
@@ -1246,11 +1248,19 @@ class ManagerAgent:
                 await asyncio.sleep(0)
 
         async def handled() -> None:
-            """Wait for the events handed on so far to be handled (what the chat still shows of the turn)."""
+            """Drain the turn's events; once stopped, a slow persistence gets only ``STOP_HANDLING_SEC``."""
             if handling is not None and not handling.done():
                 events.put_nowait(None)
             if handling is not None:
-                await handling
+                try:
+                    await token.cancel.race(asyncio.shield(handling))
+                except TurnCancelled:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(handling), STOP_HANDLING_SEC)
+                    except asyncio.TimeoutError:
+                        logger.warning("manager: the stopped turn's events were not handled within %.1f s (%s)",
+                                       STOP_HANDLING_SEC, token.message_id)
+                        await abandon_handling()
 
         async def abandon_handling() -> None:
             if handling is not None and not handling.done():
@@ -1354,19 +1364,30 @@ class ManagerAgent:
         # Whether the stop was asked before the runtime returned (nothing awaited since): then a runtime that
         # answered all the same lost it.
         asked_while_running = token.cancel.requested
-        # The turn's events still being handled are still reaching the chat: the turn is not over for the user
-        # until they have, and a stop meanwhile is not too late.
-        await handled()
+        # A runtime that returned an answer has dropped the turn's cancel: nobody else ends what the turn started (a
+        # detached or background process), so a stop from now on has it ended at once, not after the handling.
+        ending: asyncio.Task[None] | None = None
+
+        def end_turn_processes() -> None:
+            nonlocal ending
+            if ending is None and turn.stopped is None:
+                ending = asyncio.ensure_future(self._claude.end_turn_processes())
+
+        unregister = token.cancel.on_request(end_turn_processes)
+        try:
+            # The turn's events still being handled are still reaching the chat: the turn is not over for the user
+            # until they have, and a stop meanwhile is not too late.
+            await handled()
+        finally:
+            unregister()
         resume_lost = bool(resuming) and not turn.session_started and not retried
         # Decided here, in one place and with nothing awaited since the events were handled: a stop asked until now
         # ends the turn stopped, even when the runtime came back with an answer; from the settle on, a stop is too
         # late (the token has ended).
         stopped = token.cancel.requested
         if stopped:
-            if turn.stopped is None:
-                # The runtime returned an answer and dropped the turn's cancel: nobody has ended what the turn
-                # started (a detached or background process), so it is ended here.
-                await self._claude.end_turn_processes()
+            if ending is not None:
+                await ending
             if asked_while_running and turn.stopped is None and not (turn.result_event or {}).get(USER_STOP):
                 logger.error("stop lost: the runtime answered a turn that was asked to stop (%s)", token.message_id)
             token.settle(ReplyOutcome.STOPPED)
