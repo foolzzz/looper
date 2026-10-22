@@ -14,6 +14,7 @@ import contextlib
 import errno
 import getpass
 import http.client
+import importlib.resources
 import ipaddress
 import json
 import os
@@ -736,6 +737,31 @@ def _wait(args: argparse.Namespace, ctx: Context) -> int:
         time.sleep(min(interval, max(remaining, 0)))
 
 
+# --- skill ---
+
+
+def _skill_directory() -> Path:
+    directory = Path(str(importlib.resources.files("looper") / "skill" / "looper-skill"))
+    if not (directory / "SKILL.md").is_file():
+        raise CliError(f"the packaged skill is missing from {directory}")
+    return directory
+
+
+def _skill_arguments(parser: Parser) -> None:
+    operations = parser.add_subparsers(dest="skill_operation", required=True, metavar="OPERATION")
+    operations.add_parser("path", help="print the directory of the packaged skill")
+    operations.add_parser("show", help="print the skill's SKILL.md")
+
+
+def _skill(args: argparse.Namespace, ctx: Context) -> int:
+    directory = _skill_directory()
+    if args.skill_operation == "path":
+        print(directory)
+    else:
+        sys.stdout.write((directory / "SKILL.md").read_text(encoding="utf-8"))
+    return EXIT_OK
+
+
 HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
     HandCommand("login", "Save an API client's token (read from stdin or a prompt) after checking it with Looper",
                 _login_arguments, _login),
@@ -743,6 +769,8 @@ HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
     HandCommand("chat", "Talk to the Manager, read a conversation, or list your conversations", _chat_arguments,
                 _chat),
     HandCommand("wait", "Wait until a task needs you, ends, or the timeout passes (exit 6)", _wait_arguments, _wait),
+    HandCommand("skill", "Print the directory (path) or the text (show) of the skill packaged with Looper",
+                _skill_arguments, _skill),
 )}
 
 
