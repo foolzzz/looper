@@ -43,6 +43,7 @@ EMPTY_REPLY = "这条回复没有文字，没能交给关卡：请写下你的�
 TOO_LONG_REPLY = f"这条回答太长（最多 {MESSAGE_MAX_CHARS} 个字），没能交给关卡：请分几条回复。"
 # A reply under a gate's card with exactly this text ends the gate instead of being a message.
 END_WORDS = ("end", "/end")
+ENDED_REPLY = "这个关卡已经不在等你了，没有结束它：它已被关闭，或任务已完成。"
 REFUSED_REPLY = "这条回答没能交给关卡，请到任务页查看。"
 
 
@@ -118,12 +119,12 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
         return NOT_A_REPLY
     task_id, label = gate["task_id"], gate["step_key"]
     text = str(envelope.payload.get("text") or "").strip()
+    end = text.lower() in END_WORDS
     if GateState(gate["state"]).waiting:
         origin = {"author": _author(channel, context), "channel": channel,
                   "chat": origin_chat(channel, chat, group=_group(channel, context),
                                       sender=str(context.get("sender_id") or "")),
                   "external_id": str(context.get("message_id") or "") or None}
-        end = text.lower() in END_WORDS
         try:
             posted = await post_message(task_id, label, {"text": "" if end else text},
                                         has_planner=has_planner(task_id), bus=bus, source=source, via=channel,
@@ -133,10 +134,14 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
                 logger.info("a %s reply to gate %s of task %s was refused: %s", channel, label, task_id, exc)
                 return _refused(text)
             # It stopped waiting meanwhile, or the task completed: the Manager hears it as a closed gate's.
+            if end:
+                return Route(RouteKind.REFUSED, reply=ENDED_REPLY)
             return _closed(task_id, label, str(exc))
         kept = posted["delivered"] == "kept"
         said = receipt(await task_name(task_id), label, end=end, kept=kept)
         return Route(RouteKind.KEPT if kept else RouteKind.DELIVERED, reply=said)
+    if end:  # nothing to end, and not the Manager's to answer
+        return Route(RouteKind.REFUSED, reply=ENDED_REPLY)
     return _closed(task_id, label, f"gate {label} is {gate['state']}")
 
 

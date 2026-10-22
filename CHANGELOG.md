@@ -22,6 +22,18 @@ How the agent system works today is described in
 
 - **A task can be renamed.** The task page's heading has a pencil that edits the title in place (Enter or Save stores it, Esc cancels), `PUT /api/tasks/:id/title` sets it, and the Manager's `looper_task_update` takes a `title`. A task can be renamed in any status, an ended one included; lists, the task page and later end notices use the new name, and the change is noted in the task's history (`via` `task_page` or `manager:<channel>`).
 
+## [2.13.30] - 2026-10-21
+
+### Fixed
+
+- **Backup verifier: short boolean options with a value; docs on `LOOPER_BACKUP_VERIFY_CMD`.** `docker_exec_container` now accepts `-t=false`, `-i=false` and `-it=true` in a `docker exec ... pg_dump` backup command, so the verifier is derived where it was not. The README, README.zh-CN and the agent-system doc now say that `LOOPER_BACKUP_VERIFY_CMD` and the notes root take only the `LOOPER_` prefix. Also widens the deadlines of five timing-sensitive tests (`tests/test_dsh_installed.py`, `tests/test_dsh_runtime.py`, `tests/test_gate_channels_db.py`). Behavior change: the first. Model-visible: none. ([#381](https://github.com/foolzzz/looper/pull/381))
+
+## [2.13.29] - 2026-10-21
+
+### Fixed
+
+- **Gate chat commands: `end` to a closed gate, stopped tasks' gates, paged `/gates`.** An `end` reply under a gate's card that is closed, or that meets a 409, now gets a code-written "no longer waiting" receipt and never reaches the Manager's model or chat history. `open_gates` now includes the gates of stopped and failed tasks (every task not completed or cancelled), so `/gates` lists them and `/gate N` can answer them. `/gates` is paged (20 per page, `/gates N` for page N; numbers continue across pages and stay bound to the last delivered list's snapshot). Also fixes flaky deadlines in `tests/test_pi_steer.py` and `tests/test_provider_pricing.py`. Behavior changes: the three above. Model-visible: the Manager no longer sees `end` replies to closed gates; no prompt text, tool schema or tool result changed. ([#382](https://github.com/foolzzz/looper/pull/382))
+
 ## [2.13.28] - 2026-10-21
 
 ### Fixed

@@ -1,7 +1,7 @@
 """/gates, /gate N <answer> and /gate N end: the user answers or ends a gate from a chat, in code, never by the
 Manager's model (the Manager intercepts them next to /new).
 
-``/gates`` lists the gates that wait for the user: in a private chat (and the web chat) all of them, in every chat
+``/gates`` lists (``LISTED`` per page; ``/gates 2`` is the next page, its numbers go on) the gates that wait for the user: in a private chat (and the web chat) all of them, in every chat
 and task, in a group chat that group's. The list is numbered, and the numbers are kept as a snapshot of the last
 list sent in that chat (for one sender, ``SNAPSHOT_TTL_SEC``): ``/gate N`` refers to the snapshot, so a number never
 lands on a gate other than the one the user saw. ``/gate N <answer>`` adds the answer to gate N as the user's
@@ -33,7 +33,7 @@ SNAPSHOT_TTL_SEC = 3600
 LISTED = 20
 # "/gates", "/gate 2 text", and Telegram's "/gate@bot 2 text".
 _COMMAND = re.compile(r"^/(gates?)(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
-USAGE = "用法：/gates 列出在等你的关卡；/gate N <回答> 回答第 N 个；/gate N end 按现在的结论结束第 N 个。"
+USAGE = "用法：/gates [页码] 列出在等你的关卡；/gate N <回答> 回答第 N 个；/gate N end 按现在的结论结束第 N 个。"
 HOW_TO_ANSWER = "回答：/gate N <你的回答>；按现在的结论结束：/gate N end。"
 NONE_WAITING = "现在没有在等你的关卡。"
 
@@ -42,6 +42,7 @@ NONE_WAITING = "现在没有在等你的关卡。"
 class Entry:
     """One line of a sent list: the gate the number stands for."""
 
+    number: int
     task_id: str
     label: str
     step_id: str
@@ -98,12 +99,12 @@ def _where(envelope: MessageEnvelope) -> tuple[str, str, str, bool, str]:
     return channel, chat, sender, group, own
 
 
-async def _waiting(channel: str, own: str, group: bool) -> list[dict[str, Any]]:
+async def _waiting(channel: str, own: str, group: bool, limit: int) -> list[dict[str, Any]]:
     if not group:
-        return await db_user_gates.open_gates(LISTED)
+        return await db_user_gates.open_gates(limit)
     dashboard = await dashboard_target()
     gates = await db_user_gates.open_gates(
-        LISTED, chat=(channel, own),
+        limit, chat=(channel, own),
         dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) == (channel, own))
     here = []
     for gate in gates:
@@ -129,17 +130,21 @@ def _entry_text(number: int, gate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _list(envelope: MessageEnvelope) -> str:
+async def _list(envelope: MessageEnvelope, page: int = 1) -> str:
     channel, chat, sender, group, own = _where(envelope)
-    gates = (await _waiting(channel, own, group))[:LISTED]
+    first = (max(page, 1) - 1) * LISTED
+    waiting = await _waiting(channel, own, group, first + LISTED + 1)
+    gates, more = waiting[first:first + LISTED], len(waiting) > first + LISTED
     key = (channel, chat, sender)
     _snapshots.pop(key, None)
     _pending.pop(key, None)
     if not gates:
-        return NONE_WAITING
+        return NONE_WAITING if first == 0 else f"没有第 {page} 页，最近一次列表以 /gates 为准。"
+    numbered = list(enumerate(gates, first + 1))
     _pending[key] = (envelope.message_id, [
-        Entry(str(g["task_id"]), str(g["step_key"]), str(g["step_id"]), _name(g)) for g in gates])
-    return "\n".join(["在等你的关卡：", *(_entry_text(i, g) for i, g in enumerate(gates, 1)), "", HOW_TO_ANSWER])
+        Entry(i, str(g["task_id"]), str(g["step_key"]), str(g["step_id"]), _name(g)) for i, g in numbered])
+    next_page = [f"还有更多：/gates {page + 1} 看下一页。"] if more else []
+    return "\n".join(["在等你的关卡：", *(_entry_text(i, g) for i, g in numbered), "", *next_page, HOW_TO_ANSWER])
 
 
 async def _fresh_list(envelope: MessageEnvelope, why: str) -> str:
@@ -157,9 +162,9 @@ async def _gate(envelope: MessageEnvelope, number: str, answer: str, *, has_plan
         return await _fresh_list(envelope, "请先用 /gates 看一下列表，编号以最近一次列表为准。")
     entries = saved[1]
     index = int(number)
-    if not 1 <= index <= len(entries):
+    entry = next((e for e in entries if e.number == index), None)
+    if entry is None:
         return await _fresh_list(envelope, f"没有第 {number} 个关卡，编号以最近一次列表为准。")
-    entry = entries[index - 1]
     end = answer.lower() == "end"
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
@@ -187,7 +192,9 @@ async def handle(envelope: MessageEnvelope, text: str, *, has_planner: Any, bus:
         return None
     word, rest = match.group(1).lower(), (match.group(2) or "").strip()
     if word == "gates":
-        return await _list(envelope)
+        if rest and not rest.isdigit():
+            return USAGE
+        return await _list(envelope, int(rest) if rest else 1)
     number, _, answer = rest.partition(" ")
     answer = answer.strip()
     if not number.isdigit() or not answer:

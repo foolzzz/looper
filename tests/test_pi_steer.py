@@ -279,7 +279,9 @@ def test_startup_and_protocol_failures_are_explicit(tmp_path: Path, scenario: st
                                      'usage_parse_error', 'fast_rejected', 'fast_timeout'])
 def test_rpc_failures_preserve_accumulated_model_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                      scenario: str) -> None:
-    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 0.15)
+    # Only the timeout scenario waits for the short deadline: the others fail on what the process says, and a short
+    # deadline would race a loaded machine's process startup.
+    monkeypatch.setattr(pi_steer, '_PROMPT_TIMEOUT_SEC', 0.15 if scenario == 'fast_timeout' else 10.0)
     events = asyncio.run(_run(tmp_path, scenario))
     result, = [event for event in events if event['type'] == 'result']
     assert result['is_error'] is True
