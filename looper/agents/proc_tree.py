@@ -428,7 +428,6 @@ class TurnTree:
         self.label = label
         self.seen: dict[int, str | None] = {}
         self._groups: Tree = {}
-        self._baseline: set[int] = set()
         self._refreshed = float("-inf")
         self._lock = asyncio.Lock()
         self._ticker: asyncio.Task[None] | None = None
@@ -479,11 +478,6 @@ class TurnTree:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
 
-    def baseline(self) -> None:
-        """Remember the current members; ``end_new`` leaves them running."""
-        self._merge(_tree(self.process, _snapshot(), self._groups))
-        self._baseline = set(self.seen)
-
     async def _reused(self) -> frozenset[int]:
         known = {pid: started for pid, started in self.seen.items() if started is not None}
         current = await asyncio.to_thread(_start_times, known)
@@ -524,11 +518,6 @@ class TurnTree:
         await self.refresh(force=True)
         await self._end_all(await self._reused())
         await _reap(self.process, self.label)
-
-    async def end_new(self) -> None:
-        """End the members that are not in the baseline; the agent and the baseline members survive."""
-        await self.refresh(force=True)
-        await self._end_all(frozenset(self._baseline | {self.process.pid} | await self._reused()))
 
 
 def track(process: Any, *, label: str = "agent") -> TurnTree:

@@ -1101,7 +1101,8 @@ class AgentHTTPServer:
                     "method": getattr(method, "value", method)})
             else:
                 errors = {"not_running": "No turn is running.",
-                          "other_message": "The running turn answers a different message."}
+                          "other_message": "The running turn answers a different message.",
+                          "cannot_interrupt": "This runtime cannot interrupt a reply."}
                 response = _json_response(HTTP_409, {"state": result.value, "error": errors[result.value]})
         writer.write(response)
         await writer.drain()
@@ -1121,7 +1122,8 @@ class AgentHTTPServer:
             response = _json_response(HTTP_200, {"turn": None if current is None else {
                 "message_id": current.message_id, "client_message_id": current.client_message_id,
                 "channel": current.channel, "started_at": current.received_at.isoformat(), "state": current.phase.value,
-                "method": getattr(current.method, "value", current.method), "stopping": current.stop is not None}})
+                "method": getattr(current.method, "value", current.method), "stopping": current.stop is not None,
+                "can_interrupt": agent.can_interrupt}})
         writer.write(response)
         await writer.drain()
 

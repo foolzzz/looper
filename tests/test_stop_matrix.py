@@ -13,16 +13,19 @@ Each runtime runs a stand-in process (real pipes, real process trees). A turn is
 - ``tail``: the process has exited and its stderr is read (per-turn runtimes, and the Grok fallback).
 
 Every cell checks the same things: the stop is not lost (the turn ends stopped, never as a success); it ends within a
-bound with every process the stopped turn started gone; nothing of it reaches the next turn; the next turn runs and
-resumes the same session. The Manager's own phases (received, preparing, starting, running, ended) over the same
+bound; a runtime that ended the turn on its interrupt (``CONTROL``, ``CANCEL``) had no process signalled, the tool the
+turn started included, and one that did not (or a per-turn process) was ended with its group and tree; nothing of it
+reaches the next turn; the next turn runs and resumes the same session. The Manager's own phases (received, preparing, starting, running, ended) over the same
 stand-ins are in ``tests/test_manager_stop_matrix.py``; the table of cells is in ``chat-stop-v2.zh-CN.md`` 8.2.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -268,12 +271,12 @@ def test_resident_claude_stop_in_every_window(
         nxt = Seen()
         after = await asyncio.wait_for(session.run_turn("mode:answer", nxt), BOUND)
         await session.stop(kill=True)
-        return method, turn, seen, kept, alive, after, nxt, process
+        return method, turn, seen, kept, pids, alive, after, nxt, process
 
-    method, turn, seen, kept, alive, after, nxt, process = asyncio.run(asyncio.wait_for(run(), 60))
+    method, turn, seen, kept, pids, alive, after, nxt, process = asyncio.run(asyncio.wait_for(run(), 60))
     if window == "done" or (obey and window != "blocked"):
         assert method is StopMethod.CONTROL and kept  # the process and its session stay for the next turn
-        assert alive == [process]  # a tool the turn started is gone
+        assert process in alive and alive == pids  # nothing was signalled: a tool the turn started is Claude's
     else:
         assert method is StopMethod.KILL and alive == []
     assert _stopped(turn) and turn.stopped is method, turn.result_event
@@ -363,7 +366,7 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
         session._env = env
         stall.unlink(missing_ok=True)
         gone = pid is None or not _alive(pid) or session.pid == pid
-        gone = gone and not any(_alive(p) for p in tool_pids)  # (a tool's process in a session of its own too)
+        tools = [p for p in tool_pids if _alive(p)]  # (a tool's process in a session of its own)
         transport = session.transport
         if session.stale("s"):  # the owner starts over, resuming the saved session
             await session.stop()
@@ -373,10 +376,15 @@ def test_grok_acp_stop_in_every_window(tmp_path: Path, window: str, monkeypatch:
         after = await asyncio.wait_for(session.run_turn("next", nxt), BOUND)
         resumed = session._session
         await session.stop()
-        return method, turn, seen, gone, transport, after, nxt, sid, resumed
+        for tool in tools:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(tool, signal.SIGKILL)
+        return method, turn, seen, gone, tools, transport, after, nxt, sid, resumed
 
-    method, turn, seen, gone, transport, after, nxt, sid, resumed = asyncio.run(asyncio.wait_for(run(), 60))
+    method, turn, seen, gone, tools, transport, after, nxt, sid, resumed = asyncio.run(asyncio.wait_for(run(), 60))
     assert method is (StopMethod.KILL if window in ("before_spawn", "spawning", "blocked") else StopMethod.CANCEL)
+    if window == "tool":
+        assert tools  # Grok ended the turn on its cancel: nothing was signalled, its tool is its own
     assert _stopped(turn) and turn.stopped is method, turn.result_event
     assert turn.result_event.get("is_error"), turn.result_event  # never a success
     assert not seen.late and gone

@@ -609,38 +609,6 @@ def test_turn_tree_leaves_a_reused_pid_alone(tmp_path: Path) -> None:
     assert len(asyncio.run(_run())) == 1
 
 
-def test_turn_tree_end_new_leaves_the_agent_and_earlier_children(tmp_path: Path) -> None:
-    code = ("import subprocess, sys\n"
-            "old = subprocess.Popen(['/bin/sleep', '60'])\nprint('go', flush=True)\n"
-            "sys.stdin.readline()\n"
-            "new = subprocess.Popen(['/bin/sleep', '60'])\nopen('new.pid', 'w').write(str(new.pid))\n"
-            "print(old.pid, flush=True)\nsys.stdin.read()\n")
-
-    async def _run() -> tuple[list[int], list[int]]:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, start_new_session=True)
-        assert process.stdin and process.stdout
-        await process.stdout.readline()
-        tree = proc_tree.TurnTree.track(process, label="turn")
-        tree.baseline()
-        process.stdin.write(b"\n")
-        await process.stdin.drain()
-        old = int((await process.stdout.readline()).decode())
-        new = int(await _wait_file(tmp_path / "new.pid"))
-        try:
-            await tree.end_new()
-            return _running([new]), _running([process.pid, old], settle=0)
-        finally:
-            for pid in _running([process.pid, old, new], settle=0):
-                os.kill(pid, signal.SIGKILL)
-            await process.wait()
-
-    new_left, survivors = asyncio.run(_run())
-    assert new_left == []
-    assert len(survivors) == 2
-
-
 def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path) -> None:
     code = ("import subprocess, sys\nsys.stdin.readline()\n"
             "c = subprocess.Popen(['/bin/sleep', '60'])\nopen('c.pid', 'w').write(str(c.pid))\nsys.stdin.read()\n")
@@ -735,26 +703,3 @@ def test_turn_tree_end_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> 
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run()) == []
-
-
-def test_turn_tree_end_new_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> None:
-    code = ("import subprocess, sys\nsys.stdin.readline()\n"
-            "subprocess.Popen([sys.executable, '-c', " + repr(_MIDDLE) + "]).wait()\nsys.stdin.read()\n")
-
-    async def _run() -> tuple[list[int], list[int]]:
-        process = await _spawn_python(tmp_path, code)
-        tree = proc_tree.TurnTree.track(process, label="turn")
-        tree.baseline()
-        process.stdin.write(b"\n")  # type: ignore[union-attr]
-        child = await _child_that_leaves_its_group(tmp_path, tree)
-        try:
-            await tree.end_new()
-            return _running([child]), _running([process.pid], settle=0)
-        finally:
-            for pid in _running([child, process.pid], settle=0):
-                os.kill(pid, signal.SIGKILL)
-            await process.wait()
-
-    child_left, agent = asyncio.run(_run())
-    assert child_left == []
-    assert len(agent) == 1  # the agent survives end_new

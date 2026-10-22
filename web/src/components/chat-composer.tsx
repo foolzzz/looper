@@ -11,6 +11,8 @@ export interface ChatComposerProps {
   history: string[];
   replying: boolean;
   canStop: boolean;
+  /** Why a reply cannot be stopped though stopping is on (its runtime has no interrupt): Stop shows disabled with it. */
+  stopRefusal?: string;
   onSend: (text: string) => void;
   onStop: () => void;
   notice?: string;
@@ -23,7 +25,8 @@ const REPLYING_STOPPABLE_PLACEHOLDER = "Replying… Enter queues, Esc stops";
 const FULL_NOTICE = "Queue is full";
 
 export function ChatComposer(props: ChatComposerProps) {
-  const { draft, onDraft, staged, onStaged, history, replying, canStop, onSend, onStop, notice, disabled } = props;
+  const { draft, onDraft, staged, onStaged, history, replying, canStop, stopRefusal, onSend, onStop, notice, disabled } =
+    props;
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const browsingRef = useRef<{ index: number; saved: string } | null>(null);
   const shownRef = useRef<string | null>(null);
@@ -184,10 +187,19 @@ export function ChatComposer(props: ChatComposerProps) {
         />
         {replying ? (
           <>
-            {canStop && (
+            {canStop ? (
               <Button type="button" variant="destructive" className="h-11 w-11 shrink-0 p-0" aria-label="Stop the reply (Esc)" onClick={onStop}>
                 <Square className="h-4 w-4 fill-current" aria-hidden="true" />
               </Button>
+            ) : (
+              stopRefusal && (
+                // A disabled button gets no pointer events: the wrapper carries the tooltip.
+                <span title={stopRefusal} className="shrink-0">
+                  <Button type="button" variant="destructive" className="h-11 w-11 p-0" aria-label={`Stop the reply: ${stopRefusal}`} disabled>
+                    <Square className="h-4 w-4 fill-current" aria-hidden="true" />
+                  </Button>
+                </span>
+              )
             )}
             <Button type="submit" className="h-11 min-w-11 shrink-0" aria-label="Queue message" disabled={disabled || !hasDraft || full}>
               Queue

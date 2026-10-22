@@ -34,9 +34,11 @@ class _Writer:
 class _Manager:
     """A stand-in whose ``stop_turn`` marks the token like the real one does."""
 
-    def __init__(self, result: StopResult = StopResult.STOPPING, turn: TurnToken | None = None) -> None:
+    def __init__(self, result: StopResult = StopResult.STOPPING, turn: TurnToken | None = None, *,
+                 can_interrupt: bool = True) -> None:
         self.result = result
         self.current_turn = turn
+        self.can_interrupt = can_interrupt
         self.stops: list[tuple[str, str]] = []
 
     async def stop_turn(self, message_id: str, *, via: str) -> StopResult:
@@ -99,7 +101,7 @@ def test_stop_method_unknown_yet_is_null() -> None:
     assert (status, body) == (200, {"state": "already_stopping", "phase": "received", "method": None})
 
 
-@pytest.mark.parametrize("result", [StopResult.NOT_RUNNING, StopResult.OTHER_MESSAGE])
+@pytest.mark.parametrize("result", [StopResult.NOT_RUNNING, StopResult.OTHER_MESSAGE, StopResult.CANNOT_INTERRUPT])
 def test_stop_conflicts(result: StopResult) -> None:
     status, body = _call(_Manager(result), "POST", "/api/chat/stop", b'{"message_id": "m1"}')
     assert status == 409 and body["state"] == result.value and body["error"].endswith(".")
@@ -116,9 +118,17 @@ def test_turn_reports_running_turn_only_for_its_session() -> None:
     assert status == 200
     assert body == {"turn": {"message_id": "m1", "client_message_id": None, "channel": "web",
                              "started_at": "2026-01-02T03:04:05+00:00", "state": "received", "method": None,
-                             "stopping": True}}
+                             "stopping": True, "can_interrupt": True}}
     assert _call(manager, "GET", "/api/chat/turn", query={"session_id": "other"}) == (200, {"turn": None})
     assert _call(_Manager(), "GET", "/api/chat/turn", query={"session_id": "s1"}) == (200, {"turn": None})
+
+
+def test_stop_of_a_runtime_without_an_interrupt_is_refused_plainly() -> None:
+    status, body = _call(_Manager(StopResult.CANNOT_INTERRUPT, turn=_turn(), can_interrupt=False), "POST",
+                         "/api/chat/stop", b'{"message_id": "m1"}')
+    assert (status, body) == (409, {"state": "cannot_interrupt", "error": "This runtime cannot interrupt a reply."})
+    _, body = _call(_Manager(turn=_turn(), can_interrupt=False), "GET", "/api/chat/turn", query={"session_id": "s1"})
+    assert body["turn"]["can_interrupt"] is False
 
 
 def test_turn_carries_the_envelope_id_and_the_pages_own_id() -> None:

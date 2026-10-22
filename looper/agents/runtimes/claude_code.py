@@ -126,6 +126,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
     run_input = True  # stdin stays open until the run's first result
+    can_interrupt = True  # its resident session's control request ``interrupt``
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     # Its own login (the Claude subscription), and an API key for Anthropic's API or an Anthropic-format endpoint.
     auth_kinds = frozenset({AuthKind.OAUTH, AuthKind.API_KEY})

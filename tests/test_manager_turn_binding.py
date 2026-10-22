@@ -37,6 +37,9 @@ class _PerTurnSession:
     label = "manager"
     pid = None
     shares_bridge = False
+    # Stoppable, though Looper's per-turn runtimes are not (they have no interrupt): what is tested is the binding of
+    # a call that comes late, which a turn bridged per turn has whatever ended it.
+    can_interrupt = True
 
     def __init__(self, ops: ManagerOps, turn_file: Path) -> None:
         self.ops, self.turn_file = ops, turn_file
@@ -138,8 +141,11 @@ def _tool_use(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, A
         {"type": "tool_use", "id": call_id, "name": name, "input": arguments}]}}
 
 
-def _resident(script: Any, *, per_turn: bool = False) -> tuple[list[Any], list[dict[str, Any]], list[str]]:
-    """Run one turn of a runtime driven by ``script``; returns (script's answers, writes run, reads run)."""
+def _resident(script: Any, *, per_turn: bool = False, swapped_from: Any = None,
+              ) -> tuple[list[Any], list[dict[str, Any]], list[str]]:
+    """Run one turn of a runtime driven by ``script``; returns (script's answers, writes run, reads run).
+    ``swapped_from``: the Manager's session until then is a per-turn one of that runtime, swapped for this one
+    when the turn starts."""
     answers: list[Any] = []
     writes: list[dict[str, Any]] = []
     reads: list[str] = []
@@ -165,10 +171,23 @@ def _resident(script: Any, *, per_turn: bool = False) -> tuple[list[Any], list[d
             session = _ResidentSession(ops, turn_file, script)
             session.shares_bridge = not per_turn
             session.answers = answers  # type: ignore[attr-defined]
-            manager, bus, _ = _manager(root, session)  # type: ignore[arg-type]
+            if swapped_from is None:
+                manager, bus, _ = _manager(root, session)  # type: ignore[arg-type]
+            else:
+                from looper.agents.runtimes import CLAUDE_CODE
+
+                before = _PerTurnSession(ops, turn_file)
+                manager, bus, _ = _manager(root, before)  # type: ignore[arg-type]
+                manager._claude_runtime = swapped_from
+                assert CLAUDE_CODE is not swapped_from
+                CLAUDE_CODE.resident_session = lambda label: session  # type: ignore[method-assign]
             manager.ops = ops
-            await manager._handle(_web("改一下"))
-            await bus.shutdown()
+            try:
+                await manager._handle(_web("改一下"))
+            finally:
+                if swapped_from is not None:
+                    del CLAUDE_CODE.resident_session  # type: ignore[attr-defined]
+                await bus.shutdown()
 
     asyncio.run(run())
     return answers, writes, reads
@@ -289,3 +308,60 @@ def test_resident_grok_use_tool_matches_the_inner_tool_and_arguments(
     answers, writes, _ = _resident(script)
     assert answers[0]["status"] == "ok", answers
     assert writes == [{"n": 4}]
+
+
+def _text(words: str) -> dict[str, Any]:
+    return {"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [
+        {"type": "text", "text": words}]}}
+
+
+@pytest.mark.parametrize("slow_event", ["earlier", "same"])
+def test_resident_write_matches_though_recording_the_events_is_slow(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch, slow_event: str) -> None:
+    # The runtime hands its events on in order, one at a time; recording one (a database write) takes longer than
+    # the match waits. The bridge's call comes as the tool_use is read: it still matches, as soon as it is read.
+    from looper.db import llm_records
+    from looper.agents.ops import service
+
+    monkeypatch.setattr(service, "MATCH_WAIT_SEC", 0.3)
+    real_append = llm_records.append_events
+
+    async def slow_append(record_id: Any, events: Any, *args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.8)
+        return await real_append(record_id, events, *args, **kwargs)
+
+    monkeypatch.setattr(llm_records, "append_events", slow_append)
+
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        async def stream() -> None:  # the runtime's read loop: the next event only once the last is handled
+            if slow_event == "earlier":
+                await on_event(_text("我来改一下"))
+            await on_event(_tool_use("tu1", "mcp__looper__t_write", {"n": 1}))
+
+        reading = asyncio.create_task(stream())
+        await asyncio.sleep(0)
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding, call_id="tu1"))
+        await reading
+
+    answers, writes, _ = _resident(script)
+    assert answers[0]["status"] == "ok", answers
+    assert writes == [{"n": 1}]
+
+
+def test_resident_write_is_matched_in_the_turn_that_swaps_a_per_turn_runtime_for_it(
+        agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Manager's session was a per-turn runtime's (no matching); this turn's settings name Claude Code, so the
+    # turn starts its resident session: the turn's calls are matched from its first turn on.
+    from looper.agents.ops import service
+    from looper.agents.runtimes import ADAPTERS
+
+    monkeypatch.setattr(service, "MATCH_WAIT_SEC", 0.2)
+
+    async def script(session: Any, binding: str, on_event: Any) -> None:
+        session.answers.append(await session.ops.call("t_write", {"n": 1}, binding=binding))  # no tool_use of it
+        await on_event(_tool_use("tu1", "mcp__looper__t_write", {"n": 2}))
+        session.answers.append(await session.ops.call("t_write", {"n": 2}, binding=binding, call_id="tu1"))
+
+    answers, writes, _ = _resident(script, swapped_from=ADAPTERS["omp"])
+    assert answers[0]["error"]["code"] == "not_this_turn", answers
+    assert answers[1]["status"] == "ok" and writes == [{"n": 2}]

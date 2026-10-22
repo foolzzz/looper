@@ -141,6 +141,7 @@ class GrokRuntime(RuntimeAdapter):
     # The Manager's and a Planner's session is one process over ACP (``grok_acp``); a Worker's or Reviewer's run
     # stays headless.
     resident_transport = ResidentTransport.ACP
+    can_interrupt = True  # ACP's ``session/cancel`` (not once the session has fallen back to per turn)
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``, with an empty ``GROK_HOME`` of its own so nothing of the operator's is read."""
