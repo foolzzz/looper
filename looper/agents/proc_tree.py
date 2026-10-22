@@ -241,14 +241,21 @@ async def _record_tree(pid: int, tree: Tree) -> None:
     _write_record(path.parent, pid, started, _server, tree=starts)
 
 
+def keep(end: Awaitable[None]) -> asyncio.Future[None]:
+    """Run ``end`` (a tree's end) in a task held until it finishes, so a caller that stops waiting for it (or
+    forgets it) never leaves it to be collected before its last SIGKILL."""
+    task = asyncio.ensure_future(end)
+    _finishing.add(task)
+    task.add_done_callback(_finishing.discard)
+    return task
+
+
 async def finish(end: Awaitable[None]) -> None:
     """Await ``end`` (a tree's end) in a task of its own that a cancel of the caller does not reach, so its signals
     and its kill of strays come though the step that stops the agent is given up meanwhile (a turn's ``keep`` whose
     budget runs out). A cancel waits for the end to finish, then propagates; a second one stops only the wait, and
     the end runs on (each end is bounded)."""
-    task = asyncio.ensure_future(end)
-    _finishing.add(task)
-    task.add_done_callback(_finishing.discard)
+    task = keep(end)
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -1079,7 +1086,10 @@ class TurnTree:
         vanished = vanished or gone
         # Every one it owns, not only those the snapshot lists: one started since (a setsid command a shell starts
         # as it is told to exit) would otherwise be missed, and the end finish while it runs.
-        unseen = [pid for pid in owned if pid not in reached and pid not in skip and pid not in known]
+        # One the start times confirmed is a stray already; one they did not (``ps`` blocked) has its identity read
+        # here as any other owned one's, else it would be left running.
+        verified = {stray.pid for stray in strays}
+        unseen = [pid for pid in owned if pid not in reached and pid not in skip and pid not in verified]
         if unseen:
             if _NATIVE:
                 starts = await self._listing(_native_starts, unseen, until=owned_until, default={},

@@ -77,8 +77,10 @@ async def _exited(process: asyncio.subprocess.Process) -> None:
 
 
 def _end_bound() -> float:
-    """How long a turn waits for the cleanup of its process tree: the grace, the reap and a second."""
-    return proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + 1
+    """How long a turn waits for the cleanup of its process tree: as long as ``TurnTree.end`` may take (the grace,
+    the reap, the last look and the ownership listings' own budget when ``ps`` blocks) and a second."""
+    return (proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + proc_tree._LAST_LOOK_SEC + 2 * proc_tree._OWNED_SEC
+            + 1)
 
 
 def session_dir_name(label: str) -> str:
@@ -224,7 +226,7 @@ class PerTurnSession(ABC):
         """The turn's cancel was requested: end its tree once the process exists (otherwise ``_run_turn`` sees the
         request when it has spawned)."""
         if self._tree is not None and self._end_task is None:
-            self._end_task = asyncio.ensure_future(self._tree.end())
+            self._end_task = proc_tree.keep(self._tree.end())
 
     def _stopped_turn(self, *, session_started: bool, usage: Usage, complete: bool, sent: bool) -> ResidentTurn:
         from ..claude_cli import ResidentTurn, user_stop_result
@@ -236,7 +238,7 @@ class PerTurnSession(ABC):
     async def _end_tree(self, process: asyncio.subprocess.Process, tree: proc_tree.TurnTree) -> None:
         """End the turn's tree, through the stop's own end when it is under way; bounded."""
         if self._end_task is None:
-            self._end_task = asyncio.ensure_future(tree.end())
+            self._end_task = proc_tree.keep(tree.end())
         try:
             await asyncio.wait_for(asyncio.shield(self._end_task), _end_bound())
         except asyncio.TimeoutError:
@@ -348,7 +350,7 @@ class PerTurnSession(ABC):
         if tree is None:
             return
         # Shielded: the bound stops the wait, not the end, whose last look and SIGKILL of strays still run.
-        self._finished_end = end = asyncio.ensure_future(tree.end())
+        self._finished_end = end = proc_tree.keep(tree.end())
         try:
             await asyncio.wait_for(asyncio.shield(end), _end_bound())
         except asyncio.TimeoutError:
