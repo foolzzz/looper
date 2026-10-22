@@ -1017,6 +1017,8 @@ class AgentHTTPServer:
                     # The Manager the task belongs to.
                     "manager_id": t.get("manager_id") or "manager",
                     "manager_name": manager_names.get(t.get("manager_id") or "manager"),
+                    # The task template it came from, as it said then (null for none).
+                    "template": t.get("template"),
                     "status": t.get("status", "pending"),
                     "group": task_group(t.get("status")).value,
                     "phase": t.get("phase", "pending"),

@@ -41,6 +41,7 @@ def test_task_detail_and_list_name_the_manager_and_template(monkeypatch: pytest.
         assert status == 200
         rows = {t["task_id"]: t for t in listed["tasks"]}
         assert (rows["task-a"]["manager_id"], rows["task-a"]["manager_name"]) == ("manager-review", "Code review")
-        assert rows["task-b"]["manager_id"] == "manager"
+        assert rows["task-a"]["template"] == TEMPLATE
+        assert rows["task-b"]["manager_id"] == "manager" and rows["task-b"]["template"] is None
 
     _run(body, monkeypatch)
