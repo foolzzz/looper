@@ -940,6 +940,9 @@ class _Importer:
         # Each channel's configuration as the import leaves it (the file's over this machine's): its sender allowlist
         # says which chats a schedule may tell.
         self.channel_configs = {row["channel_type"]: dict(row["config"] or {}) for row in target.channels.values()}
+        # The configs this import gives the built-in channels by channel_id, for the same-bot check of the later ones
+        # (a preview writes none).
+        self.bot_configs: dict[str, dict[str, Any]] = {}
         # The schedules this import adds or rewrites, disabled; those that had a directory of their own.
         self.disabled_schedules: list[str] = []
         self.min_interval: int | None = None  # the file's, once read
@@ -1645,9 +1648,11 @@ class _Importer:
                 raise _Skip(str(exc)) from None
             values = {"display_name": _string(entry.get("display_name", ""), "display_name", max_chars=200),
                       "enabled": _boolean(entry.get("enabled", False), "enabled"), "config": config}
+            await self._refuse_same_bot(channel_id, kind, config)
         except _Skip as exc:
             self.record("channels", str(kind), Action.SKIPPED, reason=str(exc))
             return
+        self.bot_configs[channel_id] = config
         self.channel_configs[kind] = config
         current = {"display_name": row["display_name"], "enabled": row["enabled"],
                    "config": dict(row["config"] or {})} if row else None
@@ -1667,6 +1672,25 @@ class _Importer:
         if needed:
             self.plan.need_secret.append(NeededSecret("channels", kind, tuple(needed),
                                                       ("channel", channel_id) if row or self.apply else None))
+
+    async def _refuse_same_bot(self, channel_id: str, kind: str, config: Mapping[str, Any]) -> None:
+        """``_Skip`` when the built-in channel, with ``config`` and the token stored for it (with none, the built-in
+        Telegram row's environment one), would be the same bot as another channel row, a Manager's bot or another
+        built-in channel as this import leaves it: the server would not start the later row (``bots.clashes``)."""
+        from ..db import channel_configs as db_channel_configs
+        from . import projects
+        from .channels.bot_api import refuse_same_bot
+        from .channels.bots import builtin_env_token
+
+        if await self.conn.fetchval("SELECT to_regclass('channel_secrets')") is None:
+            return  # a preview on a database without the schema yet: it holds no other bot
+        secret = await db_channel_configs.get_bot_token(channel_id, pool=self.conn)
+        env = builtin_env_token(config) if kind == "telegram" and not secret else ""
+        try:
+            await refuse_same_bot(self.conn, kind, config, secret, env_token=env, exclude=channel_id,
+                                  configs=self.bot_configs)
+        except projects.RequestError as exc:
+            raise _Skip(str(exc)) from None
 
     # --- catalog ---
 

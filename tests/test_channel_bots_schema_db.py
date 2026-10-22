@@ -195,9 +195,11 @@ def test_gate_posts_are_keyed_by_bot_and_an_old_binary_still_writes(monkeypatch:
                                      chat="42", external_ids=["7"], pool=pool)
         await user_gates.record_post(mid, "task-a", "sent", channel="telegram", channel_id="channel-telegram",
                                      chat="42", external_ids=["7"], pool=pool)
-        rows = await pool.fetch("SELECT channel_id FROM task_user_gate_posts")
-        assert [r["channel_id"] for r in rows] == ["channel-telegram-2"]
+        # Two bots' message 7 in chat 42 are two posts; the old key holds only the built-in bot's.
+        rows = await pool.fetch("SELECT channel, channel_id FROM task_user_gate_posts ORDER BY id")
+        assert [tuple(r) for r in rows] == [(None, "channel-telegram-2"), ("telegram", "channel-telegram")]
         await pool.execute(old_sql, mid, "42", "7")
+        assert await pool.fetchval("SELECT count(*) FROM task_user_gate_posts") == 2
         await user_gates.record_post(mid, "task-a", "sent", channel="lark", chat="c", external_ids=["9"], pool=pool)
         assert await pool.fetchval("SELECT channel_id FROM task_user_gate_posts WHERE external_id = '9'") \
             == "channel-lark"

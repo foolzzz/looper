@@ -132,3 +132,34 @@ def test_a_schedule_cannot_tell_a_chat_only_the_added_bot_allows(
                        for n in _plan(out)["notes"]), _plan(out)["notes"]
 
     asyncio.run(_test())
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_the_built_in_channel_is_not_imported_as_an_added_bot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, apply: bool,
+) -> None:
+    # The built-in Telegram row stores no token: a bot_token_env naming the added bot's token would make it that bot,
+    # and the server would then skip the added row and answer its chats as the default Manager.
+    monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "999999:the-default-bot")
+    monkeypatch.setenv("ALT_TELEGRAM_TOKEN", "123456:another-secret-of-the-added-bot")
+
+    async def _test() -> None:
+        async with _installation() as (pool, url):
+            from looper.agents.serve import seed_channel_configs
+
+            await seed_channel_configs(pool)
+            await _add_bot(pool)
+            before = await _dump(pool)
+            path = tmp_path / "in.json"
+            path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
+                {"channel_type": "telegram", "channel_id": "channel-telegram", "display_name": "Telegram",
+                 "enabled": True, "config": {"allowed_user_ids": ["1"], "bot_token_env": "ALT_TELEGRAM_TOKEN"}}]}))
+            args = ["config", "import", str(path), "--json"] + (["--apply"] if apply else [])
+            code, out, err = await _looper(monkeypatch, url, *args)
+            assert code == 0, err
+            change = next(c for c in _plan(out)["changes"] if c["section"] == "channels")
+            assert change["action"] == "skipped" and f"({BOT})" in change["reason"], change
+            assert "another-secret" not in out + err and BOT_TOKEN not in out + err
+            assert await _dump(pool) == before
+
+    asyncio.run(_test())

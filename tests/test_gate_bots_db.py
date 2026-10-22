@@ -92,6 +92,33 @@ def test_a_reply_finds_the_gate_posted_through_its_own_bot(monkeypatch: pytest.M
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("first", ["channel-telegram-2", "channel-telegram"])
+def test_two_bots_posting_the_same_message_id_to_the_same_chat_keep_both(
+        monkeypatch: pytest.MonkeyPatch, first: str) -> None:
+    # A Telegram private chat's id is the user's in every bot, and each bot counts its message ids from 1.
+    async def test(pool: Any) -> None:
+        from looper.db import user_gates
+
+        await _two_telegram_tasks(pool)
+        posts = {"channel-telegram": "step-g1", "channel-telegram-2": "step-b1"}
+        for bot in sorted(posts, key=lambda bot: bot != first):
+            await _post(pool, posts[bot], "telegram", bot, "42", ["7"])
+        assert await pool.fetchval("SELECT count(*) FROM task_user_gate_posts") == 2
+        for bot, task in (("channel-telegram", "task-a"), ("channel-telegram-2", "task-b")):
+            found = await user_gates.find_reference("telegram", "42", ["7"], channel_id=bot)
+            assert found is not None and found["task_id"] == task, bot
+            assert await user_gates.first_post(posts[bot], bot, "42") == "7"
+        # An older binary's insert (it knows only the built-in bots) still finds the key its ON CONFLICT names.
+        message_id = await pool.fetchval("SELECT message_id FROM task_user_gate_posts WHERE channel_id = "
+                                         "'channel-telegram'")
+        await pool.execute("INSERT INTO task_user_gate_posts (message_id, task_id, channel, chat, external_id) "
+                           "VALUES ($1, 'task-a', 'telegram', '42', '7') ON CONFLICT (channel, chat, external_id) "
+                           "DO NOTHING", message_id)
+        assert await pool.fetchval("SELECT count(*) FROM task_user_gate_posts") == 2
+
+    _run(test, monkeypatch)
+
+
 def test_a_lark_message_id_is_found_in_any_chat_but_only_through_its_bot(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         from looper.db import user_gates
@@ -123,7 +150,8 @@ def test_the_courier_posts_through_the_gates_bot(monkeypatch: pytest.MonkeyPatch
             ("channel-lark-5", NotifyTarget(TargetKind.USER, "ou_me")),
             ("channel-telegram", NotifyTarget(TargetKind.CHAT, "42"))]
         rows = await pool.fetch("SELECT task_id, channel, channel_id, chat FROM task_user_gate_posts ORDER BY task_id")
-        assert [tuple(row.values()) for row in rows] == [("task-a", "lark", "channel-lark-5", "ou_me"),
+        # A Manager's own bot's posts keep channel NULL (schema.sql, task_user_gate_posts_bot_key).
+        assert [tuple(row.values()) for row in rows] == [("task-a", None, "channel-lark-5", "ou_me"),
                                                          ("task-b", "telegram", "channel-telegram", "42")]
 
     _run(test, monkeypatch)

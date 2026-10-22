@@ -2112,7 +2112,12 @@ ALTER TABLE task_user_gate_posts ADD COLUMN IF NOT EXISTS channel_id TEXT;
 ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS channel_id TEXT;
 UPDATE task_user_gate_posts SET channel_id = 'channel-' || channel WHERE channel_id IS NULL;
 UPDATE task_user_gate_messages SET channel_id = 'channel-' || channel WHERE channel_id IS NULL AND channel IS NOT NULL;
--- UNIQUE (channel, chat, external_id) stays: an older binary's ON CONFLICT names it.
+-- A post is one bot's message: (channel_id, chat, external_id) is its key. UNIQUE (channel, chat, external_id)
+-- stays for an older binary, whose ON CONFLICT names it and which knows only the built-in bots: the posts of a
+-- Manager's own bot keep channel NULL, so the built-in bot's and the other bots' posts of one chat and message id
+-- never meet in it (NULLs are distinct). For a built-in bot's posts the two keys are the same.
+ALTER TABLE task_user_gate_posts ALTER COLUMN channel DROP NOT NULL;
+UPDATE task_user_gate_posts SET channel = NULL WHERE channel_id <> 'channel-' || channel;
 CREATE UNIQUE INDEX IF NOT EXISTS task_user_gate_posts_bot_key ON task_user_gate_posts (channel_id, chat, external_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_posts_bot ON task_user_gate_posts (channel_id, external_id);
 CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_bot ON task_user_gate_messages (channel_id, external_id)

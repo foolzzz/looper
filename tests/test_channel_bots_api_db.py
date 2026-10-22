@@ -218,6 +218,39 @@ def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
     _run(test, monkeypatch)
 
 
+def test_a_token_removal_is_checked_against_a_bot_token_env_changed_meanwhile(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # One request removes the built-in Telegram row's token while another points its bot_token_env at the added
+    # bot's token: whichever lands second must see the other's change, not the row as it read it before the lock.
+    monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "3333333:AAthird-env-token")
+    monkeypatch.setenv("ALT_TELEGRAM_TOKEN", SAME_BOT_NEW_SECRET)
+
+    async def test(pool: Any) -> None:
+        from looper.agents.channels import bot_api
+
+        path = "/api/channel-configs/channel-telegram"
+        assert (await _call("PUT", path, {"bot_token": OTHER_TOKEN}))[0] == 200
+        assert (await _telegram(await _manager(pool), TOKEN))[0] == 201  # channel-telegram-2, bot 1111111
+        real = bot_api.db_channel_configs.get_config
+        raced: list[int] = []
+
+        async def get_config(channel_id: str, **kwargs: Any) -> Any:
+            row = await real(channel_id, **kwargs)
+            if not raced and not kwargs:
+                raced.append(1)
+                status, body = await _call("PUT", path, {"config": {**ALLOW, "bot_token_env": "ALT_TELEGRAM_TOKEN"}})
+                assert status == 200, body
+            return row
+
+        monkeypatch.setattr(bot_api.db_channel_configs, "get_config", get_config)
+        status, body = await _call("PUT", path, {"bot_token": None})
+        assert raced and status == 409 and "channel-telegram-2" in body["error"], body
+        assert await pool.fetchval("SELECT bot_token FROM channel_secrets WHERE channel_id = 'channel-telegram'"
+                                   ) == OTHER_TOKEN
+
+    _run(test, monkeypatch)
+
+
 def test_put_keeps_the_manager_and_checks_a_new_token(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
         manager, other = await _manager(pool), await _manager(pool, "other")
