@@ -509,6 +509,8 @@ database, a disposable `looper serve`, and fake or real mode.
 
 | dialog | what it checks |
 |---|---|
+| `template_review_task` | a scenario Manager (`code-review`, from `docs/examples`): a PR link is restated and confirmation asked before anything is created; 「确认」 creates one task from the `pr_review` template with that link |
+| `template_missing_input` | the same Manager, asked to review a PR without a link: it asks for the link and creates nothing |
 | `ask_project` | a task without a project: the Manager asks, and creates and changes nothing |
 | `confirm_create_start` | the whole flow: a small task is asked for, the Manager restates it and asks; 「确认」 creates it with a title (`looper_task_create`); 「开始」 starts it; no reply shows raw JSON |
 | `create_start_stop` | a confirmed task is created ready in the named project with its configuration in the reply; "start" starts it, "stop" stops it |

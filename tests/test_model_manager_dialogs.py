@@ -395,3 +395,102 @@ def test_omp_deepseek_example_registers():
         del os.environ["LOOPER_EVAL_API_KEY"]
     assert profile["name"] == "omp/deepseek/deepseek-flash"
     assert profile["model"]["protocol"] == "openai-chat"
+
+
+# --- The scenario Manager dialogs ---
+
+
+class RecordingApi:
+    def __init__(self):
+        self.gets, self.posts = [], []
+
+    def get(self, path, **query):
+        self.gets.append((path, query))
+        if path == "/api/llm-records":
+            return {"records": []}
+        if path == "/api/chat/turn":
+            return {"turn": None}
+        if path == "/api/chat/messages":
+            return {"messages": [{"message_id": self.posts[-1][1]["message_id"] + ":reply", "content": "ok"}]}
+        raise AssertionError(path)
+
+    def post(self, path, body):
+        self.posts.append((path, body))
+        return {}
+
+
+def _ask_once(manager):
+    api = RecordingApi()
+    with pytest.raises(dialogs.EvalError):  # no run record: the reply is not scored
+        dialogs._ask(api, "s", "hi", timeout=5, manager=manager)
+    return api
+
+
+def test_an_existing_dialog_sends_no_target_and_asks_for_manager_runs():
+    api = _ask_once(None)
+    assert "target" not in api.posts[0][1]
+    assert {q["agent_id"] for p, q in api.gets if p == "/api/llm-records"} == {"manager"}
+
+
+def test_a_scenario_manager_dialog_targets_and_reads_its_own_runs():
+    api = _ask_once("code-review")
+    assert api.posts[0][1]["target"] == {"kind": "manager", "id": "manager-code-review"}
+    reads = [q["agent_id"] for p, q in api.gets if p == "/api/llm-records"]
+    assert reads and set(reads) == {"manager-code-review"}
+
+
+def test_template_dialogs_are_selectable_and_use_the_scenario_manager():
+    cases = dialogs.select(["template_review_task", "template_missing_input"])
+    assert [c.manager for c in cases] == ["code-review"] * 2
+    assert all(c.seed is dialogs._seed_review_manager for c in cases)
+    assert cases[0].says[1].fake[0][1]["template"] == "pr_review"
+
+
+def test_review_seed_creates_the_manager_and_its_template_in_the_project():
+    class Api:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, path, body):
+            self.calls.append(("POST", path, body))
+
+        def put(self, path, body):
+            self.calls.append(("PUT", path, body))
+
+    api = Api()
+    dialogs._seed_review_manager(api, "project-x")
+    assert api.calls[0][:2] == ("POST", "/api/managers") and api.calls[0][2]["key"] == "code-review"
+    assert api.calls[1][:2] == ("PUT", "/api/managers/manager-code-review/templates/pr_review")
+    assert api.calls[1][2]["project_id"] == "project-x"
+
+
+class TemplateApi:
+    def get(self, path, **query):
+        assert path == "/api/tasks"
+        return {"tasks": []}
+
+
+def template_look(reply, monkeypatch, fake=False):
+    monkeypatch.setattr(dialogs, "_trail", lambda *a, **k: [])
+    return dialogs.Look(TemplateApi(), None, reply, "disposable", 0, frozenset(), fake)
+
+
+@pytest.mark.parametrize("reply, ok", [
+    ("好的", False),
+    ("要评审 https://github.com/octo-org/octo-repo/pull/42。", False),
+    ("要评审 https://github.com/octo-org/octo-repo/pull/42，确认吗？", True),
+    ("Review pull/42 — confirm?", True),
+])
+def test_asked_to_confirm_template(monkeypatch, reply, ok):
+    assert (dialogs._asked_to_confirm_template(template_look(reply, monkeypatch)) is None) is ok
+
+
+def test_asked_to_confirm_template_checks_only_the_state_in_fake_mode(monkeypatch):
+    assert dialogs._asked_to_confirm_template(template_look("好的", monkeypatch, fake=True)) is None
+    assert dialogs._asked_to_confirm_template(template_look('{"a": 1}', monkeypatch, fake=True))
+
+
+def test_asked_for_the_link(monkeypatch):
+    assert dialogs._asked_for_the_link(template_look("请给我 PR 链接", monkeypatch)) is None
+    assert dialogs._asked_for_the_link(template_look("好的", monkeypatch))
+    assert dialogs._asked_for_the_link(template_look("好的", monkeypatch, fake=True)) is None
