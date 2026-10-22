@@ -436,7 +436,8 @@ def _ops_file(tmp_path: Path, backup: dict) -> ops_config.OpsConfig:
     ["/usr/local/bin/docker", "exec", "--env", "A=b", "--env=C=d", "-eE=f", "--user=postgres", "-w", "/tmp", "pgc",
      "pg_dump"],
     ["docker", "exec", "-it", "-i", "--privileged", "pgc", "/usr/bin/pg_dump"],
-], ids=["plain", "short-options", "long-options", "flags"])
+    ["docker", "exec", "-t=false", "-i=false", "-it=true", "pgc", "pg_dump"],
+], ids=["plain", "short-options", "long-options", "flags", "short-booleans-with-values"])
 def test_the_verifier_is_derived_from_a_docker_exec_pg_dump_in_the_ops_file(tmp_path, command):
     ops = _ops_file(tmp_path, {"command": command})
 
