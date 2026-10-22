@@ -41,6 +41,8 @@ export function useTaskRuns(task: TaskDetail | null): { runs: TaskRuns | null; e
     ? [
         task.status,
         task.planner_id,
+        // A new run of the same agent moves neither status, ids nor steps: the cost's run counts do.
+        task.cost ? [task.cost.runs, task.cost.running, ...Object.values(task.cost.by_role).map((r) => r.runs)].join(",") : "",
         ...(task.steps || []).map((s) => [s.id, s.status, s.worker_id, s.reviewer_id, s.review_stage, s.retries].join(":")),
       ].join("|")
     : "";

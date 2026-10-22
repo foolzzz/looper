@@ -1120,8 +1120,9 @@ def test_a_wait_reply_can_forward_to_a_running_step(planner_claude: Any, agent_d
 def test_a_failed_wait_turn_retries_twice_then_again_on_a_later_event(
     planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(waits, "RETRY_WAIT_SEC", (0.4, 0.4))
-    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 0.3)
+    # The first wait is long next to the 0.05s pause below, so a loaded machine cannot let the retry fall due early.
+    monkeypatch.setattr(waits, "RETRY_WAIT_SEC", (1.5, 0.3))
+    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 1.0)
     broken = reply({"reply": "hmm", "action": "none"})
     claude = planner_claude(plan(wait_step("w1")), *[broken] * 8)
     seen: list[str] = []
@@ -1141,8 +1142,9 @@ def test_a_failed_wait_turn_retries_twice_then_again_on_a_later_event(
         await asyncio.sleep(0.05)
         assert _stored_wait(agent_db, "w1")["failures"] == 1
         await h.until(lambda: _stored_wait(agent_db, "w1").get("failures") == 3)
+        await asyncio.sleep(0.5)  # a retry event queued while the last retry ran may still be handled
         stalled = len(claude.turns())
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.3)
         assert _stored_wait(agent_db, "w1")["failures"] == 3 and len(claude.turns()) == stalled
         await _wake(h)
         await h.until(lambda: _stored_wait(agent_db, "w1").get("failures") == 4)
