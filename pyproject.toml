@@ -37,12 +37,13 @@ test = [
 looper = "looper.cli:main"
 # The command's name before the rename, kept for one release: a deprecation note, then looper.
 loopx = "looper.cli:legacy_main"
+loopercli = "looper.loopercli:main"
 
 [tool.setuptools.packages.find]
 include = ["looper*"]
 
 [tool.setuptools.package-data]
-"looper" = ["web/dashboard/*", "web/dashboard/assets/*"]
+"looper" = ["web/dashboard/*", "web/dashboard/assets/*", "skill/looper-skill/SKILL.md"]
 "looper.db" = ["*.sql"]
 "looper.agents.runtimes" = ["*.mjs", "pi_extension/looper.ts"]
 

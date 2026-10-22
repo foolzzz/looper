@@ -1,0 +1,12 @@
+{
+  "name": "looper",
+  "owner": {"name": "Looper contributors"},
+  "description": "Looper's skill for coding agents.",
+  "plugins": [
+    {
+      "name": "looper",
+      "source": "./plugins/looper",
+      "description": "Hand work to a local Looper and follow it, through loopercli."
+    }
+  ]
+}
