@@ -184,6 +184,10 @@ def _writes(look: Look, *, status: str | None = None, tool: str | None = None) -
             and (tool is None or a["tool"] == tool)]
 
 
+def _reads(look: Look) -> list[dict[str, Any]]:
+    return [a for a in look.actions() if a["risk"] == "read" and a["status"] == "ok"]
+
+
 # --- The checks ---
 
 
@@ -388,8 +392,7 @@ def _project_limit_explained(look: Look) -> str | None:
 
 
 def _answered_by_reading(look: Look) -> str | None:
-    reads = [a for a in look.actions() if a["risk"] == "read" and a["status"] == "ok"]
-    if not reads:
+    if not _reads(look):
         return "the Manager read nothing through its tools"
     return None if look.reply.strip() else "no reply"
 
@@ -446,7 +449,10 @@ def _knows_it_was_stopped(look: Look) -> str | None:
         return "the turn's input does not start with the note that the user stopped the previous reply"
     if look.fake:
         return None
-    if "汇总" in look.reply and not re.search(r"没(有)?(来得及|完成|做完|汇总)|未(完成|汇总)|停", look.reply):
+    # A summary the dialog's reads back (this turn may redo them) is real; without one, it is a claim unless the
+    # reply says the work was not done.
+    if "汇总" in look.reply and not _reads(look) and not re.search(
+            r"没(有)?(来得及|完成|做完|汇总)|还没|未(完成|汇总)|停", look.reply):
         return "the reply claims the summary was finished"
     return None
 

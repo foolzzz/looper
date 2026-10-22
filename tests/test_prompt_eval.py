@@ -2720,6 +2720,28 @@ def test_the_stop_dialog_checks_its_replies() -> None:
     assert dialogs._was_stopped(look("已处理（looper_projects：ok）。")) is not None
 
 
+def test_the_stop_dialog_flags_only_a_summary_no_read_backs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from evals.prompt_regression import dialogs
+
+    def look(reply: str, reads: tuple[str, ...]) -> Any:
+        class Api:
+            def get(self, path: str, **params: Any) -> dict[str, Any]:
+                return {"records": [{"id": 5, "input_text": f"{dialogs.STOPPED_NOTE} ...\n\n刚才停在哪了？",
+                                     "metadata": {}}]}
+
+        trail = [{"tool": tool, "risk": "read", "status": "ok"} for tool in reads]
+        monkeypatch.setattr(dialogs, "_trail", lambda *args: trail)
+        return dialogs.Look(Api(), None, reply, "disposable", 0, frozenset(), False)  # type: ignore[arg-type]
+
+    offered = ("刚才只做到加载工具(projects 和 tasks 的查询工具),还没有真正查询任何项目或任务。\n\n"
+               "要我现在继续吗?我会查看 eval-calc 最近的三个任务,然后汇总给你。")
+    assert dialogs._knows_it_was_stopped(look(offered, ())) is None
+    redone = "汇总：\n\n- **项目**：只有 1 个，`eval-calc`。\n- **最近的任务**：`eval-calc` 下没有任务。"
+    assert dialogs._knows_it_was_stopped(look(redone, ("looper_projects", "looper_tasks"))) is None
+    assert dialogs._knows_it_was_stopped(look(redone, ())) is not None
+    assert dialogs._knows_it_was_stopped(look("我已经逐个查看并汇总好了。", ())) is not None
+
+
 def test_a_withdraw_say_accepts_no_run_or_the_run_the_web_stop_interrupted() -> None:
     from evals.prompt_regression import dialogs
 
