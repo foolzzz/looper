@@ -56,6 +56,34 @@ def test_supplements_and_requirement_edits_are_pending_until_delivered(monkeypat
     _run(test, monkeypatch)
 
 
+def test_a_title_is_set_in_any_status_and_a_delivered_note_is_not_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import task_changes, tasks
+
+    async def test(pool: Any) -> None:
+        await _task(pool)
+        assert await tasks.get_task("task-a", pool=pool) is not None
+        assert (await tasks.get_task("task-a", pool=pool))["name"] == "g1"
+        assert await tasks.set_task_title("task-a", "  Calc \n tool ", pool=pool)
+        row = await tasks.get_task("task-a", pool=pool)
+        assert (row["title"], row["name"]) == ("Calc tool", "Calc tool")
+        for status in ("completed", "cancelled", "init"):
+            await pool.execute("UPDATE tasks SET status = $1 WHERE id = 'task-a'", status)
+            assert await tasks.set_task_title("task-a", f"as {status}", pool=pool)
+            assert (await tasks.get_task("task-a", pool=pool))["title"] == f"as {status}"
+        assert await tasks.set_task_title("task-a", "x" * 100, pool=pool)
+        assert (await tasks.get_task("task-a", pool=pool))["title"] == "x" * tasks.TITLE_MAX_CHARS
+        assert not await tasks.set_task_title("task-nope", "x", pool=pool)
+        for empty in ("", " \n\t ", None, 5):
+            with pytest.raises(ValueError):
+                await tasks.set_task_title("task-a", empty, pool=pool)
+        assert (await tasks.get_task("task-a", pool=pool))["title"] == "x" * tasks.TITLE_MAX_CHARS
+
+        await task_changes.add_supplement("task-a", "Renamed.", via="task_page", delivered=True, pool=pool)
+        assert (await task_changes.pending("task-a", pool=pool)).empty
+
+    _run(test, monkeypatch)
+
+
 def test_user_instructions_from_before_become_delivered_supplements(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import connection, journal, task_changes
 

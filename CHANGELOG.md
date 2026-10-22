@@ -18,6 +18,10 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Added
+
+- **A task can be renamed.** The task page's heading has a pencil that edits the title in place (Enter or Save stores it, Esc cancels), `PUT /api/tasks/:id/title` sets it, and the Manager's `looper_task_update` takes a `title`. A task can be renamed in any status, an ended one included; lists, the task page and later end notices use the new name, and the change is noted in the task's history (`via` `task_page` or `manager:<channel>`).
+
 ## [2.13.28] - 2026-10-21
 
 ### Fixed
