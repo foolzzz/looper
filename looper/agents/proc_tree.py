@@ -7,7 +7,10 @@ command in one. Once a process dies its children are re-parented, and
 nothing links them to the agent any more. So ``end`` reads the agent's tree
 from one ``ps`` snapshot before it sends any signal: the agent, every
 process whose parent is in the tree, and every member of a group the agent
-or one of them leads. It sends SIGTERM to those groups (and to the tree's
+or one of them leads. Before that listing, and before any lock, it stops what it knows already with SIGSTOP
+(``_hold``): the agent's own group while the agent is unreaped, and the pids a listing found just before. Held,
+nothing of it exits, forks or is re-parented while it is listed, and a pid found reused meanwhile is let go on
+(SIGCONT) untouched. It sends SIGTERM to those groups (and to the tree's
 processes outside them), waits up to ``TERM_GRACE_SEC`` for them to exit,
 sends SIGKILL to what is left and reaps the agent. A stop that first lets
 the agent exit on its own records the tree before it asks (``begin_end``) and
@@ -24,11 +27,16 @@ started it, under the runtime root (``RECORDS_DIR``) until it is reaped. At
 the next start ``sweep`` ends the tree of every recorded agent still running
 with the same start time, so a reused pid is never touched; a record whose
 server still runs is left alone.
+
+Every step of an end is bounded: a lock is waited for at most ``_LOCK_SEC``, a listing or walk of the processes
+has a time (and work) budget, and an end never waits past its deadline for one; what does not come in time is
+logged and gone without.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -41,7 +49,7 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 from .. import child_env
 
@@ -52,6 +60,12 @@ REAP_SEC = 2.0  # how long the agent has to be reaped after SIGKILL before ``end
 _REFRESH_MIN_SEC = 0.1
 _POLL_SEC = 0.05
 _PS_TIMEOUT_SEC = 5.0
+_LOCK_SEC = 0.5  # how long an end waits for a lock a refresh or the fork watch holds before it goes on without
+_FRESH_SEC = 2.0  # how recent a tree's listing must be for its pids to get SIGTERM before the next listing
+_SCAN_SEC = 1.0  # the budget of one ownership listing of every process
+_ADOPT_SEC = 0.05  # the budget of the fork watch's walk of the children of the processes that forked
+_ADOPT_MAX = 256  # how many processes that walk records at most
+_LAST_LOOK_SEC = 1.0  # how long an end's last look past its deadline may take
 RECORDS_DIR = Path(".local") / "agent-processes"  # under the runtime root: one ``<pid>.json`` per running agent
 
 # Set by ``sweep``: where this server records its agents, and the server (pid, start time) each record names.
@@ -66,6 +80,7 @@ _finishing: set[asyncio.Future[None]] = set()
 Table = dict[int, tuple[int, int]]
 # pid -> pgid of the processes of one agent's tree.
 Tree = dict[int, int]
+_T = TypeVar("_T")
 
 
 def _snapshot() -> Table:
@@ -173,6 +188,32 @@ def _send(send: Callable[[int, int], None], target: int, sig: int) -> None:
         pass  # it exited already
 
 
+def _hold(process: _Agent, tree: Tree, exclude: frozenset[int] = frozenset()) -> Tree:
+    """An end's first signal, at once, before any lock or listing: SIGSTOP to the agent's group while the agent is
+    unreaped (its pid, and so its group's id, cannot be another's) and to ``tree``, pids a listing found just before.
+    What is held neither exits, forks nor is re-parented, so the listing that follows reaches all of it; SIGSTOP
+    cannot be caught, and is undone (SIGCONT, ``_end``) once the tree has had its SIGTERM. A process signalled by pid
+    (``_Orphan``) is left to the end, which checks its start time first. What was held."""
+    held = {pid: pgid for pid, pgid in tree.items() if pid not in exclude}
+    if process.pid not in exclude and process.returncode is None and not isinstance(process, _Orphan):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            held[process.pid] = os.getpgid(process.pid)
+    _signal(process, held, signal.SIGSTOP)
+    return held
+
+
+async def _within(until: float | None, work: Awaitable[_T], default: _T, *, label: str, what: str) -> _T:
+    """``work``'s result, waited for until ``until`` (monotonic; None: no bound); past it, ``default``, logged. A
+    listing given up on runs on in its thread, bounded by ``_PS_TIMEOUT_SEC`` or its own budget."""
+    if until is None:
+        return await work
+    try:
+        return await asyncio.wait_for(work, max(0.0, until - time.monotonic()))
+    except asyncio.TimeoutError:
+        logger.warning("%s: %s did not finish in time; going on without it", label, what)
+        return default
+
+
 def tree_of(process: asyncio.subprocess.Process) -> Tree:
     """``process``'s tree now, for ``end`` once the process may have exited and its children been re-parented."""
     return _tree(process, _snapshot(), {})
@@ -180,7 +221,7 @@ def tree_of(process: asyncio.subprocess.Process) -> Tree:
 
 async def begin_end(process: asyncio.subprocess.Process) -> Tree:
     """Take and record the tree before asking the agent to exit; keep its record until ``end`` finishes."""
-    tree = tree_of(process)
+    tree = await asyncio.to_thread(tree_of, process)
     if process.pid in _recorded:
         _ending.add(process.pid)
         await _record_tree(process.pid, tree)
@@ -216,8 +257,10 @@ async def finish(end: Awaitable[None]) -> None:
 async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | None = None) -> None:
     """End ``process`` and its tree: SIGTERM, then SIGKILL for what is still running after ``TERM_GRACE_SEC``;
     ``process`` is reaped. ``known`` is its tree as ``begin_end`` took it earlier. Processes that appear during the
-    grace period get SIGTERM too, and a cancelled wait kills the rest at once."""
-    await _end(process, label=label, known=known or {})
+    grace period get SIGTERM too, and a cancelled wait kills the rest at once. The agent's group is held (``_hold``)
+    before anything is listed; ``known``, of no telling age (its pids may have been reused since), is signalled
+    only once a listing finds it still in its group."""
+    await _end(process, label=label, known=known or {}, held=_hold(process, {}))
     await _reap(process, label)
 
 
@@ -230,22 +273,39 @@ async def _reap(process: Any, label: str) -> None:
 
 
 async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[int] = frozenset(),
-               grace: float | None = None) -> None:
+               grace: float | None = None, held: Tree | None = None) -> None:
     """End the tree, recording it so the next start can finish an end cut short by the server's exit. Processes
-    in ``exclude`` are never signalled (what they start is); ``grace`` replaces ``TERM_GRACE_SEC``."""
+    in ``exclude`` are never signalled (what they start is); ``grace`` replaces ``TERM_GRACE_SEC``, counted from
+    the call. ``held`` were stopped (``_hold``): each gets SIGCONT once the tree has had its SIGTERM, or as the end
+    stops short of it. Nothing before the SIGKILL is waited for past the grace: a listing or record that has not
+    come by then is gone without."""
+    deadline = time.monotonic() + (TERM_GRACE_SEC if grace is None else grace)
+    held = held or {}
     recorded = _recorded.get(process.pid)
     if recorded is not None:
         _ending.add(process.pid)
+        path, started = recorded
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if held and not released:
+            released = True
+            _signal(process, held, signal.SIGCONT)
 
     def members(table: Table, known: Tree) -> Tree:
         return {pid: pgid for pid, pgid in _tree(process, table, known).items() if pid not in exclude}
 
-    seen = members(_snapshot(), known)
-    alive = dict(seen)
+    seen: Tree = {}
+    alive: Tree = {}
     try:
+        table = await _within(deadline, asyncio.to_thread(_snapshot), {}, label=label, what="the first listing")
+        seen = members(table, known)
+        if not table:  # without a listing, what was held is ended too
+            seen = {**{pid: pgid for pid, pgid in held.items() if pid not in exclude}, **seen}
+        alive = dict(seen)
         if recorded is not None:
-            path, started = recorded
-            await _record_tree(process.pid, seen)
+            await _within(deadline, _record_tree(process.pid, seen), None, label=label, what="recording the tree")
         if alive:
             if (gone := await _gone(process, label)) is not None:
                 alive.pop(process.pid, None)  # exited: what it left is still signalled; reused: nothing is
@@ -253,14 +313,18 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                     alive = {}
                     return
             _signal(process, alive, signal.SIGTERM)
-        deadline = time.monotonic() + (TERM_GRACE_SEC if grace is None else grace)
+        release()
         while alive and time.monotonic() < deadline:
             await asyncio.sleep(_POLL_SEC)
-            alive = members(await asyncio.to_thread(_snapshot), seen)
+            if (table := await _within(deadline, asyncio.to_thread(_snapshot), None, label=label,
+                                       what="a listing")) is None:
+                break
+            alive = members(table, seen)
             if fresh := {pid: pgid for pid, pgid in alive.items() if pid not in seen}:
                 seen.update(fresh)
                 if recorded is not None:
-                    await _record_tree(process.pid, seen)
+                    await _within(deadline, _record_tree(process.pid, seen), None, label=label,
+                                  what="recording the tree")
                 _signal(process, fresh, signal.SIGTERM)
     except BaseException:
         alive = members(_snapshot(), seen)
@@ -270,6 +334,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
             alive = {} if gone == "reused" else {pid: pgid for pid, pgid in alive.items() if pid != process.pid}
         if alive:
             _signal(process, alive, signal.SIGKILL)
+        release()
         logger.info("%s: ended the process tree of pid %s: %d found, %d exited on SIGTERM, %d killed",
                     label, process.pid, len(seen), len(seen) - len(alive), len(alive))
         _ending.discard(process.pid)
@@ -559,6 +624,8 @@ def _readable_versions() -> bool:
 class _Owned(Protocol):
     def live(self) -> tuple[set[int], bool]: ...
 
+    def recorded(self) -> set[int]: ...
+
     def close(self) -> None: ...
 
 
@@ -567,7 +634,11 @@ class _Lineage:
     fork; the forking process's children are then recorded and watched at once (and theirs, for a fork that came
     before its parent was watched), and one listing of every process (at most once per ``_POLL_SEC``) records each
     whose creator's version is recorded. Versions are never reused, so a recorded process that exited still links
-    what it started. Without a fork, nothing is listed."""
+    what it started. Without a fork, nothing is listed.
+
+    Neither holds the lock past its budget (``_ADOPT_SEC`` and ``_ADOPT_MAX``, ``_SCAN_SEC``): a tree that keeps
+    forking cannot keep an end's listing waiting. What a walk cut short leaves is found by the next listing, as its
+    creator's version is recorded."""
 
     _POLL_SEC = 0.25
 
@@ -579,6 +650,8 @@ class _Lineage:
         self._root_id: int | None = None
         self._versions: set[int] = set()
         self._known: dict[int, int] = {}  # pid -> version of each recorded process seen running
+        self._ids: dict[int, int] = {}  # pid -> unique id (kept through exec) of each of them
+        self._cut = False  # whether a walk or listing was cut short (logged once)
         self._watched: set[int] = set()
         self._scanned = float("-inf")
         self._lock = threading.Lock()
@@ -592,6 +665,7 @@ class _Lineage:
         self._root_id = identity[0]
         self._versions.add(identity[1])
         self._known[pid] = identity[1]
+        self._ids[pid] = identity[0]
         self._watch(pid)
         self._scan()
         if pid not in self._watched:  # it exited already: nothing more to follow
@@ -612,50 +686,76 @@ class _Lineage:
             return  # it exited already; what it started is still found by its version
         self._watched.add(pid)
 
-    def _adopt(self, parent: int) -> None:
+    def _cut_short(self, what: str) -> None:
+        if not self._cut:
+            self._cut = True
+            logger.warning("%s: %s ran past its budget and was cut short; the next listing finds the rest",
+                           self.label, what)
+
+    def _adopt(self, parent: int, until: float) -> None:
         """Record ``parent``'s version now (what it forked names it, since its last ``exec``), then record and watch
-        its children, then theirs (forked before they were watched)."""
+        its children, then theirs (forked before they were watched): until ``until`` and ``_ADOPT_MAX`` of them."""
         with self._lock:
             if (versions := _versions(parent)) is not None and parent in self._known:
                 self._versions.add(versions[0])
-            pending = [parent]
+            pending, adopted = [parent], 0
             while pending:
+                if adopted >= _ADOPT_MAX or time.monotonic() >= until:
+                    self._cut_short("the walk of a forking tree")
+                    return
                 for child in _children(pending.pop()):
-                    versions = _versions(child)
-                    if versions is None or self._known.get(child) == versions[0]:
+                    identity = _identity(child)
+                    if identity is None or self._known.get(child) == identity[1]:
                         continue
-                    self._versions.add(versions[0])
-                    self._known[child] = versions[0]
+                    self._versions.add(identity[1])
+                    self._known[child], self._ids[child] = identity[1], identity[0]
                     self._watch(child)
                     pending.append(child)
+                    adopted += 1
 
-    def _scan(self) -> set[int]:
-        """Record every running process created by a recorded one, until none is left; return the running ones."""
-        with self._lock:
-            self._scanned = time.monotonic()
-            table: dict[int, tuple[int, int]] = {}
+    def _scan(self, wait: float = -1) -> tuple[set[int], bool] | None:
+        """Record every running process created by a recorded one, until none is left; return the running ones, and
+        whether the listing was whole (not cut short at ``_SCAN_SEC``). None when the lock is not had in ``wait`` s."""
+        if not self._lock.acquire(timeout=wait):
+            return None
+        try:
+            began = self._scanned = time.monotonic()
+            table: dict[int, tuple[int, int, int]] = {}
+            whole = True
             for pid in _all_pids():
-                if (versions := _versions(pid)) is not None:
-                    table[pid] = versions
+                if time.monotonic() - began >= _SCAN_SEC:
+                    whole = False
+                    break
+                if (identity := _identity(pid)) is not None:
+                    table[pid] = identity[1], identity[2], identity[0]
             owned: set[int] = set()
             root = _identity(self._root)
             if root is not None and root[0] == self._root_id:  # the agent runs: its version since its last exec
                 self._versions.add(root[1])
             grew = True
             while grew:
+                if time.monotonic() - began >= _SCAN_SEC:
+                    whole = False
+                    break
                 grew = False
-                for pid, (version, creator) in table.items():
+                for pid, (version, creator, _) in table.items():
                     if pid not in owned and (version in self._versions or creator in self._versions):
                         owned.add(pid)
                         if version not in self._versions:
                             self._versions.add(version)
                             grew = True
             for pid in owned:
-                self._known[pid] = table[pid][0]
+                self._known[pid], self._ids[pid] = table[pid][0], table[pid][2]
                 self._watch(pid)
+            if not whole:
+                self._cut_short("a listing of every process")
+                return owned, False
             self._watched &= owned
             self._known = {pid: version for pid, version in self._known.items() if pid in owned}
-            return owned
+            self._ids = {pid: unique for pid, unique in self._ids.items() if pid in owned}
+            return owned, True
+        finally:
+            self._lock.release()
 
     def _follow(self) -> None:
         import select
@@ -668,8 +768,9 @@ class _Lineage:
                 except OSError:
                     return
                 forked = [event.ident for event in events if event.fflags & select.KQ_NOTE_FORK]
+                until = time.monotonic() + _ADOPT_SEC
                 for parent in forked:
-                    self._adopt(parent)
+                    self._adopt(parent, until)
                 pending = pending or bool(forked)
                 exited = any(event.ident == self._root and event.fflags & select.KQ_NOTE_EXIT for event in events)
                 if exited or (pending and time.monotonic() - self._scanned >= self._POLL_SEC):
@@ -685,9 +786,26 @@ class _Lineage:
                 self._kq.close()
 
     def live(self) -> tuple[set[int], bool]:
-        """The running processes the agent started, itself excluded (and, as for ``_Marked``, False: the listing
-        records what an exited one started by its version)."""
-        return self._scan() - {self._root}, False
+        """The running processes the agent started, itself excluded, and whether another listing is called for:
+        not after a whole one (it records what an exited one started by its version), but after one cut short, or
+        when the lock is not had within ``_LOCK_SEC`` (then the recorded ones still running are returned)."""
+        scanned = self._scan(_LOCK_SEC)
+        if scanned is None:
+            logger.warning("%s: the fork watch held its lock past %.1f s; going on with what it recorded",
+                           self.label, _LOCK_SEC)
+            return self.recorded(), True
+        owned, whole = scanned
+        return owned - {self._root}, not whole
+
+    def recorded(self) -> set[int]:
+        """The recorded processes that still run as the process recorded (by unique id, never reused), the agent
+        excluded: no lock taken and nothing listed, for an end's first signals."""
+        ids = self._ids.copy()  # one step under the GIL: the watch thread may change it meanwhile
+        alive = set()
+        for pid, unique in list(ids.items())[:_ADOPT_MAX * 4]:
+            if pid != self._root and (identity := _identity(pid)) is not None and identity[0] == unique:
+                alive.add(pid)
+        return alive
 
     def close(self) -> None:
         self._closed.set()
@@ -710,7 +828,11 @@ class _Marked:
         owned: set[int] = set()
         exited: set[int] = set()
         vanished = False
+        began = time.monotonic()
         for entry in os.scandir(_PROC):
+            if time.monotonic() - began >= _SCAN_SEC:  # cut short (processes keep coming): another is called for
+                logger.warning("a listing of every process ran past %.1f s and was cut short", _SCAN_SEC)
+                return owned, True
             if not entry.name.isdigit() or (pid := int(entry.name)) == self._root:
                 continue
             try:
@@ -730,6 +852,9 @@ class _Marked:
                 continue  # another user's (EACCES): never the agent's
         self._exited = exited
         return owned, vanished
+
+    def recorded(self) -> set[int]:
+        return set()  # nothing kept between listings that tells a reused pid apart without reading ``/proc``
 
     def close(self) -> None:
         pass
@@ -768,6 +893,8 @@ class TurnTree:
         self.label = label
         self.seen: dict[int, str | None] = {}
         self._groups: Tree = {}
+        self._current: Tree = {}  # the tree the last listing found
+        self._current_at = float("-inf")  # when
         self._baseline: set[int] = set()
         self._refreshed = float("-inf")
         self._listed: set[int] = set()  # the pids the last refresh's listing had
@@ -793,18 +920,34 @@ class TurnTree:
             return set(), False
 
     def _merge(self, tree: Tree) -> list[int]:
+        self._current, self._current_at = tree, time.monotonic()
         fresh = [pid for pid in tree if pid not in self.seen]
         self._groups.update(tree)
         for pid in fresh:
             self.seen[pid] = None
         return fresh
 
-    async def refresh(self, *, force: bool = False) -> None:
-        """Merge the current tree into ``seen``; at most once per ``_REFRESH_MIN_SEC`` unless ``force``."""
-        async with self._lock:
+    async def _listing(self, call: Callable[..., _T], *args: Any, until: float | None, default: _T, what: str) -> _T:
+        return await _within(until, asyncio.to_thread(call, *args), default, label=self.label, what=what)
+
+    async def refresh(self, *, force: bool = False, until: float | None = None) -> None:
+        """Merge the current tree into ``seen``; at most once per ``_REFRESH_MIN_SEC`` unless ``force``. With
+        ``until`` (a stop's), the lock another refresh holds is waited for at most ``_LOCK_SEC`` and each listing
+        until ``until``: what has not come by then is gone without."""
+        if until is None:
+            await self._lock.acquire()
+        else:
+            try:
+                await asyncio.wait_for(self._lock.acquire(), min(_LOCK_SEC, max(0.0, until - time.monotonic())))
+            except asyncio.TimeoutError:
+                logger.warning("%s: a refresh of the process tree held its lock; going on without one", self.label)
+                return
+        try:
             if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
                 return
-            table = await asyncio.to_thread(_snapshot)
+            table = await self._listing(_snapshot, until=until, default=None, what="a listing of the tree")
+            if table is None:
+                return
             self._merge(_tree(self.process, table, self._groups))
             self._listed = set(table)
             # One that exited before its start time was read can never be told from a reused pid: forgotten, not
@@ -813,11 +956,14 @@ class TurnTree:
                 del self.seen[pid]
             unread = [pid for pid, started in self.seen.items() if started is None]
             if unread:
-                starts = await asyncio.to_thread(_start_times, unread) or {}
+                starts = await self._listing(_start_times, unread, until=until, default=None,
+                                             what="reading start times") or {}
                 for pid in unread:
                     if pid in starts:
                         self.seen[pid] = starts[pid]
             self._refreshed = time.monotonic()
+        finally:
+            self._lock.release()
 
     def start_ticker(self, interval: float = 0.5) -> None:
         if self._ticker is None or self._ticker.done():
@@ -835,7 +981,7 @@ class TurnTree:
         ticker, self._ticker = self._ticker, None
         if ticker is not None:
             ticker.cancel()
-            await asyncio.gather(ticker, return_exceptions=True)
+            await asyncio.wait({ticker}, timeout=_LOCK_SEC)
 
     async def baseline(self) -> None:
         """Remember the current members, and what the agent started earlier that still runs; ``end_new`` leaves
@@ -844,24 +990,44 @@ class TurnTree:
         self._merge(_tree(self.process, table, self._groups))
         self._baseline = set(self.seen) | (await asyncio.to_thread(self._live_owned))[0]
 
-    async def _reused(self, exclude: frozenset[int] = frozenset()) -> frozenset[int]:
+    async def _reused(self, exclude: frozenset[int] = frozenset(), *, until: float | None = None) -> frozenset[int]:
         """The seen pids now another process's: of those the last refresh listed (one that exited is no one's)."""
         known = {pid: started for pid, started in self.seen.items()
                  if started is not None and pid not in exclude and pid in self._listed}
-        current = await asyncio.to_thread(_start_times, known)
+        current = await self._listing(_start_times, known, until=until, default=None, what="reading start times")
         if current is None:
             return frozenset()
         return frozenset(pid for pid, started in known.items() if pid in current and current[pid] != started)
 
     async def begin_end(self) -> None:
         """Refresh and record the tree before the agent is asked to exit on its own: its record (what the next
-        start's ``sweep`` ends) stays until ``end`` finishes, though the agent exits first."""
-        await self.refresh(force=True)
+        start's ``sweep`` ends) stays until ``end`` finishes, though the agent exits first. Bounded as an end's
+        refresh is."""
+        await self.refresh(force=True, until=time.monotonic() + TERM_GRACE_SEC)
         if self.process.pid in _recorded:
             _ending.add(self.process.pid)
-            await _record_tree(self.process.pid, dict(self._groups))
+            await _within(time.monotonic() + TERM_GRACE_SEC, _record_tree(self.process.pid, dict(self._groups)),
+                          None, label=self.label, what="recording the tree")
 
-    async def _strays(self, exclude: frozenset[int], *, ended: bool = False) -> tuple[list[_Orphan], bool]:
+    def _known_now(self, exclude: frozenset[int]) -> Tree:
+        """What the end holds before any lock or listing: the tree the last listing found, when it is recent
+        (``_FRESH_SEC``: the pids of an older one may have been reused since), and what the agent is recorded to
+        own that still runs as the process recorded (``_Owned.recorded``). Each owned one with its group, read now
+        (a system call, so one that leads a group has the group signalled)."""
+        known = dict(self._current) if time.monotonic() - self._current_at <= _FRESH_SEC else {}
+        if self._owned is not None:
+            try:
+                owned = self._owned.recorded()
+            except Exception:
+                logger.warning("%s: cannot read what the agent owns", self.label, exc_info=True)
+                owned = set()
+            for pid in owned - set(known):
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    known[pid] = os.getpgid(pid)
+        return {pid: pgid for pid, pgid in known.items() if pid not in exclude}
+
+    async def _strays(self, exclude: frozenset[int], *, ended: bool = False,
+                      until: float | None = None) -> tuple[list[_Orphan], bool]:
         """The processes of the turn the tree no longer reaches (one that left its group, setsid, once its parent
         exited): each seen one still running with the start time the snapshot read, so a reused pid is never among
         them, and each the agent owns (``_owned``) that runs now, whether or not the snapshot lists it. None in
@@ -869,38 +1035,42 @@ class TurnTree:
         still running is one: none is left to the tree's end, and one the snapshot reached may have left the tree
         since. Also whether one the ownership listing named exited before it was read (its environment, or its start
         time): what it started meanwhile (a command it forked into a session of its own) is in no listing yet, so it
-        calls for another."""
-        table = await asyncio.to_thread(_snapshot)
+        calls for another; as does a listing that did not come by ``until``."""
+        table = await self._listing(_snapshot, until=until, default=None, what="a listing of strays")
+        if table is None:
+            return [], True
         reached = {} if ended else _tree(self.process, table, self._groups)
         skip = exclude | {self.process.pid}
         known = {pid: started for pid, started in self.seen.items()
                  if started is not None and pid in table and pid not in reached and pid not in skip}
-        current = await asyncio.to_thread(_start_times, known) or {}
-        strays = [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
-        owned, vanished = await asyncio.to_thread(self._live_owned)
+        current = await self._listing(_start_times, known, until=until, default=None, what="reading start times")
+        vanished = current is None and bool(known)
+        strays = [_Orphan(pid, started) for pid, started in known.items() if (current or {}).get(pid) == started]
+        owned, gone = await self._listing(self._live_owned, until=until, default=(set(), True),
+                                          what="the ownership listing")
+        vanished = vanished or gone
         # Every one it owns, not only those the snapshot lists: one started since (a setsid command a shell starts
         # as it is told to exit) would otherwise be missed, and the end finish while it runs.
         unseen = [pid for pid in owned if pid not in reached and pid not in skip and pid not in known]
         if unseen:
-            starts = await asyncio.to_thread(_start_times, unseen) or {}
+            starts = await self._listing(_start_times, unseen, until=until, default=None,
+                                         what="reading start times") or {}
             strays += [_Orphan(pid, starts[pid]) for pid in unseen if pid in starts]
             vanished = vanished or any(pid not in starts for pid in unseen)
         return strays, vanished
 
     @staticmethod
-    def _kill_strays(strays: list[_Orphan]) -> list[int]:
-        """SIGKILL each of ``strays`` still running as the process its start time names; the pids signalled."""
-        if not strays:
-            return []
-        current = _start_times(stray.pid for stray in strays) or {}
+    def _kill_strays(strays: list[_Orphan], current: dict[int, str] | None) -> list[int]:
+        """SIGKILL each of ``strays`` still running as the process its start time names (``current``); the pids
+        signalled."""
         killed = []
         for stray in strays:
-            if current.get(stray.pid) == stray.started:
+            if (current or {}).get(stray.pid) == stray.started:
                 _send(os.kill, stray.pid, signal.SIGKILL)
                 killed.append(stray.pid)
         return killed
 
-    async def _end_all(self, exclude: frozenset[int]) -> None:
+    async def _end_all(self, exclude: frozenset[int], *, stop_ticker: bool = False) -> None:
         """End the tree, and beside it (not delaying its first signal) the processes it no longer reaches: those
         running now and each that appears meanwhile (a command a tool's shell starts in a session of its own as it
         is told to exit). Once every end has finished, each still running gets one more end, as it may have left
@@ -908,31 +1078,47 @@ class TurnTree:
         listed and being read. What one of ``exclude`` starts is ended: a baseline process (a resident
         MCP server) runs on, the tools it ran this turn do not.
 
-        Bounded: every stray end's SIGKILL comes by ``TERM_GRACE_SEC`` after the first signals, and the looking
-        stops ``TERM_GRACE_SEC + REAP_SEC`` after them, or once only processes ended twice already are left (one
-        SIGKILL does not end: EPERM, uninterruptible sleep); each seen or owned process a last listing then finds
-        still running, whether or not the tree reaches it, gets SIGKILL at once, and is logged and left."""
-        if self.process.pid not in exclude:
-            # Record ownership before a root that can exit is signalled. A resident agent stays alive: signal its
-            # descendants first, without delaying them for an ownership scan of every process.
-            await asyncio.to_thread(self._live_owned)
+        Signal first: what is known already (``_known_now``) is held (``_hold``: SIGSTOP) before the ticker is
+        stopped, before any lock and before anything is listed; it gets SIGTERM once listed, a reused pid among it
+        only SIGCONT. Bounded: the refresh that follows waits at most ``_LOCK_SEC`` for its
+        lock, every listing at most until the deadline; every stray end's SIGKILL comes by ``TERM_GRACE_SEC`` after
+        the first signals, and the looking stops ``TERM_GRACE_SEC + REAP_SEC`` after them, or once only processes
+        ended twice already are left (one SIGKILL does not end: EPERM, uninterruptible sleep); each seen or owned
+        process a last listing (at most ``_LAST_LOOK_SEC``) then finds still running, whether or not the tree
+        reaches it, gets SIGKILL at once, and is logged and left."""
         began = time.monotonic()
         killed_by, deadline = began + TERM_GRACE_SEC, began + TERM_GRACE_SEC + REAP_SEC
+        held = _hold(self.process, self._known_now(exclude), exclude)
+        try:
+            if stop_ticker:
+                await self.stop_ticker()
+            # What the turn started since the last tick, and the seen pids since reused: neither is waited for long.
+            await self.refresh(force=True, until=killed_by)
+            exclude |= await self._reused(exclude, until=killed_by)
+        except BaseException:
+            _signal(self.process, held, signal.SIGCONT)
+            raise
         ends = [asyncio.ensure_future(_end(self.process, label=self.label, known=dict(self._groups),
-                                           exclude=exclude))]
+                                           exclude=exclude, grace=max(0.0, killed_by - time.monotonic()),
+                                           held=held))]
         tries: dict[int, int] = {}  # pid -> how many stray ends it was given
         try:
             while True:
                 ended = all(end.done() for end in ends)
-                strays, vanished = await self._strays(exclude, ended=ended)
+                strays, vanished = await self._strays(exclude, ended=ended, until=deadline)
                 now = time.monotonic()
                 if now >= deadline:
                     # The looking stops: each still running gets SIGKILL now (its start time read once more), not
                     # left running unsignalled. A listing that filtered out what the tree reached is redone without
                     # that filter, as one it reached may have left the tree while the listing ran.
+                    last = now + _LAST_LOOK_SEC
                     if not ended:
-                        strays, _ = await self._strays(exclude, ended=True)
-                    left = await asyncio.to_thread(self._kill_strays, strays)
+                        strays, _ = await self._strays(exclude, ended=True, until=last)
+                    # Past the last look, the start times the listing just read are the ones to go by.
+                    current = await self._listing(_start_times, [stray.pid for stray in strays], until=last,
+                                                  default={stray.pid: stray.started for stray in strays},
+                                                  what="reading start times")
+                    left = self._kill_strays(strays, current)
                     if left:
                         logger.warning("%s: %d process(es) still running %.1f s after the stop began, killed and "
                                        "left: pid %s", self.label, len(left), now - began,
@@ -962,10 +1148,8 @@ class TurnTree:
     async def end(self) -> None:
         """End every process of the tree seen so far and of the tree now, and every one the agent owns, then reap
         the agent."""
-        await self.stop_ticker()
-        await self.refresh(force=True)
         try:
-            await self._end_all(await self._reused())
+            await self._end_all(frozenset(), stop_ticker=True)
         finally:
             if self._owned is not None:
                 self._owned.close()
@@ -974,9 +1158,7 @@ class TurnTree:
     async def end_new(self) -> None:
         """End the members that are not in the baseline, and what any process started since the baseline: the
         agent and the baseline members themselves survive."""
-        await self.refresh(force=True)
-        exclude = frozenset(self._baseline | {self.process.pid})
-        await self._end_all(exclude | await self._reused(exclude))
+        await self._end_all(frozenset(self._baseline | {self.process.pid}))
 
 
 def track(process: Any, *, label: str = "agent") -> TurnTree:

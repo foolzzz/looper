@@ -1019,11 +1019,12 @@ class ResidentClaude:
         if output is not None:
             output.drop_turn()
         try:
-            if tree is not None and process.returncode is None:
-                # What Claude started since the last tick, before its stdin closes and it exits; recorded when it
-                # is let exit on its own, so a server that dies meanwhile has the rest ended at its next start.
+            if tree is not None and process.returncode is None and not kill:
+                # What Claude started since the last tick, before its stdin closes and it exits on its own;
+                # recorded, so a server that dies meanwhile has the rest ended at its next start. (A kill lists
+                # nothing first: its end signals what it knows before any listing.)
                 with contextlib.suppress(Exception):
-                    await (tree.refresh(force=True) if kill else tree.begin_end())
+                    await tree.begin_end()
             if process.stdin is not None and not process.stdin.is_closing():
                 process.stdin.close()
             if process.returncode is None and not kill:

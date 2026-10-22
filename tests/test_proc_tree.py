@@ -1148,9 +1148,9 @@ def _late_fork_watch(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fork watch resumes only once the processes between the agent and what it started have exited."""
     adopt = proc_tree._Lineage._adopt
 
-    def late(self: Any, parent: int) -> None:
+    def late(self: Any, parent: int, until: float) -> None:
         time.sleep(0.5)
-        adopt(self, parent)
+        adopt(self, parent, time.monotonic() + proc_tree._ADOPT_SEC)
 
     monkeypatch.setattr(proc_tree._Lineage, "_adopt", late)
 
@@ -1405,10 +1405,10 @@ def test_turn_tree_end_looks_again_when_an_owned_process_exits_before_it_is_read
     ended_scan = threading.Event()
     strays = proc_tree.TurnTree._strays
 
-    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False) -> Any:
+    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False, **kwargs: Any) -> Any:
         if ended:
             ended_scan.set()
-        return await strays(self, exclude, ended=ended)
+        return await strays(self, exclude, ended=ended, **kwargs)
 
     def owned(self: proc_tree.TurnTree) -> tuple[set[int], bool]:
         if not ended_scan.is_set():
@@ -1454,10 +1454,10 @@ def test_turn_tree_end_looks_again_when_a_marked_process_exits_before_its_enviro
     strays = proc_tree.TurnTree._strays
     live = proc_tree._Marked.live
 
-    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False) -> Any:
+    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False, **kwargs: Any) -> Any:
         if ended:
             ended_scan.set()
-        return await strays(self, exclude, ended=ended)
+        return await strays(self, exclude, ended=ended, **kwargs)
 
     def listing(self: proc_tree._Marked) -> tuple[set[int], bool]:
         if ended_scan.is_set():
@@ -1510,10 +1510,10 @@ def test_turn_tree_end_looks_again_when_a_marked_process_is_a_zombie_as_its_envi
     strays = proc_tree.TurnTree._strays
     live = proc_tree._Marked.live
 
-    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False) -> Any:
+    async def noting_ended(self: proc_tree.TurnTree, exclude: frozenset[int], *, ended: bool = False, **kwargs: Any) -> Any:
         if ended:
             ended_scan.set()
-        return await strays(self, exclude, ended=ended)
+        return await strays(self, exclude, ended=ended, **kwargs)
 
     def listing(self: proc_tree._Marked) -> tuple[set[int], bool]:
         zombie = proc / str(gone.pid)
@@ -1599,3 +1599,205 @@ def test_turn_tree_end_kills_the_strays_a_listing_past_the_deadline_found(
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run()) == []
+
+
+# --- Every end signals first and stays bounded ---
+
+
+def _signals(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, int, frozenset[int]]]:
+    """Each signal an end sends to a tree: when (monotonic), which, and to which pids."""
+    sent: list[tuple[float, int, frozenset[int]]] = []
+    signal_tree = proc_tree._signal
+
+    def noting(process: Any, tree: dict[int, int], sig: int) -> None:
+        sent.append((time.monotonic(), sig, frozenset(tree)))
+        signal_tree(process, tree, sig)
+
+    monkeypatch.setattr(proc_tree, "_signal", noting)
+    return sent
+
+
+def _first(sent: list[tuple[float, int, frozenset[int]]], sig: int, pid: int) -> float:
+    return next(at for at, sent_sig, pids in sent if sent_sig == sig and pid in pids)
+
+
+# A child of the agent in a session of its own that ignores SIGTERM and keeps forking short-lived children (at a
+# gentle rate: a few hundred a second, a handful running at once) until it is killed.
+_FORK_STORM = (
+    "import os, signal, subprocess, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "os.setsid()\n"
+    "open('storm.pid', 'w').write(str(os.getpid()))\n"
+    "while True:\n"
+    "    subprocess.Popen(['/bin/sleep', '0.05'])\n"
+    "    time.sleep(0.005)\n"
+)
+
+
+def test_turn_tree_end_signals_at_once_and_returns_within_its_bound_under_a_fork_storm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The fork watch (macOS) and every listing see processes come and go all the time: the end holds the tree at
+    # once, and returns within its bound with the storm ended.
+    sent = _signals(monkeypatch)
+    code = ("import subprocess, sys\n"
+            "subprocess.Popen([sys.executable, '-c', " + repr(_FORK_STORM) + "])\nsys.stdin.read()\n")
+
+    async def _run() -> tuple[float, float, float, list[int]]:
+        process = await _spawn_python(tmp_path, code)
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        storm = int(await _wait_file(tmp_path / "storm.pid"))
+        try:
+            await asyncio.sleep(0.5)  # storming
+            await tree.refresh(force=True)
+            assert storm in tree.seen
+            await asyncio.sleep(0.2)
+            began = time.monotonic()
+            await asyncio.wait_for(tree.end(), 10)
+            took = time.monotonic() - began
+            return (_first(sent, signal.SIGSTOP, storm) - began, _first(sent, signal.SIGKILL, storm) - began, took,
+                    _running([storm, process.pid]))
+        finally:
+            for pid in _running([storm], settle=0):
+                os.killpg(pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+
+    held, killed, took, left = asyncio.run(_run())
+    assert held < 0.5
+    assert killed < proc_tree.TERM_GRACE_SEC + 0.5
+    assert took < proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + proc_tree._LAST_LOOK_SEC + 1
+    assert left == []
+
+
+@pytest.mark.parametrize("new_only", [False, True], ids=["end", "end_new"])
+def test_turn_tree_end_does_not_wait_for_a_slow_refresh_before_it_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_only: bool,
+) -> None:
+    # A refresh (the ticker's) is stuck in its listing, holding the tree's lock, and (macOS) the fork watch holds
+    # its own: the end holds the turn's child at once, signals it within ``_LOCK_SEC`` more and returns within its
+    # bound, the refresh still stuck.
+    sent = _signals(monkeypatch)
+    code = ("import subprocess, sys\nsys.stdin.readline()\n"
+            "child = subprocess.Popen(['/bin/sleep', '60'])\nprint(child.pid, flush=True)\nsys.stdin.read()\n")
+    stuck, entered = threading.Event(), threading.Event()
+    snapshot = proc_tree._snapshot
+
+    def slow_once() -> Any:
+        if not entered.is_set():
+            entered.set()
+            stuck.wait(10)
+        return snapshot()
+
+    async def _run() -> tuple[float, float, float, list[int], list[int]]:
+        process = await proc_tree.spawn(sys.executable, "-c", code, cwd=tmp_path, stdin=asyncio.subprocess.PIPE,
+                                        stdout=asyncio.subprocess.PIPE)
+        assert process.stdin and process.stdout
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        lineage = tree._owned if isinstance(tree._owned, proc_tree._Lineage) else None
+        child = 0
+        try:
+            await tree.baseline()
+            process.stdin.write(b"\n")
+            await process.stdin.drain()
+            child = int(await process.stdout.readline())
+            await tree.refresh(force=True)
+            assert child in tree.seen
+            monkeypatch.setattr(proc_tree, "_snapshot", slow_once)
+            refreshing = asyncio.ensure_future(tree.refresh(force=True))
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            if lineage is not None:
+                lineage._lock.acquire()
+            began = time.monotonic()
+            try:
+                await asyncio.wait_for(tree.end_new() if new_only else tree.end(), 10)
+            finally:
+                if lineage is not None:
+                    lineage._lock.release()
+            took = time.monotonic() - began
+            assert not refreshing.done()  # the end did not wait for it
+            stuck.set()
+            await refreshing
+            return (_first(sent, signal.SIGSTOP, child) - began, _first(sent, signal.SIGTERM, child) - began, took,
+                    _running([child]), _running([process.pid], settle=0))
+        finally:
+            stuck.set()
+            for pid in _running([child], settle=0) if child else []:
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+
+    held, terminated, took, child_left, agent_left = asyncio.run(_run())
+    assert held < 0.5
+    assert terminated < held + proc_tree._LOCK_SEC + 0.5
+    assert took < proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + proc_tree._LAST_LOOK_SEC + 1
+    assert child_left == []
+    assert len(agent_left) == (1 if new_only else 0)  # ``end_new`` leaves the agent running
+
+
+@pytest.mark.skipif(not proc_tree._LINEAGE, reason="the fork watch is macOS's")
+def test_a_fork_watch_walking_an_endless_subtree_does_not_hold_its_lock_or_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The review's case: a fork makes the watch walk the forking process's children, and every child it lists has
+    # one more (children that keep forking and exiting, enumerated without end). The walk stops at its budget and
+    # lets go of the lock, and the stop's first signal never waited for it.
+    sent = _signals(monkeypatch)
+    fake = 10_000_000  # beyond any pid: what the endless subtree is made of
+    made = iter(range(fake, fake + 10_000_000))
+    children, identity = proc_tree._children, proc_tree._identity
+    agent: list[int] = []
+
+    def endless(pid: int) -> list[int]:
+        time.sleep(0.001)
+        if pid >= fake:
+            return [next(made)]
+        return children(pid) + ([next(made)] if agent and pid == agent[0] else [])
+
+    def identities(pid: int) -> tuple[int, int, int] | None:
+        return (pid + 10**9, pid, pid - 1) if pid >= fake else identity(pid)
+
+    walks: list[float] = []
+    walking = threading.Event()
+    adopt = proc_tree._Lineage._adopt
+
+    def timed(self: Any, parent: int, until: float) -> None:
+        walking.set()
+        began = time.monotonic()
+        try:
+            adopt(self, parent, until)
+        finally:
+            walks.append(time.monotonic() - began)
+
+    code = ("import subprocess, sys\nsys.stdin.readline()\n"
+            "child = subprocess.Popen(['/bin/sleep', '60'])\nprint(child.pid, flush=True)\nsys.stdin.read()\n")
+
+    async def _run() -> tuple[float, float, list[int]]:
+        process = await _spawn_python(tmp_path, code)
+        assert process.stdin
+        tree = proc_tree.TurnTree.track(process, label="turn")
+        assert isinstance(tree._owned, proc_tree._Lineage)
+        agent.append(process.pid)
+        monkeypatch.setattr(proc_tree, "_children", endless)
+        monkeypatch.setattr(proc_tree, "_identity", identities)
+        monkeypatch.setattr(proc_tree._Lineage, "_adopt", timed)
+        process.stdin.write(b"\n")  # it forks: the watch walks its children
+        await process.stdin.drain()
+        while not walking.is_set():
+            await asyncio.sleep(0.005)
+        began = time.monotonic()
+        try:
+            await asyncio.wait_for(tree.end(), 10)
+            return _first(sent, signal.SIGSTOP, process.pid) - began, time.monotonic() - began, _running(
+                [process.pid])
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+
+    held, took, left = asyncio.run(_run())
+    assert held < 0.5
+    assert took < proc_tree.TERM_GRACE_SEC + proc_tree.REAP_SEC + proc_tree._LAST_LOOK_SEC + 1
+    assert left == []
+    assert walks and max(walks) < 0.5  # each walk let go of the lock within its budget
