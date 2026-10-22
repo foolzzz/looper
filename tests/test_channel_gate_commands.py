@@ -148,7 +148,7 @@ class TestList:
         world.gates = [_gate("t1", "g1", "登录重构", chat_id="ou_me"),
                        _gate("t2", "g2", "报表", chat_id="oc_team", origin="channel-lark")]
         [(text, _)] = world.send("/gates", chat_id="oc_team", chat_type="group")
-        assert world.listed_with == [("lark", "oc_team")]
+        assert world.listed_with == [("channel-lark", "oc_team")]
         assert "报表" in text and "登录重构" not in text and world.model == []
 
     def test_nothing_waiting(self, world: _World) -> None:
@@ -303,7 +303,7 @@ class TestHelp:
 @pytest.mark.usefixtures("agent_db")
 class TestReplyUnderACard:
     def _reply(self, world: _World, text: str, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
-        async def find(channel: str, chat: str, ids: Any) -> dict[str, Any]:
+        async def find(channel: str, chat: str, ids: Any, *, channel_id: str) -> dict[str, Any]:
             return {"task_id": "t1", "step_key": "g1", "state": "open"}
 
         monkeypatch.setattr(gate_routing.db_user_gates, "find_reference", find)
@@ -329,7 +329,7 @@ class TestReplyUnderACard:
         async def refuse(*args: Any, **kwargs: Any) -> Any:
             raise RequestError("409 Conflict", "gate g1 is closed")
 
-        async def find(channel: str, chat: str, ids: Any) -> dict[str, Any]:
+        async def find(channel: str, chat: str, ids: Any, *, channel_id: str) -> dict[str, Any]:
             return {"task_id": "t1", "step_key": "g1", "state": "open"}
 
         monkeypatch.setattr(gate_routing.db_user_gates, "find_reference", find)
@@ -340,7 +340,7 @@ class TestReplyUnderACard:
         assert gate_routing._closed("t1", "g1", "x").kind is RouteKind.CLOSED
 
     def test_end_under_a_closed_card_is_answered_by_code(self, world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
-        async def find(channel: str, chat: str, ids: Any) -> dict[str, Any]:
+        async def find(channel: str, chat: str, ids: Any, *, channel_id: str) -> dict[str, Any]:
             return {"task_id": "t1", "step_key": "g1", "state": "passed"}
 
         monkeypatch.setattr(gate_routing.db_user_gates, "find_reference", find)

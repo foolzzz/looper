@@ -284,6 +284,8 @@ def channel_address(channel: str, channel_id: str | None = None) -> AgentAddress
 
 BOT_CHANNEL_TYPES = ("telegram", "lark", "lark_bot")
 _CHANNEL_ID = re.compile(r"^channel-(telegram|lark_bot|lark)(?:-([1-9][0-9]{0,8}))?$")
+# The same shape for PostgreSQL (``~``): a Telegram or Lark bot's channel id, built-in or added.
+CHANNEL_ID_PATTERN = r"^channel-(telegram|lark_bot|lark)(-[1-9][0-9]*)?$"
 
 
 @dataclass(frozen=True)

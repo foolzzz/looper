@@ -30,7 +30,8 @@ class _Chat:
     """One Lark chat with the Manager: each ``say`` is a turn in which the given calls run."""
 
     def __init__(self, tmp: Path, planners: set[str] | None = None, *, group: bool = False,
-                 sender: str = "ou_1") -> None:
+                 sender: str = "ou_1", channel_id: str = "channel-lark") -> None:
+        self.channel_id = channel_id  # the bot the chat goes through
         self.group = group  # a Lark group chat, where the sender @-mentioned the bot
         self.sender = sender
         self.bus = MessageBus(runtime_root=tmp)
@@ -45,10 +46,10 @@ class _Chat:
             source=LARK, target=LARK, message_type=MessageType.USER_MESSAGE,
             payload={"text": text, "channel_context": {"chat_id": "oc_1", "sender_id": self.sender,
                                                        "chat_type": "group" if self.group else "p2p"}},
-            correlation_id=f"corr-{len(self.turns)}", metadata={"origin_channel_id": "channel-lark"},
+            correlation_id=f"corr-{len(self.turns)}", metadata={"origin_channel_id": self.channel_id},
         )
         turn = Turn(channel="lark", chat="oc_1", message_id=envelope.message_id, envelope=envelope, sender=self.sender,
-                    group=self.group)
+                    group=self.group, channel_id=self.channel_id)
         self.turns.append(turn)
         self.notes.append(self.ops.begin_turn(turn))
         try:

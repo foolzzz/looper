@@ -456,7 +456,8 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
             group = (chat or "").startswith("-")
         case _:
             group = False
-    return {"channel": channel, "sender": str(sender) if sender else None, "chat": chat, "group": group}
+    return {"channel": channel, "channel_id": getattr(envelope.source, "agent_id", None),
+            "sender": str(sender) if sender else None, "chat": chat, "group": group}
 
 
 def _stored_chat(origin: dict[str, Any]) -> bool:
@@ -1000,7 +1001,8 @@ class ManagerAgent:
                 return Prepared()
             origin = _message_origin(envelope)
             # The calls Claude makes while answering belong to this message and its chat.
-            turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
+            turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"],
+                        message_id=envelope.message_id,
                         envelope=envelope, sender=origin["sender"], group=origin["group"],
                         require_match=self._claude.shares_bridge)
             token.check()
@@ -1919,8 +1921,9 @@ class ManagerAgent:
 
         async def begin(after: Any) -> AutonomousRun:
             last = after if isinstance(after, MessageEnvelope) else None
-            origin = _message_origin(last) if last is not None else {"channel": None, "chat": None}
-            turn = Turn(channel=origin["channel"], chat=origin["chat"])  # it answers no message: it only reads
+            origin = _message_origin(last) if last is not None else {"channel": None, "channel_id": None, "chat": None}
+            turn = Turn(channel=origin["channel"], chat=origin["chat"], channel_id=origin["channel_id"])
+            # ^ it answers no message: it only reads
             if self.ops is not None:
                 self.ops.begin_turn(turn)
             recorder = ClaudeRunRecorder(
@@ -2075,7 +2078,7 @@ class ManagerAgent:
         the user's answer on (``looper_task_gate_reply``): in a Lark or Telegram chat only the gates whose messages
         go to that chat (``gate_service.gate_chat``), so no other chat's gate shows in it; in the dashboard chat all,
         each with its chat. None, no section."""
-        origin = _message_origin(envelope) if envelope is not None else {"channel": "web"}
+        origin = _message_origin(envelope) if envelope is not None else {"channel": "web", "channel_id": "channel-web"}
         here = is_lark(origin["channel"]) or origin["channel"] == "telegram"
         if here:
             chat = origin_chat(origin["channel"], origin["chat"] or "", group=origin["group"],
@@ -2084,9 +2087,9 @@ class ManagerAgent:
             if here:
                 dashboard = await gate_dashboard_target()
                 gates = await db_user_gates.open_gates(
-                    OPEN_GATES_LISTED, chat=(origin["channel"], chat), manager_id=self.agent_id,
-                    dashboard=dashboard is not None and (dashboard.channel.value, dashboard.target.id) ==
-                    (origin["channel"], chat))
+                    OPEN_GATES_LISTED, chat=(origin["channel_id"], chat), manager_id=self.agent_id,
+                    dashboard=dashboard is not None and (dashboard.channel_id, dashboard.target.id) ==
+                    (origin["channel_id"], chat))
             else:
                 gates = await db_user_gates.open_gates(OPEN_GATES_LISTED, manager_id=self.agent_id)
                 dashboard = await gate_dashboard_target() if gates else None
@@ -2096,8 +2099,8 @@ class ManagerAgent:
         listed: list[tuple[dict[str, Any], str]] = []
         for gate in gates:
             gate_chat = gate_chat_of(gate, dashboard)
-            if here and (gate_chat is None or (gate_chat.channel.value, gate_chat.target.id) !=
-                         (origin["channel"], chat)):
+            if here and (gate_chat is None or (gate_chat.channel_id, gate_chat.target.id) !=
+                         (origin["channel_id"], chat)):
                 continue
             listed.append((gate, "" if here else f"; chat: {gate_chat.label() if gate_chat else 'the task page only'}"))
         if not listed:

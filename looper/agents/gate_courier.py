@@ -35,8 +35,7 @@ from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_us
 from .channels.base import PostReceipt
 from .gate_service import GateChat, dashboard_target, gate_chat
 from .links import task_link
-from .message import builtin_channel_id
-from .task_notice import NAME_CHARS, NotifyTarget, link_line
+from .task_notice import NAME_CHARS, link_line
 from .user_gates import RETRY_WAIT_SEC, GateState, MessageKind
 
 logger = logging.getLogger(__name__)
@@ -215,11 +214,10 @@ class GateCourier:
             return True
         reply_to = await self._reply_to(row, chat)
         key = f"gate-{row['id']}"
-        receipt = await self._post(builtin_channel_id(chat.channel.value), chat.target, text, reply_to=reply_to,
-                                    idempotency_key=key)
+        receipt = await self._post(chat.channel_id, chat.target, text, reply_to=reply_to, idempotency_key=key)
         if receipt.parent_gone:
             # The message it replies to was recalled (or deleted, which Lark counts as recalled): post it on its own.
-            receipt = await self._post(builtin_channel_id(chat.channel.value), chat.target, text, reply_to=None,
+            receipt = await self._post(chat.channel_id, chat.target, text, reply_to=None,
                                        idempotency_key=f"{key}-own")
         attempt = int(row.get("post_attempts") or 0) + 1
         if not receipt.success and not receipt.external_ids and attempt < POST_ATTEMPTS:
@@ -228,7 +226,7 @@ class GateCourier:
             return False
         await db_user_gates.record_post(row["id"], row["task_id"], "sent" if receipt.success else "failed",
                                         error=None if receipt.success else receipt.error or "not sent",
-                                        channel=chat.channel.value, chat=chat.target.id,
+                                        channel=chat.channel.value, channel_id=chat.channel_id, chat=chat.target.id,
                                         external_ids=receipt.external_ids)
         if not receipt.success:
             await db_activity.insert_activity(
@@ -245,12 +243,12 @@ class GateCourier:
             return None
         if row["kind"] in (MessageKind.REPLY.value, MessageKind.ERROR.value, MessageKind.LATE.value):
             user = await db_user_gates.answered(row["step_id"], row["id"])
-            if user and user.get("external_id") and _same_chat(user, chat.channel.value, chat.target):
+            if user and user.get("external_id") and _same_chat(user, chat):
                 return str(user["external_id"])
-        return await db_user_gates.first_post(row["step_id"], chat.channel.value, chat.target.id)
+        return await db_user_gates.first_post(row["step_id"], chat.channel_id, chat.target.id)
 
 
-def _same_chat(message: Mapping[str, Any], channel: str, target: NotifyTarget) -> bool:
+def _same_chat(message: Mapping[str, Any], chat: GateChat) -> bool:
     """Whether the user's ``message`` came from the chat posted to, as ``gate_service.origin_chat`` names it (a
     Lark direct message by its sender's open_id): a reply goes into the chat of the message it replies to."""
-    return message.get("channel") == channel and str(message.get("chat") or "") == target.id
+    return message.get("channel_id") == chat.channel_id and str(message.get("chat") or "") == chat.target.id

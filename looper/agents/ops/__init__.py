@@ -92,6 +92,7 @@ class Turn:
     # A resident runtime's turns share one bridge: a write call runs only when it matches a tool_use of this turn.
     require_match: bool = False
     runtime: str | None = None  # the runtime that answers it (its type), once the Manager knows it
+    channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
 
     @property
     def autonomous(self) -> bool:
