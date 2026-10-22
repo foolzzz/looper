@@ -1073,13 +1073,14 @@ def _limits() -> dict[str, Any]:
     }
 
 
-async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
-    """Runtime/vendor types and saved runtimes, accounts, models and profiles, with usage counts."""
+async def registry_view(*, server_claude: str = "claude", manager_id: str | None = None) -> dict[str, Any]:
+    """Runtime/vendor types and saved runtimes, accounts, models and profiles, with usage counts; with
+    ``manager_id``, the usage only of that Manager's own tasks, session, profile and templates."""
     from ..db import profile_registry as db
 
     from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
 
-    uses = await db.profile_usage()
+    uses = await db.profile_usage(manager_id=manager_id)
     providers = await db.list_providers()
     logins = await _logins(providers)
     models = await db.list_models()

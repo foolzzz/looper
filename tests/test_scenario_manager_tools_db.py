@@ -520,3 +520,32 @@ def test_a_workspace_warning_does_not_name_another_managers_task(monkeypatch: py
         assert "secret title task-b" in default.turns[-1].blocks[0]
 
     _run(test, monkeypatch)
+
+
+def test_agent_profile_usage_and_deletion_conflicts_stay_inside_a_scoped_managers_tasks(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        chat, default = await _review(pool, tmp_path, tools="all", task_scope="own")
+        await _tasks(pool)
+        model = await pool.fetchval("SELECT id FROM llm_models WHERE name = 'sonnet' LIMIT 1")
+        made = _ok((await chat.say("new", ("looper_agent_profiles", {
+            "action": "create", "name": "shared", "runtime": "claude-code", "model": model})))[0])
+        profile_id = made["profile"]["profile_id"]
+        await pool.execute("INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES "
+                           "('task-own', 'worker', $1), ('task-default', 'worker', $1)", profile_id)
+
+        def used(answer: dict[str, Any]) -> str | None:
+            return next(p for p in _ok(answer)["profiles"] if p["profile_id"] == profile_id)["used_by"]
+
+        assert used((await chat.say("list", ("looper_agent_profiles", {"action": "list"})))[0]) == "1 task"
+        assert used((await default.say("list", ("looper_agent_profiles", {"action": "list"})))[0]) == "2 tasks"
+
+        await pool.execute("DELETE FROM task_profile_overrides WHERE task_id = 'task-own'")
+        assert used((await chat.say("list", ("looper_agent_profiles", {"action": "list"})))[0]) is None
+        (refused,) = await chat.say("rm", ("looper_agent_profiles", {"action": "delete", "profile": "shared"}))
+        assert _error(refused) == "conflict"
+        text = json.dumps(refused)
+        assert "task-default" not in text and "title of" not in text and "2 task" not in text
+        assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE id = $1", profile_id) == 1
+
+    _run(test, monkeypatch)

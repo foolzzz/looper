@@ -158,8 +158,22 @@ def _provider_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return listed
 
 
-async def _registry() -> dict[str, Any]:
-    return await profile_registry.registry_view()
+async def _registry(call: Call | None = None) -> dict[str, Any]:
+    return await profile_registry.registry_view(manager_id=call.manager_id if call and call.scoped else None)
+
+
+async def _unshared(call: Call, request: Awaitable[T], profile: Mapping[str, Any]) -> T:
+    """``request``, a deletion checked against every reference; a scoped Manager is refused without learning of
+    anyone else's: only its own usage is spelled out."""
+    try:
+        return await answered(request)
+    except OpError as exc:
+        if exc.code is not ErrorCode.CONFLICT or not call.scoped:
+            raise
+        own = profile_registry.usage_text(profile["used_by"])
+        raise OpError(ErrorCode.CONFLICT,
+                      f"Agent Profile {profile['name']!r} is still selected" + (f" by {own} and" if own else "")
+                      + " elsewhere, outside this Manager: select another profile there first") from None
 
 
 def _profile(registry: Mapping[str, Any], wanted: Any) -> dict[str, Any]:
@@ -183,7 +197,7 @@ def _profile_answer(answer: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _profiles(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
-    registry = await _registry()
+    registry = await _registry(call)
     if action == "list":
         return {"profiles": [_profile_listed(p) for p in registry["profiles"]],
                 "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"], "roles": r["roles"]}
@@ -202,7 +216,7 @@ async def _profiles(call: Call) -> dict[str, Any]:
         if action == "create":
             return _profile_answer(await answered(profile_registry.create_profile(fields)))
         return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields)))
-    await answered(profile_registry.delete_profile(profile["profile_id"]))
+    await _unshared(call, profile_registry.delete_profile(profile["profile_id"]), profile)
     return {"deleted": profile["name"]}
 
 
@@ -211,8 +225,8 @@ async def _deleting_profile(call: Call) -> str | None:
     if call.arguments["action"] != "delete":
         return None
     _required(call.arguments, "delete", "profile")
-    profile = _profile(await _registry(), call.arguments["profile"])
-    row = await answered(profile_registry.deletable_profile(profile["profile_id"]))
+    profile = _profile(await _registry(call), call.arguments["profile"])
+    row = await _unshared(call, profile_registry.deletable_profile(profile["profile_id"]), profile)
     effort = f" · effort {row['effort']}" if row.get("effort") else ""
     return (f"要删除 Agent Profile「{row['name']}」（{row['runtime_name']} · {row['provider']['name']} · "
             f"{row['model']['name']} · {row['model']['protocol']}"
