@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.13.23] - 2026-10-21
+
+### Fixed
+
+- **Manager session profile follow-ups.** A Manager turn stops with the settings read error instead of running on cached or built-in settings; `/profile` followed by a tab or newline is recognized; the Chat header refreshes its Profile after `/profile` and on window focus; the session view gains `follow_settings`, so Follow Settings shows the handoff confirmation when it starts a new session; and the Settings tool's "applies from its next session" note is returned only when `profile_id` is set. Model-visible: that tool result no longer carries the note for timeout, budget or harness changes. ([#355](https://github.com/foolzzz/looper/pull/355))
+
 ## [2.13.22] - 2026-10-21
 
 ### Fixed
