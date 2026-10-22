@@ -136,10 +136,11 @@ class TurnCancel:
 
 - `seen: dict[pid, start_time]`：进程本身、父链在树里的、树成员领导的进程组的成员（`_tree` 的现有规则）。
 - `refresh()`：读循环每个事件调一次，另有一个 0.5 秒的计时任务；新出现的进程连同启动时间并入 `seen`。工具 `setsid` 出去、父进程退出后被重新挂靠，只要被刷新到过一次就还在 `seen` 里。
-- **归属（不靠采样）**：一个后台命令起出来马上 `setsid`、父进程随即退出，可能在任何一次刷新之前就既不在组里、也没有父链（#339 的第一条）。所以 `track()` 同时按平台提供的机制跟住智能体起的每个进程（`proc_tree._owned`）：
-  - macOS：内核给每个进程一个不复用的 id 版本（`p_idversion`），并在 `p_orig_ppidversion` 里记下创建它的进程的版本，重新挂靠和 `setsid` 都不改。一个线程在 kqueue 上等每个已知后代的 `NOTE_FORK`，在父进程创建子进程时就把子进程的版本记下；所以中间那个 shell 立刻退出了，它起的进程照样连得回这个智能体。读的是 `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)`；读不了（旧系统）就只靠进程树。
-  - Linux：`spawn` 给智能体一个随机的环境变量 `LOOPER_PROC_OWNER`，它起的进程都继承；`/proc/<pid>/environ` 是进程启动时的环境，`setsid`、父进程退出都不改。工具自己清空环境（`env -i`）的进程不在内。
-  - `end()`/`end_new()` 把这些进程中树够不到、当前在跑的，和 `seen` 里够不到的一样逐个回收（读一次启动时间再发信号）；`baseline()` 把当时已在跑的这类进程算进基线，上一轮留下的后台进程不会被这一轮的 `end_new()` 结束。
+- **归属**：一个后台命令起出来马上 `setsid`、父进程随即退出，可能在任何一次刷新之前就既不在组里、也没有父链（#339 的第一条）。所以 `track()` 同时按平台提供的机制跟住智能体起的每个进程（`proc_tree._owned`）。两个平台的保证不一样（6.6）：
+  - Linux（保证）：`spawn` 给智能体一个随机的环境变量 `LOOPER_PROC_OWNER`，它起的进程都继承；`/proc/<pid>/environ` 是进程启动时的环境，`setsid`、两次 fork、祖先全部退出都不改。工具自己清空环境（`env -i`）的进程不在内。
+  - macOS（尽力而为）：内核给每个进程一个不复用的 id 版本（`p_idversion`），并在 `p_orig_ppidversion` 里记下创建它的进程的版本，重新挂靠和 `setsid` 都不改。一个线程在 kqueue 上等每个已知后代的 `NOTE_FORK`，在父进程创建子进程时就把父进程当前的版本和子进程的版本记下，有 fork 时最多每 0.25 秒全表扫一次（没有 fork 不扫）；加上一轮进行中 0.5 秒一次的刷新。这是竞速：中间的 shell 在被看到之前就退出了，它起的进程就连不回来。读的是 `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)`；读不了（旧系统）就只靠进程树。任何 `spawn` 都不为此多起进程，`process.kill()` 照旧直接到智能体。
+  - `end()`/`end_new()` 把这些进程中树够不到、当前在跑的，和 `seen` 里够不到的一样逐个回收（读一次启动时间再发信号）；`baseline()`（在线程里读进程表，不占事件循环）把当时已在跑的这类进程算进基线，上一轮留下的后台进程，以及它们之后起的子进程，都不会被这一轮的 `end_new()` 结束。
+  - 回收有上限：第一批信号之后，游离进程最晚在 `TERM_GRACE_SEC` 收到 SIGKILL，复查最多到 `TERM_GRACE_SEC + REAP_SEC`；每个游离进程最多回收两次（结束前一次、全部结束后复查一次），SIGKILL 也结束不了的（EPERM、不可中断睡眠）记 WARNING 后留下。基线里的循环不停起子进程，也不会让 `end_new()` 一直跑。
 - `baseline()`：常驻进程在一轮开始时的成员（Claude 的 MCP 桥接进程等），`since_baseline()` 给出这一轮新起的进程。
 - `end()`：结束 `seen ∪ 当前树`，每个 pid 先核对启动时间（防 pid 复用），SIGTERM → `TERM_GRACE_SEC` → SIGKILL，`REAP_SEC = 2` 内回收不了就记日志放弃等待，不挂住这一轮。按进程组从树里够不到的 `seen` 成员（被刷新到过、之后自己 `setsid` 出组、父进程又退出了）不靠 pgid 找：按快照里的 pid ＋ 启动时间逐个独立回收（连同它领导的组），启动时间对不上的不碰。`end_new()` 同样如此。
 - `begin_end()`：常驻进程被允许自己退出（`stop()` 不带 `kill`）之前，刷新并把树写进进程记录，记录留到 `end` 完成；服务器在这期间死掉，下次启动的 `sweep` 照记录结束剩下的。
@@ -250,6 +251,13 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 - 计数：`ManagerOps.binding_report()`，`GET /api/status` 的 `turn_binding`：`{"enforced": bool, "mismatches": N, "by": [{reason, runtime, tool, count}], "matches": [{by, when, count}]}`，从服务器启动累计。开关打开后同样记录和计数（`enforced: true`），只是这时会拒绝。`matches` 是做过匹配的调用：`by` 为 `id`（桥接带了运行时的调用 id）或 `arguments`，`when` 为 `at_arrival`（请求到达时 `tool_use` 已经读到）、`waited`（等到了）或 `missed`；6.3 节的需要验证项据此在真实路径上读出。
 - 不放宽、也不收紧：关着时轮结束、轮被停的调用只在 main 本来就拒绝的地方拒绝（没有轮在跑时的写 → `needs_user_turn`；`self._turn` 已被停 → `stopped`）。
 
+### 6.6 进程的归属：macOS 上脱离的守护进程是尽力而为
+
+这一轮起的进程是不是这一轮的（4.2 的归属），两个平台给的保证不同，这是有意的限度，不是待修的缺口：
+
+- Linux：保证。一个工具起的守护进程，`setsid` 加两次 fork、祖先全部退出，照样带着 `LOOPER_PROC_OWNER`，停止时结束。
+- macOS：尽力而为。进程树、进程组、kqueue 的 fork 通知和一轮进行中的采样都在用，大多数后台命令（包括 `setsid` 出去、父进程马上退出的）照样结束；但一个守护进程（`setsid` 加两次 fork，中间的进程在被看到之前就退出了）可能留下来，就像在终端里按 Ctrl-C 也结束不了这样的守护进程。为了在 macOS 上也保证而在每次 `spawn` 外面套启动器和看守进程的做法已经撤掉：它给每次 `spawn`（开关关着也算）多一个进程、约 50 毫秒，`process.kill()` 也只到得了启动器。
+
 ## 7. 记录、下一轮、续接（D7）
 
 - **有进程起来过**（`starting` 及之后才有 `ClaudeRunRecorder`）：`finish(status=INTERRUPTED, error="stopped by the user", output_text=已流出的文字 or None, usage=turn.usage)`，`annotate({"user_stop": {"via", "phase", "method", "requested_at", "usage_complete"}})`。`phase` 是停止到达时的阶段；`method` 是 `control|cancel|kill|null`（`null`：进程没起或提示没写出）。用量：运行时报到哪算到哪；完全不知道（Codex 被杀）时 `usage_complete=false`、花费记 `null` 而不是 0，Runs 显示「usage not reported」。会话累计按已知部分前移并 `_save_session_state`。
@@ -269,7 +277,7 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 | `tests/test_turn_token.py` | 转移表每一格（合法/非法）；`request_stop` 幂等；`advance` 在 `stopping` 抛 `TurnStopped`；`TurnCancel.on_request` 已请求时立即触发、注销、`race` 的三种结局 |
 | `tests/test_manager_stop.py`（改） | 投递即登记；`received`、`preparing`、`starting`、`running` 停止各自的回复、记录、下一轮说明；排队消息可停；`/new` 动手前后；交接被停不丢会话；`stop lost` 不变式 |
 | `tests/test_manager_stop_faults.py`（新） | 故障注入：对 `PREPARATION_STEPS` 参数化，在该步骤挂住，停止，放开；断言模型的 `run_turn` 从未被调用（步骤在 `running` 之前）、`STOP_REPLY_BOUND` 内回 `outcome: stopped`、没有成功记录、没有遗留确认；外加 AST 测试（第 5 节） |
-| `tests/test_proc_tree.py`（加） | `TurnTree`：快照、刷新抓到 `setsid` 出去的孙进程、父进程先退出后照样结束、pid 复用不误杀、`REAP_SEC` 上限、`end_new` 留下基线成员 |
+| `tests/test_proc_tree.py`（加） | `TurnTree`：快照、刷新抓到 `setsid` 出去的孙进程、父进程先退出后照样结束、pid 复用不误杀、`REAP_SEC` 上限、`end_new` 留下基线成员；基线里不停起子进程的循环和 SIGKILL 结束不了的游离进程下 `end`/`end_new` 在上限内返回；`spawn` 不多起进程；两次 fork 的守护进程被结束只在 Linux 上断言（6.6） |
 | `tests/test_per_turn_interrupt.py`、`tests/test_resident_claude_interrupt.py`、`tests/test_grok_acp.py`（改） | `cancel=` 在各入口的语义；R1（停止后没有事件进 `on_event`）；退回旧路径时停止不丢 |
 | `tests/test_mcp_server.py`、`tests/test_manager_ops.py`、`tests/test_manager_turn_binding.py`（新） | 绑定文件读写与头；按 binding 归属；迟到请求（含确认）被拒；常驻运行时的匹配：按 id、按参数、等待上限、自己的轮的调用不匹配被拒 |
 
@@ -300,7 +308,7 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 `evals/stop_realpath.py`（卡片 14）：在 worktree 里起 `looper serve`（新数据库、临时 `--runtime-root`、8767 以外的空闲端口，不碰 `~/.looper`），打开 `chat.stop_enabled`，设置管家档案，经 HTTP 驱动；每格重复 3 次，输出 Markdown 报告（不含本机路径）：
 
-1. **Claude Code：** (a) 发送后立即停（`received`/`preparing`）；(b) 「运行 `sleep 60; echo done`」，工具开始后停；(c) 「运行 `setsid sleep 120 &` 然后 `sleep 60`」，工具中停；(d) 长文本输出中停；(e) 让它调用一个高风险工具（会要求确认），确认块出现前停。核对：`STOP_REPLY_BOUND` 内 `outcome: stopped`；`ps` 里这一轮起的进程（含 `setsid` 的）都没了；记录 `interrupted` + `user_stop.phase/method`（`control`，或 `kill` 并写明）；`manager_actions` 里停止之后的调用是 `stopped`；没有遗留确认；下一轮「刚才怎么了」答得出，会话 id 不变。
+1. **Claude Code：** (a) 发送后立即停（`received`/`preparing`）；(b) 「运行 `sleep 60; echo done`」，工具开始后停；(c) 「运行 `setsid sleep 120 &` 然后 `sleep 60`」，工具中停；(d) 长文本输出中停；(e) 让它调用一个高风险工具（会要求确认），确认块出现前停。核对：`STOP_REPLY_BOUND` 内 `outcome: stopped`；`ps` 里这一轮起的进程（含 `setsid` 的）都没了，只有 macOS 上 `setsid` 那一格（脚本的格 d）脱离的睡眠进程例外：留下了就在报告里记一笔、由脚本结束，不算失败（6.6）；记录 `interrupted` + `user_stop.phase/method`（`control`，或 `kill` 并写明）；`manager_actions` 里停止之后的调用是 `stopped`；没有遗留确认；下一轮「刚才怎么了」答得出，会话 id 不变。
 2. **OMP + DeepSeek：** 同 (a)–(d)，`method` 为 `kill`，用量来自 `usage_so_far`，下一轮 `--resume` 同一会话。
 3. **6.3 节的需要验证项：** 记下 Claude Code 版本、`tools/call` 的 `_meta`、`assistant` 与工具执行的先后。
 4. **Telegram 或飞书：** 长任务中发 `/stop`，排队两条再 `/stop`（渠道不可用就写明缺口）。
@@ -330,11 +338,11 @@ _end_turn(token, t)    同步判定：cancel.requested → 停止；否则 settl
 
 全部满足才执行卡片 16：
 
-1. 第 8.1、8.2 节的测试在 CI 的 macOS 和 Linux 上全绿，并在本机连续跑 20 遍停止相关的测试文件无一次失败（`for i in $(seq 20); do pytest -q tests/test_stop_matrix.py tests/test_manager_stop_matrix.py tests/test_manager_stop_faults.py || break; done`）。
+1. 第 8.1、8.2 节的测试在 CI 的 macOS 和 Linux 上全绿（断言脱离的守护进程被结束的测试只在 Linux 上跑，6.6），并在本机连续跑 20 遍停止相关的测试文件无一次失败（`for i in $(seq 20); do pytest -q tests/test_stop_matrix.py tests/test_manager_stop_matrix.py tests/test_manager_stop_faults.py || break; done`）。
 2. AST 测试通过：准备阶段没有未登记的 `await`。
-3. 真实路径报告：Claude Code 和 OMP + DeepSeek 的每一格 3/3 通过；6.3 节的需要验证项有结论，匹配方式据此定下。
+3. 真实路径报告：Claude Code 和 OMP + DeepSeek 的每一格 3/3 通过；macOS 上格 d 脱离的睡眠进程是尽力而为，留下了只记录，不算标准（6.6），这一格的其余核对照样要通过；6.3 节的需要验证项有结论，匹配方式据此定下。
 4. dialogs 评测 `stop_then_continue`、`withdraw_then_continue`：fake 模式进 CI；real 模式 haiku 两次通过。
-5. 维护者打开开关自用，累计至少 30 次真实停止（含 Telegram 或飞书至少 5 次），日志里 `stop lost` 为零，没有残留进程的报告。
+5. 维护者打开开关自用，累计至少 30 次真实停止（含 Telegram 或飞书至少 5 次），日志里 `stop lost` 为零，没有残留进程的报告（macOS 上脱离的守护进程留下来是已知限度，6.6，不算）。
 6. 绑定观察（6.5）：开关关着的真实使用里，每个用到的运行时（至少 Claude Code、Grok ACP、Pi 和一个每轮一个进程的运行时）都有写调用，`/api/status` 的 `turn_binding.mismatches` 为零，日志里没有 `turn binding mismatch`。有一条就先查清原因、修好，计数从修好的版本重新算。
 
 默认打开时：`DEFAULT_STOP_ENABLED = True`；数据库里显式存的 `false` 仍然生效（用户关过的保持关）；设置页去掉「实验」标记；Telegram 菜单照 `stop_enabled` 列出 `/stop`；CHANGELOG 写明行为变化（Esc 停止、排队消息可停、`/stop`）。

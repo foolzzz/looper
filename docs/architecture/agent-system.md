@@ -970,6 +970,22 @@ leads. It sends SIGTERM to those groups and to the tree's processes outside
 them, waits up to `TERM_GRACE_SEC` (3 s), then sends SIGKILL to what is
 left. It never signals the server's own process or group.
 
+A user's stop also ends what the turn started that has left the tree (a
+command that moved to a session of its own, `setsid`, and whose parent
+exited): `proc_tree.TurnTree` follows the turn's processes while it runs.
+How surely depends on the platform. On Linux it is guaranteed: `spawn` gives
+the agent an environment mark (`LOOPER_PROC_OWNER`) that everything it starts
+inherits, a double-forked daemon included. On macOS it is best effort: the
+tree, its groups, kqueue fork notes and sampling while the turn runs find
+most such commands, but a daemon (setsid and a double fork, its ancestors
+gone before they were seen) can keep running, as one started from a terminal
+survives Ctrl-C there. No extra process is started for this on any spawn.
+The search is bounded: by `TERM_GRACE_SEC + REAP_SEC` after the first
+signals the end stops looking, and a process that SIGKILL does not end
+(EPERM, uninterruptible sleep) is logged and left. A process that ran
+before the turn (an MCP server, an earlier turn's background loop), and what
+it starts, are not the turn's. See the [Stop v2 RFC](rfcs/chat-stop-v2.zh-CN.md) 4.2 and 6.6.
+
 A resident Claude Code that is asked to exit (its stdin closed, then
 `STOP_GRACE_SEC`) has its tree read before its stdin closes, so what it
 started is still found after it has exited and its children have been

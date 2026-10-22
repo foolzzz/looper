@@ -851,13 +851,13 @@ class ResidentClaude:
         from .runtimes import StopMethod
         from .runtimes.cancel import TurnCancel
 
-        process, output, tree = self._process, self._output, self._tree
+        if self._tree is not None:
+            await self._tree.baseline()  # the process and its MCP servers: what the turn starts is what a stop ends
+        process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         cancel = cancel or TurnCancel.never()
         if cancel.requested:  # stopped before anything was written: the process is untouched
             return ResidentTurn(user_stop_result(), stopped=StopMethod.KILL, prompt_sent=False, usage=Usage())
-        if tree is not None:
-            tree.baseline()  # the process and its MCP servers: what the turn starts is what a stop ends
         turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag, on_event=on_event,
                          done=asyncio.get_running_loop().create_future(), stop=stop)
         input_lost = False

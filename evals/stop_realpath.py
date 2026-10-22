@@ -48,16 +48,20 @@ class Cell:
     prompt: str
     running: int = 0  # at the moment, wait for this many pids: the stop comes while the command runs
     after_s: float = 0.0  # stop this long after the moment
+    detached: bool = False  # its command leaves a sleeper detached (setsid, its parent gone): see ``best_effort``
 
 
 _PIDS = ("Run the shell commands below one after another with your Bash tool, and before anything else inside "
          "each command run `echo $$ >> {file}`. ")
 _SLEEP = _PIDS + "Command 1: `sleep 120`. After it finishes say done."
 # A sleeper in a session of its own (``os.setsid``: macOS has no setsid command) whose parent exits at once, as #339
-# reproduced; it writes its own pid too, so a survivor is seen. Python forks it itself: OMP runs commands in its
-# brush-core shell, where the sleeper of a backgrounded subshell (``(… &)``, kept as cell dx) never ran.
-_SETSID_PY = ("import os, time\nif os.fork() == 0:\n    os.setsid()\n    f = open(\"{file}\", \"a\")\n"
-              "    f.write(\"%d\\n\" % os.getpid())\n    f.close()\n    time.sleep(120)\n")
+# reproduced; it writes its own pid too, so a survivor is seen, and again to ``<file>.detached``, so it is told apart
+# from the shell. Python forks it itself: OMP runs commands in its brush-core shell, where the sleeper of a
+# backgrounded subshell (``(… &)``, kept as cell dx) never ran.
+_SETSID_PY = ("import os, time\nif os.fork() == 0:\n    os.setsid()\n"
+              "    for name in (\"{file}\", \"{file}.detached\"):\n"
+              "        f = open(name, \"a\")\n        f.write(\"%d\\n\" % os.getpid())\n        f.close()\n"
+              "    time.sleep(120)\n")
 _SETSID = _PIDS + ("Command 1: `python3 {script}; sleep 60` (the script forks a sleeper and exits at once). "
                    "After it finishes say done.")
 _SETSID_SUBSHELL = _PIDS + ("Command 1: `(python3 -c 'import os, time; os.setsid(); f = open(\"{file}\", \"a\"); "
@@ -70,14 +74,21 @@ _COMMON = (
     Cell("a", "stop right after send", "send", _SLEEP),
     Cell("b", "stop at the first tool activity", "activity", _SLEEP, running=1),
     Cell("c", "stop at the first text delta", "delta", _TEXT),
-    Cell("d", "stop at the first tool activity, a setsid child", "activity", _SETSID, running=2),
+    Cell("d", "stop at the first tool activity, a setsid child", "activity", _SETSID, running=2, detached=True),
 )
 _CLAUDE_ONLY = (Cell("e", "stop after the tool, in the text", "delta", _TOOL_THEN_TEXT),)
 # By hand only (--cells dx): cell d as first written, a subshell in the background.
-_DIAGNOSTIC = (Cell("dx", "cell d with a backgrounded subshell", "activity", _SETSID_SUBSHELL, running=2),)
+_DIAGNOSTIC = (Cell("dx", "cell d with a backgrounded subshell", "activity", _SETSID_SUBSHELL, running=2,
+                    detached=True),)
 # OMP gives a message's text only at its end (``OmpStream`` drops ``message_update``): its first delta is the whole
 # message, so cell c's stop finds a turn that is usually over. This one stops while the model is still writing.
 _OMP_ONLY = (Cell("f", "stop while the text is written, before it is shown", "thinking", _TEXT, after_s=1.5),)
+
+
+def best_effort(cell: Cell, platform: str = sys.platform) -> bool:
+    """Whether a detached sleeper the stop left running is recorded rather than failed: on macOS, ending a daemon
+    whose ancestors are gone is best effort (design chat-stop-v2.zh-CN.md 6.6 and 10); on Linux it is ended."""
+    return cell.detached and platform == "darwin"
 
 
 def cells_for(runtime: str) -> tuple[Cell, ...]:
@@ -462,6 +473,15 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
         stream.close()
     time.sleep(GONE_AFTER_S)
     pids = _read_pids(pid_file)
+    alive = [p for p in pids if _alive(p)]
+    if best_effort(cell):
+        detached = set(_read_pids(pid_file.with_name(pid_file.name + ".detached")))
+        if left := [p for p in alive if p in detached]:
+            line += f"; macOS best effort: the detached sleeper {left} was left running (not a pass criterion)"
+            for pid in left:  # (it would sleep on through the next cells)
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+        alive = [p for p in alive if p not in detached]
     record = _latest_record(api, since)
     actions = _db_rows(database_url, "SELECT status, error_code FROM manager_actions "
                        "WHERE created_at >= to_timestamp($1) AND chat = $2 ORDER BY id", started_at + clock_offset,
@@ -475,7 +495,7 @@ def run_cell(api: Api, database_url: str, cell: Cell, rep: int, work: Path, cloc
                                 if m.get("message_id") == f"{nxt}:reply"), None), 180)
     after_id = (api.get("/api/manager/session") or {}).get("session_id")
     obs = Observation(
-        final=final, final_after_s=after, pids=pids, alive=[p for p in pids if _alive(p)], record=record,
+        final=final, final_after_s=after, pids=pids, alive=alive, record=record,
         actions=actions, confirmations=confirmations, next_text=str((reply or {}).get("content") or ""),
         session_before=before, session_after=after_id, expect_pids=cell.moment != "delta" or cell.key == "e")
     if cell.key in ("c", "f"):

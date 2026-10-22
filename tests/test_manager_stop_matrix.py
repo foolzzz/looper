@@ -127,14 +127,6 @@ class Rig:
     def resident_pids(self) -> set[int]:
         """The processes a stopped turn leaves: the runtime's own one (and its MCP bridge), when it keeps one."""
         pid = self.session.pid
-        if pid in proc_tree._disclaimed:
-            # The macOS launcher has exactly one child, the keeper, whose one child is the resident agent, all in the
-            # launcher's group. Tools are the agent's children and must still be counted by ``left``.
-            table = proc_tree._snapshot()
-            (keeper,) = [child for child, pair in table.items() if pair == (pid, pid)]
-            children = {child for child, pair in table.items() if pair == (keeper, pid)}
-            assert len(children) == 1
-            return {pid, keeper, *children}
         return {pid} if pid else set()
 
     def processes(self) -> list[int]:
@@ -152,8 +144,7 @@ class Rig:
 
     def left(self) -> list[int]:
         """The processes of the turns so far that are still there, but for the runtime's own."""
-        resident = self.resident_pids
-        return [pid for pid in self.processes() if pid not in resident and _alive(pid)]
+        return [pid for pid in self.processes() if pid not in self.resident_pids and _alive(pid)]
 
     def reached(self) -> bool:
         if self.runtime == "grok-acp":

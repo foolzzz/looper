@@ -227,13 +227,7 @@ def test_resident_claude_stop_in_every_window(
         assert _answered(first), first.result_event
         process = session.pid
         agent = int((directory / "pids").read_text().split()[0])
-        if process in proc_tree._disclaimed:
-            table = proc_tree._snapshot()
-            (keeper,) = [pid for pid, pair in table.items() if pair == (process, process)]  # the launcher's one child
-            children = {pid: pair for pid, pair in table.items() if pair[0] == keeper}
-            assert children == {agent: (keeper, process)}  # exactly the resident, in the launcher's group
-        else:
-            assert agent == process
+        assert agent == process
         seen, stop, cancel = Seen(hold_at="result" if window == "done" else None), Stop(), TurnCancel()
         text = BIG if window == "blocked" else f"mode:{window}{' obey' if obey else ''}"
         running = asyncio.create_task(session.run_turn(text, seen, stop=stop, cancel=cancel))
