@@ -27,7 +27,7 @@ from ...db import profile_registry as db_profiles, role_templates as db_role_tem
 from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
 from ..agent_settings import resolve_task_concurrency
 from .. import task_templates, task_workspaces
-from ..managers_api import TaskPolicy
+from ..managers_api import DEFAULT_MANAGER_ID, TaskPolicy
 from ..profile_registry import RegistryError, check_selection
 from ..task_templates import TaskTemplate, TemplateError
 from ..gate_service import origin_chat, post_message as post_gate_message
@@ -475,7 +475,9 @@ async def _create(call: Call) -> dict[str, Any]:
         "workspace_dir": work_dir, "workspace_mode": workspace["mode"], "workspace_base": workspace["base"],
         "manager_id": call.manager_id,
     }
-    if origin == "channel-web" and envelope is not None:
+    if origin == "channel-web" and envelope is not None and call.manager_id != DEFAULT_MANAGER_ID:
+        # A scenario Manager's web task reports into the thread it was asked in; the default Manager's keeps its
+        # channel's own path.
         thread = (envelope.payload.get("channel_context") or {}).get("session_id")
         row["origin_thread"] = thread if isinstance(thread, str) and thread else None
     if template is not None:

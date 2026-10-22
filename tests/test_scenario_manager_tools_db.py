@@ -619,6 +619,8 @@ def test_schedule_runs_show_a_scoped_manager_none_of_another_managers_tasks(monk
         run_id = await _run_of(pool, nightly["schedule_id"], "completed", task_id="task-default",
                                summary="secret summary of task-default")
         await pool.execute("UPDATE schedule_runs SET cost_usd = 2.5 WHERE id = $1", run_id)
+        await pool.execute("UPDATE schedules SET planner_session_id = 'planner-session', "
+                           "planner_session_task_id = 'task-default' WHERE id = $1", nightly["schedule_id"])
 
         def run_fields(run: dict[str, Any]) -> tuple[Any, ...]:
             return run["task_id"], run["summary"], run["cost_usd"]
@@ -630,10 +632,21 @@ def test_schedule_runs_show_a_scoped_manager_none_of_another_managers_tasks(monk
             got = _ok((await who.say("get", ("looper_schedules", {"action": "get", "schedule": "nightly"})))[0])
             assert [run_fields(r) for r in got["latest_runs"]] == [expected]
             assert (got["schedule"]["spent_today_usd"] is None) is (who is chat)
+            session = got["schedule"]["planner_session"]
+            assert session["active"] is True
+            assert (session["last_task_id"], session["last_task_title"]) == (
+                (None, None) if who is chat else ("task-default", "title of task-default"))
             if who is chat:
                 text = json.dumps(_ok((await who.say("ls", ("looper_schedules", {"action": "list"})))[0])) + \
                     json.dumps(got, default=str)
                 assert "task-default" not in text and "secret summary" not in text
                 assert listed["last_run"]["status"] == "completed"  # the run itself stays
+
+        # The session's last task is the scoped Manager's own: it sees it.
+        await pool.execute("UPDATE schedules SET planner_session_task_id = 'task-own' WHERE id = $1",
+                           nightly["schedule_id"])
+        got = _ok((await chat.say("get", ("looper_schedules", {"action": "get", "schedule": "nightly"})))[0])
+        session = got["schedule"]["planner_session"]
+        assert (session["last_task_id"], session["last_task_title"]) == ("task-own", "title of task-own")
 
     _run(test, monkeypatch)

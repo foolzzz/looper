@@ -37,16 +37,23 @@ async def _create(chat: _Chat, *, web: bool) -> dict[str, Any]:
     return answer
 
 
-def test_create_records_the_web_thread_only_for_web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_create_records_the_web_thread_only_for_a_scenario_managers_web_task(monkeypatch: pytest.MonkeyPatch,
+                                                                             tmp_path: Path) -> None:
     from looper.db import tasks
+    from tests.test_scenario_manager_tools_db import _definition, _scoped_chat
+    from tests.test_managers_schema_db import _manager
 
     async def test(pool: Any) -> None:
         await _project(pool)
-        chat = _Chat(tmp_path)
+        await _manager(pool, "review", tools="all")
+        chat = _scoped_chat(tmp_path, await _definition(pool))
         web = await _create(chat, web=True)
         lark = await _create(chat, web=False)
         assert (await tasks.get_task(web["result"]["task_id"], pool=pool))["origin_thread"] == "s-web"
         assert (await tasks.get_task(lark["result"]["task_id"], pool=pool))["origin_thread"] is None
+        # The default Manager's web task keeps the channel's own path: no thread, so no persisted reports.
+        default = await _create(_Chat(tmp_path), web=True)
+        assert (await tasks.get_task(default["result"]["task_id"], pool=pool))["origin_thread"] is None
 
     _run(test, monkeypatch)
 

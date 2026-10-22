@@ -88,12 +88,16 @@ async def _runs_in_scope(call: Call, runs: list[dict[str, Any]]) -> list[dict[st
 
 async def _in_scope(call: Call, view: dict[str, Any]) -> dict[str, Any]:
     """A schedule's view as the Manager may see it: its last run as ``_runs_in_scope``, and for a scoped Manager
-    none of its tasks' spend."""
+    none of its tasks' spend, nor its Planner session's last task unless that task is its own."""
     if not call.scoped:
         return view
     view = {**view, **({"spent_today_usd": None} if "spent_today_usd" in view else {})}
     if view.get("last_run"):
         (view["last_run"],) = await _runs_in_scope(call, [view["last_run"]])
+    session = view.get("planner_session")
+    if session and session.get("last_task_id") and (
+            (await db_tasks.manager_of({session["last_task_id"]})).get(session["last_task_id"]) != call.manager_id):
+        view["planner_session"] = {**session, "last_task_id": None, "last_task_title": None}
     return view
 
 
