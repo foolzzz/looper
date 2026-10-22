@@ -224,7 +224,7 @@ describe("chat Manager picker", () => {
     await act(async () => staleClick());
     await flush();
     expect(localStorage.getItem(KEY_REVIEW)).toBe(pointer);
-    expect(api.fetchChatMessages).not.toHaveBeenCalledWith("a1", expect.anything());
+    expect(api.fetchChatMessages.mock.calls.some(([sid]) => sid === "a1")).toBe(false);
     await act(async () => b.resolve([row("b1", "B thread")]));
     expect(container.textContent).toContain("B thread");
     expect(container.textContent).not.toContain("A thread");
@@ -236,5 +236,78 @@ describe("chat Manager picker", () => {
     const pointer = localStorage.getItem(KEY_REVIEW);
     expect(pointer).not.toBe("a1");
     expect(container.textContent).toContain("404");
+  });
+
+  describe("with the server's answers", () => {
+    const OWNED = "this conversation belongs to Manager Manager: open it there or start a new one";
+    // The server: thread "a-sid" is the default Manager's; any other id is new (no row, no messages).
+    const server = vi.fn(async (url: string) => {
+      const params = new URL(url, "http://x").searchParams;
+      const manager = params.get("manager") ?? "manager";
+      if (params.get("session_id") === "a-sid" && manager !== "manager") {
+        return new Response(JSON.stringify({ error: OWNED, manager_id: "manager" }), { status: 409 });
+      }
+      if (url.includes("/chat/messages")) {
+        const rows = params.get("session_id") === "a-sid" ? [msg("a1", "A's secret history")] : [];
+        return new Response(JSON.stringify({ messages: rows }), { status: 200 });
+      }
+      const rows = params.get("session_id") === "a-sid" ? [row("a-sid", "A's secret history")] : [];
+      return new Response(JSON.stringify({ sessions: rows }), { status: 200 });
+    });
+
+    beforeEach(async () => {
+      const real = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+      api.fetchChatSession.mockImplementation(real.fetchChatSession);
+      api.fetchChatMessages.mockImplementation(real.fetchChatMessages);
+      server.mockClear();
+      vi.stubGlobal("fetch", server);
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    const asked = (path: string, sid: string) =>
+      server.mock.calls.filter(([url]) => url.includes(path) && url.includes(`session_id=${sid}`)).map(([url]) => url);
+
+    it("opens an id the server answers with an empty list as a new thread of the selected Manager", async () => {
+      await mount("target=manager-review&conversation=new-sid");
+      expect(asked("/chat/sessions", "new-sid")).toEqual([expect.stringContaining("manager=manager-review")]);
+      expect(localStorage.getItem(KEY_REVIEW)).toBe("new-sid");
+      expect(container.textContent).not.toContain("another Manager");
+      expect(container.textContent).toContain("Send a message to start");
+      await say("hello");
+      expect(api.sendChat).toHaveBeenLastCalledWith(
+        "hello", "new-sid", expect.any(String), { kind: "manager", id: "manager-review" }, expect.anything(),
+      );
+    });
+
+    it("never attaches another Manager's conversation from the address, and says whose it is", async () => {
+      await mount("target=manager-review&conversation=a-sid");
+      expect(localStorage.getItem(KEY_REVIEW)).not.toBe("a-sid");
+      expect(container.textContent).toContain("This is another Manager's conversation");
+      expect(container.textContent).toContain(OWNED);
+      expect(container.textContent).not.toContain("A's secret history");
+      expect(container.textContent).not.toContain("Send a message to start");
+      expect(input()).toBeNull();
+      expect(asked("/chat/messages", "a-sid")).toEqual([]);
+      // It opens under the Manager it belongs to.
+      await click(byText(/Open it there/));
+      expect(localStorage.getItem("looper-chat-session-id")).toBe("a-sid");
+      expect(container.textContent).toContain("A's secret history");
+      expect(localStorage.getItem(KEY_REVIEW)).not.toBe("a-sid");
+    });
+
+    it("starts a new thread instead of a stored pointer to another Manager's conversation", async () => {
+      localStorage.setItem(KEY_REVIEW, "a-sid");
+      await mount("target=manager-review");
+      expect(asked("/chat/messages", "a-sid")).toEqual([expect.stringContaining("manager=manager-review")]);
+      const pointer = localStorage.getItem(KEY_REVIEW);
+      expect(pointer).toBeTruthy();
+      expect(pointer).not.toBe("a-sid");
+      expect(container.textContent).not.toContain("A's secret history");
+      expect(container.textContent).toContain("belongs to another Manager");
+      await say("hello");
+      expect(api.sendChat).toHaveBeenLastCalledWith(
+        "hello", pointer, expect.any(String), { kind: "manager", id: "manager-review" }, expect.anything(),
+      );
+    });
   });
 });

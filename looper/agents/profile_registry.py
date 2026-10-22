@@ -1519,9 +1519,9 @@ async def _parts(runtime_id: Any, model_id: Any, conn: Any) -> tuple[RuntimeSpec
     return runtime_spec(runtime), _resolved_model(row)
 
 
-async def create_profile(data: Any) -> dict[str, Any]:
+async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[str, Any]:
     """Register a profile (agent teams on for Claude Code); refuse settings
-    its runtime cannot run."""
+    its runtime cannot run. ``manager_id``: the answer's usage as ``registry_view``'s."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -1543,15 +1543,16 @@ async def create_profile(data: Any) -> dict[str, Any]:
             profile_id = await db.insert_profile(fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
-    return await _profile_answer(profile_id)
+    return await _profile_answer(profile_id, manager_id=manager_id)
 
 
-async def _profile_answer(profile_id: str) -> dict[str, Any]:
-    """The profile, and what registering it as it is should warn about (``profile_warnings``)."""
+async def _profile_answer(profile_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
+    """The profile, and what registering it as it is should warn about (``profile_warnings``); with
+    ``manager_id``, its usage only of that Manager's own (``registry_view``)."""
     from ..db import profile_registry as db
 
     row = await _existing_profile(profile_id)
-    uses = await db.profile_usage(profile_id)
+    uses = await db.profile_usage(profile_id, manager_id=manager_id)
     models = await db.list_models(provider_id=row["provider"]["id"])
     return {"profile": profile_view(row, uses.get(profile_id, NOT_USED), models),
             "warnings": profile_warnings(_cost_profile(row, models))}
@@ -1565,8 +1566,8 @@ async def profile_views(rows: Mapping[str, Mapping[str, Any]]) -> dict[str, dict
     return {key: profile_view(row, models=models) for key, row in rows.items()}
 
 
-async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
-    """Change an Agent Profile; the result is checked like a new one."""
+async def update_profile(profile_id: str, data: Any, *, manager_id: str | None = None) -> dict[str, Any]:
+    """Change an Agent Profile; the result is checked like a new one. ``manager_id``: as ``create_profile``'s."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -1608,7 +1609,7 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
             await db.update_profile(profile_id, fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
-    return await _profile_answer(profile_id)
+    return await _profile_answer(profile_id, manager_id=manager_id)
 
 
 async def deletable_profile(profile_id: str) -> dict[str, Any]:

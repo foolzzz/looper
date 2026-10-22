@@ -549,3 +549,91 @@ def test_agent_profile_usage_and_deletion_conflicts_stay_inside_a_scoped_manager
         assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE id = $1", profile_id) == 1
 
     _run(test, monkeypatch)
+
+
+def test_agent_profile_answers_count_only_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyPatch,
+                                                                  tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        chat, default = await _review(pool, tmp_path, tools="all", task_scope="own")
+        await _tasks(pool)
+        model = await pool.fetchval("SELECT id FROM llm_models WHERE name = 'sonnet' LIMIT 1")
+        made = _ok((await chat.say("new", ("looper_agent_profiles", {
+            "action": "create", "name": "shared", "runtime": "claude-code", "model": model})))[0])
+        assert made["profile"]["used_by"] is None
+        await pool.execute("INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES "
+                           "('task-own', 'worker', $1), ('task-default', 'worker', $1)", made["profile"]["profile_id"])
+
+        scoped = _ok((await chat.say("rename", ("looper_agent_profiles", {
+            "action": "update", "profile": "shared", "name": "shared-2"})))[0])
+        assert scoped["profile"]["used_by"] == "1 task"
+        assert "task-default" not in json.dumps(scoped)
+        full = _ok((await default.say("rename", ("looper_agent_profiles", {
+            "action": "update", "profile": "shared-2", "name": "shared-3"})))[0])
+        assert full["profile"]["used_by"] == "2 tasks"
+
+    _run(test, monkeypatch)
+
+
+def test_project_deletion_conflicts_stay_inside_a_scoped_managers_tasks(monkeypatch: pytest.MonkeyPatch,
+                                                                        tmp_path: Path) -> None:
+    from tests.test_manager_schedule_tools_db import _confirm, _schedule
+
+    async def test(pool: Any) -> None:
+        from looper.db import managers
+
+        chat, default = await _review(pool, tmp_path, tools="all", task_scope="own")
+        project = await _tasks(pool)
+
+        async def refused(who: _Chat) -> str:
+            (answer,) = await who.say("rm", ("looper_projects", {"action": "delete", "project": "calc"}))
+            if answer["status"] == "needs_confirmation":  # a template is checked when the deletion runs
+                answer = await _confirm(who, answer)
+            assert _error(answer) == "conflict", answer
+            return answer["error"]["message"]
+
+        assert await refused(chat) == "project 'calc' still has 1 task of this Manager; move or delete them first"
+        assert "still has tasks" in await refused(default)
+
+        await pool.execute("DELETE FROM tasks WHERE id = 'task-own'")
+        await _schedule(project, "nightly")
+        await _manager(pool, "other", name="Other")
+        await managers.put_template("manager-other", "pr", {"name": "PR", "project_id": project["id"]})
+        message = await refused(chat)
+        assert message == "project 'calc' is still used outside this Manager: it cannot be deleted from here"
+        await pool.execute("DELETE FROM tasks")
+        await pool.execute("DELETE FROM schedules")
+        assert await refused(chat) == message  # a template of another Manager, not named
+        assert "template" in await refused(default)
+
+    _run(test, monkeypatch)
+
+
+def test_schedule_runs_show_a_scoped_manager_none_of_another_managers_tasks(monkeypatch: pytest.MonkeyPatch,
+                                                                            tmp_path: Path) -> None:
+    from tests.test_manager_schedule_tools_db import _run_of, _schedule
+
+    async def test(pool: Any) -> None:
+        chat, default = await _review(pool, tmp_path, tools="all", task_scope="own")
+        project = await _tasks(pool)
+        nightly = await _schedule(project, "nightly")
+        run_id = await _run_of(pool, nightly["schedule_id"], "completed", task_id="task-default",
+                               summary="secret summary of task-default")
+        await pool.execute("UPDATE schedule_runs SET cost_usd = 2.5 WHERE id = $1", run_id)
+
+        def run_fields(run: dict[str, Any]) -> tuple[Any, ...]:
+            return run["task_id"], run["summary"], run["cost_usd"]
+
+        hidden = (None, None, None)
+        for who, expected in ((chat, hidden), (default, ("task-default", "secret summary of task-default", 2.5))):
+            (listed,) = _ok((await who.say("ls", ("looper_schedules", {"action": "list"})))[0])["schedules"]
+            assert run_fields(listed["last_run"]) == expected
+            got = _ok((await who.say("get", ("looper_schedules", {"action": "get", "schedule": "nightly"})))[0])
+            assert [run_fields(r) for r in got["latest_runs"]] == [expected]
+            assert (got["schedule"]["spent_today_usd"] is None) is (who is chat)
+            if who is chat:
+                text = json.dumps(_ok((await who.say("ls", ("looper_schedules", {"action": "list"})))[0])) + \
+                    json.dumps(got, default=str)
+                assert "task-default" not in text and "secret summary" not in text
+                assert listed["last_run"]["status"] == "completed"  # the run itself stays
+
+    _run(test, monkeypatch)

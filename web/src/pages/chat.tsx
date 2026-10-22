@@ -26,6 +26,7 @@ import {
   stopChatReply,
   fetchChatSession,
   fetchChatSessions,
+  ForeignConversationError,
   fetchChatTargets,
   fetchManagerSession,
   fetchTaskActivity,
@@ -267,9 +268,13 @@ function getOrCreateSessionId(managerId = "manager"): string {
     localStorage.setItem(key, existing);
     return existing;
   }
-  const id = `session-${randomId().slice(0, 8)}`;
+  const id = newSessionId();
   localStorage.setItem(key, id);
   return id;
+}
+
+function newSessionId(): string {
+  return `session-${randomId().slice(0, 8)}`;
 }
 
 function loadMessages(sessionId: string): ChatMessage[] {
@@ -358,6 +363,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   const [newPanel, setNewPanel] = useState<ManagerSessionView | null>(null);
   const [newPanelOpen, setNewPanelOpen] = useState(false);
   const newSessionButtonRef = useRef<HTMLButtonElement>(null);
+  // The new thread that replaced a stored one of another Manager, so the page says why it is empty.
+  const [replacedThread, setReplacedThread] = useState<{ managerId: string; sessionId: string } | null>(null);
   // Its messages as last read, by session id, so another conversation's never show while one loads.
   const [viewingMessages, setViewingMessages] = useState<{ id: string; rows: DbChatMessage[] } | null>(null);
   // Below the md breakpoint the list takes the messages' place while it is open.
@@ -476,9 +483,15 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   // A Lark or Telegram conversation is read-only here: its newest messages, re-read on the same cadence.
   // The conversation the address names is read by its id as well, as the list holds only the newest: a link to an
   // older one opens, and one open stays open when the list moves on.
-  const [opened, setOpened] = useState<{ managerId: string; id: string; session: ChatSession | null; error: string } | null>(null);
+  // `owner`: the other Manager it belongs to (the server's 409), so it is never opened as a new thread of this one.
+  const [opened, setOpened] = useState<
+    { managerId: string; id: string; session: ChatSession | null; error: string; owner?: ForeignConversationError } | null
+  >(null);
+  // The address's conversation is read and applied only under the agent the address names (an unknown one: the
+  // Manager it falls back to), never under the one shown before the agents are listed.
+  const targetSettled = wantTarget === target.id || (targetsLoaded && !targets.some((t) => t.id === wantTarget));
   useEffect(() => {
-    if (target.kind !== "manager" || !wantConversation) return;
+    if (target.kind !== "manager" || !wantConversation || !targetSettled) return;
     let alive = true;
     const controller = new AbortController();
     const managerId = currentManagerId;
@@ -489,7 +502,9 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
         (err) =>
           fresh() &&
           !(err instanceof Error && err.name === "AbortError") &&
-          setOpened((prev) => ({
+          setOpened((prev) => err instanceof ForeignConversationError ? (
+            { managerId, id: wantConversation, session: null, error: "", owner: err }
+          ) : ({
             managerId,
             id: wantConversation,
             session: prev?.managerId === managerId && prev.id === wantConversation ? prev.session : null,
@@ -503,18 +518,19 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       controller.abort();
       clearInterval(timer);
     };
-  }, [target.kind, currentManagerId, wantConversation]);
+  }, [target.kind, currentManagerId, wantConversation, targetSettled]);
   const openedHere = opened?.id === wantConversation && opened.managerId === currentManagerId ? opened : null;
   const knownConversation =
-    target.kind === "manager" && wantConversation
+    target.kind === "manager" && wantConversation && targetSettled
       ? shownConversations?.find((c) => c.session_id === wantConversation) ?? openedHere?.session ?? null
       : null;
   const viewing = knownConversation && knownConversation.channel !== "web" ? knownConversation : null;
-  // Named by the address but not read yet: loading, or the read failed (and it is tried again).
+  // Named by the address but not read yet: loading, the read failed (and it is tried again), or another Manager's.
   const conversationUnread =
-    target.kind === "manager" && !!wantConversation && wantConversation !== sessionId && !knownConversation &&
-    (!openedHere || !!openedHere.error);
+    target.kind === "manager" && !!wantConversation && wantConversation !== sessionId &&
+    (!targetSettled || !knownConversation && (!openedHere || !!openedHere.error || !!openedHere.owner));
   const conversationError = conversationUnread ? openedHere?.error ?? "" : "";
+  const conversationOwner = conversationUnread ? openedHere?.owner ?? null : null;
   const viewingId = viewing?.session_id;
   useEffect(() => {
     if (!viewingId) return;
@@ -629,7 +645,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       alive &&
       requested.managerId === currentRef.current.managerId &&
       requested.sessionId === currentRef.current.sessionId;
-    fetchChatMessages(sessionId, controller.signal).then((dbMsgs) => {
+    const owner = target.kind === "manager" ? requested.managerId : undefined;
+    fetchChatMessages(sessionId, controller.signal, owner).then((dbMsgs) => {
       if (!fresh()) return;
       if (dbMsgs.length > 0) {
         setMessages(fromDb(dbMsgs));
@@ -640,6 +657,13 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       dbLoadedRef.current = true;
     }).catch((err) => {
       if (!fresh() || (err instanceof Error && err.name === "AbortError")) return;
+      if (err instanceof ForeignConversationError) {
+        // The stored thread is another Manager's: this Manager starts a new one instead of continuing it.
+        const fresh = newSessionId();
+        setReplacedThread({ managerId: requested.managerId, sessionId: fresh });
+        switchWebSession(fresh);
+        return;
+      }
       const local = loadMessages(requested.sessionId);
       if (local.length > 0) setMessages(local);
       dbLoadedRef.current = true;
@@ -648,6 +672,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
       alive = false;
       controller.abort();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   // What the Manager's Claude says on its own (after background work it started
@@ -795,7 +820,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   };
 
   const handleNewChat = () => {
-    const newId = `session-${randomId().slice(0, 8)}`;
+    const newId = newSessionId();
     appliedConversation.current = newId;
     onQuery?.(chatQuery(target.id, newId));
     switchWebSession(newId);
@@ -1260,7 +1285,25 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
         )}
 
         {conversationUnread &&
-          (conversationError ? (
+          (conversationOwner ? (
+            <div role="alert" className="py-10 text-center text-sm">
+              <p className="text-destructive">This is another Manager's conversation: {conversationOwner.message}</p>
+              <div className="mt-3 flex justify-center gap-2">
+                {targets.some((t) => t.kind === "manager" && t.id === conversationOwner.managerId) && (
+                  <button
+                    type="button"
+                    onClick={() => onQuery?.(chatQuery(conversationOwner.managerId, wantConversation))}
+                    className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                  >
+                    Open it there
+                  </button>
+                )}
+                <button type="button" onClick={handleNewChat} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
+                  New conversation here
+                </button>
+              </div>
+            </div>
+          ) : conversationError ? (
             <p role="alert" className="py-10 text-center text-sm text-destructive">
               Could not load the conversation: {conversationError}
             </p>
@@ -1270,6 +1313,13 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
               Loading the conversation…
             </p>
           ))}
+
+        {replacedThread?.managerId === target.id && replacedThread.sessionId === sessionId && !viewing &&
+          !conversationUnread && (
+          <p role="status" className="text-center text-xs text-muted-foreground">
+            The saved conversation belongs to another Manager, so this is a new conversation.
+          </p>
+        )}
 
         {messages.length === 0 && target.kind === "manager" && !viewing && !conversationUnread && (
           <div className="flex h-full items-center justify-center">

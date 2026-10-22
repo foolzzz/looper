@@ -120,8 +120,24 @@ async def _projects(call: Call) -> dict[str, Any]:
         fields = _given(arguments, ("name", "work_dir", "background"))
         return {"project": await answered(projects.update_project(
             project["id"], fields, manager_id=call.manager_id if call.scoped else None))}
-    await answered(projects.delete_project(project["id"]))
+    await _unused(call, projects.delete_project(project["id"]), project)
     return {"deleted": project["name"]}
+
+
+async def _unused(call: Call, request: Awaitable[T], project: Mapping[str, Any]) -> T:
+    """``request``, a deletion checked against every task, schedule and template; a scoped Manager is refused
+    without learning of anyone else's (``project`` carries its own task count): only its own tasks are counted."""
+    try:
+        return await answered(request)
+    except OpError as exc:
+        if exc.code is not ErrorCode.CONFLICT or not call.scoped:
+            raise
+        own = project["task_count"]
+        raise OpError(ErrorCode.CONFLICT,
+                      f"project {project['name']!r} still has {own} {'task' if own == 1 else 'tasks'} of this "
+                      "Manager; move or delete them first" if own else
+                      f"project {project['name']!r} is still used outside this Manager: it cannot be deleted from "
+                      "here") from None
 
 
 async def _deleting_project(call: Call) -> str | None:
@@ -129,7 +145,8 @@ async def _deleting_project(call: Call) -> str | None:
     if call.arguments["action"] != "delete":
         return None
     _required(call.arguments, "delete", "project")
-    project = await answered(projects.deletable_project((await project_named(call.arguments["project"]))["id"]))
+    named = await project_named(call.arguments["project"], manager_id=call.manager_id if call.scoped else None)
+    project = await _unused(call, projects.deletable_project(named["id"]), named)
     return (f"要删除项目「{project['name']}」（默认目录：{project['work_dir'] or '没有'}）吗？它没有任务和定时任务。它的 "
             "Agent 设置、规划者可选的 Agent Profile 列表、技能和 MCP 的安装、项目知识和它自己写的技能会一起删除，不能恢复；"
             "目录里的文件不受影响。")
@@ -213,9 +230,11 @@ async def _profiles(call: Call) -> dict[str, Any]:
     if action in ("create", "update"):
         fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt"), clears=("effort",)),
                   **await _profile_parts(registry, arguments)}
+        manager_id = call.manager_id if call.scoped else None
         if action == "create":
-            return _profile_answer(await answered(profile_registry.create_profile(fields)))
-        return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields)))
+            return _profile_answer(await answered(profile_registry.create_profile(fields, manager_id=manager_id)))
+        return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields,
+                                                                              manager_id=manager_id)))
     await _unshared(call, profile_registry.delete_profile(profile["profile_id"]), profile)
     return {"deleted": profile["name"]}
 

@@ -1153,19 +1153,9 @@ class AgentHTTPServer:
         session_id = data.get("session_id", "")
         message_id = data.get("message_id", "")
         if target.agent_type == "manager" and session_id and self._managers is not None:
-            from ..db import managers as db_managers
             owner = await self._thread_owner_for_send(session_id, target.agent_id)
             if owner != target.agent_id:
-                if self._managers.get(owner) is not None:
-                    error = (f"this conversation belongs to Manager {self._managers.get(owner).name}: "
-                             "open it there or start a new one")
-                else:
-                    row = await db_managers.get_manager(owner, include_deleted=True)
-                    if row is not None and row.get("deleted_at") is None:
-                        error = f"this conversation belongs to Manager {row['name']}: open it there or start a new one"
-                    else:
-                        error = "this conversation belongs to a deleted Manager: start a new one"
-                writer.write(_json_response(HTTP_409, {"error": error, "manager_id": owner}))
+                writer.write(await self._foreign_thread(owner))
                 await writer.drain()
                 return
         # A message to a task's Planner is a supplement to the task, stored before the Planner gets it, so it is
@@ -1195,6 +1185,25 @@ class AgentHTTPServer:
         )
         writer.write(_json_response(HTTP_200, result))
         await writer.drain()
+
+    async def _foreign_thread(self, owner: str) -> bytes:
+        """The 409 for a thread of Manager ``owner`` asked for under another Manager: whose it is, by name."""
+        from ..db import managers as db_managers
+        running = self._managers.get(owner) if self._managers is not None else None
+        row = None if running is not None else await db_managers.get_manager(owner, include_deleted=True)
+        name = running.name if running is not None else row["name"] if row and row.get("deleted_at") is None else None
+        error = (f"this conversation belongs to Manager {name}: open it there or start a new one" if name is not None
+                 else "this conversation belongs to a deleted Manager: start a new one")
+        return _json_response(HTTP_409, {"error": error, "manager_id": owner})
+
+    async def _thread_owner_elsewhere(self, session_id: str, manager_id: str) -> str | None:
+        """The Manager other than ``manager_id`` that thread ``session_id`` belongs to (an old thread, with messages
+        and no row, is the default Manager's); None for its own thread or a new one (no row, no messages)."""
+        from ..db import chat as db_chat
+        owner = await db_chat.thread_owner(session_id)
+        if owner is None and await db_chat.has_messages(session_id):
+            owner = "manager"
+        return owner if owner is not None and owner != manager_id else None
 
     async def _thread_owner_for_send(self, session_id: str, wanted: str) -> str:
         """The Manager that owns the thread, claiming it for ``wanted`` when it is new; an old thread (messages, no
@@ -1263,8 +1272,9 @@ class AgentHTTPServer:
 
     async def _handle_chat_sessions(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         """The Manager's conversations on every channel, newest first, for the Chat page's conversation list (with
-        ``session_id``, only that one, however old, so a link to it opens it); a failed read is a 500, so the page
-        shows it rather than an empty list."""
+        ``session_id``, only that one, however old, so a link to it opens it, and a 409 naming its Manager when it is
+        another Manager's; none for a new thread); a failed read is a 500, so the page shows it rather than an empty
+        list."""
         manager_id = query.get("manager") or "manager"
         try:
             from ..db.chat import list_sessions
@@ -1274,6 +1284,11 @@ class AgentHTTPServer:
                     writer.write(_json_response(HTTP_404, {"error": f"no Manager '{manager_id}'"}))
                     await writer.drain()
                     return
+            if query.get("session_id") and (
+                    owner := await self._thread_owner_elsewhere(query["session_id"], manager_id)):
+                writer.write(await self._foreign_thread(owner))
+                await writer.drain()
+                return
             sessions = await list_sessions(session_id=query.get("session_id") or None, manager_id=manager_id)
             writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
         except Exception as exc:
@@ -1291,6 +1306,11 @@ class AgentHTTPServer:
             await writer.drain()
             return
         try:
+            # With ``manager``, a thread of another Manager is a 409 naming it, never its messages.
+            if query.get("manager") and (owner := await self._thread_owner_elsewhere(session_id, query["manager"])):
+                writer.write(await self._foreign_thread(owner))
+                await writer.drain()
+                return
             from ..db.chat import list_messages
             messages = await list_messages(session_id)
             writer.write(_json_response(HTTP_200, {"messages": _serialize(messages)}))

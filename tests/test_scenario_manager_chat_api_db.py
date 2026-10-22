@@ -226,9 +226,44 @@ def test_each_manager_lists_its_own_conversations(monkeypatch: pytest.MonkeyPatc
         assert await ids({}) == ["s-def", "s-old"]
         assert await ids({"manager": "manager-review"}) == ["s-rev"]
         assert await ids({"manager": "manager-review", "session_id": "s-rev"}) == ["s-rev"]
-        assert await ids({"session_id": "s-rev"}) == []
+        status, answer = await _call(fleet, web, "GET", "/api/chat/sessions", query={"session_id": "s-rev"})
+        assert status == 409 and answer["manager_id"] == "manager-review"
         status, answer = await _call(fleet, web, "GET", "/api/chat/sessions", query={"manager": "manager-nope"})
         assert status == 404 and answer == {"error": "no Manager 'manager-nope'"}
+
+    _run(test, monkeypatch)
+
+
+def test_another_managers_thread_is_named_never_listed_or_read_as_a_new_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import chat
+
+    async def test(pool: Any) -> None:
+        fleet, web, _, _ = await _setup(pool)
+        await _say(pool, "s-old")  # messages, no row: the default Manager's
+        await _say(pool, "s-def")
+        await chat.claim_thread("s-def", "manager")
+        await chat.claim_thread("s-claimed", "manager")  # claimed by a send whose message is not saved yet
+
+        async def get(path: str, query: dict[str, str]) -> tuple[int, Any]:
+            return await _call(fleet, web, "GET", path, query=query)
+
+        for session_id in ("s-old", "s-def", "s-claimed"):
+            status, answer = await get("/api/chat/sessions", {"manager": "manager-review", "session_id": session_id})
+            assert status == 409, (session_id, answer)
+            assert answer == {"error": "this conversation belongs to Manager Manager: open it there or start a new "
+                                       "one", "manager_id": "manager"}
+            status, answer = await get("/api/chat/messages", {"manager": "manager-review", "session_id": session_id})
+            assert status == 409 and answer["manager_id"] == "manager" and "messages" not in answer
+        # A new id is a new thread: the empty list, no messages.
+        assert await get("/api/chat/sessions", {"manager": "manager-review", "session_id": "s-new"}) == (
+            200, {"sessions": []})
+        assert await get("/api/chat/messages", {"manager": "manager-review", "session_id": "s-new"}) == (
+            200, {"messages": []})
+        # Its owner reads it.
+        status, answer = await get("/api/chat/sessions", {"session_id": "s-def"})
+        assert status == 200 and [s["session_id"] for s in answer["sessions"]] == ["s-def"]
+        status, answer = await get("/api/chat/messages", {"manager": "manager", "session_id": "s-def"})
+        assert status == 200 and len(answer["messages"]) == 1
 
     _run(test, monkeypatch)
 

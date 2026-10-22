@@ -549,9 +549,34 @@ export interface DbChatMessage {
   delivery_error?: string | null;
 }
 
-/** A session's newest messages (up to 200), oldest first. */
-export async function fetchChatMessages(sessionId: string, signal?: AbortSignal): Promise<DbChatMessage[]> {
-  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}`, { signal });
+/** A conversation asked for under one Manager that belongs to another (`managerId`; the server's 409): never shown or
+ * continued there. */
+export class ForeignConversationError extends Error {
+  readonly managerId: string;
+  constructor(message: string, managerId: string) {
+    super(message);
+    this.name = "ForeignConversationError";
+    this.managerId = managerId;
+  }
+}
+
+async function foreignConversation(res: Response): Promise<ForeignConversationError | null> {
+  if (res.status !== 409) return null;
+  const data = await res.json().catch(() => ({}));
+  return new ForeignConversationError(data.error || "this conversation belongs to another Manager", data.manager_id ?? "");
+}
+
+/** A session's newest messages (up to 200), oldest first. With `managerId`, a session of another Manager is a
+ * `ForeignConversationError`. */
+export async function fetchChatMessages(
+  sessionId: string,
+  signal?: AbortSignal,
+  managerId?: string,
+): Promise<DbChatMessage[]> {
+  const owner = managerId ? `&manager=${encodeURIComponent(managerId)}` : "";
+  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}${owner}`, { signal });
+  const foreign = await foreignConversation(res);
+  if (foreign) throw foreign;
   if (!res.ok) return [];
   const data = await res.json();
   return data.messages || [];
@@ -579,8 +604,8 @@ export async function fetchChatSessions(managerId = "manager", signal?: AbortSig
   return data.sessions ?? [];
 }
 
-/** One conversation by its id, however long ago it was active (null when it has no messages): the list holds only the
- * newest. */
+/** One conversation by its id, however long ago it was active (null when it has no messages: a new one): the list holds
+ * only the newest. Another Manager's is a `ForeignConversationError`. */
 export async function fetchChatSession(
   sessionId: string,
   managerId = "manager",
@@ -588,6 +613,8 @@ export async function fetchChatSession(
 ): Promise<ChatSession | null> {
   const owner = managerId === "manager" ? "" : `&manager=${encodeURIComponent(managerId)}`;
   const res = await fetch(`${API_BASE}/chat/sessions?session_id=${encodeURIComponent(sessionId)}${owner}`, { signal });
+  const foreign = await foreignConversation(res);
+  if (foreign) throw foreign;
   if (!res.ok) await failed(res, "load the conversation");
   const data = await res.json();
   return data.sessions?.[0] ?? null;

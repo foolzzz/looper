@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ...db import connection as db_connection, profile_registry as db_profiles, projects as db_projects, schedules as db_schedules
+from ...db import tasks as db_tasks
 from .. import cron, schedules
 from ..message import is_lark
 from ..project_execution import format_usd
@@ -55,6 +56,9 @@ _NOTIFY_WORDS = {"failures": "失败时", "alerts": "只发告警", "always": "�
 CAPS = ("run_budget_usd", "daily_budget_usd")
 # A setting's name in the tool's arguments, where it differs from the API's.
 _ARGUMENT = {"profile_overrides": "profiles"}
+# What a run shows of its task, blanked where the task is another Manager's (``_runs_in_scope``).
+_TASK_OF_RUN = {"task_id": None, "task_title": None, "task_status": None, "summary": None, "error": None,
+                "cost_usd": None}
 
 
 def _run_listed(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -70,6 +74,27 @@ def _listed(view: Mapping[str, Any]) -> dict[str, Any]:
             "enabled": view["enabled"], "next_fire_at": view["next_fire_at"],
             "last_run": _run_listed(view["last_run"]) if view["last_run"] else None,
             "consecutive_failures": view["consecutive_failures"]}
+
+
+async def _runs_in_scope(call: Call, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``runs`` as the Manager may see them: for a scoped one, a run whose task is not its own (a schedule's tasks are
+    the default Manager's) keeps its time, trigger and status, without its task's id, title, result or cost."""
+    if not call.scoped:
+        return runs
+    owners = await db_tasks.manager_of({run["task_id"] for run in runs if run.get("task_id")})
+    return [run if not run.get("task_id") or owners.get(run["task_id"]) == call.manager_id else {**run, **_TASK_OF_RUN}
+            for run in runs]
+
+
+async def _in_scope(call: Call, view: dict[str, Any]) -> dict[str, Any]:
+    """A schedule's view as the Manager may see it: its last run as ``_runs_in_scope``, and for a scoped Manager
+    none of its tasks' spend."""
+    if not call.scoped:
+        return view
+    view = {**view, **({"spent_today_usd": None} if "spent_today_usd" in view else {})}
+    if view.get("last_run"):
+        (view["last_run"],) = await _runs_in_scope(call, [view["last_run"]])
+    return view
 
 
 async def _schedule(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -100,7 +125,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
             views = [v for v in views if v["project_id"] == project["id"]]
         if arguments.get("enabled") is not None:
             views = [v for v in views if v["enabled"] is arguments["enabled"]]
-        return {"schedules": [_listed(v) for v in views]}
+        return {"schedules": [_listed(await _in_scope(call, v)) for v in views]}
     if action == "create":
         return await _create(call)
     row = await _schedule(arguments)
@@ -116,19 +141,20 @@ async def _schedules(call: Call) -> dict[str, Any]:
         if call.platform.scheduler is None:
             raise OpError(ErrorCode.UNAVAILABLE, "this server runs no scheduler; try again later")
         run = (await answered(schedules.run_now(row["id"], call.platform.scheduler)))["run"]
+        (run,) = await _runs_in_scope(call, [run])
         return {"schedule": row["name"], "project": row["project_name"], "run": _run_listed(run),
                 "note": "it runs once now, through the same overlap check as a fire; its next fire time stays"}
     if action == "get":
-        view = (await answered(schedules.get_schedule(row["id"])))["schedule"]
+        view = await _in_scope(call, (await answered(schedules.get_schedule(row["id"])))["schedule"])
         runs = await answered(schedules.list_runs(row["id"], {"limit": str(RUNS_SHOWN), "skips": "hide"}))
         return {"schedule": {**{k: v for k, v in view.items() if k != "last_run"},
                              "requirement": clip(view["requirement"], 1_000)},
-                "latest_runs": [_run_listed(run) for run in runs["runs"]],
+                "latest_runs": [_run_listed(run) for run in await _runs_in_scope(call, runs["runs"])],
                 "routine_skips": runs["routine_skips"]}
     if action in ("enable", "disable"):
         enabled = action == "enable"
         answer = await answered(schedules.update_schedule(row["id"], {"enabled": enabled}))
-        result = {"schedule": _listed(answer["schedule"])}
+        result = {"schedule": _listed(await _in_scope(call, answer["schedule"]))}
         if row["enabled"] is enabled:
             result["note"] = f"it was {action}d already"
         return result
@@ -183,7 +209,7 @@ async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
     call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
                                        *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
                                        f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
-    return {"schedule": _listed(view), "changed": [_ARGUMENT.get(key, key) for key in changed],
+    return {"schedule": _listed(await _in_scope(call, view)), "changed": [_ARGUMENT.get(key, key) for key in changed],
             "shown_to_user": "Looper adds what changed, before and after, after your reply; do not repeat it."}
 
 
