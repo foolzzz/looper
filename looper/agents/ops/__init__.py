@@ -99,8 +99,10 @@ class Turn:
         return self.message_id is None
 
     @property
-    def chat_key(self) -> tuple[str | None, str | None]:
-        return self.channel, self.chat
+    def chat_key(self) -> tuple[str | None, str | None, str | None]:
+        """The chat a confirmation waits in: its channel, the bot it came through, and the chat. Two bots of one
+        Manager talking to one user are two chats; a turn naming no bot (the web chat) is keyed by channel alone."""
+        return self.channel, self.channel_id, self.chat
 
 
 @dataclass(frozen=True)

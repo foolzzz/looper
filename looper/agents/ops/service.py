@@ -197,7 +197,7 @@ class ManagerOps:
         self._turn_file = turn_file
         self._epoch = 0
         self._bindings: OrderedDict[str, Turn] = OrderedDict()  # the last BINDINGS_KEPT turns, ended ones too
-        self._pending: dict[tuple[str | None, str | None], _Pending] = {}
+        self._pending: dict[tuple[str | None, str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
         # Per binding, the tool calls its turn's stream showed and no call has claimed yet: (call id, tool, args).
         self._expected: dict[str, list[tuple[str | None, str, str]]] = {}

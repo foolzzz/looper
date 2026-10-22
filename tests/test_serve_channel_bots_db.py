@@ -58,6 +58,19 @@ def test_clashes_names_later_rows() -> None:
     assert clashes(rows) == {"channel-telegram-2": "channel-telegram"}
 
 
+def test_the_built_in_lark_rows_of_one_app_both_run_and_an_added_bot_of_it_does_not() -> None:
+    def row(channel_id: str, channel_type: str) -> dict[str, Any]:
+        config = {"app_id": "cli_a"} if channel_type == "lark_bot" else {"profile": "p1"}
+        return {"channel_id": channel_id, "channel_type": channel_type, "config": config, "app_id": "cli_a"}
+
+    builtin = [row("channel-lark", "lark"), row("channel-lark_bot", "lark_bot")]
+    assert clashes(builtin) == {}
+    assert clashes([*builtin, row("channel-lark_bot-2", "lark_bot"), row("channel-lark-2", "lark")]) == {
+        "channel-lark_bot-2": "channel-lark", "channel-lark-2": "channel-lark"}
+    assert clashes([row("channel-lark_bot", "lark_bot"), row("channel-lark-2", "lark")]) == {
+        "channel-lark-2": "channel-lark_bot"}
+
+
 # --- serve's channel pass ---
 
 class _Registry:
@@ -220,6 +233,26 @@ def test_one_lark_app_under_any_name_starts_once(monkeypatch: pytest.MonkeyPatch
         errors = sorted(r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
         assert errors == sorted(f"{later} not started: it is the same bot as channel-lark"
                                 for later in (by_name, by_token))
+
+    _run(test, monkeypatch)
+
+
+@requires_db
+def test_both_built_in_lark_rows_of_one_app_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                  lark_cli_stand_in: Path, platform: Any,  # noqa: F811
+                                                  caplog: pytest.LogCaptureFixture) -> None:
+    # As today: the lark-cli row (active profile cli_main, of app cli_main) and the bot token row of cli_main both
+    # run; RFC §9.1 keeps the same-bot check inside one channel type for them.
+    async def test(pool: Any) -> None:
+        await _builtin(pool, "channel-lark", {"allowed_open_ids": [OPEN_ID]})
+        await _builtin(pool, "channel-lark_bot", {"app_id": "cli_main", "allowed_open_ids": [OPEN_ID]}, LARK_SECRET)
+        with caplog.at_level(logging.ERROR):
+            adapters = await _pass(("lark", "lark_bot"), tmp_path)
+        for adapter in adapters:
+            if adapter.channel_id == "channel-lark_bot":
+                await adapter._transport.aclose()
+        assert [a.channel_id for a in adapters] == ["channel-lark", "channel-lark_bot"]
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
 
     _run(test, monkeypatch)
 

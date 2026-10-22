@@ -208,6 +208,26 @@ def test_a_lark_app_is_one_bot_whatever_names_it(monkeypatch: pytest.MonkeyPatch
     _run(test, monkeypatch)
 
 
+def test_the_built_in_lark_bot_row_may_act_as_the_built_in_lark_cli_rows_app(
+        monkeypatch: pytest.MonkeyPatch, lark_cli_stand_in: Path, platform: Any) -> None:  # noqa: F811
+    # The built-in lark-cli row acts as cli_main (lark-cli's active profile); the built-in bot token row may too, as
+    # today, while an added bot of cli_main may not.
+    async def test(pool: Any) -> None:
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark_bot",
+                                     {"config": {"app_id": "cli_main"}, "bot_token": SECRET})
+        assert status == 200, answer
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark_bot", {"bot_token": "new-secret"})
+        assert status == 200, answer
+        status, answer = await _call("PUT", "/api/channel-configs/channel-lark", {"config": {"profile": ""}})
+        assert status == 200, answer
+        manager = await _manager(pool)
+        status, answer = await _call("POST", "/api/channel-configs", {
+            "channel_type": "lark_bot", "manager_id": manager, "config": {"app_id": "cli_main"}, "bot_token": SECRET})
+        assert status == 409 and "(channel-lark" in answer["error"], answer
+
+    _run(test, monkeypatch)
+
+
 def test_the_built_in_telegram_row_falling_back_to_the_environment_is_checked(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", SAME_BOT_NEW_SECRET)

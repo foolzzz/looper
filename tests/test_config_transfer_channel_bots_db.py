@@ -169,3 +169,28 @@ def test_the_built_in_channel_is_not_imported_as_an_added_bot(
             assert await _dump(pool) == before
 
     asyncio.run(_test())
+
+
+def test_both_built_in_lark_channels_of_one_app_are_imported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lark_cli_stand_in: Path,
+) -> None:
+    # The built-in lark-cli channel acts as lark-cli's active profile, of app cli_main; the built-in bot token
+    # channel of cli_main runs beside it, as today, so the import does not skip it as the same bot.
+    async def _test() -> None:
+        async with _installation() as (pool, url):
+            from looper.agents.serve import seed_channel_configs
+
+            await seed_channel_configs(pool)
+            await pool.execute("UPDATE channel_configs SET enabled = true WHERE channel_id = 'channel-lark'")
+            path = tmp_path / "in.json"
+            path.write_text(json.dumps({"format": "looper-config/v3", "channels": [
+                {"channel_type": "lark_bot", "channel_id": "channel-lark_bot", "display_name": "Lark bot",
+                 "enabled": False, "config": {"app_id": "cli_main"}}]}))
+            code, out, err = await _looper(monkeypatch, url, "config", "import", str(path), "--apply", "--json")
+            assert code == 0, err
+            change = next(c for c in _plan(out)["changes"] if c["section"] == "channels")
+            assert change["action"] != "skipped", change
+            assert await pool.fetchval("SELECT config->>'app_id' FROM channel_configs "
+                                       "WHERE channel_id = 'channel-lark_bot'") == "cli_main"
+
+    asyncio.run(_test())

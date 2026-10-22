@@ -14,6 +14,9 @@ BOT_TYPES = ("telegram", "lark", "lark_bot")
 SAME_BOT_TYPES = {"telegram": ("telegram",), "lark": ("lark", "lark_bot"), "lark_bot": ("lark", "lark_bot")}
 
 _TELEGRAM_BOT_ID = re.compile(r"^(\d+):")
+# The built-in Lark rows, which today run side by side even when they act as one app: the app key does not make them
+# the same bot as each other, only as an added bot.
+_BUILTIN_LARK_IDS = {"channel-lark": "lark", "channel-lark_bot": "lark_bot"}
 
 
 def bot_key(channel_type: str, config: Mapping[str, Any], secret: str | None, *, env_token: str = "") -> str | None:
@@ -35,13 +38,17 @@ def bot_key(channel_type: str, config: Mapping[str, Any], secret: str | None, *,
 
 
 def bot_keys(channel_type: str, config: Mapping[str, Any], secret: str | None, *, env_token: str = "",
-             app_id: str | None = None) -> set[str]:
+             app_id: str | None = None, channel_id: str | None = None) -> set[str]:
     """Every key that makes two rows the same bot: ``bot_key``'s, and for the Lark types the app the row acts as
     (``app_id``, from ``lark_app_id``), so a lark-cli profile and a bot token row of one app, or two names of one
-    profile (the active profile and its own name), are the same bot."""
+    profile (the active profile and its own name), are the same bot.
+
+    The app key has one form per built-in Lark row (``channel_id``): an added bot carries both, a built-in row only
+    its own, so ``channel-lark`` and ``channel-lark_bot`` of one app are not the same bot (RFC §9.1: each runs)."""
     keys = {key for key in (bot_key(channel_type, config, secret, env_token=env_token),) if key is not None}
     if channel_type in ("lark", "lark_bot") and app_id:
-        keys.add(f"lark_app:{app_id}")
+        builtin = _BUILTIN_LARK_IDS.get(channel_id or "")
+        keys.update(f"lark_app:{app_id}:{name}" for name in _BUILTIN_LARK_IDS.values() if builtin in (None, name))
     return keys
 
 
@@ -76,7 +83,7 @@ def clashes(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     out: dict[str, str] = {}
     for row in rows:
         keys = bot_keys(row["channel_type"], row.get("config") or {}, row.get("secret"),
-                        env_token=row.get("env_token") or "", app_id=row.get("app_id"))
+                        env_token=row.get("env_token") or "", app_id=row.get("app_id"), channel_id=row["channel_id"])
         earlier = next((first[key] for key in sorted(keys) if key in first), None)
         if earlier is not None:
             out[row["channel_id"]] = earlier

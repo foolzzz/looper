@@ -59,10 +59,11 @@ async def refuse_same_bot(conn: asyncpg.Connection, channel_type: str, config: M
     """Under the bots lock: ``RequestError`` 409 when a bot other than ``exclude`` is the same bot as the one
     described (``bots.bot_keys``: for Lark, the app each row acts as, across both Lark types). ``configs`` holds
     the config other rows will have once a transaction not yet written (a config import's preview) is: by
-    channel_id, in place of the stored one. Never names a token."""
+    channel_id, in place of the stored one. ``exclude`` is the row described, when it is stored (an update, an
+    import): a built-in Lark row is not the same bot as the other built-in one. Never names a token."""
     await conn.execute(_LOCK)
     keys = bot_keys(channel_type, config, secret, env_token=env_token,
-                    app_id=await lark_app_id(channel_type, config))
+                    app_id=await lark_app_id(channel_type, config), channel_id=exclude)
     if not keys:
         return
     for other_type in SAME_BOT_TYPES[channel_type]:
@@ -74,7 +75,7 @@ async def refuse_same_bot(conn: asyncpg.Connection, channel_type: str, config: M
             env = builtin_env_token(other) if (
                 other_type == "telegram" and row["channel_id"] in BUILTIN_CHANNEL_IDS and not stored) else ""
             if keys & bot_keys(other_type, other, stored, env_token=env,
-                               app_id=await lark_app_id(other_type, other)):
+                               app_id=await lark_app_id(other_type, other), channel_id=row["channel_id"]):
                 name = await conn.fetchval(
                     "SELECT display_name FROM channel_configs WHERE channel_id = $1", row["channel_id"])
                 raise projects.RequestError(
