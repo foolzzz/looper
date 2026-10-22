@@ -203,21 +203,50 @@ def test_same_lark_profile_twice_starts_once(monkeypatch: pytest.MonkeyPatch, tm
 
 @requires_db
 def test_one_lark_app_under_any_name_starts_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-                                                 lark_cli_stand_in: Path, caplog: pytest.LogCaptureFixture) -> None:
+                                                 lark_cli_stand_in: Path, platform: Any,
+                                                 caplog: pytest.LogCaptureFixture) -> None:
     # lark-cli's active profile is cli_main, of app cli_main.
-    from looper.agents import serve
-
     async def test(pool: Any) -> None:
         await _builtin(pool, "channel-lark", {"allowed_open_ids": [OPEN_ID]})
         by_name = await _bot(pool, "lark", {"profile": "cli_main", "allowed_open_ids": [OPEN_ID]}, None)
         by_token = await _bot(pool, "lark_bot", {"app_id": "cli_main", "allowed_open_ids": [OPEN_ID]}, LARK_SECRET)
         other = await _bot(pool, "lark_bot", {"app_id": "cli_other", "allowed_open_ids": [OPEN_ID]}, LARK_SECRET)
         with caplog.at_level(logging.ERROR):
-            rows = await serve._enabled_bot_rows()
-        assert [r["channel_id"] for r in rows if r["channel_type"] != "telegram"] == ["channel-lark", other]
+            adapters = await _pass(("lark", "lark_bot"), tmp_path)
+        for adapter in adapters:
+            if adapter.channel_id == other:
+                await adapter._transport.aclose()
+        assert [a.channel_id for a in adapters] == ["channel-lark", other]
         errors = sorted(r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
         assert errors == sorted(f"{later} not started: it is the same bot as channel-lark"
                                 for later in (by_name, by_token))
+
+    _run(test, monkeypatch)
+
+
+@requires_db
+def test_builtin_lark_row_that_cannot_start_leaves_its_app_to_a_later_row(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lark_cli_stand_in: Path, platform: Any,
+        caplog: pytest.LogCaptureFixture) -> None:
+    # The reviewer's upgrade: the built-in lark-cli row names app cli_main but cannot start; the bot-token row of
+    # cli_main, which ran before, still runs.
+    from looper.agents.channels import lark_cli
+
+    async def check(config: Any, *, fresh: bool = False) -> Any:
+        return "lark-cli is not signed in as the bot", None
+
+    monkeypatch.setattr(lark_cli, "check", check)
+
+    async def test(pool: Any) -> None:
+        await _builtin(pool, "channel-lark", {"allowed_open_ids": [OPEN_ID]})
+        await _builtin(pool, "channel-lark_bot", {"app_id": "cli_main", "allowed_open_ids": [OPEN_ID]}, LARK_SECRET)
+        with caplog.at_level(logging.ERROR):
+            adapters = await _pass(("lark", "lark_bot"), tmp_path)
+        for adapter in adapters:
+            await adapter._transport.aclose()
+        assert [a.channel_id for a in adapters] == ["channel-lark_bot"]
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors == ["channel-lark not started: lark-cli is not signed in as the bot"]
 
     _run(test, monkeypatch)
 

@@ -449,8 +449,8 @@ async def _lark_bot_adapter(config: dict[str, Any], secret: str, runtime_root: P
 
 async def _enabled_bot_rows() -> list[dict[str, Any]]:
     """The enabled bot rows with their stored secret and ``clashes`` keys (``env_token``, ``app_id``), built-in rows
-    first. A bot without a valid sender allowlist does not start (its adapter says so), nor does a later row for a
-    bot an earlier row already runs."""
+    first. Rows of one bot are all kept: ``_register_bots`` starts the first that can start, so a row that cannot
+    (no valid sender allowlist, lark-cli not signed in) leaves the bot to a later row."""
     from ..db.channel_configs import get_bot_token, list_configs
 
     rows: list[dict[str, Any]] = []
@@ -458,12 +458,8 @@ async def _enabled_bot_rows() -> list[dict[str, Any]]:
         if row["enabled"] and row["channel_type"] in BOT_TYPES:
             rows.append({**row, "config": row.get("config") or {},
                          "secret": await get_bot_token(row["channel_id"]) or ""})
-    keyed = [{**r, "env_token": builtin_env_token(r["config"]) if r["channel_id"] == "channel-telegram" else "",
-              "app_id": await lark_app_id(r["channel_type"], r["config"])} for r in rows]
-    skipped = clashes(keyed)
-    for later, earlier in skipped.items():
-        logger.error("%s not started: it is the same bot as %s", later, earlier)
-    return [r for r in keyed if r["channel_id"] not in skipped]
+    return [{**r, "env_token": builtin_env_token(r["config"]) if r["channel_id"] == "channel-telegram" else "",
+             "app_id": await lark_app_id(r["channel_type"], r["config"])} for r in rows]
 
 
 async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], runtime_root: Path,
